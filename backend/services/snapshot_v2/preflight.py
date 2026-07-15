@@ -24,6 +24,7 @@ class RestorePreflightResult(BaseModel):
     required_staging_bytes: int = 0
     capsule: dict = Field(default_factory=dict)
     runtime_choice_supported: bool = True
+    runtime_choice_required: bool = False
 
 
 class RestorePreflight:
@@ -110,23 +111,34 @@ class RestorePreflight:
         result.objects_failed = objects_failed
         result.required_staging_bytes = total_bytes
 
-        # 4. Determine status
+        # 4. Verify workflow state content before declaring the snapshot ready.
+        if isinstance(manifest.continuation, GraphNodeCapsule):
+            state_path = (
+                self._paths.objects
+                / manifest.continuation.workflow_state_ref.sha256
+            )
+            if state_path.exists():
+                try:
+                    json.loads(state_path.read_bytes())
+                except (json.JSONDecodeError, OSError):
+                    result.compatibility_errors.append(
+                        "Workflow state content is not valid JSON"
+                    )
+
+        # 5. Determine status
         if objects_failed:
+            result.status = "corrupted"
+        elif result.compatibility_errors:
             result.status = "corrupted"
         else:
             result.status = "ready"
 
-        # 5. Runtime choice support / enforcement
+        # 6. Runtime choice capability / enforcement. A complete runtime with
+        # no payload is an exact empty runtime, so it needs no reset/keep choice.
         runtime_status = manifest.runtime.status
-        runtime_has_payload = (
-            bool(manifest.runtime.residual_ref)
-            or bool(manifest.runtime.adata_refs)
-        )
-        needs_explicit_runtime_choice = (
-            runtime_status != "complete"
-            or not runtime_has_payload
-        )
-        result.runtime_choice_supported = needs_explicit_runtime_choice
+        needs_explicit_runtime_choice = runtime_status != "complete"
+        result.runtime_choice_supported = True
+        result.runtime_choice_required = needs_explicit_runtime_choice
         # Only enforce runtime_choice on restorable snapshots. Corrupted /
         # non-ready preflight must return its status instead of masking it.
         if (
@@ -136,16 +148,5 @@ class RestorePreflight:
             and request.runtime_choice is None
         ):
             raise RuntimeChoiceRequired(runtime_status)
-
-        # 6. Verify workflow state content is valid JSON (if capsule references it)
-        if isinstance(manifest.continuation, GraphNodeCapsule):
-            state_path = self._paths.objects / manifest.continuation.workflow_state_ref.sha256
-            if state_path.exists():
-                try:
-                    json.loads(state_path.read_bytes())
-                except (json.JSONDecodeError, OSError):
-                    result.compatibility_errors.append(
-                        "Workflow state content is not valid JSON"
-                    )
 
         return result

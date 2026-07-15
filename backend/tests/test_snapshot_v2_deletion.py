@@ -367,6 +367,27 @@ def test_delete_conflict_details_include_reason(paths):
     assert "export" in (ei.value.details.get("reason") or str(ei.value))
 
 
+def test_delete_fails_closed_when_export_protection_cannot_be_loaded(
+    paths, monkeypatch,
+):
+    from backend.services.snapshot_v2 import exporter
+    from backend.services.snapshot_v2.service import SnapshotService
+
+    setup_two_leaf_snapshots(paths)
+
+    def _broken_loader(_paths):
+        raise OSError("unreadable export protection")
+
+    monkeypatch.setattr(exporter, "load_active_export_protected_ids", _broken_loader)
+    service = SnapshotService(session_id="s1", paths=paths)
+
+    with pytest.raises(SnapshotDeleteConflict) as exc:
+        service.delete_snapshot("snap-a")
+
+    assert exc.value.code == "EXPORT_PROTECTION_UNAVAILABLE"
+    assert (paths.committed / "snap-a.json").exists()
+
+
 # ═════════════════════════════════════════════════════════════════════════
 #  Failure durability: journals survive non-COMMITTED failures
 # ═════════════════════════════════════════════════════════════════════════

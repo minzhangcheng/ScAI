@@ -145,6 +145,26 @@ class TestSnapshotV2ResponseModels:
         assert resp.allowed_actions == []
 
 
+class TestLegacySnapshotRouteBoundary:
+    def test_v2_projection_is_rejected_by_v1_management_routes(self):
+        from backend.models.schemas import Snapshot
+        from backend.routes.snapshots import _require_v1_snapshot
+
+        snapshot = Snapshot(
+            id="v2-projection",
+            name="V2",
+            phase="manual",
+            format_version=2,
+            state_file="",
+        )
+
+        with pytest.raises(HTTPException) as exc:
+            _require_v1_snapshot(snapshot)
+
+        assert exc.value.status_code == 409
+        assert "V2" in str(exc.value.detail)
+
+
 class TestSnapshotV2ErrorMapping:
     """Error-to-status-code mapping is centralized via snapshot_error_detail / _v2_http_exc."""
 

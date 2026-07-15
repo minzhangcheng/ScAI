@@ -79,7 +79,7 @@ class SnapshotGarbageCollector:
             Path(str(self.paths.committed)),
         )
         for sid in pending_ids:
-            manifest = self.manifest_store.load(sid)
+            manifest = self.manifest_store.load_pending_verified(sid)
             marked.update(manifest.objects.keys())
 
         # 2. Collect from active transaction journals (verified envelopes)

@@ -699,7 +699,7 @@ print("setup", results["answer"])
         assert restored.restore_resume_kind == "graph_node"
         assert restored.restore_resume_node == "bioinformatics_analysis"
 
-        nb_applied = states / "notebook.ipynb"
+        nb_applied = states / f"{session_id}.ipynb"
         assert nb_applied.is_file()
         target_nb = ObjectStore(paths).get_bytes(target_manifest.notebook_ref.sha256)
         assert nb_applied.read_bytes() == target_nb
@@ -737,7 +737,7 @@ class TestFaultBarrierMatrix:
         orig_png = b"original-png-content"
         _write_file(workspace / "tables" / "result.csv", orig_table)
         _write_file(workspace / "figures" / "plot.png", orig_png)
-        _write_file(states / "notebook.ipynb", _valid_notebook_bytes("live-nb"))
+        _write_file(states / f"{session_id}.ipynb", _valid_notebook_bytes("live-nb"))
         _write_file(session_dir / "session.json", _valid_analysis_state_bytes(session_id, name="live"))
         _write_file(checkpoint_sqlite_path(states), b"live-checkpoint")
         # Out-of-scope dir must survive rollback

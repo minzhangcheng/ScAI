@@ -364,6 +364,21 @@ class TestDeleteBranch:
         assert not (mgr.snapshots_dir / snap_b.state_file).exists()
         assert not (mgr.snapshots_dir / snap_c.state_file).exists()
 
+    @pytest.mark.asyncio
+    async def test_v1_delete_rejects_empty_state_file(self, mock_config):
+        """A V2 projection must never resolve to the V1 snapshots directory."""
+        session_id, _, _ = mock_config
+        mgr = SnapshotManager(session_id)
+        snapshot = Snapshot(
+            name="V2 projection",
+            phase="manual",
+            state_file="",
+            format_version=2,
+        )
+
+        with pytest.raises(ValueError, match="V1 snapshot state_file"):
+            await mgr.delete_snapshot(snapshot)
+
 
 class TestPklCompressionSnapshotCompat:
     """Hand-written V1 .pkl.zst fixtures for restore / inventory classification."""

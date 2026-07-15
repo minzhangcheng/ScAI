@@ -200,6 +200,10 @@ class ObjectStore:
             return None
         return ev
 
+    def invalidate_evidence(self, sha256: str) -> None:
+        """Drop cached proof after a transaction removes an unpublished object."""
+        self._evidence.pop(sha256, None)
+
     def put_bytes(self, data: bytes, media_type: str) -> ObjectPutResult:
         sha = _hash_bytes(data)
         dest = self._objects_dir / sha
@@ -228,14 +232,23 @@ class ObjectStore:
             )
 
         self._ensure_store_dirs()
-        temp = self._paths.staging / f".{sha}.tmp"
-        temp.write_bytes(data)
-        temp_fd = os.open(temp, os.O_RDONLY)
+        temp_path: Path | None = None
         try:
-            os.fsync(temp_fd)
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                prefix=f".{sha}.",
+                suffix=".tmp",
+                dir=self._paths.staging,
+                delete=False,
+            ) as temp_file:
+                temp_path = Path(temp_file.name)
+                temp_file.write(data)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            os.replace(str(temp_path), str(dest))
         finally:
-            os.close(temp_fd)
-        os.replace(str(temp), str(dest))
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
         ev = VerifiedObjectEvidence.from_path(dest, sha)
         self._register_evidence(sha, ev)
         return ObjectPutResult(
@@ -605,6 +618,22 @@ class ManifestStore:
             raise SnapshotIntegrityError(
                 "MANIFEST_NOT_FOUND",
                 f"Committed manifest {snapshot_id} not found",
+            )
+        return self._load_verified(snapshot_id)
+
+    def load_verified_including_pending(
+        self, snapshot_id: str,
+    ) -> SnapshotManifestV2:
+        """Integrity-check a committed manifest without applying visibility."""
+        return self._load_verified(snapshot_id)
+
+    def load_pending_verified(self, snapshot_id: str) -> SnapshotManifestV2:
+        """Integrity-check a manifest that is explicitly pending import."""
+        pending = ManifestStore.list_pending_import_ids(self._paths.committed)
+        if snapshot_id not in pending:
+            raise SnapshotIntegrityError(
+                "MANIFEST_NOT_PENDING",
+                f"Manifest {snapshot_id} is not pending import",
             )
         return self._load_verified(snapshot_id)
 

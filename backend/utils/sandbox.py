@@ -511,7 +511,9 @@ class NotebookState:
     
     @property
     def notebook_path(self) -> Path:
-        return self.state_dir / f"{self.session_id}.ipynb"
+        from backend.utils.live_paths import live_notebook_path
+
+        return live_notebook_path(self.state_dir, self.session_id)
     
     @property
     def state_path(self) -> Path:

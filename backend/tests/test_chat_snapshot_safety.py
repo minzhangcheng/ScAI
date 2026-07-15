@@ -353,6 +353,7 @@ async def test_idle_empty_complete_requires_acknowledged_no_kernel_descriptor(tm
                 sandbox=None,
                 workflow_state={"kernel_present": False, "inactive": True},
                 workspace_root=str(tmp_path / "ws"),
+                safe_point_owner_token="test-owner",
             )
         assert record.failure is None
         assert record.manifest.runtime.status == "complete"
@@ -397,6 +398,7 @@ async def test_terminal_empty_complete_with_no_kernel_descriptor(tmp_path):
                     "status": "completed",
                 },
                 workspace_root=str(tmp_path / "ws"),
+                safe_point_owner_token="test-owner",
             )
         assert record.failure is None
         assert record.manifest.runtime.dependencies.required == {}
@@ -451,6 +453,7 @@ async def test_active_pre_restore_never_accepts_empty_complete(tmp_path):
                         "inactive": True,
                     },
                     workspace_root=str(tmp_path / "ws"),
+                    safe_point_owner_token="test-owner",
                 )
     finally:
         sessions.pop(session_id, None)

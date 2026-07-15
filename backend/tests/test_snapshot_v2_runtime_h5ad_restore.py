@@ -12,6 +12,99 @@ from backend.utils.runtime_apply import (
 )
 
 
+@pytest.mark.asyncio
+async def test_empty_complete_runtime_removes_stale_residual(tmp_path, monkeypatch):
+    from backend.services.snapshot_v2.restore import RestoreCoordinator, StagedRestore
+
+    session_id = "sid-empty-complete"
+    session_dir = tmp_path / "session"
+    workspace = session_dir / "workspace"
+    states = session_dir / "states"
+    staged_workspace = tmp_path / "staged-workspace"
+    for path in (workspace, states, staged_workspace):
+        path.mkdir(parents=True)
+
+    class Paths:
+        root = tmp_path / "v2"
+        objects = tmp_path / "objects"
+        staging = tmp_path / "staging"
+        journals = tmp_path / "journals"
+        integrity = tmp_path / "integrity"
+        committed = tmp_path / "committed"
+
+    for path in (
+        Paths.root, Paths.objects, Paths.staging, Paths.journals,
+        Paths.integrity, Paths.committed,
+    ):
+        path.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        "backend.utils.runtime_apply.get_session_states",
+        lambda _session_id: states,
+    )
+    live_pkl = states / f"{session_id}_session.pkl"
+    live_pkl.write_bytes(b"STALE-PKL")
+    (states / "adata.h5ad").write_bytes(b"STALE-H5AD")
+    write_runtime_h5ad_manifest(session_id, {"adata": "a" * 64})
+
+    staged = StagedRestore(
+        transaction_id="restore-empty-complete",
+        session_id=session_id,
+        snapshot_id="snap-empty-complete",
+        recovery_mode="rollback",
+        pre_restore_ref="snap-before",
+        branch_id="main",
+        continuation_kind="idle",
+        manifest={
+            "runtime": {
+                "status": "complete",
+                "residual_ref": None,
+                "adata_refs": {},
+            }
+        },
+        staged_workspace=str(staged_workspace),
+    )
+
+    result = await RestoreCoordinator().apply(
+        staged,
+        Paths,
+        session_dir=str(session_dir),
+        workspace_root=str(workspace),
+        states_root=str(states),
+        runtime_choice="keep",
+    )
+
+    assert result.runtime_restore_status == "complete"
+    assert result.runtime_applied is True
+    assert not live_pkl.exists()
+    assert not (states / "adata.h5ad").exists()
+    manifest = json.loads(runtime_h5ad_manifest_path(session_id).read_text())
+    assert manifest == {"version": 1, "entries": {}}
+
+
+def test_repeated_quarantine_preserves_prior_runtime(tmp_path, monkeypatch):
+    session_id = "sid-repeat-quarantine"
+    states = tmp_path / "states"
+    states.mkdir()
+    monkeypatch.setattr(
+        "backend.utils.runtime_apply.get_session_states",
+        lambda _session_id: states,
+    )
+    live_pkl = states / f"{session_id}_session.pkl"
+
+    live_pkl.write_bytes(b"FIRST")
+    quarantine_live_runtime(session_id)
+    first_quarantine = live_pkl.with_suffix(live_pkl.suffix + ".quarantine")
+    assert first_quarantine.read_bytes() == b"FIRST"
+
+    live_pkl.write_bytes(b"SECOND")
+    quarantine_live_runtime(session_id)
+
+    quarantines = sorted(states.glob(f"{live_pkl.name}.quarantine*"))
+    assert len(quarantines) == 2
+    assert {path.read_bytes() for path in quarantines} == {b"FIRST", b"SECOND"}
+
+
 def test_write_runtime_h5ad_manifest_records_validated_relative_paths(tmp_path, monkeypatch):
     session_id = "sid-h5ad-manifest"
     states = tmp_path / "sessions" / session_id / "states"
@@ -155,6 +248,8 @@ def test_recovery_forward_complete_empty_h5ad_without_runtime_dir(
 
     stale_h5ad = states / "adata.h5ad"
     stale_h5ad.write_bytes(b"STALE-LIVE-H5AD")
+    stale_pkl = states / f"{session_id}_session.pkl"
+    stale_pkl.write_bytes(b"STALE-LIVE-PKL")
     write_runtime_h5ad_manifest(session_id, {"adata": "f" * 64})
     manifest = runtime_h5ad_manifest_path(session_id)
     assert manifest.exists()
@@ -170,6 +265,8 @@ def test_recovery_forward_complete_empty_h5ad_without_runtime_dir(
     journal = {
         "transaction_id": tx_id,
         "session_id": session_id,
+        "target_runtime_status": "complete",
+        "target_runtime_has_residual": False,
         "applied_step_ledger": [
             {"step": "workspace", "completed": True},
             {"step": "state", "completed": True},
@@ -182,6 +279,7 @@ def test_recovery_forward_complete_empty_h5ad_without_runtime_dir(
     assert ok is True
 
     assert not stale_h5ad.exists()
+    assert not stale_pkl.exists()
     assert stale_h5ad.with_suffix(stale_h5ad.suffix + ".quarantine").exists()
     payload = json.loads(manifest.read_text())
     assert payload == {"version": 1, "entries": {}}

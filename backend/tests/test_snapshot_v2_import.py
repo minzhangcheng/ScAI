@@ -457,11 +457,56 @@ class TestSnapshotV2ImportRebinding:
         importer = SnapshotImporter(sid, dest_paths)
         result = importer.import_bundle(archive)
         assert result.success
-
         committed = _list_committed(dest_paths)
         assert committed[0].snapshot_id == "snap-same"
         assert committed[0].session_id == sid
 
+    def test_import_rejects_same_id_with_different_root(self, tmp_path, dest_paths):
+        from backend.services.snapshot_v2.importer import SnapshotImporter
+        from backend.services.snapshot_v2.object_store import ManifestStore
+
+        sid = SESSION_ID_DST
+        first_data, first_hash = _make_obj_data(256)
+        first = _build_manifest(
+            sid,
+            "snap-collision",
+            objects={first_hash: _make_ref(first_hash, 256)},
+        )
+        first_archive = _build_archive(
+            tmp_path / "collision-first.tar.gz",
+            [first],
+            {first_hash: first_data},
+            sid,
+        )
+        importer = SnapshotImporter(sid, dest_paths)
+        first_result = importer.import_bundle(first_archive)
+        assert first_result.success
+        original_root = ManifestStore(dest_paths).load("snap-collision").root_hash
+
+        second_data = b"different-import-content"
+        second_hash = hashlib.sha256(second_data).hexdigest()
+        second = _build_manifest(
+            sid,
+            "snap-collision",
+            objects={
+                second_hash: _make_ref(second_hash, len(second_data)),
+            },
+        )
+        second_archive = _build_archive(
+            tmp_path / "collision-second.tar.gz",
+            [second],
+            {second_hash: second_data},
+            sid,
+        )
+
+        second_result = importer.import_bundle(second_archive)
+
+        assert second_result.success is False
+        assert any(
+            "IMPORT_SNAPSHOT_ID_COLLISION" in error
+            for error in second_result.errors
+        )
+        assert ManifestStore(dest_paths).load("snap-collision").root_hash == original_root
 
 class TestSnapshotV2ImportRuntime:
     """Runtime omission and trust downgrade."""

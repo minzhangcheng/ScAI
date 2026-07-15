@@ -119,6 +119,41 @@ def make_object_ref(object_store: "ObjectStore", content: bytes,
     return object_store.put_bytes(content, media_type).ref
 
 
+def test_restore_service_resolves_verified_lineage_head(
+    service, manifest_store,
+):
+    prev = v2_manifest(
+        session_id="sess-pre",
+        snapshot_id="snap-lineage-head",
+        continuation=IdleCapsule(graph_version="2.0"),
+        objects={},
+    )
+    commit_manifest(manifest_store, prev)
+    state = make_analysis_state()
+    state.last_snapshot_id = prev.snapshot_id
+
+    resolved = service._resolve_previous_manifest(state)
+
+    assert resolved is not None
+    assert resolved.snapshot_id == prev.snapshot_id
+
+
+def test_restore_service_rejects_missing_declared_lineage_head(service):
+    state = make_analysis_state()
+    state.last_snapshot_id = "missing-head"
+
+    with pytest.raises(SnapshotIntegrityError, match="missing-head"):
+        service._resolve_previous_manifest(state)
+
+
+def test_restore_context_wires_resolved_previous_manifest():
+    source = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "services" / "snapshot_v2" / "service.py"
+    ).read_text(encoding="utf-8")
+    assert "prev_manifest=self._resolve_previous_manifest(analysis_state)" in source
+
+
 # ── Revision-Qualified Reuse Tests ────────────────────────────────────────────
 
 

@@ -197,6 +197,31 @@ async def test_second_enqueue_waits_then_owns_new_generation(
 
 class TestRestoreJobLifecycle:
 
+    def test_partial_apply_failure_helper_blocks_current_session(self, v2_paths):
+        from backend.models.schemas import AnalysisState, TaskStatus
+        from backend.services.session_store import _recovery_blocked_sessions
+        from backend.services.snapshot_v2.service import SnapshotService
+        from backend.state import sessions
+
+        session_id = "sess-partial-apply-block"
+        state = AnalysisState(
+            session_id=session_id,
+            user_id="u1",
+            status=TaskStatus.RUNNING,
+        )
+        sessions[session_id] = state
+        try:
+            failure = SnapshotService(session_id, v2_paths)._partial_apply_failure(
+                "STATE_LOAD_FAILED", "state could not be loaded"
+            )
+            assert failure["recovery_required"] is True
+            assert state.recovery_blocked is True
+            assert state.status == TaskStatus.PAUSED
+            assert session_id in _recovery_blocked_sessions
+        finally:
+            sessions.pop(session_id, None)
+            _recovery_blocked_sessions.discard(session_id)
+
     @pytest.mark.asyncio
     async def test_enqueue_returns_transaction(self, v2_paths, preflight_result, restore_request):
         """Enqueue creates a SnapshotTransactionRecord with queued status."""
@@ -441,6 +466,61 @@ class TestRestoreJobLifecycle:
 
         # Lift barrier so the cancelled task can complete cleanup
         barrier.set()
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_applying_is_recovery_required(
+        self, v2_paths, preflight_result, restore_request,
+    ):
+        from backend.services.snapshot_v2.models import SnapshotTransactionRecord
+
+        class ApplyingService:
+            def __init__(self):
+                self.applying = asyncio.Event()
+
+            async def restore_snapshot(
+                self, request, transaction_id, cancel_event, *,
+                job_transaction_id=None, status_callback=None,
+            ):
+                applying = SnapshotTransactionRecord(
+                    transaction_id=transaction_id,
+                    session_id="sess-test",
+                    snapshot_id=request.snapshot_id,
+                    status="applying",
+                )
+                status_callback(applying)
+                self.applying.set()
+                await cancel_event.wait()
+                await asyncio.sleep(0)
+                return SnapshotTransactionRecord(
+                    transaction_id=transaction_id,
+                    session_id="sess-test",
+                    snapshot_id=request.snapshot_id,
+                    status="failed",
+                    failure={
+                        "code": "CANCELLED_AFTER_APPLYING",
+                        "message": "Cancelled after apply; recovery required",
+                        "recovery_required": True,
+                    },
+                )
+
+        service = ApplyingService()
+        mgr = make_mgr(v2_paths, snapshot_service=service)
+        record = await mgr.enqueue("sess-test", preflight_result, restore_request)
+        generation = mgr._safe_point.get_pending_generation("sess-test")
+        assert generation is not None
+        assert await mgr._safe_point.acknowledge_safe_point_request(
+            "sess-test", generation, role="workflow",
+        )
+        await asyncio.wait_for(service.applying.wait(), timeout=1)
+
+        await mgr.cancel(record.transaction_id)
+        await asyncio.wait_for(
+            self._wait_for_status(mgr, record.transaction_id, "failed"), timeout=1,
+        )
+
+        result = mgr.get(record.transaction_id)
+        assert result.failure["code"] == "CANCELLED_AFTER_APPLYING"
+        assert result.failure["recovery_required"] is True
 
     @pytest.mark.asyncio
     async def test_timeout(self, v2_paths, preflight_result, restore_request):

@@ -6,6 +6,37 @@ from backend.services.snapshot_v2.safe_point import SafePointManager
 
 
 @pytest.mark.asyncio
+async def test_pending_reservation_blocks_direct_acquire():
+    manager = SafePointManager()
+    request = await manager.request_safe_point("session-1", "restore:first")
+    assert request is not False
+
+    acquired = await manager.acquire(
+        "session-1", {"source": "capture"}, owner_token="capture:first"
+    )
+
+    assert acquired is False
+    assert manager.get_pending_observation("session-1") == request
+    assert await manager.cancel_safe_point_request("session-1", "restore:first")
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_does_not_signal_when_conversion_fails(monkeypatch):
+    manager = SafePointManager()
+    request = await manager.request_safe_point("session-1", "restore:first")
+    assert request is not False
+    monkeypatch.setattr(manager, "_acquire_unlocked", lambda *args, **kwargs: False)
+
+    acknowledged = await manager.acknowledge_safe_point_request(
+        "session-1", request.generation, {"source": "workflow"}
+    )
+
+    assert acknowledged is False
+    assert request.event.is_set() is False
+    assert manager.get_pending_observation("session-1") == request
+
+
+@pytest.mark.asyncio
 async def test_waiter_reserves_only_after_current_owner_releases():
     manager = SafePointManager()
     first = await manager.request_safe_point("session-1", "restore:first")

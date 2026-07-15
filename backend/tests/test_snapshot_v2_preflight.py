@@ -317,7 +317,7 @@ class TestRestorePreflight:
         from backend.services.snapshot_v2.preflight import RestorePreflight
         result = RestorePreflight(v2_paths).run("snap-bad-state")
 
-        assert result.status == "ready"
+        assert result.status == "corrupted"
         assert any("Workflow state" in err for err in result.compatibility_errors)
 
     def test_staging_bytes_positive_with_objects(self, v2_paths):
@@ -334,10 +334,11 @@ class TestRestorePreflight:
 
         from backend.services.snapshot_v2.preflight import RestorePreflight
         result = RestorePreflight(v2_paths).run("snap-rt-yes")
-        assert result.runtime_choice_supported is False
+        assert result.runtime_choice_supported is True
+        assert result.runtime_choice_required is False
 
     def test_runtime_choice_required_when_complete_payload_absent(self, v2_paths):
-        """Empty complete runtime still needs an explicit runtime_choice."""
+        """Empty complete runtime is an exact empty runtime, not unavailable."""
         from backend.services.snapshot_v2.models import SnapshotManifestV2
         from backend.services.snapshot_v2.object_store import ManifestStore, ObjectStore
 
@@ -359,6 +360,7 @@ class TestRestorePreflight:
         from backend.services.snapshot_v2.preflight import RestorePreflight
         result = RestorePreflight(v2_paths).run("snap-rt-no")
         assert result.runtime_choice_supported is True
+        assert result.runtime_choice_required is False
 
     def test_preflight_requires_runtime_choice_for_unavailable_runtime(self, v2_paths):
         """Unavailable runtime with restore request and no runtime_choice must raise."""
@@ -387,6 +389,10 @@ class TestRestorePreflight:
 
         with pytest.raises(RuntimeChoiceRequired):
             RestorePreflight(v2_paths).run(manifest.snapshot_id, request)
+
+        result = RestorePreflight(v2_paths).run(manifest.snapshot_id)
+        assert result.runtime_choice_supported is True
+        assert result.runtime_choice_required is True
 
     def test_corrupted_preflight_skips_runtime_choice_enforcement(self, v2_paths):
         """Corrupted snapshot must return corrupted, not raise RuntimeChoiceRequired."""

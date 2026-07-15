@@ -121,7 +121,7 @@ def _materialize_target_live(
         dst.write_bytes(raw)
     if target_manifest.notebook_ref is not None:
         src = v2_paths.objects / target_manifest.notebook_ref.sha256
-        (session_states / "notebook.ipynb").write_bytes(src.read_bytes())
+        (session_states / f"{session_id}.ipynb").write_bytes(src.read_bytes())
     for entry in target_manifest.workspace or []:
         src = v2_paths.objects / entry.object_hash
         dst = session_workspace / entry.path
@@ -377,7 +377,7 @@ def live_session(session_workspace, session_states):
     _write_file(session_states / "sess-restore-tx_session.pkl",
                 "original-kernel")
     _write_file(session_states / "adata.h5ad", "original-adata")
-    _write_file(session_states / "notebook.ipynb",
+    _write_file(session_states / "sess-restore-tx.ipynb",
                 json.dumps({"cells": [{"original": True}]}))
     _write_file(session_states.parent / "session.json",
                 json.dumps({"id": "sess-restore-tx", "status": "running",
@@ -694,6 +694,43 @@ class TestRestoreCoordinatorAPI:
             obj_path = v2_paths.objects / entry.object_hash
             assert target_path.read_bytes() == obj_path.read_bytes(), \
                 "Applied workspace content mismatch: {}".format(entry.path)
+
+    @pytest.mark.asyncio
+    async def test_apply_replaces_canonical_session_notebook(
+            self, v2_paths, session_id, snapshot_id, session_dir,
+            session_workspace, session_states, live_session, target_manifest):
+        """Apply and later runtime consumers must address the same notebook."""
+        from backend.services.snapshot_v2.restore import RestoreCoordinator
+
+        legacy_path = session_states / "notebook.ipynb"
+        legacy_path.unlink(missing_ok=True)
+        canonical_path = session_states / f"{session_id}.ipynb"
+        canonical_path.write_text(json.dumps({"cells": [{"old": True}]}))
+
+        coordinator = RestoreCoordinator()
+        staged = await coordinator.stage(
+            snapshot_id=snapshot_id,
+            session_id=session_id,
+            paths=v2_paths,
+            recovery_mode="rollback",
+            pre_restore_ref="snap-pre-restore",
+            branch_id="main",
+            continuation_kind="idle",
+        )
+        applied = await coordinator.apply(
+            staged=staged,
+            paths=v2_paths,
+            session_dir=str(session_dir),
+            workspace_root=str(session_workspace),
+            states_root=str(session_states),
+        )
+
+        expected = (
+            v2_paths.objects / target_manifest.notebook_ref.sha256
+        ).read_bytes()
+        assert applied.notebook_applied is True
+        assert canonical_path.read_bytes() == expected
+        assert not legacy_path.exists()
 
     @pytest.mark.asyncio
     async def test_commit_finalizes_journal(
@@ -1235,7 +1272,7 @@ class TestRecovery:
             (session_dir / "session.json").write_bytes(src.read_bytes())
         if target_manifest.notebook_ref is not None:
             src = v2_paths.objects / target_manifest.notebook_ref.sha256
-            (session_states / "notebook.ipynb").write_bytes(src.read_bytes())
+            (session_states / f"{session_id}.ipynb").write_bytes(src.read_bytes())
         for entry in target_manifest.workspace or []:
             src = v2_paths.objects / entry.object_hash
             dst = session_workspace / entry.path
@@ -1405,7 +1442,7 @@ class TestJournalHmacIntegrity:
             (session_dir / "session.json").write_bytes(src.read_bytes())
         if target_manifest.notebook_ref is not None:
             src = v2_paths.objects / target_manifest.notebook_ref.sha256
-            (session_states / "notebook.ipynb").write_bytes(src.read_bytes())
+            (session_states / f"{session_id}.ipynb").write_bytes(src.read_bytes())
         for entry in target_manifest.workspace or []:
             src = v2_paths.objects / entry.object_hash
             dst = session_workspace / entry.path

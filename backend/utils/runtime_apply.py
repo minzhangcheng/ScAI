@@ -180,10 +180,18 @@ def apply_runtime_pkl(session_id: str, snapshot_zst: Path) -> None:
     _journal_path(session_id).unlink(missing_ok=True)
 
 
-def _quarantine_path(path: Path) -> None:
-    """Move *path* aside with a ``.quarantine`` suffix if it exists."""
-    if path.exists():
-        path.replace(path.with_suffix(path.suffix + ".quarantine"))
+def _quarantine_path(path: Path) -> Path | None:
+    """Move *path* aside without overwriting earlier quarantine evidence."""
+    if not path.exists():
+        return None
+    base = path.with_suffix(path.suffix + ".quarantine")
+    candidate = base
+    index = 1
+    while candidate.exists():
+        candidate = base.with_name(f"{base.name}.{index}")
+        index += 1
+    path.replace(candidate)
+    return candidate
 
 
 def quarantine_live_runtime(session_id: str) -> None:

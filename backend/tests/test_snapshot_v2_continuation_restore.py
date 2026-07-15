@@ -497,6 +497,14 @@ class TestActivate:
         dispatcher = ContinuationDispatcher(store)
         capsule = _make_terminal_capsule(status="completed")
         analysis_state = _make_analysis_state()
+        analysis_state.restore_resume_kind = "graph_node"
+        analysis_state.restore_resume_node = "pi_synthesis"
+        analysis_state.restore_resume_gate = "round_wait"
+        analysis_state.restore_resume_workflow_state = {"current_round": 99}
+        analysis_state.sandbox_state = {
+            "restore_gate_payload": {"current_round": 99},
+            "unrelated": "preserved",
+        }
         ws = _make_workflow_state()
 
         staged = dispatcher.stage_checkpoint(
@@ -508,8 +516,11 @@ class TestActivate:
         assert analysis_state.restore_resume_kind == "terminal"
         assert analysis_state.restore_resume_node is None
         assert analysis_state.restore_resume_gate is None
+        assert analysis_state.restore_resume_workflow_state is None
+        assert "restore_gate_payload" not in analysis_state.sandbox_state
+        assert analysis_state.sandbox_state["unrelated"] == "preserved"
 
-    def test_activate_idle_does_not_set_resume_fields(self, v2_paths):
+    def test_activate_idle_clears_stale_resume_fields(self, v2_paths):
         from backend.services.snapshot_v2.object_store import ObjectStore
         from backend.services.snapshot_v2.dispatcher import ContinuationDispatcher
 
@@ -517,16 +528,28 @@ class TestActivate:
         dispatcher = ContinuationDispatcher(store)
         capsule = _make_idle_capsule()
         analysis_state = _make_analysis_state()
+        analysis_state.restore_resume_kind = "semantic_gate"
+        analysis_state.restore_resume_node = "pi_synthesis"
+        analysis_state.restore_resume_gate = "round_wait"
+        analysis_state.restore_resume_workflow_state = {"current_round": 99}
+        analysis_state.sandbox_state = {
+            "restore_gate_payload": {"current_round": 99},
+            "unrelated": "preserved",
+        }
         ws = _make_workflow_state()
 
         staged = dispatcher.stage_checkpoint(
             capsule, ws, analysis_state,
             snapshot_id="snap-4", transaction_id="tx-jkl",
         )
-        assert analysis_state.restore_resume_kind is None
         dispatcher.activate(analysis_state, staged)
 
         assert analysis_state.restore_resume_kind is None
+        assert analysis_state.restore_resume_node is None
+        assert analysis_state.restore_resume_gate is None
+        assert analysis_state.restore_resume_workflow_state is None
+        assert "restore_gate_payload" not in analysis_state.sandbox_state
+        assert analysis_state.sandbox_state["unrelated"] == "preserved"
 
     def test_activate_invalidates_report_paths(self, v2_paths):
         from backend.services.snapshot_v2.object_store import ObjectStore

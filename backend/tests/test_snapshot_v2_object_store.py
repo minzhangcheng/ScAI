@@ -97,6 +97,30 @@ class TestCanonicalJson:
 
 
 class TestObjectStore:
+    def test_put_bytes_uses_unique_temporary_files_and_cleans_failures(
+        self, v2_paths, monkeypatch,
+    ):
+        import os
+
+        from backend.services.snapshot_v2.object_store import ObjectStore
+
+        sources = []
+
+        def _fail_replace(source, destination):
+            sources.append(Path(source))
+            raise OSError("injected replace failure")
+
+        monkeypatch.setattr(os, "replace", _fail_replace)
+        store = ObjectStore(v2_paths)
+
+        for _ in range(2):
+            with pytest.raises(OSError, match="injected replace failure"):
+                store.put_bytes(b"same concurrent content", "text/plain")
+
+        assert len(sources) == 2
+        assert sources[0] != sources[1]
+        assert not list(v2_paths.staging.glob("*.tmp"))
+
     def test_put_bytes_creates_missing_staging_and_objects_dirs(self, tmp_path):
         """Fresh sessions may not have Snapshot V2 dirs yet; put_bytes must create them."""
         from backend.services.snapshot_v2.object_store import ObjectStore

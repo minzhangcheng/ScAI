@@ -349,6 +349,30 @@ class SnapshotImporter:
                 dest_session_id=self.dest_session_id,
             )
 
+            # Destination identity is immutable. Re-importing the exact same
+            # target root is idempotent; the same ID with different content
+            # must never replace the committed manifest.
+            idempotent_ids: set[str] = set()
+            for manifest in plan.manifests:
+                target_root = hashlib.sha256(canonical_json(manifest)).hexdigest()
+                manifest.root_hash = target_root
+                committed_path = (
+                    Path(str(self.paths.committed))
+                    / f"{manifest.snapshot_id}.json"
+                )
+                if not committed_path.exists():
+                    continue
+                existing = self.manifest_store.load_verified_including_pending(
+                    manifest.snapshot_id,
+                )
+                if existing.root_hash != target_root:
+                    raise SnapshotIntegrityError(
+                        "IMPORT_SNAPSHOT_ID_COLLISION",
+                        f"Snapshot ID {manifest.snapshot_id} already exists "
+                        "with different content",
+                    )
+                idempotent_ids.add(manifest.snapshot_id)
+
             # ── Pass 2: stream approved objects through ObjectStore ─
             write_proofs: dict[str, ObjectRef] = {}
             with tarfile.open(str(archive_path), "r:gz") as tf:
@@ -392,12 +416,24 @@ class SnapshotImporter:
             # Mark ALL target manifests pending BEFORE publishing any of them,
             # so a crash mid-loop leaves every published manifest invisible
             # until the batch record commits (design §6.2 batch atomicity).
-            planned_ids = [m.snapshot_id for m in plan.manifests]
+            planned_ids = [
+                m.snapshot_id
+                for m in plan.manifests
+                if m.snapshot_id not in idempotent_ids
+            ]
             ManifestStore.mark_pending_imports(self.paths.committed, planned_ids)
 
             # Stage and publish each rebound manifest (write proofs only)
             manifest_roots: dict[str, str] = {}
             for manifest in plan.manifests:
+                if manifest.snapshot_id in idempotent_ids:
+                    manifest_roots[manifest.snapshot_id] = manifest.root_hash
+                    result.imported_snapshot_ids.append(manifest.snapshot_id)
+                    result.warnings.append(
+                        f"Snapshot {manifest.snapshot_id} already imported; "
+                        "reused identical committed root"
+                    )
+                    continue
                 staging_path = self.manifest_store.write_staging(
                     manifest, prefix=f"{txn_id}_",
                 )

@@ -251,11 +251,14 @@ class SafePointManager:
             if req.generation != generation:
                 self._pending_requests[session_id] = req
                 return False
-            self._acquire_unlocked(
+            acquired = self._acquire_unlocked(
                 session_id, workflow_state,
                 eligibility_trusted=True,
                 owner_token=req.owner_token,
             )
+            if not acquired:
+                self._pending_requests[session_id] = req
+                return False
             req.event.set()  # unblock the job
             return True
 
@@ -349,7 +352,7 @@ class SafePointManager:
         owner_token: str,
     ) -> bool:
         """Acquire without taking the lock (caller must hold ``_lock``)."""
-        if session_id in self._events:
+        if session_id in self._events or session_id in self._pending_requests:
             return False
         token = _normalize_owner_token(owner_token)
         if not token:
@@ -374,6 +377,11 @@ class SafePointManager:
     def is_eligibility_trusted(self, session_id: str) -> bool:
         """True when the held descriptor may authorize empty-complete."""
         return bool(self._eligibility_trusted.get(session_id, False))
+
+    def is_owned_by(self, session_id: str, owner_token: str) -> bool:
+        """Return whether *owner_token* owns the acquired session hold."""
+        token = _normalize_owner_token(owner_token)
+        return bool(token) and self._acquired_owners.get(session_id) == token
 
     def get_eligibility_descriptor(self, session_id: str) -> dict[str, Any] | None:
         """Descriptor for empty-complete eligibility, or None if untrusted."""

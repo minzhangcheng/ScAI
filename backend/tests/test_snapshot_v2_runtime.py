@@ -7,6 +7,69 @@ from unittest.mock import MagicMock, AsyncMock
 import pytest
 
 
+def test_save_dill_template_rolls_back_failed_frame(tmp_path):
+    """A failed frame must not poison the next residual object."""
+    import dill
+
+    from backend.services.snapshot_v2.runtime import _SAVE_DILL_TEMPLATE
+
+    class Unpicklable:
+        def __reduce__(self):
+            raise RuntimeError("intentional pickle failure")
+
+    shared = ["GENE_A", "GENE_B"]
+    namespace = {
+        "results": {
+            "large": list(range(100_000)),
+            "failure": Unpicklable(),
+        },
+        "markers": {"up": shared, "down": shared},
+    }
+    residual = tmp_path / "residual.pkl"
+    exec(
+        _SAVE_DILL_TEMPLATE.format(
+            names_repr=["results", "markers"],
+            dill_path_repr=str(residual),
+        ),
+        namespace,
+    )
+
+    with residual.open("rb") as handle:
+        name, restored = dill.load(handle)
+        assert name == "markers"
+        assert restored == {"up": shared, "down": shared}
+        assert restored["up"] is restored["down"]
+        with pytest.raises(EOFError):
+            dill.load(handle)
+
+
+@pytest.mark.asyncio
+async def test_residual_capture_rejects_missing_structural_output(tmp_path):
+    """Successful execution without saved/skipped metadata is not proof."""
+    from backend.services.snapshot_v2.runtime import RuntimeCapture
+
+    capture_dir = tmp_path / "capture"
+    capture_dir.mkdir()
+    (capture_dir / "residual.pkl").write_bytes(b"unverified")
+
+    sandbox = AsyncMock()
+    sandbox.execute.return_value = MagicMock(success=True, output="ok", error=None)
+    object_store = MagicMock()
+    capturer = RuntimeCapture(object_store, MagicMock(root=tmp_path))
+
+    ref, saved, skipped = await capturer._capture_residual_dill(
+        sandbox,
+        ["results"],
+        {"results": "builtins.dict"},
+        capture_dir,
+    )
+
+    assert ref is None
+    assert saved == []
+    assert skipped == ["results"]
+    object_store.put_file.assert_not_called()
+
+
 class TestBuildRequiredRuntimeSet:
     def test_required_set_is_union_of_all_sources(self):
         from backend.services.snapshot_v2.runtime import build_required_runtime_set

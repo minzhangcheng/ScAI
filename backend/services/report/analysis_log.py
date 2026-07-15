@@ -89,13 +89,11 @@ class AnalysisLogMixin:
 
         Falls back to state.code_history if the .ipynb file is not found.
         """
-        notebook_path = os.path.join(
-            self._get_session_states(state.id), f"{state.id}.ipynb"
-        ) if hasattr(self, '_get_session_states') else None
-
-        # Use config helper instead
+        # Use the same canonical path as sandbox and Snapshot V2 restore.
         from backend.config import get_session_states
-        notebook_path = get_session_states(state.id) / f"{state.id}.ipynb"
+        from backend.utils.live_paths import live_notebook_path
+
+        notebook_path = live_notebook_path(get_session_states(state.id), state.id)
 
         cells = []
 

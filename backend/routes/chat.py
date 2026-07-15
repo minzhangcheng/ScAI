@@ -286,6 +286,7 @@ async def capture_post_chat_snapshot(session_id: str, state: AnalysisState):
     from backend.config._config import default_config, get_session_workspace
     from backend.services.snapshot_v2.continuation import ContinuationRegistry
     from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
+    from backend.services.snapshot_v2.lineage import capture_lineage_from_state
     from backend.services.snapshot_v2.models import SnapshotCaptureRequest
     from backend.services.snapshot_v2.paths import SnapshotV2Paths
     from backend.services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
@@ -381,6 +382,7 @@ async def capture_post_chat_snapshot(session_id: str, state: AnalysisState):
                 phase="post_chat",
                 capsule=capsule,
                 round_number=getattr(state, "current_round", 0) or 0,
+                **capture_lineage_from_state(state),
             )
             return await service.capture_required_snapshot(
                 state,
@@ -388,6 +390,7 @@ async def capture_post_chat_snapshot(session_id: str, state: AnalysisState):
                 sandbox=sandbox,
                 workflow_state=workflow_state,
                 workspace_root=workspace_root,
+                safe_point_owner_token=owner_token,
             )
 
         # No active workflow — derive terminal/idle from persisted state.
@@ -452,6 +455,7 @@ async def capture_post_chat_snapshot(session_id: str, state: AnalysisState):
             phase="post_chat",
             capsule=capsule,
             round_number=getattr(state, "current_round", 0) or 0,
+            **capture_lineage_from_state(state),
         )
         return await service.capture_required_snapshot(
             state,
@@ -459,6 +463,7 @@ async def capture_post_chat_snapshot(session_id: str, state: AnalysisState):
             sandbox=None,
             workflow_state=workflow_state,
             workspace_root=workspace_root,
+            safe_point_owner_token=owner_token,
         )
     finally:
         if owned:

@@ -121,6 +121,34 @@ def _make_capture_request(session_id: str = "sess-quota"):
     )
 
 
+@pytest.mark.asyncio
+async def test_prewrite_estimate_counts_known_workspace_and_state_artifacts(
+    tmp_path, monkeypatch,
+):
+    from backend.services.snapshot_v2.service import SnapshotService
+
+    paths = _make_v2_paths(tmp_path)
+    service = SnapshotService("sess-quota", paths)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "table.csv").write_bytes(b"x" * 321)
+    states = tmp_path / "states"
+    states.mkdir()
+    (states / "sess-quota.ipynb").write_bytes(b"n" * 123)
+    monkeypatch.setattr(
+        "backend.services.snapshot_v2.service.get_session_states",
+        lambda _sid: states,
+    )
+
+    estimate = await service._estimate_capture_addition(
+        _make_capture_request(),
+        str(workspace),
+        _make_analysis_state(),
+    )
+
+    assert estimate >= 321 + 123
+
+
 def _workspace_object_sizes(workspace: Path) -> dict[str, int]:
     """sha256 -> size for scoped workspace files (root + figures/tables/repro)."""
     sizes: dict[str, int] = {}
@@ -242,5 +270,51 @@ async def test_capture_path_physical_added_includes_workspace_and_is_not_recount
             assert second_physical < first_physical
             assert second_physical < second.manifest.logical_size_bytes
             assert second.manifest.logical_size_bytes > 0
+    finally:
+        sessions.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_quota_failure_cannot_be_bypassed_by_identical_retry(tmp_path):
+    from backend.services.snapshot_v2.service import SnapshotService
+    from backend.state import sessions
+
+    session_id = "sess-quota-retry"
+    paths = _make_v2_paths(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "result.txt").write_bytes(b"quota-retry-payload")
+    states = tmp_path / "states"
+    states.mkdir()
+    (states / f"{session_id}.ipynb").write_text(
+        json.dumps({"cells": [], "nbformat": 4, "nbformat_minor": 5})
+    )
+    state = _make_analysis_state(session_id)
+    sessions[session_id] = state
+
+    try:
+        service = SnapshotService(session_id, paths, session_quota_bytes=1)
+        failures = []
+        with patch(
+            "backend.services.snapshot_v2.service.get_session_states",
+            return_value=states,
+        ):
+            for _ in range(2):
+                record = await service._capture_locked(
+                    _make_capture_request(session_id),
+                    workspace_root=str(workspace),
+                    workflow_state={"kernel_present": False},
+                    analysis_state=state,
+                    persist_session=False,
+                )
+                failures.append(record.failure)
+
+        assert all(failure is not None for failure in failures)
+        assert [failure.code for failure in failures] == [
+            "snapshot_quota_exceeded",
+            "snapshot_quota_exceeded",
+        ]
+        assert list(paths.committed.glob("*.json")) == []
+        assert list(paths.objects.iterdir()) == []
     finally:
         sessions.pop(session_id, None)

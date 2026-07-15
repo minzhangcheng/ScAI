@@ -543,15 +543,35 @@ with open({dill_path_repr!r}, 'wb') as _f:
         if _obj is None and _n not in globals():
             _skipped.append(_n)
             continue
+        _checkpoint = _f.tell()
         try:
             _runtime_dill.dump((_n, _obj), _f)
             _saved_count += 1
             _saved.append(_n)
         except Exception as _e:
+            # dill writes incrementally. Remove the incomplete frame before
+            # appending another variable or its memo references can bind to
+            # objects leaked from the failed frame during restore.
+            _f.seek(_checkpoint)
+            _f.truncate()
             _skipped.append(_n)
+_verified = []
+with open({dill_path_repr!r}, 'rb') as _verify_f:
+    while True:
+        try:
+            _verified_name, _verified_obj = _runtime_dill.load(_verify_f)
+            _verified.append(_verified_name)
+        except EOFError:
+            break
+if _verified != _saved:
+    raise RuntimeError(
+        'Residual dill readback mismatch: saved=' + repr(_saved)
+        + ' verified=' + repr(_verified)
+    )
 _size = _runtime_os.path.getsize({dill_path_repr!r})
 print('__DILL_SAVED__:' + str(_saved_count) + '/' + str(len(_names)) + ' size=' + str(_size))
 print('__DILL_SAVED_NAMES__:' + _runtime_json.dumps(_saved))
+print('__DILL_VERIFIED_NAMES__:' + _runtime_json.dumps(_verified))
 if _skipped:
     print('__DILL_SKIPPED__:' + _runtime_json.dumps(_skipped))
 """
@@ -575,14 +595,25 @@ def _parse_dill_skipped(output: str) -> list[str]:
     return skipped
 
 
-def _parse_dill_saved_names(output: str) -> list[str]:
+def _parse_dill_name_line(output: str, prefix: str) -> list[str] | None:
     for line in (output or "").splitlines():
-        if line.startswith("__DILL_SAVED_NAMES__:"):
-            raw = line[len("__DILL_SAVED_NAMES__:"):].strip()
+        if line.startswith(prefix):
+            raw = line[len(prefix):].strip()
             parsed = _parse_name_list(raw)
             if parsed is not None:
                 return parsed
+    return None
+
+
+def _parse_dill_saved_names(output: str) -> list[str]:
+    parsed = _parse_dill_name_line(output, "__DILL_SAVED_NAMES__:")
+    if parsed is not None:
+        return parsed
     return []
+
+
+def _parse_dill_verified_names(output: str) -> list[str] | None:
+    return _parse_dill_name_line(output, "__DILL_VERIFIED_NAMES__:")
 
 
 def _parse_name_list(raw: str) -> list[str] | None:
@@ -843,15 +874,18 @@ class RuntimeCapture:
         output = result.output or ""
         skipped = _parse_dill_skipped(output)
         saved = _parse_dill_saved_names(output)
+        saved_proof = _parse_dill_name_line(output, "__DILL_SAVED_NAMES__:")
+        verified = _parse_dill_verified_names(output)
         if not result.success:
             # Treat whole batch as unpersistable for required names.
             return None, saved, list(var_names)
         if not dill_path.exists():
             return None, saved, list(set(var_names) - set(saved)) or list(var_names)
-        if not saved and not skipped:
-            # Older kernel output without structural saved list: infer from skip.
-            skipped = skipped or []
-            saved = [n for n in var_names if n not in skipped]
+        # Current capture requires structural output and an in-kernel readback
+        # proof. Output loss must never be interpreted as successful capture.
+        if saved_proof is None or verified is None or verified != saved:
+            dill_path.unlink(missing_ok=True)
+            return None, [], list(var_names)
         put_result = self._object_store.put_file(dill_path, "application/octet-stream")
         ref = put_result.ref
         dill_path.unlink(missing_ok=True)

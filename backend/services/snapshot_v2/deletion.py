@@ -364,8 +364,18 @@ class DeletionService:
                 load_active_export_protected_ids,
             )
             export_protected = load_active_export_protected_ids(self.paths)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.error(
+                "Snapshot deletion blocked because export protection could "
+                "not be loaded: %s",
+                exc,
+            )
+            raise SnapshotDeleteConflict(
+                "EXPORT_PROTECTION_UNAVAILABLE",
+                "Cannot safely delete snapshots while active export protection "
+                "records are unavailable",
+                details={"reason": "export_protection_unavailable"},
+            ) from exc
 
         all_protected = set(protected_ids or {})
         all_protected.update(export_protected)

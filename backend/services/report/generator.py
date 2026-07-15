@@ -495,7 +495,9 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
 
         # Copy notebook to report directory for download
         import shutil as _shutil
-        notebook_src = get_session_states(report_state.id) / f"{report_state.id}.ipynb"
+        from backend.utils.live_paths import live_notebook_path
+
+        notebook_src = live_notebook_path(get_session_states(report_state.id), report_state.id)
         if notebook_src.exists():
             try:
                 _shutil.copy2(str(notebook_src), str(self.output_dir / f"{report_state.id}.ipynb"))

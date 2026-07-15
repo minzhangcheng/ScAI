@@ -304,10 +304,9 @@ async def test_auto_snapshot_waits_for_pending_save(generation_env, monkeypatch)
     restored_state = sessions[env.session_id]
     assert restored_state.sandbox_state["runtime_revision"] == 2
 
-    # Restore applies notebook as states/notebook.ipynb (not session-id named).
-    notebook_path = states / "notebook.ipynb"
-    if not notebook_path.is_file():
-        notebook_path = sb2.notebook_state.notebook_path
+    # Restore and the restarted sandbox must use the same canonical notebook.
+    notebook_path = sb2.notebook_state.notebook_path
+    assert notebook_path == states / f"{env.session_id}.ipynb"
     notebook = json.loads(notebook_path.read_text())
     code_sources = [
         "".join(cell.get("source", []))

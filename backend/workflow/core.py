@@ -2,6 +2,7 @@
 LangGraph workflow for multi-agent single-cell analysis
 """
 import asyncio
+import copy
 import logging
 import os
 import traceback
@@ -509,6 +510,10 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         """Release the cooperative pause gate so blocked nodes/agent loops can proceed."""
         self._pause_event.set()
 
+    def get_snapshot_workflow_state(self) -> dict[str, Any]:
+        """Return a detached workflow-state view for snapshot capture."""
+        return copy.deepcopy(dict(self._current_graph_state or {}))
+
     async def acknowledge_at_boundary(self) -> bool:
         """Acknowledge a pending restore/post-chat safe-point at a boundary.
 
@@ -932,6 +937,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         from ..services.snapshot_v2.service import SnapshotService
         from ..services.snapshot_v2.continuation import ContinuationRegistry
         from ..services.snapshot_v2.models import SnapshotCaptureRequest
+        from ..services.snapshot_v2.lineage import capture_lineage_from_state
         from ..services.snapshot_v2.paths import SnapshotV2Paths
         from ..services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
 
@@ -963,6 +969,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             phase=phase,
             capsule=capsule,
             round_number=getattr(state, "current_round", 0) or 0,
+            **capture_lineage_from_state(state),
         )
         workspace_root = str(get_session_workspace(self.session_id))
         # capture_required_snapshot applies success/failure and raises on failure

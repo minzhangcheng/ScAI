@@ -186,6 +186,13 @@ async def cancel_restore_job(
         )
         return
 
+    if record.status == "applying":
+        # Live mutation may already have happened. Do not release the safe
+        # point or inject CancelledError at an arbitrary await; let the service
+        # reach its cancellation fence and return recovery-required failure.
+        handle.cancel_event.set()
+        return
+
     # Persist cancelled before signalling so concurrent status polls see it
     updated = record.model_copy(update={"status": "cancelled"})
     handle.record = updated

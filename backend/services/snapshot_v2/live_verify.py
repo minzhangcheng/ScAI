@@ -265,6 +265,20 @@ def verify_live_restore_components(
                         component_hashes["runtime_sig"] = _sha256_file(sig_path)
             except Exception as exc:
                 failures.append(f"runtime residual verify failed: {exc}")
+    elif runtime_status == "complete":
+        # Empty-complete (or h5ad-only) targets require the old residual pair
+        # to be absent; reset/keep cannot substitute for exact application.
+        pkl_path = live_session_pkl_path(states_root_p, session_id)
+        sig_path = live_session_sig_path(states_root_p, session_id)
+        if pkl_path.exists():
+            failures.append(
+                f"unexpected runtime residual for empty complete target: {pkl_path.name}"
+            )
+        if sig_path.exists():
+            failures.append(
+                f"unexpected runtime signature for empty complete target: {sig_path.name}"
+            )
+        component_hashes["runtime_empty_residual"] = "verified"
     elif policy in ("reset", "keep"):
         # Policy may authorize empty/unavailable runtime only when the target
         # is NOT a complete residual (unavailable / no residual_ref / non-complete).
@@ -325,7 +339,9 @@ def verify_live_restore_components(
     # --- notebook ---
     notebook_ref = getattr(target_manifest, "notebook_ref", None)
     if notebook_ref is not None:
-        nb_path = states_root_p / "notebook.ipynb"
+        from backend.utils.live_paths import live_notebook_path
+
+        nb_path = live_notebook_path(states_root_p, session_id)
         if not nb_path.is_file():
             failures.append("notebook missing after apply")
         else:

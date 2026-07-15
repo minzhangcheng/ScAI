@@ -39,8 +39,18 @@ def should_reject_v1_restore(
     )
 
 
+def normalize_snapshot_format_version(value: Any) -> Optional[int]:
+    """Normalize historical integer/string format-version representations."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _is_v1_snapshot(snap: Snapshot) -> bool:
-    fv = snap.format_version
+    fv = normalize_snapshot_format_version(snap.format_version)
     return fv is None or fv < 2
 
 

@@ -50,10 +50,32 @@ def _v2_http_exc(exc) -> HTTPException:
     )
 
 
+def _require_v1_snapshot(snapshot) -> None:
+    """Reject V2 compatibility projections at legacy management routes."""
+    from backend.services.snapshot_v2.legacy import normalize_snapshot_format_version
+
+    format_version = normalize_snapshot_format_version(
+        getattr(snapshot, "format_version", None)
+    )
+    if format_version is not None and format_version >= 2:
+        raise HTTPException(
+            status_code=409,
+            detail="Snapshot V2 must be managed through the V2 snapshot endpoints",
+        )
+    if not str(getattr(snapshot, "state_file", "") or "").strip():
+        raise HTTPException(
+            status_code=409,
+            detail="Snapshot is not a valid V1 file-backed snapshot",
+        )
+
+
 @router.get("/{session_id}/snapshots")
 async def list_snapshots(session_id: str, request: Request):
     """List V1 inventory snapshots (metadata only; not restorable via V1 restore)."""
-    from backend.services.snapshot_v2.legacy import build_legacy_inventory
+    from backend.services.snapshot_v2.legacy import (
+        build_legacy_inventory,
+        normalize_snapshot_format_version,
+    )
     from backend.constants import VERSION
 
     validate_session_id(session_id)
@@ -64,7 +86,7 @@ async def list_snapshots(session_id: str, request: Request):
     snapshots = []
     for s in state.snapshots:
         payload = s.model_dump(mode="json")
-        fv = s.format_version
+        fv = normalize_snapshot_format_version(s.format_version)
         if fv is None or fv < 2:
             payload["restorable"] = False
             payload["unsupported"] = True
@@ -111,6 +133,7 @@ async def rollback_preview(session_id: str, snapshot_id: str, request: Request):
     snapshot = next((s for s in state.snapshots if s.id == snapshot_id), None)
     if not snapshot:
         raise HTTPException(status_code=404, detail="Snapshot not found")
+    _require_v1_snapshot(snapshot)
 
     runtime_status = compute_runtime_status(snapshot, session_id)
 
@@ -175,6 +198,7 @@ async def delete_snapshot(session_id: str, snapshot_id: str, request: Request):
     snapshot = next((s for s in state.snapshots if s.id == snapshot_id), None)
     if not snapshot:
         raise HTTPException(status_code=404, detail="Snapshot not found")
+    _require_v1_snapshot(snapshot)
 
     mgr = SnapshotManager(session_id)
     await mgr.delete_snapshot(snapshot)
@@ -195,6 +219,13 @@ async def delete_branch(session_id: str, snapshot_id: str, request: Request):
     snapshot = next((s for s in state.snapshots if s.id == snapshot_id), None)
     if not snapshot:
         raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    descendant_ids = SnapshotManager.find_descendant_ids(
+        state.snapshots, snapshot_id, include_root=True,
+    )
+    for candidate in state.snapshots:
+        if candidate.id in descendant_ids:
+            _require_v1_snapshot(candidate)
 
     mgr = SnapshotManager(session_id)
     deleted_ids = await mgr.delete_branch(snapshot, state.snapshots)

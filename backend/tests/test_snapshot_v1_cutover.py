@@ -65,6 +65,17 @@ def test_v2_list_excludes_v1_records():
     assert [s["snapshot_id"] for s in filtered] == ["v2-b"]
 
 
+def test_legacy_classification_accepts_historical_string_versions():
+    from backend.services.snapshot_v2.legacy import _is_v1_snapshot
+
+    class HistoricalSnapshot:
+        def __init__(self, format_version):
+            self.format_version = format_version
+
+    assert _is_v1_snapshot(HistoricalSnapshot("1")) is True
+    assert _is_v1_snapshot(HistoricalSnapshot("2")) is False
+
+
 @pytest.mark.asyncio
 async def test_v1_restore_returns_410_before_teardown(monkeypatch):
     """POST V1 restore must 410 before any workflow teardown or state mutation."""

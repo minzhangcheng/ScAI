@@ -951,6 +951,7 @@ class ReportingMixin:
         from ..services.snapshot_v2.service import SnapshotService
         from ..services.snapshot_v2.continuation import ContinuationRegistry
         from ..services.snapshot_v2.models import SnapshotCaptureRequest
+        from ..services.snapshot_v2.lineage import capture_lineage_from_state
         from ..services.snapshot_v2.paths import SnapshotV2Paths
 
         service = getattr(self, "snapshot_service", None)
@@ -1023,6 +1024,7 @@ class ReportingMixin:
                 idempotency_key=(
                     str(report_generation_id) if report_generation_id else None
                 ),
+                **capture_lineage_from_state(analysis_state),
             )
             workspace_root = str(get_session_workspace(self.session_id))
             record = await service.capture_required_snapshot(
@@ -1031,6 +1033,7 @@ class ReportingMixin:
                 sandbox=sandbox,
                 workflow_state=workflow_state,
                 workspace_root=workspace_root,
+                safe_point_owner_token=owner_token if owned_sp else None,
             )
             logger.info(
                 "[%s] Post-report snapshot created: %s (gen_id=%s)",

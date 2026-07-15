@@ -709,6 +709,10 @@ class RestoreCoordinator:
             "recovery_mode": recovery_mode,
             "branch_id": branch_id,
             "continuation_kind": continuation_kind,
+            "target_runtime_status": getattr(rt, "status", None),
+            "target_runtime_has_residual": bool(
+                getattr(rt, "residual_ref", None)
+            ),
             "status": "STAGED",
             "applied_step_ledger": [],
         }
@@ -770,6 +774,10 @@ class RestoreCoordinator:
             "session_id": session_id,
             "pre_restore_ref": staged.pre_restore_ref,
             "recovery_mode": staged.recovery_mode,
+            "target_runtime_status": _runtime_status_from_manifest(staged.manifest),
+            "target_runtime_has_residual": bool(
+                ((staged.manifest or {}).get("runtime") or {}).get("residual_ref")
+            ),
             "status": "APPLYING",
             "applied_step_ledger": [],
         }
@@ -799,16 +807,18 @@ class RestoreCoordinator:
         self._check_fault("workspace_applied")
 
         rt_status = _runtime_status_from_manifest(staged.manifest)
-        has_complete_runtime = (
-            rt_status == "complete"
-            and (bool(staged.staged_runtime_pkl) or bool(staged.staged_runtime_h5ads))
-        )
+        has_complete_runtime = rt_status == "complete"
 
         if has_complete_runtime:
             # Ignore supplied runtime_choice for complete targets.
             runtime_restore_status = "complete"
-            if "runtime_pkl" not in completed_steps and staged.staged_runtime_pkl:
-                atomic_replace_pkl(session_id, staged.staged_runtime_pkl)
+            if "runtime_pkl" not in completed_steps:
+                if staged.staged_runtime_pkl:
+                    atomic_replace_pkl(session_id, staged.staged_runtime_pkl)
+                else:
+                    # A complete runtime with no residual is an exact empty
+                    # residual target, not an unavailable runtime policy.
+                    quarantine_live_runtime(session_id)
                 ledger.append({"step": "runtime_pkl", "completed": True})
                 self._persist_ledger(paths, tx_id, ledger)
                 steps_applied.append("runtime_pkl")
@@ -883,7 +893,9 @@ class RestoreCoordinator:
                 self._check_fault("runtime_sig_replaced")
 
         if "notebook" not in completed_steps and staged.staged_notebook:
-            nb_dst = states_root_p / "notebook.ipynb"
+            from backend.utils.live_paths import live_notebook_path
+
+            nb_dst = live_notebook_path(states_root_p, session_id)
             _atomic_replace(staged.staged_notebook, nb_dst)
             ledger.append({"step": "notebook", "completed": True})
             self._persist_ledger(paths, tx_id, ledger)

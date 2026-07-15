@@ -515,9 +515,24 @@ class SnapshotManager:
 
     async def delete_snapshot(self, snapshot: Snapshot):
         """Delete a snapshot file and its kernel session pkl backup."""
-        state_path = (self.snapshots_dir / snapshot.state_file).resolve()
+        state_file = str(snapshot.state_file or "").strip()
+        if not state_file:
+            raise ValueError("V1 snapshot state_file must be a non-empty filename")
+        try:
+            format_version = (
+                int(snapshot.format_version)
+                if snapshot.format_version is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            format_version = None
+        if format_version is not None and format_version >= 2:
+            raise ValueError("V1 snapshot deletion cannot manage Snapshot V2")
+        state_path = (self.snapshots_dir / state_file).resolve()
         if not state_path.is_relative_to(self.snapshots_dir.resolve()):
-            raise ValueError(f"Invalid snapshot path: {snapshot.state_file}")
+            raise ValueError(f"Invalid snapshot path: {state_file}")
+        if state_path.is_dir():
+            raise ValueError(f"V1 snapshot state_file is not a file: {state_file}")
         if state_path.exists():
             state_path.unlink()
         pkl = self.snapshots_dir / f"{snapshot.id}_session.pkl.zst"

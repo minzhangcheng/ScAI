@@ -257,7 +257,9 @@ class _RecoveryRestorer:
                 ref = pre_manifest.notebook_ref
                 object_store.verify(ref)
                 src = Path(str(self.paths.objects)) / ref.sha256
-                dst = self.states_root / "notebook.ipynb"
+                from backend.utils.live_paths import live_notebook_path
+
+                dst = live_notebook_path(self.states_root, pre_manifest.session_id)
                 _stream_copy(src, dst)
             except Exception as exc:
                 raise RecoveryFailure(
@@ -281,6 +283,7 @@ class _RecoveryRestorer:
         from backend.utils.runtime_apply import (
             atomic_replace_pkl,
             install_live_runtime_h5ad_set,
+            quarantine_live_runtime,
         )
 
         tx_id = journal["transaction_id"]
@@ -304,6 +307,13 @@ class _RecoveryRestorer:
                 atomic_replace_pkl(session_id, str(pkl_src))
                 ledger.append({"step": "runtime_pkl", "completed": True})
                 completed.add("runtime_pkl")
+            elif (
+                journal.get("target_runtime_status") == "complete"
+                and not journal.get("target_runtime_has_residual")
+            ):
+                quarantine_live_runtime(session_id)
+                ledger.append({"step": "runtime_pkl", "completed": True})
+                completed.add("runtime_pkl")
 
         if "runtime_sig" not in completed and staging_present:
             # Pkl-only / residual-only complete targets may omit runtime/; still
@@ -321,7 +331,9 @@ class _RecoveryRestorer:
         if "notebook" not in completed:
             nb_src = staged_root / "notebook.ipynb"
             if nb_src.exists():
-                dst = self.states_root / "notebook.ipynb"
+                from backend.utils.live_paths import live_notebook_path
+
+                dst = live_notebook_path(self.states_root, session_id)
                 _stream_copy(nb_src, dst)
                 ledger.append({"step": "notebook", "completed": True})
                 completed.add("notebook")

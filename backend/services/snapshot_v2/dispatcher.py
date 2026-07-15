@@ -163,6 +163,7 @@ class ContinuationDispatcher:
             analysis_state.restore_resume_workflow_state = (
                 copy.deepcopy(staged.workflow_state) if staged.workflow_state else {}
             )
+            self._clear_gate_payload(analysis_state)
             if staged.planning_stage is not None and hasattr(analysis_state, "sandbox_state"):
                 ss = dict(getattr(analysis_state, "sandbox_state", None) or {})
                 ss["planning_stage"] = staged.planning_stage
@@ -173,6 +174,7 @@ class ContinuationDispatcher:
             analysis_state.restore_resume_node = staged.payload.get(
                 "node_name"
             ) if staged.payload else None
+            analysis_state.restore_resume_workflow_state = None
             # Rebuild exact waiting payload from capsule.
             # Fail closed if capsule declared payload_ref but stage lost it.
             if staged.payload is None:
@@ -225,6 +227,8 @@ class ContinuationDispatcher:
             analysis_state.restore_resume_kind = "terminal"
             analysis_state.restore_resume_node = None
             analysis_state.restore_resume_gate = None
+            analysis_state.restore_resume_workflow_state = None
+            self._clear_gate_payload(analysis_state)
             from backend.models.schemas import TaskStatus
             try:
                 status = staged.terminal_status or "completed"
@@ -234,8 +238,13 @@ class ContinuationDispatcher:
             except Exception:
                 pass
         elif staged.kind == "idle":
-            # Do NOT set any restore_resume_* fields — the session should
-            # remain as-is (no automatic workflow restart).
+            # Idle restores must not inherit a one-shot continuation from the
+            # pre-restore live session.
+            analysis_state.restore_resume_kind = None
+            analysis_state.restore_resume_node = None
+            analysis_state.restore_resume_gate = None
+            analysis_state.restore_resume_workflow_state = None
+            self._clear_gate_payload(analysis_state)
             from backend.models.schemas import TaskStatus
             try:
                 if getattr(analysis_state, "status", None) == TaskStatus.RUNNING:
@@ -257,6 +266,14 @@ class ContinuationDispatcher:
 
         # Invalidate report paths
         self._invalidate_report_paths(analysis_state)
+
+    @staticmethod
+    def _clear_gate_payload(analysis_state: Any) -> None:
+        if not hasattr(analysis_state, "sandbox_state"):
+            return
+        sandbox_state = dict(getattr(analysis_state, "sandbox_state", None) or {})
+        sandbox_state.pop("restore_gate_payload", None)
+        analysis_state.sandbox_state = sandbox_state
 
     # ── Stage helpers (private) ────────────────────────────────────────
 

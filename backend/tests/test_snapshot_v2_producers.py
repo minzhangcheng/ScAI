@@ -192,6 +192,9 @@ async def test_required_boundary_failure_blocks_next_node():
     workflow.sandbox = MagicMock()
     workflow._current_graph_state = {"current_round": 1}
     state = _make_analysis_state()
+    state.last_snapshot_id = "snap-parent"
+    state.restore_branch_id = "branch-a"
+    state.restore_branch_label = "Branch A"
     workflow.state = state
 
     from backend.workflow.core import SingleCellAnalysisWorkflow
@@ -201,6 +204,9 @@ async def test_required_boundary_failure_blocks_next_node():
     )
 
     async def _fail(state_arg, request, *a, **kw):
+        assert request.parent_id == "snap-parent"
+        assert request.branch_id == "branch-a"
+        assert request.branch_label == "Branch A"
         state_arg.wait_input_reason = "snapshot_failure"
         state_arg.snapshot_failure = {
             "code": "required_runtime_unpersistable",
@@ -239,6 +245,91 @@ async def test_required_boundary_failure_blocks_next_node():
     assert set(state.snapshot_failure["allowed_actions"]) == {
         "retry", "manage", "terminate",
     }
+
+
+def test_normal_v2_producers_use_shared_lineage_resolution():
+    """Workflow, chat, and report captures must share one lineage policy."""
+    project_root = Path(__file__).resolve().parents[2]
+    for relative_path in (
+        "backend/workflow/core.py",
+        "backend/routes/chat.py",
+        "backend/workflow/reporting.py",
+    ):
+        source = (project_root / relative_path).read_text(encoding="utf-8")
+        assert "capture_lineage_from_state" in source, relative_path
+
+
+def test_capture_lineage_defaults_and_restored_branch_values():
+    from backend.services.snapshot_v2.lineage import capture_lineage_from_state
+
+    state = _make_analysis_state()
+    assert capture_lineage_from_state(state) == {
+        "parent_id": None,
+        "branch_id": "main",
+        "branch_label": "main",
+    }
+
+    state.last_snapshot_id = "snap-parent"
+    state.restore_branch_id = " branch-a "
+    state.restore_branch_label = " Branch A "
+    assert capture_lineage_from_state(state) == {
+        "parent_id": "snap-parent",
+        "branch_id": "branch-a",
+        "branch_label": "Branch A",
+    }
+
+
+def test_workflow_snapshot_state_accessor_returns_deep_copy():
+    from backend.workflow.core import SingleCellAnalysisWorkflow
+
+    workflow = MagicMock()
+    workflow._current_graph_state = {
+        "node_retry_count": {"pi_synthesis": 2},
+        "skip_nodes": ["literature_research"],
+    }
+    workflow.get_snapshot_workflow_state = (
+        SingleCellAnalysisWorkflow.get_snapshot_workflow_state.__get__(
+            workflow, SingleCellAnalysisWorkflow,
+        )
+    )
+
+    frozen = workflow.get_snapshot_workflow_state()
+    frozen["node_retry_count"]["pi_synthesis"] = 99
+    frozen["skip_nodes"].append("bioinformatics_analysis")
+
+    assert workflow._current_graph_state["node_retry_count"]["pi_synthesis"] == 2
+    assert workflow._current_graph_state["skip_nodes"] == ["literature_research"]
+
+
+def test_restore_service_prefers_explicit_workflow_snapshot_accessor():
+    from backend.services.snapshot_v2.service import _workflow_state_for_snapshot
+
+    class Workflow:
+        _current_graph_state = {"source": "private"}
+
+        def get_snapshot_workflow_state(self):
+            return {"source": "accessor", "nested": {"value": 1}}
+
+    workflow = Workflow()
+    frozen = _workflow_state_for_snapshot(workflow)
+    frozen["nested"]["value"] = 2
+
+    assert frozen["source"] == "accessor"
+    assert workflow.get_snapshot_workflow_state()["nested"]["value"] == 1
+
+
+def test_active_workflow_requires_snapshot_state_or_safe_point_descriptor():
+    from backend.services.snapshot_v2.service import (
+        _has_trusted_workflow_snapshot_context,
+    )
+
+    workflow = object()
+    assert _has_trusted_workflow_snapshot_context(None, {}, {}) is True
+    assert _has_trusted_workflow_snapshot_context(workflow, {"next_node": "pi"}, {})
+    assert _has_trusted_workflow_snapshot_context(
+        workflow, {}, {"kernel_present": False},
+    )
+    assert _has_trusted_workflow_snapshot_context(workflow, {}, {}) is False
 
 
 @pytest.mark.asyncio
@@ -429,11 +520,13 @@ async def test_same_post_report_idempotency_key_returns_original_manifest(tmp_pa
                         state, _req("report-7"), sandbox=None,
                         workflow_state={"kernel_present": False},
                         workspace_root=str(workspace),
+                        safe_point_owner_token="test-owner",
                     )
                     second = await service.capture_required_snapshot(
                         state, _req("report-7"), sandbox=None,
                         workflow_state={"kernel_present": False},
                         workspace_root=str(workspace),
+                        safe_point_owner_token="test-owner",
                     )
     finally:
         await service.safe_point.release(session_id, "test-owner")

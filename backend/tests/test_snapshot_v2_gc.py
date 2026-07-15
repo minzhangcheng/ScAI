@@ -154,6 +154,27 @@ class TestMark:
         assert unique_a in marked
         assert unique_b in marked
 
+    def test_mark_includes_verified_pending_import_manifest(self, v2_paths):
+        from backend.services.snapshot_v2.gc import SnapshotGarbageCollector
+        from backend.services.snapshot_v2.object_store import ManifestStore
+
+        object_hash = hashlib.sha256(b"pending-object").hexdigest()
+        ref = build_object_ref(sha256=object_hash, size=100)
+        write_object(v2_paths, object_hash, 100)
+        manifest = build_manifest(
+            "s1", "snap-pending", objects={object_hash: ref},
+        )
+        write_manifest_to_store(
+            manifest, v2_paths.committed, v2_paths.integrity,
+        )
+        ManifestStore.mark_pending_imports(
+            v2_paths.committed, [manifest.snapshot_id],
+        )
+
+        marked = SnapshotGarbageCollector("s1", v2_paths).mark()
+
+        assert object_hash in marked
+
     def test_gc_mark_aborts_on_corrupt_committed_manifest(self, v2_paths):
         """mark() aborts when any committed (non-audit) manifest is corrupt."""
         from backend.services.snapshot_v2.errors import SnapshotIntegrityError

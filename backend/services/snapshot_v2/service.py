@@ -9,6 +9,7 @@ Never acquire session_lock while holding _exec_lock.
 from __future__ import annotations
 
 import asyncio
+import copy
 import contextlib
 import hashlib
 import json
@@ -89,6 +90,32 @@ async def _null_async_cm():
     yield
 
 
+def _workflow_state_for_snapshot(workflow: Any) -> dict[str, Any]:
+    """Read a detached workflow state, preferring the explicit contract."""
+    if workflow is None:
+        return {}
+    accessor = getattr(workflow, "get_snapshot_workflow_state", None)
+    if callable(accessor):
+        raw = accessor()
+        if isinstance(raw, dict):
+            return copy.deepcopy(raw)
+    # Compatibility fallback for test doubles and older in-process workflows.
+    for attr in ("_current_graph_state", "_last_workflow_state"):
+        raw = getattr(workflow, attr, None)
+        if isinstance(raw, dict):
+            return copy.deepcopy(raw)
+    return {}
+
+
+def _has_trusted_workflow_snapshot_context(
+    workflow: Any,
+    workflow_state: dict[str, Any],
+    live_safe_point: dict[str, Any],
+) -> bool:
+    """Require observable state before freezing an active workflow."""
+    return workflow is None or bool(workflow_state) or bool(live_safe_point)
+
+
 class SnapshotService:
     """Atomic snapshot capture and restore orchestration service."""
 
@@ -143,6 +170,19 @@ class SnapshotService:
         self.transaction_repository = transaction_repository
         self.session_persistence = session_persistence
 
+    def _resolve_previous_manifest(
+        self, analysis_state: Any,
+    ) -> SnapshotManifestV2 | None:
+        """Resolve and verify the current V2 lineage head, when declared."""
+        if analysis_state is None:
+            return None
+        snapshot_id = str(
+            getattr(analysis_state, "last_snapshot_id", None) or ""
+        ).strip()
+        if not snapshot_id:
+            return None
+        return self.manifest_store.load(snapshot_id)
+
     # ── Public API ───────────────────────────────────────────────────
 
     async def capture(
@@ -154,6 +194,7 @@ class SnapshotService:
         transaction: str | None = None,
         workflow_state: dict[str, Any] | None = None,
         analysis_state: Any = None,
+        safe_point_owner_token: str | None = None,
     ) -> SnapshotRecordV2:
         """Execute the capture transaction under the per-session lock."""
         session_id = request.session_id
@@ -166,6 +207,7 @@ class SnapshotService:
                 transaction=transaction,
                 workflow_state=workflow_state,
                 analysis_state=analysis_state,
+                safe_point_owner_token=safe_point_owner_token,
             )
 
     async def restore_snapshot(
@@ -262,14 +304,21 @@ class SnapshotService:
             analysis_state = sessions.get(self.session_id)
             workflow = workflows.get(self.session_id)
             sandbox = getattr(workflow, "sandbox", None) if workflow else None
-            workflow_state: dict[str, Any] = {}
-            if workflow is not None:
-                for attr in ("_current_graph_state", "_last_workflow_state"):
-                    raw = getattr(workflow, attr, None)
-                    if isinstance(raw, dict):
-                        workflow_state = dict(raw)
-                        break
+            workflow_state = _workflow_state_for_snapshot(workflow)
             live_sp = self.safe_point.get_descriptor(self.session_id) or {}
+            if not _has_trusted_workflow_snapshot_context(
+                workflow, workflow_state, live_sp,
+            ):
+                return _status(
+                    "failed",
+                    failure={
+                        "code": "LIVE_WORKFLOW_STATE_UNAVAILABLE",
+                        "message": (
+                            "Active workflow has no observable snapshot state "
+                            "or trusted safe-point descriptor"
+                        ),
+                    },
+                )
             if live_sp:
                 workflow_state = {**workflow_state, **live_sp}
 
@@ -293,6 +342,7 @@ class SnapshotService:
                 workspace_root=workspace_root,
                 workflow_state=workflow_state,
                 analysis_state=analysis_state,
+                prev_manifest=self._resolve_previous_manifest(analysis_state),
                 live_safe_point=live_sp,
                 # The apply transaction is an internal journal identifier.
                 # Retry lineage and every client-facing contract use the
@@ -427,11 +477,9 @@ class SnapshotService:
                 return _status(
                     "failed",
                     recovery_mode=recovery_mode,
-                    failure={
-                        "code": "APPLY_FAILED",
-                        "message": str(exc),
-                        "recovery_required": True,
-                    },
+                    failure=self._partial_apply_failure(
+                        "APPLY_FAILED", str(exc),
+                    ),
                 )
 
             if _cancelled():
@@ -439,11 +487,10 @@ class SnapshotService:
                 return _status(
                     "failed",
                     recovery_mode=recovery_mode,
-                    failure={
-                        "code": "CANCELLED_AFTER_APPLYING",
-                        "message": "Cancelled after apply; recovery required",
-                        "recovery_required": True,
-                    },
+                    failure=self._partial_apply_failure(
+                        "CANCELLED_AFTER_APPLYING",
+                        "Cancelled after apply; recovery required",
+                    ),
                 )
 
             # Validate staged checkpoint when present.
@@ -453,11 +500,10 @@ class SnapshotService:
                     return _status(
                         "failed",
                         recovery_mode=recovery_mode,
-                        failure={
-                            "code": "CHECKPOINT_INVALID",
-                            "message": "Applied checkpoint missing or empty",
-                            "recovery_required": True,
-                        },
+                        failure=self._partial_apply_failure(
+                            "CHECKPOINT_INVALID",
+                            "Applied checkpoint missing or empty",
+                        ),
                     )
 
             # Load applied analysis state into memory + activate dispatcher.
@@ -474,22 +520,18 @@ class SnapshotService:
                     return _status(
                         "failed",
                         recovery_mode=recovery_mode,
-                        failure={
-                            "code": "STATE_LOAD_FAILED",
-                            "message": str(exc),
-                            "recovery_required": True,
-                        },
+                        failure=self._partial_apply_failure(
+                            "STATE_LOAD_FAILED", str(exc),
+                        ),
                     )
 
             if restored_state is None:
                 return _status(
                     "failed",
                     recovery_mode=recovery_mode,
-                    failure={
-                        "code": "MISSING_STATE",
-                        "message": "No analysis state after apply",
-                        "recovery_required": True,
-                    },
+                    failure=self._partial_apply_failure(
+                        "MISSING_STATE", "No analysis state after apply",
+                    ),
                 )
 
             # Exact continuation only — no fresh-run fallback.
@@ -505,11 +547,7 @@ class SnapshotService:
                 return _status(
                     "failed",
                     recovery_mode=recovery_mode,
-                    failure={
-                        "code": exc.code,
-                        "message": str(exc),
-                        "recovery_required": True,
-                    },
+                    failure=self._partial_apply_failure(exc.code, str(exc)),
                 )
 
             # Terminal/idle: quarantine unrelated live kernel before exposing session.
@@ -645,6 +683,16 @@ class SnapshotService:
                 self.session_id,
             )
 
+    def _partial_apply_failure(self, code: str, message: str) -> dict[str, Any]:
+        """Build a recovery-required failure and block live session mutation."""
+        failure = {
+            "code": str(code),
+            "message": str(message),
+            "recovery_required": True,
+        }
+        self._block_session_after_partial_apply(failure)
+        return failure
+
     async def _verify_live_restore(
         self,
         *,
@@ -705,6 +753,7 @@ class SnapshotService:
         workflow_state: dict[str, Any] | None = None,
         *,
         workspace_root: str | None = None,
+        safe_point_owner_token: str | None = None,
     ) -> SnapshotRecordV2:
         """Capture a required system snapshot and apply result to *state*.
 
@@ -759,6 +808,7 @@ class SnapshotService:
             workspace_root=workspace_root,
             workflow_state=workflow_state,
             analysis_state=state,
+            safe_point_owner_token=safe_point_owner_token,
         )
         if record.failure is not None:
             failure_payload = record.failure.model_dump(mode="json")
@@ -1189,6 +1239,7 @@ class SnapshotService:
         workflow_state: dict[str, Any] | None = None,
         snapshot_id_override: str | None = None,
         analysis_state: Any = None,
+        safe_point_owner_token: str | None = None,
         skip_safe_point_lifecycle: bool = False,
         persist_session: bool = True,
     ) -> SnapshotRecordV2:
@@ -1204,6 +1255,15 @@ class SnapshotService:
         snapshot_id = snapshot_id_override or _new_snapshot_id()
         tx = transaction or snapshot_id
         try:
+            if safe_point_owner_token:
+                if not self.safe_point.is_owned_by(
+                    request.session_id, safe_point_owner_token,
+                ):
+                    raise SnapshotCaptureError(
+                        "SAFE_POINT_OWNERSHIP_LOST",
+                        "Capture no longer owns the supplied session safe point",
+                    )
+                skip_safe_point_lifecycle = True
             manifest, pending = await self._capture_impl(
                 request, snapshot_id, tx,
                 sandbox=sandbox,
@@ -1351,6 +1411,9 @@ class SnapshotService:
         skip_safe_point_lifecycle: bool = False,
         persist_session: bool = True,
     ) -> tuple[SnapshotManifestV2, bool]:
+        existing_object_hashes_before_capture: set[str] = set()
+        object_baseline_captured = False
+        manifest_published = False
         # Step 1 — validate state
         self._validate_state(request)
 
@@ -1378,6 +1441,19 @@ class SnapshotService:
                 }
             else:
                 existing_object_hashes_before_capture = set()
+            object_baseline_captured = True
+
+            estimated_addition = await self._estimate_capture_addition(
+                request, workspace_root, analysis_state,
+            )
+            current_physical = self._physical_object_store_bytes()
+            if current_physical + estimated_addition > self.session_quota_bytes:
+                raise SnapshotStorageError(
+                    "snapshot_quota_exceeded",
+                    "Conservative pre-write estimate would use "
+                    f"{current_physical + estimated_addition} bytes, exceeding "
+                    f"session quota {self.session_quota_bytes}",
+                )
 
             # Acquire exec lock (never acquire session_lock while holding this).
             exec_cm = (
@@ -1643,6 +1719,7 @@ class SnapshotService:
             # Step 9 — publish manifest
             staging_path = self.manifest_store.write_staging(manifest, prefix=f"{tx}_")
             published = self.manifest_store.publish_staging(staging_path)
+            manifest_published = True
 
             # Re-read verification
             reloaded = self.manifest_store.load(published.snapshot_id)
@@ -1711,10 +1788,18 @@ class SnapshotService:
             return reloaded, session_reconciliation_pending
 
         except SnapshotV2Error:
+            if object_baseline_captured and not manifest_published:
+                self._cleanup_unpublished_capture_objects(
+                    existing_object_hashes_before_capture,
+                )
             if not skip_safe_point_lifecycle:
                 await self._release_safe_point()
             raise
         except Exception as exc:
+            if object_baseline_captured and not manifest_published:
+                self._cleanup_unpublished_capture_objects(
+                    existing_object_hashes_before_capture,
+                )
             if not skip_safe_point_lifecycle:
                 await self._release_safe_point()
             raise SnapshotCaptureError("CAPTURE_FAILED", str(exc))
@@ -1746,6 +1831,12 @@ class SnapshotService:
                 "No AnalysisState available to capture",
             )
 
+        raw = self._serialize_analysis_state(state)
+        return self.object_store.put_bytes(raw, "application/json")
+
+    @staticmethod
+    def _serialize_analysis_state(state: Any) -> bytes:
+        """Serialize the canonical business-state payload used by capture."""
         # model_dump excluding derived listing fields that are rebuilt
         state_dict = state.model_dump(mode="json")
         state_dict.pop("snapshots", None)
@@ -1760,7 +1851,71 @@ class SnapshotService:
             state_dict, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
             default=str,
         ).encode("utf-8")
-        return self.object_store.put_bytes(raw, "application/json")
+        return raw
+
+    def _physical_object_store_bytes(self) -> int:
+        objects_dir = Path(str(self.paths.objects))
+        total = 0
+        if not objects_dir.is_dir():
+            return total
+        for path in objects_dir.iterdir():
+            if not path.is_file():
+                continue
+            try:
+                total += path.stat().st_size
+            except FileNotFoundError:
+                continue
+        return total
+
+    async def _estimate_capture_addition(
+        self,
+        request: SnapshotCaptureRequest,
+        workspace_root: str | None,
+        analysis_state: Any = None,
+    ) -> int:
+        """Conservatively estimate known bytes before writing any objects."""
+        estimate = 0
+        if request.analysis_state_ref is None:
+            state = analysis_state or await self._get_session_state(request.session_id)
+            if state is not None:
+                estimate += len(self._serialize_analysis_state(state))
+
+        states_dir = get_session_states(request.session_id)
+        if request.notebook_ref is None:
+            from backend.utils.live_paths import live_notebook_path
+
+            notebook = live_notebook_path(states_dir, request.session_id)
+            if notebook.is_file():
+                estimate += notebook.stat().st_size
+            else:
+                estimate += len(json.dumps(
+                    {
+                        "nbformat": 4,
+                        "nbformat_minor": 5,
+                        "metadata": {},
+                        "cells": [],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8"))
+
+        if request.checkpoint_ref is None:
+            checkpoint = checkpoint_sqlite_path(states_dir)
+            if checkpoint.is_file():
+                estimate += checkpoint.stat().st_size
+
+        if workspace_root:
+            from backend.services.snapshot_v2.workspace import WorkspaceScope
+
+            root = Path(workspace_root)
+            for relative in WorkspaceScope().list_live_scoped_paths(root):
+                path = root / relative
+                try:
+                    estimate += path.stat().st_size
+                except FileNotFoundError:
+                    continue
+        return estimate
 
     async def _capture_notebook(
         self,
@@ -1774,7 +1929,9 @@ class SnapshotService:
             )
 
         states_dir = get_session_states(request.session_id)
-        nb_path = Path(states_dir) / f"{request.session_id}.ipynb"
+        from backend.utils.live_paths import live_notebook_path
+
+        nb_path = live_notebook_path(states_dir, request.session_id)
         if not nb_path.exists():
             # Empty notebook is valid when no kernel work has been done.
             empty_nb = {
@@ -1826,12 +1983,18 @@ class SnapshotService:
         # Token is process-local for this service instance's lifecycle hold.
         owner_token = f"capture:{self.session_id}:{id(self)}"
         self._safe_point_owner_token = owner_token
-        await self.safe_point.acquire(
+        acquired = await self.safe_point.acquire(
             self.session_id,
             workflow_state,
             eligibility_trusted=False,
             owner_token=owner_token,
         )
+        if not acquired:
+            self._safe_point_owner_token = None
+            raise SnapshotCaptureError(
+                "SAFE_POINT_BUSY",
+                "Another snapshot or restore operation owns the session safe point",
+            )
 
     async def _release_safe_point(self) -> None:
         owner_token = getattr(self, "_safe_point_owner_token", None) or (
@@ -2050,6 +2213,13 @@ class SnapshotService:
                 f"Snapshot physical addition {added} exceeds quota "
                 f"{self.session_quota_bytes}",
             )
+        cumulative = self._physical_object_store_bytes()
+        if cumulative > self.session_quota_bytes:
+            raise SnapshotStorageError(
+                "snapshot_quota_exceeded",
+                f"Snapshot object store uses {cumulative} bytes, exceeding "
+                f"session quota {self.session_quota_bytes}",
+            )
         # Also enforce cumulative store size soft bound via logical objects.
         # The v2 root dir is not created during a normal capture (objects/
         # staging/committed are siblings), so probe the nearest existing
@@ -2071,6 +2241,44 @@ class SnapshotService:
                 "DISK_USAGE_CHECK_FAILED",
                 f"Failed to check disk usage: {exc}",
             )
+
+    def _cleanup_unpublished_capture_objects(
+        self, existing_hashes: set[str],
+    ) -> None:
+        """Remove only transaction-created objects proven unreachable."""
+        objects_dir = Path(str(self.paths.objects))
+        if not objects_dir.is_dir():
+            return
+        candidates = {
+            path.name
+            for path in objects_dir.iterdir()
+            if path.is_file() and path.name not in existing_hashes
+        }
+        if not candidates:
+            return
+        try:
+            from backend.services.snapshot_v2.gc import SnapshotGarbageCollector
+
+            protected = SnapshotGarbageCollector(
+                self.session_id, self.paths,
+            ).mark()
+        except Exception:
+            logger.exception(
+                "[%s] cannot prove unpublished object reachability; "
+                "leaving capture objects for recovery GC",
+                self.session_id,
+            )
+            return
+        for sha256 in candidates - protected:
+            path = objects_dir / sha256
+            try:
+                path.unlink(missing_ok=True)
+                self.object_store.invalidate_evidence(sha256)
+            except OSError:
+                logger.exception(
+                    "[%s] failed to remove unpublished capture object %s",
+                    self.session_id, sha256,
+                )
 
     async def _save_session_state(self, session_id: str) -> None:
         from backend.services.session_store import async_save_session
