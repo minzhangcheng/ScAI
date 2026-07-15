@@ -168,15 +168,31 @@ class SnapshotGarbageCollector:
         verified_manifests = list(self.manifest_store.verify_all_committed())
         verified_manifest_count = len(verified_manifests)
 
-        # Count batch snapshots (ImportBatchStore)
+        # Count verified batch snapshots (ImportBatchStore membership).
+        # Each verified batch record contributes its member snapshot count;
+        # unverifiable batches are skipped rather than aborting the count.
         verified_batch_count = 0
         try:
             from backend.services.snapshot_v2.batch_store import ImportBatchStore
             batch_store = ImportBatchStore(self.paths.root)
-            batch_records = batch_store.list()
-            verified_batch_count = len(batch_records) if batch_records else 0
+            for batch_id in batch_store.list_batch_ids():
+                try:
+                    record = batch_store.load(batch_id)
+                except SnapshotIntegrityError:
+                    logger.warning(
+                        "[%s] Skipping unverifiable import batch %s during GC count",
+                        self.session_id, batch_id,
+                    )
+                    continue
+                if record is not None:
+                    verified_batch_count += len(record.manifest_roots)
         except Exception:
-            pass
+            # Diagnostic count only — never abort GC over it, but do not
+            # silently swallow: log for observability.
+            logger.exception(
+                "[%s] Failed to count verified import batches during GC",
+                self.session_id,
+            )
 
         marked = self.mark(verified_manifests)
         sweep_result = self.sweep(marked)

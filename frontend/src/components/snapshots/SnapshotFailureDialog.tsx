@@ -53,15 +53,23 @@ export function SnapshotFailureDialog({
   const isPostReport =
     phase === 'post_report' || /post_report/i.test(record.code || '')
 
+  // The backend message can be a short sentence or a multi-thousand-character
+  // kernel traceback. Split off the first line as a human summary and keep the
+  // full text in a bounded, scrollable box so the dialog never outgrows the
+  // viewport (which would push the action buttons off-screen).
+  const fullMessage = (record.message || '').trim()
+  const firstLine = fullMessage.split('\n', 1)[0]
+  const hasMoreDetail = fullMessage.length > firstLine.length
+
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
       role="dialog"
       aria-label="Snapshot failure"
       aria-modal="true"
     >
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-5 space-y-4">
-        <div className="flex items-start justify-between gap-3">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[85vh] flex flex-col">
+        <div className="flex items-start justify-between gap-3 p-5 pb-3 shrink-0 border-b border-slate-100">
           <h3 className="text-base font-semibold text-red-700">
             {isZh ? '快照失败' : 'Snapshot Failure'}
           </h3>
@@ -69,62 +77,76 @@ export function SnapshotFailureDialog({
             <button
               type="button"
               onClick={onClose}
-              className="text-xs text-slate-400 hover:text-slate-600"
+              className="text-xs text-slate-400 hover:text-slate-600 shrink-0"
             >
               {isZh ? '关闭' : 'Close'}
             </button>
           )}
         </div>
 
-        <div className="space-y-2 text-sm text-slate-700">
-          <div>
-            <span className="font-medium text-slate-500">{isZh ? '错误码' : 'Code'}: </span>
-            <code className="text-red-700 font-mono text-xs">{record.code}</code>
+        <div className="flex-1 overflow-y-auto p-5 py-4 space-y-4">
+          <div className="space-y-2 text-sm text-slate-700">
+            <div>
+              <span className="font-medium text-slate-500">{isZh ? '错误码' : 'Code'}: </span>
+              <code className="text-red-700 font-mono text-xs break-all">{record.code}</code>
+            </div>
+            {firstLine && (
+              <p className="text-slate-600 break-words">{firstLine}</p>
+            )}
+            {hasMoreDetail && (
+              <details className="group">
+                <summary className="cursor-pointer text-xs text-slate-500 hover:text-slate-700 select-none">
+                  {isZh ? '技术细节' : 'Technical details'}
+                </summary>
+                <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words bg-slate-50 border border-slate-200 rounded-lg p-2 font-mono text-[11px] leading-snug text-slate-600">
+                  {fullMessage}
+                </pre>
+              </details>
+            )}
           </div>
-          <p className="text-slate-600">{record.message}</p>
+
+          {variables.length > 0 && (
+            <div className="bg-amber-50 border border-amber-100 rounded-lg p-3">
+              <div className="text-xs font-semibold text-amber-800 uppercase tracking-wide mb-1">
+                {isZh ? '必需变量诊断' : 'Required variable diagnostics'}
+              </div>
+              <ul className="list-disc list-inside text-sm text-amber-900 space-y-0.5">
+                {variables.map((name) => (
+                  <li key={name}>
+                    <code className="font-mono text-xs break-all">{name}</code>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {isPreRestore && (
+            <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-600">
+              <div className="font-semibold text-slate-700 mb-1">pre_restore</div>
+              {isZh
+                ? '预恢复快照捕获失败。当前工作流保持可恢复状态，尚未对线上状态做任何变更。'
+                : 'Pre-restore capture failed. The current workflow remains resumable; no live mutation occurred.'}
+            </div>
+          )}
+
+          {isPostReport && (
+            <p className="text-xs text-slate-500">
+              {isZh
+                ? '重试仅重新进入捕获流程，不会重新生成已完成的报告。'
+                : 'Retry re-enters capture only and does not regenerate completed reports.'}
+            </p>
+          )}
+
+          {!isPostReport && (
+            <p className="text-xs text-slate-500">
+              {isZh
+                ? '重试仅重新进入捕获流程。'
+                : 'Retry re-enters capture only.'}
+            </p>
+          )}
         </div>
 
-        {variables.length > 0 && (
-          <div className="bg-amber-50 border border-amber-100 rounded-lg p-3">
-            <div className="text-xs font-semibold text-amber-800 uppercase tracking-wide mb-1">
-              {isZh ? '必需变量诊断' : 'Required variable diagnostics'}
-            </div>
-            <ul className="list-disc list-inside text-sm text-amber-900 space-y-0.5">
-              {variables.map((name) => (
-                <li key={name}>
-                  <code className="font-mono text-xs">{name}</code>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {isPreRestore && (
-          <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-600">
-            <div className="font-semibold text-slate-700 mb-1">pre_restore</div>
-            {isZh
-              ? '预恢复快照捕获失败。当前工作流保持可恢复状态，尚未对线上状态做任何变更。'
-              : 'Pre-restore capture failed. The current workflow remains resumable; no live mutation occurred.'}
-          </div>
-        )}
-
-        {isPostReport && (
-          <p className="text-xs text-slate-500">
-            {isZh
-              ? '重试仅重新进入捕获流程，不会重新生成已完成的报告。'
-              : 'Retry re-enters capture only and does not regenerate completed reports.'}
-          </p>
-        )}
-
-        {!isPostReport && (
-          <p className="text-xs text-slate-500">
-            {isZh
-              ? '重试仅重新进入捕获流程。'
-              : 'Retry re-enters capture only.'}
-          </p>
-        )}
-
-        <div className="flex flex-col gap-2 pt-1">
+        <div className="flex flex-col gap-2 p-5 pt-3 shrink-0 border-t border-slate-100">
           {actions.has('retry') && (
             <button
               type="button"

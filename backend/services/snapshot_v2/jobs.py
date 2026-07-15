@@ -286,8 +286,6 @@ def collect_active_restore_protected_ids(
 
     if paths is not None:
         from backend.services.snapshot_v2.journal_store import JournalStore
-        from backend.services.snapshot_v2.errors import SnapshotIntegrityError
-        from backend.services.snapshot_v2.recovery import RecoveryFailure
 
         store = JournalStore(paths)
         journals = getattr(paths, "journals", None)
@@ -299,7 +297,7 @@ def collect_active_restore_protected_ids(
                         continue
                     try:
                         env = store.read(entry.stem)
-                    except (SnapshotIntegrityError, RecoveryFailure, Exception):
+                    except Exception:
                         continue
                     if env.session_id not in (None, "", session_id):
                         continue

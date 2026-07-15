@@ -609,3 +609,34 @@ class TestSnapshotV2ExportRoute:
             assert resp.status_code == 422, f"Expected 422, got {resp.status_code}: {resp.text}"
         finally:
             sessions.pop(session_id, None)
+
+
+def test_load_active_export_protected_ids_skips_corrupt_journal(v2_paths):
+    """A corrupt export- journal must be skipped, not crash the caller.
+
+    Regression: ``load_active_export_protected_ids`` referenced
+    ``SnapshotIntegrityError`` in an ``except`` clause without importing it,
+    so any ``JournalStore.read()`` failure raised ``NameError`` while
+    evaluating the exception tuple instead of skipping the corrupt entry.
+    """
+    from backend.services.snapshot_v2.exporter import (
+        load_active_export_protected_ids,
+    )
+    from backend.services.snapshot_v2.paths import SnapshotV2Paths
+
+    paths = SnapshotV2Paths(
+        root=v2_paths.root,
+        objects=v2_paths.objects,
+        staging=v2_paths.staging,
+        journals=v2_paths.journals,
+        integrity=v2_paths.integrity,
+        committed=v2_paths.committed,
+    )
+
+    # An export- journal that JournalStore.read() cannot parse — read() raises,
+    # exercising the except clause in load_active_export_protected_ids.
+    (v2_paths.journals / "export-corrupt.json").write_text("{ not valid json")
+
+    # Must not raise (previously NameError during except evaluation).
+    result = load_active_export_protected_ids(paths)
+    assert result == set()

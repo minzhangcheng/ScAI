@@ -387,12 +387,24 @@ class DeletionService:
         parent_id = target.parent_id
         new_head = parent_id if parent_id and parent_id in surviving_ids else None
 
+        # The live lineage head prior to deletion (audit metadata only).
+        # Sourced from committed session state, mirroring the protection-set
+        # lookup in SnapshotServiceV2. Falls back to None when unavailable.
+        previous_head: str | None = None
+        try:
+            from backend.state import sessions
+            state = sessions.get(self.session_id)
+            if state is not None:
+                previous_head = getattr(state, "last_snapshot_id", None)
+        except Exception:
+            previous_head = None
+
         record = {
             "transaction_id": tx_id,
             "session_id": self.session_id,
             "delete_set": delete_set,
             "surviving_manifest_ids": surviving_ids,
-            "previous_lineage_head": snapshot_id,
+            "previous_lineage_head": previous_head,
             "new_lineage_head": new_head,
             "status": "STAGED",
         }
@@ -442,9 +454,14 @@ class DeletionService:
         Only removes objects that are **not** referenced by any surviving
         visible manifest.
         """
-        # Collect all surviving object hashes from visible manifests
+        # Snapshot the visible manifest set once. verify_all_committed()
+        # excludes pending-import manifests, and this method only removes
+        # pending-import manifests (never visible ones), so the visible set is
+        # invariant across the deletion — reuse it for both surviving-objects
+        # and surviving-ids instead of re-verifying every manifest twice.
+        surviving_manifests = self.manifest_store.verify_all_committed()
         surviving_objects: set[str] = set()
-        for manifest in self.manifest_store.verify_all_committed():
+        for manifest in surviving_manifests:
             surviving_objects.update(manifest.objects.keys())
 
         freed_bytes = 0
@@ -485,10 +502,7 @@ class DeletionService:
 
             deleted_ids.append(sid)
 
-        surviving_ids = [
-            m.snapshot_id
-            for m in self.manifest_store.verify_all_committed()
-        ]
+        surviving_ids = [m.snapshot_id for m in surviving_manifests]
 
         return DeleteResult(
             deleted_ids=deleted_ids,

@@ -235,8 +235,6 @@ def load_active_import_protected_ids(paths, session_id: str | None = None) -> se
     if not journals_dir.exists():
         return protected
     from backend.services.snapshot_v2.journal_store import JournalStore
-    from backend.services.snapshot_v2.recovery import RecoveryFailure
-
     store = JournalStore(paths)
     for entry in journals_dir.iterdir():
         if not entry.is_file() or entry.suffix != ".json":
@@ -245,7 +243,7 @@ def load_active_import_protected_ids(paths, session_id: str | None = None) -> se
             continue
         try:
             env = store.read(entry.stem)
-        except (SnapshotIntegrityError, RecoveryFailure, Exception):
+        except Exception:
             continue
         if env.kind != "import":
             continue

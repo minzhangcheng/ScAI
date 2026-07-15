@@ -10,7 +10,6 @@ import ast
 import json
 import shutil
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
 from backend.services.snapshot_v2.errors import SnapshotCaptureError, SnapshotIntegrityError
@@ -19,7 +18,6 @@ from backend.services.snapshot_v2.models import (
     ObjectRef,
     RuntimeDependency,
     RuntimeDependencyManifest,
-    RuntimeGenerationManifest,
     RuntimeManifest,
     RuntimeSkip,
     empty_complete_runtime,
@@ -938,12 +936,10 @@ class RuntimeCapture:
         capture_dir = self._paths.staging / f"rtcap_{uuid.uuid4().hex[:12]}"
         capture_dir.mkdir(parents=True, exist_ok=True)
 
-        captured_adata_vars: list[str] = []
         captured_adata_refs: dict[str, ObjectRef] = {}
         captured_residual_vars: list[str] = []
         captured_residual_ref: ObjectRef | None = None
         incidental_skips: list[RuntimeSkip] = []
-        manifest_warnings: list[str] = []
 
         # Names that are continuation-critical (checkpoint dependencies) must
         # fail closed when absent from globals. Advisory declared names (e.g. an
@@ -1000,7 +996,6 @@ class RuntimeCapture:
                     self._raise_unpersistable(
                         var_name, type_str, "h5ad", f"capture failed: {e}"
                     )
-                captured_adata_vars.append(var_name)
                 captured_adata_refs[var_name] = ref
 
             # Drop absent advisory dill names (soft-skip); keep absent mandatory
@@ -1198,20 +1193,6 @@ class RuntimeCapture:
                 adata_refs=dict(captured_adata_refs),
             )
 
-            # Also attach a legacy generation record on a private attribute for
-            # transitional callers that still read RuntimeGenerationManifest fields.
-            generation = RuntimeGenerationManifest(
-                capture_command="runtime_capture_v2",
-                capture_timestamp=datetime.now(timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ"
-                ),
-                kernel_id=getattr(sandbox, "session_id", "") or "",
-                captured_adata_vars=captured_adata_vars,
-                captured_residual_vars=captured_residual_vars,
-                captured_adata_refs=captured_adata_refs,
-                captured_residual_ref=captured_residual_ref,
-                warnings=manifest_warnings,
-            )
             # Return RuntimeManifest directly.
             return runtime
         finally:

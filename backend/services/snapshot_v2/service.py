@@ -875,8 +875,6 @@ class SnapshotService:
         journals_dir = _Path(str(self.paths.journals))
         if journals_dir.exists():
             from backend.services.snapshot_v2.journal_store import JournalStore
-            from backend.services.snapshot_v2.errors import SnapshotIntegrityError
-            from backend.services.snapshot_v2.recovery import RecoveryFailure
 
             store = JournalStore(self.paths)
             for entry in journals_dir.iterdir():
@@ -884,7 +882,7 @@ class SnapshotService:
                     continue
                 try:
                     env = store.read(entry.stem)
-                except (SnapshotIntegrityError, RecoveryFailure, Exception):
+                except Exception:
                     # Fall back to raw parse for incomplete fixtures only
                     try:
                         data = json.loads(entry.read_text())

@@ -80,7 +80,6 @@ def load_active_export_protected_ids(paths) -> set[str]:
     if not journals_dir.exists():
         return protected
     from backend.services.snapshot_v2.journal_store import JournalStore
-    from backend.services.snapshot_v2.recovery import RecoveryFailure
 
     store = JournalStore(paths)
     for entry in journals_dir.iterdir():
@@ -92,7 +91,9 @@ def load_active_export_protected_ids(paths) -> set[str]:
             continue
         try:
             env = store.read(entry.stem)
-        except (SnapshotIntegrityError, RecoveryFailure, Exception):
+        except Exception:
+            # Skip any journal that fails to read/verify (incomplete fixtures
+            # or integrity failures) — protection is best-effort here.
             continue
         if env.kind != "export_protection":
             continue

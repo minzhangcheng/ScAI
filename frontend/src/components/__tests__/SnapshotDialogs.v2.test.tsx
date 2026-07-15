@@ -102,6 +102,35 @@ describe('SnapshotFailureDialog', () => {
     expect(screen.getByText(/does not regenerate|capture only|re-enter capture/i)).toBeInTheDocument()
   })
 
+  it('collapses a huge traceback message behind a details disclosure while keeping actions reachable', () => {
+    const summary =
+      "required_runtime_unpersistable: AnnData variable 'dds' write failed"
+    const hugeMessage = summary + '\n' + Array.from({ length: 400 }, (_, i) =>
+      `  File "/dep/venv/lib/python3.11/site-packages/anndata/_io/specs/registry.py", line ${i}, in write_elem`,
+    ).join('\n')
+    render(
+      <SnapshotFailureDialog
+        failure={{
+          ...baseFailure,
+          failure: { ...baseFailure.failure, message: hugeMessage },
+        }}
+        onRetry={vi.fn()}
+        onSkip={vi.fn()}
+        onManage={vi.fn()}
+        onTerminate={vi.fn()}
+      />,
+    )
+
+    // First line is shown as a summary; full traceback is tucked into a
+    // collapsible <details>, so the dialog does not expand past the viewport.
+    expect(screen.getByText(summary)).toBeInTheDocument()
+    const disclosure = screen.getByText(/technical details/i)
+    expect(disclosure.tagName.toLowerCase()).toBe('summary')
+    // Action buttons remain rendered (not pushed off-screen by the message).
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /terminate/i })).toBeInTheDocument()
+  })
+
   it('discloses pre_restore context when failure phase is pre_restore', () => {
     render(
       <SnapshotFailureDialog

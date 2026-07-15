@@ -184,11 +184,25 @@ class ContinuationRegistry:
                 "application/json",
             )
             ref = put_result.ref
+            # Validate planning_stage before constructing the capsule so an
+            # invalid live-descriptor value surfaces as a typed capture error
+            # (symmetric with the restore-side check) instead of a raw
+            # pydantic ValidationError.
+            raw_stage = desc.get("planning_stage", "full")
+            if raw_stage not in ("stage1", "stage2", "full"):
+                raise SnapshotCaptureError(
+                    "INVALID_PLANNING_STAGE",
+                    f"Live descriptor has invalid planning_stage: {raw_stage!r}",
+                    details={
+                        "planning_stage": raw_stage,
+                        "next_node": str(next_node),
+                    },
+                )
             return GraphNodeCapsule(
                 graph_version=GRAPH_VERSION,
                 next_node=str(next_node),
                 workflow_state_ref=ref,
-                planning_stage=desc.get("planning_stage", "full"),
+                planning_stage=raw_stage,
             )
 
         # Truly inactive / unknown → idle

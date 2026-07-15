@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.33.11 · **Last updated**: 2026-07-14
+**Version**: 0.33.11 · **Last updated**: 2026-07-15
 
 ## 1. Runtime Architecture
 
@@ -194,12 +194,16 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.33.x — (2026-07-14)**
+**0.33.x — (2026-07-15)**
 
-- `0.33.11` — Realtime message stream survival on refresh, obs/var/raw/X/obsm-DataFrame h5ad sanitization; version bump (2026-07-14):
-  - **Realtime message stream survival on refresh (`backend/routes/websockets.py`)**: Fixed a bug where realtime messages vanished on page refresh/WebSocket reconnect. The `message_callback` closure was appending to the `state` object captured at handler entry, which became orphaned after LangGraph checkpoint round-trips swapped `sessions[session_id]`. Now appends to the live `_sessions.get(session_id)` object. Added `_preserve_realtime_stream()` to carry the fuller stream forward across each state-object swap so `/load` and reconnect always serve the complete history.
-  - **AnnData obs/var/raw/X/obsm-DataFrame h5ad sanitization (`backend/services/snapshot_v2/runtime.py`)**: New `_sanitize_frame_columns()` coerces object-dtype columns holding non-string objects (bool/None like scrublet `predicted_doublet`, datetime64/timedelta64) to `str`, fixing `TypeError: Can't implicitly convert non-string objects to strings`. Applies the same fix to DataFrame values in obsm/varm/layers/uns. Coerces object-dtype dense `X` to `float`. Rebuilds `raw` from a sanitized view so raw.var columns / raw.varm cannot block capture. The uns coercion additionally rejects 0-d object and non-string-string object arrays (preventing `list[dict]` from silently passing through as object-`ndarray`).
-  - **New tests**: `backend/tests/test_snapshot_v2_runtime.py` (`test_sanitize_anndata_coerces_unwritable_obs_var_columns`, `test_sanitize_anndata_covers_raw_x_obsm_df_and_uns_lists`); `backend/tests/test_snapshot_v2_runtime_kernel.py` (`test_anndata_with_raw_x_obsm_uns_edge_cases_is_captured`, `test_anndata_with_unwritable_obs_column_is_captured`).
+- `0.33.11` — Snapshot V2 robustness: planning_stage pre-validation, deletion lineage from live state, GC batch-count tolerance, corrupt-journal skip, huge-traceback collapse; version bump (2026-07-15):
+  - **Planning stage pre-validation on capture (`backend/services/snapshot_v2/continuation.py`)**: `GraphNodeCapsule` construction now validates `planning_stage` live-descriptor values before persisting, surfacing an invalid value as a typed `SnapshotCaptureError` (symmetric with the restore-side check) instead of a raw pydantic `ValidationError`.
+  - **Deletion lineage head from live state (`backend/services/snapshot_v2/deletion.py`)**: `previous_lineage_head` in the deletion journal now reads from the live in-memory `AnalysisState.last_snapshot_id` rather than the target snapshot's own ID, providing accurate pre-deletion lineage metadata. Visible manifest set is snapshot once and reused across surviving-objects and surviving-ids passes, avoiding redundant re-verification.
+  - **GC import-batch count tolerance (`backend/services/snapshot_v2/gc.py`)**: GC batch counting now iterates `ImportBatchStore.list_batch_ids()` and skips unverifiable batches individually (`SnapshotIntegrityError` logged as warning) instead of failing the entire count. Exception logging added for observability without aborting GC.
+  - **Corrupt journal skip in protected-ID loaders (`backend/services/snapshot_v2/exporter.py`, `backend/services/snapshot_v2/importer.py`, `backend/services/snapshot_v2/jobs.py`, `backend/services/snapshot_v2/service.py`)**: Removed narrow `(SnapshotIntegrityError, RecoveryFailure)` exception tuples that caused `NameError` when the referenced exception class was not imported at the call site — switched to bare `except Exception` so corrupt/incomplete journal entries are skipped cleanly.
+  - **Legacy RuntimeGenerationManifest removal (`backend/services/snapshot_v2/runtime.py`)**: Removed dead transitional code that assembled and attached a `RuntimeGenerationManifest` on a private attribute — unused since the Snapshot V2 migration.
+  - **Frontend huge-traceback collapse (`frontend/src/components/snapshots/SnapshotFailureDialog.tsx`)**: Multi-thousand-character kernel tracebacks are now split: the first line shown as a human summary, the full text tucked into a collapsible `<details>` disclosure. Dialog layout uses `max-h-[85vh]` with `overflow-y-auto` on the content area and `shrink-0` on the action footer, preventing the dialog from pushing action buttons off-screen.
+  - **New tests (`backend/tests/test_snapshot_v2_export.py`)**: `test_load_active_export_protected_ids_skips_corrupt_journal` — regression test for the bare `except` fix. **Frontend (`frontend/src/components/__tests__/SnapshotDialogs.v2.test.tsx`)**: `collapses a huge traceback message behind a details disclosure while keeping actions reachable`.
 
 - `0.33.10` — AnnData uns recursive sanitization (kernel template + host), ANSI error-strip in SnapshotCaptureError; version bump (2026-07-14):
   - **AnnData uns recursive sanitization (`backend/services/snapshot_v2/runtime.py`)**: Both the kernel template (`_SAVE_ANNDATA_TEMPLATE`) and the host-side `sanitize_anndata_for_h5ad()` now recursively walk `uns`, coercing unwritable leaves (bare `pd.Series`, `pd.Index`, `pd.Categorical`, formulaic ModelMatrix/ObjectProxy) to `ndarray` or dropping them. Previously `uns` was entirely left for AnnData's own writer, but objects such as PyDESeq2's `uns['trend_coeffs']` (a bare `pd.Series`) have no registered h5ad writer under `/uns` and caused `write_h5ad` to fail during runtime capture. Nested Scanpy metadata dicts (neighbors, pca, log1p, rank_genes_groups) are preserved.
