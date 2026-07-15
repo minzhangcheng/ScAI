@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.config._config import default_config, get_session_states
+from backend.services.snapshot_v2.checkpoint_paths import checkpoint_sqlite_path
 from backend.services.snapshot_v2.continuation import ContinuationRegistry
 from backend.services.snapshot_v2.errors import (
     RequiredSnapshotBlocked,
@@ -447,7 +448,7 @@ class SnapshotService:
 
             # Validate staged checkpoint when present.
             if staged.staged_checkpoint:
-                ckpt_path = Path(states_root) / "checkpoint.sqlite"
+                ckpt_path = checkpoint_sqlite_path(states_root)
                 if not ckpt_path.is_file() or ckpt_path.stat().st_size <= 0:
                     return _status(
                         "failed",
@@ -1193,10 +1194,12 @@ class SnapshotService:
     ) -> SnapshotRecordV2:
         """Capture transaction (caller already holds the session lock).
 
-        ``physical_added_bytes`` is computed from ``ObjectPutResult.created``
-        instead of a full-store pre-scan. Each ``put_bytes``/``put_file``
-        call returns a boolean ``created`` flag; references whose put
-        returned ``created=True`` are counted as physical additions.
+        ``physical_added_bytes`` prefers ``ObjectPutResult.created`` for
+        refs produced by ``put_bytes``/``put_file``. Bare ``ObjectRef``
+        values (workspace / runtime / continuation) are counted only when
+        their hash was absent from the object store before this capture
+        (pre-scan of ``paths.objects``). Never use
+        ``register_existing_ref()`` return value for quota decisions.
         """
         snapshot_id = snapshot_id_override or _new_snapshot_id()
         tx = transaction or snapshot_id
@@ -1364,6 +1367,18 @@ class SnapshotService:
             if sandbox is not None and hasattr(sandbox, "await_pending_saves"):
                 await sandbox.await_pending_saves()
 
+            # Snapshot object hashes present before any put in this capture.
+            # Used for quota accounting of refs that only expose ObjectRef
+            # (workspace/runtime/continuation) — never use register_existing_ref
+            # return value as a proxy for "already existed before capture".
+            objects_dir = Path(str(self.paths.objects))
+            if objects_dir.is_dir():
+                existing_object_hashes_before_capture = {
+                    path.name for path in objects_dir.iterdir() if path.is_file()
+                }
+            else:
+                existing_object_hashes_before_capture = set()
+
             # Acquire exec lock (never acquire session_lock while holding this).
             exec_cm = (
                 sandbox._exec_lock
@@ -1379,8 +1394,8 @@ class SnapshotService:
                 )
 
             async with exec_cm:
-                # physical_added_bytes computed from ObjectPutResult.created
-                # instead of full-store pre-scan.
+                # physical_added_bytes from ObjectPutResult.created where available,
+                # else from pre-capture object hash set for bare ObjectRefs.
 
                 # Freeze AnalysisState, notebook, checkpoint while execution excluded.
                 analysis_state_result = await self._capture_analysis_state(
@@ -1468,19 +1483,37 @@ class SnapshotService:
             def _record_transaction_evidence(ref: ObjectRef) -> None:
                 transaction_evidence[ref.sha256] = ref
 
-            def _add_ref_with_result(put_result) -> ObjectRef:
+            def _track_ref_with_result(
+                ref: ObjectRef,
+                result: ObjectPutResult | None = None,
+            ) -> None:
+                """Declare *ref* on the manifest and count quota if newly created.
+
+                Prefer ``ObjectPutResult.created`` when available. For bare
+                ObjectRefs (workspace/runtime/continuation), count size only
+                when the hash was absent from the object store before this
+                capture transaction started. Never use
+                ``register_existing_ref()`` return value for quota decisions.
+                """
+                nonlocal physical_added
+                if ref.sha256 in all_objects:
+                    return
+                all_objects[ref.sha256] = ref
+                if result is not None:
+                    if result.created:
+                        physical_added += ref.size
+                elif ref.sha256 not in existing_object_hashes_before_capture:
+                    physical_added += ref.size
+
+            def _add_ref_with_result(put_result: ObjectPutResult) -> ObjectRef:
                 """Add an ObjectPutResult to the manifest's objects dict.
 
                 Returns the ObjectRef. The ``created`` flag controls
                 whether the size counts toward physical_added_bytes.
                 """
-                nonlocal physical_added
                 ref = put_result.ref
                 _record_transaction_evidence(ref)
-                if ref.sha256 not in all_objects:
-                    all_objects[ref.sha256] = ref
-                    if put_result.created:
-                        physical_added += ref.size
+                _track_ref_with_result(ref, put_result)
                 return ref
 
             _add_ref_with_result(analysis_state_result)
@@ -1493,46 +1526,23 @@ class SnapshotService:
                     size=we.size,
                     media_type="application/octet-stream",
                 )
-                if ref.sha256 not in all_objects:
-                    all_objects[ref.sha256] = ref
-                    # Workspace entries were created in this transaction
-                    # if they weren't already in the store; use register_existing_ref
-                    # fast-path: if the object already existed, don't count it.
-                    if not self.object_store.register_existing_ref(ref):
-                        physical_added += ref.size
+                _track_ref_with_result(ref)
             for ref in runtime.adata_refs.values():
-                if ref.sha256 not in all_objects:
-                    all_objects[ref.sha256] = ref
-                    if not self.object_store.register_existing_ref(ref):
-                        physical_added += ref.size
+                _track_ref_with_result(ref)
             if runtime.residual_ref is not None:
-                rref = runtime.residual_ref
-                if rref.sha256 not in all_objects:
-                    all_objects[rref.sha256] = rref
-                    if not self.object_store.register_existing_ref(rref):
-                        physical_added += rref.size
+                _track_ref_with_result(runtime.residual_ref)
             if runtime_snapshot is not None:
                 for ref in (runtime_snapshot.captured_adata_refs or {}).values():
-                    if ref.sha256 not in all_objects:
-                        all_objects[ref.sha256] = ref
-                        if not self.object_store.register_existing_ref(ref):
-                            physical_added += ref.size
+                    _track_ref_with_result(ref)
                 if runtime_snapshot.captured_residual_ref is not None:
-                    rref = runtime_snapshot.captured_residual_ref
-                    if rref.sha256 not in all_objects:
-                        all_objects[rref.sha256] = rref
-                        if not self.object_store.register_existing_ref(rref):
-                            physical_added += rref.size
+                    _track_ref_with_result(runtime_snapshot.captured_residual_ref)
 
             # Continuation payload/workflow-state refs must be declared in objects
             # so restore stage can verify them as first-class content.
             for attr in ("workflow_state_ref", "payload_ref"):
                 cref = getattr(continuation, attr, None)
                 if cref is not None:
-                    if cref.sha256 not in all_objects:
-                        all_objects[cref.sha256] = cref
-                        if not self.object_store.register_existing_ref(cref):
-                            physical_added += cref.size
+                    _track_ref_with_result(cref)
 
             logical_size = sum(r.size for r in all_objects.values())
 
@@ -1791,7 +1801,7 @@ class SnapshotService:
             )
         # Optional: LangGraph checkpoint sqlite if present
         states_dir = get_session_states(request.session_id)
-        ckpt = Path(states_dir) / "checkpoints.sqlite"
+        ckpt = checkpoint_sqlite_path(states_dir)
         if not ckpt.exists() or not ckpt.is_file():
             return None
         return self.object_store.put_file(ckpt, "application/x-sqlite3")

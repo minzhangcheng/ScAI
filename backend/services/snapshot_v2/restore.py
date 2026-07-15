@@ -23,10 +23,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Optional
 
+from backend.services.snapshot_v2.checkpoint_paths import checkpoint_sqlite_path
 from backend.services.snapshot_v2.errors import SnapshotIntegrityError
 from backend.services.snapshot_v2.models import ObjectRef
 from backend.services.snapshot_v2.object_store import ManifestStore, ObjectStore
 from backend.services.snapshot_v2.runtime import validate_runtime_dependency_proof
+from backend.services.snapshot_v2.runtime_names import runtime_h5ad_path
 from backend.services.snapshot_v2.workspace import WorkspaceScope
 
 logger = logging.getLogger(__name__)
@@ -670,7 +672,7 @@ class RestoreCoordinator:
         if rt is not None:
             validate_runtime_dependency_proof(rt)
             for var_name, ref in (rt.adata_refs or {}).items():
-                dst = runtime_dir / f"{var_name}.h5ad"
+                dst = runtime_h5ad_path(runtime_dir, var_name)
                 staged_runtime_h5ads[var_name] = _stage_object_ref(
                     object_store, paths, ref, dst,
                 )
@@ -694,7 +696,7 @@ class RestoreCoordinator:
 
         if getattr(manifest, "checkpoint_ref", None) is not None and manifest.checkpoint_ref is not None:
             cref = manifest.checkpoint_ref
-            dst = staged_root / "checkpoint.sqlite"
+            dst = checkpoint_sqlite_path(staged_root)
             staged_checkpoint = _stage_object_ref(object_store, paths, cref, dst)
             _validate_staged_checkpoint(Path(staged_checkpoint))
 
@@ -750,8 +752,9 @@ class RestoreCoordinator:
         - Unavailable + keep: no live runtime mutate, intentionally_kept.
         """
         from backend.utils.runtime_apply import (
-            atomic_replace_pkl, atomic_replace_h5ad, quarantine_live_runtime,
+            atomic_replace_pkl, quarantine_live_runtime,
             resolve_runtime_choice, RuntimeChoiceRequired,
+            install_live_runtime_h5ad_set,
         )
 
         tx_id = staged.transaction_id
@@ -812,9 +815,12 @@ class RestoreCoordinator:
 
             self._check_fault("runtime_pkl_replaced")
 
-            if "runtime_sig" not in completed_steps and staged.staged_runtime_h5ads:
-                for var_name, h5ad_path in staged.staged_runtime_h5ads.items():
-                    atomic_replace_h5ad(session_id, h5ad_path, var_name=var_name)
+            if "runtime_sig" not in completed_steps:
+                # Always rewrite live h5ad set to the target — including empty
+                # (residual/pkl-only complete) so stale sidecars cannot rehydrate.
+                install_live_runtime_h5ad_set(
+                    session_id, staged.staged_runtime_h5ads or {},
+                )
                 ledger.append({"step": "runtime_sig", "completed": True})
                 self._persist_ledger(paths, tx_id, ledger)
                 steps_applied.append("runtime_sig")
@@ -859,9 +865,10 @@ class RestoreCoordinator:
                     self._persist_ledger(paths, tx_id, ledger)
                     steps_applied.append("runtime_pkl")
                 self._check_fault("runtime_pkl_replaced")
-                if "runtime_sig" not in completed_steps and staged.staged_runtime_h5ads:
-                    for var_name, h5ad_path in staged.staged_runtime_h5ads.items():
-                        atomic_replace_h5ad(session_id, h5ad_path, var_name=var_name)
+                if "runtime_sig" not in completed_steps:
+                    install_live_runtime_h5ad_set(
+                        session_id, staged.staged_runtime_h5ads or {},
+                    )
                     ledger.append({"step": "runtime_sig", "completed": True})
                     self._persist_ledger(paths, tx_id, ledger)
                     steps_applied.append("runtime_sig")
@@ -896,7 +903,7 @@ class RestoreCoordinator:
         self._check_fault("state_replaced")
 
         if "checkpoint" not in completed_steps and staged.staged_checkpoint:
-            ckpt_dst = states_root_p / "checkpoint.sqlite"
+            ckpt_dst = checkpoint_sqlite_path(states_root_p)
             _atomic_replace(staged.staged_checkpoint, ckpt_dst)
             ledger.append({"step": "checkpoint", "completed": True})
             self._persist_ledger(paths, tx_id, ledger)

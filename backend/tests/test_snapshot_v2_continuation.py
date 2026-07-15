@@ -215,3 +215,29 @@ class TestContinuationRegistryPhases:
         assert "phase" in data
         assert "gate" in data
         assert data["phase"] == "pre_annotation"
+
+
+class RecordingObjectStore:
+    def __init__(self):
+        self.put_calls = 0
+
+    def put_bytes(self, payload, media_type):
+        self.put_calls += 1
+        raise AssertionError("put_bytes must not run for invalid planning_stage")
+
+
+def test_freeze_dynamic_validates_planning_stage_before_writing():
+    from backend.services.snapshot_v2.continuation import ContinuationRegistry
+    from backend.services.snapshot_v2.errors import SnapshotCaptureError
+
+    store = RecordingObjectStore()
+    registry = ContinuationRegistry(store)
+    live_safe_point = {
+        "next_node": "bioinformatics_analysis",
+        "planning_stage": "invalid",
+    }
+
+    with pytest.raises(SnapshotCaptureError, match="invalid planning_stage"):
+        registry.freeze_dynamic(live_safe_point)
+
+    assert store.put_calls == 0

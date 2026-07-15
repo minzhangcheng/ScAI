@@ -3,6 +3,7 @@ from typing import Any, Literal, Annotated
 from pathlib import PurePosixPath
 
 from backend.models.schemas import SnapshotPhase
+from backend.services.snapshot_v2.runtime_names import validate_runtime_global_name
 
 FORMAT_VERSION = 2
 
@@ -95,6 +96,11 @@ class RuntimeDependency(BaseModel):
     type_name: str = ""
     version: str = ""
 
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return validate_runtime_global_name(value)
+
 
 class RuntimeSkip(BaseModel):
     """Incidental unpicklable global that was intentionally skipped."""
@@ -103,12 +109,32 @@ class RuntimeSkip(BaseModel):
     type_name: str = ""
     reason: str = ""
 
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return validate_runtime_global_name(value)
+
 
 class RuntimeDependencyManifest(BaseModel):
     """Authoritative required-set proof for a runtime capture."""
 
     required: dict[str, RuntimeDependency] = Field(default_factory=dict)
     incidental_skips: list[RuntimeSkip] = Field(default_factory=list)
+
+    @field_validator("required")
+    @classmethod
+    def validate_required_keys(
+        cls, value: dict[str, RuntimeDependency]
+    ) -> dict[str, RuntimeDependency]:
+        validated: dict[str, RuntimeDependency] = {}
+        for key, dep in value.items():
+            safe_key = validate_runtime_global_name(key)
+            if safe_key != dep.name:
+                raise ValueError(
+                    f"required key {key!r} must match dependency name {dep.name!r}"
+                )
+            validated[safe_key] = dep
+        return validated
 
 
 class RuntimeManifest(BaseModel):
@@ -119,6 +145,21 @@ class RuntimeManifest(BaseModel):
     residual_ref: ObjectRef | None = None
     captured_residual_names: list[str] = Field(default_factory=list)
     adata_refs: dict[str, ObjectRef] = Field(default_factory=dict)
+
+    @field_validator("captured_residual_names")
+    @classmethod
+    def validate_captured_residual_names(cls, value: list[str]) -> list[str]:
+        return [validate_runtime_global_name(name) for name in value]
+
+    @field_validator("adata_refs")
+    @classmethod
+    def validate_adata_ref_names(
+        cls, value: dict[str, ObjectRef]
+    ) -> dict[str, ObjectRef]:
+        return {
+            validate_runtime_global_name(name): ref
+            for name, ref in value.items()
+        }
 
     @model_validator(mode="after")
     def prove_complete(self):

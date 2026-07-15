@@ -24,6 +24,10 @@ from backend.services.snapshot_v2.models import (
 )
 from backend.services.snapshot_v2.object_store import ObjectStore
 from backend.services.snapshot_v2.paths import SnapshotV2Paths
+from backend.services.snapshot_v2.runtime_names import (
+    runtime_h5ad_path,
+    validate_runtime_global_name,
+)
 from backend.services.snapshot_v2.runtime_registry import (
     CANONICAL_RUNTIME_ARTIFACTS,
     build_required_runtime_manifest,
@@ -757,7 +761,8 @@ class RuntimeCapture:
         self, sandbox, var_name: str, type_str: str, capture_dir: Path,
         *, exec_lock_held: bool = False,
     ) -> ObjectRef:
-        h5ad_path = capture_dir / f"{var_name}.h5ad"
+        var_name = validate_runtime_global_name(var_name)
+        h5ad_path = runtime_h5ad_path(capture_dir, var_name)
         code = _SAVE_ANNDATA_TEMPLATE.format(
             var_name_repr=var_name,
             h5ad_path_repr=str(h5ad_path),
@@ -826,6 +831,7 @@ class RuntimeCapture:
         """Return (ref, saved_names, skipped_names)."""
         if not var_names:
             return None, [], []
+        var_names = [validate_runtime_global_name(name) for name in var_names]
         dill_path = capture_dir / "residual.pkl"
         code = _SAVE_DILL_TEMPLATE.format(
             names_repr=var_names,

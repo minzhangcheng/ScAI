@@ -23,8 +23,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
+from backend.services.snapshot_v2.checkpoint_paths import checkpoint_sqlite_path
 from backend.services.snapshot_v2.errors import SnapshotIntegrityError
 from backend.services.snapshot_v2.object_store import ManifestStore, ObjectStore
+from backend.services.snapshot_v2.runtime_names import runtime_h5ad_path
 from backend.services.snapshot_v2.workspace import WorkspaceScope
 
 if TYPE_CHECKING:
@@ -199,7 +201,7 @@ class _RecoveryRestorer:
                             f"h5ad object missing for {var_name}: {ref.sha256}",
                             details={"var": var_name, "sha256": ref.sha256},
                         )
-                    dst = self.states_root / f"{var_name}.h5ad"
+                    dst = runtime_h5ad_path(self.states_root, var_name)
                     _stream_copy(src, dst)
                 except RecoveryFailure:
                     raise
@@ -276,13 +278,17 @@ class _RecoveryRestorer:
         is missing (cannot finish the apply). Callers must still re-verify live
         state before treating recovery as success.
         """
-        from backend.utils.runtime_apply import atomic_replace_pkl, atomic_replace_h5ad
+        from backend.utils.runtime_apply import (
+            atomic_replace_pkl,
+            install_live_runtime_h5ad_set,
+        )
 
         tx_id = journal["transaction_id"]
         staged_root = Path(str(self.paths.staging)) / tx_id
         workspace_dir = staged_root / "workspace"
         runtime_dir = staged_root / "runtime"
         staging_present = staged_root.exists()
+        session_id = journal.get("session_id", "")
 
         ledger = journal.get("applied_step_ledger", [])
         completed = {s["step"] for s in ledger if s.get("completed")}
@@ -295,16 +301,20 @@ class _RecoveryRestorer:
         if "runtime_pkl" not in completed:
             pkl_src = runtime_dir / "residual.pkl" if runtime_dir.exists() else None
             if pkl_src and pkl_src.exists():
-                atomic_replace_pkl(journal.get("session_id", ""), str(pkl_src))
+                atomic_replace_pkl(session_id, str(pkl_src))
                 ledger.append({"step": "runtime_pkl", "completed": True})
                 completed.add("runtime_pkl")
 
-        if "runtime_sig" not in completed and runtime_dir.exists():
-            for h5ad_file in runtime_dir.glob("*.h5ad"):
-                var_name = h5ad_file.stem
-                atomic_replace_h5ad(
-                    journal.get("session_id", ""), str(h5ad_file), var_name=var_name,
-                )
+        if "runtime_sig" not in completed and staging_present:
+            # Pkl-only / residual-only complete targets may omit runtime/; still
+            # rewrite the live h5ad set (empty → clear stale sidecars).
+            staged_h5ads = {}
+            if runtime_dir.exists():
+                staged_h5ads = {
+                    h5ad_file.stem: str(h5ad_file)
+                    for h5ad_file in runtime_dir.glob("*.h5ad")
+                }
+            install_live_runtime_h5ad_set(session_id, staged_h5ads)
             ledger.append({"step": "runtime_sig", "completed": True})
             completed.add("runtime_sig")
 
@@ -327,9 +337,9 @@ class _RecoveryRestorer:
                 completed.add("state")
 
         if "checkpoint" not in completed:
-            ckpt_src = staged_root / "checkpoint.sqlite"
+            ckpt_src = checkpoint_sqlite_path(staged_root)
             if ckpt_src.exists():
-                dst = self.states_root / "checkpoint.sqlite"
+                dst = checkpoint_sqlite_path(self.states_root)
                 _stream_copy(ckpt_src, dst)
                 ledger.append({"step": "checkpoint", "completed": True})
                 completed.add("checkpoint")

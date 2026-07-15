@@ -12,6 +12,8 @@ from unittest.mock import patch
 import pytest
 import pytest_asyncio
 
+from backend.services.snapshot_v2.checkpoint_paths import checkpoint_sqlite_path
+
 
 # ---- Fault point constants ------------------------------------------------
 
@@ -140,6 +142,25 @@ def _materialize_target_live(
         mirror = session_states / f"{session_id}_session.pkl"
         if mirror.resolve() != live_pkl.resolve():
             mirror.write_bytes(src.read_bytes())
+
+    adata_refs = getattr(runtime, "adata_refs", None) if runtime is not None else None
+    if adata_refs:
+        from backend.utils.runtime_apply import write_runtime_h5ad_manifest
+        from backend.services.snapshot_v2.runtime_names import runtime_h5ad_path
+
+        prod_states = get_session_states(session_id)
+        prod_states.mkdir(parents=True, exist_ok=True)
+        h5ad_hashes: dict[str, str] = {}
+        for var_name, ref in adata_refs.items():
+            src = v2_paths.objects / ref.sha256
+            raw = src.read_bytes()
+            live_h5 = runtime_h5ad_path(prod_states, var_name)
+            live_h5.write_bytes(raw)
+            mirror_h5 = runtime_h5ad_path(session_states, var_name)
+            if mirror_h5.resolve() != live_h5.resolve():
+                mirror_h5.write_bytes(raw)
+            h5ad_hashes[var_name] = ref.sha256
+        write_runtime_h5ad_manifest(session_id, h5ad_hashes)
 
 
 def _make_manifest(session_id, snapshot_id, p,
@@ -361,7 +382,7 @@ def live_session(session_workspace, session_states):
     _write_file(session_states.parent / "session.json",
                 json.dumps({"id": "sess-restore-tx", "status": "running",
                             "current_round": 1}))
-    _write_file(session_states / "checkpoint.sqlite", "original-checkpoint")
+    _write_file(checkpoint_sqlite_path(session_states), "original-checkpoint")
 
 
 # ---- Live content snapshot helper -----------------------------------------

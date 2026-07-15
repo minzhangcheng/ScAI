@@ -328,16 +328,16 @@ class TestRestorePreflight:
         result = RestorePreflight(v2_paths).run("snap-bytes")
         assert result.required_staging_bytes > 0
 
-    def test_runtime_choice_supported_when_capture_present(self, v2_paths):
-        """runtime_choice_supported must be True when runtime objects are present."""
+    def test_runtime_choice_not_required_when_complete_payload_present(self, v2_paths):
+        """Complete runtime with payload does not require explicit runtime_choice."""
         _publish_valid_manifest(v2_paths, snapshot_id="snap-rt-yes")
 
         from backend.services.snapshot_v2.preflight import RestorePreflight
         result = RestorePreflight(v2_paths).run("snap-rt-yes")
-        assert result.runtime_choice_supported is True
+        assert result.runtime_choice_supported is False
 
-    def test_runtime_choice_unsupported_when_capture_absent(self, v2_paths):
-        """runtime_choice_supported must be False when runtime has no captured objects."""
+    def test_runtime_choice_required_when_complete_payload_absent(self, v2_paths):
+        """Empty complete runtime still needs an explicit runtime_choice."""
         from backend.services.snapshot_v2.models import SnapshotManifestV2
         from backend.services.snapshot_v2.object_store import ManifestStore, ObjectStore
 
@@ -358,4 +358,57 @@ class TestRestorePreflight:
 
         from backend.services.snapshot_v2.preflight import RestorePreflight
         result = RestorePreflight(v2_paths).run("snap-rt-no")
-        assert result.runtime_choice_supported is False
+        assert result.runtime_choice_supported is True
+
+    def test_preflight_requires_runtime_choice_for_unavailable_runtime(self, v2_paths):
+        """Unavailable runtime with restore request and no runtime_choice must raise."""
+        from backend.services.snapshot_v2.object_store import ManifestStore
+        from backend.services.snapshot_v2.models import SnapshotRestoreRequest
+        from backend.tests.snapshot_v2_fixtures import make_snapshot_v2_manifest, complete_runtime
+        from backend.utils.runtime_apply import RuntimeChoiceRequired
+        from backend.services.snapshot_v2.preflight import RestorePreflight
+
+        manifest = make_snapshot_v2_manifest(
+            session_id="sess-test",
+            snapshot_id="snap-rt-missing",
+            workspace=[],
+            objects={},
+            runtime=complete_runtime(required={}, captured={}, status="missing"),
+        )
+        manifest_store = ManifestStore(v2_paths)
+        staging_path = manifest_store.write_staging(manifest)
+        manifest_store.publish_staging(staging_path)
+
+        request = SnapshotRestoreRequest(
+            snapshot_id=manifest.snapshot_id,
+            current_state_choice="abort",
+            runtime_choice=None,
+        )
+
+        with pytest.raises(RuntimeChoiceRequired):
+            RestorePreflight(v2_paths).run(manifest.snapshot_id, request)
+
+    def test_corrupted_preflight_skips_runtime_choice_enforcement(self, v2_paths):
+        """Corrupted snapshot must return corrupted, not raise RuntimeChoiceRequired."""
+        from backend.services.snapshot_v2.models import SnapshotRestoreRequest
+        from backend.services.snapshot_v2.preflight import RestorePreflight
+        from backend.utils.runtime_apply import RuntimeChoiceRequired
+
+        manifest, _ = _publish_valid_manifest(v2_paths, snapshot_id="snap-rt-corrupt")
+        # Tamper one object so status becomes corrupted.
+        first_hash = next(iter(manifest.objects))
+        (v2_paths.objects / first_hash).write_text("tampered")
+
+        request = SnapshotRestoreRequest(
+            snapshot_id=manifest.snapshot_id,
+            current_state_choice="abort",
+            runtime_choice=None,
+        )
+
+        try:
+            result = RestorePreflight(v2_paths).run(manifest.snapshot_id, request)
+        except RuntimeChoiceRequired as exc:
+            pytest.fail(f"corrupted preflight raised RuntimeChoiceRequired: {exc}")
+
+        assert result.status == "corrupted"
+        assert first_hash in result.objects_failed

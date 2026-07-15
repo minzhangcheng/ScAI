@@ -11,6 +11,7 @@ from backend.services.snapshot_v2.models import (
     SnapshotRestoreRequest,
 )
 from backend.services.snapshot_v2.object_store import ManifestStore, ObjectStore
+from backend.utils.runtime_apply import RuntimeChoiceRequired
 
 
 class RestorePreflightResult(BaseModel):
@@ -41,7 +42,7 @@ class RestorePreflight:
     def run(
         self,
         snapshot_id: str,
-        request: SnapshotRestoreRequest | None = None,  # unused; reserved for forward-looking choice validation
+        request: SnapshotRestoreRequest | None = None,
     ) -> RestorePreflightResult:
         result = RestorePreflightResult()
         result.capsule = {}
@@ -115,13 +116,26 @@ class RestorePreflight:
         else:
             result.status = "ready"
 
-        # 5. Runtime choice support
-        result.runtime_choice_supported = (
-            manifest.runtime.status != "complete"
+        # 5. Runtime choice support / enforcement
+        runtime_status = manifest.runtime.status
+        runtime_has_payload = (
+            bool(manifest.runtime.residual_ref)
             or bool(manifest.runtime.adata_refs)
-            or bool(manifest.runtime.captured_residual_names)
-            or manifest.runtime.residual_ref is not None
         )
+        needs_explicit_runtime_choice = (
+            runtime_status != "complete"
+            or not runtime_has_payload
+        )
+        result.runtime_choice_supported = needs_explicit_runtime_choice
+        # Only enforce runtime_choice on restorable snapshots. Corrupted /
+        # non-ready preflight must return its status instead of masking it.
+        if (
+            result.status == "ready"
+            and request is not None
+            and needs_explicit_runtime_choice
+            and request.runtime_choice is None
+        ):
+            raise RuntimeChoiceRequired(runtime_status)
 
         # 6. Verify workflow state content is valid JSON (if capsule references it)
         if isinstance(manifest.continuation, GraphNodeCapsule):

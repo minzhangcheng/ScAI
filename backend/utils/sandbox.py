@@ -1288,7 +1288,10 @@ print(f"I/O sandbox active: writes restricted to session directory")
         # pkl cannot leave a journal lingering until a later start (where it could
         # otherwise interfere with a subsequently saved pkl).
         from .runtime_apply import (
-            recover_runtime_apply_journal, verify_live_pkl_or_raise, RuntimeApplyError,
+            RUNTIME_H5AD_MANIFEST_FILENAME,
+            recover_runtime_apply_journal,
+            verify_live_pkl_or_raise,
+            RuntimeApplyError,
         )
         recover_runtime_apply_journal(self.session_id)
 
@@ -1298,7 +1301,11 @@ print(f"I/O sandbox active: writes restricted to session directory")
 
         self.notebook_state.load()
 
-        if not self.notebook_state.has_session_dump():
+        states_dir = Path(self.notebook_state.session_path).parent
+        h5ad_manifest = states_dir / RUNTIME_H5AD_MANIFEST_FILENAME
+        has_h5ad_manifest = h5ad_manifest.exists()
+
+        if not self.notebook_state.has_session_dump() and not has_h5ad_manifest:
             logger.info("No session dump to restore")
             return
 
@@ -1306,35 +1313,81 @@ print(f"I/O sandbox active: writes restricted to session directory")
         # skip: continuing would rehydrate a kernel inconsistent with the state
         # that referenced this pkl. Raising lets the caller surface a typed
         # runtime-failure state (Stage 1 safety contract).
-        try:
-            verify_live_pkl_or_raise(self.session_id)
-        except RuntimeApplyError:
-            # Symmetric with the dill-restore-failure path below: mark the failure
-            # so start()'s "restore_failed" result reflects it, then abort startup.
-            self._session_restore_failed = True
-            logger.error(
-                "[%s] live pkl present but HMAC invalid; aborting session restore",
-                self.session_id,
-            )
-            raise
+        if self.notebook_state.has_session_dump():
+            try:
+                verify_live_pkl_or_raise(self.session_id)
+            except RuntimeApplyError:
+                # Symmetric with the dill-restore-failure path below: mark the failure
+                # so start()'s "restore_failed" result reflects it, then abort startup.
+                self._session_restore_failed = True
+                logger.error(
+                    "[%s] live pkl present but HMAC invalid; aborting session restore",
+                    self.session_id,
+                )
+                raise
 
         session_path = str(self.notebook_state.session_path.absolute())
+        h5ad_manifest_path = str(h5ad_manifest.absolute())
         escaped_path = repr(session_path)
+        escaped_h5ad_manifest_path = repr(h5ad_manifest_path)
+        has_session_dump = self.notebook_state.has_session_dump()
         logger.info(f"Restoring session from {session_path}")
 
         restore_code = f"""
 import dill
+import hashlib
+import json
+from pathlib import Path
 
 _restored_names = []
 try:
-    with open({escaped_path}, 'rb') as _f:
-        while True:
-            try:
-                _name, _obj = dill.load(_f)
-            except EOFError:
-                break
-            globals()[_name] = _obj
-            _restored_names.append(_name)
+    if {has_session_dump!r}:
+        with open({escaped_path}, 'rb') as _f:
+            while True:
+                try:
+                    _name, _obj = dill.load(_f)
+                except EOFError:
+                    break
+                globals()[_name] = _obj
+                _restored_names.append(_name)
+
+    _h5ad_manifest_path = Path({escaped_h5ad_manifest_path})
+    if _h5ad_manifest_path.exists():
+        try:
+            import anndata as _runtime_anndata
+        except Exception:
+            import scanpy as _runtime_scanpy
+            _runtime_read_h5ad = _runtime_scanpy.read_h5ad
+        else:
+            _runtime_read_h5ad = _runtime_anndata.read_h5ad
+        _payload = json.loads(_h5ad_manifest_path.read_text())
+        _states_root = _h5ad_manifest_path.parent.resolve()
+        import re as _re
+        _name_re = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]{{0,127}}$")
+        for _name, _entry in sorted((_payload.get("entries") or {{}}).items()):
+            if not isinstance(_name, str) or not _name_re.fullmatch(_name):
+                raise RuntimeError(f"invalid h5ad sidecar variable name: {{_name!r}}")
+            if not isinstance(_entry, dict):
+                raise RuntimeError(f"invalid h5ad sidecar entry for {{_name}}")
+            _expected_filename = f"{{_name}}.h5ad"
+            _raw_path = _entry.get("path")
+            if not isinstance(_raw_path, str) or _raw_path != _expected_filename:
+                raise RuntimeError(
+                    f"h5ad sidecar path must be exactly {{_expected_filename!r}}, got {{_raw_path!r}}"
+                )
+            # Never join raw manifest path; only the validated basename.
+            _path = (_states_root / _expected_filename).resolve()
+            if _path.parent != _states_root:
+                raise RuntimeError(f"h5ad sidecar path escapes states dir: {{_path}}")
+            if not _path.is_file():
+                raise RuntimeError(f"h5ad sidecar missing for {{_name}}: {{_path}}")
+            _expected = _entry.get("sha256", "")
+            _actual = hashlib.sha256(_path.read_bytes()).hexdigest()
+            if _actual != _expected:
+                raise RuntimeError(f"h5ad sidecar hash mismatch for {{_name}}")
+            globals()[_name] = _runtime_read_h5ad(_path)
+            if _name not in _restored_names:
+                _restored_names.append(_name)
 
     print(f"Session restored: {{len(_restored_names)}} variables")
     print(f"Restored: {{_restored_names}}")

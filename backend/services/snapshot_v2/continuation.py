@@ -178,16 +178,8 @@ class ContinuationRegistry:
 
         next_node = desc.get("graph_node") or desc.get("next_node")
         if next_node and next_node in _KNOWN_GRAPH_NODES:
-            serialized = self._serialize_workflow_state(desc)
-            put_result = self._object_store.put_bytes(
-                json.dumps(serialized, sort_keys=True, ensure_ascii=False).encode(),
-                "application/json",
-            )
-            ref = put_result.ref
-            # Validate planning_stage before constructing the capsule so an
-            # invalid live-descriptor value surfaces as a typed capture error
-            # (symmetric with the restore-side check) instead of a raw
-            # pydantic ValidationError.
+            # Validate planning_stage before put_bytes so invalid stages fail
+            # closed without writing objects (symmetric with restore-side check).
             raw_stage = desc.get("planning_stage", "full")
             if raw_stage not in ("stage1", "stage2", "full"):
                 raise SnapshotCaptureError(
@@ -198,12 +190,19 @@ class ContinuationRegistry:
                         "next_node": str(next_node),
                     },
                 )
+            serialized = self._serialize_workflow_state(desc)
+            put_result = self._object_store.put_bytes(
+                json.dumps(serialized, sort_keys=True, ensure_ascii=False).encode(),
+                "application/json",
+            )
+            ref = put_result.ref
             return GraphNodeCapsule(
                 graph_version=GRAPH_VERSION,
                 next_node=str(next_node),
                 workflow_state_ref=ref,
                 planning_stage=raw_stage,
             )
+
 
         # Truly inactive / unknown → idle
         return IdleCapsule(graph_version=GRAPH_VERSION)

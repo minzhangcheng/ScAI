@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from backend.services.snapshot_v2.checkpoint_paths import checkpoint_sqlite_path
 from backend.services.snapshot_v2.workspace import WorkspaceScope
 
 logger = logging.getLogger(__name__)
@@ -269,6 +270,58 @@ def verify_live_restore_components(
         # is NOT a complete residual (unavailable / no residual_ref / non-complete).
         component_hashes["runtime_policy"] = str(policy)
 
+    # --- live h5ad sidecars + manifest (complete runtime with adata_refs) ---
+    if runtime_status == "complete" and runtime is not None:
+        adata_refs = getattr(runtime, "adata_refs", None) or {}
+        if adata_refs:
+            from backend.services.snapshot_v2.errors import SnapshotIntegrityError
+            from backend.services.snapshot_v2.runtime_names import runtime_h5ad_path
+            from backend.utils.runtime_apply import runtime_h5ad_manifest_path
+
+            try:
+                from backend.config._config import get_session_states
+
+                prod_states = get_session_states(session_id)
+            except Exception:
+                prod_states = states_root_p
+
+            try:
+                manifest_path = runtime_h5ad_manifest_path(session_id)
+                if not manifest_path.exists():
+                    alt = states_root_p / "runtime_h5ad_manifest.json"
+                    if alt.exists():
+                        manifest_path = alt
+                    else:
+                        raise SnapshotIntegrityError(
+                            "LIVE_RUNTIME_H5AD_MANIFEST_MISSING",
+                            "live runtime h5ad manifest missing after restore",
+                        )
+                payload = json.loads(manifest_path.read_text())
+                entries = payload.get("entries") or {}
+                for var_name, ref in adata_refs.items():
+                    live_h5ad = runtime_h5ad_path(prod_states, var_name)
+                    if not live_h5ad.exists():
+                        live_h5ad = runtime_h5ad_path(states_root_p, var_name)
+                    if not live_h5ad.exists():
+                        raise SnapshotIntegrityError(
+                            "LIVE_RUNTIME_H5AD_MISSING",
+                            f"LIVE_RUNTIME_H5AD_MISSING:{var_name}",
+                        )
+                    actual = hashlib.sha256(live_h5ad.read_bytes()).hexdigest()
+                    if actual != ref.sha256:
+                        raise SnapshotIntegrityError(
+                            "LIVE_RUNTIME_H5AD_HASH_MISMATCH",
+                            f"LIVE_RUNTIME_H5AD_HASH_MISMATCH:{var_name}",
+                        )
+                    if entries.get(var_name, {}).get("sha256") != ref.sha256:
+                        raise SnapshotIntegrityError(
+                            "LIVE_RUNTIME_H5AD_MANIFEST_MISMATCH",
+                            f"LIVE_RUNTIME_H5AD_MANIFEST_MISMATCH:{var_name}",
+                        )
+                    component_hashes[f"runtime_h5ad:{var_name}"] = actual
+            except SnapshotIntegrityError as exc:
+                failures.append(str(exc))
+
     # --- notebook ---
     notebook_ref = getattr(target_manifest, "notebook_ref", None)
     if notebook_ref is not None:
@@ -291,7 +344,7 @@ def verify_live_restore_components(
     # --- checkpoint ---
     checkpoint_ref = getattr(target_manifest, "checkpoint_ref", None)
     if checkpoint_ref is not None:
-        ckpt_path = states_root_p / "checkpoint.sqlite"
+        ckpt_path = checkpoint_sqlite_path(states_root_p)
         if not ckpt_path.is_file():
             failures.append("checkpoint missing after apply")
         else:

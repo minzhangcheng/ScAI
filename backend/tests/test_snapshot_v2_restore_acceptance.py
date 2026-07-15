@@ -23,6 +23,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 
+from backend.services.snapshot_v2.checkpoint_paths import checkpoint_sqlite_path
+
 # Gate B requires SCAI_RUN_KERNEL_TESTS=1. Without the flag, skip the whole module.
 # With the flag set, every test must run (no skip) or report BLOCKED.
 pytestmark = [
@@ -737,7 +739,7 @@ class TestFaultBarrierMatrix:
         _write_file(workspace / "figures" / "plot.png", orig_png)
         _write_file(states / "notebook.ipynb", _valid_notebook_bytes("live-nb"))
         _write_file(session_dir / "session.json", _valid_analysis_state_bytes(session_id, name="live"))
-        _write_file(states / "checkpoint.sqlite", b"live-checkpoint")
+        _write_file(checkpoint_sqlite_path(states), b"live-checkpoint")
         # Out-of-scope dir must survive rollback
         oos = workspace / "uploads" / "keep_me.txt"
         _write_file(oos, b"out-of-scope-preserved")

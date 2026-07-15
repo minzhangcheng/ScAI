@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from ..config import get_session_states
+from backend.services.snapshot_v2.runtime_names import (
+    runtime_h5ad_filename,
+    runtime_h5ad_path,
+    validate_runtime_global_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -175,13 +180,43 @@ def apply_runtime_pkl(session_id: str, snapshot_zst: Path) -> None:
     _journal_path(session_id).unlink(missing_ok=True)
 
 
+def _quarantine_path(path: Path) -> None:
+    """Move *path* aside with a ``.quarantine`` suffix if it exists."""
+    if path.exists():
+        path.replace(path.with_suffix(path.suffix + ".quarantine"))
+
+
 def quarantine_live_runtime(session_id: str) -> None:
-    """reset choice: move the live pkl + signature aside so no stale runtime loads."""
+    """reset choice: quarantine live pkl, signature, h5ad sidecars, and manifest.
+
+    After Task 3 the sandbox rehydrates from ``runtime_h5ad_manifest.json`` even
+    without a pkl.  Leaving those sidecars in place after ``reset`` would break
+    the reset contract by rehydrating stale AnnData into a fresh kernel.
+    """
     live = _live_pkl(session_id)
     sig = _live_sig(session_id)
     for p in (live, sig):
-        if p.exists():
-            p.replace(p.with_suffix(p.suffix + ".quarantine"))
+        _quarantine_path(p)
+
+    states = _states_dir(session_id)
+    _quarantine_path(runtime_h5ad_manifest_path(session_id))
+
+    # Quarantine every live *.h5ad confined to the states directory (safer than
+    # trusting only manifest-referenced names when the manifest is corrupt).
+    if states.is_dir():
+        try:
+            states_resolved = states.resolve()
+        except OSError:
+            states_resolved = states
+        for p in states.glob("*.h5ad"):
+            if not p.is_file():
+                continue
+            try:
+                if p.resolve().parent != states_resolved:
+                    continue
+            except OSError:
+                continue
+            _quarantine_path(p)
 
 
 def recover_runtime_apply_journal(session_id: str) -> None:
@@ -274,6 +309,46 @@ def _states_dir(session_id: str) -> Path:
     return get_session_states(session_id)
 
 
+RUNTIME_H5AD_MANIFEST_FILENAME = "runtime_h5ad_manifest.json"
+
+
+def runtime_h5ad_manifest_path(session_id: str) -> Path:
+    """Return the live h5ad sidecar manifest path for a session."""
+    return _states_dir(session_id) / RUNTIME_H5AD_MANIFEST_FILENAME
+
+
+def write_runtime_h5ad_manifest(session_id: str, entries: dict[str, str]) -> Path:
+    """Atomically write the live h5ad sidecar manifest.
+
+    entries maps validated runtime variable name to the SHA-256 of the live
+    h5ad file written as `{name}.h5ad`.
+    """
+    from backend.utils.files import atomic_write_bytes
+
+    manifest_entries = {}
+    for name, sha256 in sorted(entries.items()):
+        filename = runtime_h5ad_filename(name)
+        if not isinstance(sha256, str) or len(sha256) != 64:
+            raise RuntimeApplyError(
+                f"[{session_id}] invalid h5ad sha256 for {name!r}: {sha256!r}"
+            )
+        manifest_entries[name] = {
+            "path": filename,
+            "sha256": sha256,
+        }
+    payload = {
+        "version": 1,
+        "entries": manifest_entries,
+    }
+    path = runtime_h5ad_manifest_path(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_bytes(
+        path,
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
+    )
+    return path
+
+
 def atomic_replace_pkl(session_id: str, src_pkl_path: str) -> str:
     """Atomically replace the live session.pkl with a staged copy.
 
@@ -335,9 +410,16 @@ def atomic_replace_h5ad(session_id: str, src_h5ad_path: str, var_name: str = "ad
             f"[{session_id}] staged h5ad not found: {src_h5ad_path}"
         )
 
+    try:
+        safe_var_name = validate_runtime_global_name(var_name)
+    except ValueError as exc:
+        raise RuntimeApplyError(
+            f"[{session_id}] invalid runtime variable name: {var_name!r}"
+        ) from exc
+
     states = _states_dir(session_id)
     states.mkdir(parents=True, exist_ok=True)
-    dst = states / f"{var_name}.h5ad"
+    dst = runtime_h5ad_path(states, safe_var_name)
 
     # Atomic copy
     tmp = dst.with_suffix(dst.suffix + f".{os.getpid()}.staged")
@@ -356,3 +438,56 @@ def atomic_replace_h5ad(session_id: str, src_h5ad_path: str, var_name: str = "ad
 
     import hashlib
     return hashlib.sha256(dst.read_bytes()).hexdigest()
+
+
+def _quarantine_unreferenced_live_h5ads(
+    session_id: str, keep_names: set[str],
+) -> None:
+    """Quarantine live ``*.h5ad`` files not in *keep_names* (confined to states)."""
+    states = _states_dir(session_id)
+    if not states.is_dir():
+        return
+    try:
+        states_resolved = states.resolve()
+    except OSError:
+        states_resolved = states
+
+    keep_filenames = set()
+    for name in keep_names:
+        try:
+            keep_filenames.add(runtime_h5ad_filename(name))
+        except ValueError:
+            continue
+
+    for p in states.glob("*.h5ad"):
+        if not p.is_file():
+            continue
+        try:
+            if p.resolve().parent != states_resolved:
+                continue
+        except OSError:
+            continue
+        if p.name in keep_filenames:
+            continue
+        _quarantine_path(p)
+
+
+def install_live_runtime_h5ad_set(
+    session_id: str,
+    staged_h5ads: dict[str, str],
+) -> dict[str, str]:
+    """Install the target live h5ad set and rewrite the manifest to match.
+
+    *staged_h5ads* maps runtime variable name → staged h5ad path.  An empty
+    mapping is valid (pkl-only / residual-only complete runtime): previous live
+    ``*.h5ad`` sidecars are quarantined and the manifest is rewritten with
+    ``entries: {}`` so sandbox restore cannot rehydrate stale AnnData.
+    """
+    h5ad_hashes: dict[str, str] = {}
+    for var_name, h5ad_path in staged_h5ads.items():
+        h5ad_hashes[var_name] = atomic_replace_h5ad(
+            session_id, h5ad_path, var_name=var_name,
+        )
+    _quarantine_unreferenced_live_h5ads(session_id, set(h5ad_hashes))
+    write_runtime_h5ad_manifest(session_id, h5ad_hashes)
+    return h5ad_hashes
