@@ -26,8 +26,9 @@ Ownership enforcement:
   ``update_descriptor`` / ``cancel_safe_point_request`` / ``release``)
   require a non-empty ``owner_token`` and reject foreign owners.
 - ``acknowledge_safe_point_request(session_id, generation, descriptor,
-  role="workflow")`` checks generation for workflow acknowledgements
-  (never requires the requester token).
+  role=...)`` checks generation for workflow acknowledgements and for a
+  restore coordinator that has atomically proven the session quiescent
+  (neither requires the requester token).
 - Empty tokens remain allowed only via explicitly named test adapters.
 - No filesystem I/O, workflow calls, or message emission is performed
   while holding ``SafePointManager._lock`` (the lock only protects the
@@ -234,8 +235,9 @@ class SafePointManager:
         pending request.  *generation* must match the generation stored
         in the pending request.
 
-        Workflow acknowledgements (``role="workflow"``) never require
-        the requester token.
+        Workflow acknowledgements (``role="workflow"``), and coordinator
+        acknowledgements after an authoritative quiescence check, never
+        require the requester token.
 
         Optionally stores *workflow_state* as the safe-point descriptor
         (``kernel_present``, ``next_node``, etc.).  The descriptor is

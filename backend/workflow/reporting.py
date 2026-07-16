@@ -965,6 +965,7 @@ class ReportingMixin:
             sandbox is not None
             and getattr(sandbox, "km", None) is not None
         )
+        capture_sandbox = sandbox if kernel_present else None
         workflow_state = {
             "analysis_state": analysis_state,
             "current_round": analysis_state.current_round,
@@ -1030,7 +1031,11 @@ class ReportingMixin:
             record = await service.capture_required_snapshot(
                 analysis_state,
                 request,
-                sandbox=sandbox,
+                # A retained sandbox object with km=None has no capturable
+                # runtime. Route it through the trusted terminal/no-kernel
+                # path instead of re-declaring historical dependencies as
+                # values that must be read from a nonexistent kernel.
+                sandbox=capture_sandbox,
                 workflow_state=workflow_state,
                 workspace_root=workspace_root,
                 safe_point_owner_token=owner_token if owned_sp else None,

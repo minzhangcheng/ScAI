@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.33.15 · **Last updated**: 2026-07-15
+**Version**: 0.33.16 · **Last updated**: 2026-07-15
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,12 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.33.x — (2026-07-15)**
+
+- `0.33.16` — Quiescent session restore safe-point acknowledgement, post-report dead-sandbox bypass; version bump (2026-07-15):
+  - **Quiescent session restore safe-point ack (`backend/services/snapshot_v2/jobs.py`)**: New `_acknowledge_if_quiescent()` atomically checks (under `state_lock`) that a session has no live workflow, no run/report/chat task, and no ongoing initialization. When the session is fully quiescent, acknowledges the restore safe point with `role="quiescent_coordinator"` instead of waiting for a workflow boundary handshake that may never arrive. Fixes a regression where completed/failed report workflows left the session in `waiting_safe_point` until timeout.
+  - **Post-report dead-sandbox bypass (`backend/workflow/reporting.py`)**: `_capture_post_report_snapshot` now checks `sandbox.km is not None` and routes through the trusted terminal/no-kernel path when the kernel is gone, instead of re-declaring historical runtime dependencies that require reading from a nonexistent kernel.
+  - **Safe point doc update (`backend/services/snapshot_v2/safe_point.py`)**: `acknowledge_safe_point_request` docstring clarifies that `role="quiescent_coordinator"` (alongside `role="workflow"`) never requires the requester token.
+  - **New tests**: `test_snapshot_v2_restore_jobs.py` (`test_quiescent_session_restore_does_not_wait_for_workflow_ack`, `test_initializing_session_restore_still_waits_for_boundary_ack`), `test_snapshot_v2_producers.py` (`test_post_report_dead_sandbox_uses_empty_complete_path`). Extended: `TestCommittedJobLiveSideEffects` registers a mock workflow to avoid the new quiescent path.
 
 - `0.33.15` — Integration gate accessible modal dialog, focus management & keyboard trap, countdown-preserving close/reopen; version bump (2026-07-15):
   - **Integration gate accessible modal dialog (`frontend/src/components/IntegrationGatePanel.tsx`)**: Converted from a flat panel to an accessible modal: `role="dialog"`, `aria-modal="true"`, `aria-labelledby`, close button with close `aria-label` and `X` icon (lucide-react). Backdrop overlay (`fixed inset-0 z-50 bg-black/40 backdrop-blur-sm`). Visual redesign with `max-h-[90vh]` scrollable container, rounded-2xl card, header/footer borders, slate-50 footer background. Added `open` and `onClose` props for controlled visibility.

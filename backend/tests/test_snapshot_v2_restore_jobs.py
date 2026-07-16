@@ -195,6 +195,83 @@ async def test_second_enqueue_waits_then_owns_new_generation(
     await second_manager.cancel(second.transaction_id)
 
 
+@pytest.mark.asyncio
+async def test_quiescent_session_restore_does_not_wait_for_workflow_ack(
+    v2_paths, preflight_result, restore_request,
+):
+    """A loaded session with no workflow/task has no boundary that can ack.
+
+    Regression: completed and snapshot-failure sessions remained in
+    ``waiting_safe_point`` until the restore job timed out because their
+    workflow had already been removed from the process registry.
+    """
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.state import _run_tasks, sessions, workflows
+
+    session_id = "sess-quiescent-restore"
+    state = AnalysisState(
+        session_id=session_id,
+        user_id="u1",
+        status=TaskStatus.WAITING_INPUT,
+        current_round=4,
+    )
+    sessions[session_id] = state
+    workflows.pop(session_id, None)
+    _run_tasks.pop(session_id, None)
+
+    try:
+        manager = make_mgr(v2_paths, session_id=session_id)
+        record = await manager.enqueue(
+            session_id,
+            preflight_result,
+            restore_request,
+            timeout_seconds=30,
+        )
+
+        await asyncio.wait_for(
+            TestRestoreJobLifecycle()._wait_for_status(
+                manager, record.transaction_id, "committed",
+            ),
+            timeout=1,
+        )
+        assert not manager._safe_point.has_pending_request(session_id)
+        assert not manager._safe_point.is_paused(session_id)
+    finally:
+        sessions.pop(session_id, None)
+        workflows.pop(session_id, None)
+        _run_tasks.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_initializing_session_restore_still_waits_for_boundary_ack(
+    v2_paths, preflight_result, restore_request,
+):
+    """Workflow initialization is active work, even before registration."""
+    from backend.models.schemas import AnalysisState
+    from backend.state import initializing_sessions, sessions
+
+    session_id = "sess-initializing-restore"
+    sessions[session_id] = AnalysisState(session_id=session_id, user_id="u1")
+    initializing_sessions.add(session_id)
+
+    try:
+        manager = make_mgr(v2_paths, session_id=session_id)
+        record = await manager.enqueue(
+            session_id,
+            preflight_result,
+            restore_request,
+            timeout_seconds=30,
+        )
+        await asyncio.sleep(0)
+
+        assert manager._safe_point.has_pending_request(session_id)
+        assert not manager._safe_point.is_paused(session_id)
+        await manager.cancel(record.transaction_id)
+    finally:
+        initializing_sessions.discard(session_id)
+        sessions.pop(session_id, None)
+
+
 class TestRestoreJobLifecycle:
 
     def test_partial_apply_failure_helper_blocks_current_session(self, v2_paths):
@@ -871,7 +948,7 @@ class TestCommittedJobLiveSideEffects:
         from backend.services.snapshot_v2.paths import SnapshotV2Paths
         from backend.services.snapshot_v2.preflight import RestorePreflight
         from backend.services.snapshot_v2.service import SnapshotService
-        from backend.state import sessions
+        from backend.state import sessions, workflows
         from backend.tests.snapshot_v2_fixtures import make_snapshot_v2_manifest
 
         session_id = "sess-live-effect"
@@ -921,6 +998,13 @@ class TestCommittedJobLiveSideEffects:
             initial_instruction="live", current_round=1, max_rounds=4,
         )
         sessions[session_id] = live_state
+        live_workflow = MagicMock()
+        live_workflow.sandbox = None
+        live_workflow.get_snapshot_workflow_state.return_value = {
+            "current_round": live_state.current_round,
+            "kernel_present": False,
+        }
+        monkeypatch.setitem(workflows, session_id, live_workflow)
         (workspace / "tables").mkdir(parents=True, exist_ok=True)
         (workspace / "tables" / "result.csv").write_bytes(b"live,old\n")
 

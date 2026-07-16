@@ -639,6 +639,58 @@ async def test_post_report_no_sandbox_acquires_trusted_safe_point(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_post_report_dead_sandbox_uses_empty_complete_path(tmp_path):
+    """A sandbox object without a live kernel is equivalent to no sandbox.
+
+    Regression: report-only resume can retain the LocalJupyterSandbox object
+    after its kernel has gone away. Passing that object into SnapshotService
+    re-enters runtime capture and treats historical runtime dependencies as
+    values that must be read from a nonexistent kernel.
+    """
+    from backend.models.schemas import TaskStatus
+    from backend.services.snapshot_v2.models import TerminalCapsule
+    from backend.services.snapshot_v2.safe_point import SafePointManager
+    from backend.workflow.reporting import ReportingMixin
+
+    session_id = "sess-post-report-dead-sandbox"
+    state = _make_analysis_state(id=session_id)
+    state.status = TaskStatus.GENERATING_REPORT
+    state.current_round = 2
+
+    service = MagicMock()
+    service.safe_point = SafePointManager()
+    service.object_store = MagicMock()
+    service.capture_required_snapshot = AsyncMock(
+        return_value=_committed_record(session_id=session_id),
+    )
+
+    workflow = MagicMock()
+    workflow.session_id = session_id
+    workflow.sandbox = MagicMock(km=None)
+    workflow.snapshot_service = service
+    workflow._capture_post_report_snapshot = (
+        ReportingMixin._capture_post_report_snapshot.__get__(
+            workflow, type(workflow),
+        )
+    )
+
+    with patch(
+        "backend.services.snapshot_v2.continuation.ContinuationRegistry.freeze",
+        return_value=TerminalCapsule(graph_version="2.0", status="completed"),
+    ):
+        with patch(
+            "backend.config.get_session_workspace",
+            return_value=tmp_path,
+        ):
+            await workflow._capture_post_report_snapshot(state, "report-dead-kernel")
+
+    capture_kwargs = service.capture_required_snapshot.await_args.kwargs
+    assert capture_kwargs["sandbox"] is None
+    assert capture_kwargs["workflow_state"]["kernel_present"] is False
+    assert not service.safe_point.is_paused(session_id)
+
+
+@pytest.mark.asyncio
 async def test_snapshot_failure_not_converted_to_node_retry():
     """RequiredSnapshotBlocked must propagate through with_retry, not become node failure."""
     from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked

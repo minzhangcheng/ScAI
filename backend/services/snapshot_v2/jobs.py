@@ -370,6 +370,73 @@ class RestoreJobManager:
 
     # ── Public API ───────────────────────────────────────────────────
 
+    async def _acknowledge_if_quiescent(
+        self,
+        session_id: str,
+        reservation: SafePointRequest,
+    ) -> bool:
+        """Acknowledge a restore request when no workflow can reach a boundary.
+
+        Workflow creation uses ``state_lock`` too, so the idle proof and the
+        acknowledgement are atomic with respect to registering a new workflow.
+        Sessions with a live workflow or run task keep the normal cooperative
+        boundary handshake.
+        """
+        from backend.services.workflow_runner import _report_tasks
+        from backend.state import (
+            _run_tasks,
+            chat_sandboxes,
+            chat_tasks,
+            initializing_sessions,
+            sessions,
+            state_lock,
+            workflows,
+        )
+
+        async with state_lock:
+            workflow = workflows.get(session_id)
+            run_task = _run_tasks.get(session_id)
+            report_task = _report_tasks.get(session_id)
+            chat_task = chat_tasks.get(session_id)
+            state = sessions.get(session_id)
+            if (
+                state is None
+                or workflow is not None
+                or session_id in initializing_sessions
+                or session_id in chat_sandboxes
+                or (run_task is not None and not run_task.done())
+                or (report_task is not None and not report_task.done())
+                or (chat_task is not None and not chat_task.done())
+            ):
+                return False
+
+            status = getattr(state, "status", None)
+            status_value = getattr(status, "value", status)
+            descriptor = {
+                "kernel_present": False,
+                "current_round": getattr(state, "current_round", 0) or 0,
+                "inactive": True,
+                "status": str(status_value or "idle"),
+            }
+            if status_value in ("completed", "stopped"):
+                descriptor["continuation_kind"] = "terminal"
+
+            acknowledged = await self._safe_point.acknowledge_safe_point_request(
+                session_id,
+                reservation.generation,
+                descriptor,
+                role="quiescent_coordinator",
+            )
+
+        if acknowledged:
+            logger.info(
+                "[snapshot-v2] Restore safe point acknowledged for quiescent "
+                "session %s (generation %s)",
+                session_id,
+                reservation.generation,
+            )
+        return acknowledged
+
     async def enqueue(
         self,
         session_id: str,
@@ -420,6 +487,10 @@ class RestoreJobManager:
             safe_point_request=reservation,
         )
         try:
+            # Completed/failed report workflows are removed from the process
+            # maps. They cannot reach another graph boundary, so acknowledge
+            # only after atomically proving that the session is quiescent.
+            await self._acknowledge_if_quiescent(session_id, reservation)
             _persist_handle(handle)
             snapshot_restore_jobs[tx_id] = handle
             handle.task = asyncio.create_task(
