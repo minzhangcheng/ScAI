@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { X } from 'lucide-react'
 import { useCountdownTimer } from '../hooks/useCountdownTimer'
 import { useTranslation } from '../i18n/translations'
 import { ErrorBanner } from './shared/ErrorBanner'
@@ -18,6 +19,8 @@ export interface IntegrationGatePanelProps {
   countdownSeconds: number  // -1=manual, 0=no-wait, >0=countdown
   language: string
   reportUrl?: string | null
+  onClose: () => void
+  open?: boolean
 }
 
 export function IntegrationGatePanel({
@@ -29,11 +32,15 @@ export function IntegrationGatePanel({
   countdownSeconds,
   language,
   reportUrl,
+  onClose,
+  open = true,
 }: IntegrationGatePanelProps) {
   const { t } = useTranslation(language === 'zh' ? 'zh' : 'en')
   const [sel, setSel] = useState<Record<string, boolean>>({})
   const [submitting, setSubmitting] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const previousFocusRef = useRef<HTMLElement | null>(null)
   const candidateKey = candidates
     .map((c, i) => `${c.direction_id ?? String(i)}:${c.direction}`)
     .join('|')
@@ -105,40 +112,136 @@ export function IntegrationGatePanel({
     }
   }, [isNoWait, submitting])
 
+  useEffect(() => {
+    if (open) {
+      previousFocusRef.current = document.activeElement as HTMLElement
+      dialogRef.current?.querySelector<HTMLElement>('[data-autofocus]')?.focus()
+      return () => {
+        previousFocusRef.current?.focus()
+      }
+    } else {
+      previousFocusRef.current?.focus()
+    }
+  }, [open])
+
+  const handleKeyDown = useCallback((event: React.KeyboardEvent) => {
+    if (event.key === 'Escape') {
+      event.stopPropagation()
+      onClose()
+      return
+    }
+    if (event.key !== 'Tab') return
+
+    const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    ) ?? []).filter((element) => (
+      !element.matches(':disabled')
+      && !element.closest('[hidden], [inert], [aria-hidden="true"]')
+    ))
+    if (focusable.length === 0) return
+    const first = focusable[0]
+    const last = focusable[focusable.length - 1]
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault()
+      first.focus()
+    }
+  }, [onClose])
+
+  const titleId = `integration-gate-title-${cycle}`
+
+  if (!open) return null
+
   return (
-    <div className="integration-gate-panel">
-      <h3>{t('integrationGateTitle', { cycle })}</h3>
-      {reportUrl && (
-        <a href={reportUrl} target="_blank" rel="noopener noreferrer"
-           style={{ display: 'inline-block', marginBottom: '0.5rem', color: '#4f46e5' }}>
-          {language === 'zh' ? '查看整合报告' : 'View Integration Report'}
-        </a>
-      )}
-      {timerDisplay && (
-        <div className="countdown-timer" style={{ marginBottom: '0.5rem', color: '#888' }}>
-          {t('integrationGateCountdown')} {timerDisplay}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        ref={dialogRef}
+        onKeyDown={handleKeyDown}
+        className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+      >
+        <div className="flex items-start justify-between border-b border-slate-200 px-6 py-4">
+          <h2 id={titleId} className="text-xl font-semibold text-slate-900">
+            {t('integrationGateTitle', { cycle })}
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={language === 'zh' ? '关闭' : 'Close'}
+            data-autofocus
+            className="rounded-lg p-2 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700"
+          >
+            <X className="h-5 w-5" aria-hidden="true" />
+          </button>
         </div>
-      )}
-      {actionError && (
-        <ErrorBanner message={actionError} onDismiss={() => setActionError(null)} />
-      )}
-      <ul>
-        {candidates.map((c, i) => {
-          const id = c.direction_id ?? String(i)
-          return (
-            <li key={id}>
-              <label>
-                <input type="checkbox" checked={!!sel[id]} onChange={() => toggle(id)} />
-                {c.direction}
-              </label>
-            </li>
-          )
-        })}
-      </ul>
-      <div className="actions" style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
-        <button onClick={submit} disabled={submitting}>{t('integrationGateContinue')}</button>
-        <button onClick={handleLetPiDecide} disabled={submitting}>{t('integrationGateLetPiDecide')}</button>
-        <button onClick={handleFinalize} disabled={submitting}>{t('integrationGateFinalize')}</button>
+        <div className="space-y-4 overflow-y-auto px-6 py-5">
+          {reportUrl && (
+            <a
+              href={reportUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex font-medium text-primary-600 hover:text-primary-700 hover:underline"
+            >
+              {language === 'zh' ? '查看整合报告' : 'View Integration Report'}
+            </a>
+          )}
+          {timerDisplay && (
+            <div className="text-sm text-slate-500">
+              {t('integrationGateCountdown')} {timerDisplay}
+            </div>
+          )}
+          {actionError && (
+            <ErrorBanner message={actionError} onDismiss={() => setActionError(null)} />
+          )}
+          <ul className="space-y-3">
+            {candidates.map((candidate, index) => {
+              const id = candidate.direction_id ?? String(index)
+              return (
+                <li key={id}>
+                  <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 p-4 transition-colors hover:border-primary-300 hover:bg-primary-50/40">
+                    <input
+                      type="checkbox"
+                      checked={!!sel[id]}
+                      onChange={() => toggle(id)}
+                      className="mt-1 h-4 w-4 rounded border-slate-300 text-primary-600 focus:ring-primary-500"
+                    />
+                    <span className="text-sm leading-6 text-slate-700">{candidate.direction}</span>
+                  </label>
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+        <div className="flex flex-wrap justify-end gap-3 border-t border-slate-200 bg-slate-50 px-6 py-4">
+          <button
+            type="button"
+            onClick={handleLetPiDecide}
+            disabled={submitting}
+            className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {t('integrationGateLetPiDecide')}
+          </button>
+          <button
+            type="button"
+            onClick={handleFinalize}
+            disabled={submitting}
+            className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {t('integrationGateFinalize')}
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={submitting}
+            className="rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {t('integrationGateContinue')}
+          </button>
+        </div>
       </div>
     </div>
   )

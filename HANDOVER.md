@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.33.14 · **Last updated**: 2026-07-15
+**Version**: 0.33.15 · **Last updated**: 2026-07-15
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,13 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.33.x — (2026-07-15)**
+
+- `0.33.15` — Integration gate accessible modal dialog, focus management & keyboard trap, countdown-preserving close/reopen; version bump (2026-07-15):
+  - **Integration gate accessible modal dialog (`frontend/src/components/IntegrationGatePanel.tsx`)**: Converted from a flat panel to an accessible modal: `role="dialog"`, `aria-modal="true"`, `aria-labelledby`, close button with close `aria-label` and `X` icon (lucide-react). Backdrop overlay (`fixed inset-0 z-50 bg-black/40 backdrop-blur-sm`). Visual redesign with `max-h-[90vh]` scrollable container, rounded-2xl card, header/footer borders, slate-50 footer background. Added `open` and `onClose` props for controlled visibility.
+  - **Focus management & keyboard trap**: Auto-focuses close button on open via `data-autofocus`; restores `previousFocusRef` on close. Tab/Shift+Tab cycles among enabled focusable controls (excluding disabled/submitting buttons). Escape key closes the dialog without resolving the gate. Focus restoration on authoritative unmount (e.g. stop/resume clears session status).
+  - **Controlled dialog visibility in AnalysisPanel (`frontend/src/components/AnalysisPanel.tsx`)**: New `showIntegrationGateDialog` state decouples dialog visibility from `integrationGateData`. Dialog opens when data arrives (`setShowIntegrationGateDialog(true)`), closes on any action (submit, finalize, pi-decide) or explicit close. "Waiting for Input" badge re-opens by setting `showIntegrationGateDialog=true` without re-invoking the action. Stale-gate guard clears both state variables.
+  - **Countdown-preserving close/reopen**: The original countdown deadline continues running while the modal is closed; reopening shows the remaining time. No-wait auto-PI-decide fires only once regardless of close/reopen cycles.
+  - **New tests**: `AnalysisPanel.integration-gate.test.tsx` (auto-open + close/reopen from badge, countdown preserved across close/reopen, no-repeat no-wait PI decision, focus restore on authoritative unmount). `IntegrationGate.test.tsx` (accessible modal rendering, focus trap forward/backward, Escape close with focus restoration, focus trap during submission, focus restoration on successful unmount).
 
 - `0.33.14` — Snapshot V2 lineage resolution, safe-point acquire hardening, dill residual integrity, V1 management route hardening, quota enforcement & cleanup; version bump (2026-07-15):
   - **Lineage resolution for all V2 producers (`backend/services/snapshot_v2/lineage.py`, `backend/workflow/core.py`, `backend/workflow/reporting.py`, `backend/routes/chat.py`)**: Shared `capture_lineage_from_state()` resolves `parent_id`, `branch_id`, `branch_label` from `AnalysisState` for every forward capture. Workflow, chat, and report capture requests now consistently pass lineage metadata and `safe_point_owner_token`.

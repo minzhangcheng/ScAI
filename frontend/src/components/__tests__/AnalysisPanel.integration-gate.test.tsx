@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AnalysisPanel } from '../AnalysisPanel'
 import { useAppStore, type Message, type Session } from '../../stores/appStore'
 
@@ -9,10 +9,11 @@ const sessionMocks = vi.hoisted(() => ({
   continueRound: vi.fn().mockResolvedValue(undefined),
   pauseAnalysis: vi.fn(),
   stopAnalysis: vi.fn(),
+  apiFetch: vi.fn().mockResolvedValue(undefined),
 }))
 
 vi.mock('../../hooks/useApi', () => ({
-  apiFetch: vi.fn(),
+  apiFetch: sessionMocks.apiFetch,
   generateId: () => 'test-id',
   useConfig: () => ({
     checkStatus: vi.fn(),
@@ -73,6 +74,8 @@ describe('AnalysisPanel integration gate lifecycle', () => {
   beforeEach(() => {
     sessionMocks.continueRound.mockClear()
     sessionMocks.continueRound.mockResolvedValue(undefined)
+    sessionMocks.apiFetch.mockClear()
+    sessionMocks.apiFetch.mockResolvedValue(undefined)
     useAppStore.setState({
       currentSession: null,
       messages: [],
@@ -84,6 +87,10 @@ describe('AnalysisPanel integration gate lifecycle', () => {
       authUser: { id: 'user-1', username: 'tester', role: 'admin', status: 'active' },
       roundWaitSeconds: -1,
     })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('hides stale integration gate content after the session resumes running', async () => {
@@ -121,5 +128,102 @@ describe('AnalysisPanel integration gate lifecycle', () => {
     await waitFor(() => {
       expect(sessionMocks.continueRound).toHaveBeenCalledTimes(1)
     })
+  })
+
+  it('opens the integration modal automatically and reopens it from the waiting badge', async () => {
+    useAppStore.setState({
+      currentSession: makeSession('waiting_input'),
+      messages: [integrationGateMessage],
+    })
+
+    render(<AnalysisPanel />)
+
+    expect(await screen.findByRole('dialog', { name: /Integration Analysis/i })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /close/i }))
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: /Integration Analysis/i })).not.toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /Waiting for Input/i }))
+    expect(await screen.findByRole('dialog', { name: /Integration Analysis/i })).toBeInTheDocument()
+  })
+
+  it('keeps the original countdown deadline while the integration modal is closed', async () => {
+    vi.useFakeTimers()
+    useAppStore.setState({
+      currentSession: makeSession('waiting_input'),
+      messages: [integrationGateMessage],
+      roundWaitSeconds: 2,
+    })
+
+    render(<AnalysisPanel />)
+    await act(async () => {})
+    expect(screen.getByRole('dialog', { name: /Integration Analysis/i })).toBeInTheDocument()
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+    fireEvent.click(screen.getByRole('button', { name: /close/i }))
+    expect(screen.queryByRole('dialog', { name: /Integration Analysis/i })).not.toBeInTheDocument()
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+    fireEvent.click(screen.getByRole('button', { name: /Waiting for Input/i }))
+    expect(screen.getByRole('dialog', { name: /Integration Analysis/i })).toBeInTheDocument()
+    await act(async () => { await vi.advanceTimersByTimeAsync(600) })
+
+    expect(sessionMocks.apiFetch).toHaveBeenCalledTimes(1)
+    expect(sessionMocks.apiFetch).toHaveBeenCalledWith(
+      '/session/session-1/choose-direction',
+      expect.objectContaining({ body: JSON.stringify({ let_pi_decide: true }) }),
+    )
+  })
+
+  it('does not repeat a no-wait PI decision after close and reopen', async () => {
+    sessionMocks.apiFetch.mockRejectedValue(new Error('upstream unavailable'))
+    useAppStore.setState({
+      currentSession: makeSession('waiting_input'),
+      messages: [integrationGateMessage],
+      roundWaitSeconds: 0,
+    })
+
+    render(<AnalysisPanel />)
+    await waitFor(() => expect(sessionMocks.apiFetch).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(screen.getByRole('button', { name: /close/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Waiting for Input/i }))
+
+    await waitFor(() => expect(screen.getByRole('dialog', { name: /Integration Analysis/i })).toBeInTheDocument())
+    expect(sessionMocks.apiFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('restores focus when authoritative session state directly unmounts the gate', async () => {
+    useAppStore.setState({
+      currentSession: makeSession('waiting_input'),
+      messages: [],
+    })
+
+    const view = (
+      <>
+        <button type="button">Stable outside control</button>
+        <AnalysisPanel />
+      </>
+    )
+    const { rerender } = render(view)
+    const outside = screen.getByRole('button', { name: /stable outside control/i })
+    outside.focus()
+
+    await act(async () => {
+      useAppStore.setState({ messages: [integrationGateMessage] })
+      rerender(view)
+    })
+    await waitFor(() => expect(screen.getByRole('button', { name: /close/i })).toHaveFocus())
+
+    await act(async () => {
+      useAppStore.setState({ currentSession: makeSession('running') })
+      rerender(view)
+    })
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: /Integration Analysis/i })).not.toBeInTheDocument()
+    })
+    expect(outside).toHaveFocus()
   })
 })

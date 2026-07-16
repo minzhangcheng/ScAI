@@ -152,6 +152,7 @@ export function AnalysisPanel() {
 
   // Integration gate state
   const [integrationGateData, setIntegrationGateData] = useState<any>(null)
+  const [showIntegrationGateDialog, setShowIntegrationGateDialog] = useState(false)
   const lastIntegrationMsgRef = useRef<string>('')
 
   // Supplementary analysis state
@@ -542,11 +543,13 @@ export function AnalysisPanel() {
         selected.map((s: any) => ({ direction: s.direction, notes: s.notes ?? '', isCustom: !!s.isCustom }))
       ) }),
     })
+    setShowIntegrationGateDialog(false)
     setIntegrationGateData(null)
   }
   const finalizeFromIntegration = async () => {
     if (!currentSession) return
     await apiFetch(`/session/${currentSession.id}/finalize-from-integration`, { method: 'POST' })
+    setShowIntegrationGateDialog(false)
     setIntegrationGateData(null)
   }
   const handleLetPiDecideIntegration = async () => {
@@ -555,6 +558,7 @@ export function AnalysisPanel() {
       method: 'POST',
       body: JSON.stringify({ let_pi_decide: true }),
     })
+    setShowIntegrationGateDialog(false)
     setIntegrationGateData(null)
   }
 
@@ -1023,7 +1027,7 @@ export function AnalysisPanel() {
     } else if (currentSession?.status === 'waiting_input') {
       if (integrationGateData) {
         // Integration gate has its own panel; don't reopen the generic feedback dialog.
-        setIntegrationGateData({ ...integrationGateData })
+        setShowIntegrationGateDialog(true)
       } else if (explorationReportData && (currentSession.currentRound ?? 0) <= MAX_EXPLORATION_ROUND) {
         setShowExplorationDialog(true)
       } else if (feedbackRoundData && feedbackRoundData.phase !== 'integration') {
@@ -1173,6 +1177,7 @@ export function AnalysisPanel() {
 
   useEffect(() => {
     if (!isCurrentIntegrationGate) {
+      setShowIntegrationGateDialog(false)
       // Functional update returns the same ref when already null, so React skips
       // the re-render and the effect doesn't need integrationGateData as a dep.
       setIntegrationGateData((prev: any) => (prev ? null : prev))
@@ -1188,6 +1193,7 @@ export function AnalysisPanel() {
     if (msg && lastIntegrationMsgRef.current !== msg.id) {
       lastIntegrationMsgRef.current = msg.id
       setIntegrationGateData(msg.content)
+      setShowIntegrationGateDialog(true)
     }
   }, [messages, isCurrentIntegrationGate])
 
@@ -1826,6 +1832,8 @@ export function AnalysisPanel() {
           countdownSeconds={roundWaitSeconds}
           language={language}
           reportUrl={integrationGateData.html_url || undefined}
+          onClose={() => setShowIntegrationGateDialog(false)}
+          open={showIntegrationGateDialog}
         />
       )}
 
