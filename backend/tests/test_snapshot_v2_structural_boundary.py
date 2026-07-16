@@ -61,22 +61,13 @@ def test_reporting_uses_idempotency_key():
     assert "capture_required_snapshot" in source or "_capture_required_snapshot" in source
 
 
-def test_no_skip_in_snapshot_v2_failure_ux_comments():
-    """Snapshot V2 failure UX must not advertise Skip as a valid action."""
-    offenders = []
-    for rel in (
-        "backend/workflow/core.py",
-        "backend/workflow/reporting.py",
-        "backend/services/snapshot_v2/service.py",
-        "backend/services/snapshot_v2/errors.py",
-    ):
-        text = _read(rel)
-        for i, line in enumerate(text.splitlines(), 1):
-            if "Retry/Skip/Terminate" in line or "retry/skip/terminate" in line.lower():
-                # LLM failure UX may still mention skip; only flag snapshot-specific
-                if "snapshot" in line.lower() or "Snapshot" in line:
-                    offenders.append(f"{rel}:{i}: {line.strip()}")
-    assert not offenders, "Snapshot V2 UX still offers Skip:\n" + "\n".join(offenders)
+def test_snapshot_v2_failure_skip_is_producer_aware():
+    """Safe producers offer Skip while pre-restore remains fail-closed."""
+    errors = _read("backend/services/snapshot_v2/errors.py")
+    gate = _read("backend/services/snapshot_v2/failure_gate.py")
+    assert "SNAPSHOT_FAILURE_ACTIONS_SKIPPABLE" in errors
+    assert '"workflow_boundary", "post_report", "chat"' in gate
+    assert "pre_restore (or any unknown producer): skip is unsafe" in gate
 
 
 def test_safe_point_module_exports_process_wide_getter():

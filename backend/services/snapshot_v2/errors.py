@@ -23,8 +23,9 @@ def is_snapshot_failure_blocked(state: Any) -> bool:
     """True when forward resume/start must refuse until dedicated HITL action.
 
     Blocks when ``wait_input_reason == "snapshot_failure"`` or a structured
-    ``snapshot_failure`` payload is present. Only retry/manage/terminate may
-    clear the gate — generic run/resume/stop-summarize must not.
+    ``snapshot_failure`` payload is present. Only dedicated producer-aware
+    retry/skip/manage/terminate handling may clear the gate — generic
+    run/resume/stop-summarize must not.
     """
     if state is None:
         return False

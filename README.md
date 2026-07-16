@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for multi-omics biomedical research. It integrates single-cell sequencing (scRNA-seq / snRNA-seq), bulk RNA-seq, pathology image analysis (H&E / IHC), and biochemical indicators into a unified, iterative workflow. Powered by specialized agents and a **human-in-the-loop** design, ScAI is **provider-agnostic**: any OpenAI-compatible endpoint works, with per-agent routing so you can mix flagship and open-source models to balance quality and cost. Verified endpoints include cloud aggregators (OpenRouter, n1n.ai), direct provider APIs (DeepSeek, Moonshot, Zhipu, MiniMax, Aliyun/Qwen), Google Gemini (for Deep Research literature mode), and **locally deployed open-source models via Ollama**.
 
-**Version**: 0.33.16 · **License**: Apache 2.0
+**Version**: 0.33.17 · **License**: Apache 2.0
 
 ## Quick Start
 
@@ -63,7 +63,7 @@ Snapshot V2 is the authoritative checkpoint lifecycle for continuation. Operator
 
 | Topic | Behavior |
 |-------|----------|
-| Fail-closed large runtime | Required system snapshots commit only with complete, verified runtime. Oversized or failed runtime capture does **not** publish a state-only partial snapshot; the workflow pauses at snapshot-failure HITL with **Retry / Manage Snapshots / Terminate** (no Skip). |
+| Fail-closed large runtime | Required system snapshots commit only with complete, verified runtime. Oversized or failed runtime capture does **not** publish a state-only partial snapshot. Workflow-boundary, post-report, and post-chat failures may be skipped with reduced restorability; pre-restore remains fail-closed with no Skip. |
 | V1 restore cutover | Legacy V1 restore always returns **HTTP 410**. V1 inventory, export, and delete remain available as non-restorable management only. |
 | Runtime unavailable (`reset` / `keep`) | Restore of a snapshot without usable runtime requires an explicit choice: **`reset`** restores business state and workspace, quarantines live runtime, and blocks resume until a full re-run from original inputs; **`keep`** retains the current live runtime and records a **persistent** risk acceptance (not an exact restore). |
 | Import `trust_runtime=false` (default) | Imported archives never materialize dill/runtime objects unless trust is explicitly enabled. Imported snapshots report unavailable runtime and require `reset`/`keep` for continuation. |

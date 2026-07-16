@@ -806,7 +806,7 @@ export function AnalysisPanel() {
           status?: TaskStatus
           still_blocked?: boolean
           snapshot_failure?: Record<string, unknown> | null
-          snapshot_failure_allowed_actions?: Array<'retry' | 'manage' | 'terminate'>
+          snapshot_failure_allowed_actions?: Array<'retry' | 'skip' | 'manage' | 'terminate'>
           transaction_id?: string
           snapshot_transaction?: SnapshotTransactionRecord
         }
@@ -1929,7 +1929,7 @@ export function AnalysisPanel() {
 
       {/* Snapshot failure HITL — Retry re-enters capture only; Skip continues
           without capturing at that boundary (skippable producers only) */}
-      {snapshotFailure && (
+      {snapshotFailure && !showSnapshotPanel && (
         <SnapshotFailureDialog
           failure={snapshotFailure}
           isZh={language === 'zh'}

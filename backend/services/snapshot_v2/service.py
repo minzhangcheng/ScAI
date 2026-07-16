@@ -125,6 +125,7 @@ class SnapshotService:
         paths: SnapshotV2Paths,
         *,
         session_quota_bytes: int | None = None,
+        pre_restore_quota_grace_bytes: int | None = None,
         free_space_reserve_bytes: int | None = None,
         restore_coordinator: Any = None,
         pre_restore_capture: Any = None,
@@ -147,6 +148,11 @@ class SnapshotService:
             session_quota_bytes
             if session_quota_bytes is not None
             else default_config.snapshot_v2_session_quota_bytes
+        )
+        self.pre_restore_quota_grace_bytes = (
+            pre_restore_quota_grace_bytes
+            if pre_restore_quota_grace_bytes is not None
+            else default_config.snapshot_v2_pre_restore_quota_grace_bytes
         )
         self.free_space_reserve_bytes = (
             free_space_reserve_bytes
@@ -813,6 +819,27 @@ class SnapshotService:
         if record.failure is not None:
             failure_payload = record.failure.model_dump(mode="json")
             failure_payload["allowed_actions"] = list(SNAPSHOT_FAILURE_ACTIONS)
+            phase = (
+                getattr(request, "phase", None)
+                or getattr(request, "reason", None)
+            )
+            details = dict(record.failure.details or {})
+            if phase and not details.get("phase"):
+                details["phase"] = phase
+            failure_payload["details"] = details
+            blocked_error = RequiredSnapshotBlocked(
+                record.failure.code,
+                record.failure.message,
+                details=details,
+                snapshot_id=record.snapshot_id,
+                phase=phase,
+            )
+            previous_status = getattr(state, "status", None)
+            previous_status_value = (
+                getattr(previous_status, "value", str(previous_status))
+                if previous_status is not None
+                else "running"
+            )
             state.snapshot_failure = failure_payload
             state.snapshot_transaction = {
                 "snapshot_id": record.snapshot_id,
@@ -825,6 +852,21 @@ class SnapshotService:
                 state.status = TaskStatus.WAITING_INPUT
             except Exception:
                 pass
+            # Type known workflow/post-report producers before the first event
+            # is emitted. Otherwise the frontend can briefly (or permanently
+            # on catch paths without a second sync) receive a stale base-action
+            # gate that hides the safe Skip action.
+            from backend.services.snapshot_v2.failure_gate import (
+                ensure_workflow_boundary_retry_context,
+            )
+
+            ensure_workflow_boundary_retry_context(
+                state,
+                blocked_error,
+                previous_status=previous_status_value,
+                phase=phase,
+            )
+            failure_payload = dict(state.snapshot_failure or failure_payload)
             await self._send_state_sync({
                 "change_type": "snapshot_failure",
                 "version": getattr(state, "state_version", 0),
@@ -832,20 +874,7 @@ class SnapshotService:
                 "snapshot_failure": failure_payload,
                 "snapshot_transaction": state.snapshot_transaction,
             })
-            phase = (
-                getattr(request, "phase", None)
-                or getattr(request, "reason", None)
-            )
-            details = dict(record.failure.details or {})
-            if phase and not details.get("phase"):
-                details["phase"] = phase
-            raise RequiredSnapshotBlocked(
-                record.failure.code,
-                record.failure.message,
-                details=details,
-                snapshot_id=record.snapshot_id,
-                phase=phase,
-            )
+            raise blocked_error
 
         state.snapshot_failure = None
         state.snapshot_transaction = {
@@ -1447,12 +1476,23 @@ class SnapshotService:
                 request, workspace_root, analysis_state,
             )
             current_physical = self._physical_object_store_bytes()
-            if current_physical + estimated_addition > self.session_quota_bytes:
+            phase = str(getattr(request.phase, "value", request.phase))
+            allow_over_quota_baseline = phase == "pre_restore"
+            quota_ceiling = (
+                current_physical + self.pre_restore_quota_grace_bytes
+                if (
+                    allow_over_quota_baseline
+                    and current_physical > self.session_quota_bytes
+                )
+                else self.session_quota_bytes
+            )
+            if current_physical + estimated_addition > quota_ceiling:
                 raise SnapshotStorageError(
                     "snapshot_quota_exceeded",
                     "Conservative pre-write estimate would use "
                     f"{current_physical + estimated_addition} bytes, exceeding "
-                    f"session quota {self.session_quota_bytes}",
+                    f"capture ceiling {quota_ceiling} bytes "
+                    f"(session quota {self.session_quota_bytes})",
                 )
 
             # Acquire exec lock (never acquire session_lock while holding this).
@@ -1714,7 +1754,11 @@ class SnapshotService:
             await self._compute_root_hash(manifest)
 
             # Step 8 — check quota (uses physical_added + free space)
-            await self._check_quota(manifest)
+            await self._check_quota(
+                manifest,
+                quota_baseline_bytes=current_physical,
+                allow_over_quota_baseline=allow_over_quota_baseline,
+            )
 
             # Step 9 — publish manifest
             staging_path = self.manifest_store.write_staging(manifest, prefix=f"{tx}_")
@@ -1873,12 +1917,42 @@ class SnapshotService:
         workspace_root: str | None,
         analysis_state: Any = None,
     ) -> int:
-        """Conservatively estimate known bytes before writing any objects."""
+        """Estimate new physical bytes after content-addressed deduplication."""
         estimate = 0
+        known_hashes: set[str] = set()
+        objects_dir = Path(str(self.paths.objects))
+        if objects_dir.is_dir():
+            known_hashes = {
+                path.name for path in objects_dir.iterdir() if path.is_file()
+            }
+
+        def add_bytes(raw: bytes) -> None:
+            nonlocal estimate
+            sha = hashlib.sha256(raw).hexdigest()
+            if sha not in known_hashes:
+                estimate += len(raw)
+                known_hashes.add(sha)
+
+        def add_file(path: Path) -> None:
+            nonlocal estimate
+            try:
+                size = 0
+                digest = hashlib.sha256()
+                with path.open("rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        digest.update(chunk)
+                        size += len(chunk)
+            except FileNotFoundError:
+                return
+            sha = digest.hexdigest()
+            if sha not in known_hashes:
+                estimate += size
+                known_hashes.add(sha)
+
         if request.analysis_state_ref is None:
             state = analysis_state or await self._get_session_state(request.session_id)
             if state is not None:
-                estimate += len(self._serialize_analysis_state(state))
+                add_bytes(self._serialize_analysis_state(state))
 
         states_dir = get_session_states(request.session_id)
         if request.notebook_ref is None:
@@ -1886,9 +1960,9 @@ class SnapshotService:
 
             notebook = live_notebook_path(states_dir, request.session_id)
             if notebook.is_file():
-                estimate += notebook.stat().st_size
+                add_file(notebook)
             else:
-                estimate += len(json.dumps(
+                add_bytes(json.dumps(
                     {
                         "nbformat": 4,
                         "nbformat_minor": 5,
@@ -1903,7 +1977,7 @@ class SnapshotService:
         if request.checkpoint_ref is None:
             checkpoint = checkpoint_sqlite_path(states_dir)
             if checkpoint.is_file():
-                estimate += checkpoint.stat().st_size
+                add_file(checkpoint)
 
         if workspace_root:
             from backend.services.snapshot_v2.workspace import WorkspaceScope
@@ -1911,10 +1985,7 @@ class SnapshotService:
             root = Path(workspace_root)
             for relative in WorkspaceScope().list_live_scoped_paths(root):
                 path = root / relative
-                try:
-                    estimate += path.stat().st_size
-                except FileNotFoundError:
-                    continue
+                add_file(path)
         return estimate
 
     async def _capture_notebook(
@@ -2204,21 +2275,44 @@ class SnapshotService:
         raw = canonical_json(manifest)
         manifest.root_hash = hashlib.sha256(raw).hexdigest()
 
-    async def _check_quota(self, manifest: SnapshotManifestV2) -> None:
+    async def _check_quota(
+        self,
+        manifest: SnapshotManifestV2,
+        *,
+        quota_baseline_bytes: int | None = None,
+        allow_over_quota_baseline: bool = False,
+    ) -> None:
         # Session quota counts physical additions for this capture.
         added = manifest.physical_added_bytes
-        if added > self.session_quota_bytes:
+        addition_ceiling = self.session_quota_bytes
+        if (
+            allow_over_quota_baseline
+            and quota_baseline_bytes is not None
+            and quota_baseline_bytes > self.session_quota_bytes
+        ):
+            addition_ceiling = self.pre_restore_quota_grace_bytes
+        if added > addition_ceiling:
             raise SnapshotStorageError(
                 "snapshot_quota_exceeded",
                 f"Snapshot physical addition {added} exceeds quota "
-                f"{self.session_quota_bytes}",
+                f"{addition_ceiling}",
             )
         cumulative = self._physical_object_store_bytes()
-        if cumulative > self.session_quota_bytes:
+        cumulative_ceiling = self.session_quota_bytes
+        if (
+            allow_over_quota_baseline
+            and quota_baseline_bytes is not None
+            and quota_baseline_bytes > self.session_quota_bytes
+        ):
+            cumulative_ceiling = (
+                quota_baseline_bytes + self.pre_restore_quota_grace_bytes
+            )
+        if cumulative > cumulative_ceiling:
             raise SnapshotStorageError(
                 "snapshot_quota_exceeded",
                 f"Snapshot object store uses {cumulative} bytes, exceeding "
-                f"session quota {self.session_quota_bytes}",
+                f"capture ceiling {cumulative_ceiling} bytes "
+                f"(session quota {self.session_quota_bytes})",
             )
         # Also enforce cumulative store size soft bound via logical objects.
         # The v2 root dir is not created during a normal capture (objects/

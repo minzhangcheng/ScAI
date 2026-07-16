@@ -5,6 +5,7 @@ import { getToken, setToken, clearToken } from '../utils/authStorage'
 import { PERSIST_STORAGE_KEY, PERSIST_VERSION } from '../constants/storage'
 import type { SnapshotRecordV2, SnapshotStoreStatus, SnapshotTransactionRecord, SnapshotFailureInfo } from '../types/snapshotV2'
 import type { AnnotationData } from '../utils/annotationGate'
+import { resolveSnapshotFailureActions } from '../utils/snapshotV2'
 
 // Types
 export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature' | 'painter' | 'supervisor' | 'technique'
@@ -745,11 +746,10 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
           const code = typeof f.code === 'string' ? f.code : ''
           const message = typeof f.message === 'string' ? f.message : ''
           if (code || message) {
-            const allowed =
-              payload.snapshot_failure_allowed_actions ||
-              (Array.isArray(f.allowed_actions)
-                ? (f.allowed_actions as SnapshotFailureInfo['allowed_actions'])
-                : (['retry', 'manage', 'terminate'] as SnapshotFailureInfo['allowed_actions']))
+            const allowed = resolveSnapshotFailureActions(
+              f,
+              payload.snapshot_failure_allowed_actions,
+            )
             updates.snapshotFailure = {
               failure: {
                 snapshot_id: typeof f.snapshot_id === 'string' ? f.snapshot_id : '',
@@ -762,10 +762,7 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
                     ? (f.details as Record<string, unknown>)
                     : undefined,
               },
-              allowed_actions: allowed.filter(
-                (a): a is 'retry' | 'skip' | 'manage' | 'terminate' =>
-                  a === 'retry' || a === 'skip' || a === 'manage' || a === 'terminate',
-              ),
+              allowed_actions: allowed,
             }
           }
         }

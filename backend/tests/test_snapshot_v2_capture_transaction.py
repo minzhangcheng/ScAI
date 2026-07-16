@@ -1078,6 +1078,10 @@ class TestCaptureRequiredContent:
 
         service = SnapshotService("sess-cap", v2_paths)
         assert service.session_quota_bytes == default_config.snapshot_v2_session_quota_bytes
+        assert (
+            service.pre_restore_quota_grace_bytes
+            == default_config.snapshot_v2_pre_restore_quota_grace_bytes
+        )
         assert service.free_space_reserve_bytes == default_config.snapshot_v2_free_space_reserve_bytes
 
     @pytest.mark.asyncio

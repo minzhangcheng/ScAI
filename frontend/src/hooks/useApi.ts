@@ -29,7 +29,10 @@ import type {
   ExportV2Result,
   ImportV2Result,
 } from '../types/snapshotV2'
-import { normalizeSnapshotRecordV2 } from '../utils/snapshotV2'
+import {
+  normalizeSnapshotRecordV2,
+  resolveSnapshotFailureActions,
+} from '../utils/snapshotV2'
 
 export class ApiError extends Error {
   status: number
@@ -996,7 +999,7 @@ export function useWebSocket() {
                 const store = useAppStore.getState()
                 store.setSnapshotFailure({
                   failure,
-                  allowed_actions: failure.allowed_actions || ['retry', 'manage', 'terminate'],
+                  allowed_actions: resolveSnapshotFailureActions(failure),
                 })
               }
               const txn = syncContent.snapshot_transaction

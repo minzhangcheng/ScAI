@@ -308,6 +308,7 @@ class SystemConfig(BaseModel):
     # Snapshot V2 settings (V2 is the authoritative lifecycle; V1 restore cut over)
     snapshot_safe_point_timeout_seconds: int | None = None
     snapshot_v2_session_quota_bytes: int = 100 * 1024 ** 3
+    snapshot_v2_pre_restore_quota_grace_bytes: int = 64 * 1024 ** 2
     snapshot_v2_free_space_reserve_bytes: int = 5 * 1024 ** 3
     snapshot_v1_restore_cutover: bool = True
     snapshot_v2_import_compressed_bytes: int = 20 * 1024 ** 3

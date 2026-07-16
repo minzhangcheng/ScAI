@@ -149,6 +149,170 @@ async def test_prewrite_estimate_counts_known_workspace_and_state_artifacts(
     assert estimate >= 321 + 123
 
 
+@pytest.mark.asyncio
+async def test_prewrite_estimate_does_not_recount_existing_workspace_object(
+    tmp_path, monkeypatch,
+):
+    from backend.services.snapshot_v2.service import SnapshotService
+
+    paths = _make_v2_paths(tmp_path)
+    service = SnapshotService("sess-quota", paths)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    payload = b"already-content-addressed"
+    workspace_file = workspace / "table.csv"
+    workspace_file.write_bytes(payload)
+    service.object_store.put_file(workspace_file, "application/octet-stream")
+
+    states = tmp_path / "states"
+    states.mkdir()
+    monkeypatch.setattr(
+        "backend.services.snapshot_v2.service.get_session_states",
+        lambda _sid: states,
+    )
+    request = _make_capture_request().model_copy(
+        update={
+            "analysis_state_ref": service.object_store.put_bytes(
+                b"state", "application/json",
+            ).ref,
+            "notebook_ref": service.object_store.put_bytes(
+                b"notebook", "application/x-ipynb+json",
+            ).ref,
+            "checkpoint_ref": service.object_store.put_bytes(
+                b"checkpoint", "application/x-sqlite3",
+            ).ref,
+        }
+    )
+
+    estimate = await service._estimate_capture_addition(
+        request,
+        str(workspace),
+        _make_analysis_state(),
+    )
+
+    assert estimate == 0
+
+
+@pytest.mark.asyncio
+async def test_pre_restore_can_use_bounded_grace_for_legacy_over_quota_store(
+    tmp_path, monkeypatch,
+):
+    from backend.services.snapshot_v2.service import SnapshotService
+
+    paths = _make_v2_paths(tmp_path)
+    service = SnapshotService(
+        "sess-quota",
+        paths,
+        session_quota_bytes=1,
+        pre_restore_quota_grace_bytes=32,
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    workspace_file = workspace / "table.csv"
+    workspace_file.write_bytes(b"existing-workspace")
+    service.object_store.put_file(workspace_file, "application/octet-stream")
+    new_payload = b"small-pre-restore-change"
+    (workspace / "new.csv").write_bytes(new_payload)
+
+    states = tmp_path / "states"
+    states.mkdir()
+    monkeypatch.setattr(
+        "backend.services.snapshot_v2.service.get_session_states",
+        lambda _sid: states,
+    )
+    request = _make_capture_request().model_copy(
+        update={
+            "phase": "pre_restore",
+            "reason": "pre_restore",
+            "analysis_state_ref": service.object_store.put_bytes(
+                b"state", "application/json",
+            ).ref,
+            "notebook_ref": service.object_store.put_bytes(
+                b"notebook", "application/x-ipynb+json",
+            ).ref,
+            "checkpoint_ref": service.object_store.put_bytes(
+                b"checkpoint", "application/x-sqlite3",
+            ).ref,
+        }
+    )
+    baseline = service._physical_object_store_bytes()
+
+    record = await service._capture_locked(
+        request,
+        workspace_root=str(workspace),
+        workflow_state={"kernel_present": False},
+        analysis_state=_make_analysis_state(),
+        persist_session=False,
+    )
+
+    assert record.failure is None
+    assert record.manifest.physical_added_bytes == len(new_payload)
+    assert service._physical_object_store_bytes() == baseline + len(new_payload)
+
+    normal = await service._capture_locked(
+        request.model_copy(update={"phase": "manual", "reason": "manual"}),
+        workspace_root=str(workspace),
+        workflow_state={"kernel_present": False},
+        analysis_state=_make_analysis_state(),
+        persist_session=False,
+    )
+    assert normal.failure is not None
+    assert normal.failure.code == "snapshot_quota_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_pre_restore_grace_rejects_large_addition_to_over_quota_store(
+    tmp_path, monkeypatch,
+):
+    from backend.services.snapshot_v2.service import SnapshotService
+
+    paths = _make_v2_paths(tmp_path)
+    service = SnapshotService(
+        "sess-quota",
+        paths,
+        session_quota_bytes=1,
+        pre_restore_quota_grace_bytes=4,
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "new.csv").write_bytes(b"12345")
+    states = tmp_path / "states"
+    states.mkdir()
+    monkeypatch.setattr(
+        "backend.services.snapshot_v2.service.get_session_states",
+        lambda _sid: states,
+    )
+    request = _make_capture_request().model_copy(
+        update={
+            "phase": "pre_restore",
+            "reason": "pre_restore",
+            "analysis_state_ref": service.object_store.put_bytes(
+                b"state", "application/json",
+            ).ref,
+            "notebook_ref": service.object_store.put_bytes(
+                b"notebook", "application/x-ipynb+json",
+            ).ref,
+            "checkpoint_ref": service.object_store.put_bytes(
+                b"checkpoint", "application/x-sqlite3",
+            ).ref,
+        }
+    )
+    baseline = service._physical_object_store_bytes()
+
+    record = await service._capture_locked(
+        request,
+        workspace_root=str(workspace),
+        workflow_state={"kernel_present": False},
+        analysis_state=_make_analysis_state(),
+        persist_session=False,
+    )
+
+    assert record.failure is not None
+    assert record.failure.code == "snapshot_quota_exceeded"
+    assert list(paths.committed.glob("*.json")) == []
+    assert service._physical_object_store_bytes() == baseline
+
+
 def _workspace_object_sizes(workspace: Path) -> dict[str, int]:
     """sha256 -> size for scoped workspace files (root + figures/tables/repro)."""
     sizes: dict[str, int] = {}

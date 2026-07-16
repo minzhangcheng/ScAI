@@ -63,6 +63,53 @@ def sandbox():
 class TestSnapshotFailureGate:
 
     @pytest.mark.asyncio
+    async def test_required_workflow_boundary_emits_skippable_typed_gate_immediately(
+        self, v2_paths, sandbox, workspace_root,
+    ):
+        """The first failure event must already support Skip.
+
+        The frontend can render the service-level state_sync before the outer
+        workflow catch runs, so the service must not emit a stale base-action
+        payload for a known workflow boundary.
+        """
+        from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
+        from backend.services.snapshot_v2.service import SnapshotService
+
+        state = make_analysis_state()
+        req = _make_req().model_copy(update={
+            "reason": "pre_annotation",
+            "phase": "pre_annotation",
+        })
+        service = SnapshotService("sess-fail", v2_paths)
+
+        async def fail(*a, **kw):
+            raise SnapshotStorageError("snapshot_quota_exceeded", "disk full")
+
+        service._capture_impl = fail
+        ws_messages = []
+
+        async def fake_send(payload):
+            ws_messages.append(payload)
+
+        service._send_state_sync = fake_send
+
+        with pytest.raises(RequiredSnapshotBlocked):
+            await service.capture_required_snapshot(
+                state,
+                req,
+                sandbox=sandbox,
+                workspace_root=str(workspace_root),
+            )
+
+        failure = ws_messages[-1]["snapshot_failure"]
+        assert failure["allowed_actions"] == [
+            "retry", "skip", "manage", "terminate",
+        ]
+        assert failure["details"]["phase"] == "pre_annotation"
+        assert failure["retry_context"]["producer"] == "workflow_boundary"
+        assert failure["retry_context"]["snapshot_request"]["phase"] == "pre_annotation"
+
+    @pytest.mark.asyncio
     async def test_failure_persists_snapshot_failure_on_state(self, v2_paths, sandbox, workspace_root):
         """When a capture fails, snapshot_failure is set on the AnalysisState
         and snapshot_transaction is updated."""

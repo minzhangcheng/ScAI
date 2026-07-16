@@ -8,6 +8,19 @@ import type { SnapshotTransactionRecord } from '../../types/snapshotV2'
 vi.mock('../../hooks/useApi', () => ({
   apiFetch: vi.fn(),
   getSnapshotTransaction: vi.fn(),
+  listSnapshotsV2: vi.fn(async () => ({
+    snapshots: [],
+    store_status: {
+      logical_bytes: 0,
+      physical_bytes: 0,
+      dedup_savings: 0,
+      object_count: 0,
+      manifest_count: 0,
+    },
+  })),
+  deleteSnapshotV2: vi.fn(),
+  restoreSnapshotV2: vi.fn(),
+  cancelSnapshotTransaction: vi.fn(),
   generateId: () => 'test-id',
   useConfig: () => ({
     checkStatus: vi.fn(),
@@ -111,6 +124,29 @@ describe('AnalysisPanel snapshot-failure retry gate', () => {
       expect(failure?.failure.message).toBe('still full')
     })
     expect(screen.getByRole('dialog', { name: /snapshot failure/i })).toBeInTheDocument()
+  })
+
+  it('lets the snapshot manager own the modal layer until it closes', async () => {
+    render(<AnalysisPanel />)
+
+    fireEvent.click(screen.getByRole('button', { name: /manage snapshots/i }))
+
+    expect(
+      await screen.findByRole('dialog', { name: /analysis snapshots/i }),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('dialog', { name: /snapshot failure/i }),
+    ).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /^close$/i }))
+
+    expect(
+      screen.queryByRole('dialog', { name: /analysis snapshots/i }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('dialog', { name: /snapshot failure/i }),
+    ).toBeInTheDocument()
+    expect(useAppStore.getState().snapshotFailure).not.toBeNull()
   })
 
   it('clears gate only when retry returns success:true', async () => {

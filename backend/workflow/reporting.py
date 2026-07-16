@@ -876,7 +876,8 @@ class ReportingMixin:
 
         # === POST-PROCESSING: ALWAYS RUNS (even on Error) ===
         # Idempotent post-report snapshot with pending_required_snapshot state machine
-        # Failure UX: retry / manage / terminate (no Skip).
+        # Failure UX is producer-aware; post-report capture may be skipped
+        # without regenerating reports, forfeiting only this restore point.
         if analysis_state.pending_required_snapshot is not None:
             logger.info(
                 "[%s] Found pending_required_snapshot from previous attempt; retrying capture",
@@ -912,7 +913,7 @@ class ReportingMixin:
         # Only set COMPLETED if snapshot capture succeeded.
         # If capture failed, RequiredSnapshotBlocked is raised and the run
         # boundary holds WAITING_INPUT for the snapshot-failure HITL gate
-        # (retry/manage/terminate).
+        # (retry/skip/manage/terminate for this post-report producer).
         if analysis_state.pending_required_snapshot is None:
             self._set_status(analysis_state, TaskStatus.COMPLETED)
             await self._send_message("completed", "Analysis completed", AgentType.PI)

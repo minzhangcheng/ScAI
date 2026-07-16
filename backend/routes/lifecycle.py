@@ -213,13 +213,13 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         )
 
     # Snapshot-failure gate: generic resume must not clear or advance.
-    # Only dedicated retry/manage/terminate endpoints may clear the gate.
+    # Only dedicated producer-aware snapshot-failure actions may clear it.
     if is_snapshot_failure_blocked(state):
         return APIResponse(
             success=False,
             message=(
                 "Session is blocked on a required snapshot failure. "
-                "Use Retry, Manage, or Terminate — generic resume is refused."
+                "Use a snapshot-failure action — generic resume is refused."
             ),
             data={
                 "needs_reconnect": False,

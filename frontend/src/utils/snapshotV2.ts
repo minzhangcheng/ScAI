@@ -9,6 +9,7 @@ import type {
   SnapshotRecordV2,
   SnapshotManifestV2,
   SnapshotFailureRecord,
+  SnapshotFailureAction,
   ContinuationCapsule,
 } from '../types/snapshotV2'
 
@@ -69,6 +70,73 @@ export const SNAPSHOT_TERMINAL_STATUSES = new Set([
   'timed_out',
 ])
 
+const BASE_SNAPSHOT_FAILURE_ACTIONS: SnapshotFailureAction[] = [
+  'retry',
+  'manage',
+  'terminate',
+]
+
+const SKIPPABLE_SNAPSHOT_FAILURE_ACTIONS: SnapshotFailureAction[] = [
+  'retry',
+  'skip',
+  'manage',
+  'terminate',
+]
+
+const SKIPPABLE_SNAPSHOT_PRODUCERS = new Set([
+  'workflow_boundary',
+  'post_report',
+  'chat',
+])
+
+function validSnapshotFailureActions(raw: unknown): SnapshotFailureAction[] {
+  if (!Array.isArray(raw)) return []
+  return raw.filter(
+    (action): action is SnapshotFailureAction =>
+      action === 'retry' ||
+      action === 'skip' ||
+      action === 'manage' ||
+      action === 'terminate',
+  )
+}
+
+/**
+ * Resolve snapshot-failure actions while preserving explicit backend policy.
+ *
+ * Older payloads may omit allowed_actions even though their typed retry
+ * context identifies a safely skippable producer. Infer Skip only for those
+ * producers; pre_restore and unknown producers stay fail-closed.
+ */
+export function resolveSnapshotFailureActions(
+  failure: unknown,
+  explicitActions?: unknown,
+): SnapshotFailureAction[] {
+  if (Array.isArray(explicitActions)) {
+    return validSnapshotFailureActions(explicitActions)
+  }
+
+  const raw =
+    failure && typeof failure === 'object'
+      ? (failure as Record<string, unknown>)
+      : {}
+  if (Array.isArray(raw.allowed_actions)) {
+    return validSnapshotFailureActions(raw.allowed_actions)
+  }
+
+  const retryContext =
+    raw.retry_context && typeof raw.retry_context === 'object'
+      ? (raw.retry_context as Record<string, unknown>)
+      : null
+  const producer =
+    retryContext && typeof retryContext.producer === 'string'
+      ? retryContext.producer
+      : ''
+
+  return SKIPPABLE_SNAPSHOT_PRODUCERS.has(producer)
+    ? [...SKIPPABLE_SNAPSHOT_FAILURE_ACTIONS]
+    : [...BASE_SNAPSHOT_FAILURE_ACTIONS]
+}
+
 /**
  * Format a byte count into a human-readable string.
  */
@@ -91,7 +159,7 @@ export interface ParsedSnapshotFailure {
     message: string
     details?: Record<string, unknown>
   }
-  allowed_actions: Array<'retry' | 'manage' | 'terminate'>
+  allowed_actions: SnapshotFailureAction[]
 }
 
 export function parseSnapshotFailure(
@@ -103,10 +171,6 @@ export function parseSnapshotFailure(
   const code = typeof f.code === 'string' ? f.code : ''
   const message = typeof f.message === 'string' ? f.message : ''
   if (!code && !message) return null
-
-  const rawActions = Array.isArray(f.allowed_actions)
-    ? f.allowed_actions
-    : ['retry', 'manage', 'terminate']
 
   return {
     failure: {
@@ -120,10 +184,7 @@ export function parseSnapshotFailure(
           ? (f.details as Record<string, unknown>)
           : undefined,
     },
-    allowed_actions: rawActions.filter(
-      (a): a is 'retry' | 'manage' | 'terminate' =>
-        a === 'retry' || a === 'manage' || a === 'terminate',
-    ),
+    allowed_actions: resolveSnapshotFailureActions(f),
   }
 }
 

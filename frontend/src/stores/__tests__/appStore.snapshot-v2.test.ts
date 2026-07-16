@@ -271,5 +271,48 @@ describe('Snapshot V2 store actions', () => {
         allowed_actions: ['retry', 'manage', 'terminate'],
       })
     })
+
+    it('hydrates Skip for a legacy workflow-boundary failure with typed retry context', () => {
+      useAppStore.getState().hydrateRuntimeRestoreFromSession({
+        runtime_restore_status: 'complete',
+        snapshot_failure: {
+          code: 'snapshot_quota_exceeded',
+          message: 'disk full',
+          retry_context: {
+            producer: 'workflow_boundary',
+            resume_policy: 'graph_checkpoint',
+            snapshot_request: { phase: 'pre_annotation' },
+          },
+        },
+      })
+
+      expect(useAppStore.getState().snapshotFailure?.allowed_actions).toEqual([
+        'retry',
+        'skip',
+        'manage',
+        'terminate',
+      ])
+    })
+
+    it('does not infer Skip for a legacy pre-restore failure', () => {
+      useAppStore.getState().hydrateRuntimeRestoreFromSession({
+        runtime_restore_status: 'complete',
+        snapshot_failure: {
+          code: 'snapshot_quota_exceeded',
+          message: 'disk full',
+          retry_context: {
+            producer: 'pre_restore',
+            resume_policy: 'restore_transaction',
+            snapshot_request: { phase: 'pre_restore' },
+          },
+        },
+      })
+
+      expect(useAppStore.getState().snapshotFailure?.allowed_actions).toEqual([
+        'retry',
+        'manage',
+        'terminate',
+      ])
+    })
   })
 })

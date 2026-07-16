@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.33.16 · **Last updated**: 2026-07-15
+**Version**: 0.33.17 · **Last updated**: 2026-07-15
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,17 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.33.x — (2026-07-15)**
+
+- `0.33.17` — Pre-restore quota grace, typed snapshot failure gate with immediate skippable actions, content-aware deduplicated prewrite estimate; version bump (2026-07-15):
+  - **Pre-restore quota grace (`backend/services/snapshot_v2/service.py`, `backend/config/_config.py`)**: New `snapshot_v2_pre_restore_quota_grace_bytes` (default 64MB) allows pre-restore captures to proceed when the cumulative object store already exceeds the session quota baseline, bounded by a configurable grace ceiling. Non-pre-restore captures are unaffected. `SnapshotService` constructor, `_check_quota`, and `_estimate_capture_addition` all updated.
+  - **Content-aware deduplicated prewrite estimate (`backend/services/snapshot_v2/service.py`)**: `_estimate_capture_addition` now hashes workspace files, notebook, checkpoint, and state against existing object-store SHAs, counting only new bytes. Eliminates over-counting when retrying a capture whose objects are already on disk.
+  - **Typed snapshot failure gate with immediate skippable actions (`backend/services/snapshot_v2/service.py`, `backend/services/snapshot_v2/failure_gate.py`)**: `capture_required_snapshot` now calls `ensure_workflow_boundary_retry_context()` before emitting the state_sync, so the first failure event carries typed `retry_context` (producer, resume_policy, snapshot_request phase). Workflow-boundary, post-report, and chat failures immediately advertise Skip in `allowed_actions` instead of requiring a second sync.
+  - **Frontend snapshot failure action resolution (`frontend/src/utils/snapshotV2.ts`, `frontend/src/stores/appStore.ts`, `frontend/src/hooks/useApi.ts`)**: New `resolveSnapshotFailureActions()` infers Skip for known skippable producers (`workflow_boundary`, `post_report`, `chat`) based on `retry_context.producer`; `pre_restore` and unknown producers remain fail-closed (retry/manage/terminate only). Used by WebSocket handler, `setSnapshotFailure` store action, and `parseSnapshotFailure`.
+  - **Snapshot panel modal layer ownership (`frontend/src/components/AnalysisPanel.tsx`)**: `SnapshotFailureDialog` hidden when `SnapshotPanel` is open, preventing double-modal layout. Failure dialog reappears when the snapshot panel closes, preserving gate state.
+  - **Lifecycle generic-resume message update (`backend/routes/lifecycle.py`)**: Message broadened to reference "snapshot-failure action" instead of specific action names, staying correct as action sets vary by producer.
+  - **Structural boundary test updated (`backend/tests/test_snapshot_v2_structural_boundary.py`)**: Replaced `test_no_skip_in_snapshot_v2_failure_ux_comments` with `test_snapshot_v2_failure_skip_is_producer_aware` that verifies skippable producers are documented and pre_restore remains fail-closed.
+  - **Doc updates**: AGENTS.md Snapshot V2 section updated to reflect skippable producers; README.md fail-closed table updated.
+  - **New tests**: `test_snapshot_failure_gate.py` (`test_required_workflow_boundary_emits_skippable_typed_gate_immediately`), `test_snapshot_v2_quota_accounting.py` (deduplicated prewrite estimate, pre_restore grace acceptance, pre_restore grace rejection). Frontend: `AnalysisPanel.snapshot-failure-retry.test.tsx` (snapshot manager modal layer ownership), `appStore.snapshot-v2.test.ts` (Skip hydration from workflow-boundary retry context, pre_restore exclusion).
 
 - `0.33.16` — Quiescent session restore safe-point acknowledgement, post-report dead-sandbox bypass; version bump (2026-07-15):
   - **Quiescent session restore safe-point ack (`backend/services/snapshot_v2/jobs.py`)**: New `_acknowledge_if_quiescent()` atomically checks (under `state_lock`) that a session has no live workflow, no run/report/chat task, and no ongoing initialization. When the session is fully quiescent, acknowledges the restore safe point with `role="quiescent_coordinator"` instead of waiting for a workflow boundary handshake that may never arrive. Fixes a regression where completed/failed report workflows left the session in `waiting_safe_point` until timeout.
