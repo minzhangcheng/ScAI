@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.33.17 · **Last updated**: 2026-07-15
+**Version**: 0.33.18 · **Last updated**: 2026-07-15
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,10 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.33.x — (2026-07-15)**
+
+- `0.33.18` — Legacy snapshot-failure gate upgrade on reconnect; version bump (2026-07-15):
+  - **Legacy gate upgrade on reconnect (`backend/services/snapshot_v2/failure_gate.py`, `backend/routes/websockets.py`)**: New `upgrade_legacy_snapshot_failure_gate()` upgrades persisted pre-producer snapshot failure gates in place during WebSocket reconnect. Bare gates (no `retry_context.producer`) are upgraded to typed gates: workflow boundary (for known phases or unknown/manual), post-report (when `pending_required_snapshot` is set or phase is `post_report`). Pre_restore gates with explicit typed contexts remain untouched. Fixes a scenario where a restart/reconnect left the frontend with a Retry/Manage/Terminate-only gate for a skippable producer.
+  - **New tests**: `test_snapshot_failure_resume_gate.py` (`test_ws_resend_upgrades_legacy_bare_snapshot_failure_gate`), `test_snapshot_failure_skip.py` (legacy bare gate upgraded to skippable workflow boundary, typed pre_restore gate preserved).
 
 - `0.33.17` — Pre-restore quota grace, typed snapshot failure gate with immediate skippable actions, content-aware deduplicated prewrite estimate; version bump (2026-07-15):
   - **Pre-restore quota grace (`backend/services/snapshot_v2/service.py`, `backend/config/_config.py`)**: New `snapshot_v2_pre_restore_quota_grace_bytes` (default 64MB) allows pre-restore captures to proceed when the cumulative object store already exceeds the session quota baseline, bounded by a configurable grace ceiling. Non-pre-restore captures are unaffected. `SnapshotService` constructor, `_check_quota`, and `_estimate_capture_addition` all updated.

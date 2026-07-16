@@ -90,6 +90,45 @@ class TestConsumeSnapshotSkip:
 
 
 class TestAllowedActionsOfferSkip:
+    def test_legacy_bare_gate_is_upgraded_to_skippable_workflow_boundary(self):
+        from backend.services.snapshot_v2.failure_gate import (
+            upgrade_legacy_snapshot_failure_gate,
+        )
+
+        st = _gated()
+        st.snapshot_failure["allowed_actions"] = ["retry", "manage", "terminate"]
+
+        changed = upgrade_legacy_snapshot_failure_gate(st)
+
+        assert changed is True
+        assert st.snapshot_failure is not None
+        assert st.snapshot_failure["allowed_actions"] == [
+            "retry", "skip", "manage", "terminate",
+        ]
+        assert st.snapshot_failure["retry_context"]["producer"] == "workflow_boundary"
+        assert st.snapshot_failure["retry_context"]["snapshot_request"] == {}
+
+    def test_legacy_upgrade_preserves_typed_pre_restore_gate(self):
+        from backend.services.snapshot_v2.failure_gate import (
+            upgrade_legacy_snapshot_failure_gate,
+        )
+
+        st = _gated()
+        st.snapshot_failure.update({
+            "allowed_actions": ["retry", "manage", "terminate"],
+            "retry_context": {
+                "producer": "pre_restore",
+                "resume_policy": "restore_transaction",
+                "snapshot_request": {"phase": "pre_restore"},
+                "previous_status": "running",
+            },
+        })
+
+        changed = upgrade_legacy_snapshot_failure_gate(st)
+
+        assert changed is False
+        assert "skip" not in st.snapshot_failure["allowed_actions"]
+
     def test_workflow_boundary_gate_offers_skip(self):
         from backend.services.snapshot_v2.failure_gate import (
             ensure_workflow_boundary_retry_context,

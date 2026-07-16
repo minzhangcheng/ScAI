@@ -115,6 +115,32 @@ async def test_ws_resend_includes_snapshot_failure():
 
 
 @pytest.mark.asyncio
+async def test_ws_resend_upgrades_legacy_bare_snapshot_failure_gate():
+    from backend.routes.websockets import _resend_wait_input_state_sync
+
+    state = _state()
+    state.snapshot_failure = {
+        "code": "snapshot_quota_exceeded",
+        "message": "disk full",
+        "allowed_actions": ["retry", "manage", "terminate"],
+    }
+    sent = []
+
+    class FakeWS:
+        async def send_json(self, payload):
+            sent.append(payload)
+
+    await _resend_wait_input_state_sync(FakeWS(), state, "sess-gate")
+
+    content = sent[0].get("content") or sent[0]
+    failure = content["snapshot_failure"]
+    assert failure["allowed_actions"] == [
+        "retry", "skip", "manage", "terminate",
+    ]
+    assert failure["retry_context"]["producer"] == "workflow_boundary"
+
+
+@pytest.mark.asyncio
 async def test_chat_snapshot_failure_not_rewritten_as_chat_error():
     """RequiredSnapshotBlocked from post-chat must surface structured failure."""
     from backend.routes import chat as chat_mod

@@ -93,6 +93,17 @@ async def _resend_wait_input_state_sync(websocket, state, session_id: str) -> No
 
     Also re-emits snapshot_failure so the failure HITL gate survives reconnect.
     """
+    from backend.services.snapshot_v2.failure_gate import (
+        upgrade_legacy_snapshot_failure_gate,
+    )
+
+    upgraded_legacy_gate = upgrade_legacy_snapshot_failure_gate(state)
+    if upgraded_legacy_gate:
+        logger.info(
+            "[%s] Upgraded legacy snapshot-failure gate on reconnect",
+            session_id,
+        )
+
     reason = getattr(state, "wait_input_reason", None)
     snapshot_failure = getattr(state, "snapshot_failure", None)
     _HITL_RESEND_REASONS = (

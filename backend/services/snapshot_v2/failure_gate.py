@@ -415,6 +415,70 @@ def enter_chat_snapshot_failure_gate(
     )
 
 
+def upgrade_legacy_snapshot_failure_gate(state: Any) -> bool:
+    """Upgrade a persisted pre-producer snapshot gate in place.
+
+    Older versions emitted and persisted the service-level failure before the
+    outer producer catch attached ``retry_context``. Those gates expose only
+    Retry/Manage/Terminate, and Retry/Skip routes cannot dispatch them after a
+    restart. A context-free required-capture gate is a workflow boundary unless
+    state proves a dedicated producer. Explicit typed contexts, especially
+    ``pre_restore``, remain authoritative and are never widened.
+    """
+    failure = getattr(state, "snapshot_failure", None)
+    if not isinstance(failure, dict) or not failure:
+        return False
+    retry_context = failure.get("retry_context")
+    if isinstance(retry_context, dict) and retry_context.get("producer"):
+        return False
+
+    details = failure.get("details")
+    details = details if isinstance(details, dict) else {}
+    phase = str(details.get("phase") or "").strip()
+    if phase == "pre_restore":
+        return False
+
+    pending = getattr(state, "pending_required_snapshot", None)
+    if isinstance(pending, dict) and pending:
+        ensure_post_report_retry_context(
+            state,
+            previous_status="generating_report",
+            snapshot_request=dict(pending),
+        )
+        return True
+
+    if phase == "post_report":
+        ensure_post_report_retry_context(
+            state,
+            previous_status="generating_report",
+            snapshot_request={"phase": "post_report"},
+        )
+        return True
+
+    if phase and phase not in _WORKFLOW_BOUNDARY_PHASES:
+        # Unknown/manual captures are not automatically made skippable.
+        return False
+
+    error = RequiredSnapshotBlocked(
+        str(failure.get("code") or "REQUIRED_SNAPSHOT_BLOCKED"),
+        str(failure.get("message") or "Required snapshot capture failed"),
+        details=details,
+        snapshot_id=(
+            str(failure.get("snapshot_id"))
+            if failure.get("snapshot_id")
+            else None
+        ),
+        phase=phase or None,
+    )
+    ensure_workflow_boundary_retry_context(
+        state,
+        error,
+        previous_status="running",
+        phase=phase or None,
+    )
+    return True
+
+
 def retry_post_report(state: Any) -> TaskStatus:
     """Clear failure gate and return to GENERATING_REPORT for capture-only retry.
 
