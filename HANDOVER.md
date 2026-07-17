@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.33.18 · **Last updated**: 2026-07-15
+**Version**: 0.34.1 · **Last updated**: 2026-07-15
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,17 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.33.x — (2026-07-15)**
+**0.33.x–0.34.x — (2026-07-15)**
+
+- `0.34.1` — Snapshot V2 disabled-by-default feature gate, post-exploration phase drift repair, frontend V2 UI gating; version bump (2026-07-15):
+  - **Snapshot V2 disabled-by-default (`backend/services/snapshot_v2/feature_gate.py`, `backend/config/_config.py`, `backend/config/__init__.py`)**: New `SCAI_ENABLE_SNAPSHOT_V2` environment variable (`1`/`true`/`yes`, case-insensitive) controls the process-scoped feature gate. Default is disabled. `is_snapshot_v2_enabled()` and `SNAPSHOT_V2_ENABLED` exported from `backend.config`. `require_snapshot_v2_enabled()` FastAPI dependency returns HTTP 404 with `SNAPSHOT_V2_DISABLED` for all V2 HTTP routes. `normalize_disabled_snapshot_state()` clears stale snapshot blockers (`snapshot_failure`, `pending_required_snapshot`, `wait_input_reason`, `skip_required_snapshot_phase`) and downgrades phantom RUNNING/WAITING_INPUT to PAUSED. Test conftest sets `SCAI_ENABLE_SNAPSHOT_V2=true` to keep existing snapshot regression tests unchanged.
+  - **Backend HTTP route gating (`backend/routes/snapshots.py`, `backend/routes/lifecycle.py`, `backend/routes/export_import.py`, `backend/routes/chat.py`, `backend/routes/config.py`)**: All Snapshot V2 HTTP endpoints (list/get/delete/restore/transaction status/cancel, snapshot-failure retry/skip/terminate, V2 export/import) gated with `Depends(require_snapshot_v2_enabled)`. Post-chat snapshot capture no-ops when disabled. `/config/status` returns `snapshot_v2_enabled` boolean for frontend capability detection.
+  - **Startup and session-load gating (`backend/main.py`, `backend/services/session_store.py`)**: Lifespan journal recovery only runs when enabled. `ensure_session_loaded` runs disabled-mode state normalization on cached and disk-loaded sessions; V2 manifest reconciliation and recovery-blocked paths only run when enabled.
+  - **Workflow/Report gating (`backend/workflow/core.py`, `backend/workflow/reporting.py`)**: `_capture_required_snapshot` no-ops when disabled. `run`, `generate_final_report`, `resume_workflow_thread` call `normalize_disabled_snapshot_state` before proceeding. Post-report capture extracted to `_capture_post_report_if_enabled` and skipped when disabled; `COMPLETED` status set directly without snapshot dependency.
+  - **Post-exploration phase drift repair (`backend/routes/interaction.py`)**: `_choose_direction_locked` repairs `analysis_phase` from `EXPLORATION` to `INNOVATION` when a completed exploration report exists with direction candidates and no user choice yet. Fixes snapshot-restore scenario where phase=EXPLORATION persisted despite Report A being complete.
+  - **Frontend Snapshot V2 feature gating (`frontend/src/stores/appStore.ts`, `frontend/src/hooks/useApi.ts`, `frontend/src/components/AnalysisPanel.tsx`)**: New `snapshotV2Enabled` store state (default false) + `setSnapshotV2Enabled`. `checkStatus` reads `snapshot_v2_enabled` from backend; `useConfig` wires through. AnalysisPanel: all Snapshot V2 UI (Snapshot button in all status sections, SnapshotFailureDialog, SnapshotPanel, CleanupReminder, RuntimeWarningBanner, transaction polling, auto-open on retry, cleanup state reset) gated behind `snapshotV2Enabled`. When disabled, no V2 API calls are made and stale V2 UI state is cleaned up.
+  - **README doc update (`README.md`)**: Snapshot V2 safety contract section updated with opt-in mechanism (`SCAI_ENABLE_SNAPSHOT_V2=true`) and disabled-behavior description.
+  - **New tests**: `test_choose_direction_gating.py` (post-exploration phase drift repair). Frontend: `AnalysisPanel.snapshot-failure-retry.test.tsx` (hides Snapshot V2 UI when disabled), `appStore.snapshot-v2.test.ts` (default disabled, update capability).
 
 - `0.33.18` — Legacy snapshot-failure gate upgrade on reconnect; version bump (2026-07-15):
   - **Legacy gate upgrade on reconnect (`backend/services/snapshot_v2/failure_gate.py`, `backend/routes/websockets.py`)**: New `upgrade_legacy_snapshot_failure_gate()` upgrades persisted pre-producer snapshot failure gates in place during WebSocket reconnect. Bare gates (no `retry_context.producer`) are upgraded to typed gates: workflow boundary (for known phases or unknown/manual), post-report (when `pending_required_snapshot` is set or phase is `post_report`). Pre_restore gates with explicit typed contexts remain untouched. Fixes a scenario where a restart/reconnect left the frontend with a Retry/Manage/Terminate-only gate for a skippable producer.

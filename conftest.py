@@ -19,6 +19,10 @@ import tempfile
 
 _DEFAULT_DATA_DIR = "/tmp/scai_test_data"
 
+# Snapshot regression tests exercise the explicitly enabled lifecycle. Default
+# disabled behavior is covered in fresh subprocesses and targeted gate tests.
+os.environ.setdefault("SCAI_ENABLE_SNAPSHOT_V2", "true")
+
 
 def _is_writable_data_dir(path: str) -> bool:
     try:

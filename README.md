@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for multi-omics biomedical research. It integrates single-cell sequencing (scRNA-seq / snRNA-seq), bulk RNA-seq, pathology image analysis (H&E / IHC), and biochemical indicators into a unified, iterative workflow. Powered by specialized agents and a **human-in-the-loop** design, ScAI is **provider-agnostic**: any OpenAI-compatible endpoint works, with per-agent routing so you can mix flagship and open-source models to balance quality and cost. Verified endpoints include cloud aggregators (OpenRouter, n1n.ai), direct provider APIs (DeepSeek, Moonshot, Zhipu, MiniMax, Aliyun/Qwen), Google Gemini (for Deep Research literature mode), and **locally deployed open-source models via Ollama**.
 
-**Version**: 0.33.18 · **License**: Apache 2.0
+**Version**: 0.34.1 · **License**: Apache 2.0
 
 ## Quick Start
 
@@ -55,11 +55,19 @@ The script creates a virtual environment, installs dependencies, and starts both
 - **Multi-omics integration** — scRNA-seq, snRNA-seq, bulk RNA-seq, pathology images, and biochemistry values are cross-referenced automatically.
 - **Provider-agnostic LLM layer** — each agent independently selects its model and endpoint; any OpenAI-compatible API works (cloud or self-hosted), including **local Ollama** deployments of open-source models for fully offline use.
 - **Publication-ready output** — PI-reviewed figures (PNG + high-res PDF), a 9-chapter HTML report with appendix, and an AI-generated graphic abstract.
-- **Session lifecycle** — pause, resume, snapshot, export, and import complete sessions (data, state, notebooks, figures, reports).
+- **Session lifecycle** — pause, resume, export, and import complete sessions (data, state, notebooks, figures, reports), with an optional Snapshot V2 checkpoint subsystem.
 
 ### Snapshot V2 safety contract
 
-Snapshot V2 is the authoritative checkpoint lifecycle for continuation. Operators and developers should treat the following as product contracts:
+Snapshot V2 is **disabled by default**. To opt in, set the environment variable before backend startup and restart ScAI:
+
+```bash
+SCAI_ENABLE_SNAPSHOT_V2=true ./start.sh
+```
+
+For Docker, add `-e SCAI_ENABLE_SNAPSHOT_V2=true` to `docker run`. Accepted truthy values are `1`, `true`, and `yes` (case-insensitive). Disabling Snapshot V2 does not delete existing snapshot data; setting the variable and restarting restores access to it.
+
+When disabled, ScAI does not create automatic workflow, report, or chat snapshots; Snapshot V2 management, restore, import, export, and failure-action APIs return `SNAPSHOT_V2_DISABLED`; and the frontend hides Snapshot V2 controls. When explicitly enabled, Snapshot V2 is the authoritative checkpoint lifecycle and the following safety contracts apply:
 
 | Topic | Behavior |
 |-------|----------|

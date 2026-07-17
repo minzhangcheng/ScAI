@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import aiofiles
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 
 class ImportCancelled(Exception):
@@ -39,6 +39,10 @@ from backend.config import (
 )
 from backend.models.schemas import AnalysisState, APIResponse
 from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
+from backend.services.snapshot_v2.feature_gate import (
+    is_snapshot_v2_enabled,
+    require_snapshot_v2_enabled,
+)
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
     update_session_cache as _update_session_cache,
@@ -78,6 +82,40 @@ def is_sandbox_pickle(name: str) -> bool:
     """
     base = name.rsplit("/", 1)[-1]
     return bool(re.match(r".*_session\.pkl(\.zst)?$", base) or base == "session.pkl")
+
+
+_SNAPSHOT_V2_SESSION_ROOTS = frozenset({
+    "v2",
+    "objects",
+    "staging",
+    "journals",
+    "committed",
+    "integrity",
+})
+_SNAPSHOT_V2_OBJECT_MEMBER = re.compile(r"objects/[0-9a-f]{64}$")
+
+
+def _is_disabled_snapshot_v2_member(name: str) -> bool:
+    """Return whether a tar member belongs to Snapshot V2 storage.
+
+    Explicit V2 exports use flat ``objects/`` and ``manifests/`` roots, while
+    ordinary session archives may carry session-prefixed V2 storage roots.
+    Neither form may be materialized through the ordinary import path when the
+    subsystem is disabled.
+    """
+    if is_snapshot_v2_enabled():
+        return False
+
+    normalized = name.strip("/")
+    if normalized == "snapshot-v2-export.json":
+        return True
+    if _SNAPSHOT_V2_OBJECT_MEMBER.fullmatch(normalized):
+        return True
+    if normalized.startswith("manifests/"):
+        return True
+
+    parts = normalized.split("/")
+    return len(parts) >= 2 and parts[1] in _SNAPSHOT_V2_SESSION_ROOTS
 
 
 # P3-7: cap export filename's slug portion to keep total filename below
@@ -422,7 +460,10 @@ async def export_download(session_id: str, request: Request, token: str | None =
     )
 
 
-@router.post("/api/session/{session_id}/export-v2")
+@router.post(
+    "/api/session/{session_id}/export-v2",
+    dependencies=[Depends(require_snapshot_v2_enabled)],
+)
 async def export_v2(
     session_id: str,
     request: Request,
@@ -502,7 +543,10 @@ async def export_v2(
     }
 
 
-@router.post("/api/session/{session_id}/import-v2")
+@router.post(
+    "/api/session/{session_id}/import-v2",
+    dependencies=[Depends(require_snapshot_v2_enabled)],
+)
 async def import_v2(
     session_id: str,
     request: Request,
@@ -970,6 +1014,14 @@ def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = 
                 )
 
             if not member.isfile():
+                continue
+
+            if _is_disabled_snapshot_v2_member(member.name):
+                logger.warning(
+                    "Skipping Snapshot V2 member from ordinary import while "
+                    "the subsystem is disabled: %s",
+                    member.name,
+                )
                 continue
 
             if '..' in member.name or member.name.startswith('/'):

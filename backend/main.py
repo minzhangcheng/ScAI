@@ -100,6 +100,28 @@ from .utils.agent_llm import (
 logger = logging.getLogger(__name__)
 
 
+async def _recover_snapshots_on_startup() -> None:
+    """Recover Snapshot V2 journals only for explicitly enabled deployments."""
+    from backend.config import is_snapshot_v2_enabled
+
+    if not is_snapshot_v2_enabled():
+        return
+
+    try:
+        from backend.services.snapshot_v2.recovery import recover_for_all_sessions
+
+        recovery_result = await recover_for_all_sessions()
+        if recovery_result.recovered:
+            logger.info(
+                "Lifespan: recovered %d restore transactions across all sessions",
+                len(recovery_result.recovered_transactions),
+            )
+            if recovery_result.errors:
+                logger.warning("Lifespan recovery errors: %s", recovery_result.errors)
+    except Exception:
+        logger.exception("Lifespan snapshot recovery failed; continuing")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
@@ -122,19 +144,8 @@ async def lifespan(app: FastAPI):
     from backend.services.upload import set_session_callbacks
     set_session_callbacks(_update_session_cache, async_save_session)
 
-    # Recover any incomplete snapshot restore transactions for all sessions
-    try:
-        from backend.services.snapshot_v2.recovery import recover_for_all_sessions
-        recovery_result = await recover_for_all_sessions()
-        if recovery_result.recovered:
-            logger.info(
-                "Lifespan: recovered %d restore transactions across all sessions",
-                len(recovery_result.recovered_transactions),
-            )
-            if recovery_result.errors:
-                logger.warning("Lifespan recovery errors: %s", recovery_result.errors)
-    except Exception:
-        logger.exception("Lifespan snapshot recovery failed; continuing")
+    # Recover incomplete restore transactions only when Snapshot V2 is enabled.
+    await _recover_snapshots_on_startup()
 
     from backend.tasks.session_cleanup import cleanup_stale_sessions
     cleanup_task = asyncio.create_task(
@@ -223,5 +234,4 @@ from .models.api_requests import (
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
 

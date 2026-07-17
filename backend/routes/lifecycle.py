@@ -29,6 +29,7 @@ from backend.services.snapshot_v2.errors import (
     SnapshotTransactionError,
     is_snapshot_failure_blocked,
 )
+from backend.services.snapshot_v2.feature_gate import require_snapshot_v2_enabled
 from backend.utils.files import validate_session_id
 from backend.state import (
     _run_tasks,
@@ -103,6 +104,17 @@ async def run_analysis(session_id: str, request: Request):
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    from backend.config import is_snapshot_v2_enabled
+    from backend.services.snapshot_v2.feature_gate import (
+        normalize_disabled_snapshot_state,
+    )
+
+    if not is_snapshot_v2_enabled():
+        normalize_disabled_snapshot_state(
+            state,
+            workflow_active=session_id in workflows,
+        )
 
     if state.status == TaskStatus.RUNNING:
         raise HTTPException(status_code=400, detail="Analysis already running")
@@ -202,6 +214,17 @@ async def resume_analysis(session_id: str, request: Request):
 
 async def _resume_analysis_locked(session_id: str, user_id: str):
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    from backend.config import is_snapshot_v2_enabled
+    from backend.services.snapshot_v2.feature_gate import (
+        normalize_disabled_snapshot_state,
+    )
+
+    if not is_snapshot_v2_enabled():
+        normalize_disabled_snapshot_state(
+            state,
+            workflow_active=session_id in workflows,
+        )
 
     try:
         assert_recovery_clear(state, session_id=session_id)
@@ -697,7 +720,10 @@ async def resume_bioinformatics(session_id: str, request: Request):
         raise HTTPException(status_code=500, detail=f"Error reading checkpoint: {str(e)}")
 
 
-@router.post("/{session_id}/snapshot-failure/retry")
+@router.post(
+    "/{session_id}/snapshot-failure/retry",
+    dependencies=[Depends(require_snapshot_v2_enabled)],
+)
 async def snapshot_failure_retry(session_id: str, request: Request):
     """Retry a snapshot failure by re-invoking the exact failed capture producer.
 
@@ -784,7 +810,10 @@ async def snapshot_failure_retry(session_id: str, request: Request):
     )
 
 
-@router.post("/{session_id}/snapshot-failure/skip")
+@router.post(
+    "/{session_id}/snapshot-failure/skip",
+    dependencies=[Depends(require_snapshot_v2_enabled)],
+)
 async def snapshot_failure_skip(session_id: str, request: Request):
     """Skip snapshot creation and continue the analysis.
 
@@ -850,7 +879,10 @@ async def snapshot_failure_skip(session_id: str, request: Request):
     )
 
 
-@router.post("/{session_id}/snapshot-failure/terminate")
+@router.post(
+    "/{session_id}/snapshot-failure/terminate",
+    dependencies=[Depends(require_snapshot_v2_enabled)],
+)
 async def snapshot_failure_terminate(session_id: str, request: Request):
     """Terminate the session on snapshot failure.
 

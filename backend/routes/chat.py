@@ -477,6 +477,11 @@ async def _create_chat_snapshot(session_id: str, state: AnalysisState) -> None:
     same blocking snapshot_failure state so a later run/resume refuses to
     start until Retry, Manage, or Terminate.
     """
+    from backend.config import is_snapshot_v2_enabled
+
+    if not is_snapshot_v2_enabled():
+        return None
+
     from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
     from backend.services.session_store import async_save_session, update_session_cache
 

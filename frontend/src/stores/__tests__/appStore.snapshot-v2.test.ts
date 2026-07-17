@@ -11,6 +11,20 @@ describe('Snapshot V2 store actions', () => {
     })
   })
 
+  describe('feature capability', () => {
+    it('defaults to disabled', () => {
+      expect(useAppStore.getState().snapshotV2Enabled).toBe(false)
+    })
+
+    it('updates from the backend capability', () => {
+      useAppStore.getState().setSnapshotV2Enabled(true)
+      expect(useAppStore.getState().snapshotV2Enabled).toBe(true)
+
+      useAppStore.getState().setSnapshotV2Enabled(false)
+      expect(useAppStore.getState().snapshotV2Enabled).toBe(false)
+    })
+  })
+
   describe('setSnapshotsV2', () => {
     it('updates snapshotsV2 state', () => {
       const snapshots = [

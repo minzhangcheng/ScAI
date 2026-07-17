@@ -27,6 +27,18 @@ _ENABLE_REPRODUCIBILITY = os.environ.get("SCAI_ENABLE_REPRODUCIBILITY", "").lowe
     "yes",
 )
 
+_ENABLE_SNAPSHOT_V2 = os.environ.get("SCAI_ENABLE_SNAPSHOT_V2", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+SNAPSHOT_V2_ENABLED = _ENABLE_SNAPSHOT_V2
+
+
+def is_snapshot_v2_enabled() -> bool:
+    """Return the process-scoped Snapshot V2 operator feature gate."""
+    return SNAPSHOT_V2_ENABLED
+
 # Legacy top-level directories (kept for backward compatibility / migration fallback)
 UPLOAD_DIR = DATA_BASE_DIR / "uploads"
 STATE_DIR = DATA_BASE_DIR / "states"
@@ -306,6 +318,13 @@ class SystemConfig(BaseModel):
     )
 
     # Snapshot V2 settings (V2 is the authoritative lifecycle; V1 restore cut over)
+    snapshot_v2_enabled: bool = Field(
+        default=_ENABLE_SNAPSHOT_V2,
+        description=(
+            "Enable Snapshot V2. Disabled by default; set "
+            "SCAI_ENABLE_SNAPSHOT_V2=true before backend startup to opt in."
+        ),
+    )
     snapshot_safe_point_timeout_seconds: int | None = None
     snapshot_v2_session_quota_bytes: int = 100 * 1024 ** 3
     snapshot_v2_pre_restore_quota_grace_bytes: int = 64 * 1024 ** 2

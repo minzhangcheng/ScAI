@@ -875,9 +875,48 @@ class ReportingMixin:
                 break
 
         # === POST-PROCESSING: ALWAYS RUNS (even on Error) ===
-        # Idempotent post-report snapshot with pending_required_snapshot state machine
-        # Failure UX is producer-aware; post-report capture may be skipped
-        # without regenerating reports, forfeiting only this restore point.
+        await self._capture_post_report_if_enabled(
+            analysis_state,
+            report_generation_id,
+        )
+
+        # Only set COMPLETED if snapshot capture succeeded or Snapshot V2 is
+        # intentionally disabled. If capture failed, RequiredSnapshotBlocked is
+        # raised before this point and the run remains in its failure gate.
+        if analysis_state.pending_required_snapshot is None:
+            self._set_status(analysis_state, TaskStatus.COMPLETED)
+            await self._send_message("completed", "Analysis completed", AgentType.PI)
+
+            await self._send_state_sync(analysis_state, "analysis_complete")
+
+            logger.info(f"[{self.session_id}] Analysis workflow completed")
+        else:
+            logger.warning(
+                "[%s] Post-report snapshot capture failed; "
+                "keeping status GENERATING_REPORT for snapshot-failure HITL gate",
+                self.session_id,
+            )
+
+        return {
+            **state,
+            "analysis_state": analysis_state,
+        }
+
+    async def _capture_post_report_if_enabled(
+        self,
+        analysis_state: AnalysisState,
+        report_generation_id: str,
+    ):
+        """Run the required post-report capture unless Snapshot V2 is disabled."""
+        from ..config import is_snapshot_v2_enabled
+
+        if not is_snapshot_v2_enabled():
+            analysis_state.pending_required_snapshot = None
+            return None
+
+        # Idempotent post-report snapshot with pending_required_snapshot state
+        # machine. Failure UX is producer-aware; capture may be skipped without
+        # regenerating reports, forfeiting only this restore point.
         if analysis_state.pending_required_snapshot is not None:
             logger.info(
                 "[%s] Found pending_required_snapshot from previous attempt; retrying capture",
@@ -909,29 +948,7 @@ class ReportingMixin:
             except Exception:
                 # Keep pending so retry re-enters capture only
                 raise
-
-        # Only set COMPLETED if snapshot capture succeeded.
-        # If capture failed, RequiredSnapshotBlocked is raised and the run
-        # boundary holds WAITING_INPUT for the snapshot-failure HITL gate
-        # (retry/skip/manage/terminate for this post-report producer).
-        if analysis_state.pending_required_snapshot is None:
-            self._set_status(analysis_state, TaskStatus.COMPLETED)
-            await self._send_message("completed", "Analysis completed", AgentType.PI)
-
-            await self._send_state_sync(analysis_state, "analysis_complete")
-
-            logger.info(f"[{self.session_id}] Analysis workflow completed")
-        else:
-            logger.warning(
-                "[%s] Post-report snapshot capture failed; "
-                "keeping status GENERATING_REPORT for snapshot-failure HITL gate",
-                self.session_id,
-            )
-
-        return {
-            **state,
-            "analysis_state": analysis_state,
-        }
+        return record
 
     async def _capture_post_report_snapshot(
         self,

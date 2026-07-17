@@ -255,10 +255,10 @@ async def _install_loaded_session(
         return loaded
 
 
-async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
-    validate_session_id(session_id)
-
-    # Run journal recovery before any session mutation (outside state_lock)
+async def _recover_snapshot_v2_on_load(
+    session_id: str,
+) -> tuple[bool, Optional[Dict[str, Any]]]:
+    """Run enabled-mode Snapshot V2 journal recovery before session loading."""
     recovery_blocked = False
     recovery_failure: Optional[Dict[str, Any]] = None
     gc_result = None
@@ -323,10 +323,34 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
             "code": "RECOVERY_BLOCKED",
             "message": "Snapshot recovery left mutations blocked",
         }
+    return recovery_blocked, recovery_failure
+
+
+async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
+    validate_session_id(session_id)
+
+    from backend.config import is_snapshot_v2_enabled
+
+    snapshot_v2_enabled = is_snapshot_v2_enabled()
+    if snapshot_v2_enabled:
+        recovery_blocked, recovery_failure = await _recover_snapshot_v2_on_load(
+            session_id,
+        )
+    else:
+        recovery_blocked = False
+        recovery_failure = None
 
     # Check cache before disk load
     cached = await _get_cached_session(session_id)
     if cached is not None:
+        if not snapshot_v2_enabled:
+            from backend.services.snapshot_v2.feature_gate import (
+                normalize_disabled_snapshot_state,
+            )
+
+            if normalize_disabled_snapshot_state(cached, workflow_active=False):
+                await _persist_recovery_marker(session_id, cached)
+            return cached
         # Apply recovery outcome to cached state and return
         if recovery_blocked:
             mark_recovery_blocked(session_id, cached, recovery_failure)
@@ -370,17 +394,23 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
         dumped = state.model_dump(mode="json")
         await asyncio.to_thread(_externalize_and_write, session_id, dumped)
 
-    # Apply recovery outcome (outside state_lock)
-    if recovery_blocked:
+    # Apply Snapshot V2 recovery or disabled-mode stale-state normalization.
+    if not snapshot_v2_enabled:
+        from backend.services.snapshot_v2.feature_gate import (
+            normalize_disabled_snapshot_state,
+        )
+
+        if normalize_disabled_snapshot_state(state, workflow_active=False):
+            await _persist_recovery_marker(session_id, state)
+    elif recovery_blocked:
         mark_recovery_blocked(session_id, state, recovery_failure)
         await _persist_recovery_marker(session_id, state)
-    else:
-        if clear_recovery_blocked(session_id, state):
-            await _persist_recovery_marker(session_id, state)
+    elif clear_recovery_blocked(session_id, state):
+        await _persist_recovery_marker(session_id, state)
 
     # Reconcile AnalysisState.snapshots from verified V2 manifests
     # (skip when recovery is blocked — read-only display only)
-    if not recovery_blocked:
+    if snapshot_v2_enabled and not recovery_blocked:
         try:
             from backend.services.snapshot_v2.paths import SnapshotV2Paths
             from backend.services.snapshot_v2.service import SnapshotService

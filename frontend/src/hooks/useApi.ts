@@ -183,7 +183,7 @@ export async function apiFetch<T>(
 
 // Config hook
 export function useConfig() {
-  const { apiConfig, setApiConfig } = useAppStore()
+  const { apiConfig, setApiConfig, setSnapshotV2Enabled } = useAppStore()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   
@@ -213,13 +213,20 @@ export function useConfig() {
       const status = await apiFetch<{
         configured: boolean
         has_api_key: boolean
+        snapshot_v2_enabled: boolean
       }>('/config/status')
+      setSnapshotV2Enabled(Boolean(status.snapshot_v2_enabled))
       return status
     } catch (e) {
       console.warn('[ScAI] checkStatus failed:', e)
-      return { configured: false, has_api_key: false }
+      setSnapshotV2Enabled(false)
+      return {
+        configured: false,
+        has_api_key: false,
+        snapshot_v2_enabled: false,
+      }
     }
-  }, [])
+  }, [setSnapshotV2Enabled])
 
   const validateApiKey = useCallback(async () => {
     try {

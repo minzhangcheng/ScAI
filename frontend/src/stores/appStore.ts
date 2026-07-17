@@ -434,6 +434,8 @@ export interface AppState {
   // Server-side API configuration flag (set when backend confirms a key is configured)
   apiConfigured: boolean
   setApiConfigured: (v: boolean) => void
+  snapshotV2Enabled: boolean
+  setSnapshotV2Enabled: (enabled: boolean) => void
 
   // Auth state
   authReady: boolean
@@ -813,6 +815,8 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
       // Server-side API configuration flag (start as false, set by App.tsx on load)
       apiConfigured: false,
       setApiConfigured: (v) => set({ apiConfigured: v }),
+      snapshotV2Enabled: false,
+      setSnapshotV2Enabled: (enabled) => set({ snapshotV2Enabled: enabled }),
 
       // Exploration failed user intervention
       explorationFailedInfo: null,

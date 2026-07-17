@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.models.schemas import APIResponse
 from backend.models.api_requests import SnapshotTransactionResponse
@@ -24,6 +24,7 @@ from backend.utils.runtime_apply import (
     compute_runtime_status, RuntimeChoiceRequired,
 )
 from backend.config import get_session_states
+from backend.services.snapshot_v2.feature_gate import require_snapshot_v2_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -245,7 +246,10 @@ async def delete_branch(session_id: str, snapshot_id: str, request: Request):
 # Routes only: ownership checks + HTTP error translation.
 
 
-@router.get("/{session_id}/snapshots-v2")
+@router.get(
+    "/{session_id}/snapshots-v2",
+    dependencies=[Depends(require_snapshot_v2_enabled)],
+)
 async def list_snapshots_v2(session_id: str, request: Request):
     """List V2 snapshots with store-level status and integrity diagnostics."""
     validate_session_id(session_id)
@@ -272,7 +276,10 @@ async def list_snapshots_v2(session_id: str, request: Request):
     )
 
 
-@router.get("/{session_id}/snapshots-v2/{snapshot_id}")
+@router.get(
+    "/{session_id}/snapshots-v2/{snapshot_id}",
+    dependencies=[Depends(require_snapshot_v2_enabled)],
+)
 async def get_snapshot_v2(session_id: str, snapshot_id: str, request: Request):
     """Get a single V2 snapshot manifest via SnapshotService."""
     validate_session_id(session_id)
@@ -295,7 +302,10 @@ async def get_snapshot_v2(session_id: str, snapshot_id: str, request: Request):
     )
 
 
-@router.delete("/{session_id}/snapshots-v2/{snapshot_id}")
+@router.delete(
+    "/{session_id}/snapshots-v2/{snapshot_id}",
+    dependencies=[Depends(require_snapshot_v2_enabled)],
+)
 async def delete_snapshot_v2(session_id: str, snapshot_id: str, request: Request, branch: bool = False):
     """Delete a V2 snapshot via SnapshotService (leaf or branch).
 
@@ -339,7 +349,11 @@ def _transaction_urls(request: Request, session_id: str, transaction_id: str) ->
     return status_url, cancel_url
 
 
-@router.post("/{session_id}/snapshots/{snapshot_id}/restore-v2", status_code=202)
+@router.post(
+    "/{session_id}/snapshots/{snapshot_id}/restore-v2",
+    status_code=202,
+    dependencies=[Depends(require_snapshot_v2_enabled)],
+)
 async def restore_snapshot_v2(session_id: str, snapshot_id: str, request: Request):
     """Initiate a background V2 restore job.
 
@@ -410,7 +424,10 @@ async def restore_snapshot_v2(session_id: str, snapshot_id: str, request: Reques
     )
 
 
-@router.get("/{session_id}/snapshot-transactions/{transaction_id}")
+@router.get(
+    "/{session_id}/snapshot-transactions/{transaction_id}",
+    dependencies=[Depends(require_snapshot_v2_enabled)],
+)
 async def get_restore_transaction_status(
     session_id: str, transaction_id: str, request: Request,
 ):
@@ -433,7 +450,10 @@ async def get_restore_transaction_status(
     )
 
 
-@router.post("/{session_id}/snapshot-transactions/{transaction_id}/cancel")
+@router.post(
+    "/{session_id}/snapshot-transactions/{transaction_id}/cancel",
+    dependencies=[Depends(require_snapshot_v2_enabled)],
+)
 async def cancel_restore_v2(session_id: str, transaction_id: str, request: Request):
     """Cancel a running V2 restore job via the shared job registry."""
     validate_session_id(session_id)

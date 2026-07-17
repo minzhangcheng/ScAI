@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 from backend.models.api_requests import ConfigRequest, ValidateKeyRequest
 from backend.models.schemas import APIResponse
+from backend.config import is_snapshot_v2_enabled
 from backend.state import system_config
 from backend.utils.auth import require_admin, get_db
 from backend.utils.llm_probe import validate_llm_credentials
@@ -55,11 +56,16 @@ async def config_status():
     """Check if configuration is set"""
     cfg = system_config["current"]
     if cfg is None:
-        return {"configured": False}
+        return {
+            "configured": False,
+            "has_api_key": False,
+            "snapshot_v2_enabled": is_snapshot_v2_enabled(),
+        }
 
     return {
         "configured": True,
         "has_api_key": bool(cfg.api.api_key),
+        "snapshot_v2_enabled": is_snapshot_v2_enabled(),
     }
 
 

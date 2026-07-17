@@ -160,6 +160,7 @@ export function AnalysisPanel() {
 
   // Snapshot panel state
   const [showSnapshotPanel, setShowSnapshotPanel] = useState(false)
+  const snapshotV2Enabled = useAppStore(state => state.snapshotV2Enabled)
   const snapshotRetryPollRef = useRef<{
     transactionId: string
     cancelled: boolean
@@ -256,6 +257,7 @@ export function AnalysisPanel() {
   )
 
   useEffect(() => {
+    if (!snapshotV2Enabled) return
     if (!currentSession || !snapshotTransaction) return
     if (snapshotTransaction.session_id !== currentSession.id) return
     if (SNAPSHOT_TERMINAL_STATUSES.has(snapshotTransaction.status)) {
@@ -265,18 +267,31 @@ export function AnalysisPanel() {
     monitorSnapshotRetry(currentSession.id, snapshotTransaction)
   }, [
     currentSession,
+    snapshotV2Enabled,
     snapshotTransaction,
     monitorSnapshotRetry,
     stopSnapshotRetryPolling,
   ])
 
   useEffect(() => {
+    if (!snapshotV2Enabled) return
     if (!currentSession || !snapshotTransaction) return
     if (snapshotTransaction.session_id !== currentSession.id) return
     if (!snapshotTransaction.retry_of_transaction_id) return
     if (snapshotTransaction.status === 'committed') return
     setShowSnapshotPanel(true)
-  }, [currentSession, snapshotTransaction])
+  }, [currentSession, snapshotTransaction, snapshotV2Enabled])
+
+  useEffect(() => {
+    void checkStatus()
+  }, [checkStatus])
+
+  useEffect(() => {
+    if (snapshotV2Enabled) return
+    setShowSnapshotPanel(false)
+    stopSnapshotRetryPolling()
+    useAppStore.getState().setShowSnapshotCleanupReminder(false)
+  }, [snapshotV2Enabled, stopSnapshotRetryPolling])
   const isRerunEnabled = useAppStore(s => s.isRerunEnabled)
 
   // Reset message refs when session changes so dialogs can re-trigger after page reload
@@ -1253,7 +1268,7 @@ export function AnalysisPanel() {
       )}
 
       {/* Runtime restore safety banner (persists across reload) */}
-      {(runtimeRestoreStatus === 'unavailable' || runtimeRestoreStatus === 'intentionally_kept') && (
+      {snapshotV2Enabled && (runtimeRestoreStatus === 'unavailable' || runtimeRestoreStatus === 'intentionally_kept') && (
         <div className="mb-2">
           <RuntimeWarningBanner
             runtimeRestoreStatus={runtimeRestoreStatus}
@@ -1328,27 +1343,27 @@ export function AnalysisPanel() {
                 <Square className="w-3.5 h-3.5" />
                 {language === 'zh' ? '停止' : 'Stop'}
               </button>
-              <button
+              {snapshotV2Enabled && <button
                 onClick={() => setShowSnapshotPanel(true)}
                 className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition-colors"
                 title={language === 'zh' ? '快照管理' : 'Snapshots'}
               >
                 <Camera className="w-3.5 h-3.5" />
                 {language === 'zh' ? '快照' : 'Snapshot'}
-              </button>
+              </button>}
             </div>
           )}
 
           {isPaused && (
             <div className="flex items-center gap-2">
-              <button
+              {snapshotV2Enabled && <button
                 onClick={() => setShowSnapshotPanel(true)}
                 className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition-colors"
                 title={language === 'zh' ? '快照管理' : 'Snapshots'}
               >
                 <Camera className="w-3.5 h-3.5" />
                 {language === 'zh' ? '快照' : 'Snapshot'}
-              </button>
+              </button>}
               <div className="flex items-center gap-2 px-3 py-1 bg-slate-100 text-slate-600 rounded-lg">
                 <Pause className="w-4 h-4" />
                 <span className="font-medium">
@@ -1377,14 +1392,14 @@ export function AnalysisPanel() {
 
           {isWaitingInput && (
             <div className="flex items-center gap-2">
-              <button
+              {snapshotV2Enabled && <button
                 onClick={() => setShowSnapshotPanel(true)}
                 className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition-colors"
                 title={language === 'zh' ? '快照管理' : 'Snapshots'}
               >
                 <Camera className="w-3.5 h-3.5" />
                 {language === 'zh' ? '快照' : 'Snapshot'}
-              </button>
+              </button>}
               {llmFailureInfo ? (
                 <button
                   onClick={() => setShowLlmTimeoutDialog(true)}
@@ -1428,14 +1443,14 @@ export function AnalysisPanel() {
 
           {isCompleted && (
             <div className="flex items-center gap-2">
-              <button
+              {snapshotV2Enabled && <button
                 onClick={() => setShowSnapshotPanel(true)}
                 className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition-colors"
                 title={language === 'zh' ? '快照管理' : 'Snapshots'}
               >
                 <Camera className="w-3.5 h-3.5" />
                 {language === 'zh' ? '快照' : 'Snapshot'}
-              </button>
+              </button>}
               <div className="flex items-center gap-2 px-3 py-1 bg-green-100 text-green-700 rounded-lg">
                 <CheckCircle2 className="w-4 h-4" />
                 <span className="font-medium">{t('analysisComplete')}</span>
@@ -1445,14 +1460,14 @@ export function AnalysisPanel() {
 
           {isFailed && (
             <div className="flex items-center gap-2">
-              <button
+              {snapshotV2Enabled && <button
                 onClick={() => setShowSnapshotPanel(true)}
                 className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition-colors"
                 title={language === 'zh' ? '快照管理' : 'Snapshots'}
               >
                 <Camera className="w-3.5 h-3.5" />
                 {language === 'zh' ? '快照' : 'Snapshot'}
-              </button>
+              </button>}
               <div className="flex items-center gap-2 px-3 py-1 bg-red-100 text-red-700 rounded-lg">
                 <AlertCircle className="w-4 h-4" />
                 <span className="font-medium">{language === 'zh' ? '分析失败' : 'Analysis Failed'}</span>
@@ -1929,7 +1944,7 @@ export function AnalysisPanel() {
 
       {/* Snapshot failure HITL — Retry re-enters capture only; Skip continues
           without capturing at that boundary (skippable producers only) */}
-      {snapshotFailure && !showSnapshotPanel && (
+      {snapshotV2Enabled && snapshotFailure && !showSnapshotPanel && (
         <SnapshotFailureDialog
           failure={snapshotFailure}
           isZh={language === 'zh'}
@@ -1947,7 +1962,7 @@ export function AnalysisPanel() {
       )}
 
       {/* Snapshot Panel */}
-      {showSnapshotPanel && currentSession && (
+      {snapshotV2Enabled && showSnapshotPanel && currentSession && (
         <SnapshotPanel
           sessionId={currentSession.id}
           language={language}
@@ -1961,7 +1976,7 @@ export function AnalysisPanel() {
       )}
 
       {/* Snapshot Cleanup Reminder */}
-      <ConfirmDialog
+      {snapshotV2Enabled && <ConfirmDialog
         open={showSnapshotCleanupReminder}
         title={language === 'zh' ? '快照数量提醒' : 'Snapshot Count Reminder'}
         message={language === 'zh'
@@ -1975,7 +1990,7 @@ export function AnalysisPanel() {
           setShowSnapshotPanel(true)
         }}
         onCancel={() => setShowSnapshotCleanupReminder(false)}
-      />
+      />}
     </div>
   )
 }

@@ -916,6 +916,11 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         failure at this boundary, the marker is consumed here and the capture is a
         no-op so the graph proceeds past the boundary that previously failed.
         """
+        from ..config import is_snapshot_v2_enabled
+
+        if not is_snapshot_v2_enabled():
+            return None
+
         from ..services.snapshot_v2.failure_gate import consume_snapshot_skip
 
         if consume_snapshot_skip(state, phase):
@@ -1082,6 +1087,17 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         Returns:
             Final analysis state
         """
+        from ..config import is_snapshot_v2_enabled
+        from ..services.snapshot_v2.feature_gate import (
+            normalize_disabled_snapshot_state,
+        )
+
+        if not is_snapshot_v2_enabled():
+            normalize_disabled_snapshot_state(
+                initial_state,
+                workflow_active=True,
+            )
+
         # §1d: never run the graph forward on a kernel that is inconsistent with
         # the restored state. Twin of the lifecycle run guard.
         if is_forward_resume_blocked(
@@ -1248,6 +1264,18 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         Used when a session completed all analysis rounds but was interrupted
         before report generation finished.
         """
+        from ..config import is_snapshot_v2_enabled
+        from ..services.snapshot_v2.feature_gate import (
+            normalize_disabled_snapshot_state,
+        )
+
+        if not is_snapshot_v2_enabled() and normalize_disabled_snapshot_state(
+            initial_state,
+            workflow_active=True,
+        ):
+            if initial_state.status == TaskStatus.COMPLETED:
+                return initial_state
+
         # Entry guard: snapshot_failure or pending post-report snapshot means
         # reports already ran; hold WAITING_INPUT for capture-only retry.
         # WS reconnect must not re-run report generators.
@@ -1418,6 +1446,18 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             analysis_state: Optional analysis state to restore custom config from
         """
         logger.info(f"[{self.session_id}] Resuming workflow for thread {thread_id}")
+
+        if analysis_state is not None:
+            from ..config import is_snapshot_v2_enabled
+            from ..services.snapshot_v2.feature_gate import (
+                normalize_disabled_snapshot_state,
+            )
+
+            if not is_snapshot_v2_enabled():
+                normalize_disabled_snapshot_state(
+                    analysis_state,
+                    workflow_active=True,
+                )
 
         # §1d: never run the graph forward on a kernel that is inconsistent with
         # the restored state. This is the workflow-level twin of the lifecycle

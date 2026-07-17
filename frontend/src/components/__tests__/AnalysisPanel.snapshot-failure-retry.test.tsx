@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AnalysisPanel } from '../AnalysisPanel'
 import { useAppStore, type Session } from '../../stores/appStore'
-import { apiFetch, getSnapshotTransaction } from '../../hooks/useApi'
+import { apiFetch, getSnapshotTransaction, listSnapshotsV2 } from '../../hooks/useApi'
 import type { SnapshotTransactionRecord } from '../../types/snapshotV2'
 
 vi.mock('../../hooks/useApi', () => ({
@@ -43,6 +43,7 @@ vi.mock('../../hooks/useApi', () => ({
 
 const mockApiFetch = apiFetch as unknown as ReturnType<typeof vi.fn>
 const mockGetSnapshotTransaction = getSnapshotTransaction as unknown as ReturnType<typeof vi.fn>
+const mockListSnapshotsV2 = listSnapshotsV2 as unknown as ReturnType<typeof vi.fn>
 
 function makeSession(): Session {
   return {
@@ -82,10 +83,41 @@ describe('AnalysisPanel snapshot-failure retry gate', () => {
       language: 'en',
       wsConnected: true,
       snapshotFailure: blockedFailure,
+      snapshotV2Enabled: true,
       snapshotTransaction: null,
       runtimeRestoreStatus: 'complete',
       runtimeRestoreWarning: null,
     })
+  })
+
+  it('hides Snapshot V2 UI and starts no Snapshot requests when disabled', async () => {
+    useAppStore.setState({
+      snapshotV2Enabled: false,
+      snapshotFailure: blockedFailure,
+      snapshotTransaction: {
+        transaction_id: 'disabled-restore',
+        session_id: 'sess-snap-retry',
+        snapshot_id: 'snapshot-disabled',
+        status: 'queued',
+        recovery_mode: 'rollback',
+        failure: null,
+      },
+      showSnapshotCleanupReminder: true,
+      runtimeRestoreStatus: 'unavailable',
+      runtimeRestoreWarning: 'snapshot runtime unavailable',
+    })
+
+    render(<AnalysisPanel />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(screen.queryByRole('dialog', { name: /snapshot failure/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: /analysis snapshots/i })).not.toBeInTheDocument()
+    expect(screen.queryByText(/snapshot count reminder/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/snapshot runtime unavailable/i)).not.toBeInTheDocument()
+    expect(mockGetSnapshotTransaction).not.toHaveBeenCalled()
+    expect(mockListSnapshotsV2).not.toHaveBeenCalled()
   })
 
   it('does not clear gate when retry returns success:false / still_blocked', async () => {

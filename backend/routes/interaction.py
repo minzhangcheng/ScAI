@@ -33,6 +33,7 @@ from backend.services.interaction_record_capture import (
     get_or_open_direction_record, map_selections, build_annotation_record,
     populate_direction_record_from_state, resolve_integration_gate,
 )
+from backend.services.snapshot_v2.errors import is_snapshot_failure_blocked
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +205,28 @@ async def _choose_direction_locked(session_id: str, user_id: str, body: Directio
 
     if state.status != TaskStatus.WAITING_INPUT:
         raise HTTPException(status_code=400, detail="Session is not waiting for input")
+    if is_snapshot_failure_blocked(state):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Session is blocked on a required snapshot failure. Resolve the "
+                "snapshot failure before choosing a research direction."
+            ),
+        )
+    post_exploration_phase_drift = (
+        state.current_round == 1
+        and state.analysis_phase == AnalysisPhase.EXPLORATION
+        and state.exploration_report is not None
+        and not state.user_chosen_direction
+        and not state.user_chosen_directions
+    )
+    if post_exploration_phase_drift:
+        logger.warning(
+            "[%s] Repairing post-exploration direction gate phase drift "
+            "(EXPLORATION -> INNOVATION)",
+            session_id,
+        )
+        state.analysis_phase = AnalysisPhase.INNOVATION
     exploration_gate = (
         state.current_round == 1
         and state.analysis_phase == AnalysisPhase.INNOVATION
