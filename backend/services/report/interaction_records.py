@@ -52,6 +52,15 @@ def _score_badge(label: str, val: Any) -> str:
     return f"<span class='muted'>{_esc(label)}:</span> <span class='badge b-slate'>{_esc(str(val))}</span> "
 
 
+def _as_list(value: Any) -> List[Any]:
+    """Treat scalar legacy/LLM values as one item, never as an iterable string."""
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
 def _candidate_detail(c: Dict[str, Any]) -> str:
     parts: List[str] = []
     badges = "".join([
@@ -69,7 +78,7 @@ def _candidate_detail(c: Dict[str, Any]) -> str:
                        ("main_hypothesis", "Main hypothesis"), ("pi_review_summary", "PI review")]:
         if c.get(key):
             parts.append(f"<div><b>{label}:</b> {_esc(str(c[key]))}</div>")
-    supporting_data = c.get("supporting_data") or []
+    supporting_data = _as_list(c.get("supporting_data"))
     if supporting_data:
         rows = []
         for item in supporting_data:
@@ -85,7 +94,7 @@ def _candidate_detail(c: Dict[str, Any]) -> str:
     for key, label in [("alternative_hypotheses", "Alternative hypotheses"),
                        ("artifact_risks", "Artifact risks"),
                        ("contradictory_or_missing_evidence", "Contradictory / missing evidence")]:
-        items = c.get(key) or []
+        items = _as_list(c.get(key))
         if items:
             lis = "".join(f"<li>{_esc(str(x))}</li>" for x in items)
             parts.append(f"<div><b>{label}:</b><ul>{lis}</ul></div>")
@@ -94,7 +103,7 @@ def _candidate_detail(c: Dict[str, Any]) -> str:
         for key, label in [("next_analysis", "Next analysis"),
                            ("wet_lab_validation", "Wet-lab validation"),
                            ("decision_criteria", "Decision criteria")]:
-            items = vp.get(key) or []
+            items = _as_list(vp.get(key))
             if items:
                 lis = "".join(f"<li>{_esc(str(x))}</li>" for x in items)
                 parts.append(f"<div><b>{label}:</b><ul>{lis}</ul></div>")

@@ -92,6 +92,34 @@ def test_direction_renders_supporting_data():
     assert "high" in html
 
 
+def test_direction_renders_scalar_list_fields_as_single_items():
+    rec = DirectionSelectionRecord(
+        round_number=5,
+        phase="integration",
+        integration_cycle=1,
+        event_type="select",
+        candidates=[{
+            "direction": "Cross-direction stress program",
+            "supporting_data": "Round 2 and 3 share an NRF2 signal.",
+            "artifact_risks": "Single-library composition uncertainty.",
+            "validation_plan": {
+                "next_analysis": "Residualize the shared score.",
+            },
+        }],
+        selections=[SelectionEntry(
+            direction="Cross-direction stress program", candidate_index=0
+        )],
+    )
+
+    html = render_direction_record_html(rec)
+
+    assert "<li>Round 2 and 3 share an NRF2 signal.</li>" in html
+    assert "<li>Single-library composition uncertainty.</li>" in html
+    assert "<li>Residualize the shared score.</li>" in html
+    assert "<li>R</li>" not in html
+    assert "<li>S</li>" not in html
+
+
 def test_direction_finalize_note():
     rec = DirectionSelectionRecord(
         round_number=9, phase="integration", integration_cycle=2, event_type="finalize",

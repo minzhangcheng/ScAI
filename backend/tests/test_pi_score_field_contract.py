@@ -92,13 +92,19 @@ async def test_scored_candidates_land_in_research_direction_candidates(monkeypat
 @pytest.mark.asyncio
 async def test_integration_direction_candidates_parse_json_array(monkeypatch):
     agent = _make_pi_agent()
+    captured_prompt = ""
 
     async def fake_chat(prompt, temperature=0.3):
+        nonlocal captured_prompt
+        captured_prompt = prompt
         return json.dumps([
             {
                 "direction_id": "int_001",
                 "direction": "Cross-direction stress program",
                 "core_observation": "Round 2 and 3 share NRF2-linked signals.",
+                "supporting_data": "Round 2 and 3 both show NRF2 activation.",
+                "artifact_risks": "Single-library composition uncertainty.",
+                "suggested_validation_analysis": "Residualize the shared score.",
             }
         ])
 
@@ -124,6 +130,17 @@ async def test_integration_direction_candidates_parse_json_array(monkeypatch):
 
     assert candidates[0]["direction_id"] == "int_001"
     assert candidates[0]["direction"] == "Cross-direction stress program"
+    assert candidates[0]["supporting_data"] == [
+        "Round 2 and 3 both show NRF2 activation."
+    ]
+    assert candidates[0]["artifact_risks"] == [
+        "Single-library composition uncertainty."
+    ]
+    assert candidates[0]["validation_plan"]["next_analysis"] == [
+        "Residualize the shared score."
+    ]
+    assert "arrays of strings (never a single string)" in captured_prompt
+    assert "supporting_data: an array of objects" in captured_prompt
 
 
 @pytest.mark.asyncio
@@ -142,12 +159,21 @@ async def test_integration_direction_scoring_parses_json_array(monkeypatch):
 
     monkeypatch.setattr(agent, "chat", fake_chat)
     state = SimpleNamespace(name="s", initial_instruction="x")
-    raw_candidates = [{"direction_id": "int_001", "direction": "Cross-direction stress program"}]
+    raw_candidates = [{
+        "direction_id": "int_001",
+        "direction": "Cross-direction stress program",
+        "supporting_data": "Observed in rounds 2 and 3.",
+        "artifact_risks": "Batch confounding.",
+    }]
 
     scored = await agent.score_integration_directions_with_evidence(state, raw_candidates, [])
 
     assert scored[0]["direction_id"] == "int_001"
     assert scored[0]["novelty_score"] == 8
+    # A score-only LLM response must retain and normalize the original evidence fields.
+    assert scored[0]["direction"] == "Cross-direction stress program"
+    assert scored[0]["supporting_data"] == ["Observed in rounds 2 and 3."]
+    assert scored[0]["artifact_risks"] == ["Batch confounding."]
 
 
 def test_candidate_specific_core_observation_requires_data_element():

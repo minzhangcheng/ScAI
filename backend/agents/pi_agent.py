@@ -44,6 +44,86 @@ _BRIEF_QC_MARKERS = (
     "qc", "pca", "elbow", "hvg", "doublet", "silhouette", "variance", "metrics",
 )
 
+_DIRECTION_CANDIDATE_LIST_FIELDS = (
+    "alternative_hypotheses",
+    "artifact_risks",
+    "key_genes",
+    "key_cell_types",
+    "key_pathways",
+    "key_uncertainties",
+    "suggested_literature_topics",
+    "suggested_validation_analysis",
+    "suggested_wet_lab_validation",
+    "decision_criteria",
+    "prerequisite_dependencies",
+)
+
+
+def _as_direction_list(value: Any) -> List[Any]:
+    """Coerce one LLM-produced candidate field to a JSON-list shape."""
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _normalize_direction_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize unstable LLM field shapes without discarding their content."""
+    normalized = dict(candidate)
+    normalized["supporting_data"] = _as_direction_list(
+        normalized.get("supporting_data")
+    )
+    for field in _DIRECTION_CANDIDATE_LIST_FIELDS:
+        normalized[field] = _as_direction_list(normalized.get(field))
+
+    validation_plan = normalized.get("validation_plan")
+    if not isinstance(validation_plan, dict):
+        validation_plan = {}
+    else:
+        validation_plan = dict(validation_plan)
+    validation_plan["next_analysis"] = _as_direction_list(
+        validation_plan.get("next_analysis")
+        or normalized.get("suggested_validation_analysis")
+    )
+    validation_plan["wet_lab_validation"] = _as_direction_list(
+        validation_plan.get("wet_lab_validation")
+        or normalized.get("suggested_wet_lab_validation")
+    )
+    validation_plan["decision_criteria"] = _as_direction_list(
+        validation_plan.get("decision_criteria")
+        or normalized.get("decision_criteria")
+    )
+    normalized["validation_plan"] = validation_plan
+    return normalized
+
+
+def _normalize_integration_scored_candidates(
+    scored: List[Any], raw_candidates: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Merge score-only responses onto their raw candidates, then normalize."""
+    raw_by_id = {
+        str(candidate.get("direction_id", "")): candidate
+        for candidate in raw_candidates
+        if isinstance(candidate, dict) and candidate.get("direction_id")
+    }
+    raw_by_direction = {
+        str(candidate.get("direction", "")).strip(): candidate
+        for candidate in raw_candidates
+        if isinstance(candidate, dict) and candidate.get("direction")
+    }
+    normalized = []
+    for candidate in scored:
+        if not isinstance(candidate, dict):
+            continue
+        raw = raw_by_id.get(str(candidate.get("direction_id", "")))
+        if raw is None:
+            raw = raw_by_direction.get(str(candidate.get("direction", "")).strip())
+        merged = dict(raw or {})
+        merged.update(candidate)
+        normalized.append(_normalize_direction_candidate(merged))
+    return normalized
+
 
 def _bounded_brief_fallback(
     all_figures: list[dict], limit: int = 20
@@ -1671,21 +1751,36 @@ Return a JSON object with a single key "candidates" containing the list of candi
 
 Only propose directions genuinely NEW relative to the already-investigated list and grounded in concrete cumulative observations. If nothing sufficiently novel and evidence-supported exists, return an empty list [].
 
-For each candidate, provide ALL fields:
-- direction_id (like "int_001"), direction, core_observation, main_hypothesis,
-  alternative_hypotheses (>=2), artifact_risks, rationale, supporting_data,
-  key_genes, key_cell_types, key_pathways, key_uncertainties,
-  suggested_literature_topics, suggested_validation_analysis,
-  suggested_wet_lab_validation, decision_criteria,
-  biology_expectedness (expected|partially_expected|unexpected|unknown),
-  functional_impact_hypothesis, prerequisite_dependencies (list of direction_ids),
-  organism ({state.species or "Not specified"}), tissue, experimental_context.
+For each candidate, provide ALL fields with these exact JSON types:
+- direction_id, direction, core_observation, main_hypothesis, rationale,
+  functional_impact_hypothesis, organism, tissue, experimental_context: strings
+- alternative_hypotheses, artifact_risks, key_genes, key_cell_types,
+  key_pathways, key_uncertainties, suggested_literature_topics,
+  suggested_validation_analysis, suggested_wet_lab_validation,
+  decision_criteria: arrays of strings (never a single string)
+- supporting_data: an array of objects, each with string fields
+  source, evidence, and strength (high|medium|low); never a single string
+- biology_expectedness: expected|partially_expected|unexpected|unknown
+- prerequisite_dependencies: array of direction_id strings
+
+Example field shapes:
+{{"alternative_hypotheses": ["..."], "artifact_risks": ["..."],
+  "supporting_data": [{{"source": "round 2 bioinformatics",
+  "evidence": "...", "strength": "high"}}],
+  "suggested_validation_analysis": ["..."],
+  "suggested_wet_lab_validation": ["..."], "decision_criteria": ["..."]}}
 
 Return a JSON array. Return [] if no sufficiently novel direction exists."""
         response = await self.chat(prompt, temperature=0.3)
         # This prompt contracts for a top-level JSON array; the dict parser drops valid arrays.
         data = safe_parse_json_array(response, default=[])
-        return data if isinstance(data, list) else []
+        if not isinstance(data, list):
+            return []
+        return [
+            _normalize_direction_candidate(candidate)
+            for candidate in data
+            if isinstance(candidate, dict)
+        ]
 
     async def score_integration_directions_with_evidence(
         self,
@@ -1723,7 +1818,9 @@ Return the surviving candidates as a JSON array, sorted by priority_rank ascendi
         response = await self.chat(prompt, temperature=0.3)
         # This prompt contracts for a top-level JSON array; the dict parser drops valid arrays.
         data = safe_parse_json_array(response, default=[])
-        return data if isinstance(data, list) else []
+        if not isinstance(data, list):
+            return []
+        return _normalize_integration_scored_candidates(data, raw_candidates)
 
     async def score_directions_with_evidence(
         self,

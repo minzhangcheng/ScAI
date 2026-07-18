@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.34.1 · **Last updated**: 2026-07-15
+**Version**: 0.34.2 · **Last updated**: 2026-07-15
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,12 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.33.x–0.34.x — (2026-07-15)**
+
+- `0.34.2` — Direction candidate field normalization, scalar-to-list coercion in LLM responses and report rendering; version bump (2026-07-15):
+  - **Direction candidate field normalization (`backend/agents/pi_agent.py`)**: New `_normalize_direction_candidate()` coerces unstable LLM field shapes for integration direction candidates: `supporting_data` → array of objects, all list-typed fields (`alternative_hypotheses`, `artifact_risks`, `key_genes`, `key_cell_types`, `key_pathways`, `key_uncertainties`, `suggested_literature_topics`, `suggested_validation_analysis`, `suggested_wet_lab_validation`, `decision_criteria`, `prerequisite_dependencies`) → arrays of strings. `validation_plan` sub-fields (`next_analysis`, `wet_lab_validation`, `decision_criteria`) coalesced from both `validation_plan` and flat `suggested_*` fields. New `_normalize_integration_scored_candidates()` merges score-only LLM responses onto their raw candidates before normalization, preventing data loss during integration scoring. Both `generate_integration_directions` and `score_integration_directions_with_evidence` now return normalized data.
+  - **Prompt type specification (`backend/agents/pi_agent.py`)**: Updated `generate_integration_directions` prompt to specify exact JSON types (arrays of strings, `supporting_data` as array of objects with `source`/`evidence`/`strength` fields). Example field shapes included in the prompt.
+  - **Scalar-to-list coercion in report rendering (`backend/services/report/interaction_records.py`)**: New `_as_list()` helper in interaction records rendering treats scalar single-string values as one-item lists instead of iterating character-by-character. Applied to `supporting_data`, `alternative_hypotheses`, `artifact_risks`, `contradictory_or_missing_evidence`, and `validation_plan` sub-fields. Fixes HTML output where a string like `"Round 2 and 3 share an NRF2 signal."` rendered as individual characters `<li>R</li><li>o</li><li>u</li>…`.
+  - **New tests**: `test_interaction_records_render.py` (scalar list fields rendered as single items). Extended: `test_pi_score_field_contract.py` (normalized integration direction shapes, scoring merge preserves raw fields).
 
 - `0.34.1` — Snapshot V2 disabled-by-default feature gate, post-exploration phase drift repair, frontend V2 UI gating; version bump (2026-07-15):
   - **Snapshot V2 disabled-by-default (`backend/services/snapshot_v2/feature_gate.py`, `backend/config/_config.py`, `backend/config/__init__.py`)**: New `SCAI_ENABLE_SNAPSHOT_V2` environment variable (`1`/`true`/`yes`, case-insensitive) controls the process-scoped feature gate. Default is disabled. `is_snapshot_v2_enabled()` and `SNAPSHOT_V2_ENABLED` exported from `backend.config`. `require_snapshot_v2_enabled()` FastAPI dependency returns HTTP 404 with `SNAPSHOT_V2_DISABLED` for all V2 HTTP routes. `normalize_disabled_snapshot_state()` clears stale snapshot blockers (`snapshot_failure`, `pending_required_snapshot`, `wait_input_reason`, `skip_required_snapshot_phase`) and downgrades phantom RUNNING/WAITING_INPUT to PAUSED. Test conftest sets `SCAI_ENABLE_SNAPSHOT_V2=true` to keep existing snapshot regression tests unchanged.
