@@ -241,13 +241,41 @@ async def test_revision_uses_images_edit_first_then_falls_back_to_chat():
     assert painter._images_edit_attempt.await_args.args[1] == "QUJD"
 
 
+@pytest.mark.asyncio
+async def test_revision_generic_403_is_protocol_scoped_and_falls_back_to_chat():
+    """A gateway may forbid /images/edits while allowing chat image output."""
+    painter = _make_painter()
+    painter._images_edit_attempt = AsyncMock(side_effect=[
+        Exception(
+            "Error code: 403 - {'error': {'message': 'openai_error', "
+            "'code': 'bad_response_status_code'}}"
+        )
+    ])
+    painter._chat_image_attempt = AsyncMock(side_effect=["REVISED_VIA_CHAT"])
+    painter._generate_image_dashscope = AsyncMock(side_effect=[Exception("nope")])
+
+    with patch("backend.agents.painter_agent.asyncio.sleep", new=AsyncMock()):
+        result = await painter.revise_graphic_abstract(
+            state=MagicMock(),
+            current_image_base64="QUJD",
+            original_prompt="orig",
+            feedback="fix spelling",
+            suggestions=["fix spelling"],
+            must_fix=["correct title"],
+            revision_history=[{"round": 1, "feedback": "x", "suggestions": []}],
+        )
+
+    assert result == "REVISED_VIA_CHAT"
+    assert painter._images_edit_attempt.await_count == 1
+    assert painter._chat_image_attempt.await_count == 1
+
+
 # --------------------------------------------------------------------------- #
 # Fatal-error classifier
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("msg", [
     "Error code: 401 - unauthorized",
-    "Error code: 403 - forbidden",
     "request blocked by content_filter",
     "invalid api key provided",
 ])
@@ -257,6 +285,8 @@ def test_is_fatal_image_error_true(msg):
 
 @pytest.mark.parametrize("msg", [
     "Error code: 400 - bad request",
+    "Error code: 403 - forbidden",
+    "Error code: 403 - bad_response_status_code openai_error",
     "Error code: 404 - not found",
     "Error code: 422 - unprocessable",
     "Error code: 429 - rate limit",
@@ -291,3 +321,18 @@ async def test_images_api_attempt_b64_fallback_preserved():
 
     assert result == "FALLBACKDATA"
     assert painter.llm_client.client.images.generate.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_images_edit_generic_403_does_not_repeat_denied_endpoint():
+    painter = _make_painter(base_url="https://gateway.example/v1")
+    painter.llm_client.client.images.edit = AsyncMock(
+        side_effect=Exception(
+            "Error code: 403 - {'error': {'code': 'bad_response_status_code'}}"
+        )
+    )
+
+    with pytest.raises(Exception, match="403"):
+        await painter._images_edit_attempt("revise", "QUJD")
+
+    assert painter.llm_client.client.images.edit.await_count == 1

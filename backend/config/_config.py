@@ -306,9 +306,9 @@ class SystemConfig(BaseModel):
         description="Enable the automatic annotation validation round (PI plan -> restricted bioinformatics checks -> PI revision) before user annotation confirmation. Gated by trigger conditions; does not run on every annotation.",
     )
     annotation_validation_timeout_seconds: int = Field(
-        default=180,
+        default=600,
         ge=1,
-        description="Wall-clock timeout (seconds) for the whole annotation validation executor. On timeout it returns a partial/failed result rather than blocking the annotation dialog.",
+        description="Wall-clock timeout (seconds) for the whole annotation validation executor. The default covers several bounded LLM/code iterations on large datasets; on timeout it returns a partial result rather than blocking the annotation dialog.",
     )
     annotation_validation_max_iterations: int = Field(
         default=5,

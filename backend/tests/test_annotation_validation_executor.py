@@ -1,4 +1,5 @@
 import json
+import asyncio
 import pytest
 from types import SimpleNamespace
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
@@ -60,7 +61,9 @@ async def test_executor_completes_on_copy():
         max_iterations=5, timeout_seconds=30)
     assert out["status"] == "completed"
     val = [c for c in a.sandbox.executed if "check ran" in c]
-    assert val and "adata_val = adata.copy()" in val[0]
+    assert val == ["print('check ran')"]
+    assert a.sandbox.executed.count("adata_val = adata.copy()") == 1
+    assert "globals().pop('adata_val', None)" in a.sandbox.executed
 
 
 @pytest.mark.asyncio
@@ -86,6 +89,27 @@ async def test_executor_stops_at_max_iterations():
         tissue="liver", organism="mouse", context=_META, max_iterations=3, timeout_seconds=30)
     assert out["status"] in ("partial", "failed")
     assert len([c for c in a.sandbox.executed if "print('x')" in c]) <= 3
+
+
+@pytest.mark.asyncio
+async def test_executor_timeout_releases_validation_copy():
+    sandbox = _Sandbox()
+    a = _agent(sandbox, [])
+
+    async def slow_chat(prompt, temperature=None):
+        await asyncio.sleep(1)
+
+    a.chat = slow_chat
+    out = await a.validate_annotations_with_plan(
+        validation_plan={"tasks": []}, annotations={"0": {}}, cluster_markers={"0": ["A"]},
+        tissue="liver", organism="mouse", context=_META,
+        max_iterations=3, timeout_seconds=0.01,
+    )
+
+    assert out["status"] == "partial"
+    assert out["warnings"] == ["timeout"]
+    assert "adata_val = adata.copy()" in sandbox.executed
+    assert "globals().pop('adata_val', None)" in sandbox.executed
 
 
 @pytest.mark.asyncio

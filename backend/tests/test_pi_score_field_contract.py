@@ -4,7 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.agents.pi_agent import PIAgent
+from backend.agents.pi_agent import (
+    PIAgent,
+    _normalize_integration_scored_candidates,
+)
 from backend.models.schemas import ExplorationReport
 
 SRC = Path("backend/agents/pi_agent.py").read_text()
@@ -65,7 +68,8 @@ async def test_scored_candidates_land_in_research_direction_candidates(monkeypat
             "raw_direction_candidates": [
                 {"direction_id": "dir_001", "direction": "IFN network",
                  "overall_priority": "high", "data_reliability": "high",
-                 "literature_novelty": "high", "functional_impact": "high"}
+                 "literature_novelty": "high", "functional_impact": "high",
+                 "risk_flags": "single_sample", "prerequisite_dependencies": "dir_000"}
             ],
             "direction_dependency_graph": {},
         })
@@ -76,7 +80,7 @@ async def test_scored_candidates_land_in_research_direction_candidates(monkeypat
     round_result = SimpleNamespace(
         bioinformatics_findings=[], pathology_findings=[], biochemistry_findings=[],
         literature_findings=[], pi_summary="")
-    raw = [{"direction_id": "dir_001", "direction": "IFN network", "key_genes": ["Stat1"]}]
+    raw = [{"direction_id": "dir_001", "direction": "IFN network", "key_genes": "Stat1"}]
     evidence = [{"direction_id": "dir_001", "direction": "IFN network", "status": "completed"}]
 
     report = await agent.score_directions_with_evidence(state, round_result, raw, evidence)
@@ -85,7 +89,10 @@ async def test_scored_candidates_land_in_research_direction_candidates(monkeypat
     assert final.get("overall_priority") == "high"
     assert final.get("direction_id") == "dir_001"
     assert final.get("evidence_ref") == "dir_001"
-    # raw_direction_candidates must hold the ORIGINAL raw input, not the scored set
+    assert final.get("key_genes") == ["Stat1"]
+    assert "single_sample" in final.get("risk_flags", [])
+    assert final.get("prerequisite_dependencies") == ["dir_000"]
+    # raw_direction_candidates holds normalized raw content, not the scored set.
     assert report.raw_direction_candidates[0].get("key_genes") == ["Stat1"]
 
 
@@ -130,9 +137,11 @@ async def test_integration_direction_candidates_parse_json_array(monkeypatch):
 
     assert candidates[0]["direction_id"] == "int_001"
     assert candidates[0]["direction"] == "Cross-direction stress program"
-    assert candidates[0]["supporting_data"] == [
-        "Round 2 and 3 both show NRF2 activation."
-    ]
+    assert candidates[0]["supporting_data"] == [{
+        "source": "unspecified",
+        "evidence": "Round 2 and 3 both show NRF2 activation.",
+        "strength": "low",
+    }]
     assert candidates[0]["artifact_risks"] == [
         "Single-library composition uncertainty."
     ]
@@ -172,8 +181,108 @@ async def test_integration_direction_scoring_parses_json_array(monkeypatch):
     assert scored[0]["novelty_score"] == 8
     # A score-only LLM response must retain and normalize the original evidence fields.
     assert scored[0]["direction"] == "Cross-direction stress program"
-    assert scored[0]["supporting_data"] == ["Observed in rounds 2 and 3."]
+    assert scored[0]["supporting_data"] == [{
+        "source": "unspecified",
+        "evidence": "Observed in rounds 2 and 3.",
+        "strength": "low",
+    }]
     assert scored[0]["artifact_risks"] == ["Batch confounding."]
+
+
+def test_scored_candidate_name_fallback_preserves_canonical_id_and_raw_evidence():
+    raw = [{
+        "direction_id": "int_001",
+        "direction": "Shared stress program",
+        "supporting_data": [{
+            "source": "round 2",
+            "evidence": "Observed NRF2 score increase.",
+            "strength": "high",
+        }],
+        "key_genes": ["NFE2L2"],
+    }]
+    scored = [{
+        "direction_id": "int_1",
+        "direction": "Shared stress program",
+        "supporting_data": None,
+        "key_genes": [],
+        "novelty_score": 8,
+    }]
+
+    merged = _normalize_integration_scored_candidates(scored, raw)[0]
+
+    assert merged["direction_id"] == "int_001"
+    assert merged["supporting_data"] == raw[0]["supporting_data"]
+    assert merged["key_genes"] == ["NFE2L2"]
+    assert merged["novelty_score"] == 8
+
+
+def test_candidate_normalization_does_not_alias_raw_lists():
+    genes = ["NFE2L2"]
+    raw = [{
+        "direction_id": "int_001",
+        "direction": "Stress program",
+        "key_genes": genes,
+    }]
+
+    normalized = _normalize_integration_scored_candidates([{
+        "direction_id": "int_001",
+        "novelty_score": 7,
+    }], raw)
+    normalized[0]["key_genes"].append("HMOX1")
+
+    assert genes == ["NFE2L2"]
+
+
+def test_duplicate_raw_ids_fall_back_to_direction_name():
+    raw = [
+        {"direction_id": "dup", "direction": "First", "key_genes": ["A"]},
+        {"direction_id": "dup", "direction": "Second", "key_genes": ["B"]},
+    ]
+
+    normalized = _normalize_integration_scored_candidates([{
+        "direction_id": "dup",
+        "direction": "Second",
+        "novelty_score": 6,
+    }], raw)
+
+    assert normalized[0]["direction"] == "Second"
+    assert normalized[0]["key_genes"] == ["B"]
+
+
+@pytest.mark.asyncio
+async def test_round1_raw_candidates_are_normalized(monkeypatch):
+    agent = _make_pi_agent()
+
+    async def fake_chat(prompt, temperature=0.3):
+        return json.dumps({"candidates": [{
+            "direction_id": "dir_001",
+            "direction": "Stress response",
+            "supporting_data": "Cluster 2 has a higher stress score.",
+            "key_genes": "NFE2L2",
+            "prerequisite_dependencies": "dir_000",
+            "decision_criteria": "The score decreases after perturbation.",
+        }]})
+
+    monkeypatch.setattr(agent, "chat", fake_chat)
+    state = SimpleNamespace(
+        name="s", initial_instruction="x", species="mouse",
+        annotation_state=None, data_driven_mechanism_programs=[],
+        build_experimental_design_summary=lambda: "",
+    )
+    round_result = SimpleNamespace(
+        bioinformatics_findings=[], pathology_findings=[],
+        biochemistry_findings=[], literature_findings=[], pi_summary="",
+    )
+
+    candidates = await agent.generate_raw_direction_candidates(state, round_result)
+
+    assert candidates[0]["key_genes"] == ["NFE2L2"]
+    assert candidates[0]["prerequisite_dependencies"] == ["dir_000"]
+    assert candidates[0]["supporting_data"][0]["evidence"].startswith("Cluster 2")
+    assert candidates[0]["validation_plan"]["decision_criteria"] == [
+        "The score decreases after perturbation."
+    ]
+    assert "decision_criteria" not in candidates[0]
 
 
 def test_candidate_specific_core_observation_requires_data_element():
@@ -235,4 +344,22 @@ def test_critical_direction_fields_missing_lists_absent_fields():
 
     assert "alternative_hypotheses" in missing
     assert "artifact_risks" in missing
+    assert "validation_plan" in missing
+
+
+def test_critical_direction_fields_treat_placeholders_and_incomplete_plan_as_missing():
+    missing = PIAgent._critical_direction_fields_missing({
+        "core_observation": "Cluster 2 has NFE2L2 score=1.2.",
+        "alternative_hypotheses": "tbd",
+        "artifact_risks": ["batch effect"],
+        "contradictory_or_missing_evidence": ["replication missing"],
+        "validation_plan": {
+            "next_analysis": ["score replication"],
+            "wet_lab_validation": [],
+            "decision_criteria": ["effect replicates"],
+        },
+        "recommendation": "prioritize",
+    })
+
+    assert "alternative_hypotheses" in missing
     assert "validation_plan" in missing

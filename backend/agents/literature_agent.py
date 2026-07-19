@@ -24,6 +24,7 @@ from openai import APIConnectionError as OpenAIConnectionError
 
 from .base import BaseAgent
 from ..utils.settings_provider import AgentSettingsProvider
+from ..utils.formatting import as_list
 
 logger = logging.getLogger(__name__)
 from ..models.schemas import (
@@ -1939,10 +1940,10 @@ Reply in JSON format:
 
     def _candidate_terms(self, candidate: Dict[str, Any]) -> Dict[str, List[str]]:
         return {
-            "genes": [str(x).strip() for x in candidate.get("key_genes", []) if str(x).strip()],
-            "cells": [str(x).strip() for x in candidate.get("key_cell_types", []) if str(x).strip()],
-            "pathways": [str(x).strip() for x in candidate.get("key_pathways", []) if str(x).strip()],
-            "methods": [str(x).strip() for x in candidate.get("suggested_methods", []) if str(x).strip()],
+            "genes": [str(x).strip() for x in as_list(candidate.get("key_genes")) if str(x).strip()],
+            "cells": [str(x).strip() for x in as_list(candidate.get("key_cell_types")) if str(x).strip()],
+            "pathways": [str(x).strip() for x in as_list(candidate.get("key_pathways")) if str(x).strip()],
+            "methods": [str(x).strip() for x in as_list(candidate.get("suggested_methods")) if str(x).strip()],
             "organism": [str(candidate.get("organism") or "").strip()],
             "tissue": [str(candidate.get("tissue") or "").strip()],
             "context": [str(candidate.get("experimental_context") or "").strip()],

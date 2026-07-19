@@ -10,7 +10,7 @@ import logging
 from .base import BaseAgent
 from ..utils.settings_provider import AgentSettingsProvider
 from ..utils.direction_evidence import build_fallback_direction_evidence
-from ..utils.formatting import safe_parse_json_array
+from ..utils.formatting import as_list, safe_parse_json_array
 from .prompt_blocks import build_integration_block
 
 # Configure logger
@@ -47,53 +47,74 @@ _BRIEF_QC_MARKERS = (
 _DIRECTION_CANDIDATE_LIST_FIELDS = (
     "alternative_hypotheses",
     "artifact_risks",
+    "contradictory_or_missing_evidence",
     "key_genes",
     "key_cell_types",
     "key_pathways",
     "key_uncertainties",
     "suggested_literature_topics",
+    "suggested_methods",
     "suggested_validation_analysis",
     "suggested_wet_lab_validation",
-    "decision_criteria",
     "prerequisite_dependencies",
+    "risk_flags",
 )
 
 
-def _as_direction_list(value: Any) -> List[Any]:
-    """Coerce one LLM-produced candidate field to a JSON-list shape."""
-    if value is None or value == "":
-        return []
-    if isinstance(value, list):
-        return value
-    return [value]
+def _normalize_supporting_data(value: Any) -> List[Dict[str, str]]:
+    """Normalize supporting evidence to the documented list-of-objects shape."""
+    normalized = []
+    for item in as_list(value):
+        if isinstance(item, dict):
+            evidence = str(item.get("evidence") or "").strip()
+            if not evidence:
+                continue
+            strength = str(item.get("strength") or "low").strip().lower()
+            if strength not in {"high", "medium", "low"}:
+                strength = "low"
+            normalized.append({
+                "source": str(item.get("source") or "unspecified").strip(),
+                "evidence": evidence,
+                "strength": strength,
+            })
+            continue
+        evidence = str(item).strip()
+        if evidence:
+            normalized.append({
+                "source": "unspecified",
+                "evidence": evidence,
+                "strength": "low",
+            })
+    return normalized
 
 
 def _normalize_direction_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize unstable LLM field shapes without discarding their content."""
     normalized = dict(candidate)
-    normalized["supporting_data"] = _as_direction_list(
+    normalized["supporting_data"] = _normalize_supporting_data(
         normalized.get("supporting_data")
     )
     for field in _DIRECTION_CANDIDATE_LIST_FIELDS:
-        normalized[field] = _as_direction_list(normalized.get(field))
+        normalized[field] = as_list(normalized.get(field))
 
     validation_plan = normalized.get("validation_plan")
     if not isinstance(validation_plan, dict):
         validation_plan = {}
     else:
         validation_plan = dict(validation_plan)
-    validation_plan["next_analysis"] = _as_direction_list(
+    validation_plan["next_analysis"] = as_list(
         validation_plan.get("next_analysis")
         or normalized.get("suggested_validation_analysis")
     )
-    validation_plan["wet_lab_validation"] = _as_direction_list(
+    validation_plan["wet_lab_validation"] = as_list(
         validation_plan.get("wet_lab_validation")
         or normalized.get("suggested_wet_lab_validation")
     )
-    validation_plan["decision_criteria"] = _as_direction_list(
+    validation_plan["decision_criteria"] = as_list(
         validation_plan.get("decision_criteria")
         or normalized.get("decision_criteria")
     )
+    normalized.pop("decision_criteria", None)
     normalized["validation_plan"] = validation_plan
     return normalized
 
@@ -102,16 +123,22 @@ def _normalize_integration_scored_candidates(
     scored: List[Any], raw_candidates: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     """Merge score-only responses onto their raw candidates, then normalize."""
-    raw_by_id = {
-        str(candidate.get("direction_id", "")): candidate
-        for candidate in raw_candidates
-        if isinstance(candidate, dict) and candidate.get("direction_id")
-    }
-    raw_by_direction = {
-        str(candidate.get("direction", "")).strip(): candidate
-        for candidate in raw_candidates
-        if isinstance(candidate, dict) and candidate.get("direction")
-    }
+    raw_by_id = {}
+    raw_by_direction = {}
+    duplicate_ids = set()
+    for candidate in raw_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        direction_id = str(candidate.get("direction_id", ""))
+        direction = str(candidate.get("direction", "")).strip()
+        if direction_id and direction_id not in duplicate_ids:
+            if direction_id in raw_by_id:
+                raw_by_id.pop(direction_id, None)
+                duplicate_ids.add(direction_id)
+            else:
+                raw_by_id[direction_id] = candidate
+        if direction:
+            raw_by_direction.setdefault(direction, candidate)
     normalized = []
     for candidate in scored:
         if not isinstance(candidate, dict):
@@ -120,7 +147,13 @@ def _normalize_integration_scored_candidates(
         if raw is None:
             raw = raw_by_direction.get(str(candidate.get("direction", "")).strip())
         merged = dict(raw or {})
-        merged.update(candidate)
+        for key, value in candidate.items():
+            if value not in (None, "", [], {}):
+                merged[key] = value
+        # A name-based fallback means the scorer returned a drifted ID. Keep the
+        # canonical raw identity so evidence/dependency lookups remain stable.
+        if raw is not None and raw.get("direction_id"):
+            merged["direction_id"] = raw["direction_id"]
         normalized.append(_normalize_direction_candidate(merged))
     return normalized
 
@@ -1646,21 +1679,21 @@ For each candidate, provide ALL of the following fields:
 - direction: A specific, actionable research question
 - core_observation: Concrete Round 1 data observation motivating the candidate. Must cite specific data elements such as cluster ID, cell type, gene, pathway, fold-change, p-value, correlation, module score, or sample-level observation.
 - main_hypothesis: Primary testable hypothesis.
-- alternative_hypotheses: At least two plausible alternatives unless the data clearly excludes alternatives. Consider different transcriptional regulators, different ions/metals, different biological process classes, different causal direction, and technical artifacts.
-- artifact_risks: Specific technical or interpretive risks such as batch effect, doublets, low-quality cluster, annotation uncertainty, ambient RNA, dropout, or confounded design.
+- alternative_hypotheses: Array of at least two strings unless the data clearly excludes alternatives. Consider different transcriptional regulators, different ions/metals, different biological process classes, different causal direction, and technical artifacts. Never return a single string.
+- artifact_risks: Array of strings describing technical or interpretive risks such as batch effect, doublets, low-quality cluster, annotation uncertainty, ambient RNA, dropout, or confounded design. Never return a single string.
 - rationale: Why this direction is interesting based on the data
-- supporting_data: What specific data supports this direction
-- key_genes: List of relevant genes
-- key_cell_types: List of relevant cell types
-- key_pathways: List of relevant pathways
-- key_uncertainties: What remains uncertain or needs validation
-- suggested_literature_topics: Natural-language topics for literature search
-- suggested_validation_analysis: Computational follow-up analyses.
-- suggested_wet_lab_validation: Wet-lab validation experiments.
-- decision_criteria: Results that would support or weaken the hypothesis.
+- supporting_data: Array of objects with string fields source, evidence, and strength (high|medium|low). Never return a scalar.
+- key_genes: Array of relevant gene strings. Never return a single string.
+- key_cell_types: Array of relevant cell-type strings. Never return a single string.
+- key_pathways: Array of relevant pathway strings. Never return a single string.
+- key_uncertainties: Array of strings describing what remains uncertain or needs validation.
+- suggested_literature_topics: Array of natural-language topics for literature search.
+- suggested_validation_analysis: Array of computational follow-up analysis strings.
+- suggested_wet_lab_validation: Array of wet-lab validation experiment strings.
+- decision_criteria: Array of strings describing results that would support or weaken the hypothesis.
 - biology_expectedness: one of "expected", "partially_expected", "unexpected", "unknown"
 - functional_impact_hypothesis: Brief hypothesis about functional/clinical impact
-- prerequisite_dependencies: List of direction_ids that should be investigated first (empty list if none)
+- prerequisite_dependencies: Array of direction_id strings that should be investigated first (empty array if none)
 - organism: {state.species or "Not specified"}
 - tissue: Tissue context from the experiment
 - experimental_context: The experimental design context
@@ -1683,7 +1716,9 @@ Return a JSON object with a single key "candidates" containing the list of candi
 """
         response = await self.chat(prompt, temperature=0.3)
         data = self._safe_parse_json(response, default={})
-        candidates = data.get("candidates", [])
+        candidates = data.get("candidates", []) if isinstance(data, dict) else []
+        if not isinstance(candidates, list):
+            candidates = []
         if not candidates:
             logger.warning("[PI] Raw direction candidates empty, using fallback")
             candidates = [{
@@ -1705,7 +1740,11 @@ Return a JSON object with a single key "candidates" containing the list of candi
                 "tissue": "",
                 "experimental_context": "",
             }]
-        return candidates
+        return [
+            _normalize_direction_candidate(candidate)
+            for candidate in candidates
+            if isinstance(candidate, dict)
+        ]
 
     async def generate_integration_direction_candidates(
         self,
@@ -1833,6 +1872,11 @@ Return the surviving candidates as a JSON array, sorted by priority_rank ascendi
         Score raw direction candidates with literature evidence to produce a complete ExplorationReport.
         """
         logger.info(f"[PI] Scoring {len(raw_candidates)} direction candidates with evidence")
+        raw_candidates = [
+            _normalize_direction_candidate(candidate)
+            for candidate in raw_candidates
+            if isinstance(candidate, dict)
+        ]
         self.reset_history()
 
         ann_summary = self._format_cluster_annotation_summary(state)
@@ -1979,6 +2023,10 @@ Return a complete structured report JSON:
                          if isinstance(c, dict) and c.get("overall_priority")]
             if recovered:
                 scored = recovered
+        # Merge score-only or shape-unstable responses onto canonical raw
+        # candidates before any downstream validation or rendering.
+        scored = _normalize_integration_scored_candidates(scored, raw_candidates)
+
         # Guarantee direction_id + evidence_ref on every scored candidate.
         raw_by_index = {i: rc for i, rc in enumerate(raw_candidates)}
         for i, c in enumerate(scored):
@@ -2009,10 +2057,11 @@ Return a complete structured report JSON:
             except Exception as retry_err:
                 self._append_unique_flag(candidate, "critical_field_retry_failed")
                 candidate.setdefault("limitations", []).append(f"Critical field retry failed: {str(retry_err)[:120]}")
+        scored = _normalize_integration_scored_candidates(scored, raw_candidates)
         scored = self._apply_direction_guardrails(scored, raw_candidates, literature_evidence)
         report.research_direction_candidates = scored
 
-        # raw_direction_candidates always holds the ORIGINAL raw input.
+        # Preserve the raw candidate content in its canonical normalized shape.
         report.raw_direction_candidates = raw_candidates
         # Evidence matrix always preserved.
         if not report.direction_literature_evidence:
@@ -2120,14 +2169,38 @@ Return a complete structured report JSON:
 
     @staticmethod
     def _critical_direction_fields_missing(candidate: Dict[str, Any]) -> List[str]:
+        placeholders = {"...", "tbd", "todo", "n/a", "na", "none", "not specified"}
+
+        def meaningful(value: Any) -> bool:
+            if value is None:
+                return False
+            if isinstance(value, str):
+                return bool(value.strip()) and value.strip().lower() not in placeholders
+            if isinstance(value, dict):
+                return any(meaningful(item) for item in value.values())
+            if isinstance(value, (list, tuple, set)):
+                return any(meaningful(item) for item in value)
+            return True
+
         missing = []
         for key in (
             "core_observation", "alternative_hypotheses", "artifact_risks",
             "contradictory_or_missing_evidence", "validation_plan", "recommendation",
         ):
             value = candidate.get(key)
-            if value is None or value == "" or value == [] or value == {}:
+            if not meaningful(value):
                 missing.append(key)
+        alternatives = as_list(candidate.get("alternative_hypotheses"))
+        if "alternative_hypotheses" not in missing and sum(
+            meaningful(item) for item in alternatives
+        ) < 2:
+            missing.append("alternative_hypotheses")
+        validation_plan = candidate.get("validation_plan")
+        if isinstance(validation_plan, dict) and not all(
+            meaningful(validation_plan.get(key))
+            for key in ("next_analysis", "wet_lab_validation", "decision_criteria")
+        ) and "validation_plan" not in missing:
+            missing.append("validation_plan")
         return missing
 
     async def _soft_retry_direction_candidate(
@@ -2513,7 +2586,7 @@ Return JSON:
                 cand = cand_by_id.get(dir_id)
                 if not cand:
                     continue
-                for prereq_id in cand.get("prerequisite_dependencies", []) or []:
+                for prereq_id in as_list(cand.get("prerequisite_dependencies")):
                     prereq_text = text_by_id.get(prereq_id)
                     if prereq_text and prereq_text not in selected_texts:
                         selected.append({"direction": prereq_text,

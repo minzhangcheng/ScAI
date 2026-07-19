@@ -12,6 +12,7 @@ import base64
 import io
 import uuid
 import re
+import ast
 import textwrap
 from pathlib import Path
 from datetime import datetime
@@ -206,6 +207,181 @@ _CELL_TYPE_ASSIGN_RE = re.compile(
     r"""\.obs\[\s*['"](?:cell_?type|cluster_identity|cell_identity|cell_annotation|annotation)['"]\s*\]\s*=(?!=)"""
 )
 
+_HIGH_MEMORY_ANALYSIS_RE = re.compile(
+    r"\b(?:scv|scvelo)\s*\.\s*(?:pp\s*\.\s*moments|tl\s*\.\s*(?:velocity|velocity_graph))\s*\(|"
+    r"\bcellrank\b",
+    re.IGNORECASE,
+)
+
+
+def _high_memory_referenced_names(code: str) -> List[str]:
+    """Return AnnData call arguments for known high-memory operations."""
+    if not _HIGH_MEMORY_ANALYSIS_RE.search(code):
+        return []
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    cellrank_aliases = {"cellrank"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "cellrank":
+                    cellrank_aliases.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("cellrank"):
+            for alias in node.names:
+                cellrank_aliases.add(alias.asname or alias.name)
+
+    def _dotted_name(node: ast.AST) -> str:
+        parts = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if isinstance(node, ast.Name):
+            parts.append(node.id)
+        return ".".join(reversed(parts))
+
+    names = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func_name = _dotted_name(node.func)
+        is_scvelo = bool(re.fullmatch(
+            r"(?:scv|scvelo)\.(?:pp\.moments|tl\.(?:velocity|velocity_graph))",
+            func_name,
+            re.IGNORECASE,
+        ))
+        root = func_name.split(".", 1)[0]
+        is_cellrank = root in cellrank_aliases
+        if not (is_scvelo or is_cellrank):
+            continue
+        target = node.args[0] if node.args else next(
+            (kw.value for kw in node.keywords if kw.arg in {"adata", "data"}),
+            None,
+        )
+        if isinstance(target, ast.Name):
+            names.add(target.id)
+    return sorted(names)
+
+
+def _build_resource_guard_preamble(code: str) -> str:
+    """Build a kernel-side memory preflight for velocity/fate operations.
+
+    The guard measures referenced AnnData matrices and actual host/cgroup
+    headroom immediately before user code runs. It fails early with actionable
+    guidance instead of letting the kernel be OOM-killed and losing the cell.
+    """
+    names = _high_memory_referenced_names(code)
+    if not names:
+        return ""
+    names_repr = repr(names)
+    operation_factor = 8 if re.search(r"\bcellrank\b", code, re.I) else (
+        6 if re.search(r"velocity_graph", code, re.I) else 4
+    )
+    return f"""
+# ScAI resource preflight for high-memory velocity/fate analysis.
+def _scai_matrix_bytes(_value, _seen):
+    if _value is None or id(_value) in _seen:
+        return 0
+    _seen.add(id(_value))
+    _total = 0
+    _has_sparse_parts = False
+    for _part_name in ('data', 'indices', 'indptr'):
+        _part = getattr(_value, _part_name, None)
+        if _part is not None and id(_part) not in _seen:
+            _has_sparse_parts = True
+            _seen.add(id(_part))
+            _total += int(getattr(_part, 'nbytes', 0) or 0)
+    if not _has_sparse_parts:
+        _total = int(getattr(_value, 'nbytes', 0) or 0)
+    return _total
+
+def _scai_adata_bytes(_adata):
+    _seen = set()
+    _total = _scai_matrix_bytes(getattr(_adata, 'X', None), _seen)
+    for _mapping_name in ('layers', 'obsp', 'varp', 'obsm', 'varm'):
+        _mapping = getattr(_adata, _mapping_name, None)
+        if _mapping is not None:
+            try:
+                for _value in _mapping.values():
+                    _total += _scai_matrix_bytes(_value, _seen)
+            except Exception:
+                pass
+    return _total
+
+def _scai_memory_headroom():
+    _limits = []
+    try:
+        with open('/proc/meminfo', 'r', encoding='utf-8') as _meminfo:
+            for _line in _meminfo:
+                if _line.startswith('MemAvailable:'):
+                    _limits.append(int(_line.split()[1]) * 1024)
+                    break
+    except Exception:
+        pass
+    for _max_path, _cur_path in (
+        ('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.current'),
+        ('/sys/fs/cgroup/memory/memory.limit_in_bytes',
+         '/sys/fs/cgroup/memory/memory.usage_in_bytes'),
+    ):
+        try:
+            with open(_max_path, 'r', encoding='utf-8') as _f:
+                _maximum = _f.read().strip()
+            with open(_cur_path, 'r', encoding='utf-8') as _f:
+                _current = int(_f.read().strip())
+            if _maximum != 'max':
+                _maximum_int = int(_maximum)
+                if 0 < _maximum_int < (1 << 60):
+                    _limits.append(max(0, _maximum_int - _current))
+        except Exception:
+            pass
+    return min(_limits) if _limits else None
+
+_scai_guard_names = {names_repr}
+_scai_guard_candidates = []
+for _scai_guard_name in _scai_guard_names:
+    _scai_guard_obj = globals().get(_scai_guard_name)
+    if (_scai_guard_obj is not None
+            and hasattr(_scai_guard_obj, 'n_obs')
+            and hasattr(_scai_guard_obj, 'n_vars')
+            and hasattr(_scai_guard_obj, 'X')):
+        _scai_guard_candidates.append((_scai_guard_name, _scai_guard_obj))
+
+if _scai_guard_candidates:
+    # Measure each candidate once and reuse the winner's byte count; the
+    # earlier form re-traversed X/layers/obsp/varp/obsm/varm for the chosen
+    # AnnData a second time just to recompute the same number.
+    _scai_guard_name, _scai_guard_adata, _scai_guard_bytes = max(
+        ((_n, _o, _scai_adata_bytes(_o)) for _n, _o in _scai_guard_candidates),
+        key=lambda _item: _item[2],
+    )
+    _scai_guard_bytes = max(1, _scai_guard_bytes)
+    _scai_guard_n_obs = int(getattr(_scai_guard_adata, 'n_obs', 0) or 0)
+    _scai_guard_graph_bytes = _scai_guard_n_obs * min(_scai_guard_n_obs, 5000) * 8
+    _scai_guard_required = max(
+        512 * 1024**2,
+        _scai_guard_bytes * {operation_factor} + _scai_guard_graph_bytes,
+    )
+    _scai_guard_headroom = _scai_memory_headroom()
+    if (_scai_guard_headroom is not None
+            and _scai_guard_required > int(_scai_guard_headroom * 0.70)):
+        raise MemoryError(
+            'ScAI resource preflight blocked a high-memory velocity/fate operation: '
+            f'{{_scai_guard_name}} has {{_scai_guard_n_obs:,}} cells and the operation '
+            f'is estimated to need {{_scai_guard_required / 1024**3:.1f}} GiB, but only '
+            f'{{_scai_guard_headroom / 1024**3:.1f}} GiB headroom is available. '
+            'Subset/downsample the relevant lineage, remove unused AnnData copies, '
+            'or use DPT/PAGA before retrying.'
+        )
+    print(
+        f'[ScAI resource preflight] {{_scai_guard_name}}: '
+        f'{{_scai_guard_n_obs:,}} cells; estimated additional budget '
+        f'{{_scai_guard_required / 1024**3:.1f}} GiB; '
+        f'headroom {{(_scai_guard_headroom or 0) / 1024**3:.1f}} GiB'
+    )
+"""
+
 # Reusable sandbox template snippet: safely close all matplotlib figures
 _TPL_SAFE_CLOSE_ALL = """\
 try:
@@ -215,6 +391,28 @@ try:
     # 报告里同一张图出现上百次。改用内核初始化时捕获的基线 close 绕过 no-op 桩。
     _scai_real_close = globals().get('_original_plt_close', plt.close)
     _scai_real_close('all')
+except Exception:
+    pass"""
+
+
+# Reusable sandbox template snippet: re-import matplotlib AFTER user code and
+# restore plt.close / plt.show to the immutable baselines captured at kernel
+# init. User-generated code runs in the persistent global namespace and may
+# rebind the ``plt`` alias (e.g. ``plt = 'shadowed'``); cleanup must never
+# trust that mutable name, so it re-binds a fresh module reference instead.
+# f-string safe: contains no { or }.
+_TPL_PLT_RESTORE_BASELINE = """\
+import matplotlib.pyplot as _scai_cleanup_plt
+try:
+    _scai_cleanup_plt.close = globals().get(
+        '_original_plt_close', _scai_cleanup_plt.close
+    )
+except Exception:
+    pass
+try:
+    _scai_cleanup_plt.show = globals().get('_capturing_show') or globals().get(
+        '_original_plt_show', _scai_cleanup_plt.show
+    )
 except Exception:
     pass"""
 
@@ -229,6 +427,8 @@ def _build_exec_autosave_wrapper(code: str, figures_dir: str, timestamp: str) ->
     """
     figures_dir_repr = repr(str(figures_dir))
     indented_code = textwrap.indent(code, '    ')
+    resource_guard = textwrap.indent(_build_resource_guard_preamble(code), '    ')
+    restore_baseline = textwrap.indent(_TPL_PLT_RESTORE_BASELINE, '    ')
     return f'''
 import matplotlib.pyplot as plt
 import matplotlib.figure as _mpl_figure
@@ -292,28 +492,27 @@ _pre_fignums = set(plt.get_fignums())
 # Execute user code (auto-save runs in finally so PDFs are always supplemented,
 # even when the user code raises midway through)
 try:
+{resource_guard}
 {indented_code}
 finally:
-    # Restore plt.close / plt.show / Figure.savefig overrides
+{restore_baseline}
+    import matplotlib.figure as _scai_cleanup_figure
+
+    # Restore Figure.savefig to the immutable baseline captured when the
+    # sandbox kernel was initialized (close/show already restored above).
     try:
-        plt.close = _orig_close
-    except Exception:
-        pass
-    try:
-        plt.show = _orig_show
-    except Exception:
-        pass
-    try:
-        _mpl_figure.Figure.savefig = _prev_fig_savefig
+        _scai_cleanup_figure.Figure.savefig = globals().get(
+            '_combined_savefig', _scai_cleanup_figure.Figure.savefig
+        )
     except Exception:
         pass
 
     # Detect and save only figures created during THIS execution (diff vs snapshot)
     try:
-        _fig_nums = [_n for _n in plt.get_fignums() if _n not in _pre_fignums]
+        _fig_nums = [_n for _n in _scai_cleanup_plt.get_fignums() if _n not in _pre_fignums]
         for _fig_num in _fig_nums:
             try:
-                _fig = plt.figure(_fig_num)
+                _fig = _scai_cleanup_plt.figure(_fig_num)
 
                 # Display figure to trigger capture via display_data message (always)
                 display(_fig)
@@ -371,7 +570,7 @@ finally:
             except Exception as _save_err:
                 print(f"[Auto-save] Warning: could not save figure {{_fig_num}}: {{_save_err}}")
                 try:
-                    plt.close(_fig_num)
+                    _scai_cleanup_plt.close(_fig_num)
                 except Exception as _close_err:
                     print(f"[Auto-save] Debug: plt.close({{_fig_num}}) failed: {{_close_err}}")
     except Exception as _autosave_block_err:
@@ -379,7 +578,93 @@ finally:
 
     # Close all figures to free memory
     try:
-        plt.close('all')
+        _scai_cleanup_plt.close('all')
+    except Exception:
+        pass
+'''
+
+
+def _build_publication_figure_wrapper(
+    code: str, figures_dir: str, jpg_path: str, pdf_path: str
+) -> str:
+    """Build the publication-figure execution wrapper (JPG + PDF auto-save).
+
+    Shared by generate_publication_figure and its revision / auto-retry paths
+    so every figure-execution path uses one cleanup + save template. The
+    revised/retry paths previously inlined drifted copies that bypassed the
+    ``_TPL_NOOP_INSTALL`` stub-unwind (a naive ``plt.close = lambda``); they
+    now go through the same machinery as the initial render. Includes the
+    velocity/fate memory preflight so the resource guard is not skipped on
+    figure code (it is a no-op unless the code runs scv.tl.velocity / cellrank).
+    """
+    figures_dir_repr = repr(str(figures_dir))
+    jpg_path_repr = repr(str(jpg_path))
+    pdf_path_repr = repr(str(pdf_path))
+    indented_code = textwrap.indent(code, '    ')
+    restore_baseline = textwrap.indent(_TPL_PLT_RESTORE_BASELINE, '    ')
+    resource_guard = textwrap.indent(_build_resource_guard_preamble(code), '    ')
+    return f'''
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+# Close any stale figures from previous executions to prevent poisoning
+{_TPL_SAFE_CLOSE_ALL}
+
+# Set publication-quality parameters
+plt.rcParams.update({{
+    'figure.dpi': 300,
+    'savefig.dpi': 300,
+    'font.size': 14,
+    'axes.titlesize': 16,
+    'axes.labelsize': 14,
+    'xtick.labelsize': 12,
+    'ytick.labelsize': 12,
+    'legend.fontsize': 11,
+    'axes.grid': False,
+    'axes.linewidth': 1.2,
+    'pdf.fonttype': 42,  # Ensure fonts are vectorized in PDF
+    'ps.fonttype': 42,
+}})
+
+# Create figures directory
+_figures_dir = {figures_dir_repr}
+Path(_figures_dir).mkdir(exist_ok=True)
+
+{_TPL_NOOP_INSTALL}
+
+# Execute the plotting code (save runs in finally so JPG+PDF are always written,
+# even if user code raises midway through)
+try:
+{resource_guard}
+{indented_code}
+finally:
+{restore_baseline}
+
+    # Get current figure and save (both JPG and PDF)
+    if _scai_cleanup_plt.get_fignums():
+        try:
+            fig = _scai_cleanup_plt.gcf()
+            _jpg_path = {jpg_path_repr}
+            _pdf_path = {pdf_path_repr}
+
+            try:
+                fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
+                            format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
+                print(f"Saved JPG: {{_jpg_path}}")
+            except Exception as _jpg_err:
+                print(f"[Auto-save] Warning: could not save JPG: {{_jpg_err}}")
+            try:
+                fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
+                print(f"Saved PDF: {{_pdf_path}}")
+            except Exception as _pdf_err:
+                print(f"[Auto-save] Warning: could not save PDF: {{_pdf_err}}")
+        except Exception as _save_err:
+            print(f"[Auto-save] Warning: could not save figure: {{_save_err}}")
+    else:
+        print("[Auto-save] No figures found — skipping save")
+
+    try:
+        _scai_cleanup_plt.close('all')
     except Exception:
         pass
 '''
@@ -1977,7 +2262,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         organism: str,
         context: Dict[str, Any],
         max_iterations: int = 5,
-        timeout_seconds: int = 180,
+        timeout_seconds: int = 600,
     ) -> Dict[str, Any]:
         """Run annotation-validation code on a COPY (`adata_val`) of the live
         AnnData, re-checking main-object invariants after EVERY cell. Never
@@ -2018,42 +2303,72 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             transcript: List[str] = []
             final_result: Optional[Dict[str, Any]] = None
 
-            for _ in range(max_iterations):
-                prompt = self._build_validation_executor_prompt(
-                    validation_plan, annotations, cluster_markers, tissue, organism,
-                    ctx, "\n\n".join(transcript[-3:]))
-                parsed = self._safe_parse_json(await self.chat(prompt, temperature=0.2), default={})
-                if not isinstance(parsed, dict):
-                    transcript.append("Executor returned unparseable response; reply with valid JSON.")
-                    continue
-                if parsed.get("done"):
-                    final_result = parsed.get("validation_result") or {}
-                    break
+            # Copy the main object once.  Re-copying a large AnnData before every
+            # validation cell multiplies both runtime and peak memory and was the
+            # main reason the bounded executor exhausted its wall-clock budget.
+            init_result = await self.sandbox.execute(
+                f"adata_val = {var_name}.copy()",
+                save_to_history=False,
+                skip_safety_check=True,
+            )
+            init_error = getattr(init_result, "error", None)
+            if init_error:
+                return {**empty,
+                        "summary": f"Validation aborted: could not create isolated copy ({init_error}).",
+                        "warnings": ["validation copy creation failed"]}
 
-                code = parsed.get("code", "")
-                if not code or not isinstance(code, str):
-                    transcript.append("No code provided; provide `code` or set done=true.")
-                    continue
+            try:
+                for _ in range(max_iterations):
+                    prompt = self._build_validation_executor_prompt(
+                        validation_plan, annotations, cluster_markers, tissue, organism,
+                        ctx, "\n\n".join(transcript[-3:]))
+                    parsed = self._safe_parse_json(await self.chat(prompt, temperature=0.2), default={})
+                    if not isinstance(parsed, dict):
+                        transcript.append("Executor returned unparseable response; reply with valid JSON.")
+                        continue
+                    if parsed.get("done"):
+                        final_result = parsed.get("validation_result") or {}
+                        break
 
-                unsafe = self._validation_code_is_safe(code, var_name)
-                if unsafe:
-                    transcript.append(f"[rejected] {unsafe}. Operate only on adata_val with read-only summaries.")
-                    continue
+                    code = parsed.get("code", "")
+                    if not code or not isinstance(code, str):
+                        transcript.append("No code provided; provide `code` or set done=true.")
+                        continue
 
-                wrapped = f"adata_val = {var_name}.copy()\n{code}"
-                exec_result = await self.sandbox.execute(wrapped, save_to_history=False, skip_safety_check=True)
-                out = (getattr(exec_result, "output", "") or "")[:6000]
-                err = getattr(exec_result, "error", None)
-                transcript.append(f"[code]\n{code[:1500]}\n[stdout]\n{out}\n[error]\n{err or 'none'}")
+                    unsafe = self._validation_code_is_safe(code, var_name)
+                    if unsafe:
+                        transcript.append(f"[rejected] {unsafe}. Operate only on adata_val with read-only summaries.")
+                        continue
 
-                # Per-iteration invariant check: abort immediately on first mutation.
-                post_sig = await self.capture_main_object_signature(var_name, cluster_key)
-                ok, changed = signatures_match(pre_sig, post_sig)
-                if not ok:
-                    logger.error(f"[{getattr(self, 'session_id', '?')}] validation mutated main object: {changed}")
-                    return {**empty,
-                            "summary": f"Validation aborted: main object invariant changed ({changed}).",
-                            "warnings": [f"main-object invariant changed: {changed}"]}
+                    exec_result = await self.sandbox.execute(
+                        code, save_to_history=False, skip_safety_check=True
+                    )
+                    out = (getattr(exec_result, "output", "") or "")[:6000]
+                    err = getattr(exec_result, "error", None)
+                    transcript.append(f"[code]\n{code[:1500]}\n[stdout]\n{out}\n[error]\n{err or 'none'}")
+
+                    # Per-iteration invariant check: abort immediately on first mutation.
+                    post_sig = await self.capture_main_object_signature(var_name, cluster_key)
+                    ok, changed = signatures_match(pre_sig, post_sig)
+                    if not ok:
+                        logger.error(f"[{getattr(self, 'session_id', '?')}] validation mutated main object: {changed}")
+                        return {**empty,
+                                "summary": f"Validation aborted: main object invariant changed ({changed}).",
+                                "warnings": [f"main-object invariant changed: {changed}"]}
+            finally:
+                # The validation copy can be large; release it on success, error,
+                # cancellation, or timeout instead of retaining it in the kernel.
+                # sandbox.execute() returns a CodeExecutionResult rather than
+                # raising, so check .error like the init-copy call above.
+                release_result = await self.sandbox.execute(
+                    "globals().pop('adata_val', None)",
+                    save_to_history=False,
+                    skip_safety_check=True,
+                )
+                if getattr(release_result, "error", None):
+                    logger.warning(
+                        f"[{getattr(self, 'session_id', '?')}] could not release validation copy"
+                    )
 
             if final_result is None:
                 return {**empty, "status": "partial",
@@ -2082,7 +2397,7 @@ You may ONLY generate Python that runs in the existing Jupyter kernel. No analys
 PI consultation, or autonomous analysis.
 
 ## Hard rules
-- A copy `adata_val = {main_var}.copy()` is created before your code runs. Use ONLY `adata_val`.
+- One isolated copy `adata_val = {main_var}.copy()` is created before the validation loop. Use ONLY `adata_val`.
   NEVER assign to or mutate `{main_var}` (the main object).
 - Do NOT filter cells, recluster, reintegrate, normalize, or change preprocessing.
 - Do NOT run DEG between conditions, pathway enrichment, communication, trajectory, or velocity.
@@ -4634,82 +4949,9 @@ If results significantly deviate from plan expectations, report via consult_pi i
         jpg_path = figures_dir / f"{safe_name}.jpg"
         pdf_path = figures_dir / f"{safe_name}.pdf"
 
-        # Wrap code to save both JPG and PDF (use repr() for paths to prevent injection)
-        figures_dir_repr = repr(str(figures_dir))
-        png_path_repr = repr(str(jpg_path))  # Variable name kept for template compatibility
-        pdf_path_repr = repr(str(pdf_path))
-        indented_code = textwrap.indent(code, '    ')
-        wrapped_code = f'''
-import matplotlib.pyplot as plt
-from pathlib import Path
-
-# Close any stale figures from previous executions to prevent poisoning
-{_TPL_SAFE_CLOSE_ALL}
-
-# Set publication-quality parameters
-plt.rcParams.update({{
-    'figure.dpi': 300,
-    'savefig.dpi': 300,
-    'font.size': 14,
-    'axes.titlesize': 16,
-    'axes.labelsize': 14,
-    'xtick.labelsize': 12,
-    'ytick.labelsize': 12,
-    'legend.fontsize': 11,
-    'axes.grid': False,
-    'axes.linewidth': 1.2,
-    'pdf.fonttype': 42,  # Ensure fonts are vectorized in PDF
-    'ps.fonttype': 42,
-}})
-
-# Create figures directory
-_figures_dir = {figures_dir_repr}
-Path(_figures_dir).mkdir(exist_ok=True)
-
-{_TPL_NOOP_INSTALL}
-
-# Execute the plotting code (save runs in finally so JPG+PDF are always written,
-# even if user code raises midway through)
-try:
-{indented_code}
-finally:
-    try:
-        plt.close = _orig_close
-    except Exception:
-        pass
-    try:
-        plt.show = _orig_show
-    except Exception:
-        pass
-
-    # Get current figure and save (both JPG and PDF)
-    if plt.get_fignums():
-        try:
-            fig = plt.gcf()
-            _jpg_path = {png_path_repr}
-            _pdf_path = {pdf_path_repr}
-
-            try:
-                fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
-                            format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
-                print(f"Saved JPG: {{_jpg_path}}")
-            except Exception as _jpg_err:
-                print(f"[Auto-save] Warning: could not save JPG: {{_jpg_err}}")
-            try:
-                fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
-                print(f"Saved PDF: {{_pdf_path}}")
-            except Exception as _pdf_err:
-                print(f"[Auto-save] Warning: could not save PDF: {{_pdf_err}}")
-        except Exception as _save_err:
-            print(f"[Auto-save] Warning: could not save figure: {{_save_err}}")
-    else:
-        print("[Auto-save] No figures found — skipping save")
-
-    try:
-        plt.close('all')
-    except Exception:
-        pass
-'''
+        # Wrap code to save both JPG and PDF; paths are repr()'d inside the
+        # shared wrapper to prevent injection.
+        wrapped_code = _build_publication_figure_wrapper(code, figures_dir, jpg_path, pdf_path)
 
         # Execute the code
         result = await self.sandbox.execute(wrapped_code)
@@ -4863,80 +5105,7 @@ finally:
                     break
 
                 # Re-execute with revised code (rebuild wrapper instead of str.replace to avoid corruption)
-                indented_revised_code = textwrap.indent(revised_code, '    ')
-                revised_wrapped = f'''
-import matplotlib.pyplot as plt
-from pathlib import Path
-
-# Close any stale figures from previous executions to prevent poisoning
-{_TPL_SAFE_CLOSE_ALL}
-
-plt.rcParams.update({{
-    'figure.dpi': 300,
-    'savefig.dpi': 300,
-    'font.size': 14,
-    'axes.titlesize': 16,
-    'axes.labelsize': 14,
-    'xtick.labelsize': 12,
-    'ytick.labelsize': 12,
-    'legend.fontsize': 11,
-    'axes.grid': False,
-    'axes.linewidth': 1.2,
-    'pdf.fonttype': 42,
-    'ps.fonttype': 42,
-}})
-
-_figures_dir = {figures_dir_repr}
-Path(_figures_dir).mkdir(exist_ok=True)
-
-# Temporarily disable plt.close/plt.show to keep figures alive
-_orig_close = plt.close
-_orig_show = plt.show
-plt.close = lambda *a, **kw: None
-plt.show = lambda *a, **kw: None
-
-# Execute revised code (save runs in finally so JPG+PDF are always written,
-# even if user code raises midway through)
-try:
-{indented_revised_code}
-finally:
-    try:
-        plt.close = _orig_close
-    except Exception:
-        pass
-    try:
-        plt.show = _orig_show
-    except Exception:
-        pass
-
-    # Get current figure and save (both JPG and PDF)
-    if plt.get_fignums():
-        try:
-            fig = plt.gcf()
-            _jpg_path = {png_path_repr}
-            _pdf_path = {pdf_path_repr}
-
-            try:
-                fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
-                            format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
-                print(f"Saved JPG: {{_jpg_path}}")
-            except Exception as _jpg_err:
-                print(f"[Auto-save] Warning: could not save JPG: {{_jpg_err}}")
-            try:
-                fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
-                print(f"Saved PDF: {{_pdf_path}}")
-            except Exception as _pdf_err:
-                print(f"[Auto-save] Warning: could not save PDF: {{_pdf_err}}")
-        except Exception as _save_err:
-            print(f"[Auto-save] Warning: could not save figure: {{_save_err}}")
-    else:
-        print("[Auto-save] No figures found — skipping save")
-
-    try:
-        plt.close('all')
-    except Exception:
-        pass
-'''
+                revised_wrapped = _build_publication_figure_wrapper(revised_code, figures_dir, jpg_path, pdf_path)
                 result = await self.sandbox.execute(revised_wrapped)
 
                 if not result.error and jpg_path.exists():
@@ -4979,79 +5148,7 @@ finally:
                         )
                         is_valid_retry, err_retry = self._validate_code(retry_code)
                         if is_valid_retry:
-                            indented_retry_code = textwrap.indent(retry_code, '    ')
-                            retry_wrapped = f'''
-import matplotlib.pyplot as plt
-from pathlib import Path
-
-# Close any stale figures from previous executions to prevent poisoning
-{_TPL_SAFE_CLOSE_ALL}
-
-plt.rcParams.update({{
-    'figure.dpi': 300,
-    'savefig.dpi': 300,
-    'font.size': 14,
-    'axes.titlesize': 16,
-    'axes.labelsize': 14,
-    'xtick.labelsize': 12,
-    'ytick.labelsize': 12,
-    'legend.fontsize': 11,
-    'axes.grid': False,
-    'axes.linewidth': 1.2,
-    'pdf.fonttype': 42,
-    'ps.fonttype': 42,
-}})
-
-_figures_dir = {figures_dir_repr}
-Path(_figures_dir).mkdir(exist_ok=True)
-
-_orig_close = plt.close
-_orig_show = plt.show
-plt.close = lambda *a, **kw: None
-plt.show = lambda *a, **kw: None
-
-# Execute retry code (save runs in finally so JPG+PDF are always written,
-# even if user code raises midway through)
-try:
-{indented_retry_code}
-finally:
-    try:
-        plt.close = _orig_close
-    except Exception:
-        pass
-    try:
-        plt.show = _orig_show
-    except Exception:
-        pass
-
-    # Get current figure and save (both JPG and PDF)
-    if plt.get_fignums():
-        try:
-            fig = plt.gcf()
-            _jpg_path = {png_path_repr}
-            _pdf_path = {pdf_path_repr}
-
-            try:
-                fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
-                            format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
-                print(f"Saved JPG: {{_jpg_path}}")
-            except Exception as _jpg_err:
-                print(f"[Auto-save] Warning: could not save JPG: {{_jpg_err}}")
-            try:
-                fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
-                print(f"Saved PDF: {{_pdf_path}}")
-            except Exception as _pdf_err:
-                print(f"[Auto-save] Warning: could not save PDF: {{_pdf_err}}")
-        except Exception as _save_err:
-            print(f"[Auto-save] Warning: could not save figure: {{_save_err}}")
-    else:
-        print("[Auto-save] No figures found — skipping save")
-
-    try:
-        plt.close('all')
-    except Exception:
-        pass
-'''
+                            retry_wrapped = _build_publication_figure_wrapper(retry_code, figures_dir, jpg_path, pdf_path)
                             retry_result = await self.sandbox.execute(retry_wrapped)
                             if not retry_result.error and jpg_path.exists() and jpg_path.stat().st_size >= 2000:
                                 logger.info(f"[Bioinformatics] Auto-retry succeeded for {figure_name}")

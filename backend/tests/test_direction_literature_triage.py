@@ -20,6 +20,20 @@ def _make_literature_agent():
     return agent
 
 
+def test_candidate_terms_treat_scalar_fields_as_single_terms():
+    terms = _make_literature_agent()._candidate_terms({
+        "key_genes": "NRF2",
+        "key_cell_types": "epithelial cell",
+        "key_pathways": "oxidative stress",
+        "suggested_methods": "single-cell RNA-seq",
+    })
+
+    assert terms["genes"] == ["NRF2"]
+    assert terms["cells"] == ["epithelial cell"]
+    assert terms["pathways"] == ["oxidative stress"]
+    assert terms["methods"] == ["single-cell RNA-seq"]
+
+
 @pytest.mark.asyncio
 async def test_direction_triage_uses_llm_and_not_hardcoded_example_terms(monkeypatch):
     agent = _make_literature_agent()

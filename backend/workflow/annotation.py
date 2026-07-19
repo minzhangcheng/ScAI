@@ -636,16 +636,16 @@ class AnnotationMixin:
         }
 
     def _validation_limits(self):
-        """(max_iterations, timeout_seconds) from config; defaults 5 / 180.
+        """(max_iterations, timeout_seconds) from config; defaults 5 / 600.
         Clamped defensively (iter in [1,8], timeout >= 1) so a stray config can't
         make validation time out instantly or loop unboundedly."""
         try:
             from ..config import default_config
             cfg = getattr(self, "config", None) or default_config
             it = int(getattr(cfg, "annotation_validation_max_iterations", 5))
-            to = int(getattr(cfg, "annotation_validation_timeout_seconds", 180))
+            to = int(getattr(cfg, "annotation_validation_timeout_seconds", 600))
         except Exception:
-            return (5, 180)
+            return (5, 600)
         return (max(1, min(it, 8)), max(1, to))
 
     async def _run_annotation_validation_round(

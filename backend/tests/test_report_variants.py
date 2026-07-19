@@ -19,6 +19,20 @@ def test_render_direction_evidence_section_from_lists_with_candidates():
     assert "Literature-Gated Direction Evaluation" in result
 
 
+def test_direction_evidence_renderer_treats_scalar_lists_as_single_items():
+    result = _render_direction_evidence_section_from_lists([{
+        "direction": "Scalar-safe direction",
+        "direction_id": "dir_001",
+        "prerequisite_dependencies": "dir_000",
+        "risk_flags": "batch_confounding",
+    }], [])
+
+    assert "dir_000" in result
+    assert "batch_confounding" in result
+    assert "d, i, r" not in result
+    assert "b, a, t" not in result
+
+
 def _make_integration_state():
     from backend.models.schemas import AnalysisState, RoundResult
     state = AnalysisState(id="test-session", name="Test Project", user_id="test", integration_cycle=1)

@@ -213,13 +213,57 @@ def _is_safe_importlib(code: str) -> bool:
 
 
 def _is_safe_file_write(code: str) -> bool:
-    """Check if file write calls reference known safe path variables."""
-    lines = [
-        l.strip() for l in code.splitlines()
-        if re.search(r'\bopen\s*\(', l) and re.search(r',\s*["\'][wa]', l)
-    ]
-    safe_ref = re.compile(r'_?WORKSPACE_DIR|working_dir|figures|tables|/tmp', re.IGNORECASE)
-    return all(safe_ref.search(l) for l in lines)
+    """Reject static ``open(..., write-mode)`` calls on unsafe *literal* paths.
+
+    Aliased or computed paths are allowed here and re-enforced at runtime by
+    the kernel's ``_sandboxed_open`` write allowlist (``_ALLOWED_WRITE_ROOTS``),
+    which is the authoritative boundary for anything too dynamic to prove
+    statically. Keeping this check a cheap early-reject for obvious-bad
+    literals avoids a parallel path-provenance prover that would have to grow
+    with every new idiom (BinOp/JoinedStr/Call chains, fixpoint alias
+    propagation) to track a boundary the runtime already enforces.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+
+    def _literal_is_safe(value: str) -> bool:
+        normalized = value.replace("\\", "/").lower()
+        return (
+            normalized.startswith("/tmp/scai-")
+            or "/workspace/" in normalized
+            or "/figures/" in normalized
+            or "/tables/" in normalized
+            or "/annotation_validation/" in normalized
+            or normalized.startswith((
+                "figures/", "tables/", "annotation_validation/",
+                "./figures/", "./tables/", "./annotation_validation/",
+            ))
+        )
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != "open" or not node.args:
+            continue
+        mode = None
+        if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
+            mode = node.args[1].value
+        for kw in node.keywords:
+            if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+                mode = kw.value.value
+        if not (isinstance(mode, str) and any(flag in mode for flag in ("w", "a", "x", "+"))):
+            continue
+        path_arg = node.args[0]
+        # Only literal paths can be ruled on statically; everything else is
+        # resolved and gated by _sandboxed_open at execution time.
+        if isinstance(path_arg, ast.Constant) and isinstance(path_arg.value, str):
+            if not _literal_is_safe(path_arg.value):
+                return False
+    return True
 
 
 # Maps pattern description keywords to their safety check functions

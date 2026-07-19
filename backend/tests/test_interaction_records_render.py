@@ -102,8 +102,12 @@ def test_direction_renders_scalar_list_fields_as_single_items():
             "direction": "Cross-direction stress program",
             "supporting_data": "Round 2 and 3 share an NRF2 signal.",
             "artifact_risks": "Single-library composition uncertainty.",
+            "alternative_hypotheses": "A technical stress response.",
+            "contradictory_or_missing_evidence": "No independent cohort.",
             "validation_plan": {
                 "next_analysis": "Residualize the shared score.",
+                "wet_lab_validation": "Perturb the regulator.",
+                "decision_criteria": "The shared score should decrease.",
             },
         }],
         selections=[SelectionEntry(
@@ -116,6 +120,10 @@ def test_direction_renders_scalar_list_fields_as_single_items():
     assert "<li>Round 2 and 3 share an NRF2 signal.</li>" in html
     assert "<li>Single-library composition uncertainty.</li>" in html
     assert "<li>Residualize the shared score.</li>" in html
+    assert "<li>A technical stress response.</li>" in html
+    assert "<li>No independent cohort.</li>" in html
+    assert "<li>Perturb the regulator.</li>" in html
+    assert "<li>The shared score should decrease.</li>" in html
     assert "<li>R</li>" not in html
     assert "<li>S</li>" not in html
 

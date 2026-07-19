@@ -12,7 +12,7 @@ def test_validation_flag_overridable():
 
 def test_validation_timeout_and_iter_defaults():
     cfg = SystemConfig()
-    assert cfg.annotation_validation_timeout_seconds == 180
+    assert cfg.annotation_validation_timeout_seconds == 600
     assert cfg.annotation_validation_max_iterations == 5
 
 

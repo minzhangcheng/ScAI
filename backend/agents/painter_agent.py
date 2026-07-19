@@ -11,13 +11,15 @@ Zhipu, ...) works without provider-specific branching:
   2. Chat completions with modalities=["image", "text"]
   3. DashScope native async task API
 
-On ANY failure (no image parsed, regardless of HTTP status) the cascade moves to
+On ANY protocol-scoped failure (no image parsed, unsupported endpoint, generic
+403 from a gateway, regardless of HTTP status) the cascade moves to
 the next protocol, waiting 1s between protocols. Once every protocol has been tried
 once, the whole cascade is retried, backing off 2s / 4s / 8s / 16s between rounds,
 up to 5 rounds. Each Images API / Chat attempt is bounded by a 60s timeout so a hung
 wrong-protocol call switches quickly (the DashScope native task keeps its own longer
-polling budget). Only auth (401/403) and content-moderation errors are treated as
-fatal and abort the cascade early, since no protocol or retry can recover them.
+polling budget). Only explicit authentication/credential failures and
+content-moderation errors are treated as fatal. A bare 403 is not sufficient:
+gateways commonly authorize chat generation while denying the Images edits route.
 
 The protocol *order* is nudged by base_url so known providers hit their working
 protocol first (DashScope -> native first; OpenRouter -> chat first; everything
@@ -59,15 +61,14 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 3)
 
 
-def _is_client_error(exc: Exception) -> bool:
-    """Check if an exception is a non-retriable client error (4xx)."""
+def _is_response_format_compat_error(exc: Exception) -> bool:
+    """Whether retrying the same endpoint without response_format can help."""
     err = str(exc)
-    # OpenAI/OpenRouter client wraps HTTP status in error messages
-    for code in ("400", "401", "403", "404", "413", "422", "429"):
+    # Only malformed/unsupported-parameter responses justify repeating the
+    # same endpoint. Auth, permission, missing endpoint, size, and rate-limit
+    # errors must return to the protocol cascade instead.
+    for code in ("400", "422"):
         if f"Error code: {code}" in err or f"status_code={code}" in err:
-            # 429 (rate limit) IS retriable, skip it
-            if code == "429":
-                return False
             return True
     return False
 
@@ -75,21 +76,23 @@ def _is_client_error(exc: Exception) -> bool:
 def _is_fatal_image_error(exc: Exception) -> bool:
     """Errors that no protocol switch or retry can recover, so the cascade aborts.
 
-    Only authentication (401/403) and content-moderation failures qualify: they
-    reproduce identically on every protocol and every round, and retrying wastes
-    time and may repeatedly trip content filters (possibly re-billing). Every
-    other error (400/404/422/5xx/timeout/parse) falls through to the next protocol.
+    Only explicit credential/authentication and content-moderation failures
+    qualify. Generic HTTP 403 is protocol-scoped because OpenAI-compatible
+    gateways may deny ``/images/edits`` while allowing chat image generation.
+    Every other error falls through to the next protocol.
     """
     err = str(exc).lower()
-    for code in ("401", "403"):
-        if f"error code: {code}" in err or f"status_code={code}" in err:
-            return True
     for kw in (
         "content_filter", "content policy", "content_policy",
         "safety system", "moderation", "invalid api key", "incorrect api key",
+        "authentication failed", "authentication_error", "unauthorized api key",
     ):
         if kw in err:
             return True
+    if ("error code: 401" in err or "status_code=401" in err) and any(
+        kw in err for kw in ("unauthorized", "authentication", "api key", "credential")
+    ):
+        return True
     return False
 
 
@@ -759,8 +762,10 @@ The graphic abstract should tell the story of the research at a glance, highligh
                 response_format="b64_json",
             )
         except Exception as fmt_err:
-            # Only fall back for client errors (unsupported param); propagate the rest.
-            if not _is_client_error(fmt_err):
+            # Only repeat the same endpoint for an unsupported response_format.
+            # A generic 403/404 must return to the cascade so chat/native
+            # revision protocols still get a chance.
+            if not _is_response_format_compat_error(fmt_err):
                 raise
             logger.info(
                 f"[{self.session_id}][Painter] Images edits with b64_json failed ({fmt_err}), "
@@ -812,7 +817,7 @@ The graphic abstract should tell the story of the research at a glance, highligh
             except Exception as b64_err:
                 # Only fall back for client errors (400/422 = unsupported param);
                 # propagate transient/auth errors immediately
-                if not _is_client_error(b64_err):
+                if not _is_response_format_compat_error(b64_err):
                     raise
                 logger.info(
                     f"[{self.session_id}][Painter] Images API with b64_json failed ({b64_err}), "

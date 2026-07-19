@@ -13,6 +13,7 @@ from backend.utils.report_html import (
 from backend.utils.image_utils import compress_image_to_base64, categorize_figures
 from backend.config import get_session_dir, get_session_reports
 from backend.utils.blob_store import inline_blobs
+from backend.utils.formatting import as_list
 from backend.services.report.score_section import build_score_definitions_section_html
 from backend.models.schemas import AnalysisState
 
@@ -127,12 +128,12 @@ def _render_direction_evidence_section_from_lists(
         species_label = _SPECIES_TISSUE_LABELS.get(species_tissue, "")
         species_display = f"{html_module.escape(species_tissue)} ({html_module.escape(species_label)})" if species_label else (html_module.escape(species_tissue) if species_tissue else "")
 
-        prereqs = c.get("prerequisite_dependencies", [])
+        prereqs = as_list(c.get("prerequisite_dependencies"))
         prereq_html = ""
         if prereqs:
             prereq_html = "<li><strong>Prerequisite Dependencies:</strong> " + ", ".join(html_module.escape(str(p)) for p in prereqs) + "</li>"
 
-        risk_flags = c.get("risk_flags", [])
+        risk_flags = as_list(c.get("risk_flags"))
         risk_html = ""
         if risk_flags:
             risk_html = "<li><strong>Risk Flags:</strong> " + ", ".join(html_module.escape(str(r)) for r in risk_flags) + "</li>"

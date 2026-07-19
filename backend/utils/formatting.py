@@ -16,6 +16,17 @@ except ImportError:
     _JSON_REPAIR_AVAILABLE = False
 
 
+def as_list(value: Any) -> List[Any]:
+    """Return an independent list for scalar or unstable LLM-produced values."""
+    if value is None or (isinstance(value, str) and value == ""):
+        return []
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, (tuple, set)):
+        return list(value)
+    return [value]
+
+
 def fmt_tokens(n: int) -> str:
     """Format token count with K/M suffix."""
     if n >= 1_000_000:
