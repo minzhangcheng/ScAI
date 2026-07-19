@@ -1,0 +1,4 @@
+# Some legacy scientific sdists still import pkg_resources from setup.py.
+# setuptools 82 removed pkg_resources, so their isolated build environment
+# must remain on the final compatible setuptools release series.
+setuptools<82

@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.34.3 · **Last updated**: 2026-07-15
+**Version**: 0.34.4 · **Last updated**: 2026-07-15
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,10 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.33.x–0.34.x — (2026-07-15)**
+
+- `0.34.4` — pip build-constraint support for PEP 517 build isolation, setuptools compatibility pin; version bump (2026-07-15):
+  - **pip build-constraint support (`docker-entrypoint.sh`, `start.sh`)**: Both Docker and `start.sh` now probe pip for `--build-constraint` support (pip ≥25.3) and apply `build-constraints.txt` inside isolated PEP 517 build environments. Older pip versions use the `PIP_CONSTRAINT` env var instead. `docker-entrypoint.sh` additionally respects `$PIP_INDEX_URL` for custom package indexes. All ``PIP_CONSTRAINT`` / ``--build-constraint`` references are driven by an opt-in `build-constraints.txt` that users create only when they need it, keeping the default install path unchanged.
+  - **setuptools compatibility pin (`requirements.txt`)**: Added `setuptools<82` to prevent legacy scientific packages (e.g. numba, llvmlite, scipy ecosystem) that use `pkg_resources` from breaking under setuptools ≥82 where `pkg_resources` is no longer bundled.
 
 - `0.34.3` — Bioinformatics resource preflight, publication-figure wrapper unification, plt baseline restore, direction candidate normalization v2, Painter 403 protocol-scoped, pin scientific stack, annotation validation single-copy; version bump (2026-07-15):
   - **Bioinformatics resource preflight (`backend/agents/bioinformatics_agent.py`)**: AST-based detection of scvelo velocity (`scv.tl.velocity`/`velocity_graph`) and CellRank calls. `_build_resource_guard_preamble()` generates kernel-side memory measurement code that computes AnnData matrix bytes (X/layers/obsp/varp/obsm/varm, including sparse parts), reads `/proc/meminfo` and cgroup limits, and raises `MemoryError` with actionable guidance when the estimated budget exceeds 70% of available headroom. Prevents silent OOM-killed kernel during velocity/fate analysis on large datasets.

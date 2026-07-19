@@ -58,10 +58,25 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 
 echo "Installing/updating Python dependencies..."
+PIP_CMD=("$VENV_DIR/bin/python" -m pip)
+# Python 3.11's ensurepip currently seeds pip 24.0, whose resolver can exhaust
+# its 200,000-round limit on this scientific dependency graph. Upgrade before
+# resolving requirements; pip still honors PIP_INDEX_URL for this bootstrap.
+"${PIP_CMD[@]}" install -q --upgrade "pip>=25.3,<27"
+PIP_ARGS=(install -q -r "$APP_DIR/requirements.txt")
 if [ -n "$PIP_INDEX_URL" ]; then
-    "$VENV_DIR/bin/pip" install -q -r "$APP_DIR/requirements.txt" -i "$PIP_INDEX_URL"
+    PIP_ARGS+=(-i "$PIP_INDEX_URL")
+fi
+
+# pip 25.3+ has a dedicated build-constraint option. Older pip versions also
+# apply PIP_CONSTRAINT inside isolated PEP 517 build environments, so retain
+# that compatibility path for persisted /dep virtual environments.
+if "${PIP_CMD[@]}" install --help 2>/dev/null | grep -q -- '--build-constraint'; then
+    "${PIP_CMD[@]}" "${PIP_ARGS[@]}" \
+        --build-constraint "$APP_DIR/build-constraints.txt"
 else
-    "$VENV_DIR/bin/pip" install -q -r "$APP_DIR/requirements.txt"
+    PIP_CONSTRAINT="$APP_DIR/build-constraints.txt" \
+        "${PIP_CMD[@]}" "${PIP_ARGS[@]}"
 fi
 
 # ── Node.js dependencies ─────────────────────────────────────────

@@ -114,7 +114,18 @@ source "$VENV_DIR/bin/activate"
 
 # Install backend dependencies
 echo "Installing backend dependencies..."
-pip install -q -r "$SCRIPT_DIR/requirements.txt"
+PIP_CMD=("$VENV_DIR/bin/python" -m pip)
+# Upgrade the ensurepip-provided resolver before processing the large
+# scientific dependency graph. pip 24.0 can fail with ResolutionTooDeep.
+"${PIP_CMD[@]}" install -q --upgrade "pip>=25.3,<27"
+PIP_ARGS=(install -q -r "$SCRIPT_DIR/requirements.txt")
+if "${PIP_CMD[@]}" install --help 2>/dev/null | grep -q -- '--build-constraint'; then
+    "${PIP_CMD[@]}" "${PIP_ARGS[@]}" \
+        --build-constraint "$SCRIPT_DIR/build-constraints.txt"
+else
+    PIP_CONSTRAINT="$SCRIPT_DIR/build-constraints.txt" \
+        "${PIP_CMD[@]}" "${PIP_ARGS[@]}"
+fi
 
 # Setup frontend dependencies (must be done BEFORE building)
 # Create symlink for node_modules in frontend directory pointing to shared location

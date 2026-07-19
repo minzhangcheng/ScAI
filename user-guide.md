@@ -82,6 +82,30 @@ To build the image yourself:
 docker build -t ghcr.io/minzhangcheng/scai:latest .
 ```
 
+**Docker environment variables** — pass with `-e`. Data always lives at the `/data` volume (`SCAI_DATA_DIR` is fixed by the entrypoint).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCAI_MODE` | `prod` | Runtime mode (`prod` or `dev`) |
+| `PIP_INDEX_URL` | (unset) | PyPI mirror for `pip install` behind network restrictions |
+| `SCAI_ENABLE_SNAPSHOT_V2` | (disabled) | Enable Snapshot V2 checkpoint system (`1`/`true`/`yes`) |
+| `SCAI_ENABLE_REPRODUCIBILITY` | (disabled) | Enable reproducibility bundle generation (`1`/`true`/`yes`) |
+| `SCAI_JWT_SECRET` | auto-generated | JWT signing secret; set explicitly for multi-instance deployments |
+| `SCAI_CONFIG_SECRET` | auto-generated | Encryption key for user LLM config secrets |
+
+Example with PyPI mirror and Snapshot V2 enabled:
+```bash
+docker run -d --name scai \
+  -p 3000:3000 \
+  -v ./scai-dep:/dep \
+  -v ./scai-data:/data \
+  -e PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+  -e SCAI_ENABLE_SNAPSHOT_V2=true \
+  ghcr.io/minzhangcheng/scai:latest
+```
+
+> Full environment variable reference (including frontend build vars): [README.md](README.md#environment-variables).
+
 ### Method B — Startup Script
 
 Suitable for users with Python and Node.js development environments.
@@ -106,6 +130,22 @@ Custom host and port:
 The script automatically creates a virtual environment, installs dependencies, and starts the backend (FastAPI) and frontend (React). Use `./stop.sh` to stop services.
 
 **Environment Requirements**: Python 3.11+ and Node.js LTS.
+
+**`start.sh` environment variables**:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCAI_DATA_DIR` | `../data` (relative to `backend/`) | Root directory for session data, uploads, logs |
+| `SCAI_ENABLE_SNAPSHOT_V2` | (disabled) | Enable Snapshot V2 checkpoint system (`true`) |
+| `SCAI_ENABLE_REPRODUCIBILITY` | (disabled) | Enable reproducibility bundle generation (`true`) |
+| `SCAI_JWT_SECRET` | auto-generated | JWT signing secret; set explicitly for multi-instance deployments |
+| `SCAI_CONFIG_SECRET` | auto-generated | Encryption key for user LLM config; set explicitly for multi-instance deployments |
+| `SCAI_AUTO_FETCH_MARKERS` | `0` | Auto-fetch marker gene databases on first startup (`1` to enable) |
+
+Example:
+```bash
+SCAI_ENABLE_SNAPSHOT_V2=true SCAI_DATA_DIR=/custom/data ./start.sh
+```
 
 ---
 

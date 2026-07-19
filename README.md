@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for multi-omics biomedical research. It integrates single-cell sequencing (scRNA-seq / snRNA-seq), bulk RNA-seq, pathology image analysis (H&E / IHC), and biochemical indicators into a unified, iterative workflow. Powered by specialized agents and a **human-in-the-loop** design, ScAI is **provider-agnostic**: any OpenAI-compatible endpoint works, with per-agent routing so you can mix flagship and open-source models to balance quality and cost. Verified endpoints include cloud aggregators (OpenRouter, n1n.ai), direct provider APIs (DeepSeek, Moonshot, Zhipu, MiniMax, Aliyun/Qwen), Google Gemini (for Deep Research literature mode), and **locally deployed open-source models via Ollama**.
 
-**Version**: 0.34.3 · **License**: Apache 2.0
+**Version**: 0.34.4 · **License**: Apache 2.0
 
 ## Quick Start
 
@@ -21,6 +21,18 @@ docker run -d --name scai \
 
 Open **http://localhost:3000**. View logs with `docker logs -f scai`.
 
+Common Docker environment flags (pass with `-e`):
+
+```bash
+docker run -d --name scai \
+  -p 3000:3000 \
+  -v ./scai-dep:/dep \
+  -v ./scai-data:/data \
+  -e PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+  -e SCAI_ENABLE_SNAPSHOT_V2=true \
+  ghcr.io/minzhangcheng/scai:latest
+```
+
 To build locally: `docker build -t ghcr.io/minzhangcheng/scai:latest .`
 
 ### Option B — Startup script
@@ -37,15 +49,38 @@ Customize host/ports:
 ./start.sh --host 0.0.0.0 --port 3000 --backport 8000
 ```
 
-| Option       | Description      | Default     |
-|--------------|------------------|-------------|
-| `--host`     | Listen address   | `127.0.0.1` |
-| `--port`     | Frontend port    | `3000`      |
-| `--backport` | Backend port     | `8000`      |
+| Option       | Description                | Default     |
+|--------------|----------------------------|-------------|
+| `--host`     | Listen address             | `127.0.0.1` |
+| `--port`     | Frontend port              | `3000`      |
+| `--backport` | Backend port               | `8000`      |
 
 The script creates a virtual environment, installs dependencies, and starts both backend and frontend. Stop with `./stop.sh`.
 
-> First-run configuration (API keys, PubMed email, optional proxy) is performed in the UI. See the [User Guide](user-guide.md) for full details.
+Common script environment variables:
+
+```bash
+SCAI_ENABLE_SNAPSHOT_V2=true SCAI_DATA_DIR=/custom/data ./start.sh
+```
+
+> Full environment variable reference is below. First-run configuration (API keys, PubMed email, optional proxy) is performed in the UI. See the [User Guide](user-guide.md) for full details.
+
+## Environment Variables
+
+| Variable | Default | Applies to | Purpose |
+|----------|---------|------------|---------|
+| `SCAI_DATA_DIR` | `../data` (relative to backend) | `start.sh` / backend | Root for session data, uploads, logs. Docker always uses `/data` (volume-mounted). |
+| `SCAI_JWT_SECRET` | auto-generated | Docker / `start.sh` | JWT signing secret; set explicitly for multi-instance deployments |
+| `SCAI_CONFIG_SECRET` | auto-generated | Docker / `start.sh` | Encryption key for per-user LLM config secrets in SQLite |
+| `SCAI_ENABLE_REPRODUCIBILITY` | disabled | Docker / `start.sh` | Enable reproducibility bundle generation (`1`/`true`/`yes`) |
+| `SCAI_ENABLE_SNAPSHOT_V2` | disabled | Docker / `start.sh` | Enable Snapshot V2 checkpoint system (`1`/`true`/`yes`) |
+| `SCAI_MODE` | `prod` | Docker only | Runtime mode: `prod` or `dev` |
+| `PIP_INDEX_URL` | unset | Docker only | Custom PyPI mirror for `pip install` (e.g. `https://mirrors.aliyun.com/pypi/simple/`) |
+| `SCAI_AUTO_FETCH_MARKERS` | `0` | `start.sh` only | Auto-fetch marker gene databases on first startup (`1` to enable) |
+| `VITE_API_BASE_URL` | `/api` | Frontend build | API base URL override (Vite build-time) |
+| `VITE_WS_BASE_URL` | `ws://localhost:8000/ws` | Frontend build | WebSocket URL override (Vite build-time) |
+
+> `SCAI_HOST` and `SCAI_BACKPORT` are internal variables set automatically by the startup scripts for the Vite proxy; manual setting is generally unnecessary.
 
 ## Core Features
 

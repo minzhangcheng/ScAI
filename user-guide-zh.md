@@ -79,6 +79,30 @@ docker run -d --name scai \
 docker build -t ghcr.io/minzhangcheng/scai:latest .
 ```
 
+**Docker 环境变量** — 通过 `-e` 传入。数据固定落在 `/data` 卷（entrypoint 会设置 `SCAI_DATA_DIR`，一般无需手动改）。
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `SCAI_MODE` | `prod` | 运行模式（`prod` 生产 / `dev` 开发） |
+| `PIP_INDEX_URL` | （未设置） | PyPI 镜像源，用于受限网络环境的 pip 安装 |
+| `SCAI_ENABLE_SNAPSHOT_V2` | （关闭） | 启用 Snapshot V2 检查点系统（`1`/`true`/`yes`） |
+| `SCAI_ENABLE_REPRODUCIBILITY` | （关闭） | 启用可复现性包生成（`1`/`true`/`yes`） |
+| `SCAI_JWT_SECRET` | 自动生成 | JWT 签名密钥；多实例部署需显式设置 |
+| `SCAI_CONFIG_SECRET` | 自动生成 | 用户 LLM 配置加密密钥 |
+
+示例：启用 PyPI 镜像和 Snapshot V2：
+```bash
+docker run -d --name scai \
+  -p 3000:3000 \
+  -v ./scai-dep:/dep \
+  -v ./scai-data:/data \
+  -e PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+  -e SCAI_ENABLE_SNAPSHOT_V2=true \
+  ghcr.io/minzhangcheng/scai:latest
+```
+
+> 完整环境变量参考（含前端构建变量）：[README.md](README.md#environment-variables)。
+
 ### 方式 B — 启动脚本
 
 适用于有 Python 和 Node.js 开发环境的用户。
@@ -103,6 +127,22 @@ cd scai
 脚本会自动创建虚拟环境、安装依赖、启动后端（FastAPI）和前端（React）。停止服务使用 `./stop.sh`。
 
 **环境要求**：Python 3.11+ 和 Node.js LTS。
+
+**`start.sh` 环境变量**：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `SCAI_DATA_DIR` | `../data`（相对 `backend/`） | 所有会话数据、上传文件、日志的根目录 |
+| `SCAI_ENABLE_SNAPSHOT_V2` | （关闭） | 启用 Snapshot V2 检查点系统（`true`） |
+| `SCAI_ENABLE_REPRODUCIBILITY` | （关闭） | 启用可复现性包生成（`true`） |
+| `SCAI_JWT_SECRET` | 自动生成 | JWT 签名密钥，多实例部署需显式设置 |
+| `SCAI_CONFIG_SECRET` | 自动生成 | 用户 LLM 配置加密密钥，多实例部署需显式设置 |
+| `SCAI_AUTO_FETCH_MARKERS` | `0` | 首次启动时自动下载 Marker 基因数据库（`1` 启用） |
+
+示例：
+```bash
+SCAI_ENABLE_SNAPSHOT_V2=true SCAI_DATA_DIR=/custom/data ./start.sh
+```
 
 ---
 
