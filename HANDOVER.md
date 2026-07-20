@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.34.4 · **Last updated**: 2026-07-15
+**Version**: 0.34.5 · **Last updated**: 2026-07-15
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,15 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.33.x–0.34.x — (2026-07-15)**
+
+- `0.34.5` — Pathology tile validation & HITL safety, unified direction selection history across all report paths, round completion status for stop-and-summarize, LLM logger single-write fix; version bump (2026-07-15):
+  - **Pathology tile validation (`backend/agents/pathology_agent.py`)**: New `_validate_tile_batch()` validates model-produced tile findings at the batch level: enforces correct count, non-empty findings (>12 chars), rejects placeholders and generic responses. Up to 2 validation attempts per batch with corrective feedback. `tile_validation` metadata (status, coverage ratio, invalid batches) attached to every image result. `_summarize_status()` now returns "partial" when any image has error/skipped/partial status. Synthesis and overview use `chat_without_history` to avoid polluting message history.
+  - **Pathology skip/terminate propagation (`backend/agents/pathology_agent.py`)**: `_ImageSkipRequested` and `WorkflowTerminatedError` now cross the generic exception boundary in `_analyze_image` and `targeted_analysis` instead of being swallowed as per-image errors. Targeted analysis records skip with explicit `status: "skipped"` and no `error` field.
+  - **Unified direction selection history (`backend/services/report/interaction_records.py`)**: New `build_direction_selection_history()` iterates all `DirectionSelectionRecord` entries (pi_decide→PI-selected, select→User-selected, skips open/finalize), falls back to legacy `user_chosen_directions`. New `render_direction_selection_history_html()` renders a 4-column table (Selection Event, Decision Mode, Direction, Notes) reused across all report paths.
+  - **All report paths use shared direction history (`backend/services/report/sections.py`, `backend/services/report/generator.py`, `backend/services/report/regenerator.py`, `backend/agents/supervisor_agent.py`)**: Supervisor, detailed report generator, regenerator, and section builder all use the shared `build_direction_selection_history()` / `render_direction_selection_history_html()` instead of inline `user_chosen_directions` processing.
+  - **Round completion status for stop-and-summarize (`backend/workflow/synthesis.py`)**: `_statuses_for_keys()` accepts `missing_status` parameter; absent core agent result keys return "not_run". `derive_round_completion_status` uses `missing_status="not_run"` for core agents — missing results → partial (if evidence exists) or skipped. `_summarize_agent_results` treats absent keys as `{"status": "not_run", "findings": []}`.
+  - **LLM logger single-write fix (`backend/utils/llm_client.py`)**: `_emit_log_response()` now calls async logger exclusively when available, falling back to sync only when async is missing. Fixes double-write where both `log_response` and `log_response_async` logged simultaneously.
+  - **New tests**: `test_pathology_llm_failure_hitl.py` (skip/terminate through `_analyze_image`), `test_pathology_targeted_hitl.py` (skip recording, terminate propagation), `test_pathology_soft_failure_status.py` (partial status semantics, tile coverage partial), `test_interaction_records_render.py` (direction history all records + legacy fallback), `test_supervisor_report_shared.py` (complete direction history in appendix), `test_regenerator_appendix.py` (enriched direction history), `test_round_completion_status.py` (missing core → partial/skipped), `test_llm_logger_emit.py` (sync-only fallback, daily+session write count). Extended: `test_llm_logger_async.py` (monkeypatch for session dir).
 
 - `0.34.4` — pip build-constraint support for PEP 517 build isolation, setuptools compatibility pin; version bump (2026-07-15):
   - **pip build-constraint support (`docker-entrypoint.sh`, `start.sh`)**: Both Docker and `start.sh` now probe pip for `--build-constraint` support (pip ≥25.3) and apply `build-constraints.txt` inside isolated PEP 517 build environments. Older pip versions use the `PIP_CONSTRAINT` env var instead. `docker-entrypoint.sh` additionally respects `$PIP_INDEX_URL` for custom package indexes. All ``PIP_CONSTRAINT`` / ``--build-constraint`` references are driven by an opt-in `build-constraints.txt` that users create only when they need it, keeping the default install path unchanged.

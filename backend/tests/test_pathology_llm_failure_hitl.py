@@ -123,7 +123,7 @@ async def test_process_skips_one_image_and_continues(monkeypatch):
     state = type("S", (), {"get_files_by_section": lambda self, s: imgs})()
     result = await agent.process(state, "analyze", images=imgs)
 
-    assert result["status"] == "completed"
+    assert result["status"] == "partial"
     assert result["findings"] == ["finding-b.tif"]  # b survived, a skipped
     skipped = [r for r in result["detailed_results"] if r.get("skipped")]
     assert len(skipped) == 1 and skipped[0]["image_id"] == "a.tif"
@@ -146,3 +146,50 @@ async def test_process_propagates_terminate(monkeypatch):
     state = type("S", (), {"get_files_by_section": lambda self, s: imgs})()
     with pytest.raises(WorkflowTerminatedError):
         await agent.process(state, "analyze", images=imgs)
+
+
+def _patch_analyze_image_setup(monkeypatch, agent):
+    agent.tile_size = 224
+    agent.max_tiles = 1
+    monkeypatch.setattr(agent, "refresh_runtime_config_if_needed", lambda: None)
+    monkeypatch.setattr(agent, "_set_llm_context", lambda: None)
+    monkeypatch.setattr(mod.os.path, "exists", lambda path: True)
+    monkeypatch.setattr(mod, "load_image", lambda path: object())
+    monkeypatch.setattr(mod, "process_pathology_image", lambda *a, **k: ["tile"])
+    monkeypatch.setattr(mod, "create_overview_image", lambda image: "overview")
+
+    class FakeImg:
+        id = "img-1"
+        filename = "img-1.tif"
+        file_path = "/fake/img-1.tif"
+        data_type = "H&E"
+
+    return FakeImg()
+
+
+@pytest.mark.asyncio
+async def test_analyze_image_does_not_swallow_skip_sentinel(monkeypatch):
+    """Exercise the real broad exception boundary inside _analyze_image."""
+    agent = _bare_agent()
+    image = _patch_analyze_image_setup(monkeypatch, agent)
+
+    async def raise_skip(*args, **kwargs):
+        raise _ImageSkipRequested(image.filename, last_error=_make_error())
+
+    monkeypatch.setattr(agent, "_call_llm_with_hitl", raise_skip)
+    with pytest.raises(_ImageSkipRequested):
+        await agent._analyze_image(image, "analyze")
+
+
+@pytest.mark.asyncio
+async def test_analyze_image_does_not_swallow_terminate(monkeypatch):
+    """TERMINATE must cross _analyze_image and reach the workflow boundary."""
+    agent = _bare_agent()
+    image = _patch_analyze_image_setup(monkeypatch, agent)
+
+    async def raise_terminate(*args, **kwargs):
+        raise WorkflowTerminatedError("user terminated")
+
+    monkeypatch.setattr(agent, "_call_llm_with_hitl", raise_terminate)
+    with pytest.raises(WorkflowTerminatedError):
+        await agent._analyze_image(image, "analyze")

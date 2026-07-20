@@ -21,6 +21,7 @@ from backend.utils.image_utils import compress_image_to_base64, categorize_figur
 from backend.utils.report_html import HTML_TEMPLATE, markdown_to_html, render_report_html
 from backend.services.report.score_section import build_score_definitions_section_html, write_score_definitions_csv
 from backend.services.report.literature_files import render_literature_download_li
+from backend.services.report.interaction_records import render_direction_selection_history_html
 from backend.config import get_session_logs, get_session_workspace
 from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
 
@@ -483,17 +484,7 @@ def _build_appendix_from_report(report: dict, language: str, session_id: Optiona
             """
 
         if dir_selections:
-            dir_title = "Research Direction Selections"
-            dir_rows = ""
-            for d in dir_selections:
-                dir_rows += f"<tr><td>{esc(d.get('direction', '-'))}</td><td>{esc(d.get('notes', '-') or '-')}</td></tr>\n"
-            interaction_html += f"""
-            <h4>{dir_title}</h4>
-            <table>
-                <thead><tr><th>Direction</th><th>User Notes</th></tr></thead>
-                <tbody>{dir_rows}</tbody>
-            </table>
-            """
+            interaction_html += render_direction_selection_history_html(dir_selections)
 
     # 7. Related Reports & Downloads
     from .download_section import render_related_reports_downloads_html

@@ -4,6 +4,10 @@ import json
 
 from backend.config import get_session_workspace
 from backend.services.report.literature_files import render_literature_download_li
+from backend.services.report.interaction_records import (
+    build_direction_selection_history,
+    render_direction_selection_history_html,
+)
 from backend.services.reproducibility import KEY_PACKAGES, REPRODUCIBILITY_DIR_NAME
 from typing import Dict, Any, List, Optional
 
@@ -475,21 +479,9 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             </table>
             """
 
-        direction_items = ""
-        if state.user_chosen_directions:
-            dir_title = "Research Direction Selections"
-            lbl_dir = "Direction"
-            lbl_notes = "User Notes"
-            dir_rows = ""
-            for d in state.user_chosen_directions:
-                dir_rows += f"<tr><td>{esc(d.get('direction', '-'))}</td><td>{esc(d.get('notes', '-') or '-')}</td></tr>\n"
-            direction_items = f"""
-            <h4>{dir_title}</h4>
-            <table>
-                <thead><tr><th>{lbl_dir}</th><th>{lbl_notes}</th></tr></thead>
-                <tbody>{dir_rows}</tbody>
-            </table>
-            """
+        direction_items = render_direction_selection_history_html(
+            build_direction_selection_history(state)
+        )
 
         if annotation_items or direction_items:
             interaction_title = "User Interaction History"

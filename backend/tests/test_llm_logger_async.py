@@ -20,6 +20,16 @@ sample_interaction = LLMInteraction(
 async def test_log_interaction_is_awaitable_and_serialized(tmp_path, monkeypatch):
     from backend.utils import llm_logger as llm_logger_module
     monkeypatch.setattr(llm_logger_module, "LLM_LOG_DIR", tmp_path)
+    monkeypatch.setattr(
+        llm_logger_module,
+        "get_session_logs",
+        lambda session_id: tmp_path / "sessions" / session_id,
+    )
+
+    async def inline_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(llm_logger_module.asyncio, "to_thread", inline_to_thread)
     await llm_logger_module.llm_logger.log_interaction_async(sample_interaction)
     files = list(tmp_path.glob("*.jsonl"))
     assert files

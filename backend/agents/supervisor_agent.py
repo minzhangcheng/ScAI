@@ -1865,13 +1865,8 @@ Report generation model call failed due to API connection error. Please refer to
                     "confidence": ca.confidence,
                 })
 
-        direction_selection_data = []
-        if state.user_chosen_directions:
-            for d in state.user_chosen_directions:
-                direction_selection_data.append({
-                    "direction": d.get("direction", ""),
-                    "notes": d.get("notes", ""),
-                })
+        from ..services.report.interaction_records import build_direction_selection_history
+        direction_selection_data = build_direction_selection_history(state)
 
         agent_names = ("pi", "bioinformatics", "pathology", "biochemistry",
                        "literature", "painter", "supervisor")
@@ -2512,18 +2507,10 @@ Report generation model call failed due to API connection error. Please refer to
                 parts.append('</tbody></table>')
 
             if dir_selections:
-                parts.append('<h4>Research Direction Selections</h4>')
-                parts.append('<table>')
-                parts.append('<thead><tr>'
-                             '<th>Direction</th>'
-                             '<th>User Notes</th>'
-                             '</tr></thead><tbody>')
-                for d in dir_selections:
-                    parts.append(
-                        f'<tr><td>{esc(d.get("direction", "-"))}</td>'
-                        f'<td>{esc(d.get("notes", "-") or "-")}</td></tr>'
-                    )
-                parts.append('</tbody></table>')
+                from ..services.report.interaction_records import (
+                    render_direction_selection_history_html,
+                )
+                parts.append(render_direction_selection_history_html(dir_selections))
 
         # Related Reports & Downloads
         from ..services.report.download_section import render_related_reports_downloads_html

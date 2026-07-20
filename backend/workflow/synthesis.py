@@ -79,6 +79,7 @@ FAILED_AGENT_STATUSES = frozenset({
 
 SKIPPED_AGENT_STATUSES = frozenset({
     "skipped",
+    "not_run",
 })
 
 PARTIAL_AGENT_STATUSES = frozenset({
@@ -110,12 +111,20 @@ def _agent_result_status(result: Any) -> str:
     return str(result.get("status") or "").strip().lower()
 
 
-def _statuses_for_keys(state: Dict[str, Any], keys: tuple[str, ...]) -> list[str]:
-    return [
-        _agent_result_status(state.get(key))
-        for key in keys
-        if isinstance(state.get(key), dict)
-    ]
+def _statuses_for_keys(
+    state: Dict[str, Any],
+    keys: tuple[str, ...],
+    *,
+    missing_status: str = "",
+) -> list[str]:
+    statuses = []
+    for key in keys:
+        result = state.get(key)
+        if isinstance(result, dict) and result:
+            statuses.append(_agent_result_status(result))
+        elif missing_status:
+            statuses.append(missing_status)
+    return statuses
 
 
 def derive_round_completion_status(state: Dict[str, Any], result: RoundResult) -> RoundResult:
@@ -134,7 +143,15 @@ def derive_round_completion_status(state: Dict[str, Any], result: RoundResult) -
         result.evidence_status = "substantive" if has_evidence else "failed"
         return result
 
-    core_statuses = _statuses_for_keys(state, CORE_ROUND_AGENT_RESULT_KEYS)
+    # Core agents are required for a completed research round. During
+    # stop-and-summarize, the graph snapshot legitimately lacks results for
+    # agents that had not run yet; absence is therefore an explicit not_run,
+    # never evidence that the round completed successfully.
+    core_statuses = _statuses_for_keys(
+        state,
+        CORE_ROUND_AGENT_RESULT_KEYS,
+        missing_status="not_run",
+    )
     optional_statuses = _statuses_for_keys(state, OPTIONAL_ROUND_AGENT_RESULT_KEYS)
 
     has_core_failed = any(status in FAILED_AGENT_STATUSES for status in core_statuses)
@@ -468,13 +485,18 @@ class SynthesisMixin:
             ("bioinformatics", "bioinformatics_result"),
             ("literature", "literature_result"),
         ]:
-            result = state.get(result_key, {}) or {}
+            raw_result = state.get(result_key)
+            result = raw_result if isinstance(raw_result, dict) else {}
             findings = result.get("findings", [])
             error = result.get("error")
             status = result.get("status")
 
             # Build result string with error/status context so PI knows what happened
-            if error:
+            if not result:
+                agent_results[agent_name] = json.dumps(
+                    {"status": "not_run", "findings": []}, ensure_ascii=False
+                )
+            elif error:
                 agent_results[agent_name] = json.dumps(
                     {"error": error, "findings": findings}, ensure_ascii=False
                 )

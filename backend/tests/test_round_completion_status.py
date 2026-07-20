@@ -150,3 +150,41 @@ def test_optional_failed_agent_marks_partial_not_completed():
     assert result.round_status == "partial"
     assert result.evidence_status == "substantive"
     assert completed_innovation_direction_keys(state) == set()
+
+
+def test_missing_core_results_mark_stopped_round_partial():
+    """Stop-and-summarize may have optional evidence before core agents run."""
+    result = RoundResult(
+        round_number=7,
+        phase="innovation",
+        direction="A",
+        pi_summary="summary from available evidence",
+        biochemistry_findings=["available finding"],
+    )
+    derive_round_completion_status(
+        {
+            "biochemistry_result": {
+                "status": "completed",
+                "findings": ["available finding"],
+            },
+            "bioinformatics_result": None,
+            "literature_result": None,
+        },
+        result,
+    )
+
+    assert result.round_status == "partial"
+    assert result.evidence_status == "substantive"
+
+
+def test_missing_core_results_without_evidence_mark_round_skipped():
+    result = RoundResult(
+        round_number=7,
+        phase="innovation",
+        direction="A",
+        pi_summary="No analysis completed",
+    )
+    derive_round_completion_status({}, result)
+
+    assert result.round_status == "skipped"
+    assert result.evidence_status == "failed"

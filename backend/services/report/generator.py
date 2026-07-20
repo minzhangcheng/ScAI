@@ -40,7 +40,10 @@ from .pi_review import PIReviewMixin
 from .planning import PlanningMixin
 from .sections import SectionsMixin
 from backend.services.report.lineage import build_lineage_report_state
-from backend.services.report.interaction_records import write_interaction_record_files
+from backend.services.report.interaction_records import (
+    build_direction_selection_history,
+    write_interaction_record_files,
+)
 from backend.workflow.direction_coverage import normalize_legacy_round_result
 
 logger = logging.getLogger(__name__)
@@ -447,7 +450,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                     }
                     for ca in report_state.annotation_state.cluster_annotations
                 ] if report_state.annotation_state and report_state.annotation_state.cluster_annotations else [],
-                "direction_selection": report_state.user_chosen_directions or [],
+                "direction_selection": build_direction_selection_history(report_state),
             },
             "related_reports": related_reports,
             "notebook_filename": f"{report_state.id}.ipynb",

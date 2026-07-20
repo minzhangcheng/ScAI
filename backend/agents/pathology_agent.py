@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional, Callable, Awaitable
 import json
 import logging
 import os
+import re
 
 from .base import BaseAgent
 from ..constants import LlmFailureAction
@@ -20,14 +21,91 @@ from ..utils.settings_provider import AgentSettingsProvider
 logger = logging.getLogger(__name__)
 
 
+_TILE_FINDING_PLACEHOLDER_RE = re.compile(
+    r"^tile\s*(?:\d+|n)?(?:\s*[:\-])?\s*findings?\s*(?:\.{3}|…)?$",
+    re.IGNORECASE,
+)
+_GENERIC_TILE_FINDINGS = frozenset({
+    "analysis failed",
+    "findings",
+    "n/a",
+    "no findings",
+    "none",
+    "not available",
+    "unknown",
+})
+
+
+def _validate_tile_batch(
+    batch_data: Any,
+    *,
+    start_idx: int,
+    expected_count: int,
+) -> tuple[List[Dict[str, Any]], List[str]]:
+    """Validate one model-produced tile batch and assign canonical indices.
+
+    A batch is atomic: any malformed or placeholder entry invalidates the full
+    batch. Model-provided indices are deliberately ignored because the prompt
+    uses human-facing one-based tile labels while internal indices are zero-based.
+    """
+    errors: List[str] = []
+    if not isinstance(batch_data, dict):
+        return [], ["response must be a JSON object"]
+
+    entries = batch_data.get("tile_findings")
+    if not isinstance(entries, list):
+        return [], ["tile_findings must be an array"]
+    if len(entries) != expected_count:
+        return [], [
+            f"tile_findings count {len(entries)} does not match expected {expected_count}"
+        ]
+
+    normalized: List[Dict[str, Any]] = []
+    for offset, entry in enumerate(entries):
+        label = start_idx + offset + 1
+        if not isinstance(entry, dict):
+            errors.append(f"tile {label} entry must be an object")
+            continue
+        finding = entry.get("findings")
+        if not isinstance(finding, str):
+            errors.append(f"tile {label} findings must be a string")
+            continue
+        finding = finding.strip()
+        folded = finding.casefold().rstrip(".")
+        if not finding:
+            errors.append(f"tile {label} findings are empty")
+        elif len(finding) < 12:
+            errors.append(f"tile {label} findings are too short")
+        elif folded in _GENERIC_TILE_FINDINGS:
+            errors.append(f"tile {label} findings are generic")
+        elif _TILE_FINDING_PLACEHOLDER_RE.fullmatch(finding):
+            errors.append(f"tile {label} findings repeat the schema placeholder")
+        else:
+            normalized.append({
+                **entry,
+                "tile_index": start_idx + offset,
+                "findings": finding,
+            })
+
+    if errors:
+        return [], errors
+    return normalized, []
+
+
 def _summarize_status(detailed_results, all_findings) -> str:
-    """'error' if every image failed (no findings and all carry an error);
-    otherwise 'completed'."""
+    """Summarize image outcomes without hiding degraded modality coverage."""
     if not detailed_results:
         return "error"
     any_success = any(not r.get("error") and r.get("findings") for r in detailed_results)
-    if not any_success and not all_findings:
+    if not any_success:
         return "error"
+    if any(
+        r.get("error")
+        or r.get("skipped")
+        or str(r.get("status") or "").lower() in {"partial", "error", "failed"}
+        for r in detailed_results
+    ):
+        return "partial"
     return "completed"
 
 
@@ -139,11 +217,16 @@ class PathologyAgent(BaseAgent):
                     "findings": []
                 })
         
-        # Synthesize findings if we have results
-        if detailed_results:
+        # Never ask the synthesizer to interpret skipped/failed images. Partial
+        # image results remain eligible because their valid tile subset is useful
+        # and is accompanied by explicit coverage metadata.
+        synthesis_results = [
+            result for result in detailed_results if result.get("findings")
+        ]
+        if synthesis_results:
             try:
                 synthesis = await self._synthesize_findings(
-                    instruction, detailed_results, state
+                    instruction, synthesis_results, state
                 )
             except Exception as e:
                 logger.exception("[PathologyAgent] Failed to synthesize findings")
@@ -317,6 +400,7 @@ Please reply in JSON format:
             
             # Analyze tiles in batches
             tile_findings = []
+            invalid_batches = []
             tiles_to_analyze = tiles[:self.max_tiles]
             num_batches = (len(tiles_to_analyze) + BATCH_SIZE - 1) // BATCH_SIZE
             
@@ -329,7 +413,9 @@ Please reply in JSON format:
                 
                 logger.info(f"[PathologyAgent] Processing batch {batch_idx + 1}/{num_batches} ({len(batch_tiles)} tiles)")
                 
-                # Create batch prompt
+                # Describe the response contract without an example finding. In
+                # production, the former "Tile N findings..." example was echoed
+                # verbatim by the model and silently accepted as evidence.
                 batch_prompt = f"""
 You are analyzing {len(batch_tiles)} regions (tiles {start_idx + 1} to {end_idx}) from a {image_info.data_type} stained tissue section.
 Total tiles in this section: {len(tiles_to_analyze)}
@@ -341,55 +427,107 @@ For EACH tile (in order), identify pathological features based on the tissue typ
 4. Vascular or structural changes
 5. Other abnormalities specific to this tissue type
 
-Reply in JSON format with an array of findings for each tile:
-{{
-    "tile_findings": [
-        {{"tile_index": {start_idx}, "findings": "Tile {start_idx + 1} findings..."}},
-        {{"tile_index": {start_idx + 1}, "findings": "Tile {start_idx + 2} findings..."}},
-        ...
-    ]
-}}
+Return one JSON object with a "tile_findings" array containing EXACTLY {len(batch_tiles)} objects in image order.
+Each object must contain:
+- "tile_index": the zero-based integer index for that tile, beginning at {start_idx}
+- "findings": a concrete, non-empty observation from that tile
 
-Be concise but thorough for each tile.
+Never copy field descriptions, use ellipses, or return placeholders such as "Tile N findings".
+If no abnormality is visible in a tile, use the explicit finding "No abnormality detected."
 """
-                
+
                 # Dynamic timeout: 120s base + 30s per image
                 batch_timeout = 120.0 + 30.0 * len(batch_tiles)
-                batch_result = await self._call_llm_with_hitl(
-                    lambda bt=batch_prompt, imgs=batch_tiles, to=batch_timeout: self.llm_client.chat_with_vision(
-                        model=self.model,
-                        text_prompt=bt,
-                        images=imgs,
-                        temperature=0.3,
-                        request_timeout=to
-                    ),
-                    image_label=image_info.filename,
-                    step_label=f"tile batch {batch_idx + 1}/{num_batches}",
-                )
-                
-                # Parse batch results (handle None)
-                batch_content = batch_result.content if batch_result else ""
-                try:
-                    batch_data = self._safe_parse_json(batch_content, default={"raw_response": batch_content}, agent_label="PathologyAgent")
-                    if "tile_findings" in batch_data:
-                        tile_findings.extend(batch_data["tile_findings"])
-                    else:
-                        # Fallback: treat entire response as one finding
-                        tile_findings.append({
-                            "tile_index": start_idx,
-                            "findings": batch_content or "No findings"
-                        })
-                except Exception as e:
-                    # If parsing fails, log warning and store error info
-                    logger.warning(f"[PathologyAgent] Failed to parse batch {batch_idx} response: {e}")
-                    tile_findings.append({
-                        "tile_index": start_idx,
-                        "findings": batch_content[:500] if batch_content else "Analysis failed",
-                        "parse_error": str(e),
-                        "is_error": True
+                normalized_batch: List[Dict[str, Any]] = []
+                last_validation_errors: List[str] = []
+                for validation_attempt in range(2):
+                    validation_prompt = batch_prompt
+                    if validation_attempt:
+                        validation_prompt += (
+                            "\nYour previous response failed validation: "
+                            + "; ".join(last_validation_errors[:5])
+                            + "\nReturn a corrected batch that follows every constraint exactly."
+                        )
+                    batch_result = await self._call_llm_with_hitl(
+                        lambda bt=validation_prompt, imgs=batch_tiles, to=batch_timeout: self.llm_client.chat_with_vision(
+                            model=self.model,
+                            text_prompt=bt,
+                            images=imgs,
+                            temperature=0.3,
+                            request_timeout=to
+                        ),
+                        image_label=image_info.filename,
+                        step_label=f"tile batch {batch_idx + 1}/{num_batches}",
+                    )
+
+                    batch_content = batch_result.content if batch_result else ""
+                    batch_data = self._safe_parse_json(
+                        batch_content,
+                        default={"raw_response": batch_content},
+                        agent_label="PathologyAgent",
+                    )
+                    normalized_batch, last_validation_errors = _validate_tile_batch(
+                        batch_data,
+                        start_idx=start_idx,
+                        expected_count=len(batch_tiles),
+                    )
+                    if not last_validation_errors:
+                        tile_findings.extend(normalized_batch)
+                        break
+                    logger.warning(
+                        "[PathologyAgent] Invalid tile batch %s/%s (validation attempt %s/2): %s",
+                        batch_idx + 1,
+                        num_batches,
+                        validation_attempt + 1,
+                        "; ".join(last_validation_errors[:5]),
+                    )
+
+                if last_validation_errors:
+                    invalid_batches.append({
+                        "batch_index": batch_idx,
+                        "tile_start": start_idx,
+                        "tile_end": end_idx - 1,
+                        "attempts": 2,
+                        "errors": last_validation_errors,
                     })
             
-            logger.info(f"[PathologyAgent] All batches complete, synthesizing findings...")
+            expected_tiles = len(tiles_to_analyze)
+            valid_tiles = len(tile_findings)
+            coverage_ratio = valid_tiles / expected_tiles if expected_tiles else 0.0
+            tile_validation = {
+                "status": (
+                    "completed" if valid_tiles == expected_tiles
+                    else "partial" if valid_tiles
+                    else "error"
+                ),
+                "expected_tiles": expected_tiles,
+                "valid_tiles": valid_tiles,
+                "coverage_ratio": coverage_ratio,
+                "invalid_batches": invalid_batches,
+            }
+
+            if not tile_findings:
+                logger.error(
+                    "[PathologyAgent] No valid tile batches for image %s after validation retries",
+                    image_info.id,
+                )
+                return {
+                    "image_id": image_info.id,
+                    "image_type": image_info.data_type,
+                    "overview": overview_data,
+                    "tile_count": expected_tiles,
+                    "tile_findings": [],
+                    "tile_validation": tile_validation,
+                    "status": "error",
+                    "error": "No valid tile findings after validation retries",
+                    "findings": [],
+                }
+
+            logger.info(
+                "[PathologyAgent] Tile batches complete: %s/%s valid; synthesizing findings",
+                valid_tiles,
+                expected_tiles,
+            )
             
             # Combine findings
             combined_prompt = f"""
@@ -400,6 +538,9 @@ Based on the following regional analysis results, please summarize the pathologi
 
 ## Regional Analysis
 {json.dumps(tile_findings, ensure_ascii=False, indent=2)}
+
+## Regional Coverage
+{valid_tiles}/{expected_tiles} tiles passed validation. Do not infer findings for omitted tiles.
 
 Please summarize:
 1. Main pathological findings (list format)
@@ -417,7 +558,7 @@ Reply in JSON format:
 """
             
             combined_result = await self._call_llm_with_hitl(
-                lambda: self.chat(combined_prompt, temperature=0.3),
+                lambda: self.chat_without_history(combined_prompt, temperature=0.3),
                 image_label=image_info.filename,
                 step_label="findings synthesis",
             )
@@ -438,14 +579,24 @@ Reply in JSON format:
                 "image_id": image_info.id,
                 "image_type": image_info.data_type,
                 "overview": overview_data,
-                "tile_count": len(tiles),
+                "tile_count": expected_tiles,
+                "tile_findings": tile_findings,
+                "tile_validation": tile_validation,
+                "status": tile_validation["status"],
                 "findings": final_data.get("findings", []),
                 "severity_score": final_data.get("severity_score", 0),
                 "further_analysis": final_data.get("further_analysis", []),
                 "suggested_staining": final_data.get("suggested_staining", [])
             }
             
+        except _ImageSkipRequested:
+            raise
         except Exception as e:
+            # User termination must reach the workflow boundary. This check is
+            # intentionally before the generic per-image error conversion.
+            from ..workflow.helpers import WorkflowTerminatedError
+            if isinstance(e, WorkflowTerminatedError):
+                raise
             import traceback
             error_detail = traceback.format_exc()
             logger.error(f"[PathologyAgent] Failed to analyze image {image_info.id}: {error_detail}")
@@ -504,7 +655,7 @@ Please provide comprehensive analysis and reply in JSON format:
 }}
 """
         
-        response = await self.chat(prompt, temperature=0.3)
+        response = await self.chat_without_history(prompt, temperature=0.3)
         return self._safe_parse_json(response, default={"raw_response": response}, agent_label="PathologyAgent")
     
     async def targeted_analysis(
@@ -576,7 +727,23 @@ Please reply in structured format.
                 "answer": result.content if result and result.content else "Analysis failed to generate a response",
                 "image_id": image_info.id
             }
+        except _ImageSkipRequested as skip:
+            logger.warning(
+                "[PathologyAgent] Targeted analysis for %s skipped by user",
+                image_info.filename,
+            )
+            return {
+                "question": specific_question,
+                "answer": "Targeted pathology analysis skipped by user",
+                "image_id": image_info.id,
+                "status": "skipped",
+                "skipped": True,
+                "last_error": str(skip.last_error) if skip.last_error else "",
+            }
         except Exception as e:
+            from ..workflow.helpers import WorkflowTerminatedError
+            if isinstance(e, WorkflowTerminatedError):
+                raise
             logger.exception("[PathologyAgent] Targeted analysis failed")
             return {
                 "question": specific_question,

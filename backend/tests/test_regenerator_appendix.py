@@ -44,3 +44,29 @@ def test_regenerator_includes_graphic_abstract_and_reproducibility(tmp_path, mon
 
     appendix = _build_appendix_from_report(report, "en", "test-session")
     assert "Reproducibility" in appendix or "Checksum" in appendix
+
+
+def test_regenerator_renders_enriched_direction_history():
+    from backend.services.report.regenerator import _build_appendix_from_report
+
+    report = {
+        "appendix": {
+            "project_name": "Test",
+            "user_interactions": {
+                "direction_selection": [{
+                    "selection_event": "Integration Cycle 2 · integration",
+                    "decision_mode": "PI-selected",
+                    "direction": "Cross-direction mechanism",
+                    "notes": "Strong shared evidence",
+                }],
+            },
+        },
+    }
+
+    html = _build_appendix_from_report(report, "en")
+
+    assert "Research Direction Selections" in html
+    assert "Selection Event" in html
+    assert "Integration Cycle 2" in html
+    assert "PI-selected" in html
+    assert "Cross-direction mechanism" in html

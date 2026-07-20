@@ -7,9 +7,9 @@ from types import SimpleNamespace
 import os
 
 import backend.agents.pathology_agent as mod
-from backend.agents.pathology_agent import PathologyAgent
+from backend.agents.pathology_agent import PathologyAgent, _ImageSkipRequested
 from backend.models.schemas import AgentType, DataFile
-from backend.utils.image_utils import process_pathology_image
+from backend.workflow.helpers import WorkflowTerminatedError
 
 
 def _bare_agent() -> PathologyAgent:
@@ -54,3 +54,49 @@ async def test_targeted_analysis_uses_hitl(monkeypatch):
     )
 
     assert called["hitl"], "_call_llm_with_hitl was never called"
+
+
+def _targeted_image():
+    return DataFile(
+        id="img-1",
+        filename="test.tif",
+        file_path="/fake/test.tif",
+        section="pathology",
+        data_type="H&E",
+    )
+
+
+def _patch_targeted_setup(monkeypatch, agent):
+    monkeypatch.setattr(agent, "_set_llm_context", lambda: None)
+    monkeypatch.setattr(agent, "refresh_runtime_config_if_needed", lambda: None)
+    monkeypatch.setattr(os.path, "exists", lambda path: True)
+    monkeypatch.setattr(mod, "process_pathology_image", lambda *args, **kwargs: ["tile"])
+
+
+@pytest.mark.asyncio
+async def test_targeted_analysis_records_skip_without_generic_error(monkeypatch):
+    agent = _bare_agent()
+    _patch_targeted_setup(monkeypatch, agent)
+
+    async def raise_skip(*args, **kwargs):
+        raise _ImageSkipRequested("test.tif")
+
+    monkeypatch.setattr(agent, "_call_llm_with_hitl", raise_skip)
+    result = await agent.targeted_analysis(_targeted_image(), "question")
+
+    assert result["status"] == "skipped"
+    assert result["skipped"] is True
+    assert "error" not in result
+
+
+@pytest.mark.asyncio
+async def test_targeted_analysis_propagates_terminate(monkeypatch):
+    agent = _bare_agent()
+    _patch_targeted_setup(monkeypatch, agent)
+
+    async def raise_terminate(*args, **kwargs):
+        raise WorkflowTerminatedError("user terminated")
+
+    monkeypatch.setattr(agent, "_call_llm_with_hitl", raise_terminate)
+    with pytest.raises(WorkflowTerminatedError):
+        await agent.targeted_analysis(_targeted_image(), "question")

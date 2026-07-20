@@ -10,7 +10,12 @@ import pytest
 from backend.agents.supervisor_agent import SupervisorAgent
 from backend.config._config import SystemConfig
 from backend.utils.settings_provider import AgentSettingsProvider
-from backend.models.schemas import AnalysisState, ScoreDefinition, LiteratureReport
+from backend.models.schemas import (
+    AnalysisState,
+    DirectionSelectionRecord,
+    LiteratureReport,
+    ScoreDefinition,
+)
 
 
 def _make_supervisor(state):
@@ -72,3 +77,39 @@ def test_appendix_no_literature_link_without_reports():
     sup = _make_supervisor(state)
     appendix = sup._build_appendix(state, stats={})
     assert not appendix.get("literature_report")
+
+
+def test_live_appendix_includes_complete_direction_selection_history():
+    state = AnalysisState(id="s4", name="t", initial_instruction="x", user_id="u1")
+    state.user_chosen_directions = [{"direction": "Last direction", "notes": "last"}]
+    state.direction_selection_records = [
+        DirectionSelectionRecord(
+            round_number=1,
+            phase="exploration",
+            event_type="pi_decide",
+            pi_selected=[
+                {"direction": "First direction", "notes": "first rationale"},
+                {"direction": "Second direction", "notes": "second rationale"},
+            ],
+        ),
+        DirectionSelectionRecord(
+            round_number=4,
+            phase="integration",
+            integration_cycle=1,
+            event_type="pi_decide",
+            pi_selected=[{"direction": "Third direction", "notes": "third rationale"}],
+        ),
+    ]
+    sup = _make_supervisor(state)
+
+    appendix = sup._build_appendix(state, stats={})
+    rows = appendix["user_interactions"]["direction_selection"]
+    html = sup._build_appendix_html_section({"appendix": appendix})
+
+    assert len(rows) == 3
+    assert [row["direction"] for row in rows] == [
+        "First direction", "Second direction", "Third direction",
+    ]
+    assert "Selection Event" in html
+    assert "PI-selected" in html
+    assert "Integration Cycle 1" in html

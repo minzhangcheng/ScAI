@@ -3,11 +3,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend.models.schemas import (
-    SelectionEntry, DirectionSelectionRecord,
+    AnalysisState, SelectionEntry, DirectionSelectionRecord,
     AnnotationClusterEntry, AnnotationRecord,
 )
 from backend.services.report.interaction_records import (
-    render_direction_record_html, render_annotation_record_html,
+    build_direction_selection_history,
+    render_direction_record_html,
+    render_direction_selection_history_html,
+    render_annotation_record_html,
 )
 
 
@@ -134,6 +137,69 @@ def test_direction_finalize_note():
     )
     html = render_direction_record_html(rec)
     assert "without adding" in html.lower() or "ended" in html.lower()
+
+
+def test_direction_selection_history_uses_all_completed_records():
+    state = AnalysisState(
+        id="history", name="history", initial_instruction="test", user_id="user",
+        user_chosen_directions=[{"direction": "Newest only", "notes": "legacy view"}],
+        direction_selection_records=[
+            DirectionSelectionRecord(
+                round_number=1,
+                phase="exploration",
+                event_type="pi_decide",
+                pi_selected=[
+                    {"direction": "Direction A", "notes": "PI rationale A"},
+                    {"direction": "Direction B", "notes": "PI rationale B"},
+                ],
+            ),
+            DirectionSelectionRecord(
+                round_number=4,
+                integration_cycle=1,
+                phase="integration",
+                event_type="select",
+                selections=[SelectionEntry(
+                    direction="Direction C", notes="User note C", candidate_index=0,
+                )],
+            ),
+            DirectionSelectionRecord(
+                round_number=6,
+                integration_cycle=2,
+                phase="integration",
+                event_type="finalize",
+            ),
+        ],
+    )
+
+    rows = build_direction_selection_history(state)
+
+    assert [row["direction"] for row in rows] == [
+        "Direction A", "Direction B", "Direction C",
+    ]
+    assert rows[0]["selection_event"] == "Round 1 · exploration"
+    assert rows[0]["decision_mode"] == "PI-selected"
+    assert rows[2]["selection_event"] == "Integration Cycle 1 · integration"
+    assert rows[2]["decision_mode"] == "User-selected"
+    assert "Newest only" not in {row["direction"] for row in rows}
+
+
+def test_direction_selection_history_legacy_fallback_and_table_escaping():
+    state = AnalysisState(
+        id="legacy", name="legacy", initial_instruction="test", user_id="user",
+        user_chosen_directions=[{
+            "direction": "Legacy <direction>", "notes": "A & B",
+        }],
+    )
+
+    rows = build_direction_selection_history(state)
+    html = render_direction_selection_history_html(rows)
+
+    assert rows[0]["selection_event"] == "Current selection"
+    assert "Selection Event" in html
+    assert "Decision Mode" in html
+    assert "Rationale / Notes" in html
+    assert "Legacy &lt;direction&gt;" in html
+    assert "A &amp; B" in html
 
 
 def test_annotation_edit_shows_original_struck_and_tag():

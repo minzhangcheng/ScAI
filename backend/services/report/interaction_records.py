@@ -169,6 +169,78 @@ def _direction_record_label(rec: DirectionSelectionRecord) -> str:
     )
 
 
+def build_direction_selection_history(state: AnalysisState) -> List[Dict[str, str]]:
+    """Return every completed direction choice in chronological record order.
+
+    ``user_chosen_directions`` represents only the current/most recent batch and
+    is therefore not an audit trail.  DirectionSelectionRecord is the durable
+    source for the report appendix.  The legacy field remains as a fallback for
+    sessions created before interaction records were introduced.
+    """
+    rows: List[Dict[str, str]] = []
+    for rec in state.direction_selection_records:
+        if rec.event_type == "pi_decide":
+            selections = rec.pi_selected
+            decision_mode = "PI-selected"
+        elif rec.event_type == "select":
+            selections = rec.selections
+            decision_mode = "User-selected"
+        else:
+            # "open" is unfinished and "finalize" adds no direction.
+            continue
+
+        for selection in selections:
+            if hasattr(selection, "model_dump"):
+                selection = selection.model_dump()
+            direction = str(selection.get("direction", "") or "").strip()
+            if not direction:
+                continue
+            rows.append({
+                "selection_event": _direction_record_label(rec),
+                "decision_mode": decision_mode,
+                "direction": direction,
+                "notes": str(selection.get("notes", "") or ""),
+            })
+
+    if rows:
+        return rows
+
+    # Backward compatibility for sessions that predate selection records.
+    for selection in state.user_chosen_directions or []:
+        direction = str(selection.get("direction", "") or "").strip()
+        if not direction:
+            continue
+        rows.append({
+            "selection_event": "Current selection",
+            "decision_mode": "Legacy state",
+            "direction": direction,
+            "notes": str(selection.get("notes", "") or ""),
+        })
+    return rows
+
+
+def render_direction_selection_history_html(rows: List[Dict[str, str]]) -> str:
+    """Render the canonical direction-history table used by all report paths."""
+    if not rows:
+        return ""
+    body = "".join(
+        "<tr>"
+        f"<td>{_esc(str(row.get('selection_event', '-') or '-'))}</td>"
+        f"<td>{_esc(str(row.get('decision_mode', '-') or '-'))}</td>"
+        f"<td>{_esc(str(row.get('direction', '-') or '-'))}</td>"
+        f"<td>{_esc(str(row.get('notes', '-') or '-'))}</td>"
+        "</tr>"
+        for row in rows
+    )
+    return (
+        "<h4>Research Direction Selections</h4>"
+        "<table><thead><tr>"
+        "<th>Selection Event</th><th>Decision Mode</th>"
+        "<th>Direction</th><th>Rationale / Notes</th>"
+        f"</tr></thead><tbody>{body}</tbody></table>"
+    )
+
+
 def render_direction_record_html(rec: DirectionSelectionRecord) -> str:
     label = _direction_record_label(rec)
     head = (f"<div class='hdr'><h1>Direction Selection Record</h1>"

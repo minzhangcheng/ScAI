@@ -1536,12 +1536,22 @@ class OpenAICompatibleClient:
         self.agent_name = agent_name
 
     async def _emit_log_response(self, **kwargs) -> None:
-        # Call sync log_response for backward compat (tests check it).
-        self.llm_logger.log_response(**kwargs)
-        # Also call async version if available (production path).
-        result = self.llm_logger.log_response_async(**kwargs)
-        if inspect.iscoroutine(result):
-            await result
+        """Persist one response exactly once.
+
+        Production uses the async logger to keep file I/O off the event loop.
+        Older/custom test loggers may expose only the synchronous method, which
+        remains a fallback rather than a second write.
+        """
+        async_log_response = getattr(self.llm_logger, "log_response_async", None)
+        if callable(async_log_response):
+            result = async_log_response(**kwargs)
+            if inspect.isawaitable(result):
+                await result
+                return
+
+        sync_log_response = getattr(self.llm_logger, "log_response", None)
+        if callable(sync_log_response):
+            sync_log_response(**kwargs)
 
     def _ensure_cache_locks(self) -> None:
         # Lazy-init guard for objects constructed via __new__ or fixtures that
