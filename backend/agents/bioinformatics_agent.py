@@ -178,7 +178,7 @@ def count_saved_figures(analysis_log) -> int:
     """
     if not analysis_log:
         return 0
-    total = 0
+    saved_names = set()
     for step in analysis_log:
         if step is None:
             continue
@@ -186,8 +186,15 @@ def count_saved_figures(analysis_log) -> int:
             names = step.get("saved_figure_filenames") or []
         else:
             names = getattr(step, "saved_figure_filenames", None) or []
-        total += len(names)
-    return total
+        saved_names.update(Path(str(name)).stem for name in names if name)
+        pub_name = (
+            step.get("pub_figure_name")
+            if isinstance(step, dict)
+            else getattr(step, "pub_figure_name", None)
+        )
+        if pub_name:
+            saved_names.add(Path(str(pub_name)).stem)
+    return len(saved_names)
 
 from ..models.schemas import (
     AgentType, AnalysisPhase, AnalysisState, MessageRole, CodeExecution,
@@ -199,6 +206,18 @@ from ..utils.llm_client import OpenAICompatibleClient, ToolCall, UpstreamExhaust
 from ..utils.tool_messages import tool_calls_are_paired, append_missing_tool_results
 from ..constants import PLAN_REVISION_NEEDED_TAG
 from ..utils.error_parsing import strip_ansi, extract_error_type, TECHNICAL_ERROR_TYPES, detect_swallowed_error
+from ..utils.expression_contract import (
+    build_expression_preflight_code,
+    extract_sensitive_expression_inputs,
+    mutates_expression_representation,
+    parse_expression_contracts,
+    prepares_expression_before_sensitive_call,
+    record_expression_contract,
+    record_invalidated_file_stems,
+    record_representation_change,
+    unchanged_artifact_stems,
+    workspace_artifact_versions,
+)
 from .supervisor_agent import SupervisorEvalResult
 
 # Pre-compiled pattern for detecting manual cell_type assignment in code
@@ -1629,6 +1648,15 @@ Before running sc.tl.pca() or any dimensionality reduction:
    - adata.X = np.nan_to_num(adata.X, nan=0.0) if dense
    - adata.X.data = np.nan_to_num(adata.X.data, nan=0.0) if sparse
 3. NEVER skip this step - PCA will fail with NaN values!
+
+**EXPRESSION-SCALE CONTRACT (ENFORCED AT RUNTIME)**:
+- Differential expression, gene scoring, and NMF MUST use a normalized continuous
+  expression representation, never raw integer counts.
+- Preserve raw counts in a layer or `.raw`, create an explicit normalized copy
+  (for example library-size normalization followed by log1p), and use that copy.
+- If you change normalization or replace `.X`, regenerate every downstream table
+  and figure from that representation. The runtime invalidates earlier same-round
+  publication artifacts when it detects such a representation change.
 
 **HARMONY BATCH CORRECTION (CRITICAL — dimension mismatch prevention)**:
 When using harmonypy for batch correction, ALWAYS verify dimensions match:
@@ -3635,11 +3663,36 @@ If results significantly deviate from plan expectations, report via consult_pi i
                             code, str(figures_dir), timestamp
                         )
 
-                        result = await self.sandbox.execute(
-                            wrapped_code,
-                            declared_outputs=list(persistent_outputs or []),
-                            track_globals=True,
+                        expression_specs = extract_sensitive_expression_inputs(code)
+                        representation_will_change = mutates_expression_representation(code)
+                        preexisting_artifact_versions = (
+                            workspace_artifact_versions(self.sandbox.working_dir)
+                            if representation_will_change else {}
                         )
+                        preflight_result = None
+                        if (
+                            expression_specs
+                            and not prepares_expression_before_sensitive_call(code)
+                        ):
+                            preflight_result = await self.sandbox.execute(
+                                build_expression_preflight_code(expression_specs),
+                                save_to_history=False,
+                                skip_safety_check=True,
+                            )
+                            if not preflight_result.error:
+                                record_expression_contract(
+                                    state,
+                                    parse_expression_contracts(preflight_result.output),
+                                )
+
+                        if preflight_result is not None and preflight_result.error:
+                            result = preflight_result
+                        else:
+                            result = await self.sandbox.execute(
+                                wrapped_code,
+                                declared_outputs=list(persistent_outputs or []),
+                                track_globals=True,
+                            )
 
 
                         # Auto-fix: ensure obs/var names are unique after every execution
@@ -3656,6 +3709,22 @@ If results significantly deviate from plan expectations, report via consult_pi i
                         # Strip ANSI escape codes from Jupyter traceback
                         if result.error:
                             result.error = strip_ansi(result.error)
+                        else:
+                            invalidated_count = record_representation_change(state, code)
+                            if representation_will_change:
+                                record_invalidated_file_stems(
+                                    state,
+                                    unchanged_artifact_stems(
+                                        self.sandbox.working_dir,
+                                        preexisting_artifact_versions,
+                                    ),
+                                )
+                            if invalidated_count:
+                                logger.warning(
+                                    "[Bioinformatics] Invalidated %d stale artifacts after "
+                                    "expression representation change",
+                                    invalidated_count,
+                                )
 
                         # Cap output/error at source so all downstream consumers
                         # (code_history, LLM tool message, analysis_log, notify)
@@ -4953,6 +5022,27 @@ If results significantly deviate from plan expectations, report via consult_pi i
         # shared wrapper to prevent injection.
         wrapped_code = _build_publication_figure_wrapper(code, figures_dir, jpg_path, pdf_path)
 
+        expression_specs = extract_sensitive_expression_inputs(code)
+        representation_will_change = mutates_expression_representation(code)
+        preexisting_artifact_versions = (
+            workspace_artifact_versions(self.sandbox.working_dir)
+            if representation_will_change else {}
+        )
+        if (
+            expression_specs
+            and not prepares_expression_before_sensitive_call(code)
+        ):
+            preflight = await self.sandbox.execute(
+                build_expression_preflight_code(expression_specs),
+                save_to_history=False,
+                skip_safety_check=True,
+            )
+            if preflight.error:
+                return f"Figure generation blocked: {strip_ansi(preflight.error)}"
+            record_expression_contract(
+                state, parse_expression_contracts(preflight.output)
+            )
+
         # Execute the code
         result = await self.sandbox.execute(wrapped_code)
 
@@ -4962,6 +5052,15 @@ If results significantly deviate from plan expectations, report via consult_pi i
             logger.error(f"[Bioinformatics] {error_msg}")
             await self._notify("error", error_msg)
             return error_msg
+
+        record_representation_change(state, code)
+        if representation_will_change:
+            record_invalidated_file_stems(
+                state,
+                unchanged_artifact_stems(
+                    self.sandbox.working_dir, preexisting_artifact_versions
+                ),
+            )
 
         # Check if files were created
         if not jpg_path.exists():
@@ -4979,6 +5078,7 @@ If results significantly deviate from plan expectations, report via consult_pi i
         png_b64 = self._compress_image_to_base64(jpg_path, max_width=800)
 
         # Create PublicationFigure object (png_path field stores JPG path for web display)
+        sandbox_state = state.sandbox_state or {}
         figure = PublicationFigure(
             id=str(uuid.uuid4()),
             name=safe_name,
@@ -4987,7 +5087,12 @@ If results significantly deviate from plan expectations, report via consult_pi i
             png_path=str(jpg_path),
             pdf_path=str(pdf_path),
             png_base64=png_b64,
-            review_status=FigureReviewStatus.PENDING
+            review_status=FigureReviewStatus.PENDING,
+            round_number=int(state.current_round or 0),
+            analysis_generation=int(sandbox_state.get("analysis_generation", 0) or 0),
+            expression_provenance=dict(
+                sandbox_state.get("expression_contract_v1") or {}
+            ),
         )
 
         # Send figure to frontend for display
@@ -5176,6 +5281,14 @@ If results significantly deviate from plan expectations, report via consult_pi i
 
     def _upsert_publication_figure(self, state, figure):
         """Replace existing figure with same name, or append if new."""
+        refreshed_stems = {
+            Path(str(figure.name)).stem,
+            Path(str(figure.png_path)).stem,
+        }
+        state.invalidated_artifact_stems = [
+            stem for stem in (state.invalidated_artifact_stems or [])
+            if stem not in refreshed_stems
+        ]
         existing_idx = next(
             (i for i, f in enumerate(state.publication_figures) if f.name == figure.name),
             None

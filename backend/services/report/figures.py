@@ -10,6 +10,10 @@ from typing import Dict, Any, List, Optional
 from PIL import Image
 
 from backend.utils.files import resolve_figure_in_workspace
+from backend.services.report.artifacts import (
+    artifact_stems,
+    eligible_artifacts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +130,7 @@ class FiguresMixin:
         self,
         publication_figures: Optional[List[Any]] = None,
         analysis_log: Optional[List[Any]] = None,
+        invalidated_stems: Optional[set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Scan the WORKSPACE directory for existing images from analysis phase.
@@ -139,10 +144,17 @@ class FiguresMixin:
         existing_figures = []
         seen_filenames = set()
 
-        # Build filename-stem -> declared figure_type map from agent metadata.
+        eligible_publication_figures = eligible_artifacts(publication_figures)
+        excluded_publication_stems = (
+            artifact_stems(publication_figures)
+            - artifact_stems(eligible_publication_figures)
+        )
+        excluded_publication_stems.update(invalidated_stems or set())
+
+        # Build filename-stem -> declared figure_type map from eligible metadata.
         declared_type_by_stem: Dict[str, str] = {}
-        if publication_figures:
-            for pf in publication_figures:
+        if eligible_publication_figures:
+            for pf in eligible_publication_figures:
                 declared = getattr(pf, "figure_type", None)
                 png_path = getattr(pf, "png_path", None)
                 if not declared or not png_path:
@@ -164,6 +176,8 @@ class FiguresMixin:
             # Scan for both JPG and PNG (JPG preferred, PNG for backward compatibility)
             image_files = sorted(scan_dir.glob("*.jpg")) + sorted(scan_dir.glob("*.png"))
             for png_file in image_files:
+                if png_file.stem in excluded_publication_stems:
+                    continue
                 if png_file.stem in seen_filenames:
                     continue  # Skip PNG if JPG already found for same stem
                 seen_filenames.add(png_file.stem)
@@ -206,6 +220,8 @@ class FiguresMixin:
                     fnames = getattr(step, "saved_figure_filenames", None) or []
                 for fname in fnames:
                     base = os.path.basename(str(fname))
+                    if os.path.splitext(base)[0] in excluded_publication_stems:
+                        continue
                     if base and base not in seen_logged:
                         seen_logged.add(base)
                         logged_basenames.append(base)
@@ -243,7 +259,9 @@ class FiguresMixin:
 
         return existing_figures
 
-    def _scan_existing_tables(self) -> List[Dict[str, Any]]:
+    def _scan_existing_tables(
+        self, invalidated_stems: Optional[set[str]] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Scan the workspace directory for existing CSV tables from analysis phase.
         Copies tables to the report output directory.
@@ -259,6 +277,8 @@ class FiguresMixin:
         tables_subdir = self.workspace_dir / "tables"
         csv_search_dir = tables_subdir if tables_subdir.exists() else self.workspace_dir
         for csv_file in sorted(csv_search_dir.glob("*.csv")):
+            if csv_file.stem in (invalidated_stems or set()):
+                continue
             # Copy to report tables directory
             dest_csv = self.tables_dir / csv_file.name
             try:
@@ -446,4 +466,3 @@ class FiguresMixin:
                         }
 
         logger.info(f"Cluster annotations extracted from state: {len(self.cluster_annotations)} clusters")
-

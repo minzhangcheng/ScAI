@@ -1,6 +1,7 @@
 """Report variant generators - HTML report builders for different analysis phases."""
 import os
 import html as html_module
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -15,6 +16,7 @@ from backend.config import get_session_dir, get_session_reports
 from backend.utils.blob_store import inline_blobs
 from backend.utils.formatting import as_list
 from backend.services.report.score_section import build_score_definitions_section_html
+from backend.services.report.artifacts import artifact_stems, eligible_artifacts
 from backend.models.schemas import AnalysisState
 
 logger = __import__('logging').getLogger(__name__)
@@ -949,9 +951,15 @@ def generate_detailed_report_segment_html(
                         parts.append(f'<div class="detail">{markdown_to_html(str(detail)[:3000])}</div>')
                     parts.append('</div>')
 
+    segment_round = int(getattr(state, "current_round", 0) or 0)
+    segment_steps = [
+        step for step in (state.analysis_log or [])
+        if int(getattr(step, "round_number", 0) or 0) in (0, segment_round)
+    ]
+
     # --- Section: Analysis Log Summary ---
-    if state.analysis_log:
-        recent_steps = state.analysis_log[-50:]
+    if segment_steps:
+        recent_steps = segment_steps[-50:]
         parts.append('<div class="segment-section"><h3>Analysis Steps Executed</h3>')
         parts.append('<table class="steps-table"><thead><tr><th>#</th><th>Step</th><th>Status</th><th>Details</th></tr></thead><tbody>')
         for i, step in enumerate(recent_steps, 1):
@@ -975,7 +983,23 @@ def generate_detailed_report_segment_html(
         if workspace_dir and workspace_dir.exists():
             figures_subdir = workspace_dir / "figures"
             categories = categorize_figures(figures_subdir if figures_subdir.exists() else workspace_dir)
-            fig_desc_map = _build_figure_description_map(state.analysis_log)
+            fig_desc_map = _build_figure_description_map(segment_steps)
+            eligible_figures = eligible_artifacts(state.publication_figures)
+            excluded_stems = (
+                artifact_stems(state.publication_figures)
+                - artifact_stems(eligible_figures)
+            )
+            excluded_stems.update(state.invalidated_artifact_stems or [])
+            round_step_stems = {
+                Path(fname).stem
+                for step in segment_steps
+                for fname in (step.saved_figure_filenames or [])
+            }
+            eligible_round_stems = artifact_stems(
+                fig for fig in eligible_figures
+                if int(getattr(fig, "round_number", 0) or 0) in (0, segment_round)
+            )
+            allowed_stems = round_step_stems | eligible_round_stems
             has_figures = any(figs for figs in categories.values())
             if has_figures:
                 parts.append('<div class="segment-section"><h3>Generated Figures</h3>')
@@ -986,13 +1010,16 @@ def generate_detailed_report_segment_html(
                         if count >= 20:
                             break
                         try:
+                            fig_name = fig_info.get("name", "")
+                            if fig_name in excluded_stems or fig_name not in allowed_stems:
+                                continue
                             fig_path = fig_info.get("png_path") or fig_info.get("path", "")
                             if not fig_path:
                                 continue
                             b64 = compress_image_to_base64(fig_path, max_width=1000, quality=82)
-                            fig_name = fig_info.get("name", "")
                             caption = fig_desc_map.get(fig_name, fig_name.replace("_", " ").title())
-                            parts.append(f'<div class="figure-item"><img src="{b64}" />'
+                            key = html_module.escape(str(fig_name), quote=True)
+                            parts.append(f'<div class="figure-item" data-figure-key="{key}"><img src="{b64}" />'
                                          f'<p class="caption">{html_module.escape(str(caption))}</p></div>')
                             count += 1
                         except Exception as e:
@@ -1038,6 +1065,24 @@ def generate_detailed_report_segment_html(
     return "\n".join(parts)
 
 
+def _deduplicate_detailed_figure_blocks(html: str) -> str:
+    """Keep the first occurrence of each keyed detailed-report figure block."""
+    seen_figure_keys: set[str] = set()
+    figure_block_re = re.compile(
+        r'<div class="figure-item" data-figure-key="([^"]+)">.*?</div>',
+        re.DOTALL,
+    )
+
+    def _dedupe_figure(match: re.Match) -> str:
+        key = html_module.unescape(match.group(1))
+        if key in seen_figure_keys:
+            return ""
+        seen_figure_keys.add(key)
+        return match.group(0)
+
+    return figure_block_re.sub(_dedupe_figure, html)
+
+
 def generate_combined_detailed_report_html(state: "AnalysisState") -> str:
     """Generate combined HTML from all detailed report segments.
 
@@ -1051,6 +1096,9 @@ def generate_combined_detailed_report_html(state: "AnalysisState") -> str:
     segments_html = "\n<hr class='segment-divider'>\n".join(
         seg.content_html for seg in state.detailed_report_segments if seg.content_html
     )
+    # A figure can be visible at several workflow gates. Keep its first segment
+    # occurrence so the combined report does not repeat the same image gallery.
+    segments_html = _deduplicate_detailed_figure_blocks(segments_html)
 
     toc_items = "".join(
         f'<li><a href="#{seg.phase}">{html_module.escape(seg.title)}'
@@ -1728,6 +1776,11 @@ def generate_annotation_context_report_html(
 
     # --- Build figure description map ---
     figure_desc_map = _build_figure_description_map(state.analysis_log)
+    eligible_figures = eligible_artifacts(state.publication_figures)
+    excluded_figure_stems = (
+        artifact_stems(state.publication_figures) - artifact_stems(eligible_figures)
+    )
+    excluded_figure_stems.update(state.invalidated_artifact_stems or [])
     workspace_dir = get_session_workspace(state.id) if state.id else None
 
     def _resolve_fig_path(fname: str) -> Optional[Path]:
@@ -1770,6 +1823,8 @@ def generate_annotation_context_report_html(
             step_fig_blocks = []
             for fname in (s.saved_figure_filenames or []):
                 stem = Path(fname).stem
+                if stem in excluded_figure_stems:
+                    continue
                 linked_stems.add(stem)
                 fpath = _resolve_fig_path(fname)
                 if fpath:
@@ -1812,6 +1867,8 @@ def generate_annotation_context_report_html(
 
         for scan_dir in scan_dirs:
             for img_file in sorted(scan_dir.glob("*.jpg")) + sorted(scan_dir.glob("*.png")):
+                if img_file.stem in excluded_figure_stems:
+                    continue
                 if img_file.stem in seen_stems:
                     continue
                 seen_stems.add(img_file.stem)
@@ -1825,11 +1882,12 @@ def generate_annotation_context_report_html(
                     logger.warning("Failed to embed figure in HTML: %s", img_file, exc_info=True)
 
     # From publication_figures
-    for pf in (state.publication_figures or []):
+    for pf in eligible_figures:
         pf_name = getattr(pf, 'name', '') or 'Figure'
         b64_data = getattr(pf, 'png_base64', None)
-        if b64_data and pf_name not in seen_stems:
-            seen_stems.add(pf_name)
+        pf_stems = artifact_stems([pf])
+        if b64_data and not (pf_stems & seen_stems):
+            seen_stems.update(pf_stems)
             title = html_module.escape(pf_name)
             fmt = "png" if b64_data[:5] == "iVBOR" else "jpeg"
             orphan_blocks.append(_make_figure_block(f"data:image/{fmt};base64,{b64_data}", title))

@@ -793,6 +793,12 @@ class PublicationFigure(BaseModel):
     pi_feedback: Optional[str] = None
     revision_history: List[Dict[str, Any]] = Field(default_factory=list)  # Accumulated feedback from all revision rounds
     revision_count: int = 0
+    round_number: int = 0
+    analysis_generation: int = 0
+    expression_provenance: Dict[str, Any] = Field(default_factory=dict)
+    is_current: bool = True
+    invalidated_at: Optional[datetime] = None
+    invalidation_reason: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
 
 class PublicationTable(BaseModel):
@@ -806,6 +812,12 @@ class PublicationTable(BaseModel):
     interpretation: Optional[str] = None  # Scientific interpretation of the table data
     review_status: FigureReviewStatus = FigureReviewStatus.PENDING
     pi_feedback: Optional[str] = None
+    round_number: int = 0
+    analysis_generation: int = 0
+    expression_provenance: Dict[str, Any] = Field(default_factory=dict)
+    is_current: bool = True
+    invalidated_at: Optional[datetime] = None
+    invalidation_reason: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
 
 class GraphicAbstract(BaseModel):
@@ -990,6 +1002,7 @@ class AnalysisState(BaseModel):
     # Publication-quality outputs
     publication_figures: List[PublicationFigure] = Field(default_factory=list)
     publication_tables: List[PublicationTable] = Field(default_factory=list)
+    invalidated_artifact_stems: List[str] = Field(default_factory=list)
     graphic_abstract: Optional[GraphicAbstract] = None
     integrated_report: Optional[str] = None  # Integrated report with figure/table references
 

@@ -26,3 +26,14 @@ def test_removed_global_pruned_from_tracker():
     # Cell 2: loom_con is deleted (present before, absent after).
     sb._record_globals_diff(before={"loom_con"}, after=set(), declared=set())
     assert sb.runtime_dependency_tracker.required_outputs == set()
+
+
+def test_only_names_actually_loaded_are_promoted():
+    sb = _bare_sandbox()
+    sb._record_globals_diff(before=set(), after={"used", "scratch"})
+    sb._record_globals_diff(
+        before={"used", "scratch"},
+        after={"used", "scratch", "result"},
+        loaded=sb._loaded_global_names_from_code("result = used + 1"),
+    )
+    assert sb.runtime_dependency_tracker.required_outputs == {"used"}

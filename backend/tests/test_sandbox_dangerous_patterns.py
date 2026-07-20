@@ -1,4 +1,4 @@
-from backend.utils.sandbox import DANGEROUS_PATTERNS
+from backend.utils.sandbox import DANGEROUS_PATTERNS, validate_code_safety
 import re
 
 def _matches_any(code):
@@ -14,3 +14,22 @@ def test_detects_builtins_eval():
 def test_detects_string_eval():
     code = """fn = "eval"\n"""
     assert _matches_any(code)
+
+
+def test_allows_regex_compile():
+    assert validate_code_safety("import re\npattern = re.compile(r'abc')") == (True, "")
+
+
+def test_allows_safe_importlib_metadata_and_util():
+    code = (
+        "import importlib.util\n"
+        "from importlib.metadata import version\n"
+        "print(importlib.util.find_spec('numpy'), version('numpy'))"
+    )
+    assert validate_code_safety(code) == (True, "")
+
+
+def test_blocks_unsafe_importlib_submodule():
+    safe, reason = validate_code_safety("import importlib.machinery")
+    assert not safe
+    assert "importlib" in reason

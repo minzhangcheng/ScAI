@@ -2,11 +2,12 @@
 Tests for streaming per-variable save_session/restore_session format.
 
 Format: a single .pkl file containing a sequence of dill-pickled
-(var_name: str, value: Any) tuples, written one after another.
+(var_name: str, value: Any) tuples, written one after another. Runtime aliases
+use tagged three-item frames so the target object is not serialized twice.
 Read by looping `dill.load` until EOFError.
 
-Unpicklable variables are skipped using file.tell()/seek()/truncate()
-to roll back the half-written frame, so the file stays valid.
+An unpicklable required variable rolls back its half-written frame and rejects
+the atomic save, so the previous complete runtime remains valid.
 """
 import io
 import dill
@@ -130,6 +131,55 @@ def test_snapshot_round_trip_compress_decompress(tmp_path):
     }
     # Sanity: compression saved space on this repetitive payload
     assert snapshot.stat().st_size < live.stat().st_size
+
+
+@pytest.mark.asyncio
+async def test_save_targets_tracked_dependencies_without_anndata_sweep(tmp_path, monkeypatch):
+    from backend.utils.sandbox import CodeExecutionResult, LocalJupyterSandbox
+    from backend.services.snapshot_v2.runtime_registry import RuntimeDependencyTracker
+
+    sb = LocalJupyterSandbox(
+        session_id="tracked-save",
+        state_dir=str(tmp_path / "states"),
+        working_dir=str(tmp_path / "workspace"),
+    )
+    tracker = RuntimeDependencyTracker()
+    tracker.merge_declared({"analysis_result"})
+    sb.runtime_dependency_tracker = tracker
+    captured = {}
+
+    async def _capture(code, **_kwargs):
+        captured["code"] = code
+        return CodeExecutionResult(success=True, output="Session saved: 1 variables")
+
+    monkeypatch.setattr(sb, "_execute_unlocked", _capture)
+    assert await sb.save_session()
+    assert "analysis_result" in captured["code"]
+    assert "isinstance(_obj, ad.AnnData)" not in captured["code"]
+    assert "__SCAI_ALIAS__" in captured["code"]
+
+
+@pytest.mark.asyncio
+async def test_incomplete_required_runtime_save_raises(tmp_path, monkeypatch):
+    from backend.utils.sandbox import CodeExecutionResult, LocalJupyterSandbox
+
+    sb = LocalJupyterSandbox(
+        session_id="failed-save",
+        state_dir=str(tmp_path / "states"),
+        working_dir=str(tmp_path / "workspace"),
+    )
+
+    async def _fail(_code, **_kwargs):
+        return CodeExecutionResult(
+            success=False,
+            output="__SCAI_SAVE_SKIPPED__\tneeded\tThing\tTypeError\tbad state",
+            error="required runtime variables could not be persisted: needed",
+        )
+
+    monkeypatch.setattr(sb, "_execute_unlocked", _fail)
+    with pytest.raises(RuntimeError, match="runtime save failed"):
+        await sb.save_session()
+    assert sb._last_save_skipped[0]["name"] == "needed"
 
 
 @pytest.mark.asyncio

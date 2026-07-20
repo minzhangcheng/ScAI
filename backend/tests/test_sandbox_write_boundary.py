@@ -32,3 +32,11 @@ def test_allowed_roots_no_bare_tmp(tmp_path):
     roots = sb._allowed_write_roots()
     assert "/tmp" not in roots
     assert any("/tmp/scai-" in r for r in roots)
+
+
+def test_numba_cache_is_inside_session_temp_root(tmp_path):
+    from backend.utils.sandbox import LocalJupyterSandbox, _path_is_within
+
+    sb = LocalJupyterSandbox(session_id="numba-boundary", working_dir=tmp_path)
+    cache_path = sb._session_tmp / "numba_cache"
+    assert _path_is_within(str(cache_path), str(sb._session_tmp))

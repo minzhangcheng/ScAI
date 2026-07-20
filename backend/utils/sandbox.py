@@ -117,7 +117,9 @@ DANGEROUS_PATTERNS = [
     (r'\beval\s*\(', 'eval() function'),
     (r'\bexec\s*\(', 'exec() function'),
     (r'\b__import__\b', '__import__ function'),
-    (r'\bcompile\s*\(', 'compile() function'),
+    # Block the dangerous built-in, but allow ordinary attribute calls such as
+    # ``re.compile(...)``.  The previous word-boundary expression matched both.
+    (r'(?<![\w.])compile\s*\(', 'compile() function'),
     (r'\bimportlib\b', 'importlib module'),
     (r'''['"](eval|exec|__import__)['"]''', 'string-referenced dangerous builtin'),
 
@@ -201,15 +203,49 @@ def _is_safe_subprocess(code: str) -> bool:
 
 
 def _is_safe_importlib(code: str) -> bool:
-    """Check if importlib usage is limited to safe patterns (import_module, find_spec, reload)."""
-    lines = [l.strip() for l in code.splitlines() if re.search(r'\bimportlib\b', l)]
-    safe_import = r'^import\s+importlib\s*$'
-    safe_from = r'^from\s+importlib(?:\.util)?\s+import\s+'
-    safe_use = r'importlib\.(?:import_module|util\.find_spec|reload)\s*\('
-    return all(
-        re.match(safe_import, l) or re.match(safe_from, l) or re.search(safe_use, l)
-        for l in lines
-    )
+    """Allow only the small, non-executing importlib surface analyses need."""
+    import ast
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+
+    allowed_modules = {"importlib", "importlib.util", "importlib.metadata"}
+    allowed_from = {
+        "importlib": {"import_module", "reload"},
+        "importlib.util": {"find_spec"},
+        "importlib.metadata": {
+            "version", "PackageNotFoundError", "packages_distributions",
+        },
+    }
+    allowed_calls = {
+        "importlib.import_module", "importlib.reload",
+        "importlib.util.find_spec", "importlib.metadata.version",
+        "importlib.metadata.packages_distributions",
+    }
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name.startswith("importlib") and alias.name not in allowed_modules
+                   for alias in node.names):
+                return False
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("importlib"):
+            if node.module not in allowed_from:
+                return False
+            if any(alias.name not in allowed_from[node.module] for alias in node.names):
+                return False
+        elif isinstance(node, ast.Call):
+            parts = []
+            expr = node.func
+            while isinstance(expr, ast.Attribute):
+                parts.append(expr.attr)
+                expr = expr.value
+            if isinstance(expr, ast.Name) and expr.id == "importlib":
+                dotted = ".".join([expr.id, *reversed(parts)])
+                if dotted not in allowed_calls:
+                    return False
+    return True
 
 
 def _is_safe_file_write(code: str) -> bool:
@@ -895,7 +931,7 @@ from pathlib import Path
 SEED = 42
 
 # === Isolate Numba cache per session to prevent concurrent cache corruption ===
-_numba_cache = Path('/tmp/numba_cache___SESSION_ID__')
+_numba_cache = Path('__SESSION_TMP__') / 'numba_cache'
 _numba_cache.mkdir(parents=True, exist_ok=True)
 os.environ['NUMBA_CACHE_DIR'] = str(_numba_cache)
 # Prevent Numba from spawning extra threads that compete for cache locks
@@ -1125,7 +1161,9 @@ def check_and_fix_nan(adata, fix=True):
 
 print(f"Environment initialized with SEED={SEED} for reproducibility")
 print("Helper functions available: get_seed(), check_and_fix_nan(adata)")
-""".replace('__SESSION_ID__', self.session_id)
+""".replace('__SESSION_ID__', self.session_id).replace(
+            '__SESSION_TMP__', str(self._session_tmp)
+        )
         result = await self._execute_unlocked(init_code, save_to_history=False, skip_safety_check=True)
         if result.output:
             logger.debug("Kernel init stdout: %s", result.output[:1000])
@@ -1391,9 +1429,22 @@ try:
         with open({escaped_path}, 'rb') as _f:
             while True:
                 try:
-                    _name, _obj = dill.load(_f)
+                    _frame = dill.load(_f)
                 except EOFError:
                     break
+                if (
+                    isinstance(_frame, tuple)
+                    and len(_frame) == 3
+                    and _frame[0] == "__SCAI_ALIAS__"
+                ):
+                    _, _name, _alias_target = _frame
+                    if _alias_target not in globals():
+                        raise RuntimeError(
+                            f"runtime alias target missing: {{_name}} -> {{_alias_target}}"
+                        )
+                    _obj = globals()[_alias_target]
+                else:
+                    _name, _obj = _frame
                 globals()[_name] = _obj
                 _restored_names.append(_name)
 
@@ -1468,8 +1519,8 @@ except Exception as e:
         """Save the current session state by streaming dill per-variable.
 
         Each saved variable is written as one independent `dill.dump((name, obj), f)`
-        frame. Variables that cannot be pickled are skipped via
-        `file.tell()/seek()/truncate()` rollback so the file stays parseable.
+        frame. Required variables that cannot be pickled fail the save, leaving
+        the previous atomic file intact. Object aliases use small reference frames.
 
         No compression is applied here — compression happens out-of-kernel during
         snapshot creation. This keeps the kernel's peak memory low (a single
@@ -1482,33 +1533,37 @@ except Exception as e:
             escaped_path = repr(session_path)
             logger.info(f"Saving session to {session_path}")
 
+            from backend.services.snapshot_v2.runtime_registry import (
+                CANONICAL_RUNTIME_ARTIFACTS,
+            )
+            required_names = self.get_runtime_dependency_names()
+            target_names = sorted(
+                set(CANONICAL_RUNTIME_ARTIFACTS)
+                | required_names
+            )
+            escaped_targets = repr(target_names)
+            escaped_required = repr(sorted(required_names))
+
             save_code = """\
 import dill
 import os
-try:
-    import anndata as ad
-except ImportError:
-    ad = None
-
-_vars_to_save = ['adata', 'adata_control', 'adata_treatment', 'adata_merged',
-                 'ldata', 'ldata_control', 'ldata_treatment',
-                 'results', 'markers', 'deg_results', 'pathway_results',
-                 'cell_types', 'cluster_markers', 'differential_genes']
-
-# Collect explicit list, then sweep globals() for any other AnnData we missed.
-_to_dump = []  # list of (name, obj)
-_seen = set()
+_vars_to_save = """ + escaped_targets + """
+_required_names = set(""" + escaped_required + """)
+_to_dump = []
+_missing_required = []
 for _var_name in _vars_to_save:
-    if _var_name in dir():
+    if _var_name in globals():
         _to_dump.append((_var_name, globals()[_var_name]))
-        _seen.add(_var_name)
-if ad is not None:
-    for _var_name, _obj in list(globals().items()):
-        if isinstance(_obj, ad.AnnData) and _var_name not in _seen:
-            _to_dump.append((_var_name, _obj))
-            _seen.add(_var_name)
+    elif _var_name in _required_names:
+        _missing_required.append(_var_name)
 
-_skipped_vars = []  # P1-11: report what could not be persisted
+if _missing_required:
+    raise RuntimeError(
+        "required runtime variables are missing: " + ", ".join(_missing_required)
+    )
+
+_skipped_vars = []
+_saved_object_names = {}
 
 # Write to a temp file then atomically replace, so a mid-write crash can't
 # corrupt the only good pkl.
@@ -1519,9 +1574,18 @@ try:
         for _var_name, _obj in _to_dump:
             _checkpoint = _f.tell()
             try:
+                _object_id = id(_obj)
+                if _object_id in _saved_object_names:
+                    _frame = (
+                        "__SCAI_ALIAS__", _var_name,
+                        _saved_object_names[_object_id],
+                    )
+                else:
+                    _frame = (_var_name, _obj)
                 # Stream one (name, obj) frame; dill writes incrementally so peak
                 # memory is bounded by this single object's pickling, not the sum.
-                dill.dump((_var_name, _obj), _f)
+                dill.dump(_frame, _f)
+                _saved_object_names.setdefault(_object_id, _var_name)
                 _saved_count += 1
             except Exception as _e:
                 # Roll back the half-written frame so subsequent loads stay valid.
@@ -1533,6 +1597,13 @@ try:
                     type(_e).__name__,
                     str(_e)[:200],
                 ))
+    if _skipped_vars:
+        for _sv in _skipped_vars:
+            print(f"__SCAI_SAVE_SKIPPED__\\t{_sv[0]}\\t{_sv[1]}\\t{_sv[2]}\\t{_sv[3]}")
+        raise RuntimeError(
+            "required runtime variables could not be persisted: "
+            + ", ".join(_sv[0] for _sv in _skipped_vars)
+        )
     os.replace(_tmp_path, """ + escaped_path + """)
 except Exception:
     try:
@@ -1542,40 +1613,23 @@ except Exception:
     raise
 
 print(f"Session saved: {_saved_count} variables")
-if _skipped_vars:
-    for _sv in _skipped_vars:
-        print(f"__SCAI_SAVE_SKIPPED__\\t{_sv[0]}\\t{_sv[1]}\\t{_sv[2]}\\t{_sv[3]}")
-    print(f"__SCAI_SAVE_SKIPPED_COUNT__: {len(_skipped_vars)}")
 """
             result = await self._execute_unlocked(save_code, save_to_history=False, skip_safety_check=True)
 
+            skipped = []
+            for line in (result.output or "").splitlines():
+                if line.startswith("__SCAI_SAVE_SKIPPED__\t"):
+                    parts = line.split("\t")
+                    if len(parts) >= 5:
+                        skipped.append({
+                            "name": parts[1],
+                            "type": parts[2],
+                            "exc": parts[3],
+                            "msg": parts[4],
+                        })
+            self._last_save_skipped = skipped
+
             if result.success:
-                skipped = []
-                for line in (result.output or "").splitlines():
-                    if line.startswith("__SCAI_SAVE_SKIPPED__\t"):
-                        parts = line.split("\t")
-                        if len(parts) >= 5:
-                            skipped.append({
-                                "name": parts[1],
-                                "type": parts[2],
-                                "exc": parts[3],
-                                "msg": parts[4],
-                            })
-                if skipped:
-                    for sv in skipped:
-                        logger.warning(
-                            f"[{self.session_id}] save_session: skipping unpicklable "
-                            f"variable '{sv['name']}' ({sv['type']}): "
-                            f"{sv['exc']}: {sv['msg']}"
-                        )
-                    logger.warning(
-                        f"[{self.session_id}] save_session: {len(skipped)} variables were "
-                        f"not persisted and will be unavailable on restore: "
-                        f"{[sv['name'] for sv in skipped]}"
-                    )
-                    self._last_save_skipped = skipped
-                else:
-                    self._last_save_skipped = []
                 logger.info("Session saved successfully")
 
                 # Write HMAC signature (host-side, outside sandbox-writable roots)
@@ -1588,9 +1642,20 @@ if _skipped_vars:
                 except Exception:
                     logger.exception("Failed to write pkl integrity signature")
             else:
+                if skipped:
+                    logger.error(
+                        "[%s] save_session rejected incomplete runtime; required "
+                        "variables not persisted: %s",
+                        self.session_id,
+                        [sv["name"] for sv in skipped],
+                    )
                 logger.warning(f"Failed to save session: {result.error}")
+                raise RuntimeError(
+                    f"Sandbox runtime save failed for session {self.session_id}: "
+                    f"{result.error or 'unknown error'}"
+                )
 
-            return result.success
+            return True
 
     async def _restart_kernel(self) -> None:
         """Restart the kernel, then best-effort restore the session.
@@ -1720,16 +1785,20 @@ if _skipped_vars:
         before: set[str],
         after: set[str],
         declared: set[str] | None = None,
+        loaded: set[str] | None = None,
     ) -> Dict[str, Any]:
         """Update tracker from a created/loaded user-global diff.
 
         - created: names present after but not before
-        - loaded: names present both before and after (treated as read/used)
+        - loaded: names statically read by the executed cell and still present
         - removed: names present before but not after
         """
         created = after - before
         removed = before - after
-        loaded = before & after
+        # ``loaded`` comes from the executed cell's AST. Treating the full
+        # before/after intersection as "read" promoted every untouched scratch
+        # variable on the next cell and recreated an all-globals snapshot sweep.
+        loaded = (before & after) if loaded is None else (set(loaded) & before & after)
         self._last_execution_diff = {
             "created": set(created),
             "loaded": set(loaded),
@@ -1753,6 +1822,21 @@ if _skipped_vars:
             removed=removed,
         )
         return self._last_execution_diff
+
+    @staticmethod
+    def _loaded_global_names_from_code(code: str) -> set[str]:
+        """Best-effort static names read by a cell; dynamic reads must be declared."""
+        import ast
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return set()
+        return {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        }
 
     async def execute(
         self,
@@ -1784,7 +1868,12 @@ if _skipped_vars:
             )
             if result.success and should_track:
                 after = await self._snapshot_user_globals()
-                self._record_globals_diff(before, after, declared=declared)
+                self._record_globals_diff(
+                    before,
+                    after,
+                    declared=declared,
+                    loaded=self._loaded_global_names_from_code(code),
+                )
         if result.success and save_to_history:
             self.runtime_revision += 1
             if declared:

@@ -3,12 +3,22 @@ from pathlib import Path
 
 import pytest
 from backend.services.report.variants import _render_direction_evidence_section_from_lists
+from backend.services.report.variants import _deduplicate_detailed_figure_blocks
 from backend.utils.blob_store import externalize_blobs
 
 
 def test_render_direction_evidence_section_from_lists_empty():
     result = _render_direction_evidence_section_from_lists([], [])
     assert result == ""
+
+
+def test_combined_detailed_report_deduplicates_keyed_figures():
+    block = (
+        '<div class="figure-item" data-figure-key="same">'
+        '<img src="data:image/jpeg;base64,x" /><p>Caption</p></div>'
+    )
+    result = _deduplicate_detailed_figure_blocks(block + "<hr>" + block)
+    assert result.count('data-figure-key="same"') == 1
 
 
 def test_render_direction_evidence_section_from_lists_with_candidates():

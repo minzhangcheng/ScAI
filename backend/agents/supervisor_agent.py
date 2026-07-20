@@ -35,6 +35,7 @@ from ..utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
 from ..utils.settings_provider import AgentSettingsProvider
 from ..utils.image_utils import save_graphic_abstract_image
 from ..services.report.interaction_records import write_interaction_record_files
+from ..services.report.artifacts import artifact_stems, eligible_artifacts
 from .prompt_blocks import build_integration_block
 
 # Section IDs that represent specific/targeted analysis
@@ -713,7 +714,10 @@ class SupervisorAgent:
         figure_map = self._collect_figure_paths(all_records, workspace_path, state=analysis_state)
 
         # Collect table paths from workspace
-        table_list = self._collect_table_paths(workspace_path)
+        table_list = self._collect_table_paths(
+            workspace_path,
+            invalidated_stems=set(analysis_state.invalidated_artifact_stems or []),
+        )
 
         await _progress(15, "Generating report content...")
 
@@ -1407,9 +1411,10 @@ Respond in JSON:
             lines.append("")
 
         # Publication figures
-        if state.publication_figures:
+        eligible_figures = eligible_artifacts(state.publication_figures)
+        if eligible_figures:
             lines.append("=== Publication Figures ===")
-            for pf in state.publication_figures:
+            for pf in eligible_figures:
                 lines.append(f"- {pf.name}: {pf.description or ''}")
                 if pf.png_path:
                     lines.append(f"  Path: {pf.png_path}")
@@ -1435,8 +1440,20 @@ Respond in JSON:
         if not workspace_path:
             return figure_map
 
+        eligible_figures = eligible_artifacts(
+            state.publication_figures if state else []
+        )
+        excluded_stems = (
+            artifact_stems(state.publication_figures if state else [])
+            - artifact_stems(eligible_figures)
+        )
+        if state:
+            excluded_stems.update(state.invalidated_artifact_stems or [])
+
         for rec in records:
             for fname in rec.get("saved_figure_filenames", []):
+                if Path(fname).stem in excluded_stems:
+                    continue
                 if fname in figure_map:
                     continue
                 resolved = resolve_figure_in_workspace(fname, workspace_path, seen_stems)
@@ -1445,8 +1462,8 @@ Respond in JSON:
                     figure_map[fname] = resolved
 
         # Also include publication figures (PI-reviewed, may not be in supervision records)
-        if state and state.publication_figures:
-            for pf in state.publication_figures:
+        if eligible_figures:
+            for pf in eligible_figures:
                 if not pf.png_path:
                     continue
                 fname = os.path.basename(pf.png_path)
@@ -1467,6 +1484,8 @@ Respond in JSON:
         seen_stems = {Path(f).stem for f in figure_map}
         for scan_dir in scan_dirs:
             for img_file in sorted(scan_dir.glob("*.jpg")) + sorted(scan_dir.glob("*.png")):
+                if img_file.stem in excluded_stems:
+                    continue
                 if img_file.stem in seen_stems:
                     continue
                 seen_stems.add(img_file.stem)
@@ -1496,6 +1515,7 @@ Respond in JSON:
 
     def _collect_table_paths(
         self, workspace_path: Optional[Path],
+        invalidated_stems: Optional[set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """Scan workspace for CSV tables generated during analysis."""
         tables = []
@@ -1506,6 +1526,8 @@ Respond in JSON:
         csv_search_dir = tables_subdir if tables_subdir.exists() else workspace_path
 
         for csv_file in sorted(csv_search_dir.glob("*.csv")):
+            if csv_file.stem in (invalidated_stems or set()):
+                continue
             table_info: Dict[str, Any] = {
                 "filename": csv_file.name,
                 "path": str(csv_file),
@@ -1981,8 +2003,11 @@ Report generation model call failed due to API connection error. Please refer to
         # Build publication figure description lookup
         pub_fig_descriptions: Dict[str, Dict[str, str]] = {}
         analysis_state = report.get("_analysis_state")
-        if analysis_state and analysis_state.publication_figures:
-            for pf in analysis_state.publication_figures:
+        eligible_figures = eligible_artifacts(
+            analysis_state.publication_figures if analysis_state else []
+        )
+        if eligible_figures:
+            for pf in eligible_figures:
                 fname = os.path.basename(pf.png_path) if pf.png_path else ""
                 if fname:
                     pub_fig_descriptions[fname] = {

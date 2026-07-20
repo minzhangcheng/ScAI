@@ -243,8 +243,15 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         existing_figures = self._scan_existing_figures(
             publication_figures=getattr(report_state, "publication_figures", None),
             analysis_log=getattr(report_state, "analysis_log", None),
+            invalidated_stems=set(
+                getattr(report_state, "invalidated_artifact_stems", None) or []
+            ),
         )
-        existing_tables = self._scan_existing_tables()
+        existing_tables = self._scan_existing_tables(
+            invalidated_stems=set(
+                getattr(report_state, "invalidated_artifact_stems", None) or []
+            )
+        )
         logger.info(f"Collected {len(existing_figures)} figures and {len(existing_tables)} tables for report")
 
         # Step 3: Extract findings from round results

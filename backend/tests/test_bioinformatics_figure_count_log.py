@@ -27,3 +27,11 @@ def test_handles_missing_attr_and_dicts():
 def test_empty_log_returns_zero():
     assert count_saved_figures([]) == 0
     assert count_saved_figures(None) == 0
+
+
+def test_counts_publication_figure_tool_and_deduplicates_names():
+    log = [
+        {"saved_figure_filenames": ["same_name.jpg"], "pub_figure_name": "same_name"},
+        SimpleNamespace(pub_figure_name="publication_only", saved_figure_filenames=[]),
+    ]
+    assert count_saved_figures(log) == 2

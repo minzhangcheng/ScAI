@@ -18,6 +18,7 @@ from ..constants import LlmFailureAction
 from ..config import get_session_reports, get_session_workspace
 from ..services.report import DetailedReportGenerator, compress_image_to_base64
 from ..services.report.figure_discovery import discover_workspace_figures
+from ..services.report.artifacts import artifact_stems, eligible_artifacts
 from .direction_coverage import current_lineage_id, direction_coverage_status
 from ..services.report.paths import resolve_report_output_dir
 from ..services.report.lineage import build_lineage_report_state
@@ -190,9 +191,18 @@ class ReportingMixin:
     ) -> None:
         """Discover, curate, and emit the brief Results figure gallery."""
         DISCOVERY_CAP = 200
-        pub_figure_names = {fig.name for fig in analysis_state.publication_figures}
+        publication_figures = eligible_artifacts(analysis_state.publication_figures)
+        pub_figure_names = {fig.name for fig in publication_figures}
+        excluded_stems = (
+            artifact_stems(analysis_state.publication_figures)
+            - artifact_stems(publication_figures)
+        )
+        excluded_stems.update(
+            getattr(analysis_state, "invalidated_artifact_stems", None) or []
+        )
 
         discovered = discover_workspace_figures(self.session_id)
+        discovered = [f for f in discovered if f["name"] not in excluded_stems]
         all_workspace_figs = discovered[:DISCOVERY_CAP]
         if len(discovered) > DISCOVERY_CAP:
             logger.info(
@@ -207,7 +217,7 @@ class ReportingMixin:
             {"name": f["name"], "type": f["type"], "is_publication": f["name"] in pub_figure_names}
             for f in all_workspace_figs
         ]
-        for fig in analysis_state.publication_figures:
+        for fig in publication_figures:
             if fig.name not in seen_stems:
                 all_figs_for_ai.append(
                     {"name": fig.name, "type": fig.figure_type, "is_publication": True}
@@ -226,7 +236,7 @@ class ReportingMixin:
             selected_names = pub_figure_names
 
         figures_data: List[Dict[str, Any]] = []
-        for fig in analysis_state.publication_figures:
+        for fig in publication_figures:
             if fig.name in selected_names:
                 figures_data.append({
                     "id": fig.id,
