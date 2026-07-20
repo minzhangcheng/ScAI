@@ -81,12 +81,12 @@ def apply_config_to_session(config: ConfigV1, user_id: str = "") -> AnalysisStat
     lit = config.api_config.literature
     literature_config: Dict[str, Any] = {
         "mode": lit.mode,
-        "deep_research_model": lit.deep_research_model or "",
+        "deep_research_model": lit.deep_research_model or "o4-mini-deep-research",
         "deep_research_llm_base_url": lit.deep_research_llm_base_url or "",
         "deep_research_api_key": lit.deep_research_api_key or "",
         "google_api_key": lit.google_api_key or "",
         "pubmed_email": lit.pubmed_email or "",
-        "max_search_rounds": lit.max_search_rounds or 10,
+        "max_search_rounds": lit.max_search_rounds or 20,
     }
 
     # Apply fallback server_config for ALL agents
@@ -241,7 +241,7 @@ def export_session_to_config(state: AnalysisState) -> Dict[str, Any]:
         "deep_research_api_key": lit.get("deep_research_api_key") or None,
         "google_api_key": lit.get("google_api_key") or None,
         "pubmed_email": lit.get("pubmed_email") or None,
-        "max_search_rounds": lit.get("max_search_rounds", 10),
+        "max_search_rounds": lit.get("max_search_rounds", 20),
     }
 
     # Build output

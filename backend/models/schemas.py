@@ -1032,13 +1032,13 @@ class AnalysisState(BaseModel):
 
     # Literature agent configuration
     literature_config: Dict[str, Any] = Field(default_factory=lambda: {
-        "mode": "deep_research",              # deep_research | gemini_deep_research | pubmed_llm
-        "deep_research_model": "",           # e.g., "openai/o4-mini-deep-research"
+        "mode": "pubmed_llm",                 # deep_research | gemini_deep_research | pubmed_llm
+        "deep_research_model": "o4-mini-deep-research",
         "deep_research_llm_base_url": "",    # Separate LLM server for deep research (optional)
         "deep_research_api_key": "",         # Separate API key for deep research (optional)
         "google_api_key": "",                # For Gemini Deep Research mode
         "pubmed_email": "",                  # For PubMed mode (NCBI requirement)
-        "max_search_rounds": 10,             # Max iterative search rounds
+        "max_search_rounds": 20,             # Max iterative search rounds
     })
     
     # Chat messages (PI Agent free-form chat, separate from workflow)
@@ -1118,6 +1118,12 @@ class AnalysisState(BaseModel):
         "species_resolved": "species_resolved",
         "species_genes_validated": "species_genes_validated",
         "species_input_info": "species_input_info",
+        # Pending HITL gates must be part of the authoritative load response.
+        # WebSocket state_sync delivery is best-effort and cannot be the only
+        # way a refreshed client learns how to reopen an intervention dialog.
+        "wait_input_reason": "wait_input_reason",
+        "llm_failure_info": "llm_failure_info",
+        "agent_disabled_info": "agent_disabled_info",
         "literature_config": "literature_config",
         "runtime_restore_status": "runtime_restore_status",
         "runtime_restore_warning": "runtime_restore_warning",

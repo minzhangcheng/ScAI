@@ -663,13 +663,13 @@ async def _execute_chat_agent(
         from backend.agents.literature_agent import LiteratureAgent
         literature_agent = LiteratureAgent(
             settings_provider=provider,
-            literature_mode=lit_config.get("mode", "deep_research"),
-            deep_research_model=lit_config.get("deep_research_model", ""),
+            literature_mode=lit_config.get("mode", "pubmed_llm"),
+            deep_research_model=lit_config.get("deep_research_model", "o4-mini-deep-research"),
             deep_research_llm_base_url=lit_config.get("deep_research_llm_base_url", ""),
             deep_research_api_key=lit_config.get("deep_research_api_key", ""),
             google_api_key=lit_config.get("google_api_key", ""),
             pubmed_email=lit_config.get("pubmed_email", ""),
-            max_search_rounds=lit_config.get("max_search_rounds", 10),
+            max_search_rounds=lit_config.get("max_search_rounds", 20),
             proxy_url=config.api.proxy_url if config.api else None,
         )
 
@@ -760,13 +760,13 @@ async def _execute_chat_agent(
 
         lit_agent = LiteratureAgent(
             settings_provider=provider,
-            literature_mode=lit_config.get("mode", "deep_research"),
-            deep_research_model=lit_config.get("deep_research_model", ""),
+            literature_mode=lit_config.get("mode", "pubmed_llm"),
+            deep_research_model=lit_config.get("deep_research_model", "o4-mini-deep-research"),
             deep_research_llm_base_url=lit_config.get("deep_research_llm_base_url", ""),
             deep_research_api_key=lit_config.get("deep_research_api_key", ""),
             google_api_key=lit_config.get("google_api_key", ""),
             pubmed_email=lit_config.get("pubmed_email", ""),
-            max_search_rounds=lit_config.get("max_search_rounds", 10),
+            max_search_rounds=lit_config.get("max_search_rounds", 20),
             proxy_url=config.api.proxy_url if config.api else None,
         )
         result = await lit_agent.process(state, instruction)

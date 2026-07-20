@@ -214,14 +214,14 @@ export const DEFAULT_VISION_SETTINGS: AgentVisionSettings = {
 
 // Default models
 export const DEFAULT_MODELS: AgentModels = {
-  pi: 'google/gemini-3.1-pro-preview',
-  pathology: 'google/gemini-3.1-pro-preview',
-  bioinformatics: 'anthropic/claude-sonnet-4.6',
-  biochemistry: 'google/gemini-3.1-pro-preview',
-  literature: 'google/gemini-3.1-flash-lite-preview',
-  painter: 'google/gemini-3.1-flash-image-preview',  // Image generation model via OpenRouter
-  supervisor: 'google/gemini-3.1-flash-lite-preview',
-  technique: 'google/gemini-3.1-flash-lite-preview'
+  pi: 'gpt-5.6-sol',
+  pathology: 'gemini-3.1-pro-preview',
+  bioinformatics: 'gpt-5.6-sol',
+  biochemistry: 'gemini-3.1-pro-preview',
+  literature: 'gpt-5.4-mini',
+  painter: 'gpt-image-2',
+  supervisor: 'gpt-5.4-mini',
+  technique: 'gpt-5.4-mini'
 }
 
 // Default temperatures
@@ -593,9 +593,9 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
       })),
 
       // Literature agent config
-      literatureMode: 'deep_research' as AppState['literatureMode'],
+      literatureMode: 'pubmed_llm' as AppState['literatureMode'],
       setLiteratureMode: (mode) => set({ literatureMode: mode }),
-      deepResearchModel: 'openai/o4-mini-deep-research',
+      deepResearchModel: 'o4-mini-deep-research',
       setDeepResearchModel: (model) => set({ deepResearchModel: model }),
       deepResearchLlmBaseUrl: '',
       setDeepResearchLlmBaseUrl: (url) => set({ deepResearchLlmBaseUrl: url }),
@@ -605,7 +605,7 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
       setGoogleApiKey: (key) => set({ googleApiKey: key }),
       pubmedEmail: '',
       setPubmedEmail: (email) => set({ pubmedEmail: email }),
-      literatureMaxSearchRounds: 10,
+      literatureMaxSearchRounds: 20,
       setLiteratureMaxSearchRounds: (rounds) => set({ literatureMaxSearchRounds: Math.max(1, Math.min(50, rounds)) }),
 
       // Chat messages

@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.34.6 · **Last updated**: 2026-07-15
+**Version**: 0.34.7 · **Last updated**: 2026-07-15
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,18 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.33.x–0.34.x — (2026-07-15)**
+
+- `0.34.7` — Responses API input shape sanitization, HITL gate payload in load response, default model refresh, literature mode defaults; version bump (2026-07-20):
+  - **Responses API input shape sanitization (`backend/utils/llm_client.py`)**: New `_responses_messages_to_input()` strips null `tool_calls` and extra Chat Completions fields from assistant messages, rebuilding items to only include role/content for strict Responses API gateways. New `is_responses_input_shape_error()` classifies deterministic `input[]` schema errors as non-transient, preventing infinite retry loops on shape-mismatch 400s. `retry_with_backoff` breaks on these deterministic input-shape errors instead of retrying. Test files: `test_responses_adapter.py`, `test_retry_classification.py`, `test_transient_probe_classifier.py`.
+  - **HITL gate payload in load response (`backend/models/schemas.py`, `frontend/src/types.ts`)**: `wait_input_reason`, `llm_failure_info`, `agent_disabled_info` now included in `AnalysisState.to_api_dict()` so HITL dialog state survives page reload instead of relying solely on best-effort WebSocket delivery.
+  - **LLM failure state hydration on load (`frontend/src/utils/transformLoadResponse.ts`, `frontend/src/hooks/useApi.ts`)**: New `StoreUpdates.llmFailureInfo` rebuilt from authoritative `wait_input_reason`/`llm_failure_info`/`agent_disabled_info` fields. `applyStoreUpdates()` directly wires `llmFailureInfo` to store state and auto-opens the LLM timeout dialog, clearing stale state when no gate is pending.
+  - **WebSocket reconnect for lost HITL gate (`frontend/src/components/AnalysisPanel.tsx`)**: When `waiting_input` status has no locally recoverable gate payload (exploration/feedback/integration/annotation data), explicitly calls `wsConnect()` to trigger backend re-emission of the pending state_sync.
+  - **Default model refresh**: All agent default models updated: PI → `gpt-5.6-sol`, Pathology → `gemini-3.1-pro-preview`, Bioinformatics → `gpt-5.6-sol`, Biochemistry → `gemini-3.1-pro-preview`, Literature → `gpt-5.4-mini`, Painter → `gpt-image-2`, Supervisor → `gpt-5.4-mini`, Technique → `gpt-5.4-mini`. Updated across `backend/config/_config.py`, `backend/routes/session_config.py`, `frontend/src/stores/appStore.ts`.
+  - **Literature mode default**: Changed from `deep_research` to `pubmed_llm` across all config layers (`_config.py`, `api_requests.py`, `config_schema.py`, `schemas.py`, `chat.py`, `core.py`, `config_io.py`, `appStore.ts`, `PromptsPanel.tsx`).
+  - **Deep research model default**: Set to `o4-mini-deep-research` across all config layers.
+  - **Max search rounds default**: Changed from 10 to 20 across all config layers.
+  - **Frontend model recommendations**: Updated placeholder text and recommended model lists in `PromptsPanel.tsx` and `translations.ts` to reflect new model names (removed `google/` and `openai/` prefixes, added `deepseek-v4-*`, `glm-5.2`, `mimo-v2.5`; Technique agent recommendations added; placeholder uses `DEFAULT_MODELS[agent]`).
+  - **New tests**: `test_agent_model_defaults.py` (model defaults alignment between backend and frontend, `test_to_api_dict_coverage.py` pending HITL gate fields), `appStore.defaults.test.ts` (frontend default values). `AnalysisPanel.integration-gate.test.tsx` (reconnect on waiting badge without gate payload).
 
 - `0.34.6` — Expression contract system, artifact invalidation on representation change, sandbox save targets tracked deps, AST-based globals diff; version bump (2026-07-15):
   - **Expression contract system (`backend/utils/expression_contract.py`)**: New module providing AST-based detection of sensitive expression calls (DE, gene scoring, NMF), kernel-side preflight code that rejects raw integer count inputs, provenance tracking via `analysis_generation` in sandbox state, and artifact invalidation on representation change. `extract_sensitive_expression_inputs()` parses code for `rank_genes_groups`/`score_genes`/`score_genes_cell_cycle`/`non_negative_factorization`/NMF `fit_transform` calls. `build_expression_preflight_code()` generates kernel code that samples matrix values, detects raw counts vs normalized continuous vs centered/scaled, and raises `ValueError` on violation. `mutates_expression_representation()` detects `normalize_total`/`log1p`/`scale`/`normalize_per_cell` or `.X` assignment. `record_representation_change()` bumps generation and invalidates same-round artifacts. `workspace_artifact_versions()`/`unchanged_artifact_stems()`/`record_invalidated_file_stems()` track stale derived files.

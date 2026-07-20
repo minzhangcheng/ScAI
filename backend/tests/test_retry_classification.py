@@ -72,3 +72,28 @@ async def test_tool_choice_400_not_retried_propagates():
         )
 
     assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_responses_input_shape_400_is_wrapped_for_hitl_without_retry():
+    call_count = 0
+
+    async def invalid_input_func():
+        nonlocal call_count
+        call_count += 1
+        raise _err(
+            BadRequestError,
+            "Unknown parameter: 'input[19].tool_calls'",
+            400,
+        )
+
+    with pytest.raises(UpstreamExhaustedError) as exc_info:
+        await retry_with_backoff(
+            lambda: invalid_input_func(),
+            max_retries=4,
+            retry_delay_base=0.01,
+            agent_name="bioinformatics",
+        )
+
+    assert call_count == 1
+    assert "input[19].tool_calls" in str(exc_info.value)

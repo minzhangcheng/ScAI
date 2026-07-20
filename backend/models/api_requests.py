@@ -53,13 +53,13 @@ class VisionSettingUpdateRequest(BaseModel):
 
 
 class LiteratureConfigRequest(BaseModel):
-    mode: Literal["deep_research", "gemini_deep_research", "pubmed_llm", "disabled"] = Field(default="deep_research")
-    deep_research_model: str = ""
+    mode: Literal["deep_research", "gemini_deep_research", "pubmed_llm", "disabled"] = Field(default="pubmed_llm")
+    deep_research_model: str = "o4-mini-deep-research"
     deep_research_llm_base_url: str = ""
     deep_research_api_key: str = ""
     google_api_key: str = ""
     pubmed_email: str = ""
-    max_search_rounds: int = Field(default=10, ge=1, le=50)
+    max_search_rounds: int = Field(default=20, ge=1, le=50)
 
 
 class AgentServerConfigRequest(BaseModel):
@@ -247,5 +247,3 @@ class SnapshotFailureResponse(BaseModel):
     message: str
     details: Optional[Dict[str, Any]] = None
     allowed_actions: List[str] = Field(default_factory=list)
-
-

@@ -358,9 +358,9 @@ export function PromptsPanel() {
 
     // Reset literature config if on literature agent
     if (selectedAgent === 'literature') {
-      setLiteratureMode(googleApiKey ? 'gemini_deep_research' : 'pubmed_llm')
-      setDeepResearchModel('')
-      setLiteratureMaxSearchRounds(10)
+      setLiteratureMode('pubmed_llm')
+      setDeepResearchModel('o4-mini-deep-research')
+      setLiteratureMaxSearchRounds(20)
     }
 
     setSaved(false)
@@ -685,7 +685,7 @@ export function PromptsPanel() {
                     value={literatureMaxSearchRounds}
                     disabled={literatureMode === 'disabled'}
                     onChange={(e) => {
-                      setLiteratureMaxSearchRounds(parseInt(e.target.value) || 10)
+                      setLiteratureMaxSearchRounds(parseInt(e.target.value) || 20)
                       setSaved(false)
                     }}
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-100 disabled:text-slate-400"
@@ -710,12 +710,12 @@ export function PromptsPanel() {
                       setSaved(false)
                     }}
                     className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-100 disabled:text-slate-400"
-                    placeholder="e.g., google/gemini-3.1-pro-preview"
+                    placeholder="e.g., gpt-5.4-mini"
                   />
                   <p className="text-xs text-slate-400">
                     {language === 'zh'
-                      ? '用于 PubMed 模式文献分析的 LLM 模型，推荐: google/gemini-3.1-flash-lite-preview、google/gemini-3-flash-preview、openai/gpt-5.4-nano、openai/gpt-5.4-mini'
-                      : 'LLM model for PubMed mode literature analysis. Recommended: google/gemini-3.1-flash-lite-preview, google/gemini-3-flash-preview, openai/gpt-5.4-nano, openai/gpt-5.4-mini'}
+                      ? '用于 PubMed + LLM Only 模式文献分析的模型。推荐: gemini-3.1-flash-lite、gpt-5.4-nano、gpt-5.4-mini、deepseek-v4-flash'
+                      : 'Model for PubMed + LLM Only analysis. Recommended: gemini-3.1-flash-lite, gpt-5.4-nano, gpt-5.4-mini, deepseek-v4-flash'}
                   </p>
                 </div>
 
@@ -793,7 +793,7 @@ export function PromptsPanel() {
                 setSaved(false)
               }}
               className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
-              placeholder="e.g., google/gemini-3.1-pro-preview"
+              placeholder={`e.g., ${DEFAULT_MODELS[selectedAgent]}`}
             />
           </div>
 
@@ -825,21 +825,23 @@ export function PromptsPanel() {
 
           <p className="text-xs text-slate-500 mt-2 ml-8">
             {language === 'zh' ? (
-              selectedAgent === 'pi' ? '推荐支持 Vision（图片识别）的模型用于审核图片质量。推荐: google/gemini-3.1-pro-preview、openai/gpt-5.4' :
-              selectedAgent === 'pathology' ? '推荐具有病理图片识别能力的模型，强烈推荐: google/gemini-3.1-pro-preview、openai/gpt-5.4' :
-              selectedAgent === 'bioinformatics' ? '推荐 coding 能力较强且支持 Vision 的模型（用于图片修订）。推荐: anthropic/claude-sonnet-4.6、anthropic/claude-opus-4.6 或 google/gemini-3.1-pro-preview' :
-              selectedAgent === 'biochemistry' ? '推荐: google/gemini-3.1-pro-preview、openai/gpt-5.4。若上传了生化结果图片，推荐选择支持 Vision 的模型' :
-              selectedAgent === 'painter' ? '推荐具有图片生成能力的模型，推荐: google/gemini-3.1-flash-image-preview、google/gemini-3-pro-image-preview' :
-              selectedAgent === 'supervisor' ? '推荐低成本、快速且支持 Vision 的模型进行实时监控（用于评估图片质量）。推荐: google/gemini-3.1-flash-lite-preview、openai/gpt-5.4-nano' :
-              '使用 OpenRouter 模型格式'
+              selectedAgent === 'pi' ? '推荐支持 Vision（图片识别）的模型用于审核图片质量。推荐: gemini-3.1-pro-preview、gpt-5.6-sol、deepseek-v4-pro' :
+              selectedAgent === 'pathology' ? '推荐具有病理图片识别能力的模型。推荐: gemini-3.1-pro-preview、gpt-5.6-sol' :
+              selectedAgent === 'bioinformatics' ? '推荐 coding 能力较强且支持 Vision 的模型（用于图片修订）。推荐: claude-sonnet-4.6、claude-opus-4.6、gpt-5.6-sol、glm-5.2' :
+              selectedAgent === 'biochemistry' ? '若上传了生化结果图片，推荐选择支持 Vision 的模型。推荐: gemini-3.1-pro-preview、gpt-5.6-sol' :
+              selectedAgent === 'painter' ? '推荐具有图片生成能力的模型。推荐: gemini-3-pro-image、gemini-3.1-flash-lite-image、gpt-image-2' :
+              selectedAgent === 'supervisor' ? '推荐低成本、快速且支持 Vision 的模型进行实时监控（用于评估图片质量）。推荐: gemini-3.1-flash-lite、gpt-5.4-nano、gpt-5.4-mini、mimo-v2.5' :
+              selectedAgent === 'technique' ? '推荐低成本、快速的模型。推荐: gemini-3.1-flash-lite、gpt-5.4-nano、gpt-5.4-mini、deepseek-v4-flash' :
+              '使用 OpenAI 兼容模型名称'
             ) : (
-              selectedAgent === 'pi' ? 'Vision-capable model recommended for figure quality review. Recommended: google/gemini-3.1-pro-preview, openai/gpt-5.4' :
-              selectedAgent === 'pathology' ? 'Model with pathology image recognition recommended. Strongly recommended: google/gemini-3.1-pro-preview, openai/gpt-5.4' :
-              selectedAgent === 'bioinformatics' ? 'Model with strong coding capability and Vision support recommended (for figure revision). Recommended: anthropic/claude-sonnet-4.6, anthropic/claude-opus-4.6, or google/gemini-3.1-pro-preview' :
-              selectedAgent === 'biochemistry' ? 'Recommended: google/gemini-3.1-pro-preview, openai/gpt-5.4. If biochemistry images are uploaded, a Vision-capable model is recommended' :
-              selectedAgent === 'painter' ? 'Model with image generation capability recommended. Recommended: google/gemini-3.1-flash-image-preview, google/gemini-3-pro-image-preview' :
-              selectedAgent === 'supervisor' ? 'A cheap, fast, Vision-capable model recommended for real-time monitoring (evaluates figure quality). Recommended: google/gemini-3.1-flash-lite-preview, openai/gpt-5.4-nano' :
-              'Use OpenRouter model format'
+              selectedAgent === 'pi' ? 'Vision-capable model recommended for figure quality review. Recommended: gemini-3.1-pro-preview, gpt-5.6-sol, deepseek-v4-pro' :
+              selectedAgent === 'pathology' ? 'Model with pathology image recognition recommended. Recommended: gemini-3.1-pro-preview, gpt-5.6-sol' :
+              selectedAgent === 'bioinformatics' ? 'Model with strong coding capability and Vision support recommended (for figure revision). Recommended: claude-sonnet-4.6, claude-opus-4.6, gpt-5.6-sol, glm-5.2' :
+              selectedAgent === 'biochemistry' ? 'If biochemistry images are uploaded, a Vision-capable model is recommended. Recommended: gemini-3.1-pro-preview, gpt-5.6-sol' :
+              selectedAgent === 'painter' ? 'Image generation model recommended. Recommended: gemini-3-pro-image, gemini-3.1-flash-lite-image, gpt-image-2' :
+              selectedAgent === 'supervisor' ? 'A cheap, fast, Vision-capable model is recommended for real-time monitoring. Recommended: gemini-3.1-flash-lite, gpt-5.4-nano, gpt-5.4-mini, mimo-v2.5' :
+              selectedAgent === 'technique' ? 'A cheap, fast model is recommended. Recommended: gemini-3.1-flash-lite, gpt-5.4-nano, gpt-5.4-mini, deepseek-v4-flash' :
+              'Use an OpenAI-compatible model name'
             )}
           </p>
           {['pathology', 'biochemistry', 'painter', 'supervisor'].includes(selectedAgent) && (

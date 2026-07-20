@@ -195,13 +195,13 @@ class LiteratureAgent(BaseAgent):
         self,
         settings_provider: 'AgentSettingsProvider',
         # Literature-specific parameters
-        literature_mode: str = "deep_research",
-        deep_research_model: str = "",
+        literature_mode: str = "pubmed_llm",
+        deep_research_model: str = "o4-mini-deep-research",
         deep_research_llm_base_url: str = "",
         deep_research_api_key: str = "",
         google_api_key: str = "",
         pubmed_email: str = "",
-        max_search_rounds: int = 10,
+        max_search_rounds: int = 20,
         proxy_url: Optional[str] = None,
     ):
         super().__init__(
@@ -321,7 +321,7 @@ class LiteratureAgent(BaseAgent):
         self.deep_research_llm_base_url = new_base_url
         self.deep_research_api_key = new_api_key
         self.pubmed_email = new_pubmed_email
-        self.max_search_rounds = max(1, min(50, int(new_max_rounds or 10)))
+        self.max_search_rounds = max(1, min(50, int(new_max_rounds or 20)))
 
         new_client_signature = self._deep_research_client_signature()
         if new_client_signature != old_client_signature:

@@ -42,9 +42,6 @@ _EXCLUDED_FIELDS = {
     "pending_uploaded_files",
     "human_input_requested",
     "human_messages",
-    "wait_input_reason",
-    "llm_failure_info",
-    "agent_disabled_info",
     "agent_server_configs",
     "agent_vision_settings",
     "chat_messages",
@@ -93,6 +90,27 @@ _COMPUTED_FIELDS = {
 
 
 class TestToApiDictCoverage:
+    def test_pending_hitl_gate_is_exposed_for_client_reload(self):
+        state = AnalysisState(
+            user_id="test",
+            wait_input_reason="llm_failure",
+            llm_failure_info={
+                "agent": "bioinformatics",
+                "model": "test-model",
+                "llm_server": "https://llm.example/v1",
+                "error": "upstream exhausted",
+                "node_name": "bioinformatics_analysis",
+                "generation": 4,
+            },
+        )
+
+        api = state.to_api_dict()
+
+        assert api["wait_input_reason"] == "llm_failure"
+        assert api["llm_failure_info"]["node_name"] == "bioinformatics_analysis"
+        assert api["llm_failure_info"]["generation"] == 4
+        assert api["agent_disabled_info"] is None
+
     def test_all_non_excluded_fields_are_present(self):
         state = AnalysisState(user_id="test")
         api = state.to_api_dict()

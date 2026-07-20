@@ -27,12 +27,12 @@ class DefaultLlm(BaseModel):
 
 class LiteratureConfig(BaseModel):
     mode: Literal["pubmed_llm", "deep_research", "gemini_deep_research", "disabled"]
-    deep_research_model: Optional[str] = None
+    deep_research_model: Optional[str] = "o4-mini-deep-research"
     deep_research_llm_base_url: Optional[str] = None
     deep_research_api_key: Optional[str] = None
     google_api_key: Optional[str] = None
     pubmed_email: Optional[str] = None
-    max_search_rounds: int = Field(ge=1, le=50, default=10)
+    max_search_rounds: int = Field(ge=1, le=50, default=20)
 
 
 class ApiConfigSection(BaseModel):

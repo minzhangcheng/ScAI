@@ -1047,13 +1047,19 @@ export function AnalysisPanel() {
         setShowExplorationDialog(true)
       } else if (feedbackRoundData && feedbackRoundData.phase !== 'integration') {
         setShowFeedbackDialog(true)
+      } else {
+        // The initial /load request can race with the reconnect state_sync:
+        // setCurrentSession clears transient dialog state after the socket has
+        // restored it. Reconnect on demand so the backend re-emits the pending
+        // HITL payload instead of leaving this badge as a no-op.
+        wsConnect?.()
       }
     } else if (currentSession?.status === 'waiting_plan_review') {
       setShowPlanReviewDialog(true)
     } else if (currentSession?.status === 'waiting_species_input') {
       useAppStore.getState().setShowSpeciesInputDialog(true)
     }
-  }, [currentSession?.status, currentSession?.currentRound, explorationReportData, feedbackRoundData, integrationGateData, annotationData, annotationGateData])
+  }, [currentSession?.status, currentSession?.currentRound, explorationReportData, feedbackRoundData, integrationGateData, annotationData, annotationGateData, wsConnect])
 
   // Countdown timer for LLM failure auto-skip
   const { timeRemaining } = useCountdownTimer({

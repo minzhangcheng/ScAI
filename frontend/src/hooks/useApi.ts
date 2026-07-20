@@ -75,6 +75,14 @@ export function applyStoreUpdates(updates: StoreUpdates): void {
   if (updates.roundWaitSeconds != null) store.setRoundWaitSeconds(updates.roundWaitSeconds)
   // Presence check, not a null check: an absent gate must clear a stale one.
   if ('annotationGateData' in updates) store.setAnnotationGateData(updates.annotationGateData ?? null)
+  if ('llmFailureInfo' in updates) {
+    if (updates.llmFailureInfo) {
+      store.setLlmFailureInfo(updates.llmFailureInfo)
+      store.setShowLlmTimeoutDialog(true)
+    } else {
+      store.clearLlmFailureState()
+    }
+  }
   if (updates.literatureMode != null) store.setLiteratureMode(updates.literatureMode as AppState['literatureMode'])
   if (updates.deepResearchModel != null) store.setDeepResearchModel(updates.deepResearchModel)
   if (updates.deepResearchLlmBaseUrl != null) store.setDeepResearchLlmBaseUrl(updates.deepResearchLlmBaseUrl)

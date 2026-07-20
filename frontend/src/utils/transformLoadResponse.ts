@@ -9,7 +9,12 @@ import type {
   RawPublicationFigure,
   RawPublicationTable,
 } from '../types'
-import type { Session, RoundResult, FigureReviewStatus } from '../stores/appStore'
+import type {
+  Session,
+  RoundResult,
+  FigureReviewStatus,
+  LlmFailureInfo,
+} from '../stores/appStore'
 import type { SnapshotTransactionRecord } from '../types/snapshotV2'
 
 const VALID_STATUSES: readonly Session['status'][] = [
@@ -20,6 +25,17 @@ const VALID_STATUSES: readonly Session['status'][] = [
 
 function opt<K extends string, V>(key: K, value: V | null | undefined): Partial<Record<K, V>> {
   return value != null ? { [key]: value } as Partial<Record<K, V>> : {}
+}
+
+function hasInterventionTarget(
+  value: unknown,
+): value is Record<string, unknown> & { node_name: string; generation: number } {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Record<string, unknown>
+  return (
+    typeof candidate.node_name === 'string' &&
+    typeof candidate.generation === 'number'
+  )
 }
 
 export function transformRoundResults(raw: (RawRoundResult | null)[] | undefined): RoundResult[] {
@@ -123,6 +139,8 @@ export type StoreUpdates = {
   roundWaitSeconds?: number
   /** Rebuilt from the authoritative annotation_state; null when no gate pending. */
   annotationGateData?: AnnotationData | null
+  /** Pending LLM/disabled-agent intervention rebuilt from authoritative state. */
+  llmFailureInfo?: LlmFailureInfo | null
   runtimeRestoreStatus?: 'complete' | 'unavailable' | 'intentionally_kept'
   runtimeRestoreWarning?: string | null
   snapshotFailure?: {
@@ -179,6 +197,40 @@ export function transformLoadResponse(data: SessionLoadResponse): TransformedLoa
       ...opt('annotation_report_url', data.annotation_report_url),
       ...opt('detailed_report_url', data.detailed_report_url),
     }),
+    llmFailureInfo: null,
+  }
+
+  if (
+    status === 'waiting_input' &&
+    (data.wait_input_reason === 'llm_failure' || data.wait_input_reason === 'marker_db_missing') &&
+    hasInterventionTarget(data.llm_failure_info)
+  ) {
+    const info = data.llm_failure_info
+    storeUpdates.llmFailureInfo = {
+      agent: typeof info.agent === 'string' ? info.agent : '',
+      model: typeof info.model === 'string' ? info.model : '',
+      llmServer: typeof info.llm_server === 'string' ? info.llm_server : '',
+      error: typeof info.error === 'string' ? info.error : '',
+      nodeName: info.node_name,
+      generation: info.generation,
+      reason: data.wait_input_reason,
+    }
+  } else if (
+    status === 'waiting_input' &&
+    data.wait_input_reason === 'agent_disabled' &&
+    hasInterventionTarget(data.agent_disabled_info)
+  ) {
+    const info = data.agent_disabled_info
+    const agent = typeof info.agent === 'string' ? info.agent : ''
+    storeUpdates.llmFailureInfo = {
+      agent,
+      model: '',
+      llmServer: '',
+      error: `Agent "${agent}" is disabled but required by step "${info.node_name}".`,
+      nodeName: info.node_name,
+      generation: info.generation,
+      reason: 'agent_disabled',
+    }
   }
 
   if (

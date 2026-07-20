@@ -96,6 +96,21 @@ export interface SessionLoadResponse {
   species_resolved?: boolean
   species_genes_validated?: boolean
   species_input_info?: Record<string, unknown>
+  wait_input_reason?: string | null
+  llm_failure_info?: {
+    agent?: string
+    model?: string
+    llm_server?: string
+    error?: string
+    node_name?: string
+    generation?: number
+    reason?: 'llm_failure' | 'marker_db_missing'
+  } | null
+  agent_disabled_info?: {
+    agent?: string
+    node_name?: string
+    generation?: number
+  } | null
   literature_config?: {
     mode?: 'gemini_deep_research' | 'pubmed_llm' | 'deep_research' | 'disabled'
     deep_research_model?: string

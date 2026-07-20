@@ -35,6 +35,65 @@ def test_messages_to_input_no_system():
     assert items == [{"role": "user", "content": "hi"}]
 
 
+def test_messages_to_input_strips_null_tool_calls_from_text_assistant_regression():
+    """Regression for the observed input[19].tool_calls Responses 400."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "Stage 1 is blocked at the mandatory manifest gate.",
+            "tool_calls": None,
+        },
+        {"role": "user", "content": "Please continue with a tool."},
+    ]
+
+    instructions, items = _responses_messages_to_input(msgs)
+
+    assert instructions is None
+    assert items == [
+        {
+            "role": "assistant",
+            "content": "Stage 1 is blocked at the mandatory manifest gate.",
+        },
+        {"role": "user", "content": "Please continue with a tool."},
+    ]
+    assert all("tool_calls" not in item for item in items)
+
+
+def test_messages_to_input_rebuilds_regular_messages_with_responses_fields_only():
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "Text response",
+            "tool_calls": [],
+            "reasoning_content": "private reasoning",
+            "function_call": None,
+            "name": "legacy-assistant",
+            "refusal": None,
+        },
+        {
+            "role": "user",
+            "content": "Continue",
+            "name": "legacy-user",
+        },
+    ]
+
+    _, items = _responses_messages_to_input(msgs)
+
+    assert items == [
+        {"role": "assistant", "content": "Text response"},
+        {"role": "user", "content": "Continue"},
+    ]
+
+
+def test_messages_to_input_drops_empty_assistant_echo_without_tool_calls():
+    _, items = _responses_messages_to_input([
+        {"role": "assistant", "content": None, "tool_calls": None},
+        {"role": "user", "content": "Continue"},
+    ])
+
+    assert items == [{"role": "user", "content": "Continue"}]
+
+
 def test_messages_to_input_converts_assistant_tool_calls_to_responses_function_calls():
     msgs = [
         {"role": "system", "content": "be precise"},
@@ -375,6 +434,54 @@ async def test_responses_adapter_complete_with_tools_sends_converted_tool_histor
     ]
     assert all("tool_calls" not in item for item in kwargs["input"])
     assert all("tool_call_id" not in item for item in kwargs["input"])
+
+
+@pytest.mark.asyncio
+async def test_responses_adapter_never_sends_null_tool_calls_in_input():
+    dump = {
+        "output": [
+            {
+                "type": "function_call",
+                "call_id": "call_next",
+                "name": "execute_code",
+                "arguments": "{}",
+            }
+        ],
+        "usage": {},
+    }
+    client = _fake_openai_with_response(dump)
+    adapter = _ResponsesAdapter(client, agent_name="bioinformatics")
+
+    await adapter.complete_with_tools(
+        model="gpt-5.6-sol",
+        messages=[
+            {
+                "role": "assistant",
+                "content": "Stage 1 is blocked at the mandatory manifest gate.",
+                "tool_calls": None,
+            },
+            {"role": "user", "content": "Please continue with a tool."},
+        ],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "execute_code",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+        tool_choice="required",
+        temperature=0.1,
+        max_tokens=32768,
+    )
+
+    sent_input = client.responses.create.call_args.kwargs["input"]
+    assert sent_input[0] == {
+        "role": "assistant",
+        "content": "Stage 1 is blocked at the mandatory manifest gate.",
+    }
+    assert all("tool_calls" not in item for item in sent_input)
 
 
 @pytest.mark.asyncio

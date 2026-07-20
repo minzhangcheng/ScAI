@@ -238,16 +238,16 @@ class APIConfig(BaseModel):
     
 class ModelConfig(BaseModel):
     """Model configuration for each agent"""
-    pi_model: str = "google/gemini-3.1-pro-preview"
-    pathology_model: str = "google/gemini-3.1-pro-preview"
-    bioinformatics_model: str = "anthropic/claude-sonnet-4.6"
-    biochemistry_model: str = "google/gemini-3.1-pro-preview"
-    literature_model: str = "google/gemini-3.1-flash-lite-preview"
+    pi_model: str = "gpt-5.6-sol"
+    pathology_model: str = "gemini-3.1-pro-preview"
+    bioinformatics_model: str = "gpt-5.6-sol"
+    biochemistry_model: str = "gemini-3.1-pro-preview"
+    literature_model: str = "gpt-5.4-mini"
     # Painter agent uses image generation model via OpenRouter
-    painter_model: str = "google/gemini-3.1-flash-image-preview"
+    painter_model: str = "gpt-image-2"
     # Supervisor agent uses cheap vision model for real-time monitoring
-    supervisor_model: str = "google/gemini-3.1-flash-lite-preview"
-    technique_model: str = "google/gemini-3.1-flash-lite-preview"
+    supervisor_model: str = "gpt-5.4-mini"
+    technique_model: str = "gpt-5.4-mini"
 
 class AgentTemperatures(BaseModel):
     """Default temperatures for each agent - centralized configuration"""
@@ -271,8 +271,8 @@ class AgentTemperatures(BaseModel):
         return AgentTemperatures(**data)
     
 # Literature agent defaults
-DEFAULT_LITERATURE_MODE = "deep_research"
-DEFAULT_LITERATURE_MAX_SEARCH_ROUNDS = 5
+DEFAULT_LITERATURE_MODE = "pubmed_llm"
+DEFAULT_LITERATURE_MAX_SEARCH_ROUNDS = 20
 
 class SystemConfig(BaseModel):
     """System configuration"""

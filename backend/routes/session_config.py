@@ -104,14 +104,14 @@ async def get_models(session_id: str, request: Request):
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     models = {
-        PI_AGENT_NAME: state.custom_models.get(PI_AGENT_NAME, cfg.models.pi_model if cfg else ""),
-        "pathology": state.custom_models.get("pathology", cfg.models.pathology_model if cfg else ""),
-        "bioinformatics": state.custom_models.get("bioinformatics", cfg.models.bioinformatics_model if cfg else ""),
-        "biochemistry": state.custom_models.get("biochemistry", cfg.models.biochemistry_model if cfg else ""),
-        "literature": state.custom_models.get("literature", cfg.models.literature_model if cfg else "google/gemini-3-flash-preview"),
-        "painter": state.custom_models.get("painter", cfg.models.painter_model if cfg else "gemini-2.0-flash-exp-image-generation"),
-        "supervisor": state.custom_models.get("supervisor", cfg.models.supervisor_model if cfg else "google/gemini-3.1-flash-lite-preview"),
-        "technique": state.custom_models.get("technique", cfg.models.technique_model if cfg else "google/gemini-3.1-flash-lite-preview"),
+        PI_AGENT_NAME: state.custom_models.get(PI_AGENT_NAME, cfg.models.pi_model if cfg else "gpt-5.6-sol"),
+        "pathology": state.custom_models.get("pathology", cfg.models.pathology_model if cfg else "gemini-3.1-pro-preview"),
+        "bioinformatics": state.custom_models.get("bioinformatics", cfg.models.bioinformatics_model if cfg else "gpt-5.6-sol"),
+        "biochemistry": state.custom_models.get("biochemistry", cfg.models.biochemistry_model if cfg else "gemini-3.1-pro-preview"),
+        "literature": state.custom_models.get("literature", cfg.models.literature_model if cfg else "gpt-5.4-mini"),
+        "painter": state.custom_models.get("painter", cfg.models.painter_model if cfg else "gpt-image-2"),
+        "supervisor": state.custom_models.get("supervisor", cfg.models.supervisor_model if cfg else "gpt-5.4-mini"),
+        "technique": state.custom_models.get("technique", cfg.models.technique_model if cfg else "gpt-5.4-mini"),
     }
     return models
 

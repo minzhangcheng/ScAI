@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { transformLoadResponse, transformRoundResults } from './transformLoadResponse'
+import { applyStoreUpdates } from '../hooks/useApi'
+import { useAppStore } from '../stores/appStore'
 import type { SessionLoadResponse } from '../types'
 
 const MINIMAL_RESPONSE: SessionLoadResponse = {
@@ -324,5 +326,79 @@ describe('transformLoadResponse — annotation gate', () => {
   it('clears annotationGateData when the session has no pending gate', () => {
     const result = transformLoadResponse(MINIMAL_RESPONSE)
     expect(result.storeUpdates.annotationGateData).toBeNull()
+  })
+})
+
+describe('transformLoadResponse — LLM intervention gate', () => {
+  it('rebuilds an LLM failure dialog from the authoritative load response', () => {
+    const result = transformLoadResponse({
+      ...MINIMAL_RESPONSE,
+      status: 'waiting_input',
+      wait_input_reason: 'llm_failure',
+      llm_failure_info: {
+        agent: 'bioinformatics',
+        model: 'test-model',
+        llm_server: 'https://llm.example/v1',
+        error: 'upstream exhausted',
+        node_name: 'bioinformatics_analysis',
+        generation: 4,
+      },
+    })
+
+    expect(result.storeUpdates.llmFailureInfo).toEqual({
+      agent: 'bioinformatics',
+      model: 'test-model',
+      llmServer: 'https://llm.example/v1',
+      error: 'upstream exhausted',
+      nodeName: 'bioinformatics_analysis',
+      generation: 4,
+      reason: 'llm_failure',
+    })
+  })
+
+  it('rebuilds a disabled-agent dialog from the authoritative load response', () => {
+    const result = transformLoadResponse({
+      ...MINIMAL_RESPONSE,
+      status: 'waiting_input',
+      wait_input_reason: 'agent_disabled',
+      agent_disabled_info: {
+        agent: 'literature',
+        node_name: 'literature_research',
+        generation: 2,
+      },
+    })
+
+    expect(result.storeUpdates.llmFailureInfo).toMatchObject({
+      agent: 'literature',
+      nodeName: 'literature_research',
+      generation: 2,
+      reason: 'agent_disabled',
+    })
+  })
+
+  it('clears stale LLM failure state when no intervention gate is pending', () => {
+    const result = transformLoadResponse(MINIMAL_RESPONSE)
+    expect(result.storeUpdates.llmFailureInfo).toBeNull()
+  })
+
+  it('opens the dialog on load and clears it after the gate is released', () => {
+    const pending = transformLoadResponse({
+      ...MINIMAL_RESPONSE,
+      status: 'waiting_input',
+      wait_input_reason: 'llm_failure',
+      llm_failure_info: {
+        agent: 'bioinformatics',
+        node_name: 'bioinformatics_analysis',
+        generation: 4,
+      },
+    })
+
+    applyStoreUpdates(pending.storeUpdates)
+    expect(useAppStore.getState().llmFailureInfo?.nodeName).toBe('bioinformatics_analysis')
+    expect(useAppStore.getState().showLlmTimeoutDialog).toBe(true)
+
+    applyStoreUpdates(transformLoadResponse(MINIMAL_RESPONSE).storeUpdates)
+    expect(useAppStore.getState().llmFailureInfo).toBeNull()
+    expect(useAppStore.getState().showLlmTimeoutDialog).toBe(false)
   })
 })

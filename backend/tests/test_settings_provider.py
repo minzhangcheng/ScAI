@@ -164,8 +164,9 @@ class TestGetVisionSetting:
 class TestGetLiteratureConfig:
     def test_returns_default_config(self, provider):
         config = provider.get_literature_config()
-        assert config["mode"] == "deep_research"
-        assert config["max_search_rounds"] == 10
+        assert config["mode"] == "pubmed_llm"
+        assert config["deep_research_model"] == "o4-mini-deep-research"
+        assert config["max_search_rounds"] == 20
 
     def test_returns_custom_config(self, provider, state):
         state.literature_config["mode"] = "pubmed_llm"

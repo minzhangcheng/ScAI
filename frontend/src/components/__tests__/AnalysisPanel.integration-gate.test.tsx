@@ -149,6 +149,20 @@ describe('AnalysisPanel integration gate lifecycle', () => {
     expect(await screen.findByRole('dialog', { name: /Integration Analysis/i })).toBeInTheDocument()
   })
 
+  it('reconnects when the waiting badge has no locally recoverable gate payload', () => {
+    const reconnect = vi.fn()
+    useAppStore.setState({
+      currentSession: makeSession('waiting_input', 'innovation'),
+      messages: [],
+      wsConnect: reconnect,
+    })
+
+    render(<AnalysisPanel />)
+    fireEvent.click(screen.getByRole('button', { name: /Waiting for Input/i }))
+
+    expect(reconnect).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps the original countdown deadline while the integration modal is closed', async () => {
     vi.useFakeTimers()
     useAppStore.setState({

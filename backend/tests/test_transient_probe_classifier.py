@@ -66,6 +66,15 @@ def test_plain_bad_request_is_transient():
     assert is_transient_probe_error(_err(BadRequestError, "invalid param foo", 400)) is True
 
 
+def test_responses_input_shape_error_is_not_transient():
+    error = _err(
+        BadRequestError,
+        "Unknown parameter: 'input[19].tool_calls'",
+        400,
+    )
+    assert is_transient_probe_error(error) is False
+
+
 def test_temperature_error_is_not_transient():
     # Temperature-related BadRequestError must propagate to _call_with_temp_fallback
     e = _err(BadRequestError, "Temperature parameter is not supported", 400)

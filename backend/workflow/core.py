@@ -812,13 +812,13 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         literature_config = self._settings_provider.get_literature_config()
         self.literature_agent = LiteratureAgent(
             settings_provider=self._settings_provider,
-            literature_mode=literature_config.get('mode', 'deep_research'),
-            deep_research_model=literature_config.get('deep_research_model', ''),
+            literature_mode=literature_config.get('mode', 'pubmed_llm'),
+            deep_research_model=literature_config.get('deep_research_model', 'o4-mini-deep-research'),
             deep_research_llm_base_url=literature_config.get('deep_research_llm_base_url', ''),
             deep_research_api_key=literature_config.get('deep_research_api_key', ''),
             google_api_key=literature_config.get('google_api_key', ''),
             pubmed_email=literature_config.get('pubmed_email', ''),
-            max_search_rounds=literature_config.get('max_search_rounds', 10),
+            max_search_rounds=literature_config.get('max_search_rounds', 20),
             proxy_url=self.config.api.proxy_url,
         )
         self.literature_agent.set_session(self.session_id)

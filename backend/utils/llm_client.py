@@ -415,6 +415,24 @@ def _responses_messages_to_input(messages: List[Dict[str, Any]]):
             })
             continue
 
+        # A regular Responses message accepts role/content, not the wider
+        # Chat Completions message shape. Rebuild the item instead of passing
+        # the source dict through: raw assistant echoes commonly carry
+        # ``tool_calls=None`` plus provider-specific reasoning fields, and
+        # strict Responses gateways reject even null unknown parameters (for
+        # example ``input[19].tool_calls``).
+        if role is not None:
+            content = msg.get("content")
+            # An empty assistant echo has no conversational value and some
+            # gateways reject a null content item. Real tool-call turns were
+            # already converted above.
+            if role == "assistant" and content is None:
+                continue
+            items.append({"role": role, "content": content})
+            continue
+
+        # Already-native Responses input items have no role (for example a
+        # caller-provided function_call item). Preserve those verbatim.
         items.append(msg)
     return instructions, items
 
@@ -803,6 +821,33 @@ def _is_protocol_adaptation_signal(error: Exception) -> bool:
             or is_tool_choice_error(error))
 
 
+_RESPONSES_INPUT_PARAMETER_RE = re.compile(r"\binput\[\d+\]\.")
+
+
+def is_responses_input_shape_error(error: Exception) -> bool:
+    """Return True for deterministic Responses ``input[]`` schema errors.
+
+    These errors identify a concrete invalid field path such as
+    ``input[19].tool_calls``. Repeating the same serialized request cannot
+    recover, but the caller should still receive ``UpstreamExhaustedError`` so
+    the workflow enters its normal Retry/Skip/Terminate HITL gate.
+    """
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code is not None and status_code != 400:
+        return False
+    message = str(error).lower()
+    if not _RESPONSES_INPUT_PARAMETER_RE.search(message):
+        return False
+    return any(marker in message for marker in (
+        "unknown parameter",
+        "unsupported parameter",
+        "unrecognized parameter",
+        "unexpected parameter",
+        "extra inputs are not permitted",
+    ))
+
+
 def is_transient_probe_error(error: Exception) -> bool:
     """True when an error is a transient upstream blip (retry the SAME protocol),
     as opposed to a deterministic protocol/parameter adaptation signal (switch
@@ -819,6 +864,8 @@ def is_transient_probe_error(error: Exception) -> bool:
     if isinstance(error, UpstreamExhaustedError):
         return False
     if _is_protocol_adaptation_signal(error):
+        return False
+    if is_responses_input_shape_error(error):
         return False
     return True
 
@@ -974,6 +1021,17 @@ async def retry_with_backoff(
             # fallback). They must NEVER be retried here.
             if _is_protocol_adaptation_signal(e):
                 raise
+            # A strict Responses gateway has identified the exact invalid
+            # input item/field. Retry would resend byte-for-byte equivalent
+            # JSON, so stop immediately and fall through to the standard
+            # UpstreamExhaustedError/HITL path.
+            if is_responses_input_shape_error(e):
+                last_exception = e
+                logger.error(
+                    f"[{agent_name}] Deterministic Responses input schema error "
+                    f"(not retrying): {str(e)[:300]}"
+                )
+                break
             if non_retryable_predicate is not None and non_retryable_predicate(e):
                 raise
             last_exception = e
