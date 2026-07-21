@@ -681,13 +681,13 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         all_figures = result.get("figures", [])
 
         existing_code_ids = {c.id for c in analysis_state.code_history}
-        existing_code_hashes = {_stable_code_hash(c.code) for c in analysis_state.code_history}
         for code_exec in result.get("code_history", []):
-            code_hash = _stable_code_hash(code_exec.code)
-            if code_exec.id not in existing_code_ids and code_hash not in existing_code_hashes:
+            # Execution identity, not source text, defines evidence provenance.
+            # The same code may fail first and succeed after runtime state changes;
+            # collapsing by code hash would discard the successful evidence ID.
+            if code_exec.id not in existing_code_ids:
                 analysis_state.code_history.append(code_exec)
                 existing_code_ids.add(code_exec.id)
-                existing_code_hashes.add(code_hash)
 
         # Store analysis log (dedup by step id to handle node retries)
         existing_step_ids = {s.id for s in analysis_state.analysis_log}

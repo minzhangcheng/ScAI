@@ -63,8 +63,8 @@ export function ConfigPanel({ onClose, onSave, onReadMode, isAdmin = true }: Con
         await adminConfig.saveConfig()
       } else {
         // Only update apiKey in store if user entered a real (non-masked) key.
-        // Masked keys contain "..." from the backend's _mask_api_key function.
-        const isRealKey = userApiKey && !userApiKey.includes('...')
+        // The backend preview is first 3 + six asterisks + last 3.
+        const isRealKey = userApiKey && !userApiKey.includes('******')
         setApiConfig({
           ...(isRealKey ? { apiKey: userApiKey } : {}),
           llmBaseUrl: userLlmBaseUrl || 'https://openrouter.ai/api/v1',

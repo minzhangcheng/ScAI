@@ -22,6 +22,7 @@ def build_round_summaries(state):
                 "cell_types": p.cell_types,
                 "triggering_observations": p.triggering_observations[:2],
                 "supporting_genes": p.supporting_genes[:8],
+                "evidence_execution_ids": p.evidence_execution_ids[:8],
                 "evidence_strength": p.evidence_strength,
                 "specificity": p.specificity,
                 "bulk_support": p.bulk_support,
@@ -29,6 +30,11 @@ def build_round_summaries(state):
             })
         summaries.append({
             "round_number": r.round_number,
+            "round_status": r.round_status,
+            "evidence_status": r.evidence_status,
+            "bioinformatics_evidence_verified": r.bioinformatics_evidence_verified,
+            "evidence_notes": list(r.evidence_notes or []),
+            "evidence_execution_ids": list(r.evidence_execution_ids or []),
             "pi_summary": r.pi_summary or "",
             "pathology_findings": r.pathology_findings or [],
             "bioinformatics_findings": r.bioinformatics_findings or [],
@@ -64,7 +70,15 @@ class AnalysisLogMixin:
         if self.cluster_annotations:
             annotation_lines = []
             for cid, info in sorted(self.cluster_annotations.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
-                annotation_lines.append(f"Cluster {cid}: {info.get('cell_type', 'Unknown')} ({info.get('n_cells', 0)} cells)")
+                count = info.get("n_cells")
+                count_text = (
+                    f"{count} cells"
+                    if isinstance(count, int) and count > 0
+                    else "cell count unavailable"
+                )
+                annotation_lines.append(
+                    f"Cluster {cid}: {info.get('cell_type', 'Unknown')} ({count_text})"
+                )
             findings["cluster_annotations"] = "\n".join(annotation_lines)
         else:
             findings["cluster_annotations"] = "Not available"

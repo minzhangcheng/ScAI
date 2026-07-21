@@ -71,6 +71,7 @@ def test_integration_empty_candidates_short_circuits():
     assert out["integration_next"] == "stop"
     assert out["should_continue"] is False
     assert s.pending_integration is False
+    assert s.analysis_phase == AnalysisPhase.INTEGRATION
     assert "pre_integration_gate" not in h.snapshots
 
 
@@ -81,6 +82,7 @@ def test_integration_cap_short_circuits_even_with_candidates():
     assert out["integration_next"] == "stop"
     assert out["should_continue"] is False
     assert s.integration_cycle == 3
+    assert s.analysis_phase == AnalysisPhase.INTEGRATION
 
 
 def test_after_integration_routes_on_flag():

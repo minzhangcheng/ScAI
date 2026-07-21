@@ -1584,7 +1584,10 @@ Respond in JSON:
             phase_label = (rr.phase or "exploration").upper()
             if rr.phase == "innovation":
                 has_innovation = True
-            header = f"### Round {rr.round_number} ({phase_label})"
+            header = (
+                f"### Round {rr.round_number} ({phase_label}; "
+                f"status={rr.round_status}; evidence={rr.evidence_status})"
+            )
 
             # Get direction for innovation rounds (stored at synthesis time)
             direction = ""
@@ -1597,6 +1600,13 @@ Respond in JSON:
                     innovation_directions.append((rr.round_number, direction))
 
             findings_parts.append(header)
+            if getattr(rr, "bioinformatics_evidence_verified", None) is False:
+                findings_parts.append(
+                    "**Evidence warning**: Bioinformatics claims are partial/unverified. "
+                    "Do not describe them as validated, confirmed, causal, or dominant."
+                )
+            for note in (getattr(rr, "evidence_notes", None) or []):
+                findings_parts.append(f"**Evidence note**: {note}")
             if rr.pi_summary:
                 findings_parts.append(f"**PI Summary**: {rr.pi_summary[:400]}")
             for agent_name, findings_list in [
@@ -1618,7 +1628,12 @@ Respond in JSON:
         for rr in state.round_results[-3:]:
             progs = (getattr(rr, "data_driven_mechanism_programs", []) or [])[:3]
             for p in progs:
-                mech_parts.append(f"- {p.to_prompt_text(style='compact', max_observations=2, max_genes=8, max_alternatives=2, max_missing=2)}")
+                prefix = (
+                    "[UNVERIFIED ROUND EVIDENCE] "
+                    if getattr(rr, "bioinformatics_evidence_verified", None) is False
+                    else ""
+                )
+                mech_parts.append(f"- {prefix}{p.to_prompt_text(style='compact', max_observations=2, max_genes=8, max_alternatives=2, max_missing=2)}")
             if getattr(rr, "cross_modal_synthesis", None):
                 for c in rr.cross_modal_synthesis.candidates[:3]:
                     mech_parts.append(
@@ -1709,6 +1724,9 @@ Respond in JSON:
 
 ## Instructions
 Write the report in English.
+Rounds marked partial/unverified must remain explicitly labeled as such. Never
+upgrade them to validated, confirmed, causal, dominant, or independently
+replicated conclusions, even if a PI summary or literature passage uses stronger wording.
 Generate the report with the following sections. Use the EXACT section IDs in brackets.
 Each section MUST have a descriptive, scientific title — do NOT use placeholder text like "Section Title".
 

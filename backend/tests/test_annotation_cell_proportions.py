@@ -214,6 +214,7 @@ async def test_compute_cluster_group_proportions_returns_empty_on_missing_sandbo
     assert await _agent(None).compute_cluster_group_proportions(_state()) == {
         "group_labels": [],
         "proportions": {},
+        "counts": {},
         "column_used": None,
         "dimension": "group",
     }
@@ -222,6 +223,7 @@ async def test_compute_cluster_group_proportions_returns_empty_on_missing_sandbo
     assert await _agent(sandbox).compute_cluster_group_proportions(_state()) == {
         "group_labels": [],
         "proportions": {},
+        "counts": {},
         "column_used": None,
         "dimension": "group",
     }

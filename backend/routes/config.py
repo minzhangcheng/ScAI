@@ -1,6 +1,7 @@
 """Config routes for API key and LLM settings."""
 import asyncio
 import copy
+import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -13,6 +14,7 @@ from backend.config import is_snapshot_v2_enabled
 from backend.state import system_config
 from backend.utils.auth import require_admin, get_db
 from backend.utils.llm_probe import validate_llm_credentials
+from backend.utils.secret_redaction import seal_system_config_payload
 
 router = APIRouter(prefix="/api", tags=["config"])
 
@@ -36,7 +38,11 @@ async def set_config(request: ConfigRequest, _: str = Depends(require_admin)):
         # Persist to database so config survives server restarts
         try:
             db = await get_db()
-            await db.set_meta("global_system_config", cfg.model_dump_json())
+            persisted = seal_system_config_payload(cfg.model_dump(mode="json"))
+            await db.set_meta(
+                "global_system_config",
+                json.dumps(persisted, ensure_ascii=False),
+            )
         except Exception:
             system_config["current"] = old_cfg
             raise

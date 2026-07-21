@@ -540,6 +540,9 @@ class SnapshotService:
                     ),
                 )
 
+            from backend.utils.secret_redaction import preserve_runtime_secrets
+            preserve_runtime_secrets(analysis_state, restored_state)
+
             # Exact continuation only — no fresh-run fallback.
             try:
                 staged_ckpt = self.continuation_dispatcher.stage_checkpoint(
@@ -1881,8 +1884,10 @@ class SnapshotService:
     @staticmethod
     def _serialize_analysis_state(state: Any) -> bytes:
         """Serialize the canonical business-state payload used by capture."""
+        from backend.utils.secret_redaction import strip_analysis_state_secrets
+
         # model_dump excluding derived listing fields that are rebuilt
-        state_dict = state.model_dump(mode="json")
+        state_dict = strip_analysis_state_secrets(state.model_dump(mode="json"))
         state_dict.pop("snapshots", None)
         state_dict.pop("realtime_messages", None)
         for seg in state_dict.get("detailed_report_segments", []) or []:

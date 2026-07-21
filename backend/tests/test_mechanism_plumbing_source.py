@@ -12,4 +12,5 @@ def test_pi_synthesis_attaches_programs_to_round_result():
     src = inspect.getsource(wf_synth)
     assert "round_result.data_driven_mechanism_programs" in src
     # Defensive: bioinformatics_result is initialized to None, so guard with `or {}`.
-    assert '(state.get("bioinformatics_result") or {}).get("mechanism_programs"' in src
+    assert 'bioinformatics_result = state.get("bioinformatics_result") or {}' in src
+    assert 'bioinformatics_result.get("mechanism_programs"' in src

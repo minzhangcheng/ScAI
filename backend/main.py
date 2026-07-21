@@ -134,9 +134,30 @@ async def lifespan(app: FastAPI):
     try:
         saved_cfg_json = await db.get_meta("global_system_config")
         if saved_cfg_json:
+            import json
             from backend.config._config import SystemConfig
             from backend.state import system_config
-            system_config["current"] = SystemConfig.model_validate_json(saved_cfg_json)
+            from backend.utils.secret_redaction import (
+                SEALED_SECRET_PREFIX,
+                open_system_config_payload,
+                seal_system_config_payload,
+            )
+
+            persisted_payload = json.loads(saved_cfg_json)
+            config_payload = open_system_config_payload(persisted_payload)
+            system_config["current"] = SystemConfig.model_validate(config_payload)
+            api_payload = persisted_payload.get("api") or {}
+            if any(
+                api_payload.get(field)
+                and not str(api_payload[field]).startswith(SEALED_SECRET_PREFIX)
+                for field in ("api_key", "proxy_url")
+            ):
+                migrated_payload = seal_system_config_payload(config_payload)
+                await db.set_meta(
+                    "global_system_config",
+                    json.dumps(migrated_payload, ensure_ascii=False),
+                )
+                logger.info("Migrated global system credentials to encrypted storage")
             logger.info("Restored global system config from database")
     except Exception as e:
         logger.warning("Failed to restore global system config: %s; using defaults", e)
@@ -234,4 +255,3 @@ from .models.api_requests import (
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

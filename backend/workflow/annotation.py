@@ -95,6 +95,7 @@ class AnnotationMixin:
                 key_markers=info.get("key_markers", []),
                 confidence=info.get("confidence", "low"),
                 evidence=info.get("evidence", ""),
+                n_cells=max(0, int(info.get("n_cells", 0) or 0)),
                 group_proportions=info.get("group_proportions", {}) or {},
                 alternative_cell_types=info.get("alternative_cell_types", []),
                 low_confidence_reason=info.get("low_confidence_reason", ""),
@@ -112,8 +113,12 @@ class AnnotationMixin:
         proportion_meta: Optional[Dict[str, Any]],
     ) -> None:
         proportions = (proportion_meta or {}).get("proportions") or {}
+        counts = (proportion_meta or {}).get("counts") or {}
         for ca in cluster_anns:
             ca.group_proportions = dict(proportions.get(str(ca.cluster_id), {}) or {})
+            count = counts.get(str(ca.cluster_id))
+            if count is not None:
+                ca.n_cells = max(0, int(count))
 
     @staticmethod
     def _annotations_from_cluster_annotations(cluster_annotations) -> Dict[str, Any]:
@@ -127,6 +132,7 @@ class AnnotationMixin:
                 "key_markers": list(ca.key_markers),
                 "confidence": ca.confidence,
                 "evidence": ca.evidence,
+                "n_cells": ca.n_cells,
                 "group_proportions": dict(ca.group_proportions or {}),
                 "alternative_cell_types": list(ca.alternative_cell_types),
                 "low_confidence_reason": ca.low_confidence_reason,

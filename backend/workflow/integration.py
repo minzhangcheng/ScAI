@@ -137,6 +137,10 @@ class IntegrationMixin:
             logger.error(f"[{session_id}] Integration report HTML generation failed: {html_err}")
 
         cap_reached = analysis_state.integration_cycle >= analysis_state.max_integration_cycles
+        # The integration node has completed regardless of whether it opens a
+        # new-direction gate or proceeds directly to the final report. Persist
+        # the actual terminal phase before either branch returns.
+        analysis_state.analysis_phase = AnalysisPhase.INTEGRATION
         if cap_reached or not scored_candidates:
             reason = ("Reached the integration analysis limit; proceeding to the final report."
                       if cap_reached else
@@ -153,7 +157,6 @@ class IntegrationMixin:
 
         analysis_state.integration_gate_candidates = scored_candidates
         analysis_state.integration_gate_literature_evidence = list(literature_evidence or [])
-        analysis_state.analysis_phase = AnalysisPhase.INTEGRATION
         self._continue_event.clear()
         self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
         await self._create_auto_snapshot(analysis_state, "pre_integration_gate")

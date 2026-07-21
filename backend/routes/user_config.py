@@ -13,11 +13,13 @@ from backend.utils.llm_probe import validate_llm_credentials
 from backend.utils.db import AppDB
 from cryptography.fernet import InvalidToken
 from backend.utils import crypto
+from backend.utils.secret_redaction import mask_api_key
 from backend.state import system_config
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/user", tags=["user_config"])
+MASKED_PROXY_URL = "•••••"
 
 
 # ── Request models ───────────────────────────────────────────────────────────
@@ -37,9 +39,7 @@ class ValidateUserConfigRequest(BaseModel):
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _mask_api_key(key: str) -> str:
-    if len(key) <= 12:
-        return "****"
-    return key[:6] + "..." + key[-4:]
+    return mask_api_key(key)
 
 
 def _validate_url(url: str, field_name: str) -> None:
@@ -120,12 +120,34 @@ async def set_user_config(
     """Save per-user LLM config. Requires active user (pending/readonly users are rejected)."""
     if body.llm_base_url:
         _validate_url(body.llm_base_url, "llm_base_url")
-    if body.proxy_url:
+    if body.proxy_url and body.proxy_url != MASKED_PROXY_URL:
         _validate_url(body.proxy_url, "proxy_url")
 
+    existing = await db.get_user_llm_config(user_id)
+    existing_plaintext = ""
+    existing_proxy_plaintext = ""
+    if existing and existing.get("encrypted_api_key"):
+        try:
+            existing_plaintext = crypto.decrypt_value(existing["encrypted_api_key"])
+        except (crypto.ConfigEncryptionUnavailable, InvalidToken):
+            existing_plaintext = ""
+    if existing and existing.get("encrypted_proxy_url"):
+        try:
+            existing_proxy_plaintext = crypto.decrypt_value(
+                existing["encrypted_proxy_url"]
+            )
+        except (crypto.ConfigEncryptionUnavailable, InvalidToken):
+            existing_proxy_plaintext = ""
+
     try:
-        encrypted_api_key = crypto.encrypt_value(body.api_key) if body.api_key else ""
-        encrypted_proxy_url = crypto.encrypt_value(body.proxy_url or "") if body.proxy_url else ""
+        if existing_plaintext and body.api_key == mask_api_key(existing_plaintext):
+            encrypted_api_key = existing["encrypted_api_key"]
+        else:
+            encrypted_api_key = crypto.encrypt_value(body.api_key) if body.api_key else ""
+        if existing_proxy_plaintext and body.proxy_url == MASKED_PROXY_URL:
+            encrypted_proxy_url = existing["encrypted_proxy_url"]
+        else:
+            encrypted_proxy_url = crypto.encrypt_value(body.proxy_url or "") if body.proxy_url else ""
     except crypto.ConfigEncryptionUnavailable as e:
         logger.error("Encryption unavailable when saving user config: %s", e)
         raise HTTPException(status_code=503, detail="Encryption service unavailable; cannot save config")

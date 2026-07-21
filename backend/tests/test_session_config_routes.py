@@ -7,6 +7,7 @@ from backend.models.schemas import AnalysisState
 from backend.routes import session_config
 from backend.state import sessions, workflows
 from backend.utils.settings_provider import MASKED_SECRET_VALUE
+from backend.utils.secret_redaction import mask_api_key
 
 
 class _Request:
@@ -89,3 +90,32 @@ async def test_agent_server_config_route_invalidates_matching_agent(monkeypatch)
     assert response.success is True
     provider.clear_agent_client_cache.assert_called_once_with("pi")
     workflow.pi_agent.refresh_runtime_config_if_needed.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_agent_server_config_route_preserves_masked_preview(monkeypatch):
+    session_id = "route-server-mask-test"
+    state = _state(session_id)
+    state.agent_server_configs["pi"] = {
+        "llm_base_url": "https://pi.example/v1",
+        "api_key": "sk-123456789",
+    }
+    sessions[session_id] = state
+
+    monkeypatch.setattr(
+        session_config, "require_session_ownership", AsyncMock(return_value=state)
+    )
+    monkeypatch.setattr(session_config, "async_save_session", AsyncMock())
+    monkeypatch.setattr(session_config, "update_session_cache", AsyncMock())
+
+    body = AgentServerConfigRequest(
+        agent="pi",
+        llm_base_url="https://pi.example/v1",
+        api_key=mask_api_key("sk-123456789"),
+    )
+    try:
+        await session_config.update_agent_server_config(session_id, _Request(), body)
+    finally:
+        sessions.pop(session_id, None)
+
+    assert state.agent_server_configs["pi"]["api_key"] == "sk-123456789"

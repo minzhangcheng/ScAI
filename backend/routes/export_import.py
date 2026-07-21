@@ -56,6 +56,7 @@ from backend.state import (
 from backend.utils.auth import require_session_ownership
 from backend.utils.blob_store import inline_blobs
 from backend.utils.files import slugify_session_name, validate_path_within, validate_session_id, temp_file_on_error
+from backend.utils.secret_redaction import strip_analysis_state_secrets
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
 
@@ -137,6 +138,19 @@ def _build_export_filename(session_id: str, name: str, ext: str = ".tar.gz") -> 
 # Helper functions (used by export handlers)
 # ---------------------------------------------------------------------------
 
+def _add_json_bytes(tf, arcname: str, payload: dict) -> None:
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    info = tarfile.TarInfo(name=arcname)
+    info.size = len(data)
+    info.mode = 0o600
+    tf.addfile(info, io.BytesIO(data))
+
+
+def _add_portable_state_json(tf, source: Path, arcname: str) -> None:
+    """Add state JSON without installation-bound or plaintext credentials."""
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    _add_json_bytes(tf, arcname, strip_analysis_state_secrets(payload))
+
 def _add_snapshots_to_tar(tf, session_id: str, include_runtime: bool = False):
     """Add snapshot files to tar archive.
 
@@ -160,18 +174,25 @@ def _add_snapshots_to_tar(tf, session_id: str, include_runtime: bool = False):
             if not include_runtime and is_sandbox_pickle(snap_file.name):
                 continue
             rel = snap_file.relative_to(snapshots_dir)
-            tf.add(str(snap_file), arcname=f"{session_id}/snapshots/{rel.as_posix()}")
+            arcname = f"{session_id}/snapshots/{rel.as_posix()}"
+            if snap_file.suffix.casefold() == ".json":
+                _add_portable_state_json(tf, snap_file, arcname)
+            else:
+                tf.add(str(snap_file), arcname=arcname)
 
 
 def _add_states_to_tar(tf, session_id: str, include_runtime: bool = False):
     """Add files under sessions/<id>/states/ to the tar.
 
-    Skips the live sandbox pickle (``<id>_session.pkl``) unless ``include_runtime``
-    is True. Notebook (``*.ipynb``) and langgraph checkpoint (``checkpoints.sqlite``)
-    are always included — they are not arbitrary-code-execution risks.
+    Skips the live sandbox pickle and LangGraph checkpoint unless
+    ``include_runtime`` is true. Checkpoints contain installation-key-encrypted
+    credentials and therefore belong only in same-instance runtime exports;
+    notebooks remain portable and are always included.
     """
     def _add(state_file: Path):
         if not include_runtime and is_sandbox_pickle(state_file.name):
+            return
+        if not include_runtime and state_file.name.startswith("checkpoints.sqlite"):
             return
         tf.add(str(state_file), arcname=f"{session_id}/states/{state_file.name}")
 
@@ -265,7 +286,9 @@ async def export_state(session_id: str, request: Request, include_runtime: bool 
             # 1. session.json
             session_file = resolve_session_metadata_path(session_id)
             if session_file and session_file.exists():
-                tf.add(str(session_file), arcname=f"{session_id}/sessions/{session_id}.json")
+                _add_portable_state_json(
+                    tf, session_file, f"{session_id}/sessions/{session_id}.json"
+                )
 
             # 2. states (checkpoints, notebook, pkl)
             _add_states_to_tar(tf, session_id, include_runtime=include_runtime)
@@ -366,7 +389,9 @@ async def export_prepare(session_id: str, request: Request, include_runtime: boo
             # session.json
             session_file = resolve_session_metadata_path(session_id)
             if session_file and session_file.exists():
-                tf.add(str(session_file), arcname=f"{session_id}/sessions/{session_id}.json")
+                _add_portable_state_json(
+                    tf, session_file, f"{session_id}/sessions/{session_id}.json"
+                )
 
             # states
             _add_states_to_tar(tf, session_id, include_runtime=include_runtime)
@@ -1127,8 +1152,10 @@ def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = 
     # Re-serialize from state_data (not state_json_str) so the updated
     # user_id is reflected on disk.
     session_file = get_session_metadata_path(session_id)
-    session_file.parent.mkdir(parents=True, exist_ok=True)
+    session_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    session_file.parent.chmod(0o700)
     session_file.write_text(json.dumps(state_data, ensure_ascii=False), encoding="utf-8")
+    session_file.chmod(0o600)
 
     # Inline blob references so the in-memory AnalysisState carries the
     # original content rather than dangling @scai-blob tokens.

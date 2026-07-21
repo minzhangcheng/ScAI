@@ -79,8 +79,10 @@ class AppDB:
         self.path = Path(path)
 
     async def init(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.path.parent.chmod(0o700)
         async with aiosqlite.connect(self.path, timeout=30) as db:
+            self.path.chmod(0o600)
             await db.execute("PRAGMA journal_mode=WAL")
             await db.execute("PRAGMA synchronous=NORMAL")
             await db.execute("PRAGMA foreign_keys = ON")

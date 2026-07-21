@@ -198,7 +198,16 @@ class PlanningMixin:
             # Fallback to round summaries and analysis steps
             rounds_text = ""
             for rs in analysis_record.get("round_summaries", []):
-                rounds_text += f"\n### Round {rs['round_number']}\n"
+                rounds_text += (
+                    f"\n### Round {rs['round_number']} "
+                    f"(status={rs.get('round_status', 'completed')}; "
+                    f"evidence={rs.get('evidence_status', 'empty')})\n"
+                )
+                if rs.get("bioinformatics_evidence_verified") is False:
+                    rounds_text += (
+                        "**EVIDENCE WARNING**: Bioinformatics findings are partial/unverified; "
+                        "never label them validated, confirmed, causal, dominant, or replicated.\n"
+                    )
                 rounds_text += f"**PI Summary**: {rs['pi_summary'][:500]}\n"
                 if rs['bioinformatics_findings']:
                     rounds_text += f"**Bioinformatics findings**:\n"
@@ -228,6 +237,20 @@ class PlanningMixin:
 ## Key Analysis Steps (code cells that generated figures)
 {steps_text}
 """
+
+        evidence_warnings = []
+        for rs in analysis_record.get("round_summaries", []):
+            if rs.get("bioinformatics_evidence_verified") is False:
+                evidence_warnings.append(
+                    f"- Round {rs['round_number']}: partial/unverified bioinformatics evidence. "
+                    "Do not upgrade claims to validated, confirmed, causal, dominant, or replicated."
+                )
+        if evidence_warnings:
+            analysis_context += (
+                "\n## Mandatory Evidence Qualification\n"
+                + "\n".join(evidence_warnings)
+                + "\nThese qualifications override stronger wording in summaries or literature.\n"
+            )
 
         # Parameters used
         params_text = ""

@@ -41,6 +41,18 @@ def test_regular_scanpy_code_does_not_get_velocity_memory_guard():
     assert _build_resource_guard_preamble("sc.tl.umap(adata)") == ""
 
 
+def test_full_matrix_scale_and_toarray_get_dense_memory_guard():
+    assert _high_memory_referenced_names("sc.pp.scale(adata)") == ["adata"]
+    assert _high_memory_referenced_names("dense = adata.X.toarray()") == ["adata"]
+    assert "full-matrix dense transformation" in _build_resource_guard_preamble(
+        "sc.pp.scale(adata)"
+    )
+
+
+def test_sparse_scale_without_centering_does_not_get_dense_guard():
+    assert _build_resource_guard_preamble("sc.pp.scale(adata, zero_center=False)") == ""
+
+
 def test_memory_preflight_targets_call_argument_not_source_used_to_build_subset():
     code = "adata_small = adata[mask].copy()\nscv.tl.velocity_graph(adata_small)"
     assert _high_memory_referenced_names(code) == ["adata_small"]

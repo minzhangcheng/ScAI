@@ -45,6 +45,22 @@ def test_annotation_state_constructed_with_validation_meta():
     assert st.reclustering_recommendations[0]["cluster_id"] == "7"
 
 
+def test_group_metadata_applies_absolute_cluster_counts():
+    from backend.workflow.annotation import AnnotationMixin
+
+    annotations = [ClusterAnnotation(cluster_id="7", cell_type="Stromal")]
+    AnnotationMixin._apply_group_proportions(
+        annotations,
+        {
+            "proportions": {"7": {"Control": 12.5}},
+            "counts": {"7": 241},
+        },
+    )
+
+    assert annotations[0].n_cells == 241
+    assert annotations[0].group_proportions == {"Control": 12.5}
+
+
 def test_real_payload_builder_includes_validation_fields():
     """Exercise the REAL production helper, not a hand-written mirror."""
     from backend.workflow.annotation import AnnotationMixin

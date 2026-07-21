@@ -6,6 +6,7 @@ from httpx import AsyncClient, ASGITransport
 from backend import utils
 from backend.utils.auth import create_access_token, hash_password
 from backend.utils.db import AppDB
+from backend.utils.secret_redaction import mask_api_key
 
 
 @pytest_asyncio.fixture
@@ -64,3 +65,4 @@ async def test_get_agent_server_config_masks_key(client_and_token):
                         headers=headers)
     assert r.status_code == 200, r.text
     assert "sk-secret" not in r.text
+    assert r.json()["pi"]["api_key"] == mask_api_key("sk-secret")

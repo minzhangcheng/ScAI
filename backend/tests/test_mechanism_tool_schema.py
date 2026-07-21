@@ -12,7 +12,7 @@ def test_tool_schema_has_programs_and_reason():
     assert "programs" in props
     assert "no_program_reason" in props
     item_props = props["programs"]["items"]["properties"]
-    for f in ("label", "triggering_observations", "evidence_strength",
+    for f in ("label", "triggering_observations", "evidence_execution_ids", "evidence_strength",
               "specificity", "interpretation", "bulk_support"):
         assert f in item_props
 

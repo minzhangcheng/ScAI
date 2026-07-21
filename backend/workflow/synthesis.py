@@ -166,6 +166,21 @@ def derive_round_completion_status(state: Dict[str, Any], result: RoundResult) -
     has_optional_failed = any(status in FAILED_AGENT_STATUSES for status in optional_statuses)
     has_optional_partial = any(status in PARTIAL_AGENT_STATUSES for status in optional_statuses)
 
+    # New bioinformatics runs must bind findings to successful current-run
+    # execution IDs. A deliberately degraded mandatory gate or an invalid
+    # evidence reference may still yield a partial narrative, but it must not
+    # satisfy direction coverage or be reported as validated evidence.
+    bioinformatics_result = state.get("bioinformatics_result")
+    if (
+        isinstance(bioinformatics_result, dict)
+        and bioinformatics_result.get("findings")
+        and bioinformatics_result.get("evidence_verified") is False
+    ):
+        result.round_status = "partial"
+        result.evidence_status = "substantive" if has_evidence else "failed"
+        result.direction_coverage_eligible = False
+        return result
+
     if has_core_failed:
         result.round_status = "partial" if has_evidence else "failed"
         result.evidence_status = "substantive" if has_evidence else "failed"
@@ -524,6 +539,22 @@ class SynthesisMixin:
                 agent_results[agent_name] = json.dumps(
                     {"status": status, "findings": findings}, ensure_ascii=False
                 )
+            elif agent_name == "bioinformatics":
+                agent_results[agent_name] = json.dumps(
+                    {
+                        "status": status or "completed",
+                        "findings": findings,
+                        "evidence_verified": result.get("evidence_verified"),
+                        "evidence_execution_ids": result.get("evidence_execution_ids", []),
+                        "evidence_note": (
+                            "Treat these findings as partial/unverified and do not use "
+                            "validated, confirmed, or dominant wording."
+                            if result.get("evidence_verified") is False
+                            else "Findings are linked to successful execution records."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
             else:
                 agent_results[agent_name] = json.dumps(findings, ensure_ascii=False)
 
@@ -661,7 +692,17 @@ class SynthesisMixin:
                 f"staying in EXPLORATION, prompting user to check data"
             )
 
-        round_result.data_driven_mechanism_programs = (state.get("bioinformatics_result") or {}).get("mechanism_programs", [])
+        bioinformatics_result = state.get("bioinformatics_result") or {}
+        round_result.data_driven_mechanism_programs = bioinformatics_result.get("mechanism_programs", [])
+        round_result.bioinformatics_evidence_verified = bioinformatics_result.get("evidence_verified")
+        round_result.evidence_execution_ids = list(
+            bioinformatics_result.get("evidence_execution_ids") or []
+        )
+        if round_result.bioinformatics_evidence_verified is False:
+            round_result.evidence_notes.append(
+                "Bioinformatics findings were not fully bound to successful execution evidence; "
+                "treat them as partial and unvalidated."
+            )
         derive_round_completion_status(state, round_result)
         lineage_id = current_lineage_id(analysis_state)
         restored_from = restore_provenance_id(analysis_state)

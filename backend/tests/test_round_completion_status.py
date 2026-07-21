@@ -60,6 +60,24 @@ def test_agent_error_with_findings_marks_partial_not_complete():
     assert completed_innovation_direction_keys(state) == set()
 
 
+def test_unverified_execution_evidence_marks_round_partial():
+    result = _round()
+    derive_round_completion_status(
+        {
+            "bioinformatics_result": {
+                "status": "completed",
+                "findings": ["unsupported claim"],
+                "evidence_verified": False,
+            },
+            "literature_result": {"status": "completed", "findings": ["paper"]},
+        },
+        result,
+    )
+
+    assert result.round_status == "partial"
+    assert result.direction_coverage_eligible is False
+
+
 def test_completed_results_with_findings_mark_substantive():
     result = _round()
     derive_round_completion_status(

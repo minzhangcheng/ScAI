@@ -14,6 +14,7 @@ import uuid
 import re
 import ast
 import textwrap
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -192,6 +193,13 @@ def validate_mechanism_program_payload(payload, *, round_number=0, phase="", sta
         if not observations:
             return [], f"Program {idx} has empty triggering_observations."
         observations = [str(o)[:_MAX_OBS_LEN] for o in observations]
+        evidence_execution_ids = [
+            str(value).strip()
+            for value in _ensure_list(rp.get("evidence_execution_ids"))
+            if str(value).strip()
+        ]
+        if not evidence_execution_ids:
+            return [], f"Program {idx} requires at least one evidence_execution_id."
 
         alternatives = [a for a in _ensure_list(rp.get("alternative_explanations")) if str(a).strip()]
         if not alternatives:
@@ -230,6 +238,7 @@ def validate_mechanism_program_payload(payload, *, round_number=0, phase="", sta
             supporting_pathways=[str(p) for p in _ensure_list(rp.get("supporting_pathways"))],
             supporting_scores=[str(s) for s in _ensure_list(rp.get("supporting_scores"))],
             supporting_tables=[str(t) for t in _ensure_list(rp.get("supporting_tables"))],
+            evidence_execution_ids=evidence_execution_ids,
             bulk_support=bulk_support,
             evidence_strength=evidence_strength,
             specificity=specificity,
@@ -300,13 +309,40 @@ _CELL_TYPE_ASSIGN_RE = re.compile(
 
 _HIGH_MEMORY_ANALYSIS_RE = re.compile(
     r"\b(?:scv|scvelo)\s*\.\s*(?:pp\s*\.\s*moments|tl\s*\.\s*(?:velocity|velocity_graph))\s*\(|"
-    r"\bcellrank\b",
+    r"\bcellrank\b|\bsc\s*\.\s*pp\s*\.\s*scale\s*\(|\.X\s*\.\s*toarray\s*\(",
+    re.IGNORECASE,
+)
+
+_FAILED_EVIDENCE_OUTPUT_RE = re.compile(
+    r"(?:\bvalidation\s+failed\b|\bcritical\s*:\s*[^\n]*(?:failed|no\s+\w+\s+found)|"
+    r"\bmatched\s+in\s+bulk\s*:\s*\[\s*\]|\bexecution\s+failed\b)",
     re.IGNORECASE,
 )
 
 
+def execution_supports_evidence(execution: CodeExecution) -> bool:
+    """Return whether a code cell may be cited as scientific evidence."""
+    if execution.error or not execution.evidence_eligible:
+        return False
+    return not _FAILED_EVIDENCE_OUTPUT_RE.search(execution.output or "")
+
+
+def successful_evidence_executions(
+    executions: List[CodeExecution],
+    *,
+    round_number: Optional[int] = None,
+) -> List[CodeExecution]:
+    """Filter code history to successful, non-contradictory executions."""
+    return [
+        execution
+        for execution in executions
+        if execution_supports_evidence(execution)
+        and (round_number is None or execution.round_number == round_number)
+    ]
+
+
 def _high_memory_referenced_names(code: str) -> List[str]:
-    """Return AnnData call arguments for known high-memory operations."""
+    """Return AnnData arguments for graph-building or dense-memory operations."""
     if not _HIGH_MEMORY_ANALYSIS_RE.search(code):
         return []
     try:
@@ -345,19 +381,37 @@ def _high_memory_referenced_names(code: str) -> List[str]:
         ))
         root = func_name.split(".", 1)[0]
         is_cellrank = root in cellrank_aliases
-        if not (is_scvelo or is_cellrank):
-            continue
-        target = node.args[0] if node.args else next(
-            (kw.value for kw in node.keywords if kw.arg in {"adata", "data"}),
-            None,
+        is_scale = bool(re.fullmatch(r"sc\.pp\.scale", func_name, re.IGNORECASE))
+        if is_scale and any(
+            kw.arg == "zero_center"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is False
+            for kw in node.keywords
+        ):
+            is_scale = False
+        is_toarray = (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "toarray"
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "X"
+            and isinstance(node.func.value.value, ast.Name)
         )
+        if not (is_scvelo or is_cellrank or is_scale or is_toarray):
+            continue
+        if is_toarray:
+            target = node.func.value.value
+        else:
+            target = node.args[0] if node.args else next(
+                (kw.value for kw in node.keywords if kw.arg in {"adata", "data"}),
+                None,
+            )
         if isinstance(target, ast.Name):
             names.add(target.id)
     return sorted(names)
 
 
 def _build_resource_guard_preamble(code: str) -> str:
-    """Build a kernel-side memory preflight for velocity/fate operations.
+    """Build a kernel-side memory preflight for high-memory operations.
 
     The guard measures referenced AnnData matrices and actual host/cgroup
     headroom immediately before user code runs. It fails early with actionable
@@ -367,11 +421,14 @@ def _build_resource_guard_preamble(code: str) -> str:
     if not names:
         return ""
     names_repr = repr(names)
-    operation_factor = 8 if re.search(r"\bcellrank\b", code, re.I) else (
-        6 if re.search(r"velocity_graph", code, re.I) else 4
+    dense_transform = bool(re.search(r"(?:\bsc\s*\.\s*pp\s*\.\s*scale\s*\(|\.X\s*\.\s*toarray\s*\()", code, re.I))
+    operation_factor = 2 if dense_transform else (
+        8 if re.search(r"\bcellrank\b", code, re.I) else (
+            6 if re.search(r"velocity_graph", code, re.I) else 4
+        )
     )
     return f"""
-# ScAI resource preflight for high-memory velocity/fate analysis.
+# ScAI resource preflight for high-memory analysis.
 def _scai_matrix_bytes(_value, _seen):
     if _value is None or id(_value) in _seen:
         return 0
@@ -449,16 +506,29 @@ if _scai_guard_candidates:
     )
     _scai_guard_bytes = max(1, _scai_guard_bytes)
     _scai_guard_n_obs = int(getattr(_scai_guard_adata, 'n_obs', 0) or 0)
-    _scai_guard_graph_bytes = _scai_guard_n_obs * min(_scai_guard_n_obs, 5000) * 8
+    _scai_guard_n_vars = int(getattr(_scai_guard_adata, 'n_vars', 0) or 0)
+    _scai_guard_dense_bytes = _scai_guard_n_obs * _scai_guard_n_vars * 8 if {dense_transform!r} else 0
+    _scai_guard_graph_bytes = (
+        0 if {dense_transform!r}
+        else _scai_guard_n_obs * min(_scai_guard_n_obs, 5000) * 8
+    )
     _scai_guard_required = max(
         512 * 1024**2,
-        _scai_guard_bytes * {operation_factor} + _scai_guard_graph_bytes,
+        _scai_guard_bytes * {operation_factor} + _scai_guard_graph_bytes + _scai_guard_dense_bytes,
     )
     _scai_guard_headroom = _scai_memory_headroom()
+    if _scai_guard_dense_bytes > int(1.5 * 1024**3):
+        raise MemoryError(
+            'ScAI resource preflight blocked a full-matrix dense transformation: '
+            f'{{_scai_guard_name}} would require at least '
+            f'{{_scai_guard_dense_bytes / 1024**3:.1f}} GiB for one dense matrix, '
+            'which would make runtime snapshots unsafe. Subset to relevant features/HVGs, '
+            'use zero_center=False for sparse scaling, or keep the matrix sparse.'
+        )
     if (_scai_guard_headroom is not None
             and _scai_guard_required > int(_scai_guard_headroom * 0.70)):
         raise MemoryError(
-            'ScAI resource preflight blocked a high-memory velocity/fate operation: '
+            'ScAI resource preflight blocked a high-memory operation: '
             f'{{_scai_guard_name}} has {{_scai_guard_n_obs:,}} cells and the operation '
             f'is estimated to need {{_scai_guard_required / 1024**3:.1f}} GiB, but only '
             f'{{_scai_guard_headroom / 1024**3:.1f}} GiB headroom is available. '
@@ -517,7 +587,7 @@ def _build_exec_autosave_wrapper(code: str, figures_dir: str, timestamp: str) ->
     cause of the same image appearing 100+ times in reports.
     """
     figures_dir_repr = repr(str(figures_dir))
-    indented_code = textwrap.indent(code, '    ')
+    user_source_repr = repr(code)
     resource_guard = textwrap.indent(_build_resource_guard_preamble(code), '    ')
     restore_baseline = textwrap.indent(_TPL_PLT_RESTORE_BASELINE, '    ')
     return f'''
@@ -584,7 +654,8 @@ _pre_fignums = set(plt.get_fignums())
 # even when the user code raises midway through)
 try:
 {resource_guard}
-{indented_code}
+    _scai_user_source = {user_source_repr}
+    exec(compile(_scai_user_source, '<scai-user-code>', 'exec'), globals(), globals())
 finally:
 {restore_baseline}
     import matplotlib.figure as _scai_cleanup_figure
@@ -691,7 +762,7 @@ def _build_publication_figure_wrapper(
     figures_dir_repr = repr(str(figures_dir))
     jpg_path_repr = repr(str(jpg_path))
     pdf_path_repr = repr(str(pdf_path))
-    indented_code = textwrap.indent(code, '    ')
+    user_source_repr = repr(code)
     restore_baseline = textwrap.indent(_TPL_PLT_RESTORE_BASELINE, '    ')
     resource_guard = textwrap.indent(_build_resource_guard_preamble(code), '    ')
     return f'''
@@ -727,7 +798,8 @@ Path(_figures_dir).mkdir(exist_ok=True)
 # even if user code raises midway through)
 try:
 {resource_guard}
-{indented_code}
+    _scai_user_source = {user_source_repr}
+    exec(compile(_scai_user_source, '<scai-user-code>', 'exec'), globals(), globals())
 finally:
 {restore_baseline}
 
@@ -903,9 +975,18 @@ TOOLS = [
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Suggestions for next steps or further analysis"
+                    },
+                    "evidence_execution_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "IDs printed by successful execute_code calls that directly "
+                            "support the reported findings. Failed executions and prior "
+                            "rounds must not be cited."
+                        )
                     }
                 },
-                "required": ["findings", "summary"]
+                "required": ["findings", "summary", "evidence_execution_ids"]
             }
         }
     },
@@ -1085,6 +1166,11 @@ TOOLS = [
                                 "supporting_pathways": {"type": "array", "items": {"type": "string"}},
                                 "supporting_scores": {"type": "array", "items": {"type": "string"}},
                                 "supporting_tables": {"type": "array", "items": {"type": "string"}},
+                                "evidence_execution_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Successful current-run execute_code IDs that support this program.",
+                                },
                                 "bulk_support": {"type": "string", "enum": ["supported", "not_supported", "mixed", "not_available", "unknown"]},
                                 "evidence_strength": {"type": "string", "enum": ["strong", "moderate", "weak"]},
                                 "specificity": {"type": "string", "enum": ["high", "medium", "low"]},
@@ -1093,7 +1179,7 @@ TOOLS = [
                                 "interpretation": {"type": "string", "description": "Cautious interpretation; do not claim confirmation."},
                                 "downstream_literature_queries": {"type": "array", "items": {"type": "string"}},
                             },
-                            "required": ["label", "triggering_observations", "evidence_strength", "specificity", "interpretation"],
+                            "required": ["label", "triggering_observations", "evidence_execution_ids", "evidence_strength", "specificity", "interpretation"],
                         },
                     },
                     "no_program_reason": {"type": "string", "description": "Required when programs is empty: why no data-driven mechanism program was registered."},
@@ -2220,6 +2306,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         return {
             "group_labels": [],
             "proportions": {},
+            "counts": {},
             "column_used": None,
             "dimension": "group",
         }
@@ -2254,6 +2341,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                 f"_ordered_labels = {ordered_labels!r}\n"
                 "_obs = _a.obs.copy()\n"
                 "_clusters = _obs[_cluster_key].astype(str)\n"
+                "_counts = {str(_cid): int(_count) for _cid, _count in _clusters.value_counts().items()}\n"
                 "if _group_col is not None and _group_col in _obs.columns:\n"
                 "    _groups = _obs[_group_col].astype(str)\n"
                 "    _tab = _pd.crosstab(_clusters, _groups, normalize='columns') * 100\n"
@@ -2264,11 +2352,11 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                 "    _props = {}\n"
                 "    for _cid, _row in _tab.iterrows():\n"
                 "        _props[str(_cid)] = {str(_label): float(_row.get(_label, 0.0)) for _label in _labels}\n"
-                "    _out = {'group_labels': _labels, 'proportions': _props, 'column_used': _group_col, 'dimension': _dimension}\n"
+                "    _out = {'group_labels': _labels, 'proportions': _props, 'counts': _counts, 'column_used': _group_col, 'dimension': _dimension}\n"
                 "else:\n"
                 "    _vc = _clusters.value_counts(normalize=True).sort_index() * 100\n"
                 "    _props = {str(_cid): {'整体': float(round(_pct, 1))} for _cid, _pct in _vc.items()}\n"
-                "    _out = {'group_labels': ['整体'], 'proportions': _props, 'column_used': None, 'dimension': 'overall'}\n"
+                "    _out = {'group_labels': ['整体'], 'proportions': _props, 'counts': _counts, 'column_used': None, 'dimension': 'overall'}\n"
                 "print(_json.dumps(_out, ensure_ascii=False))\n"
             )
 
@@ -2281,6 +2369,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             return {
                 "group_labels": list(parsed.get("group_labels") or []),
                 "proportions": dict(parsed.get("proportions") or {}),
+                "counts": dict(parsed.get("counts") or {}),
                 "column_used": parsed.get("column_used"),
                 "dimension": parsed.get("dimension") or "group",
             }
@@ -3167,7 +3256,7 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
                         output=output_text if output_text else None,
                         error=error_text if error_text else None,
                         figures=figures,
-                        execution_time=0.0,
+                        execution_time=None,
                     ))
                 logger.info(f"[Bioinformatics] Restored {len(self.code_history)} cells into code_history from notebook state")
 
@@ -3289,6 +3378,8 @@ If results significantly deviate from plan expectations, report via consult_pi i
         MAX_DECONV_REJECTIONS = 2  # Escape hatch: allow through after N rejections
         innovation_bulk_reject_count = 0
         MAX_INNOVATION_BULK_REJECTIONS = 2
+        evidence_gate_degraded = False
+        reported_evidence_ids: List[str] = []
         llm_error: Optional[str] = None
         text_response_count = 0
         MAX_TEXT_RESPONSES = 2
@@ -3778,6 +3869,7 @@ If results significantly deviate from plan expectations, report via consult_pi i
                                     parse_expression_contracts(preflight_result.output),
                                 )
 
+                        execution_started = time.perf_counter()
                         if preflight_result is not None and preflight_result.error:
                             result = preflight_result
                         else:
@@ -3785,7 +3877,9 @@ If results significantly deviate from plan expectations, report via consult_pi i
                                 wrapped_code,
                                 declared_outputs=list(persistent_outputs or []),
                                 track_globals=True,
+                                skip_safety_check=True,
                             )
+                        execution_time = time.perf_counter() - execution_started
 
 
                         # Auto-fix: ensure obs/var names are unique after every execution
@@ -3832,7 +3926,8 @@ If results significantly deviate from plan expectations, report via consult_pi i
                             output=result.output,
                             error=result.error,
                             figures=result.figures,
-                            execution_time=0.0
+                            execution_time=execution_time,
+                            round_number=state.current_round,
                         )
                         self.code_history.append(code_exec)
                         self.last_result = result
@@ -3862,6 +3957,11 @@ If results significantly deviate from plan expectations, report via consult_pi i
                         swallowed_type, swallowed_doc_hint = (
                             await self._detect_and_lookup_swallowed_error(result, code)
                         )
+                        if swallowed_type:
+                            code_exec.evidence_eligible = False
+                            code_exec.evidence_rejection_reason = (
+                                f"Swallowed technical error: {swallowed_type}"
+                            )
                         if result.error:
                             await self._notify("error", result.error)
                             consecutive_errors += 1
@@ -3912,7 +4012,10 @@ If results significantly deviate from plan expectations, report via consult_pi i
                                 )
                                 self._current_analysis_state.sandbox_state = sandbox_state
 
-                        tool_result = f"Execution {'successful' if not result.error else 'failed'}.\n"
+                        tool_result = (
+                            f"Execution {'successful' if not result.error else 'failed'}.\n"
+                            f"Evidence execution ID: {code_exec.id}\n"
+                        )
                         if result.output:
                             tool_result += f"Output:\n{result.output}\n"
                         if result.error:
@@ -4345,7 +4448,10 @@ If results significantly deviate from plan expectations, report via consult_pi i
 
                         has_scrna_data = state.has_scrnaseq()
                         has_bulk_data = state.has_bulk_rnaseq()
-                        lowered_codes = [ce.code.lower() for ce in self.code_history if ce.code]
+                        evidence_executions = successful_evidence_executions(
+                            self.code_history, round_number=state.current_round
+                        )
+                        lowered_codes = [ce.code.lower() for ce in evidence_executions if ce.code]
 
                         # Notes appended when a mandatory gate is released after max
                         # rejections. Initialized in the common scope so every branch
@@ -4462,6 +4568,7 @@ If results significantly deviate from plan expectations, report via consult_pi i
                                     continue
                                 if escaped:
                                     _escaped_notes.append(build_gate_skip_note("bulk/scRNA-seq cross-validation"))
+                                    evidence_gate_degraded = True
 
                             # Gate 3: Cell-type deconvolution
                             if has_scrna_data and has_bulk_data:
@@ -4494,6 +4601,7 @@ If results significantly deviate from plan expectations, report via consult_pi i
                                     continue
                                 if escaped:
                                     _escaped_notes.append(build_gate_skip_note("cell-type deconvolution"))
+                                    evidence_gate_degraded = True
 
                         # Gate 4: INNOVATION-phase bulk direction validation
                         elif state.analysis_phase == AnalysisPhase.INNOVATION and has_bulk_data and has_scrna_data:
@@ -4527,6 +4635,36 @@ If results significantly deviate from plan expectations, report via consult_pi i
                                 continue
                             if escaped:
                                 _escaped_notes.append(build_gate_skip_note("innovation-phase bulk direction validation"))
+                                evidence_gate_degraded = True
+
+                        requested_evidence_ids = {
+                            str(value).strip()
+                            for value in _ensure_list(args.get("evidence_execution_ids"))
+                            if str(value).strip()
+                        }
+                        eligible_evidence_ids = {execution.id for execution in evidence_executions}
+                        invalid_evidence_ids = requested_evidence_ids - eligible_evidence_ids
+                        if not requested_evidence_ids or invalid_evidence_ids:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": (
+                                    "[REJECTED] Findings must cite at least one successful current-run "
+                                    "execute_code result using evidence_execution_ids. Failed executions "
+                                    "or outputs that explicitly say validation failed cannot support a "
+                                    f"claim. Invalid IDs: {sorted(invalid_evidence_ids)}. "
+                                    f"Available IDs: {sorted(eligible_evidence_ids)[-20:]}"
+                                ),
+                            })
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count,
+                                step_type="report_findings",
+                                agent_reasoning=agent_reasoning,
+                                findings=[],
+                                findings_summary="REJECTED: missing or invalid execution evidence",
+                                evidence_execution_ids=sorted(requested_evidence_ids),
+                            ))
+                            continue
 
                         has_substantive_work = True
                         findings = await self._handle_report_findings(args)
@@ -4538,6 +4676,7 @@ If results significantly deviate from plan expectations, report via consult_pi i
                                 findings.append(note)
 
                         all_findings.extend(findings)
+                        reported_evidence_ids = sorted(requested_evidence_ids)
 
                         await self._notify("findings", json.dumps({
                             "findings": findings,
@@ -4557,6 +4696,7 @@ If results significantly deviate from plan expectations, report via consult_pi i
                             agent_reasoning=agent_reasoning,
                             findings=findings, findings_summary=summary,
                             findings_suggestions=suggestions or [],
+                            evidence_execution_ids=reported_evidence_ids,
                         ))
 
                         completed = True
@@ -4616,6 +4756,37 @@ If results significantly deviate from plan expectations, report via consult_pi i
                                 step_number=step_count, step_type="register_mechanism_programs",
                                 agent_reasoning=agent_reasoning,
                                 findings=[], findings_summary=f"REJECTED: {err}",
+                            ))
+                            continue
+                        eligible_ids = {
+                            execution.id
+                            for execution in successful_evidence_executions(
+                                self.code_history, round_number=state.current_round
+                            )
+                        }
+                        invalid_program_ids = sorted({
+                            evidence_id
+                            for program in progs
+                            for evidence_id in program.evidence_execution_ids
+                            if evidence_id not in eligible_ids
+                        })
+                        if invalid_program_ids:
+                            err = (
+                                "Mechanism programs cite failed, contradictory, or unknown "
+                                f"execution IDs: {invalid_program_ids}. Available IDs: "
+                                f"{sorted(eligible_ids)[-20:]}"
+                            )
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": f"[REJECTED] {err}",
+                            })
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count,
+                                step_type="register_mechanism_programs",
+                                agent_reasoning=agent_reasoning,
+                                findings=[],
+                                findings_summary=f"REJECTED: {err}",
                             ))
                             continue
                         mechanism_programs_registered = True
@@ -4936,7 +5107,7 @@ If results significantly deviate from plan expectations, report via consult_pi i
         elif _plan_revision_needed:
             status = "paused_for_revision"
         elif completed:
-            status = "completed"
+            status = "partial" if evidence_gate_degraded else "completed"
         else:
             status = "max_steps_reached"
 
@@ -4975,6 +5146,8 @@ If results significantly deviate from plan expectations, report via consult_pi i
             "analysis_log": analysis_log,
             "success": status != "error",
             "mechanism_programs": mechanism_programs,
+            "evidence_verified": bool(reported_evidence_ids) and not evidence_gate_degraded,
+            "evidence_execution_ids": reported_evidence_ids,
             **({"error": llm_error} if llm_error else {}),
             "plan_revision_needed": _plan_revision_needed,
             "plan_revision_context": _plan_revision_context if _plan_revision_needed else {},
@@ -5036,6 +5209,8 @@ If results significantly deviate from plan expectations, report via consult_pi i
             "success": result["success"],
             "steps_executed": result["steps_executed"],
             "mechanism_programs": result.get("mechanism_programs", []),
+            "evidence_verified": result.get("evidence_verified", False),
+            "evidence_execution_ids": result.get("evidence_execution_ids", []),
         }
     
     def get_all_code(self) -> str:
@@ -5137,7 +5312,7 @@ If results significantly deviate from plan expectations, report via consult_pi i
             )
 
         # Execute the code
-        result = await self.sandbox.execute(wrapped_code)
+        result = await self.sandbox.execute(wrapped_code, skip_safety_check=True)
 
         if result.error:
             result.error = strip_ansi(result.error)
@@ -5304,7 +5479,9 @@ If results significantly deviate from plan expectations, report via consult_pi i
 
                 # Re-execute with revised code (rebuild wrapper instead of str.replace to avoid corruption)
                 revised_wrapped = _build_publication_figure_wrapper(revised_code, figures_dir, jpg_path, pdf_path)
-                result = await self.sandbox.execute(revised_wrapped)
+                result = await self.sandbox.execute(
+                    revised_wrapped, skip_safety_check=True
+                )
 
                 if not result.error and jpg_path.exists():
                     # Detect blank revised figure
@@ -5347,7 +5524,9 @@ If results significantly deviate from plan expectations, report via consult_pi i
                         is_valid_retry, err_retry = self._validate_code(retry_code)
                         if is_valid_retry:
                             retry_wrapped = _build_publication_figure_wrapper(retry_code, figures_dir, jpg_path, pdf_path)
-                            retry_result = await self.sandbox.execute(retry_wrapped)
+                            retry_result = await self.sandbox.execute(
+                                retry_wrapped, skip_safety_check=True
+                            )
                             if not retry_result.error and jpg_path.exists() and jpg_path.stat().st_size >= 2000:
                                 logger.info(f"[Bioinformatics] Auto-retry succeeded for {figure_name}")
                                 figure.png_base64 = self._compress_image_to_base64(jpg_path, max_width=800)

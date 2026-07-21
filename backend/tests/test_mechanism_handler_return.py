@@ -32,6 +32,7 @@ def test_validated_programs_can_be_appended_to_analysis_state_contract():
     payload = {"programs": [{
         "label": "test program",
         "triggering_observations": ["obs"],
+        "evidence_execution_ids": ["exec-1"],
         "evidence_strength": "weak", "specificity": "low",
         "interpretation": "candidate, not confirmed",
     }]}

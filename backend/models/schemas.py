@@ -1,7 +1,15 @@
 """
 Data models for the Multi-Agent Single-Cell Analysis System
 """
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from enum import Enum
@@ -106,7 +114,10 @@ class CodeExecution(BaseModel):
     output: Optional[str] = None
     error: Optional[str] = None
     figures: List[str] = Field(default_factory=list)  # Base64 encoded images
-    execution_time: float = 0.0
+    execution_time: Optional[float] = None
+    round_number: int = 0
+    evidence_eligible: bool = True
+    evidence_rejection_reason: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.now)
 
 class AnalysisStep(BaseModel):
@@ -148,6 +159,7 @@ class AnalysisStep(BaseModel):
     findings: List[str] = Field(default_factory=list)
     findings_summary: Optional[str] = None
     findings_suggestions: List[str] = Field(default_factory=list)
+    evidence_execution_ids: List[str] = Field(default_factory=list)
 
     # generate_publication_figure fields
     pub_figure_name: Optional[str] = None
@@ -256,6 +268,7 @@ class DataDrivenMechanismProgram(BaseModel):
     supporting_pathways: List[str] = Field(default_factory=list)
     supporting_scores: List[str] = Field(default_factory=list)
     supporting_tables: List[str] = Field(default_factory=list)
+    evidence_execution_ids: List[str] = Field(default_factory=list)
 
     bulk_support: Literal[
         "supported", "not_supported", "mixed", "not_available", "unknown",
@@ -822,6 +835,9 @@ class RoundResult(BaseModel):
     result_identity_key: str = ""
     round_status: Literal["completed", "partial", "failed", "skipped"] = "completed"
     evidence_status: Literal["substantive", "empty", "failed"] = "empty"
+    bioinformatics_evidence_verified: Optional[bool] = None
+    evidence_execution_ids: List[str] = Field(default_factory=list)
+    evidence_notes: List[str] = Field(default_factory=list)
     # Whether this innovation round has enough core-agent evidence to satisfy
     # direction-batch coverage. Optional modality degradation may leave the
     # overall round_status as "partial" while the direction is still covered.
@@ -889,6 +905,24 @@ class GraphicAbstract(BaseModel):
 
 class AnalysisState(BaseModel):
     """Complete state of an analysis session"""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _open_persisted_secrets(cls, value):
+        """Decrypt credentials emitted by the matching state serializer."""
+        if isinstance(value, dict):
+            from backend.utils.secret_redaction import open_analysis_state_payload
+
+            return open_analysis_state_payload(value)
+        return value
+
+    @model_serializer(mode="wrap")
+    def _seal_persisted_secrets(self, handler):
+        """Ensure model_dump/checkpoint/snapshot payloads never contain raw keys."""
+        from backend.utils.secret_redaction import seal_analysis_state_payload
+
+        return seal_analysis_state_payload(handler(self))
+
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str = "Untitled Analysis"
     user_id: str = Field(..., min_length=1)  # Owner user ID (required, non-empty)

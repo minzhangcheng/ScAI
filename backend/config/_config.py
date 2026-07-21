@@ -156,6 +156,15 @@ class _HealthProbeAccessFilter(logging.Filter):
         return True
 
 
+class _OwnerOnlyRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """Keep the active log owner-only after initial open and every rollover."""
+
+    def _open(self):
+        stream = super()._open()
+        os.chmod(self.baseFilename, 0o600)
+        return stream
+
+
 def setup_logging(log_level: int = logging.INFO) -> None:
     """
     Setup comprehensive logging for the application.
@@ -166,6 +175,14 @@ def setup_logging(log_level: int = logging.INFO) -> None:
     - {LOG_DIR}/debug.log - Debug log with all details (rotating, 50MB max, 3 backups)
     - Console output
     """
+    from backend.utils.secret_redaction import SecretRedactionFilter
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(LOG_DIR, 0o700)
+    for existing_log in LOG_DIR.glob("*.log*"):
+        if existing_log.is_file():
+            os.chmod(existing_log, 0o600)
+
     # Create formatters
     detailed_formatter = logging.Formatter(
         '%(asctime)s | %(levelname)-8s | %(name)s:%(lineno)d | %(message)s',
@@ -187,15 +204,18 @@ def setup_logging(log_level: int = logging.INFO) -> None:
     console_handler = logging.StreamHandler()
     console_handler.setLevel(log_level)
     console_handler.setFormatter(simple_formatter)
+    console_handler.addFilter(SecretRedactionFilter())
     root_logger.addHandler(console_handler)
 
     def _add_file_handler(name, level, max_bytes, backup_count):
         path = LOG_DIR / f"{name}.log"
-        handler = logging.handlers.RotatingFileHandler(
+        handler = _OwnerOnlyRotatingFileHandler(
             path, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8'
         )
+        os.chmod(path, 0o600)
         handler.setLevel(level)
         handler.setFormatter(detailed_formatter)
+        handler.addFilter(SecretRedactionFilter())
         root_logger.addHandler(handler)
 
     _add_file_handler("app",   logging.INFO,   10*1024*1024, 5)
@@ -205,6 +225,10 @@ def setup_logging(log_level: int = logging.INFO) -> None:
     # Drop uvicorn access-log lines for the health probe so container/orchestrator
     # health checks (every ~30s, one per line) don't drown out the real request log.
     logging.getLogger("uvicorn.access").addFilter(_HealthProbeAccessFilter())
+    # aiosqlite DEBUG records include complete SQL bind parameters. LangGraph
+    # checkpoint parameters contain the serialized AnalysisState and therefore
+    # must never be copied into application logs.
+    logging.getLogger("aiosqlite").setLevel(logging.WARNING)
 
     # Log startup message
     logging.info(f"Logging initialized. Log directory: {LOG_DIR}")

@@ -13,6 +13,7 @@ from backend.state import get_session_lock, workflows
 from backend.utils.auth import require_session_ownership
 from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import validate_session_id
+from backend.utils.secret_redaction import mask_api_key
 from backend.utils.settings_provider import AgentSettingsProvider
 
 router = APIRouter(prefix="/api", tags=["session-config"])
@@ -246,9 +247,13 @@ async def update_agent_server_config(session_id: str, request: Request, body: Ag
     user_id = getattr(request.state, "user_id", "")
     async with get_session_lock(session_id):
         state = await require_session_ownership(session_id=session_id, user_id=user_id)
+        existing = (state.agent_server_configs or {}).get(body.agent, {}) or {}
+        incoming_key = body.api_key
+        if incoming_key and incoming_key == mask_api_key(existing.get("api_key", "")):
+            incoming_key = existing.get("api_key", "")
         state.agent_server_configs[body.agent] = {
             "llm_base_url": body.llm_base_url,
-            "api_key": body.api_key,
+            "api_key": incoming_key,
         }
         await update_session_cache(session_id, state)
         await async_save_session(session_id, state)
@@ -267,6 +272,6 @@ async def get_agent_server_configs(session_id: str, request: Request):
     for agent, cfg in (state.agent_server_configs or {}).items():
         c = dict(cfg) if cfg else {}
         if c.get("api_key"):
-            c["api_key"] = "***"
+            c["api_key"] = mask_api_key(c["api_key"])
         masked[agent] = c
     return masked

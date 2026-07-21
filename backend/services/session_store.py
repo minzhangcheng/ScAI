@@ -149,18 +149,20 @@ def assert_recovery_clear(state: AnalysisState | None = None, *, session_id: str
 def _write_session_json(session_id: str, json_str: str) -> None:
     try:
         session_file = get_session_metadata_path(session_id)
-        session_file.parent.mkdir(parents=True, exist_ok=True)
+        session_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(session_file.parent, 0o700)
         fd, tmp_path = tempfile.mkstemp(
             suffix=".json.tmp", prefix=f"{session_id}_", dir=session_file.parent,
         )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(json_str)
-            # mkstemp hardcodes 0600; align with the other session files
-            # (state.json/blobs are 0644) so the metadata isn't accidentally
-            # owner-only. Isolation is enforced at the app layer, not via mode.
-            os.chmod(tmp_path, 0o644)
+            # Session metadata can contain encrypted credentials and private
+            # analysis content.  App-layer ownership checks do not protect it
+            # from other local OS users, so preserve mkstemp's owner-only mode.
+            os.chmod(tmp_path, 0o600)
             os.replace(tmp_path, session_file)
+            os.chmod(session_file, 0o600)
             logger.info(f"Session {session_id} saved to disk")
         except Exception:
             if os.path.exists(tmp_path):

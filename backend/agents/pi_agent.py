@@ -3665,6 +3665,9 @@ Current research direction: {current_direction or "N/A"}
         for result in state.round_results:
             rounds_summary.append(f"""
 ### Round {result.round_number}
+**Round status**: {result.round_status}; evidence status: {result.evidence_status}
+**Bioinformatics execution evidence verified**: {result.bioinformatics_evidence_verified}
+**Evidence notes**: {'; '.join(result.evidence_notes) if result.evidence_notes else 'None'}
 **Pathology findings**: {', '.join(str(f) for f in result.pathology_findings) if result.pathology_findings else 'None'}
 **Bioinformatics findings**: {', '.join(str(f) for f in result.bioinformatics_findings) if result.bioinformatics_findings else 'None'}
 **Biochemistry findings**: {', '.join(str(f) for f in result.biochemistry_findings) if result.biochemistry_findings else 'None'}
@@ -3756,6 +3759,10 @@ Please write a well-structured analysis report including:
 6. Cross-Modal Mechanism Candidates: for any candidate above, present it with its
    evidence sources, confidence, and explicitly labeled evidence gaps. Present
    low-confidence candidates as "hypotheses with evidence gaps", NOT confirmed conclusions.
+
+Any round marked partial or with bioinformatics execution evidence verified=False
+must remain explicitly labeled unverified. Do not describe its claims as validated,
+confirmed, causal, dominant, or independently replicated.
 
 Please write in academic paper style.
 """

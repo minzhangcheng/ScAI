@@ -70,7 +70,7 @@ async def test_exec_wrapper_saves_only_new_figures(tmp_path):
             wrapped = _build_exec_autosave_wrapper(
                 plot_code, str(figures_dir), f"ts{i}"
             )
-            r = await sb.execute(wrapped)
+            r = await sb.execute(wrapped, skip_safety_check=True)
             assert r.success, r.error
 
         jpgs = sorted(Path(p).name for p in glob.glob(str(figures_dir / "fig_*.jpg")))

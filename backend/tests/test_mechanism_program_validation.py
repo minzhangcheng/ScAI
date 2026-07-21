@@ -5,6 +5,7 @@ def _valid_program(**over):
     p = {
         "label": "iron-redox-lipid hepatocyte program",
         "triggering_observations": ["GPX4 down + ACSL4 up in hepatocytes"],
+        "evidence_execution_ids": ["exec-1"],
         "evidence_strength": "moderate",
         "specificity": "medium",
         "interpretation": "Candidate redox/lipid imbalance; not confirmed.",
@@ -43,6 +44,14 @@ def test_empty_observations_returns_error():
     )
     assert progs == []
     assert err
+
+
+def test_missing_execution_evidence_returns_error():
+    progs, err = validate_mechanism_program_payload(
+        {"programs": [_valid_program(evidence_execution_ids=[])]}
+    )
+    assert progs == []
+    assert err and "evidence_execution_id" in err
 
 
 def test_empty_programs_requires_reason():

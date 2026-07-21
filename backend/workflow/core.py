@@ -734,9 +734,12 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         # Initialize checkpointer if not exists
         if self._db_conn is None:
             states_dir = get_session_states(self.session_id)
-            states_dir.mkdir(parents=True, exist_ok=True)
-            db_path = str(states_dir / "checkpoints.sqlite")
+            states_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(states_dir, 0o700)
+            db_path_obj = states_dir / "checkpoints.sqlite"
+            db_path = str(db_path_obj)
             self._db_conn = await aiosqlite.connect(db_path)
+            os.chmod(db_path_obj, 0o600)
             serde = JsonPlusSerializer(allowed_json_modules=[
                 ("backend.models.schemas", "AgentType"),
                 ("backend.models.schemas", "AnalysisState"),
