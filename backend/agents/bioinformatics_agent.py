@@ -303,6 +303,7 @@ from .supervisor_agent import SupervisorEvalResult
 
 # Pre-compiled pattern for detecting manual cell_type assignment in code
 _DYNAMIC_CONTEXT_PREFIX = "[Analysis Context]"
+_APPROVED_PLAN_PREFIX = "[Approved Analysis Plan]"
 _CELL_TYPE_ASSIGN_RE = re.compile(
     r"""\.obs\[\s*['"](?:cell_?type|cluster_identity|cell_identity|cell_annotation|annotation)['"]\s*\]\s*=(?!=)"""
 )
@@ -318,6 +319,85 @@ _FAILED_EVIDENCE_OUTPUT_RE = re.compile(
     r"\bmatched\s+in\s+bulk\s*:\s*\[\s*\]|\bexecution\s+failed\b)",
     re.IGNORECASE,
 )
+
+
+def build_approved_plan_context(
+    plan: Any,
+    *,
+    resumed_from_plan_id: Optional[str] = None,
+) -> str:
+    """Build the bounded plan message used by the autonomous executor.
+
+    Planning conversations deliberately live outside the executor transcript.
+    On a mid-execution revision, the executor receives the approved replacement
+    plan as one explicit message while its checkpointed tool history remains
+    unchanged.
+    """
+    steps = "\n".join(
+        f"  [{step.status}] Step {step.id}: "
+        f"{truncate_for_llm(str(step.title), max_chars=300)} — "
+        f"{truncate_for_llm(str(step.method), max_chars=700)}"
+        for step in plan.steps
+    ) or "  (No executable steps were provided.)"
+    steps = truncate_for_llm(steps, max_chars=24_000)
+    decisions = truncate_for_llm(
+        ", ".join(str(item) for item in plan.key_decision_points),
+        max_chars=4_000,
+    ) or "None specified"
+    overview = truncate_for_llm(str(plan.overview), max_chars=4_000)
+
+    if resumed_from_plan_id is None:
+        heading = "APPROVED ANALYSIS PLAN (follow this plan)"
+        transition = "Execute the steps in order."
+    else:
+        heading = "APPROVED PLAN REVISION (apply to remaining work)"
+        replaced = plan.revision_of or resumed_from_plan_id or "unknown"
+        reason = truncate_for_llm(
+            plan.revision_reason or "The plan was revised after execution feedback.",
+            max_chars=2_000,
+        )
+        transition = (
+            f"This plan replaces plan {replaced}. Revision reason: {reason}\n"
+            "Resume from the existing checkpoint. Preserve completed work and do "
+            "not repeat successful steps; apply this revision to remaining work only."
+        )
+
+    return f"""{_APPROVED_PLAN_PREFIX}
+## {heading}
+Plan ID: {plan.id}
+Overview: {overview}
+
+Steps:
+{steps}
+
+Key Decision Points: {decisions}
+
+{transition} For key decision points, use consult_pi.
+If results significantly deviate from plan expectations, report via consult_pi immediately."""
+
+
+def inject_revised_plan_context(
+    messages: List[Dict[str, Any]],
+    plan: Any,
+    checkpoint_plan_id: Optional[str],
+) -> bool:
+    """Append an approved plan only when it differs from the checkpoint plan.
+
+    Returns True when a message was appended. Old checkpoints have no plan ID;
+    they intentionally receive the current approved plan once during migration.
+    """
+    if not plan or getattr(plan, "status", None) != "approved":
+        return False
+    if checkpoint_plan_id == str(plan.id):
+        return False
+    messages.append({
+        "role": "user",
+        "content": build_approved_plan_context(
+            plan,
+            resumed_from_plan_id=checkpoint_plan_id or "legacy-checkpoint",
+        ),
+    })
+    return True
 
 
 def execution_supports_evidence(execution: CodeExecution) -> bool:
@@ -2511,7 +2591,10 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                     prompt = self._build_validation_executor_prompt(
                         validation_plan, annotations, cluster_markers, tissue, organism,
                         ctx, "\n\n".join(transcript[-3:]))
-                    parsed = self._safe_parse_json(await self.chat(prompt, temperature=0.2), default={})
+                    parsed = self._safe_parse_json(
+                        await self.chat(prompt, temperature=0.2),
+                        default={},
+                    )
                     if not isinstance(parsed, dict):
                         transcript.append("Executor returned unparseable response; reply with valid JSON.")
                         continue
@@ -2790,7 +2873,9 @@ IMPORTANT: Reply with ONLY a JSON object, no other text:
             f"Do not add stray quotes after numbers. "
             f"Double-check JSON syntax before responding.\n[retry:{uuid.uuid4().hex[:8]}]"
         )
-        resp2 = await self.chat(retry_prompt, temperature=0.3)
+        # The retry prompt contains the complete original request, so it must not
+        # inherit unrelated planning/validation turns from BaseAgent history.
+        resp2 = await self.chat_without_history(retry_prompt, temperature=0.3)
         data2 = self._safe_parse_json(resp2, default={})
         if "parse_error" not in data2:
             return data2
@@ -2829,14 +2914,21 @@ IMPORTANT: Reply with ONLY a JSON object, no other text:
         """
         from ..models.schemas import AnalysisPlan, PlanStep
 
-        tasks_text = "\n".join(f"- {t}" for t in pi_tasks)
+        tasks_text = truncate_for_llm(
+            "\n".join(f"- {t}" for t in pi_tasks),
+            max_chars=8_000,
+        )
+        bounded_overview = truncate_for_llm(str(overview), max_chars=4_000)
 
         previous_context = ""
         if previous_results:
-            prev_text = json.dumps(previous_results, indent=2, default=str)
+            prev_text = truncate_for_llm(
+                json.dumps(previous_results, indent=2, default=str),
+                max_chars=4_000,
+            )
             previous_context = f"""
 ## Previous Stage Results
-{prev_text[:3000]}
+{prev_text}
 
 Use these results to plan the downstream analysis steps."""
 
@@ -2850,14 +2942,17 @@ The following plan was completely rejected. Generate a COMPLETELY NEW approach. 
 
 Rejected plan overview: {existing_plan.overview}
 Rejected plan steps (DO NOT COPY):
-""" + "\n".join(
-    f"  Step {s.id}: {s.title} ({s.method})"
-    for s in existing_plan.steps
-)
-            else:
-                completed_text = "\n".join(
-                    f"  [{s.status}] Step {s.id}: {s.title} ({s.method})"
+""" + truncate_for_llm("\n".join(
+                    f"  Step {s.id}: {s.title} ({s.method})"
                     for s in existing_plan.steps
+                ), max_chars=12_000)
+            else:
+                completed_text = truncate_for_llm(
+                    "\n".join(
+                        f"  [{s.status}] Step {s.id}: {s.title} ({s.method})"
+                        for s in existing_plan.steps
+                    ),
+                    max_chars=12_000,
                 )
                 revision_context = f"""
 ## Existing Plan (for incremental revision)
@@ -2868,7 +2963,10 @@ You are REVISING the remaining steps based on new findings."""
 
         stage_guidance = _stage_guidance_text(planning_stage)
 
-        data_desc = state.build_experimental_design_summary()
+        data_desc = truncate_for_llm(
+            state.build_experimental_design_summary(),
+            max_chars=8_000,
+        )
         
         prompt = f"""You are planning a single-cell RNA-seq bioinformatics analysis. Generate a method-level analysis plan.
 
@@ -2876,7 +2974,7 @@ You are REVISING the remaining steps based on new findings."""
 {data_desc}
 
 ## PI's Analysis Goals
-Overview: {overview}
+Overview: {bounded_overview}
 
 Tasks:
 {tasks_text}
@@ -2919,7 +3017,9 @@ Return the plan as a JSON object:
     "expected_runtime": "~N analysis steps"
 }}"""
 
-        response = await self.chat(prompt, temperature=0.3)
+        # Planning is a bounded, explicit context assembled by the workflow.
+        # Keep it isolated from the autonomous executor and prior rounds.
+        response = await self.chat_without_history(prompt, temperature=0.3)
         plan_data = self._safe_parse_json(response, default={})
 
         plan_data = await self._retry_on_parse_failure(prompt, plan_data, warn_on_double_failure=True, caller_name="generate_analysis_plan")
@@ -2976,21 +3076,28 @@ Return the plan as a JSON object:
         affected_steps = [s for s in current_plan.steps if s.id not in completed_step_ids]
         completed_steps = [s for s in current_plan.steps if s.id in completed_step_ids]
 
-        completed_text = "\n".join(
-            f"  [COMPLETED - DO NOT CHANGE] Step {s.id}: {s.title} ({s.method})"
-            for s in completed_steps
+        completed_text = truncate_for_llm(
+            "\n".join(
+                f"  [COMPLETED - DO NOT CHANGE] Step {s.id}: {s.title} ({s.method})"
+                for s in completed_steps
+            ),
+            max_chars=12_000,
         )
-        affected_text = "\n".join(
-            f"  [TO REVISE] Step {s.id}: {s.title} ({s.method})"
-            for s in affected_steps
+        affected_text = truncate_for_llm(
+            "\n".join(
+                f"  [TO REVISE] Step {s.id}: {s.title} ({s.method})"
+                for s in affected_steps
+            ),
+            max_chars=16_000,
         )
+        bounded_feedback = truncate_for_llm(str(pi_feedback), max_chars=12_000)
 
         stage_guidance = _stage_guidance_text(current_plan.stage or "full")
 
         prompt = f"""Revise an analysis plan based on PI feedback. Only modify affected steps — completed steps are locked.
 
 ## PI's Feedback
-{pi_feedback}
+{bounded_feedback}
 
 ## Completed Steps (LOCKED)
 {completed_text}
@@ -3016,7 +3123,7 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
     "expected_runtime": "~N steps"
 }}"""
 
-        response = await self.chat(prompt, temperature=0.3)
+        response = await self.chat_without_history(prompt, temperature=0.3)
         plan_data = self._safe_parse_json(response, default={})
 
         plan_data = await self._retry_on_parse_failure(prompt, plan_data, warn_on_double_failure=False, caller_name="revise_plan_incrementally")
@@ -3267,6 +3374,7 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
         dynamic_ctx_msg = {"role": "user", "content": f"{_DYNAMIC_CONTEXT_PREFIX}\n{dynamic_context}"}
 
         # Initialize or restore state from checkpoint
+        restored_messages_rebuilt = False
         if checkpoint and checkpoint_valid:
             messages = checkpoint.get('messages', [])
             # Validate message structure: each must have role and content
@@ -3285,6 +3393,7 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
                     dynamic_ctx_msg,
                     {"role": "user", "content": f"Analysis instruction: {initial_instruction}"}
                 ]
+                restored_messages_rebuilt = True
             else:
                 # Migrate old checkpoint format: replace monolithic system prompt
                 # with split static + dynamic structure for better prefix caching.
@@ -3320,26 +3429,11 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
                 {"role": "user", "content": f"Analysis instruction: {initial_instruction}"}
             ]
             # Inject approved analysis plan if available
-            plan_context = ""
             if state.current_plan and state.current_plan.status == "approved":
-                plan_steps = "\n".join(
-                    f"  [{s.status}] Step {s.id}: {s.title} — {s.method}"
-                    for s in state.current_plan.steps
-                )
-                plan_context = f"""
-
-## APPROVED ANALYSIS PLAN (follow this plan)
-Overview: {state.current_plan.overview}
-
-Steps:
-{plan_steps}
-
-Key Decision Points: {', '.join(state.current_plan.key_decision_points)}
-
-IMPORTANT: Execute the steps in order. For key decision points, use consult_pi.
-If results significantly deviate from plan expectations, report via consult_pi immediately."""
-            if plan_context:
-                messages.append({"role": "user", "content": plan_context})
+                messages.append({
+                    "role": "user",
+                    "content": build_approved_plan_context(state.current_plan),
+                })
             all_findings = []
             all_figures = []
             step_count = 0
@@ -3349,6 +3443,67 @@ If results significantly deviate from plan expectations, report via consult_pi i
             self.code_history = []
             self.analysis_context = {}
             self.last_result = None
+
+        def _active_plan_id() -> Optional[str]:
+            plan = state.current_plan
+            if plan and plan.status == "approved":
+                return str(plan.id)
+            return None
+
+        async def _save_executor_checkpoint(
+            step_name: str,
+            *,
+            save_sandbox: bool = False,
+        ) -> None:
+            """Persist the executor transcript independently of planning history."""
+            checkpoint_data = {
+                'step_name': step_name,
+                'session_id': state.id,
+                'round_number': state.current_round,
+                'planning_stage': planning_stage,
+                'step_number': step_count,
+                'total_steps': max_steps,
+                'active_plan_id': _active_plan_id(),
+                'messages': messages,
+                'findings': all_findings,
+                'figures': all_figures,
+                'code_history': [ce.model_dump(mode="json") for ce in self.code_history],
+                'analysis_log': [step.model_dump(mode="json") for step in analysis_log],
+                'analysis_context': self.analysis_context,
+                'completed': False,
+            }
+            await checkpoint_mgr.save(checkpoint_data)
+            if save_sandbox:
+                await self.sandbox.save_session()
+
+        # A resumed executor must keep its original tool transcript, but an
+        # approved replacement plan has to be made visible before the next LLM
+        # call. A plan ID in the checkpoint prevents duplicate injection on
+        # ordinary retries. Legacy/rebuilt checkpoints receive the plan once.
+        if checkpoint and checkpoint_valid and state.current_plan:
+            checkpoint_plan_id = checkpoint.get('active_plan_id')
+            if restored_messages_rebuilt:
+                checkpoint_plan_id = None
+            if inject_revised_plan_context(
+                messages,
+                state.current_plan,
+                checkpoint_plan_id,
+            ):
+                try:
+                    await _save_executor_checkpoint(
+                        f"step_{step_count}_plan_{state.current_plan.id}",
+                    )
+                    logger.info(
+                        "[Bioinformatics] Injected approved plan %s into resumed "
+                        "executor checkpoint (previous plan=%s)",
+                        state.current_plan.id,
+                        checkpoint_plan_id,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[Bioinformatics] Failed to persist resumed plan context: %s",
+                        e,
+                    )
 
         completed = False
         annotation_completed = False  # Mandatory step tracker for exploration phase
@@ -3443,24 +3598,10 @@ If results significantly deviate from plan expectations, report via consult_pi i
             # Save checkpoint periodically
             if checkpoint_mgr.should_checkpoint(step_count):
                 try:
-                    checkpoint_data = {
-                        'step_name': f'step_{step_count}',
-                        'session_id': state.id,
-                        'round_number': state.current_round,
-                        'planning_stage': planning_stage,
-                        'step_number': step_count,
-                        'total_steps': max_steps,
-                        'messages': messages,
-                        'findings': all_findings,
-                        'figures': all_figures,
-                        'code_history': [ce.model_dump(mode="json") for ce in self.code_history],
-                        'analysis_log': [step.model_dump(mode="json") for step in analysis_log],
-                        'analysis_context': self.analysis_context,
-                        'completed': False
-                    }
-                    await checkpoint_mgr.save(checkpoint_data)
-                    # Also save sandbox session for Python environment recovery
-                    await self.sandbox.save_session()
+                    await _save_executor_checkpoint(
+                        f'step_{step_count}',
+                        save_sandbox=True,
+                    )
                 except Exception as e:
                     logger.warning(f"[Bioinformatics] Checkpoint save failed at step {step_count}: {e}")
             
@@ -3615,21 +3756,9 @@ If results significantly deviate from plan expectations, report via consult_pi i
                     # gate resumes with reduced context instead of replaying
                     # the same overflow that caused the loop.
                     try:
-                        await checkpoint_mgr.save({
-                            'step_name': f'step_{step_count}_empty_exhausted',
-                            'session_id': state.id,
-                            'round_number': state.current_round,
-                            'planning_stage': planning_stage,
-                            'step_number': step_count,
-                            'total_steps': max_steps,
-                            'messages': messages,
-                            'findings': all_findings,
-                            'figures': all_figures,
-                            'code_history': [ce.model_dump(mode="json") for ce in self.code_history],
-                            'analysis_log': [step.model_dump(mode="json") for step in analysis_log],
-                            'analysis_context': self.analysis_context,
-                            'completed': False,
-                        })
+                        await _save_executor_checkpoint(
+                            f'step_{step_count}_empty_exhausted',
+                        )
                     except Exception as e:
                         logger.warning(f"[Bioinformatics] Pre-empty-exhaustion checkpoint save failed: {e}")
                     raise UpstreamExhaustedError(
@@ -3683,22 +3812,9 @@ If results significantly deviate from plan expectations, report via consult_pi i
                     # Save checkpoint so a Retry from the HITL gate resumes
                     # from the current conversation state instead of starting fresh.
                     try:
-                        checkpoint_data = {
-                            'step_name': f'step_{step_count}',
-                            'session_id': state.id,
-                            'round_number': state.current_round,
-                            'planning_stage': planning_stage,
-                            'step_number': step_count,
-                            'total_steps': max_steps,
-                            'messages': messages,
-                            'findings': all_findings,
-                            'figures': all_figures,
-                            'code_history': [ce.model_dump(mode="json") for ce in self.code_history],
-                            'analysis_log': [step.model_dump(mode="json") for step in analysis_log],
-                            'analysis_context': self.analysis_context,
-                            'completed': False,
-                        }
-                        await checkpoint_mgr.save(checkpoint_data)
+                        await _save_executor_checkpoint(
+                            f'step_{step_count}_text_only_exhausted',
+                        )
                     except Exception as e:
                         logger.warning(f"[Bioinformatics] Pre-escalation checkpoint save failed: {e}")
                     self._raise_text_only_exhausted(text_response_count)
@@ -5084,6 +5200,21 @@ If results significantly deviate from plan expectations, report via consult_pi i
                     [tc.id for tc in response.tool_calls],
                     note="[System: plan revision was triggered; this tool call was not executed.]",
                 )
+                # Plan revision is a semantic execution boundary. Persist the
+                # exact transcript and Jupyter state now instead of relying on
+                # the five-step periodic checkpoint, which could replay work.
+                try:
+                    await _save_executor_checkpoint(
+                        f'step_{step_count}_plan_revision',
+                        save_sandbox=True,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[Bioinformatics] Plan-revision checkpoint save failed at "
+                        "step %s: %s",
+                        step_count,
+                        e,
+                    )
                 logger.info("[Bioinformatics] Plan revision needed, pausing execution")
                 # Result dict will be populated after the loop exits
                 break

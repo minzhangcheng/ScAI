@@ -16,6 +16,7 @@ from ..services.interaction_record_capture import (
     get_or_open_direction_record,
 )
 from ..utils.llm_client import UpstreamExhaustedError
+from ..utils.formatting import truncate_for_llm
 from .direction_coverage import current_lineage_id, normalize_direction_key
 from .helpers import _diff_plan_steps, _get_task_text, _normalize_tasks, _DIFF_LABELS, wait_with_skip_time
 from .provenance import restore_provenance_id
@@ -664,6 +665,13 @@ class PlanningMixin:
                 await result
         analysis_state = state["analysis_state"]
 
+        # Planning calls use explicit, stateless prompts. Clear legacy BaseAgent
+        # history here so in-memory sessions created before context isolation do
+        # not retain multi-round planning/annotation transcripts indefinitely.
+        reset_bioinfo_history = getattr(self.bioinformatics_agent, "reset_history", None)
+        if callable(reset_bioinfo_history):
+            reset_bioinfo_history()
+
         for agent_name, node in [("pi", "planning_dialogue"), ("bioinformatics", "planning_dialogue")]:
             skip = await self._require_core_agent(state, agent_name, node)
             if skip is not None:
@@ -679,6 +687,25 @@ class PlanningMixin:
 
         phase = analysis_state.analysis_phase.value
         combined_previous = self._build_planning_context(state)
+        execution_revision_feedback = ""
+        if state.get("plan_revision_needed"):
+            revision_context = state.get("plan_revision_context") or {}
+            revision_text = json.dumps(
+                revision_context,
+                ensure_ascii=False,
+                default=str,
+            )[:4000]
+            results_text = json.dumps(
+                combined_previous or {},
+                ensure_ascii=False,
+                default=str,
+            )[:4000]
+            execution_revision_feedback = (
+                "Execution-triggered revision context:\n"
+                f"{revision_text or '(no explicit trigger details)'}\n\n"
+                "Bounded summary of results available at the pause:\n"
+                f"{results_text or '(no result summary available)'}"
+            )
         dialogue_history = []
         finalization_reason: Optional[str] = None
 
@@ -718,17 +745,25 @@ class PlanningMixin:
                         )
                     else:
                         # Collect PI feedback from all dialogue rounds, not just the last one
-                        all_pi_feedback = "\n".join(
+                        all_pi_feedback = truncate_for_llm("\n".join(
                             f"Round {d['round']}: {d['pi_feedback']}"
                             for d in dialogue_history
                             if d.get("pi_feedback")
-                        )
+                        ), max_chars=12_000)
                         # P2-6: read user_plan_feedback WITHOUT clearing it.
                         # If the revise call below fails, the feedback must
                         # survive so the user doesn't have to re-type it.
-                        user_feedback = state.get("user_plan_feedback") or ""
+                        user_feedback = truncate_for_llm(
+                            state.get("user_plan_feedback") or "",
+                            max_chars=4_000,
+                        )
                         pi_feedback = all_pi_feedback or (dialogue_history[-1]["pi_feedback"] if dialogue_history else "")
-                        combined_feedback = f"{pi_feedback}\n\nUser feedback: {user_feedback}" if user_feedback else pi_feedback
+                        feedback_parts = [part for part in (
+                            execution_revision_feedback,
+                            pi_feedback,
+                            f"User feedback: {user_feedback}" if user_feedback else "",
+                        ) if part]
+                        combined_feedback = "\n\n".join(feedback_parts)
                         plan = await self.bioinformatics_agent.revise_plan_incrementally(
                             state=analysis_state,
                             current_plan=existing_plan,
