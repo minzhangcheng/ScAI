@@ -99,6 +99,7 @@ async def _run_report_generation(session_id: str):
 
 async def _headless_workflow_runner(session_id: str):
     """Run the analysis workflow without a WebSocket connection (for API usage)."""
+    workflow = None
     try:
         workflow, state = await _build_workflow_for_session(session_id)
         if workflow is None:
@@ -126,6 +127,13 @@ async def _headless_workflow_runner(session_id: str):
             await _update_session_cache(session_id, state)
             await async_save_session(session_id, state)
     finally:
+        if workflow is not None:
+            try:
+                await workflow.close()
+            except Exception:
+                logger.exception(
+                    "Headless workflow cleanup failed for session %s", session_id
+                )
         async with _state_lock:
             _initializing_sessions.discard(session_id)
             workflows.pop(session_id, None)

@@ -116,12 +116,11 @@ DANGEROUS_PATTERNS = [
     # Code execution
     (r'\beval\s*\(', 'eval() function'),
     (r'\bexec\s*\(', 'exec() function'),
-    (r'\b__import__\b', '__import__ function'),
+    (r'\b__import__\s*\(', '__import__ function'),
     # Block the dangerous built-in, but allow ordinary attribute calls such as
     # ``re.compile(...)``.  The previous word-boundary expression matched both.
     (r'(?<![\w.])compile\s*\(', 'compile() function'),
     (r'\bimportlib\b', 'importlib module'),
-    (r'''['"](eval|exec|__import__)['"]''', 'string-referenced dangerous builtin'),
 
     # Dangerous attribute access
     (r'\b__builtins__\b', '__builtins__ access'),
@@ -350,6 +349,21 @@ def _validate_code_safety_ast(code: str) -> Tuple[bool, str]:
 
     module_aliases: dict[str, str] = {}
     blocked_direct_calls: dict[str, str] = {}
+    dangerous_string_aliases: dict[str, str] = {}
+    namespace_aliases: set[str] = set()
+
+    def _constant_string(expr) -> Optional[str]:
+        """Resolve only statically known strings; ordinary string data is safe."""
+        if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+            return expr.value
+        if isinstance(expr, ast.Name):
+            return dangerous_string_aliases.get(expr.id)
+        if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
+            left = _constant_string(expr.left)
+            right = _constant_string(expr.right)
+            if left is not None and right is not None:
+                return left + right
+        return None
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -373,6 +387,8 @@ def _validate_code_safety_ast(code: str) -> Tuple[bool, str]:
 
     def _blocked_call_from_expr(expr) -> Optional[str]:
         if isinstance(expr, ast.Name):
+            if expr.id in {"eval", "exec", "__import__", "compile"}:
+                return expr.id
             return blocked_direct_calls.get(expr.id)
         if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name):
             module_name = module_aliases.get(expr.value.id)
@@ -380,6 +396,46 @@ def _validate_code_safety_ast(code: str) -> Tuple[bool, str]:
                 return f"subprocess.{expr.attr}"
             if module_name == "os" and expr.attr == "system":
                 return "os.system"
+        return None
+
+    def _is_namespace_expr(expr) -> bool:
+        if isinstance(expr, ast.Name):
+            return expr.id in namespace_aliases
+        if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name):
+            if expr.func.id in {"globals", "locals"} and not expr.args:
+                return True
+            if expr.func.id == "vars" and len(expr.args) == 1:
+                target = expr.args[0]
+                if isinstance(target, ast.Name):
+                    target_name = module_aliases.get(target.id, target.id)
+                    return target_name in {"builtins", "__builtins__"}
+        return False
+
+    def _subscript_key(expr) -> Optional[str]:
+        if not isinstance(expr, ast.Subscript):
+            return None
+        return _constant_string(expr.slice)
+
+    def _dangerous_lookup_from_expr(expr) -> Optional[str]:
+        if isinstance(expr, ast.Subscript) and _is_namespace_expr(expr.value):
+            key = _subscript_key(expr)
+            if key in {"eval", "exec", "__import__", "compile"}:
+                return key
+        if (
+            isinstance(expr, ast.Call)
+            and isinstance(expr.func, ast.Name)
+            and expr.func.id == "getattr"
+            and len(expr.args) >= 2
+        ):
+            target = expr.args[0]
+            attr = _constant_string(expr.args[1])
+            if isinstance(target, ast.Name):
+                target_name = module_aliases.get(target.id, target.id)
+                if (
+                    target_name in {"builtins", "__builtins__"}
+                    and attr in {"eval", "exec", "__import__", "compile"}
+                ):
+                    return attr
         return None
 
     def _propagate_alias_to_target(target, value) -> bool:
@@ -391,8 +447,21 @@ def _validate_code_safety_ast(code: str) -> Tuple[bool, str]:
                 changed_alias = True
 
             blocked_reason = _blocked_call_from_expr(value)
+            blocked_reason = blocked_reason or _dangerous_lookup_from_expr(value)
             if blocked_reason and blocked_direct_calls.get(target.id) != blocked_reason:
                 blocked_direct_calls[target.id] = blocked_reason
+                changed_alias = True
+
+            string_value = _constant_string(value)
+            if (
+                string_value in {"eval", "exec", "__import__", "compile"}
+                and dangerous_string_aliases.get(target.id) != string_value
+            ):
+                dangerous_string_aliases[target.id] = string_value
+                changed_alias = True
+
+            if _is_namespace_expr(value) and target.id not in namespace_aliases:
+                namespace_aliases.add(target.id)
                 changed_alias = True
             return changed_alias
 
@@ -420,6 +489,10 @@ def _validate_code_safety_ast(code: str) -> Tuple[bool, str]:
             if isinstance(node.func, ast.Name) and node.func.id in blocked_direct_calls:
                 return False, f"Call to blocked dependency/system function '{blocked_direct_calls[node.func.id]}'"
 
+            dangerous_lookup = _dangerous_lookup_from_expr(node.func)
+            if dangerous_lookup:
+                return False, f"Call to dynamically retrieved dangerous builtin '{dangerous_lookup}'"
+
             if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
                 module_name = module_aliases.get(node.func.value.id)
                 if module_name == "subprocess" and node.func.attr in _SUBPROCESS_EXEC_FUNCS:
@@ -437,10 +510,9 @@ def _validate_code_safety_ast(code: str) -> Tuple[bool, str]:
                     target_module = module_aliases.get(target.id, target.id)
                     if target_module in _DANGEROUS_AST_MODULES:
                         return False, f"getattr() on dangerous module '{target_module}'"
-                # Check if attr argument is a dangerous function name
-                if isinstance(attr_arg, ast.Constant) and isinstance(attr_arg.value, str):
-                    if attr_arg.value in _DANGEROUS_AST_FUNCS:
-                        return False, f"getattr() retrieving dangerous function '{attr_arg.value}'"
+                # A dangerous-looking string is data unless this call retrieves
+                # it from a dangerous module/namespace.  This avoids rejecting
+                # normal column names, metric labels and parameter dictionaries.
 
         # Detect attribute chains containing __globals__, __init__.__globals__, etc.
         if isinstance(node, ast.Attribute):
@@ -1362,10 +1434,9 @@ print(f"I/O sandbox active: writes restricted to session directory")
     async def _restore_session(self):
         """Restore session from per-variable streaming dill dump if available.
 
-        Format produced by `save_session`: a sequence of `dill.dump((name, obj), f)`
-        frames in a single uncompressed .pkl file. Read by looping `dill.load`
-        until EOFError. No compression handling — snapshots are decompressed
-        out-of-kernel before being placed at this path.
+        New dumps contain a short format marker followed by a streaming zstd
+        sequence of dill frames. Legacy uncompressed frame streams remain
+        readable so existing sessions do not require migration.
         """
         # Recover any interrupted runtime-pair apply FIRST — before the
         # has_session_dump() early-return — so a crashed apply that left no live
@@ -1424,29 +1495,41 @@ import json
 from pathlib import Path
 
 _restored_names = []
+_compression_magic = b"SCAI_ZSTD_DILL_V1\\n"
+
+def _restore_dill_frames(_stream):
+    while True:
+        try:
+            _frame = dill.load(_stream)
+        except EOFError:
+            break
+        if (
+            isinstance(_frame, tuple)
+            and len(_frame) == 3
+            and _frame[0] == "__SCAI_ALIAS__"
+        ):
+            _, _name, _alias_target = _frame
+            if _alias_target not in globals():
+                raise RuntimeError(
+                    f"runtime alias target missing: {{_name}} -> {{_alias_target}}"
+                )
+            _obj = globals()[_alias_target]
+        else:
+            _name, _obj = _frame
+        globals()[_name] = _obj
+        _restored_names.append(_name)
+
 try:
     if {has_session_dump!r}:
-        with open({escaped_path}, 'rb') as _f:
-            while True:
-                try:
-                    _frame = dill.load(_f)
-                except EOFError:
-                    break
-                if (
-                    isinstance(_frame, tuple)
-                    and len(_frame) == 3
-                    and _frame[0] == "__SCAI_ALIAS__"
-                ):
-                    _, _name, _alias_target = _frame
-                    if _alias_target not in globals():
-                        raise RuntimeError(
-                            f"runtime alias target missing: {{_name}} -> {{_alias_target}}"
-                        )
-                    _obj = globals()[_alias_target]
-                else:
-                    _name, _obj = _frame
-                globals()[_name] = _obj
-                _restored_names.append(_name)
+        with open({escaped_path}, 'rb') as _raw:
+            _marker = _raw.read(len(_compression_magic))
+            if _marker == _compression_magic:
+                import zstandard as _zstd
+                with _zstd.ZstdDecompressor().stream_reader(_raw) as _f:
+                    _restore_dill_frames(_f)
+            else:
+                _raw.seek(0)
+                _restore_dill_frames(_raw)
 
     _h5ad_manifest_path = Path({escaped_h5ad_manifest_path})
     if _h5ad_manifest_path.exists():
@@ -1518,20 +1601,30 @@ except Exception as e:
     async def save_session(self):
         """Save the current session state by streaming dill per-variable.
 
-        Each saved variable is written as one independent `dill.dump((name, obj), f)`
-        frame. Required variables that cannot be pickled fail the save, leaving
-        the previous atomic file intact. Object aliases use small reference frames.
-
-        No compression is applied here — compression happens out-of-kernel during
-        snapshot creation. This keeps the kernel's peak memory low (a single
-        variable's dill chunk buffer instead of multiple full pickle byte strings
-        held simultaneously, which previously OOM-killed the kernel and crashed
-        the parent backend via libzmq fq.cpp abort).
+        Each variable is an independent dill frame written through a streaming
+        zstd writer. Compression therefore does not build a full in-memory pickle,
+        while repetitive sparse/dataframe state no longer expands to multi-GB raw
+        files. Required-variable failure leaves the previous atomic file intact.
         """
         async with self._exec_lock:
             session_path = str(self.notebook_state.session_path.absolute())
             escaped_path = repr(session_path)
             logger.info(f"Saving session to {session_path}")
+
+            # Compatibility cleanup for dependency trackers written by older
+            # execute() code. That code could mark a declared output as required
+            # even when a swallowed exception meant the name never existed. Only
+            # prune missing names that were never observed as created; genuinely
+            # tracked cross-cell dependencies remain fail-closed below.
+            live_names = await self._snapshot_user_globals()
+            stale_names = self._prune_legacy_unobserved_required(live_names)
+            if stale_names:
+                logger.warning(
+                    "[%s] Pruned legacy required outputs never observed in the "
+                    "kernel: %s",
+                    self.session_id,
+                    sorted(stale_names),
+                )
 
             from backend.services.snapshot_v2.runtime_registry import (
                 CANONICAL_RUNTIME_ARTIFACTS,
@@ -1547,6 +1640,7 @@ except Exception as e:
             save_code = """\
 import dill
 import os
+import zstandard as zstd
 _vars_to_save = """ + escaped_targets + """
 _required_names = set(""" + escaped_required + """)
 _to_dump = []
@@ -1569,41 +1663,36 @@ _saved_object_names = {}
 # corrupt the only good pkl.
 _tmp_path = """ + escaped_path + """ + '.tmp'
 _saved_count = 0
+_compression_magic = b"SCAI_ZSTD_DILL_V1\\n"
 try:
-    with open(_tmp_path, 'wb') as _f:
-        for _var_name, _obj in _to_dump:
-            _checkpoint = _f.tell()
-            try:
-                _object_id = id(_obj)
-                if _object_id in _saved_object_names:
-                    _frame = (
-                        "__SCAI_ALIAS__", _var_name,
-                        _saved_object_names[_object_id],
-                    )
-                else:
-                    _frame = (_var_name, _obj)
-                # Stream one (name, obj) frame; dill writes incrementally so peak
-                # memory is bounded by this single object's pickling, not the sum.
-                dill.dump(_frame, _f)
-                _saved_object_names.setdefault(_object_id, _var_name)
-                _saved_count += 1
-            except Exception as _e:
-                # Roll back the half-written frame so subsequent loads stay valid.
-                _f.seek(_checkpoint)
-                _f.truncate()
-                _skipped_vars.append((
-                    _var_name,
-                    type(_obj).__name__,
-                    type(_e).__name__,
-                    str(_e)[:200],
-                ))
-    if _skipped_vars:
-        for _sv in _skipped_vars:
-            print(f"__SCAI_SAVE_SKIPPED__\\t{_sv[0]}\\t{_sv[1]}\\t{_sv[2]}\\t{_sv[3]}")
-        raise RuntimeError(
-            "required runtime variables could not be persisted: "
-            + ", ".join(_sv[0] for _sv in _skipped_vars)
-        )
+    with open(_tmp_path, 'wb') as _raw:
+        _raw.write(_compression_magic)
+        with zstd.ZstdCompressor(level=1).stream_writer(_raw, closefd=False) as _f:
+            for _var_name, _obj in _to_dump:
+                try:
+                    _object_id = id(_obj)
+                    if _object_id in _saved_object_names:
+                        _frame = (
+                            "__SCAI_ALIAS__", _var_name,
+                            _saved_object_names[_object_id],
+                        )
+                    else:
+                        _frame = (_var_name, _obj)
+                    dill.dump(_frame, _f)
+                    _saved_object_names.setdefault(_object_id, _var_name)
+                    _saved_count += 1
+                except Exception as _e:
+                    _skipped_vars.append((
+                        _var_name,
+                        type(_obj).__name__,
+                        type(_e).__name__,
+                        str(_e)[:200],
+                    ))
+                    _sv = _skipped_vars[-1]
+                    print(f"__SCAI_SAVE_SKIPPED__\\t{_sv[0]}\\t{_sv[1]}\\t{_sv[2]}\\t{_sv[3]}")
+                    raise RuntimeError(
+                        "required runtime variable could not be persisted: " + _var_name
+                    ) from _e
     os.replace(_tmp_path, """ + escaped_path + """)
 except Exception:
     try:
@@ -1757,6 +1846,28 @@ print(f"Session saved: {_saved_count} variables")
             self.runtime_dependency_tracker = RuntimeDependencyTracker()
         self.runtime_dependency_tracker.merge_declared(set(names))
 
+    def _prune_legacy_unobserved_required(self, live_names: set[str]) -> set[str]:
+        """Drop legacy declarations that were required but never created.
+
+        Before declared-output verification was added, a successful tool call
+        could swallow an exception and still poison the persisted tracker with
+        a name that had never existed. Created dependencies are deliberately not
+        pruned here: if one of those is unexpectedly absent, save_session must
+        retain the fail-closed missing-runtime error.
+        """
+        tracker = self.runtime_dependency_tracker
+        if tracker is None or not tracker.needs_legacy_declared_cleanup:
+            return set()
+        stale = (
+            tracker.required_outputs
+            - tracker.created_outputs
+            - set(live_names)
+        )
+        if stale:
+            tracker.record_execution(removed=stale)
+        tracker.mark_legacy_declared_cleanup_complete()
+        return stale
+
     async def _snapshot_user_globals(self) -> set[str]:
         """Return non-underscore user global names currently in the kernel."""
         code = (
@@ -1853,11 +1964,14 @@ print(f"Session saved: {_saved_count} variables")
             save_to_history: Whether to save successful execution to notebook history
             skip_safety_check: If True, skip dangerous-pattern validation.
                 Only set this for trusted internal code (e.g. kernel init, session restore).
-            declared_outputs: Optional persistent_outputs declared by the agent tool call.
+            declared_outputs: Optional persistent_outputs declared by the agent
+                tool call. Every declared name must exist after successful code
+                execution before it is recorded as a required runtime output.
             track_globals: When True (and save_to_history), record created/loaded
                 user-global diffs into the runtime dependency tracker.
         """
         declared = set(declared_outputs or [])
+        confirmed_declared: set[str] = set()
         before: set[str] = set()
         should_track = bool(track_globals or declared) and save_to_history
         async with self._exec_lock:
@@ -1866,18 +1980,37 @@ print(f"Session saved: {_saved_count} variables")
             result = await self._execute_unlocked(
                 code, save_to_history=save_to_history, skip_safety_check=skip_safety_check
             )
-            if result.success and should_track:
+            if should_track:
                 after = await self._snapshot_user_globals()
+                # A failed cell can still create or delete globals before the
+                # exception. Always reconcile the tracker with the live
+                # namespace so removed outputs cannot poison later saves.
+                # Explicit outputs become required only after a successful
+                # execution actually produced them.
+                confirmed_declared = declared & after if result.success else set()
                 self._record_globals_diff(
                     before,
                     after,
-                    declared=declared,
+                    declared=confirmed_declared,
                     loaded=self._loaded_global_names_from_code(code),
                 )
+                missing_declared = declared - after if result.success else set()
+                if missing_declared:
+                    missing_text = ", ".join(sorted(missing_declared))
+                    contract_error = (
+                        "Declared persistent outputs were not created: "
+                        f"{missing_text}. Ensure every persistent_outputs name "
+                        "is assigned before the cell completes."
+                    )
+                    result.success = False
+                    result.error = (
+                        f"{result.error}\n{contract_error}"
+                        if result.error else contract_error
+                    )
         if result.success and save_to_history:
             self.runtime_revision += 1
-            if declared:
-                self.record_declared_outputs(declared)
+            if confirmed_declared:
+                self.record_declared_outputs(confirmed_declared)
         return result
 
     async def _execute_unlocked(

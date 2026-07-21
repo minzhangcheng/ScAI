@@ -508,6 +508,37 @@ class TestExplorationReportFromLlmDict:
         })
         assert report.data_quality_warnings == []
 
+    def test_list_of_dict_accepts_singleton_dict(self):
+        report = ExplorationReport.from_llm_dict({
+            "research_direction_candidates": {
+                "direction_id": "dir_1",
+                "direction": "Candidate mechanism",
+            },
+        })
+        assert report.research_direction_candidates == [{
+            "direction_id": "dir_1",
+            "direction": "Candidate mechanism",
+        }]
+
+    def test_list_fields_accept_id_keyed_maps(self):
+        report = ExplorationReport.from_llm_dict({
+            "direction_literature_evidence": {
+                "dir_1": {"direction_id": "dir_1", "support": "moderate"},
+                "dir_2": {"direction_id": "dir_2", "support": "weak"},
+            },
+            "strongest_heterogeneity": {
+                "primary": "A broad state gradient",
+                "secondary": "A smaller technical axis",
+            },
+        })
+        assert [
+            item["direction_id"] for item in report.direction_literature_evidence
+        ] == ["dir_1", "dir_2"]
+        assert report.strongest_heterogeneity == [
+            "A broad state gradient",
+            "A smaller technical axis",
+        ]
+
     def test_unknown_fields_ignored(self):
         report = ExplorationReport.from_llm_dict({
             "cluster_overview": "ok",

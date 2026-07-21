@@ -354,6 +354,11 @@ class TestPlanningDialogueMaxRoundsFallback:
             {"decision": "revise", "feedback": "still revise", "modifications": []},
             {"decision": "reject", "feedback": "empty", "modifications": []},
         ])
+        final_plan = round4.model_copy(deep=True)
+        final_plan.status = "pi_reviewing"
+        wf.pi_agent.generate_final_plan_from_dialogue = AsyncMock(
+            return_value=final_plan
+        )
 
         state = _make_state(analysis_state=analysis_state)
         result = await wf._planning_dialogue(state)
@@ -363,6 +368,7 @@ class TestPlanningDialogueMaxRoundsFallback:
         assert len(plan["steps"]) == 45
         assert analysis_state.current_plan.overview == "round 4"
         assert analysis_state.current_plan.status == "pi_reviewing"
+        wf.pi_agent.generate_final_plan_from_dialogue.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_max_rounds_rejected_existing_plan_uses_history(self):
@@ -395,6 +401,11 @@ class TestPlanningDialogueMaxRoundsFallback:
             {"decision": "reject", "feedback": "reject", "modifications": []},
             {"decision": "reject", "feedback": "reject", "modifications": []},
         ])
+        final_plan = valid_history_plan.model_copy(deep=True)
+        final_plan.status = "pi_reviewing"
+        wf.pi_agent.generate_final_plan_from_dialogue = AsyncMock(
+            return_value=final_plan
+        )
 
         state = _make_state(analysis_state=analysis_state)
         result = await wf._planning_dialogue(state)
@@ -402,6 +413,7 @@ class TestPlanningDialogueMaxRoundsFallback:
         plan = result["planning_result"]["plan"]
         assert plan["overview"] == "valid history"
         assert plan["steps"][0]["title"] == "Valid"
+        wf.pi_agent.generate_final_plan_from_dialogue.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_max_rounds_skips_rejected_history_plan(self):
@@ -440,6 +452,11 @@ class TestPlanningDialogueMaxRoundsFallback:
             {"decision": "revise", "feedback": "empty", "modifications": []},
             {"decision": "revise", "feedback": "empty", "modifications": []},
         ])
+        final_plan = valid_plan.model_copy(deep=True)
+        final_plan.status = "pi_reviewing"
+        wf.pi_agent.generate_final_plan_from_dialogue = AsyncMock(
+            return_value=final_plan
+        )
 
         state = _make_state(analysis_state=analysis_state)
         result = await wf._planning_dialogue(state)
@@ -447,6 +464,7 @@ class TestPlanningDialogueMaxRoundsFallback:
         plan = result["planning_result"]["plan"]
         assert plan["overview"] == "valid history"
         assert plan["steps"][0]["title"] == "Valid"
+        wf.pi_agent.generate_final_plan_from_dialogue.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_max_rounds_no_valid_history_calls_pi_final(self):

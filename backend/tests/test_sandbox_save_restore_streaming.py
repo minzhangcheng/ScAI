@@ -1,10 +1,8 @@
 """
 Tests for streaming per-variable save_session/restore_session format.
 
-Format: a single .pkl file containing a sequence of dill-pickled
-(var_name: str, value: Any) tuples, written one after another. Runtime aliases
-use tagged three-item frames so the target object is not serialized twice.
-Read by looping `dill.load` until EOFError.
+Format: a marker followed by a streaming zstd sequence of dill-pickled frames.
+Legacy uncompressed frame streams remain readable.
 
 An unpicklable required variable rolls back its half-written frame and rejects
 the atomic save, so the previous complete runtime remains valid.
@@ -13,32 +11,44 @@ import io
 import dill
 import pytest
 
+_MAGIC = b"SCAI_ZSTD_DILL_V1\n"
+
 
 def _write_stream(path, items, skipped):
     """Helper that mimics the new save_session per-var streaming write.
     Pure function so we can unit-test the format without spinning up a kernel.
     """
-    with open(path, "wb") as f:
-        for name, obj in items:
-            checkpoint = f.tell()
-            try:
-                dill.dump((name, obj), f)
-            except Exception as e:
-                f.seek(checkpoint)
-                f.truncate()
-                skipped.append((name, type(obj).__name__, type(e).__name__, str(e)[:200]))
+    import zstandard as zstd
+    with open(path, "wb") as raw:
+        raw.write(_MAGIC)
+        with zstd.ZstdCompressor(level=1).stream_writer(raw, closefd=False) as f:
+            for name, obj in items:
+                try:
+                    dill.dump((name, obj), f)
+                except Exception as e:
+                    skipped.append((name, type(obj).__name__, type(e).__name__, str(e)[:200]))
+                    raise
 
 
 def _read_stream(path):
     """Helper that mimics the new _restore_session streaming read."""
     out = {}
-    with open(path, "rb") as f:
+    import zstandard as zstd
+
+    def _read(f):
         while True:
             try:
                 name, obj = dill.load(f)
             except EOFError:
                 break
             out[name] = obj
+    with open(path, "rb") as raw:
+        if raw.read(len(_MAGIC)) == _MAGIC:
+            with zstd.ZstdDecompressor().stream_reader(raw) as f:
+                _read(f)
+        else:
+            raw.seek(0)
+            _read(raw)
     return out
 
 
@@ -61,7 +71,7 @@ def _make_unpicklable():
     return gen
 
 
-def test_unpicklable_var_is_skipped_and_file_stays_valid(tmp_path):
+def test_unpicklable_var_aborts_stream(tmp_path):
     path = tmp_path / "session.pkl"
     items = [
         ("good_before", {"k": 1}),
@@ -69,7 +79,8 @@ def test_unpicklable_var_is_skipped_and_file_stays_valid(tmp_path):
         ("good_after", [10, 20, 30]),
     ]
     skipped = []
-    _write_stream(path, items, skipped)
+    with pytest.raises(Exception):
+        _write_stream(path, items, skipped)
 
     # Exactly one skip, with structured detail
     assert len(skipped) == 1
@@ -77,18 +88,23 @@ def test_unpicklable_var_is_skipped_and_file_stays_valid(tmp_path):
     assert name == "bad"
     assert exc_name  # whatever exception dill raised
 
-    # File must still be cleanly readable — no half-written frame
-    assert _read_stream(path) == {"good_before": {"k": 1}, "good_after": [10, 20, 30]}
+    # Production writes to .tmp and never publishes this incomplete stream.
 
 
-def test_first_var_unpicklable_yields_empty_but_valid_file(tmp_path):
+def test_first_var_unpicklable_aborts_stream(tmp_path):
     path = tmp_path / "session.pkl"
     items = [("bad", _make_unpicklable())]
     skipped = []
-    _write_stream(path, items, skipped)
+    with pytest.raises(Exception):
+        _write_stream(path, items, skipped)
     assert len(skipped) == 1
-    # Empty pkl should be readable as empty dict (zero frames before EOF)
-    assert _read_stream(path) == {}
+
+
+def test_reads_legacy_uncompressed_stream(tmp_path):
+    path = tmp_path / "legacy.pkl"
+    with open(path, "wb") as stream:
+        dill.dump(("legacy", {"value": 3}), stream)
+    assert _read_stream(path) == {"legacy": {"value": 3}}
 
 
 import os
@@ -129,8 +145,10 @@ def test_snapshot_round_trip_compress_decompress(tmp_path):
         "alpha": list(range(1000)),
         "beta": {"nested": {"x": [1, 2, 3]}},
     }
-    # Sanity: compression saved space on this repetitive payload
-    assert snapshot.stat().st_size < live.stat().st_size
+    # Legacy snapshot code may apply an outer zstd layer to the already
+    # compressed live stream. The round trip must stay lossless even when that
+    # tiny outer frame is slightly larger than its input.
+    assert snapshot.stat().st_size > 0
 
 
 @pytest.mark.asyncio
@@ -157,6 +175,8 @@ async def test_save_targets_tracked_dependencies_without_anndata_sweep(tmp_path,
     assert "analysis_result" in captured["code"]
     assert "isinstance(_obj, ad.AnnData)" not in captured["code"]
     assert "__SCAI_ALIAS__" in captured["code"]
+    assert "SCAI_ZSTD_DILL_V1" in captured["code"]
+    assert "ZstdCompressor" in captured["code"]
 
 
 @pytest.mark.asyncio

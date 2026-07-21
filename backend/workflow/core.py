@@ -18,6 +18,7 @@ import aiosqlite
 logger = logging.getLogger(__name__)
 
 GRAPH_RECURSION_LIMIT = 100
+CHECKPOINTS_TO_KEEP_PER_NAMESPACE = 5
 
 
 from .direction_coverage import at_integration_gate
@@ -1710,8 +1711,12 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
                 
         if hasattr(self, '_db_conn') and self._db_conn:
             try:
+                await self._compact_checkpoints()
+            except Exception:
+                logger.exception(f"[{self.session_id}] Error compacting sqlite checkpoints")
+            try:
                 await self._db_conn.close()
-            except Exception as e:
+            except Exception:
                 logger.exception(f"[{self.session_id}] Error closing sqlite connection")
             finally:
                 self._db_conn = None
@@ -1735,6 +1740,85 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         # Close per-agent LLM clients managed by the settings provider
         if hasattr(self, '_settings_provider') and self._settings_provider:
             await self._settings_provider.cleanup()
+
+    async def _compact_checkpoints(
+        self, keep: int = CHECKPOINTS_TO_KEEP_PER_NAMESPACE
+    ) -> None:
+        """Retain only the latest graph checkpoints and reclaim SQLite space."""
+        if self._db_conn is None or keep < 1:
+            return
+        async def _execute(sql: str, parameters: tuple = ()) -> None:
+            cursor = await self._db_conn.execute(sql, parameters)
+            await cursor.close()
+
+        await _execute(
+            """
+            DELETE FROM writes
+            WHERE EXISTS (
+                SELECT 1 FROM checkpoints AS c
+                WHERE c.thread_id = writes.thread_id
+                  AND c.checkpoint_ns = writes.checkpoint_ns
+                  AND c.checkpoint_id = writes.checkpoint_id
+                  AND c.checkpoint_id NOT IN (
+                      SELECT newest.checkpoint_id
+                      FROM checkpoints AS newest
+                      WHERE newest.thread_id = c.thread_id
+                        AND newest.checkpoint_ns = c.checkpoint_ns
+                      ORDER BY newest.checkpoint_id DESC
+                      LIMIT ?
+                  )
+            )
+            """,
+            (keep,),
+        )
+        await _execute(
+            """
+            DELETE FROM checkpoints AS c
+            WHERE c.checkpoint_id NOT IN (
+                SELECT newest.checkpoint_id
+                FROM checkpoints AS newest
+                WHERE newest.thread_id = c.thread_id
+                  AND newest.checkpoint_ns = c.checkpoint_ns
+                ORDER BY newest.checkpoint_id DESC
+                LIMIT ?
+            )
+            """,
+            (keep,),
+        )
+        await _execute(
+            """
+            DELETE FROM writes
+            WHERE NOT EXISTS (
+                SELECT 1 FROM checkpoints AS c
+                WHERE c.thread_id = writes.thread_id
+                  AND c.checkpoint_ns = writes.checkpoint_ns
+                  AND c.checkpoint_id = writes.checkpoint_id
+            )
+            """
+        )
+        # The oldest retained row may point to a pruned parent. Its state remains
+        # complete, so clear only that dangling history link.
+        await _execute(
+            """
+            UPDATE checkpoints
+            SET parent_checkpoint_id = NULL
+            WHERE parent_checkpoint_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM checkpoints AS parent
+                  WHERE parent.thread_id = checkpoints.thread_id
+                    AND parent.checkpoint_ns = checkpoints.checkpoint_ns
+                    AND parent.checkpoint_id = checkpoints.parent_checkpoint_id
+              )
+            """
+        )
+        await self._db_conn.commit()
+        await _execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        await _execute("VACUUM")
+        logger.info(
+            "[%s] Compacted LangGraph checkpoints to %d per namespace",
+            self.session_id,
+            keep,
+        )
     
     def get_notebook_path(self) -> Optional[str]:
         """Get path to the saved Jupyter notebook"""

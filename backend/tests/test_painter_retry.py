@@ -11,6 +11,7 @@ from backend.agents.painter_agent import (
     PainterAgent,
     _GOOGLE_AI_STUDIO_BASE_URL,
     _MAX_RETRY_ROUNDS,
+    _image_error_disposition,
     _is_fatal_image_error,
 )
 from backend.models.schemas import AgentType
@@ -23,7 +24,7 @@ def _make_painter(base_url: str = f"https://{_GOOGLE_AI_STUDIO_BASE_URL}/v1beta"
     properties backed by a settings provider, so we mock the provider.
 
     Default base_url is a non-DashScope / non-OpenRouter host, so the protocol
-    order is [images, chat, dashscope].
+    order is [images, chat].
     """
     painter = object.__new__(PainterAgent)
     painter.agent_type = AgentType.PAINTER
@@ -61,17 +62,17 @@ def _mock_protocols(painter, *, images, chat, dashscope):
 # --------------------------------------------------------------------------- #
 
 def test_protocol_order_default_images_first():
-    assert _make_painter()._protocol_order() == ["images", "chat", "dashscope"]
+    assert _make_painter()._protocol_order() == ["images", "chat"]
 
 
 def test_protocol_order_openrouter_chat_first():
     p = _make_painter(base_url="https://openrouter.ai/api/v1")
-    assert p._protocol_order() == ["chat", "images", "dashscope"]
+    assert p._protocol_order() == ["chat", "images"]
 
 
 def test_protocol_order_dashscope_native_first():
     p = _make_painter(base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
-    assert p._protocol_order() == ["dashscope", "images", "chat"]
+    assert p._protocol_order() == ["dashscope"]
 
 
 # --------------------------------------------------------------------------- #
@@ -117,8 +118,8 @@ async def test_switches_to_next_protocol_on_any_failure():
 
 
 @pytest.mark.asyncio
-async def test_fatal_error_aborts_cascade_immediately():
-    """401 is fatal: abort without trying other protocols or retrying."""
+async def test_401_disables_affected_protocol_and_tries_next():
+    """401 is deterministic for one protocol but another protocol may work."""
     painter = _make_painter()
     _mock_protocols(
         painter,
@@ -128,13 +129,13 @@ async def test_fatal_error_aborts_cascade_immediately():
     )
 
     with patch("backend.agents.painter_agent.asyncio.sleep", new=AsyncMock()) as sleep:
-        with pytest.raises(ValueError, match="aborted"):
-            await painter._generate_image("a prompt")
+        result = await painter._generate_image("a prompt")
 
+    assert result == "CHAT_OK"
     assert painter._images_api_attempt.await_count == 1
-    assert painter._chat_image_attempt.await_count == 0
+    assert painter._chat_image_attempt.await_count == 1
     assert painter._generate_image_dashscope.await_count == 0
-    assert sleep.await_count == 0
+    sleep.assert_awaited_once_with(1.0)
 
 
 @pytest.mark.asyncio
@@ -154,10 +155,10 @@ async def test_full_round_fails_then_succeeds_next_round_with_backoff():
     assert result == "IMG_OK"
     assert painter._images_api_attempt.await_count == 2
     assert painter._chat_image_attempt.await_count == 1
-    assert painter._generate_image_dashscope.await_count == 1
-    # round 1: 1s (before chat) + 1s (before dashscope); then 2s round backoff
+    assert painter._generate_image_dashscope.await_count == 0
+    # round 1: 1s before chat; then 2s round backoff
     durations = [c.args[0] for c in sleep.await_args_list]
-    assert durations == [1.0, 1.0, 2]
+    assert durations == [1.0, 2]
 
 
 @pytest.mark.asyncio
@@ -172,12 +173,12 @@ async def test_all_rounds_exhausted_raises():
     )
 
     with patch("backend.agents.painter_agent.asyncio.sleep", new=AsyncMock()) as sleep:
-        with pytest.raises(ValueError, match=f"failed after {_MAX_RETRY_ROUNDS} rounds"):
+        with pytest.raises(ValueError, match=f"failed after at most {_MAX_RETRY_ROUNDS} rounds"):
             await painter._generate_image("a prompt")
 
     assert painter._images_api_attempt.await_count == _MAX_RETRY_ROUNDS
     assert painter._chat_image_attempt.await_count == _MAX_RETRY_ROUNDS
-    assert painter._generate_image_dashscope.await_count == _MAX_RETRY_ROUNDS
+    assert painter._generate_image_dashscope.await_count == 0
     # backoffs between rounds must include the doubling schedule
     durations = [c.args[0] for c in sleep.await_args_list]
     for expected in (2, 4, 8, 16):
@@ -275,15 +276,17 @@ async def test_revision_generic_403_is_protocol_scoped_and_falls_back_to_chat():
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("msg", [
-    "Error code: 401 - unauthorized",
     "request blocked by content_filter",
-    "invalid api key provided",
+    "request blocked by content policy",
 ])
 def test_is_fatal_image_error_true(msg):
     assert _is_fatal_image_error(Exception(msg)) is True
 
 
 @pytest.mark.parametrize("msg", [
+    "Error code: 401 - unauthorized",
+    "Client error '401 Unauthorized' for url 'https://example.test'",
+    "invalid api key provided",
     "Error code: 400 - bad request",
     "Error code: 403 - forbidden",
     "Error code: 403 - bad_response_status_code openai_error",
@@ -295,6 +298,47 @@ def test_is_fatal_image_error_true(msg):
 ])
 def test_is_fatal_image_error_false(msg):
     assert _is_fatal_image_error(Exception(msg)) is False
+
+
+@pytest.mark.parametrize("msg", [
+    "Error code: 401 - unauthorized",
+    "Client error '401 Unauthorized' for url 'https://example.test'",
+    "Error code: 403 - forbidden",
+    "Error code: 404 - endpoint missing",
+    "Error code: 422 - unsupported request",
+])
+def test_deterministic_protocol_errors_are_disabled(msg):
+    assert _image_error_disposition(Exception(msg)) == "disable"
+
+
+@pytest.mark.asyncio
+async def test_revision_does_not_repeat_deterministic_403_or_401():
+    painter = _make_painter()
+    painter._images_edit_attempt = AsyncMock(
+        side_effect=Exception("Error code: 403 - edits forbidden")
+    )
+    painter._chat_image_attempt = AsyncMock(
+        side_effect=Exception("Client error '401 Unauthorized'")
+    )
+    painter._generate_image_dashscope = AsyncMock(
+        side_effect=AssertionError("non-DashScope provider must not use native API")
+    )
+
+    with patch("backend.agents.painter_agent.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(ValueError, match="eligible protocols"):
+            await painter.revise_graphic_abstract(
+                state=MagicMock(),
+                current_image_base64="QUJD",
+                original_prompt="orig",
+                feedback="fix spelling",
+                suggestions=[],
+                must_fix=[],
+                revision_history=[{"round": 1}],
+            )
+
+    assert painter._images_edit_attempt.await_count == 1
+    assert painter._chat_image_attempt.await_count == 1
+    assert painter._generate_image_dashscope.await_count == 0
 
 
 # --------------------------------------------------------------------------- #

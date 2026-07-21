@@ -1,8 +1,9 @@
-from backend.models.schemas import AnalysisState, AnalysisPhase
+from backend.models.schemas import AnalysisState, AnalysisPhase, RoundResult
 from backend.workflow.direction_coverage import (
     at_integration_gate,
     active_batch_incomplete,
     active_batch_complete,
+    active_batch_has_unattempted_directions,
 )
 
 
@@ -41,6 +42,49 @@ def test_batch_predicates_are_complementary_when_batch_present():
     # With no completed results, an existing batch is incomplete, not complete.
     assert active_batch_incomplete(s) is True
     assert active_batch_complete(s) is False
+    assert active_batch_has_unattempted_directions(s) is True
+
+
+def test_partial_attempt_is_incomplete_but_not_unattempted():
+    direction = "dir-a"
+    s = _state(
+        active_direction_batch=[{"direction": direction}],
+        round_results=[RoundResult(
+            round_number=2,
+            phase="innovation",
+            direction=direction,
+            direction_key=direction,
+            pi_summary="Partial result",
+            bioinformatics_findings=["finding"],
+            round_status="partial",
+            evidence_status="substantive",
+            direction_coverage_eligible=False,
+        )],
+    )
+    assert active_batch_incomplete(s) is True
+    assert active_batch_complete(s) is False
+    assert active_batch_has_unattempted_directions(s) is False
+
+
+def test_optional_degraded_attempt_can_complete_active_batch():
+    direction = "dir-a"
+    s = _state(
+        active_direction_batch=[{"direction": direction}],
+        round_results=[RoundResult(
+            round_number=2,
+            phase="innovation",
+            direction=direction,
+            direction_key=direction,
+            pi_summary="Core evidence with degraded optional modality",
+            bioinformatics_findings=["finding"],
+            round_status="partial",
+            evidence_status="substantive",
+            direction_coverage_eligible=True,
+        )],
+    )
+    assert active_batch_incomplete(s) is False
+    assert active_batch_complete(s) is True
+    assert active_batch_has_unattempted_directions(s) is False
 
 
 def test_synthesis_uses_active_batch_complete_predicate():

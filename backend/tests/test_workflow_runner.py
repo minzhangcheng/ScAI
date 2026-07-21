@@ -16,6 +16,7 @@ class _FakeWorkflow:
         self.state_callback = state_callback
         self.run_calls = []
         self.resume_calls = []
+        self.close_calls = 0
         _FakeWorkflow.instances.append(self)
 
     async def run(self, initial_state, thread_id):
@@ -27,6 +28,9 @@ class _FakeWorkflow:
         self.resume_calls.append((thread_id, analysis_state))
         analysis_state.status = TaskStatus.COMPLETED
         return analysis_state
+
+    async def close(self):
+        self.close_calls += 1
 
 
 @pytest.fixture(autouse=True)
@@ -69,6 +73,7 @@ async def test_headless_runner_calls_run_with_state_and_thread_id(monkeypatch):
     workflow = _FakeWorkflow.instances[0]
     assert workflow.run_calls == [(state, "s")]
     assert workflow.resume_calls == []
+    assert workflow.close_calls == 1
     assert workflows == {}
 
 
@@ -99,4 +104,5 @@ async def test_headless_runner_resumes_existing_round_state(monkeypatch):
     workflow = _FakeWorkflow.instances[0]
     assert workflow.run_calls == []
     assert workflow.resume_calls == [("s", state)]
+    assert workflow.close_calls == 1
     assert workflows == {}

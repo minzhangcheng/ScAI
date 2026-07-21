@@ -2,28 +2,17 @@
 Painter Agent - Generates graphic abstracts using LLM image generation
 
 This agent uses the user-configured LLM hosting service to call image generation models.
-It probes three protocols in a single unified cascade so any OpenAI-compatible
-gateway (New API, OpenRouter, OpenAI, Google AI Studio, DashScope, SiliconFlow,
-Zhipu, ...) works without provider-specific branching:
+It selects the protocols that are compatible with the configured provider:
 
   1. Images API — POST /v1/images/generations (text prompt) or /v1/images/edits
      (when an input image is provided, i.e. revision)
   2. Chat completions with modalities=["image", "text"]
   3. DashScope native async task API
 
-On ANY protocol-scoped failure (no image parsed, unsupported endpoint, generic
-403 from a gateway, regardless of HTTP status) the cascade moves to
-the next protocol, waiting 1s between protocols. Once every protocol has been tried
-once, the whole cascade is retried, backing off 2s / 4s / 8s / 16s between rounds,
-up to 5 rounds. Each Images API / Chat attempt is bounded by a 60s timeout so a hung
-wrong-protocol call switches quickly (the DashScope native task keeps its own longer
-polling budget). Only explicit authentication/credential failures and
-content-moderation errors are treated as fatal. A bare 403 is not sufficient:
-gateways commonly authorize chat generation while denying the Images edits route.
-
-The protocol *order* is nudged by base_url so known providers hit their working
-protocol first (DashScope -> native first; OpenRouter -> chat first; everything
-else -> Images API first); the full cascade remains as a safety net.
+Permanent failures disable only the affected protocol for the current operation;
+transient failures may be retried.  Revision is best-effort because a usable input
+image already exists, so it has a small wall-clock budget rather than repeating five
+full 60-second cascades.
 """
 from typing import Dict, Any, Optional, List
 import logging
@@ -52,6 +41,8 @@ _ZHIPU_BASE_URL = "open.bigmodel.cn"
 
 # Protocol cascade tuning (see module docstring).
 _MAX_RETRY_ROUNDS = 5          # full-cascade rounds before giving up
+_REVISION_MAX_RETRY_ROUNDS = 2
+_REVISION_TOTAL_TIMEOUT = 75.0
 _INTER_PROTOCOL_DELAY = 1.0    # seconds to wait when switching protocols within a round
 _PROTOCOL_TIMEOUT = 60.0       # per-attempt timeout for Images API / Chat protocols
 
@@ -74,26 +65,34 @@ def _is_response_format_compat_error(exc: Exception) -> bool:
 
 
 def _is_fatal_image_error(exc: Exception) -> bool:
-    """Errors that no protocol switch or retry can recover, so the cascade aborts.
+    """Return whether the entire image operation must abort immediately."""
+    return _image_error_disposition(exc) == "abort"
 
-    Only explicit credential/authentication and content-moderation failures
-    qualify. Generic HTTP 403 is protocol-scoped because OpenAI-compatible
-    gateways may deny ``/images/edits`` while allowing chat image generation.
-    Every other error falls through to the next protocol.
+
+def _image_error_disposition(exc: Exception) -> str:
+    """Classify an attempt as ``abort``, ``disable`` or ``retry``.
+
+    Authentication and endpoint/capability errors are deterministic for the
+    affected protocol, but another protocol may still work.  Content-policy
+    failures apply to the requested operation and abort the whole cascade.
     """
     err = str(exc).lower()
     for kw in (
         "content_filter", "content policy", "content_policy",
-        "safety system", "moderation", "invalid api key", "incorrect api key",
-        "authentication failed", "authentication_error", "unauthorized api key",
+        "safety system", "moderation",
     ):
         if kw in err:
-            return True
-    if ("error code: 401" in err or "status_code=401" in err) and any(
-        kw in err for kw in ("unauthorized", "authentication", "api key", "credential")
-    ):
-        return True
-    return False
+            return "abort"
+
+    status_match = re.search(r"(?:error code:|status_code\s*=|http/\S+\s+)?\s*([45]\d\d)\b", err)
+    status = int(status_match.group(1)) if status_match else None
+    permanent_auth = any(kw in err for kw in (
+        "invalid api key", "incorrect api key", "authentication failed",
+        "authentication_error", "unauthorized api key", "401 unauthorized",
+    ))
+    if permanent_auth or status in {400, 401, 403, 404, 405, 410, 415, 422}:
+        return "disable"
+    return "retry"
 
 
 class PainterAgent(BaseAgent):
@@ -267,7 +266,12 @@ class PainterAgent(BaseAgent):
                 ),
                 dashscope_run=lambda: self._generate_image_dashscope(text_only_prompt),
             )
-            new_image = await self._run_protocol_cascade(protocols, op="revision")
+            new_image = await self._run_protocol_cascade(
+                protocols,
+                op="revision",
+                max_rounds=_REVISION_MAX_RETRY_ROUNDS,
+                total_timeout=_REVISION_TOTAL_TIMEOUT,
+            )
             logger.info(f"[{self.session_id}][Painter] Graphic abstract revision successful")
             return new_image
         except Exception as e:
@@ -615,21 +619,20 @@ The graphic abstract should tell the story of the research at a glance, highligh
             raise ValueError(f"Image generation failed: {e}") from e
 
     def _protocol_order(self) -> List[str]:
-        """Order in which to try the ("images", "chat", "dashscope") protocols.
+        """Return protocols eligible for the configured provider, in order.
 
-        The full cascade is always tried; base_url only nudges which protocol
-        goes first so known providers hit their working one immediately:
-        - DashScope: only the native task API works -> native first.
-        - OpenRouter: image models are served via chat completions -> chat first.
+        - DashScope: use only its native task API.
+        - OpenRouter: prefer chat, then its OpenAI-compatible Images API.
         - Everything else (New API, OpenAI, Google AI Studio, Zhipu, SiliconFlow,
-          ...): the OpenAI Images API is the most broadly supported -> images first.
+          ...): use Images API then chat.  Never send a non-DashScope model/key
+          to the DashScope native endpoint.
         """
         base = (self.llm_client.base_url or "").lower()
         if _DASHSCOPE_BASE_URL in base:
-            return ["dashscope", "images", "chat"]
+            return ["dashscope"]
         if "openrouter" in base:
-            return ["chat", "images", "dashscope"]
-        return ["images", "chat", "dashscope"]
+            return ["chat", "images"]
+        return ["images", "chat"]
 
     def _build_protocols(self, *, image_run, chat_run, dashscope_run) -> List[Dict[str, Any]]:
         """Assemble the ordered protocol list consumed by ``_run_protocol_cascade``.
@@ -646,34 +649,66 @@ The graphic abstract should tell the story of the research at a glance, highligh
         return [runners[p] for p in self._protocol_order()]
 
     async def _run_protocol_cascade(
-        self, protocols: List[Dict[str, Any]], *, op: str = "generation"
+        self,
+        protocols: List[Dict[str, Any]],
+        *,
+        op: str = "generation",
+        max_rounds: int = _MAX_RETRY_ROUNDS,
+        total_timeout: Optional[float] = None,
     ) -> str:
         """Try each protocol in order; on any non-fatal failure move to the next.
 
         Within a round, protocols are separated by ``_INTER_PROTOCOL_DELAY``. After
         a full round fails, back off (2/4/8/16s) and retry the whole cascade, up to
-        ``_MAX_RETRY_ROUNDS`` rounds. Fatal errors (auth / content moderation) abort
-        immediately. Each protocol carrying a ``timeout`` is bounded by it so a hung
-        wrong-protocol call switches quickly.
+        ``max_rounds`` rounds. Deterministic auth/capability errors disable that
+        protocol; operation-wide content-policy failures abort immediately. Each
+        protocol carrying a ``timeout`` is bounded by it and by the optional total
+        deadline.
 
         Returns the first successfully parsed base64 image; raises ValueError if all
         protocols fail across all rounds.
         """
         errors: Dict[str, str] = {}
-        for round_idx in range(_MAX_RETRY_ROUNDS):
+        disabled: set[str] = set()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + total_timeout if total_timeout is not None else None
+
+        def _remaining() -> Optional[float]:
+            if deadline is None:
+                return None
+            return max(0.0, deadline - loop.time())
+
+        for round_idx in range(max_rounds):
+            if deadline is not None and (_remaining() or 0.0) <= 0:
+                break
             if round_idx > 0:
                 backoff = 2 ** round_idx  # 2, 4, 8, 16 before rounds 1..4
                 logger.warning(
                     f"[{self.session_id}][Painter] All protocols failed round {round_idx} "
                     f"({op}); retrying whole cascade in {backoff}s"
                 )
+                remaining = _remaining()
+                if remaining is not None and remaining <= backoff:
+                    break
                 await asyncio.sleep(backoff)
 
-            for i, proto in enumerate(protocols):
-                if i > 0:
-                    await asyncio.sleep(_INTER_PROTOCOL_DELAY)
+            attempted = 0
+            for proto in protocols:
                 name = proto["name"]
+                if name in disabled:
+                    continue
+                if attempted > 0:
+                    remaining = _remaining()
+                    if remaining is not None and remaining <= _INTER_PROTOCOL_DELAY:
+                        break
+                    await asyncio.sleep(_INTER_PROTOCOL_DELAY)
+                attempted += 1
                 timeout = proto.get("timeout")
+                remaining = _remaining()
+                if remaining is not None:
+                    if remaining <= 0:
+                        break
+                    timeout = min(float(timeout), remaining) if timeout else remaining
                 try:
                     if timeout:
                         return await asyncio.wait_for(proto["run"](), timeout=timeout)
@@ -685,7 +720,8 @@ The graphic abstract should tell the story of the research at a glance, highligh
                         f"{round_idx + 1} timed out after {timeout}s, switching"
                     )
                 except Exception as e:  # noqa: BLE001 - any parse/HTTP error switches protocol
-                    if _is_fatal_image_error(e):
+                    disposition = _image_error_disposition(e)
+                    if disposition == "abort":
                         logger.warning(
                             f"[{self.session_id}][Painter] fatal error on {name} ({op}), "
                             f"aborting cascade: {e}"
@@ -694,14 +730,20 @@ The graphic abstract should tell the story of the research at a glance, highligh
                             f"Image {op} aborted on {name} (unrecoverable): {e}"
                         ) from e
                     errors[name] = str(e)[:200]
+                    if disposition == "disable":
+                        disabled.add(name)
                     logger.warning(
                         f"[{self.session_id}][Painter] protocol {name} ({op}) round "
-                        f"{round_idx + 1} failed: {e}, switching"
+                        f"{round_idx + 1} failed: {e}, "
+                        f"{'disabling protocol' if disposition == 'disable' else 'switching'}"
                     )
+
+            if all(proto["name"] in disabled for proto in protocols):
+                break
 
         detail = "; ".join(f"{k}: {v}" for k, v in errors.items()) or "no protocols attempted"
         raise ValueError(
-            f"Image {op} failed after {_MAX_RETRY_ROUNDS} rounds across all protocols. {detail}"
+            f"Image {op} failed after at most {max_rounds} rounds across eligible protocols. {detail}"
         )
 
     async def _chat_image_attempt(

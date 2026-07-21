@@ -1,5 +1,8 @@
 from backend.models.schemas import RoundResult
-from backend.workflow.direction_coverage import completed_innovation_direction_keys
+from backend.workflow.direction_coverage import (
+    active_batch_complete,
+    completed_innovation_direction_keys,
+)
 from backend.workflow.synthesis import derive_round_completion_status
 from backend.models.schemas import AnalysisPhase, AnalysisState
 
@@ -149,7 +152,110 @@ def test_optional_failed_agent_marks_partial_not_completed():
 
     assert result.round_status == "partial"
     assert result.evidence_status == "substantive"
+    assert result.direction_coverage_eligible is True
+    assert completed_innovation_direction_keys(state) == {"a"}
+
+
+def test_optional_partial_agent_degrades_round_but_covers_direction():
+    result = _round()
+    derive_round_completion_status(
+        {
+            "pathology_result": {"status": "partial", "findings": ["limited image coverage"]},
+            "bioinformatics_result": {"status": "completed", "findings": ["finding"]},
+            "literature_result": {"status": "completed", "findings": ["paper"]},
+        },
+        result,
+    )
+
+    state = AnalysisState(
+        id="s",
+        user_id="u",
+        analysis_phase=AnalysisPhase.INNOVATION,
+        user_chosen_directions=[{"direction": "A", "notes": ""}],
+        round_results=[result],
+    )
+
+    assert result.round_status == "partial"
+    assert result.direction_coverage_eligible is True
+    assert completed_innovation_direction_keys(state) == {"a"}
+
+
+def test_optional_only_evidence_does_not_cover_direction():
+    result = RoundResult(
+        round_number=2,
+        phase="innovation",
+        direction="A",
+        pi_summary="summary",
+        pathology_findings=["limited image finding"],
+    )
+    derive_round_completion_status(
+        {
+            "pathology_result": {
+                "status": "partial",
+                "findings": ["limited image finding"],
+            },
+            "bioinformatics_result": {"status": "completed", "findings": []},
+            "literature_result": {"status": "completed", "findings": []},
+        },
+        result,
+    )
+
+    state = AnalysisState(
+        id="s",
+        user_id="u",
+        analysis_phase=AnalysisPhase.INNOVATION,
+        user_chosen_directions=[{"direction": "A", "notes": ""}],
+        round_results=[result],
+    )
+
+    assert result.round_status == "partial"
+    assert result.evidence_status == "substantive"
+    assert result.direction_coverage_eligible is False
     assert completed_innovation_direction_keys(state) == set()
+
+
+def test_optional_partial_results_allow_multi_direction_batch_to_converge():
+    results = []
+    for round_number, direction in enumerate(("A", "B"), start=2):
+        result = _round(direction)
+        result.round_number = round_number
+        derive_round_completion_status(
+            {
+                "pathology_result": {
+                    "status": "partial",
+                    "findings": ["limited image coverage"],
+                },
+                "bioinformatics_result": {
+                    "status": "completed",
+                    "findings": [f"finding for {direction}"],
+                },
+                "literature_result": {
+                    "status": "completed",
+                    "findings": [f"paper for {direction}"],
+                },
+            },
+            result,
+        )
+        results.append(result)
+
+    state = AnalysisState(
+        id="s",
+        user_id="u",
+        analysis_phase=AnalysisPhase.INNOVATION,
+        user_chosen_directions=[
+            {"direction": "A", "notes": ""},
+            {"direction": "B", "notes": ""},
+        ],
+        active_direction_batch=[
+            {"direction": "A", "notes": ""},
+            {"direction": "B", "notes": ""},
+        ],
+        round_results=results,
+    )
+
+    assert all(result.round_status == "partial" for result in results)
+    assert completed_innovation_direction_keys(state) == {"a", "b"}
+    assert active_batch_complete(state) is True
 
 
 def test_missing_core_results_mark_stopped_round_partial():

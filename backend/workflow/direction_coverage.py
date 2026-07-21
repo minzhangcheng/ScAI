@@ -82,7 +82,12 @@ def completed_innovation_direction_keys(state: AnalysisState, lineage_id: Option
             continue
         if not result.pi_summary.strip():
             continue
-        if result.round_status != "completed":
+        coverage_eligible = result.direction_coverage_eligible
+        if coverage_eligible is None:
+            # Backward compatibility for results persisted before the explicit
+            # coverage field existed: retain the former strict interpretation.
+            coverage_eligible = result.round_status == "completed"
+        if not coverage_eligible:
             continue
         if result.evidence_status != "substantive":
             continue
@@ -90,6 +95,30 @@ def completed_innovation_direction_keys(state: AnalysisState, lineage_id: Option
             continue
         completed.add(result.direction_key)
     return completed
+
+
+def attempted_innovation_direction_keys(
+    state: AnalysisState,
+    lineage_id: Optional[str] = None,
+) -> Set[str]:
+    """Return directions that reached a canonical innovation RoundResult.
+
+    Attempted coverage is deliberately broader than completed coverage. Once a
+    direction produced a terminal round result (including partial/failed), the
+    workflow must not launch unbounded directionless rounds trying to make the
+    same batch complete. Reporting can still require explicit partial approval.
+    """
+    target_lineage = lineage_id or current_lineage_id(state)
+    attempted: Set[str] = set()
+    for raw in state.round_results:
+        result = normalize_legacy_round_result(raw)
+        if result.lineage_id != target_lineage:
+            continue
+        if result.phase != "innovation":
+            continue
+        if result.direction_key:
+            attempted.add(result.direction_key)
+    return attempted
 
 
 def direction_coverage_status(state: AnalysisState, lineage_id: Optional[str] = None) -> DirectionCoverageStatus:
@@ -139,7 +168,10 @@ def count_innovation_rounds_done(state: AnalysisState, lineage_id: Optional[str]
             continue
         if not result.pi_summary.strip():
             continue
-        if result.round_status != "completed":
+        coverage_eligible = result.direction_coverage_eligible
+        if coverage_eligible is None:
+            coverage_eligible = result.round_status == "completed"
+        if not coverage_eligible:
             continue
         if result.evidence_status != "substantive":
             continue
@@ -210,6 +242,16 @@ def active_batch_complete(state: AnalysisState) -> bool:
     """True when an active direction batch exists and every direction is covered."""
     batch = getattr(state, "active_direction_batch", None) or []
     return bool(batch) and direction_coverage_status_for_batch(state, batch).complete
+
+
+def active_batch_has_unattempted_directions(state: AnalysisState) -> bool:
+    """True while the active batch still contains a direction never executed."""
+    batch = getattr(state, "active_direction_batch", None) or []
+    if not batch:
+        return False
+    selected = selected_direction_keys(state, directions=batch)
+    attempted = attempted_innovation_direction_keys(state)
+    return bool(selected - attempted)
 
 
 def awaiting_integration_direction(state: AnalysisState) -> bool:

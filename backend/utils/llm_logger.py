@@ -1,7 +1,7 @@
 """
 LLM Interaction Logger
 
-Records all LLM prompts, responses, and tool calls to files for debugging and analysis.
+Records bounded LLM diagnostics without duplicating complete growing histories.
 """
 import os
 import json
@@ -12,6 +12,99 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, asdict
 import threading
+
+_MAX_LOG_MESSAGES = 12
+_MAX_LOG_TEXT_CHARS = 20_000
+_MAX_LOG_RESPONSE_CHARS = 40_000
+_MAX_LOG_TOOL_CALL_CHARS = 8_000
+
+
+def _truncate_text(value: Any, limit: int) -> Any:
+    if not isinstance(value, str) or len(value) <= limit:
+        return value
+    return value[:limit] + f"\n...[truncated {len(value) - limit} chars]"
+
+
+def _compact_content(value: Any) -> Any:
+    """Bound text and remove inline image bytes from one logged message."""
+    if isinstance(value, str):
+        if value.startswith("data:image/"):
+            return f"[inline image omitted: {len(value)} chars]"
+        return _truncate_text(value, _MAX_LOG_TEXT_CHARS)
+    if isinstance(value, list):
+        compact = []
+        for item in value[:20]:
+            if not isinstance(item, dict):
+                compact.append(_truncate_text(item, _MAX_LOG_TEXT_CHARS))
+                continue
+            cleaned = dict(item)
+            for key in ("text", "content"):
+                if key in cleaned:
+                    cleaned[key] = _compact_content(cleaned[key])
+            image_url = cleaned.get("image_url")
+            if isinstance(image_url, dict):
+                image_url = dict(image_url)
+                url = image_url.get("url")
+                if isinstance(url, str) and url.startswith("data:image/"):
+                    image_url["url"] = f"[inline image omitted: {len(url)} chars]"
+                cleaned["image_url"] = image_url
+            compact.append(cleaned)
+        return compact
+    return value
+
+
+def _compact_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep the system contract plus the recent conversational window."""
+    if len(messages) <= _MAX_LOG_MESSAGES:
+        selected = messages
+    else:
+        first_system = next((m for m in messages if m.get("role") == "system"), None)
+        recent_count = _MAX_LOG_MESSAGES - (1 if first_system is not None else 0)
+        selected = ([first_system] if first_system is not None else []) + messages[-recent_count:]
+    return [
+        {**message, "content": _compact_content(message.get("content"))}
+        for message in selected
+    ]
+
+
+def _compact_tools(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
+    if not tools:
+        return tools
+    compact = []
+    for tool in tools[:30]:
+        function = tool.get("function", {}) if isinstance(tool, dict) else {}
+        compact.append({
+            "type": tool.get("type", "function") if isinstance(tool, dict) else "unknown",
+            "function": {
+                "name": function.get("name"),
+                "description": _truncate_text(function.get("description"), 1_000),
+            },
+        })
+    return compact
+
+
+def _tool_name(tool: Any) -> Optional[str]:
+    if not isinstance(tool, dict):
+        return None
+    function = tool.get("function")
+    return function.get("name") if isinstance(function, dict) else None
+
+
+def _compact_tool_calls(calls: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
+    if not calls:
+        return calls
+    compact = []
+    for call in calls[:30]:
+        item = dict(call)
+        function = item.get("function")
+        if isinstance(function, dict):
+            function = dict(function)
+            function["arguments"] = _truncate_text(
+                function.get("arguments"), _MAX_LOG_TOOL_CALL_CHARS
+            )
+            item["function"] = function
+        compact.append(item)
+    return compact
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -102,23 +195,50 @@ class LLMLogger:
             return
         
         try:
-            # Convert to dict
+            # The per-session record is the canonical diagnostic copy. Histories
+            # grow on every agent turn, so storing every prior message verbatim
+            # would make JSONL size quadratic in conversation length.
             data = asdict(interaction)
-
-            # Truncate long messages for the log (keep full in separate field)
-            log_data = data.copy()
+            session_data = {
+                **data,
+                "messages": _compact_messages(data["messages"]),
+                "tools": _compact_tools(data.get("tools")),
+                "response_content": _truncate_text(
+                    data.get("response_content"), _MAX_LOG_RESPONSE_CHARS
+                ),
+                "tool_calls": _compact_tool_calls(data.get("tool_calls")),
+                "message_count": len(data["messages"]),
+            }
+            # Daily logs are an operational index, not a second full copy.
+            daily_data = {
+                key: data.get(key)
+                for key in (
+                    "timestamp", "session_id", "agent", "model",
+                    "interaction_type", "temperature", "max_tokens", "base_url",
+                    "usage", "error", "duration_ms",
+                )
+            }
+            daily_data.update({
+                "message_count": len(data["messages"]),
+                "response_chars": len(data.get("response_content") or ""),
+                "tool_names": [
+                    _tool_name(tool)
+                    for tool in (data.get("tools") or [])
+                    if _tool_name(tool)
+                ],
+            })
 
             LLM_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
             # Write to daily log
             daily_path = self._get_daily_log_path()
             with open(daily_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(log_data, ensure_ascii=False) + "\n")
+                f.write(json.dumps(daily_data, ensure_ascii=False) + "\n")
             
             # Write to session log
             session_path = self._get_session_log_path(interaction.session_id)
             with open(session_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(log_data, ensure_ascii=False) + "\n")
+                f.write(json.dumps(session_data, ensure_ascii=False) + "\n")
             
             # Console logging (summarized)
             if self.log_to_console:

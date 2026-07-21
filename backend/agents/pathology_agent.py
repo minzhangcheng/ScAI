@@ -34,6 +34,17 @@ _GENERIC_TILE_FINDINGS = frozenset({
     "not available",
     "unknown",
 })
+_PROMPT_CATEGORY_PREFIX_RE = re.compile(
+    r"^(?:cell morphology changes?|inflammatory cell infiltration|"
+    r"signs? of fibrosis|vascular (?:or structural )?changes?|"
+    r"other abnormalities?)\s*[:\-]",
+    re.IGNORECASE,
+)
+
+
+def _finding_key(value: str) -> str:
+    """Normalize one observation for exact semantic-template deduplication."""
+    return re.sub(r"\s+", " ", value.casefold()).strip().rstrip(".!")
 
 
 def _validate_tile_batch(
@@ -41,6 +52,7 @@ def _validate_tile_batch(
     *,
     start_idx: int,
     expected_count: int,
+    prior_findings: Optional[List[Dict[str, Any]]] = None,
 ) -> tuple[List[Dict[str, Any]], List[str]]:
     """Validate one model-produced tile batch and assign canonical indices.
 
@@ -61,6 +73,13 @@ def _validate_tile_batch(
         ]
 
     normalized: List[Dict[str, Any]] = []
+    prior_keys = {
+        _finding_key(str(item.get("findings", "")))
+        for item in (prior_findings or [])
+        if isinstance(item, dict) and item.get("findings")
+    }
+    batch_keys: set[str] = set()
+    explicit_normal_key = _finding_key("No abnormality detected.")
     for offset, entry in enumerate(entries):
         label = start_idx + offset + 1
         if not isinstance(entry, dict):
@@ -71,7 +90,7 @@ def _validate_tile_batch(
             errors.append(f"tile {label} findings must be a string")
             continue
         finding = finding.strip()
-        folded = finding.casefold().rstrip(".")
+        folded = _finding_key(finding)
         if not finding:
             errors.append(f"tile {label} findings are empty")
         elif len(finding) < 12:
@@ -80,12 +99,24 @@ def _validate_tile_batch(
             errors.append(f"tile {label} findings are generic")
         elif _TILE_FINDING_PLACEHOLDER_RE.fullmatch(finding):
             errors.append(f"tile {label} findings repeat the schema placeholder")
+        elif _PROMPT_CATEGORY_PREFIX_RE.match(finding):
+            errors.append(
+                f"tile {label} findings copy a prompt category instead of an observation"
+            )
+        elif (
+            folded != explicit_normal_key
+            and (folded in prior_keys or folded in batch_keys)
+        ):
+            errors.append(
+                f"tile {label} repeats an identical abnormal finding from another tile"
+            )
         else:
             normalized.append({
                 **entry,
                 "tile_index": start_idx + offset,
                 "findings": finding,
             })
+            batch_keys.add(folded)
 
     if errors:
         return [], errors
@@ -420,12 +451,12 @@ Please reply in JSON format:
 You are analyzing {len(batch_tiles)} regions (tiles {start_idx + 1} to {end_idx}) from a {image_info.data_type} stained tissue section.
 Total tiles in this section: {len(tiles_to_analyze)}
 
-For EACH tile (in order), identify pathological features based on the tissue type and staining:
-1. Cell morphology changes (size, shape, nuclear abnormalities)
-2. Inflammatory cell infiltration
-3. Signs of fibrosis or tissue remodeling
-4. Vascular or structural changes
-5. Other abnormalities specific to this tissue type
+For EACH tile in order, report only features that are directly visible in that
+tile and interpretable for the stated stain. Use observation-first language:
+describe the visible morphology or stain pattern, its distribution/localization,
+and its approximate extent when defensible. Do not force every tile through a
+fixed disease checklist, infer an etiology, or reuse a generic category label
+such as "Cell morphology changes" as the finding itself.
 
 Return one JSON object with a "tile_findings" array containing EXACTLY {len(batch_tiles)} objects in image order.
 Each object must contain:
@@ -433,6 +464,8 @@ Each object must contain:
 - "findings": a concrete, non-empty observation from that tile
 
 Never copy field descriptions, use ellipses, or return placeholders such as "Tile N findings".
+Do not repeat an identical abnormal sentence for different tiles; describe the
+tile-specific evidence. Identical explicit normal findings are allowed.
 If no abnormality is visible in a tile, use the explicit finding "No abnormality detected."
 """
 
@@ -470,6 +503,7 @@ If no abnormality is visible in a tile, use the explicit finding "No abnormality
                         batch_data,
                         start_idx=start_idx,
                         expected_count=len(batch_tiles),
+                        prior_findings=tile_findings,
                     )
                     if not last_validation_errors:
                         tile_findings.extend(normalized_batch)

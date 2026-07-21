@@ -703,13 +703,54 @@ def tolerant_from_llm_dict(cls: type, data: Dict[str, Any]) -> Any:
     This is a generalised version of ExplorationReport.from_llm_dict that
     works for any BaseModel subclass that receives LLM-generated JSON.
     """
+    def _normalize_list_field(annotation: Any, value: Any) -> Any:
+        """Recover safe dict-shaped LLM output for list-typed fields.
+
+        Models occasionally emit either a single object or an id-keyed object
+        map where the schema asks for a list.  Only dict inputs are normalized:
+        arbitrary scalar/string inputs remain invalid so prose is not silently
+        promoted into structured report fields.
+        """
+        from typing import get_args, get_origin
+
+        if get_origin(annotation) not in (list, List) or not isinstance(value, dict):
+            return value
+        args = get_args(annotation)
+        if not args:
+            return value
+        item_annotation = args[0]
+        item_adapter = TypeAdapter(item_annotation)
+
+        # An id-keyed map (for example {"dir_1": {...}, "dir_2": {...}})
+        # should become its ordered values before considering the whole mapping
+        # as one list item.  This ordering also prevents List[Dict[str, Any]]
+        # from accepting the outer map as a misleading singleton record.
+        mapped_values = list(value.values())
+        if mapped_values:
+            try:
+                for item in mapped_values:
+                    item_adapter.validate_python(item)
+            except ValidationError:
+                pass
+            else:
+                return mapped_values
+
+        # Otherwise treat the mapping as one structured item when that item
+        # itself satisfies the list element schema.
+        try:
+            item_adapter.validate_python(value)
+        except ValidationError:
+            return value
+        return [value]
+
     clean: Dict[str, Any] = {}
     for name, value in data.items():
         field = cls.model_fields.get(name)
         if field is None:
             continue
+        normalized = _normalize_list_field(field.annotation, value)
         try:
-            TypeAdapter(field.annotation).validate_python(value)
+            TypeAdapter(field.annotation).validate_python(normalized)
         except ValidationError:
             logger.warning(
                 "tolerant_from_llm_dict(%s) dropping field %r: value of "
@@ -717,7 +758,12 @@ def tolerant_from_llm_dict(cls: type, data: Dict[str, Any]) -> Any:
                 cls.__name__, name, type(value).__name__, field.annotation,
             )
             continue
-        clean[name] = value
+        if normalized is not value:
+            logger.warning(
+                "tolerant_from_llm_dict(%s) normalized dict field %r to a list",
+                cls.__name__, name,
+            )
+        clean[name] = normalized
     return cls(**clean)
 
 
@@ -776,6 +822,11 @@ class RoundResult(BaseModel):
     result_identity_key: str = ""
     round_status: Literal["completed", "partial", "failed", "skipped"] = "completed"
     evidence_status: Literal["substantive", "empty", "failed"] = "empty"
+    # Whether this innovation round has enough core-agent evidence to satisfy
+    # direction-batch coverage. Optional modality degradation may leave the
+    # overall round_status as "partial" while the direction is still covered.
+    # None preserves the legacy interpretation for older persisted results.
+    direction_coverage_eligible: Optional[bool] = None
     timestamp: datetime = Field(default_factory=datetime.now)
 
 

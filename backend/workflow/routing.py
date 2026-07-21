@@ -110,21 +110,32 @@ class RoutingMixin:
             return "stop"
 
         # Integration-loop guard (spec §9.2): never hard-stop on max_rounds while
-        # an integration round is pending, the active direction batch is not
-        # yet covered, or we are parked at the integration gate awaiting user
-        # direction selection. Loop termination is governed by the integration
-        # gate + max_integration_cycles.
+        # an integration round is pending, the active direction batch still has
+        # an unattempted direction, or we are parked at the integration gate.
+        # Loop termination is governed by the integration gate and cycle cap.
         from .direction_coverage import (
+            active_batch_has_unattempted_directions,
             active_batch_incomplete,
             at_integration_gate,
             awaiting_integration_direction,
         )
         if (getattr(analysis_state, "pending_integration", False)
-                or active_batch_incomplete(analysis_state)
+                or active_batch_has_unattempted_directions(analysis_state)
                 or at_integration_gate(analysis_state)
                 or awaiting_integration_direction(analysis_state)):
             logger.info(f"[{self.session_id}] Integration loop active; bypassing max_rounds stop")
             return "continue"
+
+        # The batch was attempted but still lacks coverage-eligible evidence.
+        # Stop at the partial-report gate instead of launching directionless
+        # rounds forever. The user can approve a partial report or retry with
+        # explicit new guidance/data.
+        if active_batch_incomplete(analysis_state):
+            logger.info(
+                f"[{self.session_id}] Stopping: active direction batch exhausted "
+                "with incomplete evidence"
+            )
+            return "stop"
 
         # Check max rounds (use state.max_rounds if valid, otherwise config default)
         # max_rounds <= 0 means use config default; max_rounds > 0 is user-specified limit
@@ -199,6 +210,7 @@ class RoutingMixin:
             return "stop"
         from .direction_coverage import (
             active_batch_complete,
+            active_batch_has_unattempted_directions,
             active_batch_incomplete,
         )
         cap_reached = (
@@ -216,6 +228,8 @@ class RoutingMixin:
             or active_batch_complete(analysis_state)
         ):
             return "stop"
-        if active_batch_incomplete(analysis_state):
+        if active_batch_has_unattempted_directions(analysis_state):
             return "continue"
+        if active_batch_incomplete(analysis_state):
+            return "stop"
         return self._should_continue(state)

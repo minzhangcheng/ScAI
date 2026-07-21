@@ -137,10 +137,16 @@ def derive_round_completion_status(state: Dict[str, Any], result: RoundResult) -
     """
     failed_node = state.get("failed_node")
     has_evidence = has_substantive_findings(result)
+    has_core_evidence = bool(
+        result.bioinformatics_findings
+        or result.literature_findings
+        or result.data_driven_mechanism_programs
+    )
 
     if failed_node in CORE_FAILED_NODES:
         result.round_status = "partial" if has_evidence else "skipped"
         result.evidence_status = "substantive" if has_evidence else "failed"
+        result.direction_coverage_eligible = False
         return result
 
     # Core agents are required for a completed research round. During
@@ -163,20 +169,33 @@ def derive_round_completion_status(state: Dict[str, Any], result: RoundResult) -
     if has_core_failed:
         result.round_status = "partial" if has_evidence else "failed"
         result.evidence_status = "substantive" if has_evidence else "failed"
+        result.direction_coverage_eligible = False
         return result
 
     if has_core_skipped:
         result.round_status = "partial" if has_evidence else "skipped"
         result.evidence_status = "substantive" if has_evidence else "failed"
+        result.direction_coverage_eligible = False
         return result
 
-    if has_core_partial or has_optional_failed or has_optional_partial:
+    if has_core_partial:
         result.round_status = "partial"
         result.evidence_status = "substantive" if has_evidence else "empty"
+        result.direction_coverage_eligible = False
+        return result
+
+    if has_optional_failed or has_optional_partial:
+        result.round_status = "partial"
+        result.evidence_status = "substantive" if has_evidence else "empty"
+        # Optional modality degradation must remain visible in round_status,
+        # but it must not keep a direction batch permanently incomplete when
+        # both core agents completed and substantive evidence exists.
+        result.direction_coverage_eligible = has_core_evidence
         return result
 
     result.round_status = "completed"
     result.evidence_status = "substantive" if has_evidence else "empty"
+    result.direction_coverage_eligible = has_evidence
     return result
 
 

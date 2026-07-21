@@ -32,8 +32,9 @@ def validate_complete_report_allowed(state: AnalysisState) -> tuple[bool, str]:
     from .direction_coverage import active_batch_incomplete
     if active_batch_incomplete(state):
         return False, (
-            "A new research direction batch was selected at the integration gate "
-            "but has not been analyzed yet; only a partial report can be produced."
+            "The active research direction batch does not have complete or "
+            "coverage-eligible evidence for every direction; only a partial "
+            "report can be produced."
         )
     if len(state.user_chosen_directions) <= 1:
         return True, ""

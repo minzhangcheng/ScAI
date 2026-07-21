@@ -1,7 +1,9 @@
 """Planning dialogue: PI ↔ Bioinformatics plan design, review, and user gate."""
 import asyncio
+import difflib
 import json
 import logging
+import re
 from datetime import datetime
 from html import escape as _html_escape
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -28,6 +30,57 @@ logger = logging.getLogger(__name__)
 
 MAX_PLANNING_ROUNDS = 5
 MAX_SPECIES_INFERENCE_ATTEMPTS = 3
+PLAN_STAGNATION_TOKEN_SIMILARITY = 0.97
+
+
+def _plan_semantic_text(plan: Optional[AnalysisPlan]) -> str:
+    """Canonical text used only to detect a revision with no material change."""
+    if plan is None:
+        return ""
+    payload = {
+        "overview": plan.overview,
+        "steps": [
+            {
+                "title": step.title,
+                "method": step.method,
+                "input": step.input,
+                "expected_output": step.expected_output,
+                "rationale": step.rationale,
+                "depends_on": sorted(step.depends_on),
+            }
+            for step in plan.steps
+        ],
+        "key_decision_points": plan.key_decision_points,
+    }
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True).casefold()
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def plans_materially_equivalent(
+    previous: Optional[AnalysisPlan], current: Optional[AnalysisPlan]
+) -> bool:
+    """Conservatively identify a revision that only rephrases the same plan."""
+    if previous is None or current is None:
+        return False
+    if len(previous.steps) != len(current.steps):
+        return False
+    before = _plan_semantic_text(previous)
+    after = _plan_semantic_text(current)
+    if not before or not after:
+        return False
+    if before == after:
+        return True
+    before_tokens = set(re.findall(r"[a-z0-9_]+", before))
+    after_tokens = set(re.findall(r"[a-z0-9_]+", after))
+    union = before_tokens | after_tokens
+    token_similarity = len(before_tokens & after_tokens) / len(union) if union else 1.0
+    sequence_similarity = difflib.SequenceMatcher(
+        None, before, after, autojunk=False
+    ).ratio()
+    return (
+        token_similarity >= PLAN_STAGNATION_TOKEN_SIMILARITY
+        and sequence_similarity >= 0.94
+    )
 
 
 def _consume_user_plan_feedback(state: dict) -> str:
@@ -627,6 +680,7 @@ class PlanningMixin:
         phase = analysis_state.analysis_phase.value
         combined_previous = self._build_planning_context(state)
         dialogue_history = []
+        finalization_reason: Optional[str] = None
 
         round_num = 1
         while round_num <= MAX_PLANNING_ROUNDS:
@@ -635,6 +689,10 @@ class PlanningMixin:
                 f"Planning dialogue: round {round_num}/{MAX_PLANNING_ROUNDS}",
                 AgentType.PI,
             )
+
+            # Keep the exact input revision so convergence is based on the two
+            # adjacent plans, not on volatile AnalysisState references.
+            previous_plan = existing_plan.model_copy(deep=True) if existing_plan else None
 
             # --- Bioinformatics agent call (with LLM failure intervention) ---
             while True:
@@ -825,6 +883,7 @@ class PlanningMixin:
                 "pi_decision": review["decision"],
                 "pi_feedback": review["feedback"],
                 "pi_modifications": review.get("modifications", []),
+                "materially_unchanged": plans_materially_equivalent(previous_plan, plan),
             })
 
             if review["decision"] == "approved":
@@ -851,86 +910,82 @@ class PlanningMixin:
                     AgentType.PI,
                 )
 
+            if (
+                review["decision"] != "approved"
+                and dialogue_history[-1]["materially_unchanged"]
+            ):
+                finalization_reason = "no_material_plan_change"
+                logger.warning(
+                    "[%s] Planning dialogue converged without approval at round %s; "
+                    "routing to unilateral PI finalization",
+                    self.session_id,
+                    round_num,
+                )
+                break
+
             round_num += 1
 
-        # Max rounds reached without approval — PI must finalize.
-        if round_num > MAX_PLANNING_ROUNDS:
-            logger.warning(
-                f"[{self.session_id}] Planning dialogue reached max rounds ({MAX_PLANNING_ROUNDS})"
-            )
+        # No agreement at the hard limit, or an unchanged revision proves the
+        # dialogue has converged without approval. In both cases PI must actually
+        # revise and commit the final plan; never relabel a draft as approved.
+        if finalization_reason or round_num > MAX_PLANNING_ROUNDS:
+            if finalization_reason is None:
+                finalization_reason = "max_rounds"
+                logger.warning(
+                    f"[{self.session_id}] Planning dialogue reached max rounds "
+                    f"({MAX_PLANNING_ROUNDS})"
+                )
 
-            fallback_plan = (
+            seed_plan = (
                 existing_plan
-                if (
-                    existing_plan is not None
-                    and existing_plan.steps
-                    and existing_plan.status != "rejected"
-                )
-                else None
+                if existing_plan is not None and existing_plan.steps
+                else self._select_fallback_plan_from_history(dialogue_history)
             )
-            if fallback_plan is None:
-                fallback_plan = self._select_fallback_plan_from_history(
-                    dialogue_history
+            if seed_plan is not None:
+                analysis_state.current_plan = seed_plan
+            await self._send_message(
+                "status",
+                "Planning dialogue converged without approval; PI is finalizing "
+                "the plan unilaterally...",
+                AgentType.PI,
+            )
+            try:
+                final_plan = await self.pi_agent.generate_final_plan_from_dialogue(
+                    analysis_state,
+                    dialogue_history,
+                    current_plan=seed_plan,
                 )
-
-            if fallback_plan is not None and fallback_plan.steps:
-                fallback_plan.status = "pi_reviewing"
-                analysis_state.current_plan = fallback_plan
+                populate_plan_scope(final_plan, analysis_state)
+                analysis_state.current_plan = final_plan
                 analysis_state.plan_dialogue_history = dialogue_history
                 state["plan_approved"] = True
                 state["planning_result"] = {
-                    "plan": fallback_plan.model_dump(mode="json"),
+                    "plan": final_plan.model_dump(mode="json"),
                     "dialogue": dialogue_history,
+                    "finalization_reason": finalization_reason,
                 }
                 await self._send_message(
                     "status",
-                    "Planning dialogue: max rounds reached, proceeding with best available plan",
+                    "PI has finalized the plan unilaterally.",
                     AgentType.PI,
                 )
-            else:
-                logger.warning(
-                    f"[{self.session_id}] MAX_PLANNING_ROUNDS reached without valid plan; "
-                    f"PI finalizes unilaterally"
+            except Exception as e:
+                logger.exception(
+                    f"[{self.session_id}] PI failed to generate final plan "
+                    f"from dialogue: {e}"
                 )
                 await self._send_message(
-                    "status",
-                    "Planning dialogue: max rounds reached without a valid plan, "
-                    "PI is finalizing the plan unilaterally...",
+                    "error",
+                    f"PI failed to finalize plan after dialogue convergence: {str(e)}",
                     AgentType.PI,
                 )
-                try:
-                    final_plan = await self.pi_agent.generate_final_plan_from_dialogue(
-                        analysis_state, dialogue_history
-                    )
-                    analysis_state.current_plan = final_plan
-                    analysis_state.plan_dialogue_history = dialogue_history
-                    state["plan_approved"] = True
-                    state["planning_result"] = {
-                        "plan": final_plan.model_dump(mode="json"),
-                        "dialogue": dialogue_history,
-                    }
-                    await self._send_message(
-                        "status",
-                        "PI has finalized the plan unilaterally after max rounds.",
-                        AgentType.PI,
-                    )
-                except Exception as e:
-                    logger.exception(
-                        f"[{self.session_id}] PI failed to generate final plan "
-                        f"from dialogue: {e}"
-                    )
-                    await self._send_message(
-                        "error",
-                        f"PI failed to finalize plan after max rounds: {str(e)}",
-                        AgentType.PI,
-                    )
-                    state["failed_node"] = "planning_dialogue"
-                    state["planning_result"] = {
-                        "error": str(e),
-                        "findings": [],
-                        "status": "failed",
-                    }
-                    state["should_continue"] = False
+                state["failed_node"] = "planning_dialogue"
+                state["planning_result"] = {
+                    "error": str(e),
+                    "findings": [],
+                    "status": "failed",
+                }
+                state["should_continue"] = False
 
         return state
 

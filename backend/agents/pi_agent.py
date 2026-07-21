@@ -922,11 +922,12 @@ IMPORTANT: Be specific in your feedback. Reference exact step IDs. If you approv
         self,
         analysis_state: AnalysisState,
         dialogue_history: List[Dict[str, Any]],
+        current_plan: Optional['AnalysisPlan'] = None,
     ) -> 'AnalysisPlan':
         """P1-10: Unilaterally generate a final analysis plan based on the
-        planning dialogue so far. Used as a fallback when MAX_PLANNING_ROUNDS
-        is exhausted without bioinfo-PI agreement — PI decides alone instead
-        of looping further.
+        planning dialogue so far. Used when the round limit is exhausted or
+        successive revisions stop changing materially — PI decides alone
+        instead of looping further.
 
         Returns an AnalysisPlan whose status is "pi_reviewing"; the workflow
         will then mark plan_approved=True so the user-review gate sees a
@@ -936,21 +937,36 @@ IMPORTANT: Be specific in your feedback. Reference exact step IDs. If you approv
 
         phase = analysis_state.analysis_phase.value
         stage = "full"
-        if analysis_state.current_plan is not None and analysis_state.current_plan.stage:
-            stage = analysis_state.current_plan.stage
+        seed_plan = current_plan or analysis_state.current_plan
+        stopped_for_stagnation = bool(
+            dialogue_history
+            and dialogue_history[-1].get("materially_unchanged")
+        )
+        termination_reason = (
+            "Successive planning revisions stopped changing materially"
+            if stopped_for_stagnation
+            else "MAX_PLANNING_ROUNDS exhausted"
+        )
+        if seed_plan is not None and seed_plan.stage:
+            stage = seed_plan.stage
 
         recent = dialogue_history[-5:] if dialogue_history else []
         history_summary = "\n\n".join(
             f"Round {entry.get('round', '?')}: PI decision={entry.get('pi_decision', '?')}\n"
-            f"  PI feedback: {str(entry.get('pi_feedback', ''))[:400]}\n"
-            f"  Plan attempted: {str(entry.get('plan'))[:600]}"
+            f"  PI feedback: {str(entry.get('pi_feedback', ''))[:1200]}\n"
+            f"  Required modifications: "
+            f"{json.dumps(entry.get('pi_modifications') or [], ensure_ascii=False)[:3000]}"
             for entry in recent
         ) or "(no prior dialogue)"
+        current_plan_json = (
+            json.dumps(seed_plan.model_dump(mode="json"), ensure_ascii=False, indent=2)
+            if seed_plan is not None else "(no valid current plan)"
+        )
 
         prompt = f"""You are the PI deciding on a FINAL analysis plan unilaterally because
-the bioinformatics agent and PI could not reach agreement within the maximum
-allowed planning rounds. You must now commit to a plan based on the dialogue
-history below — no more discussion is permitted.
+the bioinformatics agent and PI did not reach agreement before the dialogue
+stopped ({termination_reason}). You must now commit to a plan based on the
+dialogue history below — no more discussion is permitted.
 
 ## Phase
 {phase}
@@ -961,13 +977,16 @@ history below — no more discussion is permitted.
 ## Experimental Design
 {analysis_state.build_experimental_design_summary()}
 
+## Current Complete Plan
+{current_plan_json}
+
 ## Dialogue History (most recent rounds)
 {history_summary}
 
 ## Your Task
-Produce a final AnalysisPlan in JSON form. Synthesize the best ideas from the
-dialogue, resolve any disagreements in favor of scientific soundness, and keep
-the plan executable within the current stage's scope.
+Revise the complete current plan above and produce the final AnalysisPlan in
+JSON form. Resolve every still-material PI concern, preserve already-correct
+steps, and keep the plan executable within the current stage's scope.
 
 Respond ONLY with JSON in this schema:
 {{
@@ -1022,7 +1041,7 @@ Respond ONLY with JSON in this schema:
             status="pi_reviewing",
             revision_of=(analysis_state.current_plan.id
                          if analysis_state.current_plan else None),
-            revision_reason="MAX_PLANNING_ROUNDS exhausted — PI finalized unilaterally",
+            revision_reason=f"{termination_reason} — PI finalized unilaterally",
         )
         logger.info(
             f"[PI] Generated final plan unilaterally from dialogue: "

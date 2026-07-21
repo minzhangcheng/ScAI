@@ -149,6 +149,7 @@ class RuntimeDependencyTracker:
     def __init__(self) -> None:
         self._created: set[str] = set()
         self._required: set[str] = set()
+        self._needs_legacy_declared_cleanup = False
 
     @property
     def required_outputs(self) -> set[str]:
@@ -157,6 +158,13 @@ class RuntimeDependencyTracker:
     @property
     def created_outputs(self) -> set[str]:
         return set(self._created)
+
+    @property
+    def needs_legacy_declared_cleanup(self) -> bool:
+        return self._needs_legacy_declared_cleanup
+
+    def mark_legacy_declared_cleanup_complete(self) -> None:
+        self._needs_legacy_declared_cleanup = False
 
     def record_execution(
         self,
@@ -193,6 +201,7 @@ class RuntimeDependencyTracker:
 
     def to_state_dict(self) -> dict:
         return {
+            "version": 2,
             "created": sorted(self._created),
             "required": sorted(self._required),
         }
@@ -204,4 +213,5 @@ class RuntimeDependencyTracker:
             return tracker
         tracker._created = set(data.get("created") or [])
         tracker._required = set(data.get("required") or [])
+        tracker._needs_legacy_declared_cleanup = int(data.get("version") or 1) < 2
         return tracker

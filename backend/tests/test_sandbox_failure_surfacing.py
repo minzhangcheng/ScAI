@@ -30,6 +30,8 @@ def test_restore_failure_raises_not_silent():
         "P1-11: restore failure must raise so the workflow does not continue "
         "with inconsistent kernel state"
     )
+    assert "ZstdDecompressor" in body
+    assert "_raw.seek(0)" in body, "legacy uncompressed runtime must remain readable"
 
 
 def test_save_session_collects_and_reports_skipped_vars():

@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 from unittest.mock import MagicMock, AsyncMock
@@ -93,3 +94,48 @@ async def test_emit_log_response_writes_one_daily_and_one_session_record(
     assert len(daily_files) == 1
     assert daily_files[0].read_text().count("\n") == 1
     assert (session_dir / "llm.jsonl").read_text().count("\n") == 1
+    daily_record = json.loads(daily_files[0].read_text())
+    session_record = json.loads((session_dir / "llm.jsonl").read_text())
+    assert "messages" not in daily_record
+    assert daily_record["message_count"] == 1
+    assert session_record["messages"][0]["content"] == "hello"
+
+
+def test_session_log_is_bounded_and_redacts_inline_images(tmp_path, monkeypatch):
+    from backend.utils import llm_logger as llm_logger_module
+
+    daily_dir = tmp_path / "daily"
+    session_dir = tmp_path / "session"
+    monkeypatch.setattr(llm_logger_module, "LLM_LOG_DIR", daily_dir)
+    monkeypatch.setattr(llm_logger_module, "get_session_logs", lambda _sid: session_dir)
+
+    logger = object.__new__(llm_logger_module.LLMLogger)
+    logger.enabled = True
+    logger.log_to_console = False
+    logger._async_lock = asyncio.Lock()
+    messages = [{"role": "system", "content": "rules"}]
+    messages.extend(
+        {"role": "user", "content": "x" * 50_000 + str(i)}
+        for i in range(30)
+    )
+    messages.append({
+        "role": "user",
+        "content": [{
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64," + "A" * 100_000},
+        }],
+    })
+    interaction = logger.log_request(
+        session_id="bounded",
+        agent="test",
+        model="model",
+        messages=messages,
+    )
+    logger.log_response(interaction, response_content="y" * 100_000)
+
+    record = json.loads((session_dir / "llm.jsonl").read_text())
+    assert record["message_count"] == len(messages)
+    assert len(record["messages"]) == llm_logger_module._MAX_LOG_MESSAGES
+    assert "inline image omitted" in str(record["messages"][-1])
+    assert len(record["response_content"]) < 41_000
+    assert (session_dir / "llm.jsonl").stat().st_size < 300_000

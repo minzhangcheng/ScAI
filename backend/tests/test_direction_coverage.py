@@ -63,6 +63,18 @@ def test_completed_a_b_c_is_complete():
     assert coverage.missing_keys == set()
 
 
+def test_optional_degraded_round_can_be_explicitly_coverage_eligible():
+    degraded = _result("Direction C", round_status="partial")
+    degraded.direction_coverage_eligible = True
+    coverage = direction_coverage_status(_state([
+        _result("Direction A"),
+        _result("Direction B"),
+        degraded,
+    ]))
+    assert coverage.complete is True
+    assert coverage.missing_keys == set()
+
+
 def test_coverage_filters_by_lineage():
     state = _state([_result("Direction A"), _result("Direction B"), _result("Direction C", lineage_id="branch-1")])
     coverage = direction_coverage_status(state, lineage_id="main")

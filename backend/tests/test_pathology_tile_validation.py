@@ -64,6 +64,63 @@ def test_tile_batch_assigns_canonical_indices_and_accepts_explicit_normal():
     assert [entry["tile_index"] for entry in normalized] == [5, 6]
 
 
+def test_tile_batch_rejects_prompt_category_echo_and_repeated_abnormality():
+    templated = {
+        "tile_findings": [
+            {
+                "tile_index": 0,
+                "findings": "Cell morphology changes: enlarged irregular cells are present.",
+            },
+            {
+                "tile_index": 1,
+                "findings": "Dense collagen surrounds several vascular profiles.",
+            },
+        ]
+    }
+    normalized, errors = _validate_tile_batch(
+        templated, start_idx=0, expected_count=2
+    )
+    assert normalized == []
+    assert any("prompt category" in error for error in errors)
+
+    repeated = {
+        "tile_findings": [
+            {
+                "tile_index": 2,
+                "findings": "Dense collagen surrounds several vascular profiles.",
+            }
+        ]
+    }
+    normalized, errors = _validate_tile_batch(
+        repeated,
+        start_idx=2,
+        expected_count=1,
+        prior_findings=[{
+            "tile_index": 0,
+            "findings": "Dense collagen surrounds several vascular profiles.",
+        }],
+    )
+    assert normalized == []
+    assert any("repeats an identical abnormal finding" in error for error in errors)
+
+
+def test_tile_batch_allows_repeated_explicit_normal_findings():
+    batch = {
+        "tile_findings": [
+            {"tile_index": 0, "findings": "No abnormality detected."},
+            {"tile_index": 1, "findings": "No abnormality detected."},
+        ]
+    }
+    normalized, errors = _validate_tile_batch(
+        batch,
+        start_idx=0,
+        expected_count=2,
+        prior_findings=[{"findings": "No abnormality detected."}],
+    )
+    assert errors == []
+    assert len(normalized) == 2
+
+
 def _patch_image_setup(monkeypatch, agent: PathologyAgent) -> DataFile:
     monkeypatch.setattr(agent, "refresh_runtime_config_if_needed", lambda: None)
     monkeypatch.setattr(agent, "_set_llm_context", lambda: None)
