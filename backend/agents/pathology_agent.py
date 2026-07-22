@@ -35,9 +35,7 @@ _GENERIC_TILE_FINDINGS = frozenset({
     "unknown",
 })
 _PROMPT_CATEGORY_PREFIX_RE = re.compile(
-    r"^(?:cell morphology changes?|inflammatory cell infiltration|"
-    r"signs? of fibrosis|vascular (?:or structural )?changes?|"
-    r"other abnormalities?)\s*[:\-]",
+    r"^(?:category|feature|observation|finding)\s*(?:\d+|n)?\s*[:\-]",
     re.IGNORECASE,
 )
 
@@ -675,13 +673,9 @@ Please provide comprehensive analysis and reply in JSON format:
             "max": <int>,
             "scale_description": "<what the scale measures and what each level means>"
         }}
-        // Define grading dimensions appropriate for THIS tissue type and the
-        // pathology observed. Examples (DO NOT use as-is — derive from data):
-        //   liver/NASH:   inflammation, fibrosis, steatosis, hepatocellular injury
-        //   brain/AD:     amyloid burden, tau pathology, neuronal loss
-        //   tumor:        tumor grade, mitotic count, necrosis extent, invasion depth
-        //   kidney/AKI:   tubular injury, interstitial inflammation, fibrosis
-        //   lung/IPF:     UIP pattern severity, fibroblastic foci density, honeycombing
+        // Define grading dimensions from the stated stain and the observations in
+        // THIS dataset. Each dimension must name a visible, measurable feature and
+        // explain its scale; do not import a disease- or tissue-specific checklist.
     }},
     "suggested_staining": ["suggested additional special staining"],
     "questions_for_bioinformatics": ["questions requiring bioinformatics assistance"],

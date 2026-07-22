@@ -763,11 +763,8 @@ Reply in JSON format.
     def _suggest_initial_experiments(self) -> List[str]:
         """Suggest initial experiments when no data is available - generic suggestions"""
         return [
-            "Basic tissue function tests relevant to the organ/tissue being studied",
-            "Metabolic indicators: glucose, lactate, lipid profiles",
-            "Oxidative stress markers: GSH, SOD, MDA, ROS levels",
-            "Inflammatory markers: IL-6, TNF-alpha, IL-1beta",
-            "Cell death markers: LDH, caspase activity (if applicable)",
-            "Tissue-specific functional markers based on the research context",
+            "Define primary biochemical readouts from the research question and experimental design",
+            "Select quantitative measurements that directly test the stated comparison",
+            "Include appropriate assay controls, calibration, and biological replicates",
+            "Choose follow-up measurements only after reviewing the supplied observations",
         ]
-

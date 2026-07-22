@@ -15,14 +15,19 @@ def _synthesize_findings_body() -> str:
     return m.group(0)
 
 
-def test_synthesis_prompt_does_not_hardcode_liver_grading():
-    """The synthesis prompt template must NOT lock in NAS/liver-specific axes."""
+def test_synthesis_prompt_does_not_hardcode_tissue_or_disease_grading():
+    """The synthesis prompt must derive grading dimensions from the supplied images."""
     body = _synthesize_findings_body()
     forbidden = [
         '"inflammation": 0-4',
         '"fibrosis": 0-4',
         '"steatosis": 0-4',
         '"injury": 0-4',
+        "liver/NASH",
+        "brain/AD",
+        "tumor grade",
+        "kidney/AKI",
+        "lung/IPF",
     ]
     for token in forbidden:
         assert token not in body, f"P0-9: prompt still hardcodes liver axes: {token}"

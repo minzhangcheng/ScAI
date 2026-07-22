@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.34.10 · **Last updated**: 2026-07-21
+**Version**: 0.35.1 · **Last updated**: 2026-07-22
 
 ## 1. Runtime Architecture
 
@@ -193,6 +193,18 @@ scai/
 ## 12. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
+
+**0.35.x — (2026-07-22)**
+
+- `0.35.1` — Domain-neutral mechanism evidence policy, planning-failure terminal routing, plan schema normalization, domain-example scrub; version bump (2026-07-22):
+  - **Shared mechanism evidence policy (`backend/utils/mechanism_policy.py`)**: New `MECHANISM_EVIDENCE_POLICY` constant — start with unbiased analyses; name established mechanisms only when observed evidence supports them; treat objective-named mechanisms as prespecified hypotheses (supported / contradicted / insufficient); distinguish pathway activity/priming from causal mechanism execution. Wired into PI direction/synthesis/report prompts, bioinformatics `register_mechanism_programs` tool + Stage-2 capture instruction, Supervisor live report prompt, and detailed-report planning fallback.
+  - **Exploration preserves prespecified hypotheses without biasing baseline (`backend/agents/pi_agent.py`)**: `initial_exploration_instruction` still forbids objective-driven narrowing of mandatory broad tasks, but now requires an explicit post-baseline evidence assessment for mechanisms named in the research objective (support / contradiction / insufficient evidence) instead of silent omission or default confirmation.
+  - **Mechanism program validation no longer injects a generic alternative (`backend/agents/bioinformatics_agent.py`)**: Removed `_DEFAULT_ALTERNATIVE` auto-fill; empty `alternative_explanations` stay empty. Default missing-evidence text retained when the field is absent.
+  - **Plan schema normalization + bounded repair (`backend/agents/bioinformatics_agent.py`)**: New `_prepare_plan_data()` maps label-style step IDs (e.g. `"S2_Step_0"`) to deterministic positive integers, rewrites `depends_on`, reserves completed-step IDs during revision, and converts schema failures into `parse_error` so `_retry_on_parse_failure` can request one repair instead of leaking Pydantic errors into routing. `revise_plan_incrementally` freezes completed step title/method/rationale (only `depends_on` may change).
+  - **Planning failure is terminal FAILED, not a successful report (`backend/workflow/planning.py`, `backend/workflow/routing.py`, `backend/workflow/graph.py`)**: Planning dialogue / review aborts set `TaskStatus.FAILED`, emit `planning_aborted` state_sync, and set `failed_node="planning_dialogue"`. New `_after_planning_dialogue` routes `"failed" → END` instead of `user_review_gate`; `_after_review` also ends on planning failure so a missing plan never becomes a completed final report.
+  - **Resume preserves FAILED at graph end (`backend/workflow/core.py`)**: When the graph has no remaining nodes, resume no longer upgrades `FAILED`/`STOPPED` to `COMPLETED`; only non-terminal statuses are marked complete.
+  - **Domain-neutral example scrub across agents and defaults**: Removed hard-coded tissue/disease/pathway examples from tool schemas, prompts, defaults, and i18n (pathology feature checklist, biochemistry indicator panel / experiment suggestions, literature contamination plausibility tissue table, PI annotation/MeSH/data-need examples, diagram node examples, frontend default pathology/biochemistry prompts). `plausibility_terms_for_tissue()` is now a no-op compatibility hook returning `[]`.
+  - **New tests**: `test_mechanism_evidence_policy.py` (shared policy wiring + neutrality), `test_workflow_resume_terminal_status.py` (FAILED preserved on resume). Extended: plan-parse retry, mechanism tool schema/validation, workflow routing, planning dialogue failure, focused-query builder, pathology tile/grading, stage-2 mechanism instruction, rare-celltype batch replay.
 
 **0.33.x–0.34.x — (2026-07-15)**
 

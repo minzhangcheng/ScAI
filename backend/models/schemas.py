@@ -176,19 +176,19 @@ class AnalysisStep(BaseModel):
 class ScoreDefinition(BaseModel):
     """Definition of a computed score for methodology transparency in the final report"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    score_name: str          # e.g., "Fibrosis_Score", "EMT_signature"
+    score_name: str          # e.g., "response_score", "custom_signature"
     method: str              # e.g., "sc.tl.score_genes", "gseapy.ssgsea"
     description: str         # What the score measures biologically
     parameters: Dict[str, Any] = Field(default_factory=dict)
     gene_list: List[str] = Field(default_factory=list)
-    gene_list_source: str = ""  # e.g., "MSigDB Hallmark EMT"
+    gene_list_source: str = ""  # e.g., "curated gene set"
     round_number: int = 0
     timestamp: datetime = Field(default_factory=datetime.now)
 
 class TreatmentGroup(BaseModel):
     """A treatment/experimental group definition"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    name: str                          # e.g., "Control", "NASH Model", "Treatment A"
+    name: str                          # e.g., "Reference", "Condition A", "Treatment A"
     description: str = ""              # Detailed description of what this group represents
     sample_count: int = 1              # Number of samples/replicates in this group
     order: int = 0                     # Display order

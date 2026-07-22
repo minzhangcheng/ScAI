@@ -163,6 +163,12 @@ class TestPlanningDialogueBioinfoFailure:
         assert result["failed_node"] == "planning_dialogue"
         assert result["planning_result"]["status"] == "failed"
         assert "unexpected internal error" in result["planning_result"]["error"]
+        assert result["should_continue"] is False
+        assert analysis_state.status == TaskStatus.FAILED
+        wf._send_state_sync.assert_awaited_once_with(
+            analysis_state, "planning_aborted"
+        )
+        assert wf._after_planning_dialogue(result) == "failed"
 
 
 class TestPlanningDialoguePIReviewFailure:
@@ -512,5 +518,7 @@ class TestPlanningDialogueMaxRoundsFallback:
         result = await wf._user_review_gate(state)
 
         assert result["should_continue"] is False
+        assert result["failed_node"] == "planning_dialogue"
+        assert analysis_state.status == TaskStatus.FAILED
         sent_types = [call.args[0] for call in wf._send_message.call_args_list]
         assert "plan_review" not in sent_types

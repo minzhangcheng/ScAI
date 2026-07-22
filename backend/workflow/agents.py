@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..models.schemas import AgentType, AnalysisPhase, AnalysisStep, MessageRole, TaskStatus
 from ..utils.llm_client import UpstreamExhaustedError
+from ..utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ..agents.bioinformatics_agent import count_saved_figures
 from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, prepend_species, safe_pi_brief, STAGE1_KEYWORDS
 from ..utils.blob_store import BLOB_REF_PREFIX
@@ -69,7 +70,7 @@ These Stage 1 findings will be used by PI to plan Stage 2 downstream analysis.
 """
 
 
-_MECHANISM_CAPTURE_INSTRUCTION = """
+_MECHANISM_CAPTURE_INSTRUCTION = f"""
 
 After completing downstream analysis, identify up to 8 data-driven mechanism programs when
 the results support them (do NOT invent weak programs just to reach a count). A data-driven
@@ -77,11 +78,11 @@ mechanism program is a recurring, cell-type-localized or cross-validated pattern
 observed genes, pathways, module scores, enrichment terms, bulk/scRNA overlap, or cell-state
 changes.
 
-Do NOT use preset mechanism categories or search for a specific mechanism. Derive labels from
-the observed data only. For each program include: the cell type/compartment, concrete
-triggering observations, supporting genes/pathways/scores/tables, whether bulk RNA-seq supports
-it if bulk data exists, alternative explanations, missing evidence, and a cautious
-interpretation.
+{MECHANISM_EVIDENCE_POLICY}
+
+For each program include: the cell type/compartment, concrete triggering observations,
+supporting genes/pathways/scores/tables, whether bulk RNA-seq supports it if bulk data exists,
+alternative explanations, missing evidence, and a cautious interpretation.
 
 Call register_mechanism_programs BEFORE report_findings. If no supportable program exists, call
 register_mechanism_programs with an empty programs list and explain why in no_program_reason.

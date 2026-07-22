@@ -3,7 +3,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from backend.workflow import SingleCellAnalysisWorkflow
-from backend.models.schemas import AnalysisState
+from backend.models.schemas import AnalysisState, TaskStatus
 
 
 @pytest.mark.asyncio
@@ -32,14 +32,19 @@ async def test_review_gate_sets_should_continue_false_when_no_plan():
     mock = MagicMock()
     mock.session_id = "s"
     mock._send_message = AsyncMock()
+    mock._send_state_sync = AsyncMock()
     s = AnalysisState(user_id="u")
     s.current_plan = None
     state = {"analysis_state": s}
 
     bound = SingleCellAnalysisWorkflow._user_review_gate.__get__(mock, type(mock))
     result = await bound(state)
-    # No plan ⇒ must mark termination so _after_review aborts (not "revise").
+    # No plan is a planning failure, never a successful report finalization.
     assert result["should_continue"] is False
+    assert result["failed_node"] == "planning_dialogue"
+    assert s.status == TaskStatus.FAILED
+    route = SingleCellAnalysisWorkflow._after_review.__get__(mock, type(mock))
+    assert route(result) == "failed"
 
 
 def test_check_convergence_missing_key_continues():

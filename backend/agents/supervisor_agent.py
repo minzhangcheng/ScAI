@@ -23,6 +23,7 @@ from urllib.parse import quote as url_quote
 
 from ..utils.formatting import safe_parse_json, format_revision_history
 from ..utils.files import resolve_figure_in_workspace
+from ..utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ..constants import REASONING_MODEL_MIN_TOKENS
 
 logger = logging.getLogger(__name__)
@@ -1715,6 +1716,9 @@ Respond in JSON:
 
 ## Cross-Direction Integration Analyses
 {integration_text}
+
+## Mechanism Naming and Hypothesis Policy
+{MECHANISM_EVIDENCE_POLICY}
 
 ## Available Figures
 {figure_list}

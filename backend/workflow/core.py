@@ -1527,9 +1527,22 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         # WebSocket reconnect (kernel restart → reconnect → resume → RUNNING).
         if state and state.values and not state.next:
             effective = state.values.get("analysis_state") or analysis_state
-            if effective and effective.status not in (TaskStatus.COMPLETED, TaskStatus.STOPPED):
+            terminal_statuses = {
+                TaskStatus.COMPLETED,
+                TaskStatus.STOPPED,
+                TaskStatus.FAILED,
+            }
+            if effective and effective.status not in terminal_statuses:
                 self._set_status(effective, TaskStatus.COMPLETED)
-            logger.info(f"[{self.session_id}] Resume requested but graph already terminated; marking complete")
+                logger.info(
+                    f"[{self.session_id}] Resume requested but graph already "
+                    "terminated; marking complete"
+                )
+            else:
+                logger.info(
+                    f"[{self.session_id}] Resume requested but graph already "
+                    f"terminated; preserving status={getattr(effective, 'status', None)}"
+                )
             return effective
 
         if state and state.values:

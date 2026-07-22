@@ -60,6 +60,24 @@ def test_after_review_abort_when_should_continue_false_and_no_approval():
     assert s._after_review(state) == "abort"
 
 
+def test_after_planning_dialogue_failure_does_not_generate_report():
+    s = _Stub()
+
+    assert s._after_planning_dialogue({"failed_node": "planning_dialogue"}) == "failed"
+    assert s._after_planning_dialogue({"failed_node": None}) == "review"
+
+
+def test_after_review_planning_failure_does_not_generate_report():
+    s = _Stub()
+    state = {
+        "failed_node": "planning_dialogue",
+        "plan_approved": False,
+        "should_continue": False,
+    }
+
+    assert s._after_review(state) == "failed"
+
+
 def test_after_review_approval_wins_over_abort_flag():
     """Defensive: if plan was approved before someone flipped should_continue,
     honour the approval — the planning subgraph already finished its job."""

@@ -69,7 +69,7 @@ def test_tile_batch_rejects_prompt_category_echo_and_repeated_abnormality():
         "tile_findings": [
             {
                 "tile_index": 0,
-                "findings": "Cell morphology changes: enlarged irregular cells are present.",
+                "findings": "Finding 1: enlarged irregular cells are present.",
             },
             {
                 "tile_index": 1,

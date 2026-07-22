@@ -21,10 +21,23 @@ def test_valid_payload_builds_programs():
     assert progs[0].label.startswith("iron-redox-lipid")
 
 
-def test_fills_default_alternatives_and_missing_evidence():
+def test_established_mechanism_name_is_accepted_when_evidence_is_supplied():
+    progs, err = validate_mechanism_program_payload({
+        "programs": [_valid_program(
+            label="ferroptosis",
+            supporting_genes=["GPX4", "ACSL4"],
+            supporting_pathways=["lipid peroxidation"],
+        )]
+    })
+    assert err is None
+    assert progs[0].label == "ferroptosis"
+    assert progs[0].supporting_genes == ["GPX4", "ACSL4"]
+
+
+def test_does_not_invent_alternatives_and_adds_generic_missing_evidence():
     progs, err = validate_mechanism_program_payload({"programs": [_valid_program()]})
     assert err is None
-    assert progs[0].alternative_explanations == ["generic injury or stress response"]
+    assert progs[0].alternative_explanations == []
     assert progs[0].missing_evidence == [
         "Direct causal validation is not available from the current data."
     ]

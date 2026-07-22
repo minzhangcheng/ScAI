@@ -69,7 +69,14 @@ class GraphMixin:
                 "finalize": "generate_final_report",
             }
         )
-        self.graph.add_edge("planning_dialogue", "user_review_gate")
+        self.graph.add_conditional_edges(
+            "planning_dialogue",
+            self._after_planning_dialogue,
+            {
+                "review": "user_review_gate",
+                "failed": END,
+            },
+        )
 
         self.graph.add_conditional_edges(
             "user_review_gate",
@@ -83,6 +90,7 @@ class GraphMixin:
                 "approved_revision": "bioinformatics_analysis",
                 "revise": "planning_dialogue",
                 "abort": "generate_final_report",
+                "failed": END,
             }
         )
 

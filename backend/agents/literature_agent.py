@@ -45,44 +45,19 @@ _RETRY_DELAY_BASE = 2.0  # 秒，与 llm_client 保持一致
 # Focused query pure function helpers (Batch 1)
 # ===================================================================
 
-# 污染 plausibility 检索的保守组织结构/非实质成分术语(通用,适用于所有组织)。
-# 未在此处列出的组织特定词(如肝 portal tract)由 plausibility_terms_for_tissue() 按 tissue 补充。
-_GENERIC_CONTAMINATION_PLAUSIBILITY_TERMS: list = [
-    '"nerve fiber"[tiab]',
-    'innervation[tiab]',
-    '"peripheral nerve"[tiab]',
-    'Schwann[tiab]',
-    'perivascular[tiab]',
-]
-
-# 组织特定的 plausibility terms,仅当 tissue 名称含对应 key 时加入。
-_TISSUE_CONTAMINATION_PLAUSIBILITY_TERMS: Dict[str, list] = {
-    "liver": ['"portal tract"[tiab]', '"portal triad"[tiab]', '"Glisson capsule"[tiab]'],
-    "hepatic": ['"portal tract"[tiab]', '"portal triad"[tiab]', '"Glisson capsule"[tiab]'],
-}
-
-# 旧常量名保留为别名,避免直接从该文件 import 它的外部代码报错。
-_DEFAULT_CONTAMINATION_PLAUSIBILITY_TERMS: list = _GENERIC_CONTAMINATION_PLAUSIBILITY_TERMS
-
-
 def plausibility_terms_for_tissue(tissue: str) -> list:
-    """Return generic + tissue-specific terms for suspected-contamination plausibility queries.
+    """Return no static plausibility vocabulary.
 
-    Liver-specific anatomy terms (portal tract, portal triad, Glisson capsule) only appear
-    when the tissue string contains "liver" or "hepatic". Unknown/default tissues receive
-    only generic nerve/perivascular terms.
+    Tissue plausibility terms must come from the current annotation evidence or an
+    explicit caller-provided list, never from a built-in tissue keyword table.  The
+    function remains as a compatibility hook for callers that imported it directly.
     """
-    normalized = (tissue or "").strip().lower()
-    terms = list(_GENERIC_CONTAMINATION_PLAUSIBILITY_TERMS)
-    for key, extra_terms in _TISSUE_CONTAMINATION_PLAUSIBILITY_TERMS.items():
-        if key in normalized:
-            terms.extend(extra_terms)
-            break
-    return terms
+    del tissue
+    return []
 
 
 def _gene_case_variants(gene: str) -> list:
-    """跨物种 ortholog 符号双拼: 小鼠式(Pkhd1) + 人类式(PKHD1)。已全大写则只返回一个。"""
+    """Return the observed symbol plus its uppercase form when they differ."""
     gene = (gene or "").strip()
     if not gene:
         return []
@@ -1551,10 +1526,9 @@ Please return in JSON format:
         is True, Phase 2 is skipped (PI Agent handles matching externally).
 
         Args:
-            cluster_markers: Dict mapping cluster_id (str) to list of top marker genes
-                            e.g. {"0": ["Cd79a", "Cd79b", "Ms4a1"], "1": ["Cd3d", "Cd3e"]}
-            organism: Organism name (e.g., "mouse", "human")
-            tissue: Tissue/organ context (e.g., "kidney", "liver")
+            cluster_markers: Dict mapping cluster_id (str) to its observed top marker genes
+            organism: Organism name from the research context or data metadata
+            tissue: Tissue/organ context from the research context or data metadata
             state: Optional analysis state for context
             pi_initial_query: Pre-generated PubMed query from PI Agent (strong model)
             pi_evaluate_fn: Async callable for PI Agent to evaluate search sufficiency

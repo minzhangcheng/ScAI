@@ -22,6 +22,16 @@ class RoutingMixin:
             return "skip_planning"
         return "do_planning"
 
+    def _after_planning_dialogue(self, state: "WorkflowState") -> str:
+        """Do not turn a planning failure into a successful final report."""
+        if state.get("failed_node") == "planning_dialogue":
+            logger.error(
+                f"[{self.session_id}] Planning dialogue failed; ending workflow "
+                "with FAILED status"
+            )
+            return "failed"
+        return "review"
+
     def _after_review(self, state: "WorkflowState") -> str:
         """Route after user review gate.
 
@@ -35,6 +45,12 @@ class RoutingMixin:
         plan_revision_resume is a one-shot flag: cleared as soon as we route on
         it so a stale True doesn't mis-route subsequent re-entries.
         """
+        if state.get("failed_node") == "planning_dialogue":
+            logger.error(
+                f"[{self.session_id}] Plan review cannot continue after planning "
+                "failure; ending with FAILED status"
+            )
+            return "failed"
         if state.get("should_continue") is False and not state.get("plan_approved"):
             logger.info(
                 f"[{self.session_id}] Planning aborted (should_continue=False, no plan), "

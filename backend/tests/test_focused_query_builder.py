@@ -1,90 +1,104 @@
-"""focused query 纯函数: 双拼、synonyms 卫生、两级两桶、空 terms 防御、tissue plausibility 词表。"""
+"""Focused-query helpers must use supplied evidence, not built-in biology terms."""
 from backend.agents.literature_agent import (
-    _gene_case_variants, _sanitize_synonyms, build_focused_query,
+    _gene_case_variants,
+    _sanitize_synonyms,
+    build_focused_query,
     plausibility_terms_for_tissue,
 )
 
 
-def test_liver_plausibility_terms_include_portal_context():
-    terms = plausibility_terms_for_tissue("liver")
-    assert '"portal tract"[tiab]' in terms
-    assert 'Schwann[tiab]' in terms
+def test_no_static_tissue_plausibility_vocabulary():
+    assert plausibility_terms_for_tissue("organ A") == []
+    assert plausibility_terms_for_tissue("organ B") == []
 
 
-def test_non_liver_plausibility_terms_exclude_portal_context():
-    terms = plausibility_terms_for_tissue("kidney")
-    joined = " ".join(terms).lower()
-    assert "portal tract" not in joined
-    assert "portal triad" not in joined
-    assert 'Schwann[tiab]' in terms
-
-
-def test_contamination_tier2_uses_tissue_specific_terms():
-    item = {"candidate_celltype": "neuronal", "top_markers": ["Nrxn1", "Reln"]}
-    liver_query = build_focused_query(item, organism="mouse", tissue="liver", tier=2, bucket="suspected_contamination")
-    kidney_query = build_focused_query(item, organism="mouse", tissue="kidney", tier=2, bucket="suspected_contamination")
-    assert '"portal tract"[tiab]' in liver_query
-    assert '"portal tract"[tiab]' not in kidney_query
-    assert "kidney" in kidney_query.lower()
-    assert 'Schwann[tiab]' in kidney_query
-
-
-def test_explicit_plausibility_terms_override_tissue_defaults():
-    item = {"candidate_celltype": None, "top_markers": ["Nrxn1"]}
+def test_contamination_tier2_uses_only_observed_markers_and_tissue():
+    item = {"candidate_celltype": "candidate A", "top_markers": ["GeneA", "GeneB"]}
     query = build_focused_query(
-        item, organism="mouse", tissue="liver", tier=2, bucket="suspected_contamination",
-        plausibility_terms=['"renal capsule"[tiab]'],
+        item,
+        organism="species A",
+        tissue="organ A",
+        tier=2,
+        bucket="suspected_contamination",
     )
-    assert '"renal capsule"[tiab]' in query
-    assert '"portal tract"[tiab]' not in query
+    assert '"GeneA"[tiab]' in query
+    assert "organ A" in query
+    assert "candidate A" not in query
+
+
+def test_explicit_plausibility_terms_are_respected():
+    item = {"candidate_celltype": None, "top_markers": ["GeneA"]}
+    query = build_focused_query(
+        item,
+        organism="species A",
+        tissue="organ A",
+        tier=2,
+        bucket="suspected_contamination",
+        plausibility_terms=['"supplied anatomical context"[tiab]'],
+    )
+    assert '"supplied anatomical context"[tiab]' in query
 
 
 def test_gene_case_variants_dual():
-    assert _gene_case_variants("Pkhd1") == ["Pkhd1", "PKHD1"]
-    assert _gene_case_variants("PKHD1") == ["PKHD1"]   # 已全大写不重复
+    assert _gene_case_variants("GeneA") == ["GeneA", "GENEA"]
+    assert _gene_case_variants("GENEA") == ["GENEA"]
     assert _gene_case_variants("") == []
 
 
 def test_sanitize_synonyms():
-    raw = ["pDC", "pDC", "  bile duct cell ", "", "x" * 80, 'bad"quote']
+    raw = ["Alias A", "Alias A", "  Alias B ", "", "x" * 80, 'bad"quote']
     out = _sanitize_synonyms(raw)
-    assert out.count("pDC") == 1
-    assert "bile duct cell" in out
+    assert out.count("Alias A") == 1
+    assert "Alias B" in out
     assert all(len(s) <= 60 for s in out)
     assert all('"' not in s for s in out)
     assert "" not in out
 
 
-def test_rare_tier1_includes_tissue_and_candidate():
-    item = {"candidate_celltype": "plasmacytoid dendritic cell",
-            "synonyms": ["pDC"], "top_markers": ["Siglech", "Tcf4"]}
-    q = build_focused_query(item, organism="mouse", tissue="liver", tier=1, bucket="rare_unresolved")
-    assert "liver" in q.lower() and "plasmacytoid dendritic cell" in q and "pDC" in q
-    assert '"Siglech"[tiab]' in q and '"SIGLECH"[tiab]' in q
-    assert "mouse" in q.lower()
+def test_rare_tier1_includes_supplied_tissue_candidate_and_markers():
+    item = {
+        "candidate_celltype": "candidate cell type A",
+        "synonyms": ["Alias A"],
+        "top_markers": ["GeneA", "GeneB"],
+    }
+    query = build_focused_query(
+        item, organism="species A", tissue="organ A", tier=1, bucket="rare_unresolved"
+    )
+    assert "organ A" in query
+    assert "candidate cell type A" in query
+    assert "Alias A" in query
+    assert '"GeneA"[tiab]' in query and '"GENEA"[tiab]' in query
 
 
 def test_rare_tier2_drops_tissue():
-    item = {"candidate_celltype": "cholangiocyte", "synonyms": [], "top_markers": ["Pkhd1"]}
-    q = build_focused_query(item, organism="mouse", tissue="liver", tier=2, bucket="rare_unresolved")
-    assert "cholangiocyte" in q and "liver" not in q.lower()
+    item = {
+        "candidate_celltype": "candidate cell type A",
+        "synonyms": [],
+        "top_markers": ["GeneA"],
+    }
+    query = build_focused_query(
+        item, organism="species A", tissue="organ A", tier=2, bucket="rare_unresolved"
+    )
+    assert "candidate cell type A" in query
+    assert "organ A" not in query
 
 
 def test_contamination_uses_markers_not_candidate():
-    item = {"candidate_celltype": "neuronal", "top_markers": ["Nrxn1", "Reln"]}
-    discovery = build_focused_query(item, organism="mouse", tissue="liver", tier=1, bucket="suspected_contamination")
-    assert "neuronal" not in discovery and '"Nrxn1"[tiab]' in discovery and "liver" not in discovery.lower()
-    plausibility = build_focused_query(item, organism="mouse", tissue="liver", tier=2, bucket="suspected_contamination")
-    assert "liver" in plausibility.lower() and '"Nrxn1"[tiab]' in plausibility
-    assert "Schwann" in plausibility or "nerve fiber" in plausibility   # tier2 含组织合理性词
+    item = {"candidate_celltype": "candidate A", "top_markers": ["GeneA", "GeneB"]}
+    discovery = build_focused_query(
+        item, organism="species A", tissue="organ A", tier=1, bucket="suspected_contamination"
+    )
+    assert "candidate A" not in discovery
+    assert '"GeneA"[tiab]' in discovery
+    assert "organ A" not in discovery
 
 
 def test_empty_terms_returns_empty_query():
     item = {"candidate_celltype": None, "synonyms": [], "top_markers": []}
-    assert build_focused_query(item, "mouse", "liver", tier=1, bucket="rare_unresolved") == ""
+    assert build_focused_query(item, "species A", "organ A", 1, "rare_unresolved") == ""
 
 
 def test_contamination_without_markers_returns_empty_query():
-    item = {"candidate_celltype": "neuronal", "top_markers": []}
-    assert build_focused_query(item, "mouse", "liver", tier=1, bucket="suspected_contamination") == ""
-    assert build_focused_query(item, "mouse", "liver", tier=2, bucket="suspected_contamination") == ""
+    item = {"candidate_celltype": "candidate A", "top_markers": []}
+    assert build_focused_query(item, "species A", "organ A", 1, "suspected_contamination") == ""
+    assert build_focused_query(item, "species A", "organ A", 2, "suspected_contamination") == ""

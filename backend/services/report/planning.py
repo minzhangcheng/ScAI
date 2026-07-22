@@ -1,6 +1,7 @@
 """Planning mixin for DetailedReportGenerator."""
 from typing import Dict, Any, List, Optional
 
+from backend.utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from backend.utils.report_html import _safe_parse_json
 from .analysis_log import build_round_summaries
 
@@ -333,7 +334,7 @@ Each major analysis step should have its own dedicated section.
 Do NOT reorganize into fixed categories — the report should tell the story of how the analysis progressed.
 
 For example, if the workflow was:
-  1. QC → 2. Clustering → 3. Epithelial Sub-clustering → 4. DEG → 5. GSEA → 6. CCC → 7. Metabolic Analysis
+  1. QC → 2. Clustering → 3. Data-supported Sub-clustering → 4. DEG → 5. Enrichment → 6. Interaction Analysis → 7. Targeted Follow-up
 Then create sections in this EXACT order.
 
 ### CRITICAL RULES:
@@ -572,6 +573,9 @@ Objective: {state.initial_instruction}
 ## Cluster Annotations
 {findings.get('cluster_annotations', 'Not available')}
 {cross_modal_context}
+
+## Mechanism Naming and Hypothesis Policy
+{MECHANISM_EVIDENCE_POLICY}
 
 ## Your Task
 Write in English

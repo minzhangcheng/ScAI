@@ -832,9 +832,9 @@ class PlanningMixin:
                         "findings": [],
                         "status": "failed",
                     }
-                    # P0-7: set should_continue=False so _after_review takes the
-                    # abort path instead of looping infinitely on "revise".
                     state["should_continue"] = False
+                    analysis_state.status = TaskStatus.FAILED
+                    await self._send_state_sync(analysis_state, "planning_aborted")
                     return state
 
             # --- PI review call (with LLM failure intervention) ---
@@ -906,9 +906,9 @@ class PlanningMixin:
                         "findings": [],
                         "status": "failed",
                     }
-                    # P0-7: set should_continue=False so _after_review takes the
-                    # abort path instead of looping infinitely on "revise".
                     state["should_continue"] = False
+                    analysis_state.status = TaskStatus.FAILED
+                    await self._send_state_sync(analysis_state, "planning_aborted")
                     return state
 
             # --- Process PI review decision ---
@@ -1021,6 +1021,8 @@ class PlanningMixin:
                     "status": "failed",
                 }
                 state["should_continue"] = False
+                analysis_state.status = TaskStatus.FAILED
+                await self._send_state_sync(analysis_state, "planning_aborted")
 
         return state
 
@@ -1065,11 +1067,19 @@ class PlanningMixin:
                 f"steps) to review; planning aborted, routing to final report"
             )
             await self._send_message(
-                "status",
-                "Planning aborted: no plan available. Skipping to final report.",
+                "error",
+                "Planning failed: no valid plan is available.",
                 AgentType.PI,
             )
-            state["should_continue"] = False  # defensive: ensure _after_review aborts
+            state["failed_node"] = "planning_dialogue"
+            state["planning_result"] = {
+                "error": "No valid analysis plan is available",
+                "findings": [],
+                "status": "failed",
+            }
+            state["should_continue"] = False
+            analysis_state.status = TaskStatus.FAILED
+            await self._send_state_sync(analysis_state, "planning_aborted")
             return state
 
         # Wipe any action/event left behind by a previous gate invocation in the

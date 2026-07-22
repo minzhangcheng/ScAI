@@ -11,6 +11,7 @@ from .base import BaseAgent
 from ..utils.settings_provider import AgentSettingsProvider
 from ..utils.direction_evidence import build_fallback_direction_evidence
 from ..utils.formatting import as_list, safe_parse_json_array
+from ..utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from .prompt_blocks import build_integration_block
 
 # Configure logger
@@ -255,8 +256,8 @@ class PIAgent(BaseAgent):
         "Format rule for `literature_topics`: output a JSON array of PLAIN "
         "natural-language English strings — NOT Python dicts and NOT dict-like "
         "strings. Each topic is one self-contained descriptive sentence, e.g. "
-        "\"Mitochondrial copper deficiency and cytochrome c oxidase impairment in "
-        "hepatocytes\". Do NOT wrap topics as {'Topic': ..., 'Rationale': ...}; "
+        "\"Association between the observed pathway change and the measured phenotype\". "
+        "Do NOT wrap topics as {'Topic': ..., 'Rationale': ...}; "
         "if you want to convey rationale, fold it into the sentence itself."
     )
 
@@ -404,8 +405,11 @@ Research Objective: {user_instruction}
 You are generating the EXPLORATION PHASE plan (Round 1). This round performs comprehensive, unbiased data exploration.
 
 CRITICAL CONSTRAINTS:
-- Do NOT let the research objective bias your exploration tasks.
-- The goal is to discover what the data shows, NOT to confirm pre-existing hypotheses.
+- Do NOT let the research objective replace, narrow, or bias the mandatory broad exploration tasks.
+- The goal is to discover what the data shows, NOT to confirm pre-existing hypotheses by default.
+- Treat mechanisms explicitly named in the research objective as prespecified hypotheses. Preserve
+  them for an explicit evidence assessment after the unbiased baseline analyses, reporting support,
+  contradiction, or insufficient evidence rather than silently omitting or assuming them.
 - Prioritize broad, efficient, high-information analyses (e.g., DEG + GO/KEGG) over targeted deep analyses.
 - Do NOT instruct agents to perform experiments or staining that are not in the available data.
 
@@ -417,7 +421,7 @@ CRITICAL CONSTRAINTS:
 5. Clustering (leiden/louvain)
 6. Cell type annotation via annotate_clusters tool
 7. Condition-level DEG (treatment vs control) + GO/KEGG enrichment for all cell types
-   (merge similar subtypes/states into unified groups first, e.g., merge activated/exhausted states of the same lineage back into the parent cell type)
+   (merge closely related states into a shared parent population only when the observed markers support it)
 8. Cell-cell communication analysis (liana)
 9. If bulk RNA-seq data is available:
    a. Load bulk expression matrix and perform differential expression analysis (pydeseq2)
@@ -430,10 +434,10 @@ Note: These tasks span both Stage 1 (steps 1–6: QC through cell type annotatio
 ## Your Additional Planning (UNBIASED exploration)
 Beyond the fixed pipeline, plan these additional analyses:
 1. Decide which cluster comparisons are biologically meaningful for cross-cluster DEG
-   - Do NOT compare unrelated cell types (e.g., T cells vs B cells)
+   - Do NOT compare biologically unrelated populations merely because they are both present
    - Focus on: same cell type across conditions, related subtypes within a lineage
 2. Decide which subtypes should be merged for additional condition-level comparisons
-   (e.g., merge all macrophage subtypes into one group for condition comparison)
+   (e.g., merge data-supported subtypes that share a coherent parent identity)
 3. Keep all analyses simple and high-throughput
 
 IMPORTANT: You must assign tasks based ONLY on the data that is actually available.
@@ -633,15 +637,15 @@ Return JSON: {{"action": "change_species"|"keep"|"custom", "new_species": "scien
 {triage_block}
 
 Biological judgement principles:
-- This dataset may be single-nucleus RNA-seq (snRNA-seq): long nuclear genes (Nrxn1/Nrxn3/Reln)
-  appear easily; treat neuronal calls in non-neural tissue with caution.
+- Account for assay-specific capture biases (including differences between single-cell and
+  single-nucleus data); do not infer a lineage from isolated assay-enriched genes.
 - marker set coherence: require positive + negative markers + tissue plausibility + intra-cluster
   consistency; do not call a type on 1-2 markers alone.
 - condition-skewed clusters are likely state variants, not new cell types.
 - suspected technical/contamination clusters: keep low confidence and pass the provided reason through.
-- rare immune populations (e.g. pDC: Irf8+Siglech+Tcf4+Bcl11a) must NOT be down-graded merely for being rare.
-- distinguish cholangiocyte vs ductular reaction / hepatobiliary progenitor when hepatocyte/progenitor
-  markers co-occur with Pkhd1/Glis3/Spp1.
+- a tissue-plausible population must NOT be down-graded merely for being rare.
+- distinguish a stable lineage identity from reactive, transitional, or progenitor-like states using
+  coherent positive and negative markers rather than a preselected cell-type rule.
 
 For EACH cluster, evaluate:
 1. Is the cell type annotation correct given the marker genes and tissue context?
@@ -1261,7 +1265,7 @@ that will help annotate these clusters. The query should retrieve articles about
 - Cell type classification and identification
 
 Rules for PubMed query:
-1. Use MeSH terms where appropriate (e.g., "Single-Cell Analysis"[MeSH], plus a tissue MeSH term matching the dataset's organ such as "Liver"[MeSH], "Kidney"[MeSH], "Lung"[MeSH], "Brain"[MeSH])
+1. Use MeSH terms where appropriate (e.g., "Single-Cell Analysis"[MeSH] plus the MeSH term that matches the dataset's tissue)
 2. Use Boolean operators (AND, OR, NOT)
 3. Keep the query focused but not overly restrictive — aim for 20-200 results
 4. Include species and tissue/organ as filters
@@ -1693,6 +1697,9 @@ Return a JSON object with this EXACT structure:
 
 {mech_block}
 
+## Mechanism Naming and Hypothesis Policy
+{MECHANISM_EVIDENCE_POLICY}
+
 For each candidate, provide ALL of the following fields:
 - direction_id: Unique identifier like "dir_001"
 - direction: A specific, actionable research question
@@ -1806,6 +1813,9 @@ Return a JSON object with a single key "candidates" containing the list of candi
 
 ## Already-Investigated Directions (DO NOT repeat or trivially rephrase)
 {json.dumps(already_chosen, ensure_ascii=False)}
+
+## Mechanism Naming and Hypothesis Policy
+{MECHANISM_EVIDENCE_POLICY}
 
 Only propose directions genuinely NEW relative to the already-investigated list and grounded in concrete cumulative observations. If nothing sufficiently novel and evidence-supported exists, return an empty list [].
 
@@ -2323,6 +2333,8 @@ You are now in the INNOVATION PHASE. Generate TARGETED, HYPOTHESIS-DRIVEN analys
 Focus specifically on: {user_direction}
 
 Design specific analyses to deeply investigate this direction.
+
+{MECHANISM_EVIDENCE_POLICY}
 
 For each bioinformatics task, specify the CONCRETE analysis method and target:
 
@@ -3150,14 +3162,14 @@ Based on the current findings and planned next steps, what additional data would
 Please identify specific data needs in JSON format:
 {{
     "pathology": [
-        "Special staining to assess specific features (e.g., fibrosis, lipid, immune cells)",
+        "Special staining selected from the stated image type and the feature that the study asks to measure",
         "Additional tissue sections from different regions",
         ...
     ],
     "biochemistry": [
-        "Tissue/organ function markers",
-        "Metabolic indicators relevant to the phenotype",
-        "Oxidative stress or inflammatory markers",
+        "Quantitative readouts directly tied to the stated research question",
+        "Independent measurements for the main observed change",
+        "Assay controls and orthogonal validation measurements",
         ...
     ],
     "other": [
@@ -3266,7 +3278,7 @@ Respond in JSON format:
     "response": "Your response to the user",
     "file_assignments": {{
         "pathology": [
-            {{"filename": "xxx.png", "image_type": "Sirius Red", "reason": "Fibrosis assessment"}}
+            {{"filename": "example_image.png", "image_type": "user-specified stain", "reason": "Assess the feature defined by the study"}}
         ],
         "biochemistry": [
             {{"filename": "xxx.txt", "data_type": "metabolic markers", "reason": "Enzyme activity values"}}
@@ -3606,7 +3618,8 @@ Current research direction: {current_direction or "N/A"}
 }}
 
 ## Constraints
-- Do NOT use any preset mechanism names, pathway names, gene sets, or example mechanism categories. Derive ALL row labels and mechanism statements from the evidence only. You MAY cite specific genes, pathways, PMIDs, or values that appear in the input evidence.
+- {MECHANISM_EVIDENCE_POLICY}
+- Do not invent mechanism names, pathways, gene sets, genes, PMIDs, or values that are absent from the supplied evidence.
 - The matrix_markdown column headers must reflect the four agent sources plus an evidence-consistency column, in the same language as this prompt. Do not hardcode labels.
 - Each candidate must draw evidence from at least TWO different sources, and at least one must be an experimental-data agent (biochemistry, pathology, or bioinformatics) — not purely literature.
 - Each supporting_evidence item must cite a concrete observation (value, gene, pathway, morphological feature, PMID), not a vague summary.
@@ -3746,6 +3759,9 @@ Research Objective: {state.initial_instruction}
 ## Results from All Rounds
 {''.join(rounds_summary)}
 {cross_modal_block}{mechanism_block}{integration_block}
+
+## Mechanism Naming and Hypothesis Policy
+{MECHANISM_EVIDENCE_POLICY}
 
 Please write a well-structured analysis report including:
 1. Research Overview
@@ -4599,7 +4615,7 @@ pure ASCII/Unicode text.
 Your instruction MUST:
 1. List 5-10 key nodes (ligands, receptors, transcription factors, cell states, phenotypes)
 2. State the directional relationships between them (A -> B, B phosphorylates C, etc.)
-3. Mention cellular processes to include (proliferation, apoptosis, migration, ...)
+3. Mention only cellular processes supported by the supplied analysis results
 4. Use English labels only (non-ASCII characters will break alignment)
 5. NOT include drawing symbols — the diagram author will choose them
 
@@ -4667,7 +4683,7 @@ Objective: {state.initial_instruction[:400] if state.initial_instruction else 'B
     "feedback": "Plain-English assessment of the diagram",
     "strengths": ["..."],
     "issues": ["..."],
-    "suggestions": ["Describe text edits, e.g., 'Add a node for SMAD4 between SMAD2/3 and the nucleus'"],
+    "suggestions": ["Describe text edits, e.g., 'Add the missing intermediate node between the upstream signal and the observed response'"],
     "must_fix": ["Critical omissions that block publication"]
 }}
 ```
@@ -4850,6 +4866,9 @@ an earlier version may win.
 
 {integration_block}
 
+**Mechanism Naming and Hypothesis Policy:**
+{MECHANISM_EVIDENCE_POLICY}
+
 **Task:**
 Generate a comprehensive research report in Markdown format suitable for publication. The report should:
 
@@ -5013,7 +5032,7 @@ The summary should:
 4. Be written in a way that can guide visual illustration
 
 Focus on:
-- Key cell types involved (e.g., epithelial cells, immune cells, stromal cells)
+- Key cell populations identified in the supplied analysis
 - Important molecular pathways or genes
 - Treatment effects or disease mechanisms
 - Comparisons between conditions (control vs treatment)
