@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from backend.services.report.variants import _render_direction_evidence_section_from_lists
 from backend.services.report.variants import _deduplicate_detailed_figure_blocks
+from backend.tests.split_facade import setattr_facade
 from backend.utils.blob_store import externalize_blobs
 
 
@@ -57,12 +58,17 @@ def _make_integration_state():
 
 
 def _patch_report_paths(monkeypatch, tmp_path):
-    from backend.services.report import variants
+    """Redirect the session-path helpers for every module that resolves them.
 
+    The generators live in backend/services/report/variants_parts/ and read these
+    names from their own globals, so the whole split has to be rebound.
+    """
     session_root = tmp_path / "sessions" / "test-session"
     reports_dir = session_root / "reports"
-    monkeypatch.setattr(variants, "get_session_dir", lambda _session_id: session_root)
-    monkeypatch.setattr(variants, "get_session_reports", lambda _session_id: reports_dir)
+
+    facade = "backend.services.report.variants"
+    setattr_facade(monkeypatch, facade, "get_session_dir", lambda _session_id: session_root)
+    setattr_facade(monkeypatch, facade, "get_session_reports", lambda _session_id: reports_dir)
     return session_root, reports_dir
 
 

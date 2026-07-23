@@ -9,6 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from backend.services.snapshot_v2.errors import SnapshotCaptureError, SnapshotStorageError
+from backend.tests.snapshot_v2_fixtures import (
+    patch_snapshot_service_session_lock,
+    patch_snapshot_service_session_states,
+)
 
 
 # ---- Fixtures ---------------------------------------------------------------
@@ -553,10 +557,7 @@ class TestCaptureRequiredContent:
             req = make_capture_request()
             service = SnapshotService("sess-cap", v2_paths)
 
-            with patch(
-                "backend.services.snapshot_v2.service.get_session_states",
-                return_value=states,
-            ):
+            with patch_snapshot_service_session_states(states):
                 record = await service.capture_required_snapshot(
                     analysis_state,
                     req,
@@ -605,10 +606,7 @@ class TestCaptureRequiredContent:
                 json.dumps({"cells": [], "nbformat": 4, "nbformat_minor": 5, "metadata": {}})
             )
             service = SnapshotService("sess-cap", v2_paths)
-            with patch(
-                "backend.services.snapshot_v2.service.get_session_states",
-                return_value=states,
-            ):
+            with patch_snapshot_service_session_states(states):
                 first = await service.capture_required_snapshot(
                     analysis_state, make_capture_request(), sandbox,
                     {"kernel_present": False},
@@ -652,10 +650,7 @@ class TestCaptureRequiredContent:
                 json.dumps({"cells": [], "nbformat": 4, "nbformat_minor": 5, "metadata": {}})
             )
             service = SnapshotService("sess-cap", v2_paths)
-            with patch(
-                "backend.services.snapshot_v2.service.get_session_states",
-                return_value=states,
-            ):
+            with patch_snapshot_service_session_states(states):
                 record = await service.capture_required_snapshot(
                     analysis_state, make_capture_request(), sandbox,
                     {"kernel_present": False},
@@ -697,10 +692,7 @@ class TestCaptureRequiredContent:
             service = SnapshotService("sess-cap", v2_paths)
             real_compute = service._compute_root_hash
             service._compute_root_hash = bump_then_compute
-            with patch(
-                "backend.services.snapshot_v2.service.get_session_states",
-                return_value=states,
-            ):
+            with patch_snapshot_service_session_states(states):
                 record = await service.capture_required_snapshot(
                     analysis_state, make_capture_request(), sandbox,
                     {"kernel_present": False},
@@ -760,10 +752,7 @@ class TestCaptureRequiredContent:
                 json.dumps({"cells": [], "nbformat": 4, "nbformat_minor": 5, "metadata": {}})
             )
             service = SnapshotService("sess-cap", v2_paths)
-            with patch(
-                "backend.services.snapshot_v2.service.get_session_states",
-                return_value=states,
-            ):
+            with patch_snapshot_service_session_states(states):
                 with pytest.raises(RequiredSnapshotBlocked) as exc:
                     await service.capture_required_snapshot(
                         analysis_state, make_capture_request(), sandbox,
@@ -968,10 +957,7 @@ class TestCaptureRequiredContent:
                 raise SnapshotCaptureError("SESSION_SAVE_FAILED", "injected")
 
             service._save_session_state = fail_save
-            with patch(
-                "backend.services.snapshot_v2.service.get_session_states",
-                return_value=states,
-            ):
+            with patch_snapshot_service_session_states(states):
                 record = await service.capture(
                     make_capture_request(),
                     sandbox=sandbox,
@@ -1018,15 +1004,15 @@ class TestCaptureRequiredContent:
                     )
                 return real_get_session_lock(session_id)
 
-            with patch(
-                "backend.services.snapshot_v2.service.get_session_states",
-                return_value=states,
-            ), patch(
-                "backend.state.get_session_lock",
-                side_effect=guarded_get_session_lock,
-            ), patch(
-                "backend.services.snapshot_v2.service.get_session_lock",
-                side_effect=guarded_get_session_lock,
+            with (
+                patch_snapshot_service_session_states(states),
+                patch(
+                    "backend.state.get_session_lock",
+                    side_effect=guarded_get_session_lock,
+                ),
+                patch_snapshot_service_session_lock(
+                    side_effect=guarded_get_session_lock,
+                ),
             ):
                 record = await service.capture_required_snapshot(
                     analysis_state, make_capture_request(), sandbox,
@@ -1131,10 +1117,7 @@ class TestCaptureRequiredContent:
                 json.dumps({"cells": [], "nbformat": 4, "nbformat_minor": 5, "metadata": {}})
             )
             service = SnapshotService("sess-cap", v2_paths)
-            with patch(
-                "backend.services.snapshot_v2.service.get_session_states",
-                return_value=states,
-            ):
+            with patch_snapshot_service_session_states(states):
                 record = await service.capture_required_snapshot(
                     analysis_state, make_capture_request(), sandbox,
                     {"kernel_present": False},
@@ -1174,10 +1157,7 @@ class TestCaptureTransactionEvidenceReuse:
             service = SnapshotService("sess-cap", v2_paths)
             verify = Mock(side_effect=AssertionError("transaction-local reread"))
             monkeypatch.setattr(service.object_store, "verify", verify)
-            with patch(
-                "backend.services.snapshot_v2.service.get_session_states",
-                return_value=states,
-            ):
+            with patch_snapshot_service_session_states(states):
                 record = await service.capture(
                     make_capture_request(),
                     sandbox=sandbox,

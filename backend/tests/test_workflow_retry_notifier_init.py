@@ -4,6 +4,7 @@ import pytest
 
 from backend.config._config import SystemConfig
 from backend.models.schemas import AnalysisState
+from backend.tests.split_facade import setattr_facade
 from backend.workflow.core import SingleCellAnalysisWorkflow
 
 
@@ -46,7 +47,7 @@ async def test_preconfigured_deep_research_client_gets_retry_callback_before_age
     monkeypatch.setattr("backend.workflow.core.AsyncSqliteSaver", _FakeCheckpointer)
     monkeypatch.setattr("backend.workflow.core.get_session_states", lambda session_id: tmp_path / "states")
     monkeypatch.setattr("backend.workflow.core.get_session_workspace", lambda session_id: tmp_path / "workspace")
-    monkeypatch.setattr("backend.agents.literature_agent.OpenAICompatibleClient", _FakeDeepResearchClient)
+    setattr_facade(monkeypatch, "backend.agents.literature_agent", "OpenAICompatibleClient", _FakeDeepResearchClient)
     monkeypatch.setattr(SingleCellAnalysisWorkflow, "ensure_agent_ready", lambda self, agent_name: None)
     monkeypatch.setattr(SingleCellAnalysisWorkflow, "_build_graph", lambda self: None)
 

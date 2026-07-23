@@ -179,7 +179,14 @@ class TestBioinformaticsParseRetry:
         with patch("backend.agents.bioinformatics_agent.BioinformaticsAgent.__init__", lambda self: None):
             a = BioinformaticsAgent.__new__(BioinformaticsAgent)
             a._safe_parse_json = MagicMock()
-            a.chat = AsyncMock()
+            # The retry deliberately goes through chat_without_history: the retry prompt
+            # already carries the full original request and must not inherit unrelated
+            # planning turns from BaseAgent history.
+            a.chat_without_history = AsyncMock()
+            # Under test here is the retry control flow, not plan validation. Passing
+            # the payload straight through keeps the minimal fixtures below meaningful;
+            # real _prepare_plan_data would reject them on missing PlanStep fields.
+            a._prepare_plan_data = lambda data, **_kwargs: data
             a.session_id = "test"
             return a
 
@@ -188,22 +195,22 @@ class TestBioinformaticsParseRetry:
         plan_data = {"steps": [{"id": 1, "title": "Step 1"}]}
         result = await agent._retry_on_parse_failure("prompt", plan_data)
         assert result == plan_data
-        agent.chat.assert_not_called()
+        agent.chat_without_history.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_retry_succeeds(self, agent):
         bad_data = {"parse_error": True}
         good_data = {"steps": [{"id": 1}]}
-        agent.chat.return_value = "good json"
+        agent.chat_without_history.return_value = "good json"
         agent._safe_parse_json.return_value = good_data
         result = await agent._retry_on_parse_failure("prompt", bad_data)
         assert "parse_error" not in result
-        agent.chat.assert_called_once()
+        agent.chat_without_history.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_retry_fails_returns_original(self, agent):
         bad_data = {"parse_error": True, "steps": []}
-        agent.chat.return_value = "still bad"
+        agent.chat_without_history.return_value = "still bad"
         agent._safe_parse_json.return_value = {"parse_error": True}
         result = await agent._retry_on_parse_failure("prompt", bad_data, warn_on_double_failure=False)
         assert result == bad_data

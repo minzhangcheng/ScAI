@@ -1,6 +1,7 @@
 import pytest
 
 from backend.agents.literature_agent import LiteratureAgent
+from backend.tests.split_facade import setattr_facade
 
 
 class _Provider:
@@ -83,8 +84,10 @@ def test_make_google_client_returns_google_deep_research_client(monkeypatch):
             self.proxy_url = proxy_url
             created.append(self)
 
+    # Patch where the name is looked up: _make_google_client lives in the
+    # literature mixin package, so binding it on the facade module has no effect.
     monkeypatch.setattr(
-        "backend.agents.literature_agent.GoogleDeepResearchClient",
+        "backend.agents.literature.clients.GoogleDeepResearchClient",
         FakeGoogleDeepResearchClient,
     )
     provider = _Provider({})
@@ -105,8 +108,10 @@ def test_make_deep_research_client_inherits_provider_retry_callback(monkeypatch)
 
     provider = _Provider({})
     provider._retry_callback = retry_callback
-    monkeypatch.setattr(
-        "backend.agents.literature_agent.OpenAICompatibleClient",
+    setattr_facade(
+        monkeypatch,
+        "backend.agents.literature_agent",
+        "OpenAICompatibleClient",
         _OpenAIClient,
     )
     agent = LiteratureAgent(
@@ -138,6 +143,14 @@ def test_close_runtime_clients_closes_current_literature_owned_clients():
 
 
 def test_sync_literature_config_closes_replaced_clients(monkeypatch):
+    # _make_deep_research_client lives in the literature mixin package, so the
+    # replacement has to be bound across the whole split, not just the facade.
+    setattr_facade(
+        monkeypatch,
+        "backend.agents.literature_agent",
+        "OpenAICompatibleClient",
+        _OpenAIClient,
+    )
     provider = _Provider({
         "deep_research_llm_base_url": "https://new.example/v1",
         "deep_research_api_key": "new-key",

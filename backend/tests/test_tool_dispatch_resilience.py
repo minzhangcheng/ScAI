@@ -8,6 +8,7 @@ tool_call rather than propagating the exception and crashing.
 import pytest
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
 from backend.models.schemas import AgentType, AnalysisState
+from backend.tests.split_facade import setattr_facade
 from backend.utils.llm_client import UpstreamExhaustedError
 
 
@@ -18,7 +19,6 @@ class TestToolDispatchResilience:
         from unittest.mock import AsyncMock, MagicMock
         from pathlib import Path
         from backend.utils.llm_client import LLMToolResponse, ToolCall
-        from backend.agents import bioinformatics_agent as bio_mod
 
         # --- Minimal agent (bypass __init__) ---
         agent = BioinformaticsAgent.__new__(BioinformaticsAgent)
@@ -128,7 +128,9 @@ class TestToolDispatchResilience:
             def clear(self): pass
             def should_checkpoint(self, step): return False
 
-        monkeypatch.setattr(bio_mod, "CheckpointManager", _NullCheckpoint)
+        setattr_facade(
+            monkeypatch, "backend.agents.bioinformatics_agent", "CheckpointManager", _NullCheckpoint
+        )
 
         # --- Make consult_pi callback raise ---
         async def _raising_callback(question, context):

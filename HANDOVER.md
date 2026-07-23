@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.35.1 · **Last updated**: 2026-07-22
+**Version**: 0.35.1-rc1 · **Last updated**: 2026-07-23
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,14 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.35.x — (2026-07-22)**
+**0.35.x — (2026-07-23)**
+
+- `0.35.1-rc1` — Large-module facade split refactor (behavior-preserving); version bump (2026-07-23):
+  - **Backend agent packages**: Split monolithic agent modules into packages with stable facades — `bioinformatics/` (loop control, planning, figures, mechanism validation, workspace guards, kernel templates), `literature/` (PubMed, clients, query builders, synthesis, direction novelty), `pi/` (synthesis, instructions, research planning, direction candidates/selection, annotation, species, reports, figures, bioinfo liaison), `supervisor/` (evaluation, runtime, report HTML/content, diagrams). Original `*_agent.py` modules remain import-compatible re-export facades.
+  - **Schema / routes / services / sandbox split**: `models/schema_parts/` (enums, analysis, session, outputs); `routes/reports_parts/` (core, html views, downloads, publication, assets); `services/report/variants_parts/` (exploration, detailed, integration, annotation, renderers); `services/snapshot_v2/{restore,runtime,service}_parts/`; `utils/sandbox_parts/` (kernel, execution, persistence, state tracking, paths). Parent modules re-export public symbols for existing importers and tests.
+  - **Frontend modularization**: `DataPanel` / `Sidebar` / `AnalysisPanel` split into `components/data/*`, `components/sidebar/*`, and `components/analysis/RoundSummaries`; `useApi` into `hooks/api/*` (client, useSession, useConfig, useWebSocket, snapshots); Zustand store into `stores/{domain,appState,persistence,store}` with `appStore.ts` as the stable public surface; i18n into `locales/en.ts` + `locales/zh.ts` + `prompts.ts` with `translations.ts` re-exports.
+  - **Test adapter support**: `backend/tests/split_facade.py` and `test_facade_patch_targets.py` keep monkeypatch targets aligned with the new module layout.
+  - **No intentional behavior change** — structural refactor only; version string updated to `0.35.1-rc1`.
 
 - `0.35.1` — Domain-neutral mechanism evidence policy, planning-failure terminal routing, plan schema normalization, domain-example scrub; version bump (2026-07-22):
   - **Shared mechanism evidence policy (`backend/utils/mechanism_policy.py`)**: New `MECHANISM_EVIDENCE_POLICY` constant — start with unbiased analyses; name established mechanisms only when observed evidence supports them; treat objective-named mechanisms as prespecified hypotheses (supported / contradicted / insufficient); distinguish pathway activity/priming from causal mechanism execution. Wired into PI direction/synthesis/report prompts, bioinformatics `register_mechanism_programs` tool + Stage-2 capture instruction, Supervisor live report prompt, and detailed-report planning fallback.

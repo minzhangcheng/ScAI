@@ -24,6 +24,7 @@ import pytest
 import pytest_asyncio
 
 from backend.services.snapshot_v2.checkpoint_paths import checkpoint_sqlite_path
+from backend.tests.snapshot_v2_fixtures import set_snapshot_service_session_states
 
 # Gate B requires SCAI_RUN_KERNEL_TESTS=1. Without the flag, skip the whole module.
 # With the flag set, every test must run (no skip) or report BLOCKED.
@@ -390,10 +391,7 @@ def session_layout(tmp_path, session_id, monkeypatch):
     monkeypatch.setattr(
         "backend.services.snapshot_v2.paths.get_session_dir", _sess_dir,
     )
-    monkeypatch.setattr(
-        "backend.services.snapshot_v2.service.get_session_states",
-        lambda sid: _sess_dir(sid) / "states",
-    )
+    set_snapshot_service_session_states(monkeypatch, lambda sid: _sess_dir(sid) / "states")
 
     root = _sess_dir(session_id)
     workspace = root / "workspace"

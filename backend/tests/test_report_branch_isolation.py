@@ -28,6 +28,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from backend.models.schemas import AnalysisPhase, AnalysisState, AnalysisStep, RoundResult, TaskStatus
+from backend.tests.split_facade import setattr_facade
 from backend.workflow.reporting import ReportingMixin
 
 
@@ -213,7 +214,9 @@ async def test_branch_report_preview_urls_include_branch_id(tmp_path, monkeypatc
         return AnalysisState(id=session_id, user_id=user_id)
 
     monkeypatch.setattr("backend.services.report.paths.get_session_reports", lambda session_id: reports_root)
-    monkeypatch.setattr(reports, "require_session_ownership", _fake_owner)
+    # Bind on every module of the reports split, not just the facade: the handler
+    # reads the name from the reports_parts module it happens to live in.
+    setattr_facade(monkeypatch, "backend.routes.reports", "require_session_ownership", _fake_owner)
 
     payload = await reports.preview_report(
         session_id="s",
@@ -247,7 +250,8 @@ async def test_detailed_report_cache_is_lineage_scoped(tmp_path, monkeypatch):
         return AnalysisState(id=session_id, user_id=user_id)
 
     monkeypatch.setattr("backend.services.report.paths.get_session_reports", lambda session_id: reports_root)
-    monkeypatch.setattr(reports, "require_session_ownership", _fake_owner)
+    # Bound across the whole reports split; see the note above.
+    setattr_facade(monkeypatch, "backend.routes.reports", "require_session_ownership", _fake_owner)
 
     request = SimpleNamespace(state=SimpleNamespace(user_id="u"))
     branch_payload = await reports.get_detailed_report("s", request, branch_id="branch-a")

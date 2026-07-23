@@ -65,58 +65,77 @@ from backend.state import get_session_lock
 
 logger = logging.getLogger(__name__)
 
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _new_snapshot_id() -> str:
-    return f"snap-{uuid.uuid4().hex[:16]}"
-
-
-def _as_name_set(raw: Any) -> set[str]:
-    """Normalize list/set/tuple/dict keys of dependency names into a set."""
-    if not raw:
-        return set()
-    if isinstance(raw, dict):
-        return {str(n) for n in raw if n}
-    if isinstance(raw, (list, set, tuple)):
-        return {str(n) for n in raw if n}
-    return {str(raw)}
-
-
-@contextlib.asynccontextmanager
-async def _null_async_cm():
-    yield
-
-
-def _workflow_state_for_snapshot(workflow: Any) -> dict[str, Any]:
-    """Read a detached workflow state, preferring the explicit contract."""
-    if workflow is None:
-        return {}
-    accessor = getattr(workflow, "get_snapshot_workflow_state", None)
-    if callable(accessor):
-        raw = accessor()
-        if isinstance(raw, dict):
-            return copy.deepcopy(raw)
-    # Compatibility fallback for test doubles and older in-process workflows.
-    for attr in ("_current_graph_state", "_last_workflow_state"):
-        raw = getattr(workflow, attr, None)
-        if isinstance(raw, dict):
-            return copy.deepcopy(raw)
-    return {}
-
-
-def _has_trusted_workflow_snapshot_context(
-    workflow: Any,
-    workflow_state: dict[str, Any],
-    live_safe_point: dict[str, Any],
-) -> bool:
-    """Require observable state before freezing an active workflow."""
-    return workflow is None or bool(workflow_state) or bool(live_safe_point)
-
-
-class SnapshotService:
+# Re-exported so `backend.services.snapshot_v2.service.<name>` keeps resolving
+# for existing importers and for tests that patch these by name.
+from .service_parts.shared import (  # noqa: F401
+    asyncio,
+    copy,
+    contextlib,
+    hashlib,
+    json,
+    logging,
+    shutil,
+    uuid,
+    datetime,
+    timezone,
+    Path,
+    Any,
+    default_config,
+    get_session_states,
+    checkpoint_sqlite_path,
+    ContinuationRegistry,
+    RequiredSnapshotBlocked,
+    SnapshotCaptureError,
+    SnapshotDeleteConflict,
+    SnapshotStorageError,
+    SnapshotV2Error,
+    FORMAT_VERSION,
+    IdleCapsule,
+    ObjectRef,
+    RuntimeGenerationManifest,
+    RuntimeManifest,
+    SnapshotCaptureRequest,
+    SnapshotFailureRecord,
+    SnapshotManifestV2,
+    SnapshotRecordV2,
+    SnapshotRestoreRequest,
+    SnapshotTransactionRecord,
+    WorkspaceEntry,
+    empty_complete_runtime,
+    runtime_manifest_from_generation,
+    validate_system_commit,
+    ObjectPutResult,
+    ObjectStore,
+    ManifestStore,
+    canonical_json,
+    SnapshotV2Paths,
+    RuntimeCapture,
+    RuntimeDependencyTracker,
+    SafePointManager,
+    get_snapshot_safe_point_manager,
+    WorkspaceCapture,
+    get_session_lock,
+    _now_iso,
+    _new_snapshot_id,
+    _as_name_set,
+    _null_async_cm,
+    _workflow_state_for_snapshot,
+    _has_trusted_workflow_snapshot_context,
+)
+from .service_parts import (  # noqa: F401
+    RestoreOpsMixin,
+    QueriesMixin,
+    CaptureStepsMixin,
+    CaptureSupportMixin,
+    SessionStateMixin,
+)
+class SnapshotService(
+    RestoreOpsMixin,
+    QueriesMixin,
+    CaptureStepsMixin,
+    CaptureSupportMixin,
+    SessionStateMixin,
+):
     """Atomic snapshot capture and restore orchestration service."""
 
     def __init__(
@@ -176,18 +195,6 @@ class SnapshotService:
         self.transaction_repository = transaction_repository
         self.session_persistence = session_persistence
 
-    def _resolve_previous_manifest(
-        self, analysis_state: Any,
-    ) -> SnapshotManifestV2 | None:
-        """Resolve and verify the current V2 lineage head, when declared."""
-        if analysis_state is None:
-            return None
-        snapshot_id = str(
-            getattr(analysis_state, "last_snapshot_id", None) or ""
-        ).strip()
-        if not snapshot_id:
-            return None
-        return self.manifest_store.load(snapshot_id)
 
     # ── Public API ───────────────────────────────────────────────────
 
@@ -658,101 +665,9 @@ class SnapshotService:
 
             return _status("committed", recovery_mode=recovery_mode)
 
-    async def _persist_restored_state(self, restored_state: Any) -> None:
-        """Write restored analysis state to the live session store."""
-        from backend.state import sessions
 
-        sessions[self.session_id] = restored_state
-        if self.session_persistence is not None:
-            await self.session_persistence(self.session_id, restored_state)
-        else:
-            from backend.services.session_store import async_save_session
-            await async_save_session(self.session_id, restored_state)
 
-    def _block_session_after_partial_apply(self, failure: dict[str, Any]) -> None:
-        """Guard the in-process session after a post-persist restore failure.
 
-        Once ``_persist_restored_state`` has run, ``sessions[session_id]`` holds
-        the target state while the restore journal is still ``APPLYING`` and the
-        transaction failed. Mark the session recovery-blocked so forward
-        mutation is refused until startup recovery rolls back (or, for
-        ``forward_only``, rolls forward) on the next session load — the memory
-        state must not be silently trusted as a successful restore.
-        """
-        try:
-            from backend.state import sessions
-            from backend.services.session_store import mark_recovery_blocked
-
-            mark_recovery_blocked(
-                self.session_id, sessions.get(self.session_id), failure,
-            )
-        except Exception:
-            logger.exception(
-                "[%s] failed to mark recovery-blocked after partial restore apply",
-                self.session_id,
-            )
-
-    def _partial_apply_failure(self, code: str, message: str) -> dict[str, Any]:
-        """Build a recovery-required failure and block live session mutation."""
-        failure = {
-            "code": str(code),
-            "message": str(message),
-            "recovery_required": True,
-        }
-        self._block_session_after_partial_apply(failure)
-        return failure
-
-    async def _verify_live_restore(
-        self,
-        *,
-        target_manifest: Any,
-        restored_state: Any,
-        staged_checkpoint: Any,
-        workspace_root: Path,
-        session_dir: Path,
-        states_root: Path | None = None,
-        runtime_choice: str | None = None,
-    ) -> dict[str, Any]:
-        """Verify live restore side effects while the journal is still APPLYING.
-
-        Raises ``SnapshotTransactionError("LIVE_VERIFY_FAILED", ...)`` on any
-        mismatch. Returns a verification proof dict for the COMMITTED journal.
-
-        Uses the shared contract in ``live_verify.verify_live_restore_components``:
-        production residual is ``{session_id}_session.pkl`` + integrity signature
-        (not session_state.pkl / residual.pkl); session.json is presence-checked
-        only (post-activate state is continuation-mutated).
-        """
-        from backend.services.snapshot_v2.errors import SnapshotTransactionError
-        from backend.services.snapshot_v2.live_verify import (
-            verify_live_restore_components,
-        )
-
-        states = Path(states_root) if states_root is not None else session_dir / "states"
-        try:
-            return verify_live_restore_components(
-                session_id=self.session_id,
-                target_manifest=target_manifest,
-                session_dir=session_dir,
-                workspace_root=workspace_root,
-                states_root=states,
-                runtime_choice=runtime_choice,
-                restored_state=restored_state,
-                staged_checkpoint=staged_checkpoint,
-                journal=None,
-            )
-        except ValueError as exc:
-            raise SnapshotTransactionError(
-                "LIVE_VERIFY_FAILED",
-                str(exc) or "live side effects not verified",
-            ) from exc
-        except SnapshotTransactionError:
-            raise
-        except Exception as exc:
-            raise SnapshotTransactionError(
-                "LIVE_VERIFY_FAILED",
-                str(exc) or "live side effects not verified",
-            ) from exc
 
     async def capture_required_snapshot(
         self,
@@ -898,252 +813,10 @@ class SnapshotService:
         return record
 
 
-    def compute_protected_snapshot_ids(self) -> dict[str, set[str]]:
-        """Return snapshot IDs protected from deletion, keyed by reason.
 
-        Reasons:
-          live_head, continuation_source, restore_target, pre_restore,
-          import, export
 
-        Sources: committed session state (lineage head / last restored),
-        verified create/restore/delete/import/export journals, and the
-        in-process restore job registry.
-        """
-        from pathlib import Path as _Path
 
-        protected: dict[str, set[str]] = {
-            "live_head": set(),
-            "continuation_source": set(),
-            "restore_target": set(),
-            "pre_restore": set(),
-            "import": set(),
-            "export": set(),
-        }
 
-        # Live lineage from in-memory session state
-        try:
-            from backend.state import sessions
-            state = sessions.get(self.session_id)
-        except Exception:
-            state = None
-        if state is not None:
-            head = getattr(state, "last_snapshot_id", None)
-            if head:
-                protected["live_head"].add(str(head))
-            from backend.workflow.provenance import restore_provenance_id
-            cont = restore_provenance_id(state)
-            if cont:
-                protected["continuation_source"].add(str(cont))
-
-        # In-process restore job registry (active non-terminal jobs)
-        try:
-            from backend.state import snapshot_restore_jobs
-            terminal = {"committed", "failed", "cancelled", "timed_out"}
-            for handle in list(snapshot_restore_jobs.values()):
-                record = getattr(handle, "record", None)
-                if record is None:
-                    continue
-                if getattr(record, "session_id", None) != self.session_id:
-                    continue
-                status = getattr(record, "status", None)
-                if status in terminal:
-                    continue
-                sid = getattr(record, "snapshot_id", None)
-                if sid:
-                    protected["restore_target"].add(str(sid))
-        except Exception:
-            pass
-
-        # Journals: restore / import / export / delete (signed envelopes)
-        journals_dir = _Path(str(self.paths.journals))
-        if journals_dir.exists():
-            from backend.services.snapshot_v2.journal_store import JournalStore
-
-            store = JournalStore(self.paths)
-            for entry in journals_dir.iterdir():
-                if not entry.is_file() or entry.suffix != ".json":
-                    continue
-                try:
-                    env = store.read(entry.stem)
-                except Exception:
-                    # Fall back to raw parse for incomplete fixtures only
-                    try:
-                        data = json.loads(entry.read_text())
-                    except (OSError, json.JSONDecodeError):
-                        continue
-                    if not isinstance(data, dict):
-                        continue
-                    # Minimal legacy fallback for unsigned fixtures in tests
-                    kind = data.get("kind")
-                    payload = data if kind else {}
-                    status = str(data.get("status") or "").upper()
-                    if kind == "export_protection":
-                        for sid in data.get("protected_snapshot_ids") or []:
-                            if sid:
-                                protected["export"].add(str(sid))
-                    elif kind == "import" and status not in ("COMMITTED", "FAILED"):
-                        for sid in data.get("protected_snapshot_ids") or []:
-                            if sid:
-                                protected["import"].add(str(sid))
-                    elif data.get("pre_restore_ref") or data.get("target_snapshot_id"):
-                        if data.get("pre_restore_ref"):
-                            protected["pre_restore"].add(str(data["pre_restore_ref"]))
-                        t = data.get("target_snapshot_id")
-                        if t:
-                            protected["restore_target"].add(str(t))
-                    continue
-
-                if env.session_id and env.session_id != self.session_id:
-                    continue
-                payload = env.payload or {}
-                status = str(env.status or "").upper()
-                st_lower = str(env.status or "").lower()
-
-                if env.kind == "export_protection":
-                    for sid in payload.get("protected_snapshot_ids") or []:
-                        if sid:
-                            protected["export"].add(str(sid))
-                    continue
-
-                if env.kind == "import":
-                    if status in ("COMMITTED", "FAILED"):
-                        continue
-                    for sid in payload.get("protected_snapshot_ids") or []:
-                        if sid:
-                            protected["import"].add(str(sid))
-                    for sid in payload.get("committed_snapshot_ids") or []:
-                        if sid:
-                            protected["import"].add(str(sid))
-                    continue
-
-                if env.kind == "restore_apply":
-                    if st_lower in ("cancelled", "timed_out"):
-                        continue
-                    if st_lower == "committed" and not payload.get("pre_restore_ref"):
-                        continue
-                    target = payload.get("target_snapshot_id")
-                    if target:
-                        protected["restore_target"].add(str(target))
-                    pre = payload.get("pre_restore_ref")
-                    if pre:
-                        protected["pre_restore"].add(str(pre))
-                    continue
-
-                if env.kind == "restore_job":
-                    if st_lower in ("committed", "failed", "cancelled", "timed_out"):
-                        continue
-                    sid = payload.get("snapshot_id")
-                    if sid:
-                        protected["restore_target"].add(str(sid))
-                    continue
-
-                if env.kind == "delete":
-                    # Active delete does not protect delete_set from this path.
-                    continue
-
-        return protected
-
-    def delete_snapshot(self, snapshot_id: str, *, branch: bool = False) -> Any:
-        """Delete a snapshot with live-lineage and active-transaction protection.
-
-        Raises ``SnapshotDeleteConflict`` with typed ``details["reason"]`` for
-        HTTP 409 consumers.
-        """
-        from backend.services.snapshot_v2.deletion import DeletionService
-
-        by_reason = self.compute_protected_snapshot_ids()
-        for reason, ids in by_reason.items():
-            if snapshot_id in ids:
-                raise SnapshotDeleteConflict(
-                    "PROTECTED",
-                    f"Snapshot {snapshot_id} is protected ({reason}) and cannot be deleted",
-                    details={
-                        "reason": reason,
-                        "snapshot_id": snapshot_id,
-                        "protection": reason,
-                    },
-                )
-
-        protected_flat: set[str] = set()
-        for ids in by_reason.values():
-            protected_flat |= ids
-
-        deletion = DeletionService(
-            self.session_id,
-            self.paths,
-            manifest_store=self.manifest_store,
-            object_store=self.object_store,
-        )
-        if branch:
-            all_manifests = self.manifest_store.verify_all_committed()
-            children: dict[str, list[str]] = {}
-            for m in all_manifests:
-                pid = m.parent_id
-                if pid:
-                    children.setdefault(pid, []).append(m.snapshot_id)
-            descendant_ids: list[str] = []
-            stack = list(children.get(snapshot_id, []))
-            while stack:
-                sid = stack.pop()
-                descendant_ids.append(sid)
-                stack.extend(children.get(sid, []))
-            for sid in descendant_ids:
-                for reason, ids in by_reason.items():
-                    if sid in ids:
-                        raise SnapshotDeleteConflict(
-                            "PROTECTED",
-                            f"Snapshot {sid} is protected ({reason}) and cannot be deleted",
-                            details={
-                                "reason": reason,
-                                "snapshot_id": sid,
-                                "protection": reason,
-                            },
-                        )
-            return deletion.delete_branch(
-                snapshot_id, descendant_ids, protected_ids=protected_flat,
-            )
-        return deletion.delete_leaf(snapshot_id, protected_ids=protected_flat)
-
-    def list_snapshots(self) -> list[dict[str, Any]]:
-        """List committed snapshots with typed integrity diagnostics.
-
-        Never silently drops a corrupt committed manifest: each entry is either
-        status ``ok`` (with full manifest) or ``corrupt`` (with error code).
-        """
-        entries = self.manifest_store.list_committed_with_diagnostics()
-        out: list[dict[str, Any]] = []
-        for e in entries:
-            if e.status == "ok" and e.manifest is not None:
-                flat = e.manifest.model_dump(mode="json")
-                flat["status"] = "ok"
-                flat["integrity_status"] = "ok"
-                out.append(flat)
-            else:
-                out.append({
-                    "snapshot_id": e.snapshot_id,
-                    "status": "corrupt",
-                    "integrity_status": "corrupt",
-                    "error_code": e.error_code,
-                    "error_message": e.error_message,
-                    "manifest": None,
-                })
-        return out
-
-    def preview_snapshot(self, snapshot_id: str) -> dict[str, Any]:
-        """Load a single verified V2 snapshot manifest for detail views."""
-        from backend.services.snapshot_v2.errors import SnapshotIntegrityError
-
-        try:
-            manifest = self.manifest_store.load(snapshot_id)
-        except SnapshotIntegrityError:
-            raise
-        return {"manifest": manifest.model_dump(mode="json")}
-
-    def store_status(self) -> Any:
-        """Compute store-level usage statistics from verified manifests."""
-        from backend.services.snapshot_v2.management import compute_store_status
-
-        return compute_store_status(self.paths, self.manifest_store)
 
     async def delete_leaf(self, snapshot_id: str) -> Any:
         """Delete a leaf snapshot under the session lock; reconcile listings."""
@@ -1182,21 +855,6 @@ class SnapshotService:
                 snapshot_ids=snapshot_ids,
             )
 
-    def _guard_active_safe_point(self) -> None:
-        """Raise SnapshotTransactionError if a safe point is active.
-
-        Called by mutation methods (import, delete) before acquiring the
-        session lock to prevent concurrent snapshot/restore operations
-        from corrupting the session state.
-        """
-        from backend.services.snapshot_v2.errors import SnapshotTransactionError
-
-        if self.safe_point.is_paused(self.session_id):
-            raise SnapshotTransactionError(
-                "SAFE_POINT_ACTIVE",
-                f"A snapshot/restore operation is in progress for "
-                f"session {self.session_id}; rejecting mutation",
-            )
 
     async def import_snapshots(
         self,
@@ -1220,213 +878,11 @@ class SnapshotService:
                 await self._reconcile_analysis_state_snapshots()
             return result
 
-    async def _reconcile_analysis_state_snapshots(self) -> None:
-        """Rebuild AnalysisState.snapshots from verified manifests and persist."""
-        from backend.services.session_store import async_save_session, update_session_cache
-        from backend.state import sessions
 
-        state = sessions.get(self.session_id)
-        if state is None:
-            return
-        try:
-            state.snapshots = self.rebuild_snapshots_from_manifests()
-        except Exception as exc:
-            logger.warning(
-                "[%s] rebuild snapshots during reconcile failed: %s",
-                self.session_id, exc,
-            )
-            return
-        try:
-            await update_session_cache(self.session_id, state)
-            await async_save_session(self.session_id, state)
-        except Exception as exc:
-            logger.warning(
-                "[%s] persist after snapshot reconcile failed: %s",
-                self.session_id, exc,
-            )
 
-    def _find_committed_by_idempotency(
-        self, request: SnapshotCaptureRequest,
-    ) -> SnapshotManifestV2 | None:
-        key = getattr(request, "idempotency_key", None)
-        if not key:
-            return None
-        phase = request.phase or request.reason or "manual"
-        for manifest in self.manifest_store.verify_all_committed():
-            if (
-                manifest.session_id == request.session_id
-                and (manifest.phase or "") == phase
-                and getattr(manifest, "idempotency_key", None) == key
-            ):
-                return manifest
-        return None
 
-    async def _capture_locked(
-        self,
-        request: SnapshotCaptureRequest,
-        *,
-        sandbox: Any = None,
-        workspace_root: str | None = None,
-        transaction: str | None = None,
-        workflow_state: dict[str, Any] | None = None,
-        snapshot_id_override: str | None = None,
-        analysis_state: Any = None,
-        safe_point_owner_token: str | None = None,
-        skip_safe_point_lifecycle: bool = False,
-        persist_session: bool = True,
-    ) -> SnapshotRecordV2:
-        """Capture transaction (caller already holds the session lock).
 
-        ``physical_added_bytes`` prefers ``ObjectPutResult.created`` for
-        refs produced by ``put_bytes``/``put_file``. Bare ``ObjectRef``
-        values (workspace / runtime / continuation) are counted only when
-        their hash was absent from the object store before this capture
-        (pre-scan of ``paths.objects``). Never use
-        ``register_existing_ref()`` return value for quota decisions.
-        """
-        snapshot_id = snapshot_id_override or _new_snapshot_id()
-        tx = transaction or snapshot_id
-        try:
-            if safe_point_owner_token:
-                if not self.safe_point.is_owned_by(
-                    request.session_id, safe_point_owner_token,
-                ):
-                    raise SnapshotCaptureError(
-                        "SAFE_POINT_OWNERSHIP_LOST",
-                        "Capture no longer owns the supplied session safe point",
-                    )
-                skip_safe_point_lifecycle = True
-            manifest, pending = await self._capture_impl(
-                request, snapshot_id, tx,
-                sandbox=sandbox,
-                workspace_root=workspace_root,
-                workflow_state=workflow_state,
-                analysis_state=analysis_state,
-                skip_safe_point_lifecycle=skip_safe_point_lifecycle,
-                persist_session=persist_session,
-            )
-            return SnapshotRecordV2(
-                snapshot_id=manifest.snapshot_id,
-                manifest=manifest,
-                failure=None,
-                committed=True,
-                session_reconciliation_pending=pending,
-            )
-        except SnapshotV2Error as exc:
-            logger.warning(
-                "[snapshot %s] capture failed: %s — %s",
-                snapshot_id, exc.code, exc,
-            )
-            return self._to_failure_record(snapshot_id, request.session_id, exc)
-        except Exception as exc:
-            logger.exception(
-                "[snapshot %s] unexpected capture error: %s", snapshot_id, exc,
-            )
-            return self._to_failure_record(
-                snapshot_id, request.session_id,
-                SnapshotCaptureError("UNEXPECTED", str(exc)),
-            )
 
-    async def _capture_and_apply(
-        self,
-        state: Any,
-        request: SnapshotCaptureRequest,
-        *,
-        sandbox: Any = None,
-        workspace_root: str | None = None,
-    ) -> SnapshotRecordV2:
-        """Capture and apply result to the AnalysisState.
-
-        Unlike ``capture_required_snapshot``, this does not raise
-        RequiredSnapshotBlocked (used by unit tests that inspect failure
-        fields in-place). Production producers must use
-        ``capture_required_snapshot``.
-        """
-        from backend.services.snapshot_v2.errors import SNAPSHOT_FAILURE_ACTIONS
-
-        if workspace_root is None:
-            try:
-                from backend.config._config import get_session_workspace
-                workspace_root = str(get_session_workspace(request.session_id))
-            except Exception:
-                workspace_root = None
-
-        record = await self.capture(
-            request,
-            sandbox=sandbox,
-            workspace_root=workspace_root,
-            analysis_state=state,
-        )
-        if record.failure is not None:
-            failure_payload = record.failure.model_dump(mode="json")
-            failure_payload["allowed_actions"] = list(SNAPSHOT_FAILURE_ACTIONS)
-            state.snapshot_failure = failure_payload
-            state.snapshot_transaction = {
-                "snapshot_id": record.snapshot_id,
-                "status": "failed",
-                "failed_at": _now_iso(),
-            }
-            state.wait_input_reason = "snapshot_failure"
-            await self._send_state_sync({
-                "change_type": "snapshot_failure",
-                "version": getattr(state, "state_version", 0),
-                "status": getattr(state, "status", None),
-                "snapshot_failure": failure_payload,
-                "snapshot_transaction": state.snapshot_transaction,
-            })
-        else:
-            state.snapshot_failure = None
-            state.snapshot_transaction = {
-                "snapshot_id": record.snapshot_id,
-                "status": "completed",
-                "completed_at": _now_iso(),
-            }
-            if state.wait_input_reason == "snapshot_failure":
-                state.wait_input_reason = None
-            try:
-                state.snapshots = self.rebuild_snapshots_from_manifests()
-                state.last_snapshot_id = record.snapshot_id
-            except Exception as exc:
-                logger.warning(
-                    "[%s] rebuild snapshots after capture failed: %s",
-                    self.session_id, exc,
-                )
-        return record
-
-    async def _capture_locked_for_restore(
-        self,
-        request: SnapshotCaptureRequest,
-        *,
-        sandbox: Any = None,
-        workspace_root: str | None = None,
-        workflow_state: dict[str, Any] | None = None,
-        analysis_state: Any = None,
-        snapshot_id_override: str | None = None,
-    ) -> SnapshotRecordV2:
-        """Capture for restore (caller already holds session lock + safe point).
-
-        Always skips cooperative safe-point create/release so the restore
-        transaction's already-held safe point is retained for the full apply.
-        Does not persist session state — restore owns final session persistence
-        after apply (avoids re-entrant save while the session lock is held).
-        """
-        return await self._capture_locked(
-            request,
-            sandbox=sandbox,
-            workspace_root=workspace_root,
-            workflow_state=workflow_state,
-            analysis_state=analysis_state,
-            snapshot_id_override=snapshot_id_override,
-            skip_safe_point_lifecycle=True,
-            persist_session=False,
-        )
-
-    def _clear_failure(self, state: Any) -> None:
-        """Clear the failure gate state for a retry."""
-        state.snapshot_failure = None
-        state.snapshot_transaction = None
-        if state.wait_input_reason == "snapshot_failure":
-            state.wait_input_reason = None
 
     # ── Internal capture implementation ──────────────────────────────
 
@@ -1853,372 +1309,22 @@ class SnapshotService:
 
     # ── Content capture helpers ──────────────────────────────────────
 
-    async def _capture_analysis_state(
-        self,
-        request: SnapshotCaptureRequest,
-        analysis_state: Any = None,
-    ) -> ObjectPutResult:
-        """Canonicalize + externalize AnalysisState into the object store.
 
-        Returns ObjectPutResult with ``created`` flag for physical_added accounting.
-        """
-        if request.analysis_state_ref is not None:
-            self.object_store.verify(request.analysis_state_ref)
-            return ObjectPutResult(
-                ref=request.analysis_state_ref,
-                created=False,
-            )
 
-        state = analysis_state
-        if state is None:
-            state = await self._get_session_state(request.session_id)
-        if state is None:
-            raise SnapshotCaptureError(
-                "MISSING_ANALYSIS_STATE",
-                "No AnalysisState available to capture",
-            )
 
-        raw = self._serialize_analysis_state(state)
-        return self.object_store.put_bytes(raw, "application/json")
 
-    @staticmethod
-    def _serialize_analysis_state(state: Any) -> bytes:
-        """Serialize the canonical business-state payload used by capture."""
-        from backend.utils.secret_redaction import strip_analysis_state_secrets
 
-        # model_dump excluding derived listing fields that are rebuilt
-        state_dict = strip_analysis_state_secrets(state.model_dump(mode="json"))
-        state_dict.pop("snapshots", None)
-        state_dict.pop("realtime_messages", None)
-        for seg in state_dict.get("detailed_report_segments", []) or []:
-            if isinstance(seg, dict):
-                seg.pop("content_html", None)
-
-        # Externalize large blobs into object store via inline base64 reduction
-        # by writing canonical JSON bytes directly (blob refs stay as tokens).
-        raw = json.dumps(
-            state_dict, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-            default=str,
-        ).encode("utf-8")
-        return raw
-
-    def _physical_object_store_bytes(self) -> int:
-        objects_dir = Path(str(self.paths.objects))
-        total = 0
-        if not objects_dir.is_dir():
-            return total
-        for path in objects_dir.iterdir():
-            if not path.is_file():
-                continue
-            try:
-                total += path.stat().st_size
-            except FileNotFoundError:
-                continue
-        return total
-
-    async def _estimate_capture_addition(
-        self,
-        request: SnapshotCaptureRequest,
-        workspace_root: str | None,
-        analysis_state: Any = None,
-    ) -> int:
-        """Estimate new physical bytes after content-addressed deduplication."""
-        estimate = 0
-        known_hashes: set[str] = set()
-        objects_dir = Path(str(self.paths.objects))
-        if objects_dir.is_dir():
-            known_hashes = {
-                path.name for path in objects_dir.iterdir() if path.is_file()
-            }
-
-        def add_bytes(raw: bytes) -> None:
-            nonlocal estimate
-            sha = hashlib.sha256(raw).hexdigest()
-            if sha not in known_hashes:
-                estimate += len(raw)
-                known_hashes.add(sha)
-
-        def add_file(path: Path) -> None:
-            nonlocal estimate
-            try:
-                size = 0
-                digest = hashlib.sha256()
-                with path.open("rb") as handle:
-                    while chunk := handle.read(1024 * 1024):
-                        digest.update(chunk)
-                        size += len(chunk)
-            except FileNotFoundError:
-                return
-            sha = digest.hexdigest()
-            if sha not in known_hashes:
-                estimate += size
-                known_hashes.add(sha)
-
-        if request.analysis_state_ref is None:
-            state = analysis_state or await self._get_session_state(request.session_id)
-            if state is not None:
-                add_bytes(self._serialize_analysis_state(state))
-
-        states_dir = get_session_states(request.session_id)
-        if request.notebook_ref is None:
-            from backend.utils.live_paths import live_notebook_path
-
-            notebook = live_notebook_path(states_dir, request.session_id)
-            if notebook.is_file():
-                add_file(notebook)
-            else:
-                add_bytes(json.dumps(
-                    {
-                        "nbformat": 4,
-                        "nbformat_minor": 5,
-                        "metadata": {},
-                        "cells": [],
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                ).encode("utf-8"))
-
-        if request.checkpoint_ref is None:
-            checkpoint = checkpoint_sqlite_path(states_dir)
-            if checkpoint.is_file():
-                add_file(checkpoint)
-
-        if workspace_root:
-            from backend.services.snapshot_v2.workspace import WorkspaceScope
-
-            root = Path(workspace_root)
-            for relative in WorkspaceScope().list_live_scoped_paths(root):
-                path = root / relative
-                add_file(path)
-        return estimate
-
-    async def _capture_notebook(
-        self,
-        request: SnapshotCaptureRequest,
-    ) -> ObjectPutResult:
-        if request.notebook_ref is not None:
-            self.object_store.verify(request.notebook_ref)
-            return ObjectPutResult(
-                ref=request.notebook_ref,
-                created=False,
-            )
-
-        states_dir = get_session_states(request.session_id)
-        from backend.utils.live_paths import live_notebook_path
-
-        nb_path = live_notebook_path(states_dir, request.session_id)
-        if not nb_path.exists():
-            # Empty notebook is valid when no kernel work has been done.
-            empty_nb = {
-                "nbformat": 4,
-                "nbformat_minor": 5,
-                "metadata": {},
-                "cells": [],
-            }
-            raw = json.dumps(
-                empty_nb, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-            ).encode("utf-8")
-            return self.object_store.put_bytes(raw, "application/x-ipynb+json")
-        return self.object_store.put_file(nb_path, "application/x-ipynb+json")
-
-    async def _capture_checkpoint(
-        self,
-        request: SnapshotCaptureRequest,
-    ) -> ObjectPutResult | None:
-        if request.checkpoint_ref is not None:
-            self.object_store.verify(request.checkpoint_ref)
-            return ObjectPutResult(
-                ref=request.checkpoint_ref,
-                created=False,
-            )
-        # Optional: LangGraph checkpoint sqlite if present
-        states_dir = get_session_states(request.session_id)
-        ckpt = checkpoint_sqlite_path(states_dir)
-        if not ckpt.exists() or not ckpt.is_file():
-            return None
-        return self.object_store.put_file(ckpt, "application/x-sqlite3")
 
     # ── Step helpers ─────────────────────────────────────────────────
 
-    def _validate_state(self, request: SnapshotCaptureRequest) -> None:
-        if not request.session_id:
-            raise SnapshotCaptureError(
-                "MISSING_SESSION_ID", "session_id is required",
-            )
-        if request.session_id != self.session_id:
-            raise SnapshotCaptureError(
-                "SESSION_ID_MISMATCH",
-                f"Request session_id '{request.session_id}' "
-                f"does not match service session_id '{self.session_id}'",
-            )
 
-    async def _create_safe_point(self, workflow_state: dict[str, Any] | None = None) -> None:
-        # Capture lifecycle may store graph-position metadata, but must NOT
-        # authorize empty-complete from untrusted capture args.
-        # Token is process-local for this service instance's lifecycle hold.
-        owner_token = f"capture:{self.session_id}:{id(self)}"
-        self._safe_point_owner_token = owner_token
-        acquired = await self.safe_point.acquire(
-            self.session_id,
-            workflow_state,
-            eligibility_trusted=False,
-            owner_token=owner_token,
-        )
-        if not acquired:
-            self._safe_point_owner_token = None
-            raise SnapshotCaptureError(
-                "SAFE_POINT_BUSY",
-                "Another snapshot or restore operation owns the session safe point",
-            )
 
-    async def _release_safe_point(self) -> None:
-        owner_token = getattr(self, "_safe_point_owner_token", None) or (
-            f"capture:{self.session_id}:{id(self)}"
-        )
-        await self.safe_point.release(self.session_id, owner_token)
-        self._safe_point_owner_token = None
 
-    def _has_active_workflow_ownership(self) -> bool:
-        """True when this session owns a live workflow in the process map."""
-        try:
-            from backend.state import workflows
-            return self.session_id in workflows and workflows.get(self.session_id) is not None
-        except Exception:
-            return False
 
-    def _resolve_empty_runtime_eligibility(
-        self,
-        phase: str | None,
-        sandbox: Any,
-        safe_point_descriptor: dict[str, Any] | None,
-    ) -> bool:
-        """Whether empty-complete runtime may be committed without a sandbox.
 
-        Eligibility requires:
-        - no live sandbox object
-        - an eligibility-trusted descriptor (ack / explicit producer acquire)
-        - ``kernel_present is False`` on that descriptor
-        - no active workflow ownership (except inactive post_report/manual paths
-          that already proved no kernel)
-        - terminal or explicitly inactive semantics for dynamic phases
 
-        Raw ``workflow_state`` passed into capture is never sufficient alone.
-        ``pre_restore`` with an active workflow never accepts empty-complete,
-        even if a contradictory no-kernel descriptor is present. Absence of a
-        trusted descriptor is never proof of inactivity.
-        """
-        if sandbox is not None:
-            return False
 
-        phase_s = str(phase or "manual")
-        desc = dict(safe_point_descriptor or {}) if safe_point_descriptor else {}
 
-        # No trusted descriptor → unproven; cannot empty-complete.
-        if not desc:
-            return False
-
-        if "kernel_present" not in desc or desc.get("kernel_present") is not False:
-            return False
-
-        active_workflow = self._has_active_workflow_ownership()
-
-        # Active pre_restore always requires the live sandbox.
-        if phase_s == "pre_restore" and active_workflow:
-            return False
-
-        inactive = desc.get("inactive") is True
-        terminal = (
-            desc.get("status") == "completed"
-            or desc.get("continuation_kind") == "terminal"
-            or desc.get("kind") == "terminal"
-        )
-
-        if active_workflow:
-            # Active pre_restore / post_chat always require the live sandbox.
-            if phase_s in ("post_chat", "pre_restore"):
-                return False
-            if phase_s == "post_report":
-                return True
-            return inactive or terminal
-
-        # No active workflow ownership.
-        # post_report and idle pre_restore may empty-complete with proven
-        # no-kernel descriptor. post_chat/manual still need inactive/terminal.
-        if phase_s in ("post_report", "pre_restore"):
-            return True
-        if phase_s in ("post_chat", "manual"):
-            return inactive or terminal
-
-        # Unknown / other phases: only with explicit inactive or terminal.
-        return inactive or terminal
-
-    async def _capture_workspace(
-        self, workspace_root: str,
-    ) -> tuple[list[WorkspaceEntry], list[str]]:
-        warnings: list[str] = []
-        entries, ws_warnings = self.workspace_capture.capture_scope(
-            self.object_store, workspace_root,
-        )
-        warnings.extend(ws_warnings)
-        return entries, warnings
-
-    def _resolve_kernel_present(
-        self,
-        sandbox: Any,
-        workflow_state: dict[str, Any] | None,
-    ) -> bool:
-        sources: list[Any] = []
-        desc = self.safe_point.get_descriptor(self.session_id)
-        if desc is not None:
-            sources.append(desc)
-        if workflow_state is not None:
-            sources.append(workflow_state)
-
-        for source in sources:
-            if not isinstance(source, dict):
-                continue
-            if "kernel_present" in source:
-                return bool(source["kernel_present"])
-            nested = source.get("safe_point_descriptor")
-            if isinstance(nested, dict) and "kernel_present" in nested:
-                return bool(nested["kernel_present"])
-
-        return getattr(sandbox, "km", None) is not None
-
-    def _collect_checkpoint_dependencies(
-        self,
-        workflow_state: dict[str, Any] | None,
-        sandbox_state: dict[str, Any],
-        analysis_state: Any = None,
-    ) -> set[str]:
-        deps: set[str] = set()
-        for source in (workflow_state or {}, sandbox_state):
-            if isinstance(source, dict):
-                deps |= _as_name_set(source.get("checkpoint_dependencies"))
-        if analysis_state is not None:
-            ss = getattr(analysis_state, "sandbox_state", None) or {}
-            if isinstance(ss, dict):
-                deps |= _as_name_set(ss.get("checkpoint_dependencies"))
-        return deps
-
-    def _rehydrate_tracker(
-        self,
-        sandbox: Any,
-        sandbox_state: dict[str, Any],
-    ) -> RuntimeDependencyTracker | None:
-        tracker = getattr(sandbox, "runtime_dependency_tracker", None)
-        if tracker is not None:
-            return tracker
-        data = sandbox_state.get("runtime_dependency_tracker_v2")
-        if not data:
-            return None
-        tracker = RuntimeDependencyTracker.from_state_dict(data)
-        try:
-            sandbox.runtime_dependency_tracker = tracker
-        except Exception:
-            pass
-        return tracker
 
     async def _capture_runtime(
         self,
@@ -2276,229 +1382,14 @@ class SnapshotService:
         # RuntimeCapture.capture returns RuntimeManifest directly
         return result
 
-    async def _compute_root_hash(self, manifest: SnapshotManifestV2) -> None:
-        raw = canonical_json(manifest)
-        manifest.root_hash = hashlib.sha256(raw).hexdigest()
-
-    async def _check_quota(
-        self,
-        manifest: SnapshotManifestV2,
-        *,
-        quota_baseline_bytes: int | None = None,
-        allow_over_quota_baseline: bool = False,
-    ) -> None:
-        # Session quota counts physical additions for this capture.
-        added = manifest.physical_added_bytes
-        addition_ceiling = self.session_quota_bytes
-        if (
-            allow_over_quota_baseline
-            and quota_baseline_bytes is not None
-            and quota_baseline_bytes > self.session_quota_bytes
-        ):
-            addition_ceiling = self.pre_restore_quota_grace_bytes
-        if added > addition_ceiling:
-            raise SnapshotStorageError(
-                "snapshot_quota_exceeded",
-                f"Snapshot physical addition {added} exceeds quota "
-                f"{addition_ceiling}",
-            )
-        cumulative = self._physical_object_store_bytes()
-        cumulative_ceiling = self.session_quota_bytes
-        if (
-            allow_over_quota_baseline
-            and quota_baseline_bytes is not None
-            and quota_baseline_bytes > self.session_quota_bytes
-        ):
-            cumulative_ceiling = (
-                quota_baseline_bytes + self.pre_restore_quota_grace_bytes
-            )
-        if cumulative > cumulative_ceiling:
-            raise SnapshotStorageError(
-                "snapshot_quota_exceeded",
-                f"Snapshot object store uses {cumulative} bytes, exceeding "
-                f"capture ceiling {cumulative_ceiling} bytes "
-                f"(session quota {self.session_quota_bytes})",
-            )
-        # Also enforce cumulative store size soft bound via logical objects.
-        # The v2 root dir is not created during a normal capture (objects/
-        # staging/committed are siblings), so probe the nearest existing
-        # ancestor — free space is identical across the same filesystem.
-        probe = self.paths.root
-        while not probe.exists() and probe != probe.parent:
-            probe = probe.parent
-        try:
-            usage = shutil.disk_usage(probe)
-            free_after = usage.free - added
-            if free_after < self.free_space_reserve_bytes:
-                raise SnapshotStorageError(
-                    "snapshot_quota_exceeded",
-                    f"Insufficient disk space: {usage.free} free, "
-                    f"{added} needed, {self.free_space_reserve_bytes} reserve",
-                )
-        except OSError as exc:
-            raise SnapshotStorageError(
-                "DISK_USAGE_CHECK_FAILED",
-                f"Failed to check disk usage: {exc}",
-            )
-
-    def _cleanup_unpublished_capture_objects(
-        self, existing_hashes: set[str],
-    ) -> None:
-        """Remove only transaction-created objects proven unreachable."""
-        objects_dir = Path(str(self.paths.objects))
-        if not objects_dir.is_dir():
-            return
-        candidates = {
-            path.name
-            for path in objects_dir.iterdir()
-            if path.is_file() and path.name not in existing_hashes
-        }
-        if not candidates:
-            return
-        try:
-            from backend.services.snapshot_v2.gc import SnapshotGarbageCollector
-
-            protected = SnapshotGarbageCollector(
-                self.session_id, self.paths,
-            ).mark()
-        except Exception:
-            logger.exception(
-                "[%s] cannot prove unpublished object reachability; "
-                "leaving capture objects for recovery GC",
-                self.session_id,
-            )
-            return
-        for sha256 in candidates - protected:
-            path = objects_dir / sha256
-            try:
-                path.unlink(missing_ok=True)
-                self.object_store.invalidate_evidence(sha256)
-            except OSError:
-                logger.exception(
-                    "[%s] failed to remove unpublished capture object %s",
-                    self.session_id, sha256,
-                )
-
-    async def _save_session_state(self, session_id: str) -> None:
-        from backend.services.session_store import async_save_session
-        state = await self._get_session_state(session_id)
-        if state is not None:
-            await async_save_session(session_id, state)
-
-    async def _get_session_state(self, session_id: str) -> Any:
-        from backend.state import sessions
-        return sessions.get(session_id)
-
-    def _mark_runtime_committed(
-        self, sandbox: Any, runtime_revision: int | None = None,
-    ) -> None:
-        self.runtime_capture.mark_runtime_committed(
-            sandbox, runtime_revision=runtime_revision,
-        )
 
 
-    def rebuild_snapshots_from_manifests(self) -> list:
-        """Rebuild AnalysisState.snapshots listing from verified committed manifests."""
-        from backend.models.schemas import Snapshot
-        from datetime import datetime as _dt
 
-        rebuilt = []
-        for manifest in self.manifest_store.verify_all_committed():
-            try:
-                ts = _dt.fromisoformat(
-                    manifest.created_at.replace("Z", "+00:00")
-                )
-            except Exception:
-                ts = _dt.now()
-            cont_kind = None
-            cont = manifest.continuation
-            if cont is not None:
-                cont_kind = getattr(cont, "kind", None)
-            rebuilt.append(
-                Snapshot(
-                    id=manifest.snapshot_id,
-                    name=manifest.name or manifest.snapshot_id,
-                    description=manifest.description or "",
-                    phase=manifest.phase,
-                    round_number=manifest.round_number,
-                    timestamp=ts,
-                    parent_id=manifest.parent_id,
-                    branch_label=manifest.branch_label,
-                    branch_id=manifest.branch_id,
-                    size_bytes=manifest.logical_size_bytes,
-                    format_version=2,
-                    runtime_status=manifest.runtime.status if manifest.runtime else None,
-                    logical_size_bytes=manifest.logical_size_bytes,
-                    physical_added_bytes=manifest.physical_added_bytes,
-                    source_restore_transaction_id=manifest.source_restore_transaction_id,
-                    continuation_kind=cont_kind,
-                    runtime_state_included=bool(
-                        manifest.runtime
-                        and (
-                            manifest.runtime.adata_refs
-                            or manifest.runtime.residual_ref is not None
-                        )
-                    ),
-                )
-            )
-        # Sort by created_at ascending for stable lineage listing
-        rebuilt.sort(key=lambda s: s.timestamp)
-        return rebuilt
+
+
+
+
 
     # ── Failure helpers ──────────────────────────────────────────────
 
-    def _to_failure_record(
-        self,
-        snapshot_id: str,
-        session_id: str,
-        error: SnapshotV2Error,
-    ) -> SnapshotRecordV2:
-        stub_ref = ObjectRef(
-            sha256="0" * 64, size=0, media_type="application/octet-stream",
-        )
-        stub_manifest = SnapshotManifestV2(
-            session_id=session_id,
-            snapshot_id=snapshot_id,
-            name=snapshot_id,
-            description="capture-failure-stub",
-            phase="manual",
-            created_at=_now_iso(),
-            analysis_state_ref=stub_ref,
-            notebook_ref=stub_ref,
-            runtime=empty_complete_runtime(),
-            continuation=IdleCapsule(graph_version="2.0"),
-            logical_size_bytes=0,
-            physical_added_bytes=0,
-        )
-        return SnapshotRecordV2(
-            snapshot_id=snapshot_id,
-            manifest=stub_manifest,
-            failure=SnapshotFailureRecord(
-                snapshot_id=snapshot_id,
-                session_id=session_id,
-                failed_at=_now_iso(),
-                code=error.code,
-                message=str(error),
-                details=error.details,
-                allowed_actions=["retry", "manage", "terminate"],
-            ),
-            committed=False,
-            session_reconciliation_pending=False,
-        )
 
-    async def _send_state_sync(self, payload: dict[str, Any]) -> None:
-        """Emit a state_sync message for the snapshot failure gate."""
-        from backend.state import websockets
-        ws = websockets.get(self.session_id)
-        if ws is not None:
-            try:
-                await ws.send_json({
-                    "type": "state_sync",
-                    "change_type": payload.get("change_type", "snapshot_failure"),
-                    **payload,
-                })
-            except Exception as exc:
-                logger.warning(
-                    "[%s] Failed to send snapshot failure state sync: %s",
-                    self.session_id, exc,
-                )

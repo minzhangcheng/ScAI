@@ -11,6 +11,7 @@ import pytest_asyncio
 from backend.services.snapshot_v2.errors import SnapshotTransactionError
 from backend.services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
 from backend.state import snapshot_restore_jobs
+from backend.tests.snapshot_v2_fixtures import set_snapshot_service_session_states
 
 
 class _StatusOnlyService:
@@ -977,10 +978,7 @@ class TestCommittedJobLiveSideEffects:
             "backend.services.snapshot_v2.paths.get_integrity_dir",
             lambda sid: _sess_dir(sid) / "integrity",
         )
-        monkeypatch.setattr(
-            "backend.services.snapshot_v2.service.get_session_states",
-            lambda sid: _sess_dir(sid) / "states",
-        )
+        set_snapshot_service_session_states(monkeypatch, lambda sid: _sess_dir(sid) / "states")
 
         session_root = _sess_dir(session_id)
         workspace = session_root / "workspace"
@@ -1247,10 +1245,7 @@ class TestCommittedJobLiveSideEffects:
         monkeypatch.setattr(
             "backend.services.snapshot_v2.paths.get_session_dir", _sess_dir,
         )
-        monkeypatch.setattr(
-            "backend.services.snapshot_v2.service.get_session_states",
-            lambda sid: _sess_dir(sid) / "states",
-        )
+        set_snapshot_service_session_states(monkeypatch, lambda sid: _sess_dir(sid) / "states")
 
         session_root = _sess_dir(session_id)
         workspace = session_root / "workspace"
@@ -1476,10 +1471,7 @@ class TestCommittedJobLiveSideEffects:
         monkeypatch.setattr(
             "backend.services.snapshot_v2.paths.get_session_dir", _sess_dir,
         )
-        monkeypatch.setattr(
-            "backend.services.snapshot_v2.service.get_session_states",
-            lambda sid: _sess_dir(sid) / "states",
-        )
+        set_snapshot_service_session_states(monkeypatch, lambda sid: _sess_dir(sid) / "states")
 
         session_root = _sess_dir(session_id)
         workspace = session_root / "workspace"
@@ -1663,10 +1655,7 @@ class TestSafePointRetainedDuringPreRestore:
             "backend.config._config.get_session_states",
             lambda sid: _sess_dir(sid) / "states",
         )
-        monkeypatch.setattr(
-            "backend.services.snapshot_v2.service.get_session_states",
-            lambda sid: _sess_dir(sid) / "states",
-        )
+        set_snapshot_service_session_states(monkeypatch, lambda sid: _sess_dir(sid) / "states")
 
         for d in ("workspace", "states"):
             (_sess_dir(session_id) / d).mkdir(parents=True, exist_ok=True)
@@ -1740,10 +1729,7 @@ class TestSafePointRetainedDuringPreRestore:
             "backend.config._config.get_session_states",
             lambda sid: _sess_dir(sid) / "states",
         )
-        monkeypatch.setattr(
-            "backend.services.snapshot_v2.service.get_session_states",
-            lambda sid: _sess_dir(sid) / "states",
-        )
+        set_snapshot_service_session_states(monkeypatch, lambda sid: _sess_dir(sid) / "states")
 
         for d in ("workspace", "states"):
             (_sess_dir(session_id) / d).mkdir(parents=True, exist_ok=True)

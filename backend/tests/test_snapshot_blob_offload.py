@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from backend.models.schemas import AnalysisState, PublicationFigure
+from backend.tests.snapshot_v2_fixtures import set_snapshot_service_session_states
 from backend.utils.blob_store import MIN_BLOB_LEN
 
 
@@ -54,10 +55,7 @@ async def test_v2_capture_analysis_state_json_off_event_loop_friendly(tmp_path, 
     for d in [paths.root, paths.objects, paths.staging, paths.journals, paths.integrity, paths.committed]:
         d.mkdir(parents=True, exist_ok=True)
 
-    monkeypatch.setattr(
-        "backend.services.snapshot_v2.service.get_session_states",
-        lambda s: session_dir / "states",
-    )
+    set_snapshot_service_session_states(monkeypatch, lambda s: session_dir / "states")
 
     main_thread = threading.get_ident()
     recorded = {}

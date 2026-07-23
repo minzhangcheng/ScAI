@@ -6,6 +6,9 @@ import { getTargetTab, selectPrioritySession, selectCompletedSession, selectPend
 import type { SessionListItem } from '../types'
 import { useTranslation } from '../i18n/translations'
 import { ROUND_WAIT_OPTIONS } from '../constants/roundWait'
+import { ProgressModal } from './sidebar/ProgressModal'
+import { SessionBrowserModal } from './sidebar/SessionBrowserModal'
+import { NewSessionForm } from './sidebar/NewSessionForm'
 import { DEFAULT_SESSION_NAME, DEFAULT_SESSION_INSTRUCTION } from '../constants/sessionDefaults'
 import { DataConfigMenu } from './DataConfigMenu'
 import { UserMenu } from './UserMenu'
@@ -19,10 +22,6 @@ import {
   RefreshCw,
   FolderOpen,
   Clock,
-  X,
-  Loader2,
-  CheckCircle,
-  AlertCircle,
   Pencil
 } from 'lucide-react'
 
@@ -598,69 +597,12 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
 
   return (
     <div className="w-72 border-r border-surface-200 bg-accent-50 flex flex-col h-full shrink-0">
-      {/* Export/Import Progress Modal */}
-      {progressInfo && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-modal p-6 w-80 text-center space-y-4 animate-scale-in">
-            {/* 加载动画 - 进行中时显示 */}
-            {!progressInfo.closable && (
-              <Loader2 className="w-8 h-8 animate-spin text-accent-600 mx-auto" />
-            )}
-
-            {/* 成功图标 */}
-            {progressInfo.closable && progressInfo.success && (
-              <CheckCircle className="w-8 h-8 text-green-600 mx-auto" />
-            )}
-
-            {/* 失败/完成图标（导出完成或导入失败） */}
-            {progressInfo.closable && !progressInfo.success && (
-              <AlertCircle className="w-8 h-8 text-red-500 mx-auto" />
-            )}
-
-            {/* 文本信息 */}
-            <div>
-              <p className="text-sm font-semibold text-surface-800">{progressInfo.action}</p>
-              <p className="text-xs text-surface-500 mt-1">{progressInfo.detail}</p>
-            </div>
-
-            {/* 进度条（如需要） */}
-            {progressInfo.percent != null && (
-              <div className="w-full bg-surface-200 rounded-full h-2 overflow-hidden">
-                <div
-                  className="bg-accent-600 h-full rounded-full transition-all duration-300"
-                  style={{ width: `${progressInfo.percent}%` }}
-                />
-              </div>
-            )}
-
-            {/* 确定/关闭按钮 - 仅在可关闭时显示 */}
-            {progressInfo.closable && (
-              <button
-                onClick={() => {
-                  if (progressInfo.onConfirm) {
-                    progressInfo.onConfirm()
-                  } else {
-                    setProgressInfo(null)
-                  }
-                }}
-                className="w-full px-4 py-2 bg-accent-600 text-white text-sm rounded-lg hover:bg-accent-700 transition-colors font-medium"
-              >
-                {t('confirm')}
-              </button>
-            )}
-
-            {/* 取消按钮 - 进行中且支持取消时显示 */}
-            {!progressInfo.closable && progressInfo.onCancel && (
-              <button
-                onClick={() => { progressInfo.onCancel && progressInfo.onCancel() }}
-                className="w-full px-4 py-2 bg-surface-100 text-surface-700 text-sm rounded-lg hover:bg-surface-200 transition-colors font-medium"
-              >
-                {progressInfo.cancelLabel || (language === 'zh' ? '取消' : 'Cancel')}
-              </button>
-            )}
-          </div>
-        </div>
-      )}
+      <ProgressModal
+        progressInfo={progressInfo}
+        setProgressInfo={setProgressInfo}
+        t={t}
+        language={language}
+      />
 
       {/* Logo */}
       <div className="p-4 border-b border-surface-200">
@@ -696,192 +638,33 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
         </button>
       </div>
 
-      {/* Session Browser Modal */}
-      {showSessionBrowser && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl shadow-modal w-full max-w-lg mx-4 max-h-[80vh] flex flex-col animate-scale-in">
-            <div className="p-4 border-b border-surface-200 flex items-center justify-between">
-              <h2 className="text-lg font-display font-semibold text-surface-800">
-                {language === 'zh' ? '选择会话' : 'Select Session'}
-              </h2>
-              <button
-                onClick={() => setShowSessionBrowser(false)}
-                className="p-1 text-surface-400 hover:text-surface-600 rounded"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            
-            <div className="p-4 flex-1 overflow-auto">
-              {loadingSessions ? (
-                <div className="text-center py-8 text-surface-500">
-                  <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2" />
-                  {language === 'zh' ? '加载中...' : 'Loading...'}
-                </div>
-              ) : sessionListError ? (
-                <div className="text-center py-8 text-red-500">
-                  <AlertCircle className="w-10 h-10 mx-auto mb-2 opacity-70" />
-                  <p className="text-sm">{language === 'zh' ? '加载会话列表失败' : 'Failed to load sessions'}</p>
-                  <button onClick={fetchSessions} className="mt-2 text-xs text-blue-500 hover:underline">
-                    {language === 'zh' ? '重试' : 'Retry'}
-                  </button>
-                </div>
-              ) : savedSessions.length === 0 ? (
-                <div className="text-center py-8 text-surface-500">
-                  <FolderOpen className="w-10 h-10 mx-auto mb-2 opacity-50" />
-                  <p>{language === 'zh' ? '没有已保存的会话' : 'No saved sessions'}</p>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {savedSessions.map((session) => (
-                    <div
-                      key={session.id}
-                      onClick={() => handleLoadSession(session.id)}
-                      className={`p-3 rounded-xl border cursor-pointer transition-all hover:border-accent-300 hover:bg-accent-50 ${
-                        currentSession?.id === session.id
-                          ? 'border-accent-500 bg-accent-50'
-                          : 'border-surface-200'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex-1 min-w-0">
-                          <h3 className="font-medium text-surface-800 truncate">
-                            {session.name}
-                          </h3>
-                          <div className="flex items-center gap-3 mt-1 text-xs text-surface-500">
-                            <span className="flex items-center gap-1">
-                              <Clock className="w-3 h-3" />
-                              {session.updated_at 
-                                ? new Date(session.updated_at).toLocaleDateString()
-                                : '-'}
-                            </span>
-                            <span className={`px-1.5 py-0.5 rounded text-xs ${
-                              session.status === 'completed' 
-                                ? 'bg-green-100 text-green-700'
-                                : session.status === 'running'
-                                  ? 'bg-blue-100 text-blue-700'
-                                  : 'bg-surface-100 text-surface-600'
-                            }`}>
-                              {session.status}
-                            </span>
-                            <span>R{session.current_round || 0}</span>
-                          </div>
-                          <div className="flex gap-2 mt-1.5">
-                            {session.has_pathology && (
-                              <span className="text-xs px-1.5 py-0.5 bg-pink-100 text-pink-700 rounded">
-                                {language === 'zh' ? '病理' : 'Path'}
-                              </span>
-                            )}
-                            {session.has_sequencing && (
-                              <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded">
-                                {language === 'zh' ? '测序' : 'Seq'}
-                              </span>
-                            )}
-                            {session.has_biochemistry && (
-                              <span className="text-xs px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded">
-                                {language === 'zh' ? '生化' : 'Bio'}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        {!isReadOnly && (
-                          <button
-                            onClick={(e) => handleDeleteSavedSession(session.id, e)}
-                            className="p-1.5 text-surface-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
-                            title={language === 'zh' ? '删除' : 'Delete'}
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-            
-            <div className="p-4 border-t border-surface-200 flex justify-between">
-              <button
-                onClick={fetchSessions}
-                className="px-3 py-2 text-sm text-surface-800 hover:bg-surface-100 rounded-lg flex items-center gap-1"
-              >
-                <RefreshCw className="w-4 h-4" />
-                {language === 'zh' ? '刷新' : 'Refresh'}
-              </button>
-              <button
-                onClick={() => setShowSessionBrowser(false)}
-                className="px-4 py-2 text-sm bg-surface-100 text-surface-700 rounded-lg hover:bg-surface-200"
-              >
-                {language === 'zh' ? '关闭' : 'Close'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <SessionBrowserModal
+        show={showSessionBrowser}
+        onClose={() => setShowSessionBrowser(false)}
+        language={language}
+        loadingSessions={loadingSessions}
+        sessionListError={sessionListError}
+        fetchSessions={fetchSessions}
+        savedSessions={savedSessions}
+        onLoadSession={handleLoadSession}
+        currentSessionId={currentSession?.id}
+        isReadOnly={isReadOnly}
+        onDeleteSession={handleDeleteSavedSession}
+      />
 
-      {/* New Session Form */}
-      {showNewSession && (
-        <div className="px-3 pb-3">
-          <div className="p-4 bg-surface-50 rounded-xl space-y-3 border border-surface-200">
-            <input
-              type="text"
-              value={sessionName}
-              onChange={(e) => setSessionName(e.target.value)}
-              placeholder={t('sessionNamePlaceholder')}
-              className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
-            />
-            <textarea
-              value={instruction}
-              onChange={(e) => setInstruction(e.target.value)}
-              placeholder={t('researchGoalPlaceholder')}
-              rows={12}
-              className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500 resize-y min-h-[200px]"
-            />
-            
-            {/* Round Wait Time Setting */}
-            <div className="p-3 bg-surface-50 rounded-lg border border-surface-200">
-              <div className="flex items-center gap-2 mb-2">
-                <Clock className="w-4 h-4 text-accent-600" />
-                <label className="text-sm font-medium text-surface-700">
-                  {language === 'zh' ? '轮次等待时间' : 'Round Wait Time'}
-                </label>
-              </div>
-              <select
-                value={roundWaitSeconds}
-                onChange={(e) => setRoundWaitSeconds(parseInt(e.target.value))}
-                className="w-full text-sm font-mono text-surface-700 bg-white px-3 py-1.5 rounded border border-surface-200 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
-              >
-                {ROUND_WAIT_OPTIONS.map(opt => (
-                  <option key={opt.value} value={opt.value}>
-                    {language === 'zh' ? opt.labelZh : opt.labelEn}
-                  </option>
-                ))}
-              </select>
-              <p className="text-xs text-surface-500 mt-2 leading-relaxed">
-                {language === 'zh'
-                  ? '💡 每轮分析后等待用户输入的时间，超时后自动继续'
-                  : '💡 Wait time for user input between rounds, auto-continues on timeout'}
-              </p>
-            </div>
-
-            <div className="flex gap-2">
-              <button
-                onClick={() => setShowNewSession(false)}
-                className="flex-1 px-3 py-2 text-sm text-surface-500 hover:bg-surface-100 rounded-lg"
-              >
-                {t('cancel')}
-              </button>
-              <button
-                onClick={handleCreateSession}
-                disabled={!instruction.trim()}
-                className="flex-1 px-3 py-2 text-sm bg-accent-600 text-white rounded-lg hover:bg-accent-700 disabled:opacity-50 font-medium"
-              >
-                {t('create')}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <NewSessionForm
+        show={showNewSession}
+        sessionName={sessionName}
+        setSessionName={setSessionName}
+        instruction={instruction}
+        setInstruction={setInstruction}
+        roundWaitSeconds={roundWaitSeconds}
+        setRoundWaitSeconds={setRoundWaitSeconds}
+        onCancel={() => setShowNewSession(false)}
+        onCreate={handleCreateSession}
+        t={t}
+        language={language}
+      />
 
       {/* Current Session + Spacer */}
       <div className="flex-1 min-h-0 flex flex-col">

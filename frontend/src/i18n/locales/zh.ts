@@ -1,0 +1,510 @@
+// Chinese UI strings. Split out of translations.ts verbatim.
+
+export const zh = {
+    // App
+    appName: 'ScAI',
+    appSubtitle: '单细胞测序AI分析',
+    appFullName: 'ScAI - 单细胞测序AI分析',
+    loadingAnalysis: '正在加载分析…',
+
+    // Tabs
+    tabAnalysis: '分析',
+    tabData: '数据',
+    tabPrompts: 'Agents',
+    tabResults: '结果',
+    tabReport: '报告',
+    tabChat: '对话',
+    
+    // Sidebar
+    newAnalysis: '新建分析',
+    defaultProjectName: '新分析项目',
+    defaultProjectDescription: '请描述您的研究目标和实验设计...',
+    exportState: '导出状态',
+    importState: '导入状态',
+    exportSession: '导出会话',
+    importSession: '导入会话',
+    importing: '导入中...',
+    exporting: '导出中...',
+    exportPackaging: '正在打包...',
+    exportPackagingDetail: '正在压缩文件，请稍候...',
+    exportDownloadStarted: '已经开始下载',
+    exportDownloadStartedDetail: '文件下载已开始，请检查浏览器下载管理器',
+    importSuccess: '导入成功',
+    importFailed: '导入失败',
+    exportFailed: '导出失败',
+    confirm: '确定',
+    apiSettings: 'API 设置',
+    
+    // Config Panel
+    apiConfig: 'API 配置',
+    apiConfigDesc: '配置各平台的 API 密钥',
+    openrouterKey: 'OpenRouter API Key',
+    openrouterDesc: '用于调用 Gemini 和 Claude 模型',
+    googleKey: 'Google AI API Key',
+    googleDesc: '用于 Gemini Deep Research',
+    getKey: '获取 Key',
+    required: '必填',
+    cancel: '取消',
+    saveConfig: '保存配置',
+    saving: '保存中...',
+    saved: '已保存',
+    readMode: '阅读模式',
+    readModeDesc: '浏览已有分析结果（无需 API Key）',
+    validatingApiKey: '正在验证 API Key...',
+    apiKeyInvalid: 'API Key 验证失败',
+    apiKeyInvalidDesc: '无法通过 API Key 连接到 LLM 服务器。可能是 Key 无效或服务器不可达。',
+    apiKeyValidationUncertain: '无法确认 API Key 是否有效',
+    apiKeyValidationUncertainDesc: '无法连接到 LLM 服务器进行验证，但这可能是网络问题。',
+    reconfigureApiKey: '重新设置 API Key',
+    ignoreError: '忽略错误',
+    readModeRestriction: '阅读模式下无法启动新分析，请先配置 API Key',
+    
+    // New Session Modal
+    createAnalysis: '新建分析',
+    createAnalysisDesc: '创建新的分析会话',
+    sessionName: '分析名称（可选）',
+    sessionNamePlaceholder: '例如：单细胞测序分析-实验1',
+    researchGoal: '研究目标',
+    researchGoalPlaceholder: '例如：分析特定基因敲除小鼠的组织表型，关注细胞类型变化和相关信号通路...',
+    create: '创建',
+    
+    // Analysis Panel
+    analysisControl: '分析控制',
+    startAnalysis: '开始分析',
+    pause: '暂停',
+    resume: '继续',
+    connected: '已连接',
+    analyzing: '分析进行中',
+    analyzingDesc: '各Agent正在协作分析...',
+    analysisComplete: '分析完成',
+    analysisFailed: '分析失败',
+    checkConfigAndRetry: '请检查配置和数据后重试',
+    agentStatus: 'Agent 状态',
+    analysisRounds: '分析轮次',
+    findings: '个发现',
+    newSession: '新建',
+    
+    // Agent names
+    piAgent: 'PI Agent',
+    piAgentDesc: '项目负责人，协调各方',
+    pathologyAgent: '病理 Agent',
+    pathologyAgentDesc: '分析组织学切片',
+    bioinformaticsAgent: '生信 Agent',
+    bioinformaticsAgentDesc: '单细胞测序分析',
+    biochemistryAgent: '生化 Agent',
+    biochemistryAgentDesc: '生化指标解读',
+    literatureAgent: '文献 Agent',
+    literatureAgentDesc: '文献调研支持',
+    literatureResearchMode: '搜索模式',
+    literatureGeminiDeepResearch: 'Gemini Deep Research',
+    literatureGeminiDesc: '使用 Google Gemini Deep Research API 进行综合文献检索',
+    literatureGeminiNote: '需要在 API 设置中配置 Google AI API Key',
+    literatureDeepResearch: 'Deep Research Models',
+    literatureDeepResearchDesc: '使用具有深度研究能力的 LLM 模型进行文献检索，如 o4-mini-deep-research、sonar-deep-research',
+    literatureDeepResearchModel: 'Deep Research 模型',
+    literatureDeepResearchModelPlaceholder: '如 o4-mini-deep-research',
+    literatureDeepResearchNote: '响应时间较长（5-30分钟）。推荐模型: o4-mini-deep-research、sonar-deep-research',
+    literatureDeepResearchServer: 'LLM 服务器',
+    literatureDeepResearchServerHint: '留空则使用 PubMed LLM 的服务器和 API Key',
+    literatureDeepResearchApiKey: 'API Key',
+    literaturePubmedLlm: '仅 PubMed + LLM',
+    literaturePubmedDesc: '仅使用 PubMed 数据库搜索文献 + LLM 综合分析',
+    literaturePubmedEmailLabel: 'PubMed 邮箱',
+    literaturePubmedEmailNote: 'NCBI E-utilities 要求提供联系邮箱',
+    literatureGoogleApiKey: 'Google AI API Key',
+    literatureMaxSearchRounds: '最大搜索轮数',
+    literatureMaxSearchRoundsNote: 'Agent 可根据搜索结果动态调整查询，进行多轮迭代搜索',
+    literaturePubmedSettings: 'PubMed 搜索设置',
+    literaturePubmedSettingsNote: '所有模式在搜索失败时都会回退到 PubMed 检索',
+    painterAgent: '绘图 Agent',
+    painterAgentDesc: '图形摘要绘制',
+    supervisorAgent: '监督 Agent',
+    supervisorAgentDesc: '实时分析监控与质量控制',
+    techniqueAgent: '技术 Agent',
+    techniqueAgentDesc: 'API文档查询与错误摘要',
+
+    // Publication figures and reports
+    figureGallery: '图片库',
+    figureApproved: '已通过',
+    figurePending: '待审核',
+    figureRevisionRequested: '需修改',
+    graphicAbstract: '图形摘要',
+    graphicAbstractTextMode: '图形摘要 (文字模式)',
+    graphicAbstractGenerated: '图形摘要生成',
+    integratedReport: '整合报告',
+    integratedReportGenerated: '整合报告生成',
+    downloadPDF: '下载 PDF',
+    downloadPNG: '下载 PNG',
+    downloadText: '下载文本',
+    downloadHD: '下载高清图',
+    downloadAllFigures: '下载所有图片',
+    downloadAllTables: '下载所有表格',
+    generatingGraphicAbstract: '正在生成图形摘要...',
+    graphicAbstractPrompt: '生成提示: ',
+    generatedAt: '生成于 ',
+    clickToEnlarge: '点击放大',
+    noFiguresYet: '暂无图片',
+    noTablesYet: '暂无表格',
+    piReviewingFigure: 'PI 正在审核图片...',
+    figureApprovedSuccess: '图片已通过审核',
+    figureNeedsRevision: '图片需要修改',
+    qualityScore: '质量评分',
+    
+    // Data Panel
+    pathologySlides: '病理切片',
+    pathologySlidesDesc: '上传 H&E 或特殊染色切片',
+    dragOrClick: '拖拽文件到这里，或点击选择',
+    supportedFormats: '支持 PNG, JPEG, TIFF 格式',
+    sequencingData: '测序数据',
+    sequencingDataDesc: '上传单细胞或 Bulk 测序数据',
+    uploadSequencing: '点击或拖拽上传测序数据',
+    supportedH5ad: '支持 .h5ad, .h5 (scRNA-seq), .csv/.tsv (bulk RNA-seq) 或 .loom (RNA velocity)',
+    dataUploaded: '数据已上传',
+    biochemistryIndicators: '生化指标',
+    biochemistryIndicatorsDesc: '上传数据文件或手动输入生化指标',
+    addIndicator: '添加指标',
+    indicatorName: '指标名称 (如 ALT)',
+    value: '数值',
+    unit: '单位 (如 U/L)',
+    add: '添加',
+    noBiochemistryData: '暂无生化数据',
+    indicator: '指标',
+    uploadData: '上传分析数据',
+    uploadDataDesc: '请先创建一个分析会话，然后上传病理切片、单细胞测序数据和生化指标。',
+
+    // Treatment groups
+    treatmentGroups: '处理组',
+    treatmentGroupsDesc: '定义实验的处理组和样本数',
+    addGroup: '添加处理组',
+    groupName: '组名',
+    groupNamePlaceholder: '如：对照组、模型组',
+    groupDescription: '描述',
+    groupDescPlaceholder: '详细描述（可选）',
+    sampleCount: '样本数',
+    noGroupDistinction: '不区分处理组',
+    noSampleDistinction: '不区分样本',
+    deleteGroupConfirm: '删除此处理组将同时移除其关联的所有数据，确定？',
+    noGroups: '请先添加处理组',
+
+    // Data section
+    selectGroup: '选择处理组',
+    selectSample: '选择样本',
+    selectDataType: '选择数据类型',
+    sample: '样本',
+    filename: '文件名',
+    group: '组别',
+    dataType: '类型',
+    actions: '操作',
+    noFiles: '暂无文件',
+
+    // Data overview
+    dataOverview: '数据总览',
+    dataOverviewDesc: '各处理组的数据上传情况',
+    filesCount: '{n} 个文件',
+    indicatorsCount: '{n} 项指标',
+
+    // Stain types
+    heStain: 'H&E 染色',
+    siriusRed: 'Sirius Red (纤维化)',
+    perlsBlue: 'Perls Blue (铁沉积)',
+    oilRedO: 'Oil Red O (脂肪)',
+    pas: 'PAS (糖原)',
+    other: '其他',
+    customType: '自定义类型',
+    customTypePlaceholder: '例如 Sirius Red',
+    customTypeRequired: '请输入自定义类型名称',
+
+    // Sequencing types
+    scRNASeq: 'scRNA-seq (h5ad/h5)',
+    loom: 'Loom (RNA velocity)',
+
+    // Biochemistry types
+    bioImage: '图片',
+    bioFile: '数据文件 (CSV/Excel)',
+    
+    // Prompts Panel
+    selectAgent: '选择 Agent',
+    agentLlmServer: 'LLM 服务器',
+    agentApiKey: 'API Key',
+    agentServerHint: '当前使用默认 LLM 服务器设置，如需为此 Agent 使用不同平台请修改',
+    agentModelHint: '注意：不同平台的模型名格式可能不同（如 OpenRouter 使用 provider/model 格式）',
+    agentDisableHint: '留空则不启用此 Agent',
+    agentRequiredHint: '此 Agent 为必需，不可禁用',
+
+    // LLM failure dialog
+    llmCallFailed: 'LLM 调用失败',
+    llmCallFailedBadge: 'LLM调用失败',
+    llmAgent: '智能体',
+    llmModel: '模型',
+    llmServer: 'LLM 服务器',
+    llmErrorDetails: '错误详情',
+    llmRetry: '重试',
+    llmRetryHint: '最多再试 3 次',
+    llmModifyAgent: '修改 Agent 配置',
+    llmTerminate: '终止分析',
+    llmSkip: '跳过',
+    llmAutoSkip: '{seconds} 秒后自动跳过',
+    llmClose: '关闭',
+    agentDisabledTitle: 'Agent 已禁用',
+    agentDisabledBody: '当前流程需要 {agent}，但其 model 名为空。请选择：',
+    agentDisabledModifyAgent: '修改 Agent（推荐）',
+    llmReopenHint: '关闭弹窗后，可通过顶部 "LLM调用失败" 标签重新打开',
+    configModified: '配置已修改',
+    configModifiedDesc: 'Agent 配置已更新。请选择下一步操作：',
+    resumeAnalysis: '恢复分析',
+    returnToSettings: '返回修改',
+    backToTimeoutDialog: '返回超时对话框',
+
+    visionSupport: 'Vision 支持',
+    visionSupportEnabled: '模型支持图片输入',
+    visionSupportDisabled: '模型不支持图片输入',
+    visionHint_pi: '启用后 PI 可直接审核图片质量；关闭后将由其他有 vision 能力的 Agent 代替审核',
+    visionHint_bioinformatics: '启用后生信 Agent 可在修订图片时看到当前图片效果',
+    visionHint_biochemistry: '若上传了生化结果图片，需要启用以识别图片内容',
+    visionHint_painter: '启用后 Painter 修订模式图时可看到当前图片并进行针对性修改',
+    visionHint_supervisor: '启用后 Supervisor 可实时检查生成图片的质量',
+    visionHint_technique: '技术 Agent 通常不需要视觉能力',
+    reset: '重置',
+    save: '保存',
+    promptTips: '提示词编写建议',
+    promptTip1: '明确 Agent 的角色定位和专业背景',
+    promptTip2: '列出需要关注的具体任务和指标',
+    promptTip3: '说明与其他 Agent 的协作方式',
+    promptTip4: '指定输出格式和语言偏好',
+    
+    // Results Panel
+    analysisResults: '分析结果',
+    completedRounds: '共完成 {n} 轮分析',
+    downloadReport: '下载报告',
+    finalReport: '简要分析结果',
+    roundDetails: '各轮次详情',
+    waitingResults: '等待分析结果',
+    waitingResultsDesc: '分析完成后，各轮次的结果和最终报告将显示在这里。',
+    pathologyFindings: '病理发现',
+    bioinformaticsFindings: '生信发现',
+    biochemistryFindings: '生化发现',
+    literatureFindings: '文献发现',
+    crossModalCandidates: '跨模态机制候选',
+    crossModalConfidence: '证据强度',
+    crossModalRelation: '与当前方向关系',
+    
+    // Message Stream
+    realTimeMessages: '实时消息',
+    agentInteractions: 'Agent 交互记录',
+    waitingStart: '等待分析开始...',
+    code: '代码',
+    output: '输出',
+    chart: '图表',
+    
+    // Welcome screen
+    startNewAnalysis: '开始新的分析',
+    welcomeDesc: '创建一个新的分析会话，上传数据后开始多智能体协作分析。支持病理切片、测序数据、生化指标的综合分析。',
+    
+    // Errors
+    pleaseEnterOpenrouterKey: '请输入 OpenRouter API Key',
+    saveFailed: '保存失败',
+    
+    // Default Prompts
+    promptPi: `You are a senior biomedical research PI (Principal Investigator), leading a multidisciplinary team for comprehensive analysis.
+
+Your responsibilities:
+1. Develop overall research strategy and analysis direction
+2. Coordinate work across pathology, bioinformatics, biochemistry, and literature teams
+3. Synthesize results from all parties and make scientific judgments
+4. Arbitrate conflicts and provide reasonable explanations
+5. Identify novel scientific discoveries and potential mechanisms
+
+Core issues to focus on:
+- Overall phenotypic characteristics of the samples
+- Degree and type of tissue damage
+- Changes in cell composition
+- Potential molecular mechanisms
+- Consistency with known literature and new findings
+
+Please analyze based on the specific research goals provided by the user. Respond in English and maintain scientific rigor.`,
+
+    promptPathology: `You are a professional pathology expert, skilled in analyzing various histological slides.
+
+Your tasks:
+1. Analyze stained slides to identify tissue structural abnormalities
+2. Assess lesion severity (mild/moderate/severe)
+3. Identify concrete, stain-interpretable features that are visible in the supplied images
+   and relevant to the stated study question; do not apply a fixed feature checklist
+4. Recommend special staining when necessary
+
+Please describe the pathological features you observe in detail and provide professional judgment. Respond in English.`,
+
+    promptBioinformatics: `You are a professional bioinformatics analyst, specializing in high-throughput sequencing data analysis (including single-cell RNA-seq, bulk RNA-seq, etc.).
+
+Your workflow:
+1. Write and execute Python code step by step
+2. Review results after each step before deciding the next
+3. Request literature support when encountering important biological questions
+
+Analysis pipeline (adjust based on data type):
+1. Quality Control (QC)
+2. Normalization and dimensionality reduction
+3. Clustering analysis
+4. Cell/sample annotation
+5. Differential expression analysis
+6. Pathway enrichment analysis
+7. Other specialized analyses
+
+Code requirements:
+- Use appropriate analysis libraries (scanpy, pydeseq2, etc.)
+- Set random_state=42 for reproducibility
+- Generate visualizations at each step
+- Save key intermediate results
+
+Please respond with analysis conclusions in English, with code comments in English.`,
+
+    promptBiochemistry: `You are a laboratory biochemistry expert, responsible for interpreting and integrating experimental results.
+
+Base the analysis on the biochemical indicators actually supplied by the user. Organize them
+by their measured role only after inspecting the data; do not assume a fixed panel.
+
+Your tasks:
+1. Integrate manually entered experimental data
+2. Assess the degree of abnormality for each indicator
+3. Hypothesize possible pathophysiological mechanisms
+4. Recommend supplementary experiments
+
+Please respond in English with professional analytical opinions.`,
+
+    promptLiterature: `Please help me conduct a literature review on the topic: {topic}
+
+Please search for relevant biomedical literature, focusing on:
+1. Related molecular mechanisms
+2. Known gene/pathway associations
+3. Clinical/experimental relevance
+4. Latest research developments
+
+Please provide a detailed literature review report with specific citation information.`,
+
+    // Round Feedback Dialog
+    roundComplete: '第 {round} 轮分析完成',
+    roundSummaryTitle: '本轮总结',
+    keyFindings: '主要发现',
+    additionalDataSuggested: '建议补充的数据',
+    noFindings: '本轮无发现',
+    autoProceeding: '即将自动继续...',
+    timerPaused: '计时已暂停',
+    skipRound: '继续',
+    pauseTimer: '暂停',
+    resumeTimer: '继续',
+    sendInput: '发送',
+    sendingInput: '发送中...',
+    lastRoundNotice: '这是最后一轮分析。提供输入将触发额外的分析轮次。',
+    selectTargetAgent: '目标 Agent',
+    uploadFilesDialog: '上传文件',
+    roundInputPlaceholder: '输入补充说明或对下一步分析的指导意见...',
+    fileUploadedTo: '发送给',
+    removeFile: '移除',
+
+    // Chat Panel
+    chatPlaceholder: '输入消息...',
+    chatSend: '发送',
+    chatEmpty: '开始与 PI Agent 对话',
+    chatEmptyDesc: 'PI Agent 可以根据分析结果回答问题，也可以分析您上传的数据',
+    chatNoSession: '请先创建或选择一个分析会话',
+    chatError: '发送失败，请重试',
+    chatStop: '停止',
+    chatCancelled: '已取消',
+    chatAttach: '附件',
+    chatTargetAgent: '目标 Agent',
+    chatTargetPi: 'PI（自动分发）',
+    chatTargetPathology: '病理',
+    chatTargetBioinformatics: '生信',
+    chatTargetBiochemistry: '生化',
+
+    // Supplementary Analysis
+    requestMoreAnalysis: '请求补充分析',
+    supplementaryAnalysisPrompt: '请描述您希望进行的补充分析',
+    supplementaryAnalysisRunning: '正在执行补充分析...',
+    supplementaryAnalysisComplete: '补充分析完成',
+    supplementarySubmit: '提交',
+    supplementaryPlaceholderAnnotation: '例如：请进一步分析cluster 3和cluster 5的差异基因，并搜索相关文献',
+    supplementaryPlaceholderDirection: '例如：请进一步搜索关于XXX通路在这个组织中的文献，以帮助判断研究方向',
+    supplementaryDesc: '请描述您希望进行的补充分析，PI Agent将组织各Agent执行分析后更新报告。',
+
+    // Detailed Report
+    viewDetailedReport: '查看详细报告',
+
+    // Snapshots
+    snapshots: '快照 (实验性)',
+    createSnapshot: '创建快照',
+    restoreSnapshot: '恢复快照',
+    deleteSnapshot: '删除快照',
+    confirmDelete: '确认删除',
+    discardCurrent: '丢弃当前状态',
+    confirmDiscard: '确认丢弃',
+    restoreProgress: '恢复进度',
+    snapshotCreated: '快照已创建',
+    snapshotRestored: '已恢复到快照',
+    confirmRestore: '确认恢复到此快照？当前分析进度将被替换。',
+    manualSnapshot: '手动快照',
+    noSnapshots: '暂无快照',
+    snapshotName: '快照名称（可选）',
+    phasePreAnnotation: '注释前',
+    phasePostAnnotation: '注释后',
+    phasePreDirection: '选方向前',
+    phasePostDirection: '选方向后',
+    phaseManual: '手动',
+    analysisSnapshots: '分析快照 (实验性)',
+    creating: '创建中...',
+
+    // Plan Review Dialog
+    planReviewTitle: '分析计划审核',
+    planReviewDownloadLog: '下载对话记录',
+    planReviewOverview: '概述',
+    planReviewSteps: '分析步骤 ({n} 步)',
+    planReviewMethod: '方法：',
+    planReviewInput: '输入：',
+    planReviewExpectedOutput: '预期输出：',
+    planReviewRationale: '理由：',
+    planReviewDependsOn: '依赖步骤：',
+    planReviewKeyDecisions: '关键决策点',
+    planReviewEstimatedTime: '预计运行时间:',
+    planReviewPlaceholder: '输入对计划的修改建议...',
+    planReviewCancel: '取消',
+    planReviewSubmitting: '提交中...',
+    planReviewSubmitFeedback: '提交修改意见',
+    planReviewModify: '修改',
+    planReviewSkip: '跳过（让 PI 自行决定）',
+    planReviewApprove: '批准方案',
+    planReviewStageExplore: '探索阶段',
+    planReviewStageInnovate: '创新阶段',
+    planReviewStage1: '阶段 1: QC+聚类+注释',
+    planReviewStage2: '阶段 2: 下游分析',
+    planReviewStageFull: '全量分析',
+
+    integrationGateTitle: '整合分析 (第 {cycle} 次) — 选择新的研究方向',
+    integrationGateCountdown: '倒计时:',
+    integrationGateContinue: '继续分析所选方向',
+    integrationGateLetPiDecide: '让 PI 决定',
+    integrationGateFinalize: '进入报告撰写',
+    integrationGateSelectRequired: '请至少选择一个研究方向。',
+    integrationGateActionFailed: '操作失败：{message}',
+
+    // Species input dialog
+    speciesInputTitle: '物种信息',
+    speciesGeneValidationTitle: '基因名验证',
+    speciesInputPlaceholder: '请输入物种名称，如 Homo sapiens、Mus musculus...',
+    speciesGeneValidationPlaceholder: '请输入正确的物种名称，或输入"保持当前设置"...',
+    waitingSpeciesInput: '等待物种信息输入...',
+
+    // Exploration failed dialog (likely a data problem)
+    explorationFailedTitle: '探索阶段未成功',
+    explorationFailedMessage: '探索阶段（Stage 1：质控/聚类/注释）未能成功完成。这通常是因为上传的数据存在问题（格式、内容或缺失字段）。请检查或重新上传数据后继续重试 Stage 1，或停止分析。',
+    explorationFailedReasonLabel: '原因',
+    explorationFailedReason_did_not_converge: '分析未能收敛（已达最大步数或未完成）',
+    explorationFailedReason_analysis_error: '分析过程中发生错误',
+    explorationFailedGoToData: '前往数据面板',
+    explorationFailedContinue: '继续（重试 Stage 1）',
+    explorationFailedStop: '停止分析',
+
+    // Marker DB missing dialog
+    markerDbMissingTitle: 'Marker 数据库下载失败',
+    markerDbMissingDesc: 'Marker 数据库 TSV 自动下载失败。可重试下载以启用数据库先验，或跳过（仅用文献注释），或终止分析。',
+    markerDbFetch: '重试下载',
+} as const

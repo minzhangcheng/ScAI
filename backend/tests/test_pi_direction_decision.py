@@ -1,13 +1,12 @@
 """Tests for PI direction candidate generation, scoring, and selection (Task 3)."""
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from backend.agents.pi_agent import PIAgent
+from backend.tests.split_facade import split_source
 
-
-SRC = Path("backend/agents/pi_agent.py").read_text()
+SRC = split_source("backend.agents.pi_agent")
 
 
 def _make_pi_agent():

@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -9,8 +8,9 @@ from backend.agents.pi_agent import (
     _normalize_integration_scored_candidates,
 )
 from backend.models.schemas import ExplorationReport
+from backend.tests.split_facade import split_source
 
-SRC = Path("backend/agents/pi_agent.py").read_text()
+SRC = split_source("backend.agents.pi_agent")
 
 
 def _make_pi_agent():

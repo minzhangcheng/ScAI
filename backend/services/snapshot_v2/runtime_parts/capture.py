@@ -1,0 +1,589 @@
+# RuntimeCapture: drives kernel-side capture of the live analysis runtime.
+# Moved verbatim out of backend/services/snapshot_v2/runtime.py.
+"""Runtime capture for Snapshot V2.
+
+Owns kernel introspection, required-set assembly via the canonical registry,
+and authoritative serializer success (h5ad + dill).
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import uuid
+from pathlib import Path
+
+from backend.services.snapshot_v2.errors import SnapshotCaptureError
+from backend.utils.error_parsing import strip_ansi
+from backend.services.snapshot_v2.models import (
+    ObjectRef,
+    RuntimeDependencyManifest,
+    RuntimeManifest,
+    RuntimeSkip,
+    empty_complete_runtime,
+)
+from backend.services.snapshot_v2.object_store import ObjectStore
+from backend.services.snapshot_v2.paths import SnapshotV2Paths
+from backend.services.snapshot_v2.runtime_names import (
+    runtime_h5ad_path,
+    validate_runtime_global_name,
+)
+from backend.services.snapshot_v2.runtime_registry import (
+    build_required_runtime_manifest,
+    is_known_unpersistable_residual,
+)
+
+
+# Re-export for existing imports / tests.
+
+from .kernel_templates import _INTROSPECT_CODE, _SAVE_ANNDATA_TEMPLATE, _SAVE_DILL_TEMPLATE
+from .proof import RUNTIME_CAPTURE_FREE_SPACE_RESERVE_BYTES, _parse_dill_name_line, _parse_dill_saved_names, _parse_dill_skipped, _parse_dill_verified_names, _validate_h5ad_file
+
+
+class RuntimeCapture:
+    FREE_SPACE_RESERVE_BYTES: int = RUNTIME_CAPTURE_FREE_SPACE_RESERVE_BYTES
+
+    def __init__(self, object_store: ObjectStore, paths: SnapshotV2Paths):
+        self._object_store = object_store
+        self._paths = paths
+
+    def mark_runtime_committed(self, sandbox, runtime_revision: int | None = None) -> None:
+        """Signals that the current runtime generation has been committed.
+
+        Called after a successful snapshot capture transaction. Sets
+        ``saved_runtime_revision`` on the sandbox to the frozen
+        ``runtime_revision`` (or current if not provided) so subsequent
+        captures can detect drift.
+        """
+        if runtime_revision is None:
+            runtime_revision = sandbox.runtime_revision
+        sandbox.saved_runtime_revision = runtime_revision
+
+    async def _run_kernel(
+        self,
+        sandbox,
+        code: str,
+        *,
+        exec_lock_held: bool = False,
+    ):
+        """Execute trusted capture code; use unlocked path when lock already held."""
+        if exec_lock_held:
+            unlocked = getattr(sandbox, "_execute_unlocked", None)
+            if unlocked is not None and callable(unlocked):
+                # MagicMock auto-attrs are callable but not coroutine functions;
+                # only use when the call returns an awaitable.
+                try:
+                    maybe = unlocked(
+                        code, save_to_history=False, skip_safety_check=True
+                    )
+                except TypeError:
+                    maybe = None
+                if hasattr(maybe, "__await__"):
+                    return await maybe
+                # Non-awaitable (e.g. MagicMock default) — fall through to execute.
+        return await sandbox.execute(
+            code, save_to_history=False, skip_safety_check=True
+        )
+
+
+    async def _introspect_globals(self, sandbox, *, exec_lock_held: bool = False) -> dict[str, str]:
+        result = await self._run_kernel(
+            sandbox, _INTROSPECT_CODE, exec_lock_held=exec_lock_held
+        )
+        if not result.success:
+            raise SnapshotCaptureError(
+                "RUNTIME_INTROSPECT_FAILED",
+                f"Kernel globals introspection failed: {strip_ansi(result.error or '')}",
+            )
+        output = result.output or ""
+        begin_marker = "__RUNTIME_GLOBALS_BEGIN__"
+        end_marker = "__RUNTIME_GLOBALS_END__"
+        start = output.find(begin_marker)
+        if start == -1:
+            raise SnapshotCaptureError(
+                "RUNTIME_INTROSPECT_PARSE_ERROR",
+                f"Cannot find globals marker in output: {output[:500]}",
+            )
+        start += len(begin_marker)
+        end = output.find(end_marker, start)
+        if end == -1:
+            raise SnapshotCaptureError(
+                "RUNTIME_INTROSPECT_PARSE_ERROR",
+                "Missing end marker in introspection output",
+            )
+        json_str = output[start:end].strip()
+        if not json_str:
+            raise SnapshotCaptureError(
+                "RUNTIME_INTROSPECT_PARSE_ERROR",
+                "Empty globals payload between markers",
+            )
+        try:
+            parsed = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            raise SnapshotCaptureError(
+                "RUNTIME_INTROSPECT_PARSE_ERROR",
+                f"Failed to parse globals JSON: {e}",
+                details={"json_snippet": json_str[:500]},
+            ) from e
+        if not isinstance(parsed, dict):
+            raise SnapshotCaptureError(
+                "RUNTIME_INTROSPECT_PARSE_ERROR",
+                f"Globals payload is not a dict: {type(parsed).__name__}",
+            )
+        return {str(k): str(v) for k, v in parsed.items()}
+
+    async def _capture_adata(
+        self, sandbox, var_name: str, type_str: str, capture_dir: Path,
+        *, exec_lock_held: bool = False,
+    ) -> ObjectRef:
+        var_name = validate_runtime_global_name(var_name)
+        h5ad_path = runtime_h5ad_path(capture_dir, var_name)
+        code = _SAVE_ANNDATA_TEMPLATE.format(
+            var_name_repr=var_name,
+            h5ad_path_repr=str(h5ad_path),
+        )
+        result = await self._run_kernel(
+            sandbox, code, exec_lock_held=exec_lock_held
+        )
+        if not result.success:
+            raise SnapshotCaptureError(
+                "required_runtime_unpersistable",
+                (
+                    f"AnnData variable '{var_name}' (type={type_str or 'unknown'}, "
+                    f"serializer=h5ad) write failed: {strip_ansi(result.error or '')}"
+                ),
+                details={
+                    "name": var_name,
+                    "type": type_str,
+                    "serializer": "h5ad",
+                },
+            )
+        if not h5ad_path.exists():
+            raise SnapshotCaptureError(
+                "required_runtime_unpersistable",
+                (
+                    f"AnnData variable '{var_name}' (type={type_str or 'unknown'}, "
+                    f"serializer=h5ad) could not be serialized to h5ad"
+                ),
+                details={
+                    "name": var_name,
+                    "type": type_str,
+                    "serializer": "h5ad",
+                },
+            )
+        _validate_h5ad_file(h5ad_path)
+        try:
+            put_result = self._object_store.put_file(h5ad_path, "application/x-hdf5")
+            ref = put_result.ref
+        except SnapshotCaptureError:
+            raise
+        except Exception as e:
+            raise SnapshotCaptureError(
+                "required_runtime_unpersistable",
+                (
+                    f"AnnData variable '{var_name}' (type={type_str or 'unknown'}, "
+                    f"serializer=h5ad) object store put failed: {e}"
+                ),
+                details={
+                    "name": var_name,
+                    "type": type_str,
+                    "serializer": "h5ad",
+                },
+            ) from e
+        h5ad_path.unlink(missing_ok=True)
+        return ref
+
+
+    async def _capture_residual_dill(
+        self,
+        sandbox,
+        var_names: list[str],
+        type_by_name: dict[str, str],
+        capture_dir: Path,
+        *,
+        exec_lock_held: bool = False,
+    ) -> tuple[ObjectRef | None, list[str], list[str]]:
+        """Return (ref, saved_names, skipped_names)."""
+        if not var_names:
+            return None, [], []
+        var_names = [validate_runtime_global_name(name) for name in var_names]
+        dill_path = capture_dir / "residual.pkl"
+        code = _SAVE_DILL_TEMPLATE.format(
+            names_repr=var_names,
+            dill_path_repr=str(dill_path),
+        )
+        result = await self._run_kernel(
+            sandbox, code, exec_lock_held=exec_lock_held
+        )
+        output = result.output or ""
+        skipped = _parse_dill_skipped(output)
+        saved = _parse_dill_saved_names(output)
+        saved_proof = _parse_dill_name_line(output, "__DILL_SAVED_NAMES__:")
+        verified = _parse_dill_verified_names(output)
+        if not result.success:
+            # Treat whole batch as unpersistable for required names.
+            return None, saved, list(var_names)
+        if not dill_path.exists():
+            return None, saved, list(set(var_names) - set(saved)) or list(var_names)
+        # Current capture requires structural output and an in-kernel readback
+        # proof. Output loss must never be interpreted as successful capture.
+        if saved_proof is None or verified is None or verified != saved:
+            dill_path.unlink(missing_ok=True)
+            return None, [], list(var_names)
+        put_result = self._object_store.put_file(dill_path, "application/octet-stream")
+        ref = put_result.ref
+        dill_path.unlink(missing_ok=True)
+        return ref, saved, skipped
+
+    def _raise_unpersistable(
+        self, name: str, type_str: str, serializer: str, reason: str
+    ) -> None:
+        raise SnapshotCaptureError(
+            "required_runtime_unpersistable",
+            (
+                f"Required variable '{name}' (type={type_str or 'unknown'}, "
+                f"serializer={serializer}) {reason}"
+            ),
+            details={
+                "name": name,
+                "type": type_str,
+                "serializer": serializer,
+            },
+        )
+
+    async def capture(
+        self,
+        sandbox,
+        workflow_state: dict | None = None,
+        declared_outputs: set[str] | None = None,
+        checkpoint_dependencies: set[str] | None = None,
+        kernel_present: bool | None = None,
+        *,
+        exec_lock_held: bool = False,
+    ) -> RuntimeManifest:
+        """Capture required runtime dependencies from a live sandbox.
+
+        Returns a :class:`RuntimeManifest` directly (no transitional wrapper).
+
+        ``kernel_present``:
+          - ``False``: empty required set is accepted as complete (no runtime refs).
+          - ``True``/``None`` with live kernel: empty required set is fail-closed.
+
+        ``exec_lock_held``:
+          When True, caller already holds ``sandbox._exec_lock``; use
+          ``_execute_unlocked`` to avoid non-reentrant asyncio.Lock deadlock.
+        """
+        if kernel_present is None:
+            kernel_present = getattr(sandbox, "km", None) is not None
+
+        # No live kernel: do not introspect; empty complete is valid.
+        if kernel_present is False:
+            # Still allow declared/checkpoint names to force a required set, but
+            # without a kernel they cannot be captured.
+            dep_manifest = build_required_runtime_manifest(
+                globals_meta={},
+                persistent_outputs=declared_outputs,
+                checkpoint_dependencies=checkpoint_dependencies,
+            )
+            if dep_manifest.required:
+                missing = sorted(dep_manifest.required)
+                raise SnapshotCaptureError(
+                    "required_runtime_unpersistable",
+                    (
+                        "Required runtime values declared but no live kernel "
+                        f"present to capture them: {missing}"
+                    ),
+                    details={"names": missing},
+                )
+            return empty_complete_runtime()
+
+        globals_meta = await self._introspect_globals(
+            sandbox, exec_lock_held=exec_lock_held
+        )
+
+        dep_manifest = build_required_runtime_manifest(
+            globals_meta=globals_meta,
+            persistent_outputs=declared_outputs,
+            checkpoint_dependencies=checkpoint_dependencies,
+        )
+        required = set(dep_manifest.required)
+
+        if not required:
+            # Live kernel + empty required set is fail-closed: registry and
+            # introspection must be authoritative; empty is only valid when
+            # kernel_present=False.
+            raise SnapshotCaptureError(
+                "NO_RUNTIME_VARIABLES",
+                "No runtime variables found to capture from live kernel",
+            )
+
+        capture_dir = self._paths.staging / f"rtcap_{uuid.uuid4().hex[:12]}"
+        capture_dir.mkdir(parents=True, exist_ok=True)
+
+        captured_adata_refs: dict[str, ObjectRef] = {}
+        captured_residual_vars: list[str] = []
+        captured_residual_ref: ObjectRef | None = None
+        incidental_skips: list[RuntimeSkip] = []
+
+        # Names that are continuation-critical (checkpoint dependencies) must
+        # fail closed when absent from globals. Advisory declared names (e.g. an
+        # LLM-declared persistent output that was later `del`-eted) cannot be
+        # captured if they are gone, and failing closed on them would permanently
+        # brick every snapshot. Those are soft-skipped instead.
+        mandatory_names = set(checkpoint_dependencies or set())
+
+        # Pruned required set drives the completeness proof; soft-skipped absent
+        # advisory names are removed from it and recorded as incidental skips.
+        pruned_required = dict(dep_manifest.required)
+
+        def _soft_skip_absent(name: str, serializer: str) -> None:
+            type_str = dep_manifest.required[name].type_name
+            incidental_skips.append(
+                RuntimeSkip(
+                    name=name,
+                    type_name=type_str,
+                    reason=(
+                        f"declared runtime dependency absent from kernel globals "
+                        f"at capture (serializer={serializer}); soft-skipped"
+                    ),
+                )
+            )
+            pruned_required.pop(name, None)
+
+        try:
+            # Partition required names into h5ad vs dill based on dependency serializer.
+            h5ad_names: list[str] = []
+            dill_names: list[str] = []
+            for name, dep in dep_manifest.required.items():
+                if dep.serializer == "h5ad":
+                    h5ad_names.append(name)
+                else:
+                    dill_names.append(name)
+
+            for var_name in sorted(h5ad_names):
+                type_str = globals_meta.get(var_name, dep_manifest.required[var_name].type_name)
+                if var_name not in globals_meta:
+                    if var_name in mandatory_names:
+                        self._raise_unpersistable(
+                            var_name, type_str, "h5ad", "not found in kernel globals"
+                        )
+                    _soft_skip_absent(var_name, "h5ad")
+                    continue
+                try:
+                    ref = await self._capture_adata(
+                        sandbox, var_name, type_str, capture_dir,
+                        exec_lock_held=exec_lock_held,
+                    )
+                except SnapshotCaptureError:
+                    raise
+                except Exception as e:
+                    self._raise_unpersistable(
+                        var_name, type_str, "h5ad", f"capture failed: {e}"
+                    )
+                captured_adata_refs[var_name] = ref
+
+            # Drop absent advisory dill names (soft-skip); keep absent mandatory
+            # names so the fail-closed check below still raises for them.
+            # Also pre-skip present advisory names with known-unpersistable types
+            # (e.g. LoomConnection file handles) so they never brick capture.
+            present_dill_names: list[str] = []
+            for var_name in sorted(dill_names):
+                type_str = globals_meta.get(
+                    var_name, dep_manifest.required[var_name].type_name
+                )
+                if var_name not in globals_meta and var_name not in mandatory_names:
+                    _soft_skip_absent(var_name, "dill")
+                    continue
+                if (
+                    var_name not in mandatory_names
+                    and var_name in globals_meta
+                    and is_known_unpersistable_residual(type_str)
+                ):
+                    incidental_skips.append(
+                        RuntimeSkip(
+                            name=var_name,
+                            type_name=type_str,
+                            reason=(
+                                "known unpersistable residual type; soft-skipped "
+                                f"(serializer=dill): {type_str}"
+                            ),
+                        )
+                    )
+                    pruned_required.pop(var_name, None)
+                    continue
+                present_dill_names.append(var_name)
+
+            residual_names = sorted(present_dill_names)
+            if residual_names:
+                for var_name in residual_names:
+                    if var_name not in globals_meta:
+                        type_str = dep_manifest.required[var_name].type_name
+                        self._raise_unpersistable(
+                            var_name, type_str, "dill", "not found in kernel globals"
+                        )
+                type_by_name = {
+                    n: globals_meta.get(n, dep_manifest.required[n].type_name)
+                    for n in residual_names
+                }
+                try:
+                    ref, saved, dill_skipped = await self._capture_residual_dill(
+                        sandbox, residual_names, type_by_name, capture_dir,
+                        exec_lock_held=exec_lock_held,
+                    )
+                except SnapshotCaptureError:
+                    raise
+                except Exception as e:
+                    raise SnapshotCaptureError(
+                        "required_runtime_unpersistable",
+                        f"Residual dill capture failed: {e}",
+                        details={"names": residual_names},
+                    ) from e
+
+                required_skipped = set(residual_names) & set(dill_skipped)
+                # Also treat required names that neither saved nor skipped as missing.
+                if saved is not None:
+                    not_accounted = set(residual_names) - set(saved) - set(dill_skipped)
+                    required_skipped |= not_accounted
+
+                advisory_skipped = {
+                    n for n in required_skipped if n not in mandatory_names
+                }
+                mandatory_skipped = {
+                    n for n in required_skipped if n in mandatory_names
+                }
+                for n in sorted(advisory_skipped):
+                    type_str = type_by_name.get(n, "unknown")
+                    incidental_skips.append(
+                        RuntimeSkip(
+                            name=n,
+                            type_name=type_str,
+                            reason=(
+                                "dill serialization failed for advisory residual; "
+                                "soft-skipped"
+                            ),
+                        )
+                    )
+                    pruned_required.pop(n, None)
+                if mandatory_skipped:
+                    first = sorted(mandatory_skipped)[0]
+                    self._raise_unpersistable(
+                        first,
+                        type_by_name.get(first, "unknown"),
+                        "dill",
+                        f"could not be serialized via dill "
+                        f"(also missing: {sorted(mandatory_skipped)})",
+                    )
+
+                # Only treat successfully saved residual names as captured
+                residual_names_saved = [
+                    n for n in residual_names if n in set(saved or [])
+                ]
+                if not residual_names_saved:
+                    if residual_names and not mandatory_names.intersection(
+                        residual_names
+                    ):
+                        # all advisory — ok to have no residual pickle
+                        captured_residual_vars = []
+                        captured_residual_ref = None
+                    elif residual_names:
+                        # mandatory names remained but none saved (should have raised)
+                        first = sorted(
+                            mandatory_names.intersection(residual_names)
+                        )[0]
+                        self._raise_unpersistable(
+                            first,
+                            type_by_name.get(first, "unknown"),
+                            "dill",
+                            "residual pickle was not produced",
+                        )
+                else:
+                    if ref is None:
+                        self._raise_unpersistable(
+                            residual_names_saved[0],
+                            type_by_name.get(residual_names_saved[0], "unknown"),
+                            "dill",
+                            "residual pickle was not produced",
+                        )
+                    captured_residual_vars = list(residual_names_saved)
+                    captured_residual_ref = ref
+
+            # Capacity gate (post-write): objects are already in the store, so
+            # disk free already accounts for payload. Require remaining free
+            # space to stay above reserve. Fail closed if we cannot probe.
+            total_size = sum(ref.size for ref in captured_adata_refs.values())
+            if captured_residual_ref is not None:
+                total_size += captured_residual_ref.size
+
+            probe = getattr(self._paths, "staging", None) or getattr(self._paths, "root", None)
+            if probe is None:
+                raise SnapshotCaptureError(
+                    "RUNTIME_CAPTURE_DISK_FULL",
+                    (
+                        "Cannot verify free disk space for runtime capture: "
+                        "no staging/root path available"
+                    ),
+                    details={"total_size": total_size},
+                )
+            probe_path = Path(probe)
+            while not probe_path.exists() and probe_path != probe_path.parent:
+                probe_path = probe_path.parent
+            if not probe_path.exists():
+                raise SnapshotCaptureError(
+                    "RUNTIME_CAPTURE_DISK_FULL",
+                    (
+                        "Cannot verify free disk space for runtime capture: "
+                        f"no existing path from {probe}"
+                    ),
+                    details={"total_size": total_size, "probe": str(probe)},
+                )
+            try:
+                usage = shutil.disk_usage(probe_path)
+            except OSError as e:
+                raise SnapshotCaptureError(
+                    "RUNTIME_CAPTURE_DISK_FULL",
+                    f"Failed to check disk usage for runtime capture: {e}",
+                    details={"total_size": total_size},
+                ) from e
+            # After objects are written, free already accounts for payload.
+            # Require remaining free space to stay above reserve.
+            if usage.free < self.FREE_SPACE_RESERVE_BYTES:
+                raise SnapshotCaptureError(
+                    "RUNTIME_CAPTURE_DISK_FULL",
+                    (
+                        f"Insufficient disk space for runtime capture: "
+                        f"{usage.free} free after write, "
+                        f"{total_size} captured, "
+                        f"{self.FREE_SPACE_RESERVE_BYTES} reserve"
+                    ),
+                    details={
+                        "free": usage.free,
+                        "total_size": total_size,
+                        "reserve": self.FREE_SPACE_RESERVE_BYTES,
+                    },
+                )
+
+            # Build complete RuntimeManifest with dependency proof.
+            # Required is the registry-declared set minus soft-skipped absent
+            # advisory names, so the completeness proof holds against what was
+            # actually captured.
+            runtime = RuntimeManifest(
+                status="complete",
+                dependencies=RuntimeDependencyManifest(
+                    required=pruned_required,
+                    incidental_skips=incidental_skips,
+                ),
+                residual_ref=captured_residual_ref,
+                captured_residual_names=list(captured_residual_vars),
+                adata_refs=dict(captured_adata_refs),
+            )
+
+            # Return RuntimeManifest directly.
+            return runtime
+        finally:
+            try:
+                if capture_dir.exists():
+                    for p in capture_dir.iterdir():
+                        p.unlink(missing_ok=True)
+                    capture_dir.rmdir()
+            except OSError:
+                pass
