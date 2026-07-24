@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.35.1 · **Last updated**: 2026-07-22
+**Version**: 0.35.2 · **Last updated**: 2026-07-24
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,11 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.35.x — (2026-07-22)**
+**0.35.x — (2026-07-24)**
+
+- `0.35.2` — Expression contract local-copy shielding; version bump (2026-07-24):
+  - **Local-copy mutation is not a representation change (`backend/utils/expression_contract.py`)**: `mutates_expression_representation()` now tracks local-object assignments via AST event replay. Mutations of throwaway copies (e.g. `work = adata.copy(); sc.pp.log1p(work)`) no longer invalidate prior figures. Fresh-object calls (`copy`, `read_h5ad`, `AnnData`, `concat`) and aliases of already-local names are shielded. Canonical-object mutations alongside local copies are still correctly detected. New `_FRESH_OBJECT_CALLS` set, `_mutation_target_root()`, `_value_makes_fresh_object()`, and event-sorted replay loop.
+  - **New tests (`backend/tests/test_expression_contract.py`)**: `test_local_copy_mutation_is_not_a_representation_change` (6 sub-cases: copy, semicolon, existence-guarded, subset, fresh-read, local-X-replace), `test_canonical_mutation_still_detected_alongside_local_copies` (2 sub-cases: mixed copy+canonical, rebind to non-fresh source).
 
 - `0.35.1` — Domain-neutral mechanism evidence policy, planning-failure terminal routing, plan schema normalization, domain-example scrub; version bump (2026-07-22):
   - **Shared mechanism evidence policy (`backend/utils/mechanism_policy.py`)**: New `MECHANISM_EVIDENCE_POLICY` constant — start with unbiased analyses; name established mechanisms only when observed evidence supports them; treat objective-named mechanisms as prespecified hypotheses (supported / contradicted / insufficient); distinguish pathway activity/priming from causal mechanism execution. Wired into PI direction/synthesis/report prompts, bioinformatics `register_mechanism_programs` tool + Stage-2 capture instruction, Supervisor live report prompt, and detailed-report planning fallback.
