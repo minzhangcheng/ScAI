@@ -5,19 +5,9 @@ Data models for the Multi-Agent Single-Cell Analysis System
 """
 from typing import Literal
 from enum import Enum
-import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_ROUND_WAIT_SECONDS: int = 300
-
-# Sequencing data type constants
-DATA_TYPE_SCRNASEQ = "scRNA-seq"
-DATA_TYPE_BULK_RNASEQ = "bulk RNA-seq"
-
-# Module-level lock for async-safe state version increments
-_version_lock = asyncio.Lock()
 
 
 class AgentType(str, Enum):

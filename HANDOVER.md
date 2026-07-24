@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.35.1-rc-0.2 · **Last updated**: 2026-07-23
+**Version**: 0.35.1-rc-0.3 · **Last updated**: 2026-07-24
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,17 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.35.x — (2026-07-23)**
+**0.35.x — (2026-07-24)**
+
+- `0.35.1-rc-0.3` — Facade split cleanup: remove duplicated constants after module split; DataOverviewMatrix count pre-index; version-test regex fix; version bump (2026-07-24):
+  - **Bioinformatics shared constants (`backend/agents/bioinformatics/`)**: Dropped accidental duplicate imports (`inspect`/`ora_kernel`) and per-module `MAX_WORKSPACE_H5AD_FILES` copies from `kernel_templates.py`, `mechanism_validation.py`, `tool_schemas.py`, and `workspace_guards.py`. Workspace guard now imports `MAX_WORKSPACE_H5AD_FILES` from `shared.py`.
+  - **Schema parts cleanup (`backend/models/schema_parts/`)**: Removed duplicated module-level constants (`DEFAULT_ROUND_WAIT_SECONDS`, sequencing data-type strings, `_version_lock`) from `analysis.py`, `enums.py`, `outputs.py`, and `session.py` — canonical definitions remain on the parent facade (`schemas.py`).
+  - **Report routes cleanup (`backend/routes/reports_parts/`)**: Removed per-part `REPORT_ARCHIVE_PREFIX` duplicates from `assets.py`, `html_views.py`, and `publication.py`; `downloads.py` imports the shared constant from `core.py`.
+  - **Report variants cleanup (`backend/services/report/variants_parts/`)**: Removed duplicated `_SPECIES_TISSUE_LABELS` from `annotation.py`, `detailed.py`, `exploration.py`, and `integration.py` (canonical map lives in `renderers.py`).
+  - **Publication figures endpoint (`backend/routes/reports_parts/publication.py`)**: Single-pass build of figure list + approved count (no second scan over `state.publication_figures`).
+  - **Data overview matrix (`frontend/src/components/data/DataOverviewMatrix.tsx`)**: Pre-index file/indicator counts by `groupId` + section with `Map`s instead of repeated `filter` scans per group/section cell.
+  - **Version consistency tests (`backend/tests/test_version_consistency.py`)**: Version regex updated from `[0-9.]+` to `\S+` so hyphenated RC tags (e.g. `0.35.1-rc-0.3`) match.
+  - **No intentional behavior change** beyond the O(n) counting cleanup; version string updated to `0.35.1-rc-0.3`.
 
 - `0.35.1-rc-0.2` — Continue facade split: chat, export/import, LLM client, workflow agent/reporting nodes; version bump (2026-07-23):
   - **Chat routes (`backend/routes/chat_parts/`)**: Split `chat.py` into core, endpoints, delegation, figures, snapshots; parent module remains the import-compatible facade.

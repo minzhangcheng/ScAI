@@ -10,16 +10,10 @@ import logging
 import ast
 from pathlib import Path
 
-
-import inspect
-from backend.services import ora_kernel
-
-_ORA_KERNEL_SRC = inspect.getsource(ora_kernel)
+from .shared import MAX_WORKSPACE_H5AD_FILES
 
 # Configure logger
 logger = logging.getLogger(__name__)
-
-MAX_WORKSPACE_H5AD_FILES = 2
 
 
 def _static_h5ad_path(expr: ast.AST) -> Optional[str]:

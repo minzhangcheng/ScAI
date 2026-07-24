@@ -29,8 +29,6 @@ from backend.services.report.lineage import build_lineage_report_state
 
 logger = logging.getLogger(__name__)
 
-REPORT_ARCHIVE_PREFIX = "previous_report_v"
-
 
 from .core import _create_report_archive, _enforce_archive_retention, _load_report_json, _next_archive_version, _report_cache_key_for_lineage, _report_generation_pending, _sanitize_nan, _try_begin_generation, router
 

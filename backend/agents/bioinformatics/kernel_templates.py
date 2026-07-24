@@ -13,15 +13,9 @@ import textwrap
 
 
 from ...utils.sandbox import _TPL_NOOP_INSTALL
-import inspect
-from backend.services import ora_kernel
-
-_ORA_KERNEL_SRC = inspect.getsource(ora_kernel)
 
 # Configure logger
 logger = logging.getLogger(__name__)
-
-MAX_WORKSPACE_H5AD_FILES = 2
 
 
 _HIGH_MEMORY_ANALYSIS_RE = re.compile(

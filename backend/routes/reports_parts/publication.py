@@ -24,8 +24,6 @@ from backend.services.session_store import async_save_session, update_session_ca
 
 logger = logging.getLogger(__name__)
 
-REPORT_ARCHIVE_PREFIX = "previous_report_v"
-
 
 from .core import router
 
@@ -59,8 +57,13 @@ async def get_publication_figures(session_id: str, request: Request):
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    figures = [
-        {
+    figures = []
+    approved = 0
+    for fig in state.publication_figures:
+        review_status = fig.review_status.value
+        if review_status == "approved":
+            approved += 1
+        figures.append({
             "id": fig.id,
             "name": fig.name,
             "description": fig.description,
@@ -68,19 +71,17 @@ async def get_publication_figures(session_id: str, request: Request):
             "png_path": fig.png_path,
             "pdf_path": fig.pdf_path,
             "png_base64": fig.png_base64,
-            "review_status": fig.review_status.value,
+            "review_status": review_status,
             "pi_feedback": fig.pi_feedback,
             "revision_count": fig.revision_count,
             "created_at": fig.created_at.isoformat()
-        }
-        for fig in state.publication_figures
-    ]
+        })
 
     return {
         "success": True,
         "figures": figures,
         "total": len(figures),
-        "approved": sum(1 for f in state.publication_figures if f.review_status.value == "approved")
+        "approved": approved
     }
 
 @router.get("/{session_id}/publication-tables")

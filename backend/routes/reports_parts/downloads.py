@@ -32,10 +32,8 @@ from backend.services.report.paths import resolve_report_output_dir, resolve_rep
 
 logger = logging.getLogger(__name__)
 
-REPORT_ARCHIVE_PREFIX = "previous_report_v"
 
-
-from .core import _should_skip_in_report_zip, router
+from .core import REPORT_ARCHIVE_PREFIX, _should_skip_in_report_zip, router
 
 
 @router.post("/{session_id}/report/download-all-figures")

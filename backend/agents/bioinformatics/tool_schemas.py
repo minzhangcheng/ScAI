@@ -8,16 +8,10 @@ With step-level checkpointing for recovery from interruptions
 import logging
 
 
-import inspect
-from backend.services import ora_kernel
-
-_ORA_KERNEL_SRC = inspect.getsource(ora_kernel)
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 
 # Configure logger
 logger = logging.getLogger(__name__)
-
-MAX_WORKSPACE_H5AD_FILES = 2
 
 
 # Define the tools for bioinformatics agent

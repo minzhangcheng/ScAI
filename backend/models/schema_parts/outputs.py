@@ -7,19 +7,9 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 import uuid
-import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_ROUND_WAIT_SECONDS: int = 300
-
-# Sequencing data type constants
-DATA_TYPE_SCRNASEQ = "scRNA-seq"
-DATA_TYPE_BULK_RNASEQ = "bulk RNA-seq"
-
-# Module-level lock for async-safe state version increments
-_version_lock = asyncio.Lock()
 
 
 from .analysis import CrossModalSynthesis, DataDrivenMechanismProgram

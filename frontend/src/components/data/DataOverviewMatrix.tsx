@@ -27,9 +27,22 @@ export function DataOverviewMatrix({
     { key: 'biochemistry', label: t('biochemistryIndicators'), icon: FlaskConical, color: 'amber' },
   ]
 
-  // Also count files not assigned to any group
-  const ungroupedFiles = dataFiles.filter(f => !f.groupId)
-  const ungroupedIndicators = indicators.filter(i => !i.groupId)
+  const fileCounts = new Map<string | undefined, Map<string, number>>()
+  for (const file of dataFiles) {
+    const groupId = file.groupId || undefined
+    const sectionCounts = fileCounts.get(groupId) ?? new Map<string, number>()
+    sectionCounts.set(file.section, (sectionCounts.get(file.section) ?? 0) + 1)
+    fileCounts.set(groupId, sectionCounts)
+  }
+
+  const indicatorCounts = new Map<string | undefined, number>()
+  for (const indicator of indicators) {
+    const groupId = indicator.groupId || undefined
+    indicatorCounts.set(groupId, (indicatorCounts.get(groupId) ?? 0) + 1)
+  }
+
+  const ungroupedFileCounts = fileCounts.get(undefined)
+  const ungroupedIndicatorCount = indicatorCounts.get(undefined) ?? 0
 
   return (
     <section className="mt-8">
@@ -55,8 +68,8 @@ export function DataOverviewMatrix({
           </thead>
           <tbody className="divide-y divide-slate-100">
             {groups.map(group => {
-              const groupFiles = dataFiles.filter(f => f.groupId === group.id)
-              const groupIndicators = indicators.filter(i => i.groupId === group.id)
+              const groupFileCounts = fileCounts.get(group.id)
+              const groupIndicatorCount = indicatorCounts.get(group.id) ?? 0
               return (
                 <tr key={group.id} className="hover:bg-slate-50">
                   <td className="px-4 py-2.5 font-medium text-slate-900">
@@ -66,8 +79,8 @@ export function DataOverviewMatrix({
                     </span>
                   </td>
                   {sections.map(s => {
-                    const fileCount = groupFiles.filter(f => f.section === s.key).length
-                    const indCount = s.key === 'biochemistry' ? groupIndicators.length : 0
+                    const fileCount = groupFileCounts?.get(s.key) ?? 0
+                    const indCount = s.key === 'biochemistry' ? groupIndicatorCount : 0
                     const total = fileCount + indCount
                     return (
                       <td key={s.key} className="px-4 py-2.5 text-center">
@@ -89,14 +102,14 @@ export function DataOverviewMatrix({
             })}
 
             {/* Ungrouped row */}
-            {(ungroupedFiles.length > 0 || ungroupedIndicators.length > 0) && (
+            {(ungroupedFileCounts || ungroupedIndicatorCount > 0) && (
               <tr className="hover:bg-slate-50 bg-slate-50/50">
                 <td className="px-4 py-2.5 text-slate-500 italic text-xs">
                   {t('noGroupDistinction')}
                 </td>
                 {sections.map(s => {
-                  const fileCount = ungroupedFiles.filter(f => f.section === s.key).length
-                  const indCount = s.key === 'biochemistry' ? ungroupedIndicators.length : 0
+                  const fileCount = ungroupedFileCounts?.get(s.key) ?? 0
+                  const indCount = s.key === 'biochemistry' ? ungroupedIndicatorCount : 0
                   const total = fileCount + indCount
                   return (
                     <td key={s.key} className="px-4 py-2.5 text-center">
