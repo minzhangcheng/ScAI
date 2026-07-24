@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.35.2 · **Last updated**: 2026-07-24
+**Version**: 0.35.3 · **Last updated**: 2026-07-24
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,11 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.35.x — (2026-07-24)**
+
+- `0.35.3` — Report gate auto-advance for partial reports; expression-contract docstrings; version bump (2026-07-24):
+  - **Report gate auto-advance in auto-advancing modes (`backend/workflow/reporting.py`)**: When direction coverage is incomplete and `round_wait_seconds >= 0` (no-wait or countdown mode), the final-report gate now produces a partial report instead of blocking indefinitely. Manual mode (`round_wait_seconds == -1`) retains the block-and-wait behavior. New `allow_partial_report` flag on `AnalysisState`.
+  - **Expression-contract docstring clarifications (`backend/utils/expression_contract.py`)**: Added docstrings explaining the conservative closed-set design of `_FRESH_OBJECT_CALLS` (safe false positives over stale-figure false negatives) and the intentional asymmetry of `prepares_expression_before_sensitive_call` (heuristic, not figure-invalidation).
+  - **New tests (`backend/tests/test_autonomous_partial_report.py`)**: `test_auto_advancing_mode_produces_partial_instead_of_blocking` (parametrized for wait=0 and wait=300), `test_manual_mode_still_blocks_and_waits`.
 
 - `0.35.2` — Expression contract local-copy shielding; version bump (2026-07-24):
   - **Local-copy mutation is not a representation change (`backend/utils/expression_contract.py`)**: `mutates_expression_representation()` now tracks local-object assignments via AST event replay. Mutations of throwaway copies (e.g. `work = adata.copy(); sc.pp.log1p(work)`) no longer invalidate prior figures. Fresh-object calls (`copy`, `read_h5ad`, `AnnData`, `concat`) and aliases of already-local names are shielded. Canonical-object mutations alongside local copies are still correctly detected. New `_FRESH_OBJECT_CALLS` set, `_mutation_target_root()`, `_value_makes_fresh_object()`, and event-sorted replay loop.
