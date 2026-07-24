@@ -4,6 +4,7 @@ Task 4: every required producer must block forward progress on capture failure,
 use a process-wide SafePointManager, and never offer Skip.
 """
 from __future__ import annotations
+from backend.tests.split_facade import source_for_path
 
 import ast
 from pathlib import Path
@@ -28,9 +29,7 @@ V1_CALL_NAMES = frozenset({
 
 
 def _read_source(path: str) -> str:
-    full = Path(__file__).parents[2] / path
-    assert full.exists(), f"Source file not found: {full}"
-    return full.read_text(encoding="utf-8")
+    return source_for_path(path)
 
 
 def _has_call_to_method(tree: ast.Module, class_name: str, method_name: str) -> bool:
@@ -249,13 +248,12 @@ async def test_required_boundary_failure_blocks_next_node():
 
 def test_normal_v2_producers_use_shared_lineage_resolution():
     """Workflow, chat, and report captures must share one lineage policy."""
-    project_root = Path(__file__).resolve().parents[2]
     for relative_path in (
         "backend/workflow/core.py",
         "backend/routes/chat.py",
         "backend/workflow/reporting.py",
     ):
-        source = (project_root / relative_path).read_text(encoding="utf-8")
+        source = _read_source(relative_path)
         assert "capture_lineage_from_state" in source, relative_path
 
 

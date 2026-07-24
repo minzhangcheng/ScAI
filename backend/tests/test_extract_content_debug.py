@@ -1,4 +1,5 @@
 """Tests for _log_empty_content_diagnostic helper extracted from _extract_content_from_message."""
+from backend.tests.split_facade import patch_facade
 import sys
 from pathlib import Path
 
@@ -23,7 +24,7 @@ def test_log_diagnostic_returns_completion_tokens(client):
     response.usage.completion_tokens = 42
     response.usage.prompt_tokens = 10
 
-    with patch("backend.utils.llm_client.logger"):
+    with patch_facade("backend.utils.llm_client", "logger"):
         tokens, has_tools = client._log_empty_content_diagnostic(msg, response)
     assert tokens == 42
     assert has_tools is False
@@ -38,7 +39,7 @@ def test_log_diagnostic_detects_tool_calls(client):
     response.usage.completion_tokens = 50
     response.usage.prompt_tokens = 10
 
-    with patch("backend.utils.llm_client.logger"):
+    with patch_facade("backend.utils.llm_client", "logger"):
         tokens, has_tools = client._log_empty_content_diagnostic(msg, response)
     assert tokens == 50
     assert has_tools is True
@@ -49,7 +50,7 @@ def test_log_diagnostic_returns_zero_when_no_usage(client):
     response = MagicMock()
     response.usage = None
 
-    with patch("backend.utils.llm_client.logger"):
+    with patch_facade("backend.utils.llm_client", "logger"):
         tokens, has_tools = client._log_empty_content_diagnostic(msg, response)
     assert tokens == 0
     assert has_tools is False

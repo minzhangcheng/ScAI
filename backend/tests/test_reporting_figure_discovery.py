@@ -4,6 +4,7 @@ import types
 import pytest
 
 import backend.workflow.reporting as reporting_mod
+from backend.tests.split_facade import setattr_facade
 
 
 def _pub_fig(name):
@@ -59,11 +60,11 @@ async def test_nested_candidates_reach_selection_and_cap(monkeypatch, tmp_path):
          "mtime": float(i), "source": "r1_outputs/figures"}
         for i in range(250)
     ]
-    monkeypatch.setattr(
-        reporting_mod, "discover_workspace_figures", lambda sid: discovered
+    setattr_facade(
+        monkeypatch, "backend.workflow.reporting", "discover_workspace_figures", lambda sid: discovered
     )
-    monkeypatch.setattr(
-        reporting_mod, "compress_image_to_base64", lambda *a, **k: None
+    setattr_facade(
+        monkeypatch, "backend.workflow.reporting", "compress_image_to_base64", lambda *a, **k: None
     )
 
     reporter = _CaptureReporter("sess-x", discovered, publication_figures=[],
@@ -87,11 +88,11 @@ async def test_real_pi_llm_failure_does_not_dump_all(monkeypatch, tmp_path):
          "mtime": float(i), "source": "r1_outputs/figures"}
         for i in range(160)
     ]
-    monkeypatch.setattr(
-        reporting_mod, "discover_workspace_figures", lambda sid: discovered
+    setattr_facade(
+        monkeypatch, "backend.workflow.reporting", "discover_workspace_figures", lambda sid: discovered
     )
-    monkeypatch.setattr(
-        reporting_mod, "compress_image_to_base64", lambda *a, **k: None
+    setattr_facade(
+        monkeypatch, "backend.workflow.reporting", "compress_image_to_base64", lambda *a, **k: None
     )
 
     from backend.agents.pi_agent import PIAgent
@@ -124,11 +125,11 @@ async def test_invalid_selection_names_self_heal_to_publication(monkeypatch, tmp
          "path": str(tmp_path / "umap_real.png"), "pdf_path": None,
          "mtime": 1.0, "source": "r1_outputs/figures"},
     ]
-    monkeypatch.setattr(
-        reporting_mod, "discover_workspace_figures", lambda sid: discovered
+    setattr_facade(
+        monkeypatch, "backend.workflow.reporting", "discover_workspace_figures", lambda sid: discovered
     )
-    monkeypatch.setattr(
-        reporting_mod, "compress_image_to_base64", lambda *a, **k: None
+    setattr_facade(
+        monkeypatch, "backend.workflow.reporting", "compress_image_to_base64", lambda *a, **k: None
     )
 
     reporter = _CaptureReporter(

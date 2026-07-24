@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import ast
 import functools
+import importlib
 from pathlib import Path
 
 import pytest
 
-from backend.tests.split_facade import SPLIT_PACKAGES
+from backend.tests.split_facade import SPLIT_PACKAGES, part_names, reload_order
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TESTS_DIR = Path(__file__).resolve().parent
@@ -192,4 +193,20 @@ def test_no_test_patches_a_name_the_facade_no_longer_resolves():
         "split-out package, so the patch does nothing and the test silently exercises "
         "the real dependency. Use patch_facade()/setattr_facade() from "
         "backend/tests/split_facade.py instead:" + "".join(offenders)
+    )
+
+
+@pytest.mark.parametrize("facade,package_name", sorted(SPLIT_PACKAGES.items()))
+def test_reload_order_can_order_every_registered_split(facade, package_name):
+    """Every part must be reloadable dependency-first.
+
+    graphlib supplies the ordering; what this pins is that the packages on disk are a
+    shape it can order at all -- no import cycle between parts (CycleError) and no
+    sub-package (NotImplementedError). pkgutil yields alphabetically, which is not a
+    reload order: llm_client_parts alone has 54 edges pointing the wrong way, and
+    reloading in that order leaves modules bound to pre-reload objects.
+    """
+    package = importlib.import_module(package_name)
+    assert sorted(reload_order(package)) == sorted(part_names(package)), (
+        f"{package_name}: reload_order dropped or invented a module"
     )

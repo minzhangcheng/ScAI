@@ -1,11 +1,12 @@
 """P2-2: surface tool call JSON parse failures explicitly."""
+from backend.tests.split_facade import split_source
 import re
 import backend.utils.llm_client as llm_mod
 
 
 def test_toolcall_has_parse_error_fields():
     """P2-2: ToolCall must expose parse_error and raw_arguments."""
-    src = open(llm_mod.__file__).read()
+    src = split_source("backend.utils.llm_client")
     m = re.search(r"class ToolCall\b.*?(?=\nclass |\n@dataclass|\Z)", src, re.DOTALL)
     assert m, "could not locate ToolCall"
     body = m.group(0)
@@ -15,7 +16,7 @@ def test_toolcall_has_parse_error_fields():
 
 def test_arguments_not_wrapped_in_raw():
     """P2-2: must not produce arguments={'raw': ...} on parse failure."""
-    src = open(llm_mod.__file__).read()
+    src = split_source("backend.utils.llm_client")
     assert '"raw":' not in src and "{'raw'" not in src, \
         "P2-2: must not wrap failed parse in {'raw': ...} — set parse_error/raw_arguments instead"
 

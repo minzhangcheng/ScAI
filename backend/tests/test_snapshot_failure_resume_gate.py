@@ -1,4 +1,5 @@
 """Lifecycle / chat / WS guards for snapshot_failure gate."""
+from backend.tests.split_facade import patch_facade
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -162,8 +163,8 @@ async def test_chat_snapshot_failure_not_rewritten_as_chat_error():
         }
         raise RequiredSnapshotBlocked("QUOTA", "full")
 
-    with patch.object(chat_mod, "_create_chat_snapshot", side_effect=_fail):
-        with patch.object(chat_mod, "async_save_session", new=AsyncMock()):
+    with patch_facade("backend.routes.chat", "_create_chat_snapshot", side_effect=_fail):
+        with patch_facade("backend.routes.chat", "async_save_session"):
             # Minimal exercise of the exception handler path used by chat_with_pi
             result = {"role": "assistant", "content": "ok"}
             try:

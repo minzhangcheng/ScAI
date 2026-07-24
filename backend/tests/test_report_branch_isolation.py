@@ -127,9 +127,10 @@ async def test_workflow_supervisor_report_receives_filtered_branch_state(tmp_pat
     state = _mixed_lineage_state()
     workflow = _ReportingWorkflow()
 
-    monkeypatch.setattr(reporting_module, "get_session_workspace", lambda session_id: tmp_path / "workspace")
-    monkeypatch.setattr(
-        reporting_module,
+    setattr_facade(monkeypatch, "backend.workflow.reporting", "get_session_workspace", lambda session_id: tmp_path / "workspace")
+    setattr_facade(
+        monkeypatch,
+        "backend.workflow.reporting",
         "resolve_report_output_dir",
         lambda session_id, branch_id: tmp_path / "reports" / (branch_id or "main"),
     )

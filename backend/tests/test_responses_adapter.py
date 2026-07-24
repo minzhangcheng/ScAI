@@ -1,3 +1,4 @@
+from backend.tests.split_facade import setattr_facade
 from backend.utils.llm_client import LLMResponse
 
 
@@ -579,8 +580,8 @@ def test_build_params_no_background_without_background_ok():
 
 
 def test_build_params_skips_background_when_endpoint_cached(monkeypatch):
-    monkeypatch.setattr(
-        "backend.utils.llm_client._NO_BACKGROUND_ENDPOINT", {"https://api.x/v1"})
+    setattr_facade(
+        monkeypatch, "backend.utils.llm_client", "_NO_BACKGROUND_ENDPOINT", {"https://api.x/v1"})
     adapter = _ResponsesAdapter(MagicMock(), agent_name="t", base_url="https://api.x/v1")
     params = adapter._build_params(
         "o4-mini-deep-research", [{"role": "user", "content": "x"}], 0.3, None,
@@ -633,7 +634,7 @@ async def test_await_completion_returns_immediately_when_completed():
 
 @pytest.mark.asyncio
 async def test_await_completion_polls_until_completed(monkeypatch):
-    monkeypatch.setattr("backend.utils.llm_client._DR_BACKGROUND_POLL_INTERVAL", 0)
+    setattr_facade(monkeypatch, "backend.utils.llm_client", "_DR_BACKGROUND_POLL_INTERVAL", 0)
     in_progress = _mk_resp("in_progress")
     done = _mk_resp("completed")
     client = MagicMock()
@@ -649,7 +650,7 @@ async def test_await_completion_polls_until_completed(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_await_completion_raises_on_failed(monkeypatch):
-    monkeypatch.setattr("backend.utils.llm_client._DR_BACKGROUND_POLL_INTERVAL", 0)
+    setattr_facade(monkeypatch, "backend.utils.llm_client", "_DR_BACKGROUND_POLL_INTERVAL", 0)
     failed = _mk_resp("failed", error="boom")
     client = MagicMock()
     client.responses = MagicMock()
@@ -662,7 +663,7 @@ async def test_await_completion_raises_on_failed(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_await_completion_tolerates_transient_poll_errors(monkeypatch):
-    monkeypatch.setattr("backend.utils.llm_client._DR_BACKGROUND_POLL_INTERVAL", 0)
+    setattr_facade(monkeypatch, "backend.utils.llm_client", "_DR_BACKGROUND_POLL_INTERVAL", 0)
     done = _mk_resp("completed")
     client = MagicMock()
     client.responses = MagicMock()
@@ -677,8 +678,8 @@ async def test_await_completion_tolerates_transient_poll_errors(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_await_completion_raises_after_repeated_poll_errors(monkeypatch):
-    monkeypatch.setattr("backend.utils.llm_client._DR_BACKGROUND_POLL_INTERVAL", 0)
-    monkeypatch.setattr("backend.utils.llm_client._DR_BACKGROUND_MAX_POLL_ERRORS", 3)
+    setattr_facade(monkeypatch, "backend.utils.llm_client", "_DR_BACKGROUND_POLL_INTERVAL", 0)
+    setattr_facade(monkeypatch, "backend.utils.llm_client", "_DR_BACKGROUND_MAX_POLL_ERRORS", 3)
     client = MagicMock()
     client.responses = MagicMock()
     client.responses.retrieve = AsyncMock(side_effect=Exception("down"))
@@ -691,7 +692,7 @@ async def test_await_completion_raises_after_repeated_poll_errors(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_complete_deep_research_uses_background_polling(monkeypatch):
-    monkeypatch.setattr("backend.utils.llm_client._DR_BACKGROUND_POLL_INTERVAL", 0)
+    setattr_facade(monkeypatch, "backend.utils.llm_client", "_DR_BACKGROUND_POLL_INTERVAL", 0)
     dump = {
         "output": [
             {"type": "message", "role": "assistant",
@@ -752,7 +753,7 @@ def test_no_background_endpoint_cache_exists():
 
 @pytest.mark.asyncio
 async def test_create_fallback_strips_background_and_retries(monkeypatch):
-    monkeypatch.setattr("backend.utils.llm_client._NO_BACKGROUND_ENDPOINT", set())
+    setattr_facade(monkeypatch, "backend.utils.llm_client", "_NO_BACKGROUND_ENDPOINT", set())
     import backend.utils.llm_client as lc
     success = MagicMock()
     success.model_dump.return_value = {"output": [], "usage": {}}
@@ -774,7 +775,7 @@ async def test_create_fallback_strips_background_and_retries(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_create_fallback_does_not_strip_on_unrelated_error(monkeypatch):
-    monkeypatch.setattr("backend.utils.llm_client._NO_BACKGROUND_ENDPOINT", set())
+    setattr_facade(monkeypatch, "backend.utils.llm_client", "_NO_BACKGROUND_ENDPOINT", set())
     client = MagicMock()
     client.responses = MagicMock()
     client.responses.create = AsyncMock(side_effect=RuntimeError("upstream 500"))

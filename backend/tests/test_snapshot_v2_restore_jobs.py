@@ -1,4 +1,5 @@
 """Tests for Snapshot V2 cancellable restore jobs."""
+from backend.tests.split_facade import setattr_facade
 import asyncio
 import contextlib
 import json
@@ -2763,8 +2764,8 @@ async def test_chat_retry_still_blocked_when_failure_remains(monkeypatch):
         st.wait_input_reason = "snapshot_failure"
         st.status = TaskStatus.WAITING_INPUT
 
-    monkeypatch.setattr(
-        "backend.routes.chat.capture_post_chat_snapshot",
+    setattr_facade(
+        monkeypatch, "backend.routes.chat", "capture_post_chat_snapshot",
         fake_capture,
     )
     outcome = await default_retry_chat_capture(session_id, state, context)
@@ -2807,8 +2808,8 @@ async def test_retry_handlers_do_not_clear_gate_before_capture(monkeypatch):
         seen_status_during_capture["failure"] = st.snapshot_failure
         raise RequiredSnapshotBlocked("QUOTA", "still full")
 
-    monkeypatch.setattr(
-        "backend.routes.chat.capture_post_chat_snapshot",
+    setattr_facade(
+        monkeypatch, "backend.routes.chat", "capture_post_chat_snapshot",
         chat_capture_observing,
     )
     outcome = await default_retry_chat_capture(

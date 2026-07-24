@@ -1,11 +1,11 @@
+from backend.tests.split_facade import split_source
 import inspect
 import ast
 from pathlib import Path
 
 
 def test_chat_annotate_callback_accepts_new_kwargs():
-    src = Path("routes/chat.py").read_text() if Path("routes/chat.py").exists() \
-        else Path("backend/routes/chat.py").read_text()
+    src = split_source("backend.routes.chat")
     tree = ast.parse(src)
     fns = [n for n in ast.walk(tree)
            if isinstance(n, ast.AsyncFunctionDef) and n.name == "annotate_callback"]

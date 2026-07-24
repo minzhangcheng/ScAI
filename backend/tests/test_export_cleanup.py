@@ -1,3 +1,4 @@
+from backend.tests.split_facade import patch_facade
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -19,15 +20,15 @@ async def test_export_state_cleans_temp_file_on_build_failure(tmp_path):
     request.state = MagicMock()
     request.state.user_id = "test_user"
 
-    with patch("backend.routes.export_import.UPLOAD_TEMP_DIR", isolated_temp):
-        with patch("backend.routes.export_import.require_session_ownership") as mock_own:
+    with patch_facade("backend.routes.export_import", "UPLOAD_TEMP_DIR", isolated_temp):
+        with patch_facade("backend.routes.export_import", "require_session_ownership") as mock_own:
             mock_state = MagicMock()
             mock_state.name = "TestSession"
             mock_own.return_value = mock_state
 
-            with patch("backend.routes.export_import.async_save_session"):
+            with patch_facade("backend.routes.export_import", "async_save_session"):
                 with patch("backend.routes.export_import.asyncio.to_thread", side_effect=RuntimeError("tar build failed")):
-                    with patch("backend.routes.export_import.validate_session_id"):
+                    with patch_facade("backend.routes.export_import", "validate_session_id"):
                         with pytest.raises(RuntimeError, match="tar build failed"):
                             await export_state("test_session_123", request)
 
@@ -47,15 +48,15 @@ async def test_export_prepare_cleans_temp_file_on_build_failure(tmp_path):
     request.state = MagicMock()
     request.state.user_id = "test_user"
 
-    with patch("backend.routes.export_import.UPLOAD_TEMP_DIR", isolated_temp):
-        with patch("backend.routes.export_import.require_session_ownership") as mock_own:
+    with patch_facade("backend.routes.export_import", "UPLOAD_TEMP_DIR", isolated_temp):
+        with patch_facade("backend.routes.export_import", "require_session_ownership") as mock_own:
             mock_state = MagicMock()
             mock_state.name = "TestSession"
             mock_own.return_value = mock_state
 
-            with patch("backend.routes.export_import.async_save_session"):
+            with patch_facade("backend.routes.export_import", "async_save_session"):
                 with patch("backend.routes.export_import.asyncio.to_thread", side_effect=RuntimeError("tar build failed")):
-                    with patch("backend.routes.export_import.validate_session_id"):
+                    with patch_facade("backend.routes.export_import", "validate_session_id"):
                         with pytest.raises(RuntimeError, match="tar build failed"):
                             await export_prepare("test_session_456", request)
 

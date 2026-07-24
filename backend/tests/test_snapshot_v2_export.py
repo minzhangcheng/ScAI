@@ -1,4 +1,5 @@
 """Tests: V2 snapshot export with explicit runtime policy."""
+from backend.tests.split_facade import setattr_facade
 from backend.tests.snapshot_v2_fixtures import v2_manifest, write_manifest_to_store
 import hashlib
 import json
@@ -464,13 +465,13 @@ class TestSnapshotV2ExportRoute:
                 tf.addfile(info, io.BytesIO(data))
             return out
 
-        monkeypatch.setattr(exp_mod, "require_session_ownership", fake_owner)
+        setattr_facade(monkeypatch, "backend.routes.export_import", "require_session_ownership", fake_owner)
         monkeypatch.setattr(
             "backend.services.snapshot_v2.service.SnapshotService.export_snapshots",
             fake_export,
         )
         # Avoid moving into real UPLOAD_TEMP that may not exist
-        monkeypatch.setattr(exp_mod, "UPLOAD_TEMP_DIR", tmp_path)
+        setattr_facade(monkeypatch, "backend.routes.export_import", "UPLOAD_TEMP_DIR", tmp_path)
 
         # BaseHTTPMiddleware freezes dispatch into dispatch_func at construction.
         # Patch the live middleware instance so this works even if earlier tests
@@ -525,12 +526,12 @@ class TestSnapshotV2ExportRoute:
                 tf.addfile(info, io.BytesIO(data))
             return out
 
-        monkeypatch.setattr(exp_mod, "require_session_ownership", fake_owner)
+        setattr_facade(monkeypatch, "backend.routes.export_import", "require_session_ownership", fake_owner)
         monkeypatch.setattr(
             "backend.services.snapshot_v2.service.SnapshotService.export_snapshots",
             fake_export,
         )
-        monkeypatch.setattr(exp_mod, "UPLOAD_TEMP_DIR", tmp_path)
+        setattr_facade(monkeypatch, "backend.routes.export_import", "UPLOAD_TEMP_DIR", tmp_path)
 
         async def patched_dispatch(request, call_next):
             request.state.user_id = "owner"
@@ -582,12 +583,12 @@ class TestSnapshotV2ExportRoute:
                 "Snapshot IDs not found: snap-nonexistent",
             )
 
-        monkeypatch.setattr(exp_mod, "require_session_ownership", fake_owner)
+        setattr_facade(monkeypatch, "backend.routes.export_import", "require_session_ownership", fake_owner)
         monkeypatch.setattr(
             "backend.services.snapshot_v2.service.SnapshotService.export_snapshots",
             fake_export,
         )
-        monkeypatch.setattr(exp_mod, "UPLOAD_TEMP_DIR", tmp_path)
+        setattr_facade(monkeypatch, "backend.routes.export_import", "UPLOAD_TEMP_DIR", tmp_path)
 
         async def patched_dispatch(request, call_next):
             request.state.user_id = "owner"

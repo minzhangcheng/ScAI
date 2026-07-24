@@ -1,3 +1,4 @@
+from backend.tests.split_facade import split_source
 import re
 import backend.utils.error_parsing as ep_mod
 import backend.utils.llm_client as llm_mod
@@ -20,7 +21,7 @@ def test_ansi_still_strips_csi():
 def test_max_tokens_field_fallback_present():
     """P3-4: llm_client must have a fallback path for max_tokens/max_completion_tokens
     field naming, similar to the existing _temp_unsupported_models fallback."""
-    src = open(llm_mod.__file__).read()
+    src = split_source("backend.utils.llm_client")
     assert "max_completion_tokens" in src, "must reference both field names"
     assert "max_tokens" in src, "must reference both field names"
     has_cache = "_max_tokens_unsupported_models" in src or "_max_tokens_field" in src

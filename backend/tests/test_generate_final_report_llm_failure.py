@@ -1,10 +1,11 @@
 """Tests for _generate_final_report integrated_report LLM-failure retry loop."""
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from backend.constants import LlmFailureAction
 from backend.models.schemas import AnalysisState, AnalysisStep
 from backend.utils.llm_client import UpstreamExhaustedError
+from backend.tests.split_facade import patch_facade
 from backend.workflow.reporting import ReportingMixin
 
 
@@ -37,7 +38,7 @@ async def test_integrated_report_retries_on_upstream_exhausted():
     h = _Harness(integrated_responses=[err, "the integrated report html"])
     h._wait_for_llm_intervention.return_value = LlmFailureAction.RETRY
 
-    with patch("backend.workflow.reporting.get_session_workspace") as gw:
+    with patch_facade("backend.workflow.reporting", "get_session_workspace") as gw:
         gw.return_value.exists.return_value = False
         gw.return_value.__truediv__ = lambda self, other: gw.return_value
         out = await h._generate_final_report(_state())
@@ -53,7 +54,7 @@ async def test_integrated_report_skips_on_user_skip():
     h = _Harness(integrated_responses=[err])
     h._wait_for_llm_intervention.return_value = LlmFailureAction.SKIP
 
-    with patch("backend.workflow.reporting.get_session_workspace") as gw:
+    with patch_facade("backend.workflow.reporting", "get_session_workspace") as gw:
         gw.return_value.exists.return_value = False
         gw.return_value.__truediv__ = lambda self, other: gw.return_value
         out = await h._generate_final_report(_state())
