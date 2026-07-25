@@ -480,5 +480,3 @@ export function useSession() {
     updateSession,
   }
 }
-
-// WebSocket hook

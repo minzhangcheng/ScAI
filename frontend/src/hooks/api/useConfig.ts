@@ -288,5 +288,3 @@ export function useUserConfig() {
     validateUserConfig, validateSavedConfig, deleteUserConfig,
   }
 }
-
-// ── Snapshot V2 API methods ────────────────────────────────────────

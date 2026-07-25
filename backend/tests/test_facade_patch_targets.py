@@ -273,12 +273,16 @@ def _raw_source_reads() -> list[tuple[Path, int, str]]:
     moment the code it guards moves out. ``split_source``/``source_for_path`` follow the
     split; a bare ``Path(...).read_text()`` does not.
 
-    Scope is the literal-path shape only. ``open(module.__file__)`` and
-    ``inspect.getsource(module)`` are not reported: of the 15 such sites aimed at a
-    registered facade, 14 assert on text the facade still holds, so flagging them would
-    be noise. Runtime ``hasattr(facade, name)`` absence checks go blind the same way for
-    the same reason; ``split_facade.defines()`` is the fix there and nothing here
-    detects them.
+    Scope is the literal-path shape only, and it is reported for every registered facade,
+    thin or not: a literal path has a drop-in replacement (``source_for_path`` takes the
+    same string), so there is no reason to write one. The ``module.__file__`` /
+    ``inspect.getsource(module)`` shape is left to
+    ``test_no_test_reads_an_emptied_facade_through_its_module`` below, which reports it
+    only once the facade is actually emptied -- every such site today reads a facade that
+    still holds its implementation, so reporting them unconditionally would be noise.
+
+    Runtime ``hasattr(facade, name)`` absence checks go blind the same way for the same
+    reason; ``split_facade.binds()`` is the fix there and nothing here detects them.
     """
     exempt = {"split_facade.py", Path(__file__).name}
     sites: list[tuple[Path, int, str]] = []
@@ -342,6 +346,103 @@ def test_no_test_reads_a_split_facade_as_raw_source():
         "so the assertion scans none of the implementation -- a negative assertion passes "
         "unconditionally. Use split_source()/source_for_path() from "
         "backend/tests/split_facade.py instead:" + "".join(offenders)
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def _is_emptied_facade(facade: str) -> bool:
+    """True when nothing is left at the facade's own path but re-exports.
+
+    Several splits are partial: bioinformatics_agent.py is still ~3k lines of
+    implementation behind its re-export header, so reading *that* file is how a source
+    scan reaches the code, not a way of missing it. What makes such a read wrong is the
+    day the last function moves out. Absence of any def/class is the signal -- a module
+    with none of either has no implementation text left to assert on, so every source
+    assertion aimed at it is scanning nothing.
+
+    An unparseable facade counts as not emptied, matching ``_parse_file``: the whole
+    backend is broken at that point and every other test says so louder.
+    """
+    parsed = _parse_file(REPO_ROOT / (facade.replace(".", "/") + ".py"))
+    if parsed is None:
+        return False
+    _, tree = parsed
+    return not any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        for node in ast.walk(tree)
+    )
+
+
+def _module_source_reads() -> list[tuple[Path, int, str]]:
+    """(test_file, line, facade) for source reads routed through an emptied facade module.
+
+    ``open(mod.__file__)`` and ``inspect.getsource(mod)`` reach the same file a literal
+    path would, but the path is not in the source text, so ``_raw_source_reads`` cannot
+    see them. They are how nearly every source-scanning test here gets its text, and most
+    target modules that were never split, so this reports only the ones whose facade has
+    been emptied -- no noise now, a named list of sites to retarget the moment a partial
+    split is finished.
+
+    Only the module form matters. ``inspect.getsource(some_function)`` resolves through
+    the object's code, which points at whichever part it now lives in, so it follows a
+    split for free; the alias table below leaves those unresolved and they drop out.
+    """
+    exempt = {"split_facade.py", Path(__file__).name}
+    sites: list[tuple[Path, int, str]] = []
+
+    for test_file in sorted(TESTS_DIR.rglob("*.py")):
+        if test_file.name in exempt:
+            continue
+        parsed = _parse_file(test_file)
+        if parsed is None:
+            continue
+        _, tree = parsed
+        aliases = _module_aliases(tree)
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            # open(mod.__file__) / Path(mod.__file__)
+            if isinstance(node.func, ast.Name) and node.func.id in {"open", "Path"}:
+                target = node.args[0]
+                if not (isinstance(target, ast.Attribute) and target.attr == "__file__"):
+                    continue
+                target = target.value
+            # inspect.getsource(mod)
+            elif isinstance(node.func, ast.Attribute) and node.func.attr == "getsource":
+                target = node.args[0]
+            else:
+                continue
+
+            if not isinstance(target, ast.Name):
+                continue
+            facade = aliases.get(target.id)
+            if facade in SPLIT_PACKAGES and _is_emptied_facade(facade):
+                sites.append((test_file, node.lineno, facade))
+
+    return sorted(set(sites))
+
+
+def test_no_test_reads_an_emptied_facade_through_its_module():
+    """Finishing a partial split must not leave source scans asserting on a header.
+
+    The sibling check above catches a literal path. This catches the same mistake made
+    through the module object, which is how nearly every source-scanning test in this
+    suite gets its text -- and it stays quiet until the facade it reads actually runs out
+    of implementation, so it costs nothing until it matters.
+    """
+    offenders = [
+        f"\n  {test_file.relative_to(REPO_ROOT)}:{line} reads "
+        f"{facade.rpartition('.')[2]}.py through its module object, but nothing is left "
+        f"there -- the implementation is in {SPLIT_PACKAGES[facade]}"
+        for test_file, line, facade in _module_source_reads()
+    ]
+
+    assert not offenders, (
+        "A split was finished under these tests: the facade they read has no "
+        "implementation left, so their source assertions now scan a re-export header. "
+        "Switch them to split_source() from backend/tests/split_facade.py:"
+        + "".join(offenders)
     )
 
 

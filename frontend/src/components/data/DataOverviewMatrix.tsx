@@ -1,5 +1,6 @@
 // Group-by-modality coverage matrix.
-// Split out of frontend/src/components/DataPanel.tsx verbatim.
+// Split out of frontend/src/components/DataPanel.tsx; the per-cell counts were
+// since rewritten from repeated Array.filter passes to one pre-pass into Maps.
 
 import { TreatmentGroup, DataFile as DataFileType, BiochemistryIndicator } from '../../stores/appStore'
 import { FlaskConical, Check, Grid3X3, Microscope, Dna } from 'lucide-react'

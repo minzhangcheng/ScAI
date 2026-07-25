@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.36.1 · **Last updated**: 2026-07-25
+**Version**: 0.36.2 · **Last updated**: 2026-07-25
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,13 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.36.x — (2026-07-25)**
+
+- `0.36.2` — Split-facade test helper rename (`defines` → `binds`), emptied-facade module-read guard, frontend split doc/comment cleanup, upload types deduplication; version bump (2026-07-25):
+  - **`split_facade.defines()` renamed to `binds()` (`backend/tests/split_facade.py`)**: The old name implied "defines" (i.e. implements), but the function reports every namespace that *binds* a name — including re-exports. Renamed to `binds()` to match semantics; `holders()` now delegates to `binds()`. Docstrings expanded to explain the distinction: `binds` is for absence assertions (a re-export is just as reachable), `holders` is for patching (must not patch nothing).
+  - **Emptied-facade module-read guard (`backend/tests/test_facade_patch_targets.py`)**: New `test_no_test_reads_an_emptied_facade_through_its_module` AST-scans the test suite for `open(mod.__file__)` / `inspect.getsource(mod)` reads targeting a facade whose implementation has been fully moved out (no `def`/`class` left). Reports only emptied facades — partial splits still hold implementation text, so reading them is correct. New `_is_emptied_facade()` and `_module_source_reads()` helpers. The existing `test_no_test_reads_a_split_facade_as_raw_source` now reports literal-path reads for *every* registered facade (not just non-thin ones), since `source_for_path` is a drop-in replacement.
+  - **Test callers updated (`backend/tests/test_pi_agent_name_constant.py`, `backend/tests/test_schema_imports.py`)**: Both switched from `defines` to `binds`; assertion messages updated ("still define" → "still bind").
+  - **Frontend split doc/comment cleanup**: `DataPanel.tsx` comment fixed ("API layer" → "data panel"), added export-rationale note for module-private pieces. `DataOverviewMatrix.tsx` split comment updated to mention the Map-based count rewrite. `uploadRules.ts` `SEQUENCING_TYPES` now derives from `utils/dataTypes` instead of restating the list (the two had already drifted). Stale section-divider comments removed from `client.ts`, `useConfig.ts`, `useSession.ts`.
+  - **No intentional behavior change** beyond the upload-types deduplication.
 
 - `0.36.1` — Merge the `ver-0.35.1-rc` facade-split branch into `main`; restore the structural guards the split had silently disarmed; version bump (2026-07-25):
   - **Facade split landed on `main`**: ~20 monolithic modules are now a thin re-export facade plus a sibling `*_parts/` (or mixin) package — `pi_agent` (5061 → 299 lines), `bioinformatics_agent` (6256 → 2963), `sandbox` (2359 → 508), `llm_client`, `supervisor_agent`, `literature_agent`, `schemas` → `schema_parts`, `workflow/agents` → `agent_nodes`, `workflow/reporting`, `routes/{chat,export_import,reports}`, `snapshot_v2/{restore,runtime,service}`, `report/variants`; plus the frontend splits of `appStore.ts`, `useApi.ts`, `translations.ts`, `DataPanel.tsx`, `Sidebar.tsx`, `AnalysisPanel.tsx`. Behavior-preserving: routes (156), Pydantic models (149), composite-class member sets, the LangGraph node/edge registry, and all 373 × 2 i18n keys are unchanged.

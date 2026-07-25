@@ -1,9 +1,13 @@
 // Allowed/blocked upload extensions per section and data type.
-// Split out of frontend/src/components/DataPanel.tsx verbatim.
+// Split out of frontend/src/components/DataPanel.tsx; SEQUENCING_TYPES has since
+// been rewired to derive from utils/dataTypes instead of restating it.
 
+import { SEQUENCING_TYPES as PREDEFINED_SEQUENCING_TYPES, CUSTOM_TYPE_SENTINEL } from '../../utils/dataTypes'
 
-
-export const SEQUENCING_TYPES = ['scRNA-seq', 'bulk RNA-seq', 'Loom', 'Other'] as const  // DataPanel adds 'Other' for upload flexibility
+// The upload form offers the predefined sequencing types plus the custom sentinel, so a
+// user can name a format the list does not cover. Derived rather than spelled out: the
+// two lists were maintained separately and had already drifted.
+export const SEQUENCING_TYPES = [...PREDEFINED_SEQUENCING_TYPES, CUSTOM_TYPE_SENTINEL] as const
 
 // Allowed extensions per section + data type (used for manual validation instead of
 // react-dropzone accept filter, which silently rejects files with unrecognized MIME types

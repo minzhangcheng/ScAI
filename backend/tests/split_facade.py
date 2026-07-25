@@ -80,24 +80,31 @@ def split_modules(facade: str) -> list[ModuleType]:
     return modules
 
 
-def defines(facade: str, attr: str) -> list[ModuleType]:
-    """Every module in the split that binds ``attr`` in its own namespace.
+def binds(facade: str, attr: str) -> list[ModuleType]:
+    """Every module in the split whose namespace holds ``attr``.
 
     This is what an ABSENCE assertion needs. ``hasattr(facade, attr)`` sees only the
     facade's own namespace plus what it re-exports, so a name reintroduced inside a part
     is invisible and a guard forbidding it passes while the thing is back. An empty list
     means nothing in the split binds the name; use ``holders`` where that is an error.
+
+    ``vars()`` does not distinguish a definition from an import, so a module that merely
+    re-exports ``attr`` is reported too -- hence ``binds`` rather than ``defines``. That
+    is the direction both callers need: an absence guard must fail on a re-export (the
+    name is reachable again either way), and the patching helpers must rebind every
+    namespace some caller might resolve the name through. Do not use this to find where
+    something is *implemented*.
     """
     return [module for module in split_modules(facade) if attr in vars(module)]
 
 
 def holders(facade: str, attr: str) -> list[ModuleType]:
-    """``defines``, refusing to come back empty.
+    """``binds``, refusing to come back empty.
 
     Patching nothing is the silent failure this module exists to prevent, so the
     patching helpers below need the raising form.
     """
-    found = defines(facade, attr)
+    found = binds(facade, attr)
     if not found:
         raise AttributeError(f"{attr!r} is not bound in {facade} or its split package")
     return found
