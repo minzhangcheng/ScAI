@@ -27,19 +27,13 @@ from ..utils.sandbox import (
     LocalJupyterSandbox, CodeExecutionResult, _TPL_NOOP_INSTALL,
 )
 from ..utils.checkpoint import CheckpointManager
-import inspect
 import json as _json
-from backend.services import ora_kernel
 from backend.services.marker_priors import MarkerDB, summarize_database_priors
-
-_ORA_KERNEL_SRC = inspect.getsource(ora_kernel)
 from ..utils.formatting import format_revision_history, truncate_for_llm
 from ..utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 
 # Configure logger
 logger = logging.getLogger(__name__)
-
-MAX_WORKSPACE_H5AD_FILES = 2
 
 # Re-exported so `backend.agents.bioinformatics_agent.<name>` keeps resolving
 # for existing importers and for tests that patch these by name.

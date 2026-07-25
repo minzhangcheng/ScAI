@@ -39,31 +39,6 @@ from ..services.report.interaction_records import write_interaction_record_files
 from ..services.report.artifacts import artifact_stems, eligible_artifacts
 from .prompt_blocks import build_integration_block
 
-# Section IDs that represent specific/targeted analysis
-_SPECIFIC_SECTION_IDS = frozenset({
-    "differential_expression", "key_findings", "integrated_findings",
-    "exploration_findings",
-})
-
-# Section ID → default fallback title (used in prompt guidance and parse-time safety net)
-_SECTION_ID_TO_DEFAULT_TITLE: dict[str, str] = {
-    "abstract": "Abstract",
-    "analysis_overview": "Analysis Methodology Overview",
-    "data_qc": "Data Overview and Quality Control",
-    "clustering_annotation": "Clustering and Cell Type Annotation",
-    "differential_expression": "Differential Expression Analysis",
-    "exploration_findings": "Phase 1 Exploration Findings Summary",
-    "integrated_findings": "Integrated Findings Across All Phases",
-    "key_findings": "Key Biological Findings",
-    "conclusions": "Conclusions and Future Directions",
-}
-
-# Placeholder title strings that LLMs sometimes emit verbatim instead of generating titles
-_PLACEHOLDER_SECTION_TITLES = frozenset({
-    "section title",
-    "your descriptive scientific title here",
-})
-
 # ---------------------------------------------------------------------------
 # Rich HTML report CSS (extracted to utils/report_css.py for separation of concerns)
 # ---------------------------------------------------------------------------

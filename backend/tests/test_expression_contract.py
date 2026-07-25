@@ -71,3 +71,54 @@ def test_representation_change_invalidates_same_round_artifacts_only():
     assert state.publication_figures[0].invalidated_at is not None
     assert state.publication_figures[1].is_current
     assert state.sandbox_state["analysis_generation"] == 1
+
+
+def test_local_copy_mutation_is_not_a_representation_change():
+    # The dominant small-model pattern: normalize a throwaway copy every step.
+    # The canonical adata is untouched, so prior figures stay valid.
+    assert not mutates_expression_representation(
+        "work = adata.copy()\n"
+        "sc.pp.normalize_total(work, target_sum=None)\n"
+        "sc.pp.log1p(work)"
+    )
+    # Same line, semicolon-separated.
+    assert not mutates_expression_representation(
+        "adata_norm = adata.copy(); sc.pp.log1p(adata_norm)"
+    )
+    # Copy guarded by an existence check (verbatim small-model idiom).
+    assert not mutates_expression_representation(
+        "if 'adata_norm' not in locals():\n"
+        "    adata_norm = adata.copy()\n"
+        "    sc.pp.normalize_total(adata_norm)\n"
+        "    sc.pp.log1p(adata_norm)"
+    )
+    # Subset of a local copy stays local; scaling it is still shielded.
+    assert not mutates_expression_representation(
+        "work = adata.copy()\n"
+        "sub = work[work.obs['ct'] == 'Hep'].copy()\n"
+        "sc.pp.scale(sub)"
+    )
+    # A freshly (re)loaded object is a distinct matrix, not the shared one.
+    assert not mutates_expression_representation(
+        "adata2 = sc.read_h5ad('x.h5ad')\n"
+        "sc.pp.log1p(adata2)"
+    )
+    # Replacing .X on a local copy is shielded too.
+    assert not mutates_expression_representation(
+        "work = adata.copy()\n"
+        "work.X = work.X.multiply(2)"
+    )
+
+
+def test_canonical_mutation_still_detected_alongside_local_copies():
+    # A copy is normalized AND the canonical adata is normalized -> still counts.
+    assert mutates_expression_representation(
+        "work = adata.copy()\n"
+        "sc.pp.log1p(work)\n"
+        "sc.pp.log1p(adata)"
+    )
+    # Rebinding the canonical name to a non-fresh source does not shield it.
+    assert mutates_expression_representation(
+        "adata = load_shared()\n"
+        "sc.pp.normalize_total(adata)"
+    )

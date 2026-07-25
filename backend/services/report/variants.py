@@ -22,17 +22,10 @@ from backend.models.schemas import AnalysisState
 logger = __import__('logging').getLogger(__name__)
 
 
-_SPECIES_TISSUE_LABELS = {
-    "matched_species_tissue_available": "Matched species/tissue evidence available",
-    "no_matched_species_tissue_evidence": "No matched species/tissue evidence",
-    "cross_tissue_only": "Cross-tissue evidence only",
-    "cross_species_only": "Cross-species evidence only",
-    "": "",
-}
-
 # Implementations live in ./variants_parts/; re-exported here so existing
 # importers and tests keep resolving them from this module.
 from .variants_parts.renderers import (  # noqa: F401
+    _SPECIES_TISSUE_LABELS,
     _render_score_badge,
     _render_direction_evidence_section_from_lists,
     _render_direction_evidence_section,

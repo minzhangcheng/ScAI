@@ -1,9 +1,5 @@
 """Tests for _TPL_NOOP_INSTALL template constant in sandbox.py."""
-from pathlib import Path
-
 from backend.tests.split_facade import split_source
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class TestTplNoopInstall:
@@ -49,14 +45,14 @@ class TestBioinformaticsAgentConsumesTplNoopInstall:
     """bioinformatics_agent.py must import and use _TPL_NOOP_INSTALL."""
 
     def test_bioinformatics_agent_imports_tpl(self):
-        src = (_REPO_ROOT / "backend" / "agents" / "bioinformatics_agent.py").read_text()
-        assert "_TPL_NOOP_INSTALL" in src, "bioinformatics_agent.py must import _TPL_NOOP_INSTALL"
+        src = split_source("backend.agents.bioinformatics_agent")
+        assert "_TPL_NOOP_INSTALL" in src, "bioinformatics_agent must import _TPL_NOOP_INSTALL"
 
     def test_bioinformatics_agent_no_inline_unwind(self):
         """The inline unwind+install boilerplate should be gone."""
-        src = (_REPO_ROOT / "backend" / "agents" / "bioinformatics_agent.py").read_text()
+        src = split_source("backend.agents.bioinformatics_agent")
         count = src.count("_unwrap_close_guard = 0")
-        assert count == 0, f"Expected 0 inline unwind in bioinformatics_agent.py, got {count}"
+        assert count == 0, f"Expected 0 inline unwind in bioinformatics_agent, got {count}"
 
 
 class TestChatConsumesTplNoopInstall:
@@ -77,6 +73,6 @@ class TestBioinfoAgentNoForwardRef:
     asyncio is already imported at module level."""
 
     def test_no_forward_ref_on_pause_event(self):
-        src = (_REPO_ROOT / "backend" / "agents" / "bioinformatics_agent.py").read_text()
+        src = split_source("backend.agents.bioinformatics_agent")
         assert "Optional['asyncio.Event']" not in src, \
             "Unnecessary forward ref: asyncio is imported at module top"

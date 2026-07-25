@@ -25,15 +25,6 @@ from jupyter_client import KernelManager
 from backend.utils.crypto import get_integrity_secret, sign_hmac_sha256
 from backend.config._config import DATA_BASE_DIR
 
-# Cap on a single iopub poll so the wall-clock deadline is re-checked at least
-# this often even while the kernel keeps streaming output (tqdm/scanpy verbose).
-IOPUB_POLL_CAP = 30.0
-
-
-# ---------------------------------------------------------------------------
-# Session pkl HMAC integrity helpers (host-side only)
-# ---------------------------------------------------------------------------
-
 # Re-exported so `backend.utils.sandbox.<name>` keeps resolving
 # for existing importers and for tests that patch these by name.
 from .sandbox_parts.shared import (  # noqa: F401

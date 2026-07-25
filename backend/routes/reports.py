@@ -39,13 +39,10 @@ from backend.services.report.lineage import build_lineage_report_state
 
 logger = logging.getLogger(__name__)
 
-REPORT_ARCHIVE_PREFIX = "previous_report_v"
-
-
-
 # Implementations live in ./reports_parts/; re-exported here so existing
 # importers and tests keep resolving them from this module.
 from .reports_parts.core import (  # noqa: F401
+    REPORT_ARCHIVE_PREFIX,
     _should_skip_in_report_zip,
     _branch_query,
     _report_cache_key,

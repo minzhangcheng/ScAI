@@ -66,8 +66,11 @@ def part_names(package: ModuleType) -> list[str]:
     return names
 
 
-def _split_modules(facade: str) -> list[ModuleType]:
-    """The facade module followed by every module of the package it was split into."""
+def split_modules(facade: str) -> list[ModuleType]:
+    """The facade module followed by every module of the package it was split into.
+
+    A module with no split registered yields just itself.
+    """
     modules = [importlib.import_module(facade)]
     package_name = SPLIT_PACKAGES.get(facade)
     if package_name:
@@ -77,13 +80,24 @@ def _split_modules(facade: str) -> list[ModuleType]:
     return modules
 
 
-def holders(facade: str, attr: str) -> list[ModuleType]:
+def defines(facade: str, attr: str) -> list[ModuleType]:
     """Every module in the split that binds ``attr`` in its own namespace.
 
-    Raises rather than returning empty: patching nothing is the silent failure this
-    module exists to prevent.
+    This is what an ABSENCE assertion needs. ``hasattr(facade, attr)`` sees only the
+    facade's own namespace plus what it re-exports, so a name reintroduced inside a part
+    is invisible and a guard forbidding it passes while the thing is back. An empty list
+    means nothing in the split binds the name; use ``holders`` where that is an error.
     """
-    found = [module for module in _split_modules(facade) if attr in vars(module)]
+    return [module for module in split_modules(facade) if attr in vars(module)]
+
+
+def holders(facade: str, attr: str) -> list[ModuleType]:
+    """``defines``, refusing to come back empty.
+
+    Patching nothing is the silent failure this module exists to prevent, so the
+    patching helpers below need the raising form.
+    """
+    found = defines(facade, attr)
     if not found:
         raise AttributeError(f"{attr!r} is not bound in {facade} or its split package")
     return found
@@ -97,7 +111,7 @@ def split_source(facade: str) -> str:
     package's own ``__init__.py`` is included too -- ``pkgutil`` does not report it, and
     a source scan that skipped it would quietly miss anything defined there.
     """
-    modules = _split_modules(facade)
+    modules = split_modules(facade)
     package_name = SPLIT_PACKAGES.get(facade)
     if package_name:
         modules.insert(1, importlib.import_module(package_name))

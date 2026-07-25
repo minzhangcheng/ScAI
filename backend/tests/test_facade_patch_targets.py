@@ -30,13 +30,29 @@ def _package_dir(package: str) -> Path:
     return REPO_ROOT / package.replace(".", "/")
 
 
+def _parse_file(path: Path) -> tuple[str, ast.AST] | None:
+    """Source text and parsed tree of ``path``, or None if it cannot be read or parsed.
+
+    One place decides that an unreadable or invalid file is skipped rather than failing
+    the scan. Every collector below depends on that policy, and a copy of it that lost
+    ``SyntaxError`` would make a whole sweep quietly stop finding offenders -- the exact
+    failure mode this module exists to catch. Deliberately not cached: holding the trees
+    for all ~500 test files costs ~90 MB to save ~0.2 s.
+    """
+    try:
+        source = path.read_text()
+        return source, ast.parse(source)
+    except (OSError, SyntaxError):
+        return None
+
+
 @functools.lru_cache(maxsize=None)
 def _functions_referencing(path: Path, name: str) -> tuple[str, ...]:
     """Functions in ``path`` that read ``name`` as a bare global."""
-    try:
-        tree = ast.parse(path.read_text())
-    except (OSError, SyntaxError):
+    parsed = _parse_file(path)
+    if parsed is None:
         return ()
+    _, tree = parsed
     return tuple(
         f"{path.relative_to(REPO_ROOT)}:{node.lineno} {node.name}()"
         for node in ast.walk(tree)
@@ -68,10 +84,10 @@ def _patch_sites() -> list[tuple[Path, int, str, str]]:
     for test_file in sorted(TESTS_DIR.rglob("*.py")):
         if test_file.name == Path(__file__).name:
             continue
-        try:
-            tree = ast.parse(test_file.read_text())
-        except (OSError, SyntaxError):
+        parsed = _parse_file(test_file)
+        if parsed is None:
             continue
+        _, tree = parsed
         aliases = _module_aliases(tree)
 
         for node in ast.walk(tree):
@@ -113,11 +129,10 @@ def _derived_split_packages() -> dict[str, str]:
     for path in (REPO_ROOT / "backend").rglob("*.py"):
         if path.name == "__init__.py":
             continue
-        try:
-            source = path.read_text()
-            tree = ast.parse(source)
-        except (OSError, SyntaxError):
+        parsed = _parse_file(path)
+        if parsed is None:
             continue
+        source, tree = parsed
         lines = source.splitlines()
         for node in tree.body:
             if not isinstance(node, ast.ImportFrom) or node.level != 1 or not node.module:
@@ -192,6 +207,140 @@ def test_no_test_patches_a_name_the_facade_no_longer_resolves():
         "These patches target a facade, but the code that reads the name lives in the "
         "split-out package, so the patch does nothing and the test silently exercises "
         "the real dependency. Use patch_facade()/setattr_facade() from "
+        "backend/tests/split_facade.py instead:" + "".join(offenders)
+    )
+
+
+def _path_segments(expr: ast.AST, bindings: dict[str, ast.AST]) -> list[str]:
+    """Path segments of a filesystem expression, as written.
+
+    Two shapes hide the segments from a naive scan, and both were used by the guards
+    this check exists to protect. ``p = ROOT / "agents" / "x.py"`` followed by
+    ``p.read_text()`` puts every segment behind an ``ast.Name``, so one level of local
+    binding is followed -- ``bindings`` is file-global and last-wins, so a name reused
+    for two paths in one file resolves to whichever is assigned last.
+    ``__import__("pathlib").Path("backend/x.py")`` splices the module name in as an
+    ordinary string constant, so ``__import__`` arguments are dropped -- otherwise the
+    candidate reads "pathlib/backend/x.py" and matches nothing.
+    """
+    if isinstance(expr, ast.Name):
+        expr = bindings.get(expr.id)  # one level; a Name bound to a Name yields []
+        if expr is None:
+            return []
+
+    module_names = {
+        arg
+        for sub in ast.walk(expr)
+        if isinstance(sub, ast.Call)
+        and isinstance(sub.func, ast.Name)
+        and sub.func.id == "__import__"
+        for arg in sub.args
+    }
+    constants = sorted(
+        (
+            sub
+            for sub in ast.walk(expr)
+            if isinstance(sub, ast.Constant)
+            and isinstance(sub.value, str)
+            and sub not in module_names
+        ),
+        # ast.walk is breadth-first, so `a / "x" / "y.py"` would otherwise yield the
+        # trailing segment before the ones that precede it.
+        key=lambda sub: (sub.lineno, sub.col_offset),
+    )
+    return [part for sub in constants for part in sub.value.split("/") if part]
+
+
+def _reads_facade(segments: list[str], relative: str) -> bool:
+    """True when ``segments`` names ``relative``, comparing from the filename backwards.
+
+    The shorter side must be a suffix of the longer, and at least two segments must
+    agree. Anchoring at the front instead would miss a path that starts anywhere other
+    than the repo root; matching the filename alone would flag any unrelated reports.py
+    or service.py.
+    """
+    target = relative.split("/")
+    shared = min(len(segments), len(target))
+    return shared >= 2 and segments[-shared:] == target[-shared:]
+
+
+def _raw_source_reads() -> list[tuple[Path, int, str]]:
+    """(test_file, line, facade) for tests that read a split facade's file as raw text.
+
+    A facade is only a re-export header now, so a structural assertion over its text
+    scans almost nothing. A negative assertion -- "this pattern must not appear" -- then
+    holds no matter what the split package contains, and the guard dies silently at the
+    moment the code it guards moves out. ``split_source``/``source_for_path`` follow the
+    split; a bare ``Path(...).read_text()`` does not.
+
+    Scope is the literal-path shape only. ``open(module.__file__)`` and
+    ``inspect.getsource(module)`` are not reported: of the 15 such sites aimed at a
+    registered facade, 14 assert on text the facade still holds, so flagging them would
+    be noise. Runtime ``hasattr(facade, name)`` absence checks go blind the same way for
+    the same reason; ``split_facade.defines()`` is the fix there and nothing here
+    detects them.
+    """
+    exempt = {"split_facade.py", Path(__file__).name}
+    sites: list[tuple[Path, int, str]] = []
+
+    for test_file in sorted(TESTS_DIR.rglob("*.py")):
+        if test_file.name in exempt:
+            continue
+        parsed = _parse_file(test_file)
+        if parsed is None:
+            continue
+        _, tree = parsed
+
+        bindings: dict[str, ast.AST] = {
+            target.id: node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Attribute) and node.func.attr in {
+                "read_text",
+                "read_bytes",
+            }:
+                path_expr = node.func.value
+            elif isinstance(node.func, ast.Name) and node.func.id == "open" and node.args:
+                path_expr = node.args[0]
+            else:
+                continue
+
+            segments = _path_segments(path_expr, bindings)
+            if not segments or not segments[-1].endswith(".py"):
+                continue
+            facade = next(
+                (
+                    name
+                    for name in SPLIT_PACKAGES
+                    if _reads_facade(segments, name.replace(".", "/") + ".py")
+                ),
+                None,
+            )
+            if facade is not None:
+                sites.append((test_file, node.lineno, facade))
+
+    return sorted(set(sites))
+
+
+def test_no_test_reads_a_split_facade_as_raw_source():
+    """Source-scanning guards must follow the split, or they assert against a header."""
+    offenders = [
+        f"\n  {test_file.relative_to(REPO_ROOT)}:{line} reads {facade.rpartition('.')[2]}.py "
+        f"directly, but its implementation lives in {SPLIT_PACKAGES[facade]}"
+        for test_file, line, facade in _raw_source_reads()
+    ]
+
+    assert not offenders, (
+        "These tests read a facade's file as raw text. The facade is a re-export header, "
+        "so the assertion scans none of the implementation -- a negative assertion passes "
+        "unconditionally. Use split_source()/source_for_path() from "
         "backend/tests/split_facade.py instead:" + "".join(offenders)
     )
 

@@ -168,27 +168,117 @@ def parse_expression_contracts(output: str | None) -> list[dict[str, Any]]:
     return []
 
 
+# Names whose call produces a brand-new AnnData object. Mutating such an object
+# cannot retroactively change a figure rendered from a different object.
+#
+# Deliberately a conservative, closed set: a call whose name is absent (e.g. a
+# user-defined loader like ``create_anndata()``) is treated as binding the
+# canonical object, so a later mutation of that name is flagged. That yields a
+# false positive (an unnecessary figure refresh) but never a false negative (a
+# stale figure), which is the safe direction for this check.
+_FRESH_OBJECT_CALLS = frozenset({
+    "copy", "AnnData", "concat", "concatenate",
+    "read", "read_h5ad", "read_10x_h5", "read_10x_mtx", "read_mtx",
+    "read_csv", "read_text", "read_visium", "read_loom", "read_excel",
+})
+
+
+def _mutation_target_root(node: ast.Call) -> str | None:
+    """Root variable an in-place expression mutator operates on."""
+    arg = node.args[0] if node.args else None
+    if arg is None:
+        for keyword in node.keywords:
+            if keyword.arg in {"adata", "data", "X"}:
+                arg = keyword.value
+                break
+    return _root_name(arg)
+
+
+def _value_makes_fresh_object(value: ast.AST | None, local: set[str]) -> bool:
+    """Whether an assignment RHS binds a throwaway object distinct from the
+    canonical AnnData: an explicit ``.copy()``/reader/constructor call, an alias
+    of an already-local object, or a subset of one."""
+    if isinstance(value, ast.Call):
+        fn = getattr(value.func, "attr", None) or getattr(value.func, "id", None)
+        return fn in _FRESH_OBJECT_CALLS
+    if isinstance(value, ast.Name):
+        return value.id in local
+    if isinstance(value, ast.Subscript):
+        return _root_name(value) in local
+    return False
+
+
 def mutates_expression_representation(code: str) -> bool:
-    """Detect explicit expression normalization/scaling or matrix replacement."""
+    """Detect normalization/scaling or matrix replacement of the *canonical*
+    expression matrix.
+
+    Only mutations of the shared AnnData object invalidate previously generated
+    figures. Normalizing or replacing the matrix of a throwaway copy created
+    within the same execution (for example ``work = adata.copy();
+    sc.pp.log1p(work)``) leaves the canonical representation -- and every figure
+    derived from it -- intact, so it must not be treated as a representation
+    change. Small models routinely re-normalize such copies in nearly every
+    step; flagging those would invalidate the entire Results gallery.
+    """
     try:
         tree = ast.parse(code)
     except SyntaxError:
         return False
+
+    # Collect local-object assignments and mutation events, then replay them in
+    # source order so a copy created earlier in the block shields its own later
+    # mutations. Tie-break assignments (0) before mutations (1) at one position.
+    events: list[tuple[tuple[int, int], int, str, Any]] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
-            if name in _REPRESENTATION_MUTATORS:
-                return True
-        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        pos = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+        # Only plain assignment binds a name to local-copy status here. Other
+        # binding forms -- walrus ``(w := adata.copy())``, ``for w in ...``,
+        # ``with ... as w``, and tuple/list unpacking targets -- are NOT tracked,
+        # so a copy bound that way is later seen as the canonical object and its
+        # mutation is flagged. These forms are vanishingly rare in generated
+        # scanpy code, and the miss is a safe false positive (an extra figure
+        # refresh), never a stale-figure false negative.
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = [t.id for t in targets if isinstance(t, ast.Name)]
+            if names and node.value is not None:
+                events.append((pos, 0, "assign", (names, node.value)))
             for target in targets:
                 if isinstance(target, ast.Attribute) and target.attr == "X":
-                    return True
+                    events.append((pos, 1, "mutate", _root_name(target)))
+        elif isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Attribute) and node.target.attr == "X":
+                events.append((pos, 1, "mutate", _root_name(node.target)))
+        elif isinstance(node, ast.Call):
+            name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+            if name in _REPRESENTATION_MUTATORS:
+                events.append((pos, 1, "mutate", _mutation_target_root(node)))
+
+    local: set[str] = set()
+    for _pos, _tie, kind, data in sorted(events, key=lambda e: (e[0], e[1])):
+        if kind == "assign":
+            names, value = data
+            if _value_makes_fresh_object(value, local):
+                local.update(names)
+            else:
+                # Rebinding a name to the canonical object (or an unknown source)
+                # drops its local-copy status.
+                local.difference_update(names)
+        elif data is None or data not in local:
+            return True
     return False
 
 
 def prepares_expression_before_sensitive_call(code: str) -> bool:
-    """Return whether an explicit representation mutation precedes analysis."""
+    """Return whether an explicit representation mutation precedes analysis.
+
+    Intentionally asymmetric with ``mutates_expression_representation``: this
+    function does NOT distinguish canonical mutations from mutations of a local
+    copy. The question it answers -- "was the expression prepared before a
+    sensitive call?" -- is answered "yes" even when the preparation happens on a
+    copy, so the naive any-mutation scan is correct for its purpose. Its result
+    is informational/heuristic and does not drive figure invalidation.
+    """
     try:
         tree = ast.parse(code)
     except SyntaxError:

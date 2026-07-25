@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.35.1-rc-0.3 · **Last updated**: 2026-07-24
+**Version**: 0.36.1 · **Last updated**: 2026-07-25
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,28 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
+**0.36.x — (2026-07-25)**
+
+- `0.36.1` — Merge `ver-0.35.1-rc` facade-split refactor branch into `main`; version bump (2026-07-25):
+  - Merges the complete facade-split refactor (`*_parts/` module layout) and all accumulated fixes from the `ver-0.35.1-rc` branch into `main`.
+  - Includes: auto-advancing partial-report gate, expression-contract local-copy shielding, bioinformatics dependency policy (no pip install), PI agent name constant, durable file primitives, schema import cleanup, snapshot V2 pre-restore fixes, and all prior 0.35.x changes.
+  - Version string updated to `0.36.1`.
+
 **0.35.x — (2026-07-24)**
+
+- `0.35.4` — Merge `main` (0.35.3) into the facade-split refactor branch; version bump (2026-07-24):
+  - Brings the auto-advancing partial-report gate and the expression-contract local-copy shielding + docstring clarifications (from 0.35.2 and 0.35.3) onto the facade-split (`*_parts/`) codebase.
+  - **Report gate auto-advance re-applied in the split layout (`backend/workflow/reporting_parts/final_report.py`)**: `main` added the partial-report auto-advance to the pre-split monolithic `reporting.py`; here it is ported onto `FinalReportMixin._generate_final_report`, while the top-level `reporting.py` stays the thin re-export facade.
+  - **No intentional behavior change** beyond the union of both branches; version string updated to `0.35.4`.
+
+- `0.35.3` — Report gate auto-advance for partial reports; expression-contract docstrings; version bump (2026-07-24):
+  - **Report gate auto-advance in auto-advancing modes (`backend/workflow/reporting.py`)**: When direction coverage is incomplete and `round_wait_seconds >= 0` (no-wait or countdown mode), the final-report gate now produces a partial report instead of blocking indefinitely. Manual mode (`round_wait_seconds == -1`) retains the block-and-wait behavior. New `allow_partial_report` flag on `AnalysisState`.
+  - **Expression-contract docstring clarifications (`backend/utils/expression_contract.py`)**: Added docstrings explaining the conservative closed-set design of `_FRESH_OBJECT_CALLS` (safe false positives over stale-figure false negatives) and the intentional asymmetry of `prepares_expression_before_sensitive_call` (heuristic, not figure-invalidation).
+  - **New tests (`backend/tests/test_autonomous_partial_report.py`)**: `test_auto_advancing_mode_produces_partial_instead_of_blocking` (parametrized for wait=0 and wait=300), `test_manual_mode_still_blocks_and_waits`.
+
+- `0.35.2` — Expression contract local-copy shielding; version bump (2026-07-24):
+  - **Local-copy mutation is not a representation change (`backend/utils/expression_contract.py`)**: `mutates_expression_representation()` now tracks local-object assignments via AST event replay. Mutations of throwaway copies (e.g. `work = adata.copy(); sc.pp.log1p(work)`) no longer invalidate prior figures. Fresh-object calls (`copy`, `read_h5ad`, `AnnData`, `concat`) and aliases of already-local names are shielded. Canonical-object mutations alongside local copies are still correctly detected. New `_FRESH_OBJECT_CALLS` set, `_mutation_target_root()`, `_value_makes_fresh_object()`, and event-sorted replay loop.
+  - **New tests (`backend/tests/test_expression_contract.py`)**: `test_local_copy_mutation_is_not_a_representation_change` (6 sub-cases: copy, semicolon, existence-guarded, subset, fresh-read, local-X-replace), `test_canonical_mutation_still_detected_alongside_local_copies` (2 sub-cases: mixed copy+canonical, rebind to non-fresh source).
 
 - `0.35.1-rc-0.3` — Facade split cleanup: remove duplicated constants after module split; DataOverviewMatrix count pre-index; version-test regex fix; version bump (2026-07-24):
   - **Bioinformatics shared constants (`backend/agents/bioinformatics/`)**: Dropped accidental duplicate imports (`inspect`/`ora_kernel`) and per-module `MAX_WORKSPACE_H5AD_FILES` copies from `kernel_templates.py`, `mechanism_validation.py`, `tool_schemas.py`, and `workspace_guards.py`. Workspace guard now imports `MAX_WORKSPACE_H5AD_FILES` from `shared.py`.
