@@ -1,6 +1,8 @@
 // New-session creation form. Split out of Sidebar.tsx; JSX copied verbatim.
+import { useState } from 'react'
 import { Clock } from 'lucide-react'
 import { ROUND_WAIT_OPTIONS } from '../../constants/roundWait'
+import { DEFAULT_SESSION_NAME, DEFAULT_SESSION_INSTRUCTION } from '../../constants/sessionDefaults'
 import { useTranslation } from '../../i18n/translations'
 
 interface NewSessionFormProps {
@@ -30,6 +32,11 @@ export function NewSessionForm({
   t,
   language,
 }: NewSessionFormProps) {
+  const [isDefaultName, setIsDefaultName] = useState(true)
+  const [isDefaultInstruction, setIsDefaultInstruction] = useState(true)
+  const [isFocusedName, setIsFocusedName] = useState(false)
+  const [isFocusedInstruction, setIsFocusedInstruction] = useState(false)
+
   if (!show) return null
 
   return (
@@ -38,16 +45,46 @@ export function NewSessionForm({
         <input
           type="text"
           value={sessionName}
-          onChange={(e) => setSessionName(e.target.value)}
+          onFocus={() => {
+            setIsFocusedName(true)
+          }}
+          onBlur={() => {
+            setIsFocusedName(false)
+            if (sessionName === DEFAULT_SESSION_NAME && isDefaultName) {
+              setIsDefaultName(true)
+            }
+          }}
+          onChange={(e) => {
+            const value = e.target.value
+            setSessionName(value)
+            if (value !== DEFAULT_SESSION_NAME) {
+              setIsDefaultName(false)
+            }
+          }}
           placeholder={t('sessionNamePlaceholder')}
-          className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+          className={`w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500 ${isDefaultName && !isFocusedName ? 'text-surface-400' : 'text-surface-800'}`}
         />
         <textarea
           value={instruction}
-          onChange={(e) => setInstruction(e.target.value)}
+          onFocus={() => {
+            setIsFocusedInstruction(true)
+          }}
+          onBlur={() => {
+            setIsFocusedInstruction(false)
+            if (instruction === DEFAULT_SESSION_INSTRUCTION && isDefaultInstruction) {
+              setIsDefaultInstruction(true)
+            }
+          }}
+          onChange={(e) => {
+            const value = e.target.value
+            setInstruction(value)
+            if (value !== DEFAULT_SESSION_INSTRUCTION) {
+              setIsDefaultInstruction(false)
+            }
+          }}
           placeholder={t('researchGoalPlaceholder')}
           rows={12}
-          className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500 resize-y min-h-[200px]"
+          className={`w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500 resize-y min-h-[200px] ${isDefaultInstruction && !isFocusedInstruction ? 'text-surface-400' : 'text-surface-800'}`}
         />
 
         {/* Round Wait Time Setting */}

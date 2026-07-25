@@ -50,7 +50,8 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
   const [showSessionBrowser, setShowSessionBrowser] = useState(false)
   const [savedSessions, setSavedSessions] = useState<any[]>([])
   const [loadingSessions, setLoadingSessions] = useState(false)
-  
+  const [formKey, setFormKey] = useState(0)
+   
   const [instruction, setInstruction] = useState(DEFAULT_SESSION_INSTRUCTION)
   const [sessionName, setSessionName] = useState(DEFAULT_SESSION_NAME)
   const [editingSession, setEditingSession] = useState(false)
@@ -259,6 +260,7 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
       // Reset to defaults for next time
       setInstruction(DEFAULT_SESSION_INSTRUCTION)
       setSessionName(DEFAULT_SESSION_NAME)
+      setFormKey(prev => prev + 1)
     } catch (e) {
       console.error('Failed to create session:', e)
       const msg = e instanceof Error ? e.message : String(e)
@@ -653,6 +655,7 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
       />
 
       <NewSessionForm
+        key={formKey}
         show={showNewSession}
         sessionName={sessionName}
         setSessionName={setSessionName}

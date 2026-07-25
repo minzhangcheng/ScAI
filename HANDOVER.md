@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.36.2 · **Last updated**: 2026-07-25
+**Version**: 0.36.3 · **Last updated**: 2026-07-25
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,11 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.36.x — (2026-07-25)**
+
+- `0.36.3` — New-session form default-value visual hint, form reset on creation, default instruction rewrite; version bump (2026-07-25):
+  - **Default-value visual hint in NewSessionForm (`frontend/src/components/sidebar/NewSessionForm.tsx`)**: Session name and instruction fields now render their default values in placeholder-style gray (`text-surface-400`) when the content is still the unmodified default, switching to normal text (`text-surface-800`) once the user edits or focuses the field. Tracks `isDefaultName`/`isDefaultInstruction` and `isFocusedName`/`isFocusedInstruction` states so the gray hint disappears on focus and reappears on blur if the value is still the default. Imports `DEFAULT_SESSION_NAME` and `DEFAULT_SESSION_INSTRUCTION` from `sessionDefaults.ts` for comparison.
+  - **Form reset on session creation (`frontend/src/components/Sidebar.tsx`)**: New `formKey` state incremented after successful session creation, passed as `key` to `NewSessionForm` to force a full remount — clearing the local default-tracking state that would otherwise persist stale `isDefault*` flags into the next creation.
+  - **Default instruction rewrite (`frontend/src/constants/sessionDefaults.ts`)**: Default `DEFAULT_SESSION_INSTRUCTION` expanded from a single paragraph to a structured Background + Objective format. Background section provides research context; Objective section states the central analysis goal in domain-neutral terms. `DEFAULT_SESSION_NAME` unchanged.
 
 - `0.36.2` — Split-facade test helper rename (`defines` → `binds`), emptied-facade module-read guard, frontend split doc/comment cleanup, upload types deduplication; version bump (2026-07-25):
   - **`split_facade.defines()` renamed to `binds()` (`backend/tests/split_facade.py`)**: The old name implied "defines" (i.e. implements), but the function reports every namespace that *binds* a name — including re-exports. Renamed to `binds()` to match semantics; `holders()` now delegates to `binds()`. Docstrings expanded to explain the distinction: `binds` is for absence assertions (a re-export is just as reachable), `holders` is for patching (must not patch nothing).
