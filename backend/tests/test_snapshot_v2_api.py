@@ -1,4 +1,5 @@
 """Test V2 snapshot API response models, error mappings, and AnalysisState fields."""
+from backend.tests.split_facade import setattr_facade
 import asyncio
 import hashlib
 import json
@@ -398,8 +399,8 @@ def test_snapshot_error_detail_preserves_details_and_context():
 async def test_export_v2_errors_are_structured(monkeypatch):
     request = MagicMock()
     request.state.user_id = "u1"
-    monkeypatch.setattr(
-        "backend.routes.export_import.require_session_ownership",
+    setattr_facade(
+        monkeypatch, "backend.routes.export_import", "require_session_ownership",
         AsyncMock(return_value=AnalysisState(id="s1", user_id="u1")),
     )
     monkeypatch.setattr(

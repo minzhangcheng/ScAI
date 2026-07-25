@@ -1,0 +1,108 @@
+# Shared router/logger and the chat context builder.
+# Moved verbatim out of backend/routes/chat.py.
+"""Chat routes for PI Agent free-form chat with analysis sessions."""
+import asyncio
+import json
+import logging
+import re
+import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from fastapi import APIRouter, Form, HTTPException, Request, UploadFile, File
+from fastapi.responses import JSONResponse
+
+from backend.config import get_session_workspace, get_session_reports, get_session_uploads, get_session_states, PI_AGENT_NAME
+from backend.models.schemas import WebSocketMessage, AgentType, DataFile, AnalysisState
+from backend.services.session_store import ensure_session_loaded, async_save_session, update_session_cache
+from backend.state import (
+    chat_tasks, chat_task_lock, chat_sandboxes,
+    websockets, workflows, state_lock,
+)
+from backend.utils.config_resolver import resolve_config_for_user
+from backend.utils.auth import require_session_ownership
+from backend.utils.files import safe_filename, validate_session_id
+from backend.utils.upload import stream_save_file
+from backend.utils.settings_provider import AgentSettingsProvider
+from backend.utils.sandbox import _TPL_NOOP_INSTALL
+
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/session", tags=["chat"])
+
+def _build_chat_context(state: Any) -> tuple:
+    """Build analysis context summary for PI Agent chat.
+
+    Returns:
+        (context_str, figure_inventory) where figure_inventory is a list of
+        {"name": str, "path": str} dicts for PNG files found on disk.
+    """
+    parts = []
+
+    if state.initial_instruction:
+        parts.append(f"Research Goal: {state.initial_instruction}")
+
+    parts.append(f"Current Round: {state.current_round}")
+    parts.append(f"Status: {state.status.value}")
+
+    # Experimental design summary
+    design_summary = state.build_experimental_design_summary()
+    if design_summary:
+        parts.append(design_summary)
+
+    # Biochemistry indicators summary
+    if state.biochemistry_indicators:
+        indicators = [f"{r.indicator}={r.value}{r.unit}" for r in state.biochemistry_indicators]
+        parts.append(f"Biochemistry: {', '.join(indicators)}")
+
+    # Round results (last 3)
+    for rr in state.round_results[-3:]:
+        round_parts = [f"\n--- Round {rr.round_number} Summary ---"]
+        if rr.pathology_findings:
+            round_parts.append(f"Pathology: {'; '.join(rr.pathology_findings[:3])}")
+        if rr.bioinformatics_findings:
+            round_parts.append(f"Bioinformatics: {'; '.join(rr.bioinformatics_findings[:3])}")
+        if rr.biochemistry_findings:
+            round_parts.append(f"Biochemistry: {'; '.join(rr.biochemistry_findings[:3])}")
+        if rr.literature_findings:
+            round_parts.append(f"Literature: {'; '.join(rr.literature_findings[:3])}")
+        if rr.pi_summary:
+            round_parts.append(f"PI Summary: {rr.pi_summary[:500]}")
+        parts.extend(round_parts)
+
+    # Final summary
+    if state.final_summary:
+        parts.append(f"\nFinal Summary: {state.final_summary[:1000]}")
+
+    # Literature reports
+    if state.literature_reports:
+        parts.append(f"\nLiterature Reports: {len(state.literature_reports)} available")
+        for lr in state.literature_reports[-2:]:
+            parts.append(f"- Topic: {lr.topic}")
+
+    # Scan disk for actual figure files
+    figure_inventory: List[Dict[str, str]] = []
+    seen_names: set = set()
+
+    def _add_pngs(directory: Path):
+        if not directory.exists():
+            return
+        # Scan JPG first (new format), then PNG for backward compatibility
+        for img in sorted(directory.glob("*.jpg")) + sorted(directory.glob("*.png")):
+            if img.stem not in seen_names:
+                seen_names.add(img.stem)
+                figure_inventory.append({"name": img.stem, "path": str(img)})
+
+    _add_pngs(get_session_workspace(state.id))
+    _add_pngs(get_session_workspace(state.id) / "figures")
+    _add_pngs(get_session_reports(state.id) / "figures")
+
+    if figure_inventory:
+        parts.append(f"\nAvailable Figures ({len(figure_inventory)} on disk):")
+        for fig in figure_inventory:
+            parts.append(f"  - {fig['name']}")
+
+    return "\n".join(parts), figure_inventory

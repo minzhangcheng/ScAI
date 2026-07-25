@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from backend.tests.split_facade import reload_split
+
 
 @pytest.fixture(autouse=True)
 def _isolated_data_dir(tmp_path, monkeypatch):
@@ -28,8 +30,7 @@ def _isolated_data_dir(tmp_path, monkeypatch):
     importlib.reload(_cfg)
     import backend.config as _config
     importlib.reload(_config)
-    import backend.routes.export_import as _ei
-    importlib.reload(_ei)
+    reload_split("backend.routes.export_import")
     import backend.services.session_store as _ss
     importlib.reload(_ss)
 

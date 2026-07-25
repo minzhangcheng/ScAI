@@ -1,3 +1,4 @@
+from backend.tests.split_facade import setattr_facade
 import pytest
 
 from backend.utils import llm_client as llm_mod
@@ -14,9 +15,9 @@ async def test_chat_probe_fallback_retries_transient_without_upstream_wrapper(mo
     calls = {"count": 0}
     sentinel = object()
 
-    monkeypatch.setattr(llm_mod, "_route_protocol_order", lambda base_url, model: ["chat", "responses"])
-    monkeypatch.setattr(llm_mod, "is_transient_probe_error", lambda exc: isinstance(exc, ProbeTransientError))
-    monkeypatch.setattr(llm_mod, "PROBE_RETRY_DELAYS", [0, 0])
+    setattr_facade(monkeypatch, "backend.utils.llm_client", "_route_protocol_order", lambda base_url, model: ["chat", "responses"])
+    setattr_facade(monkeypatch, "backend.utils.llm_client", "is_transient_probe_error", lambda exc: isinstance(exc, ProbeTransientError))
+    setattr_facade(monkeypatch, "backend.utils.llm_client", "PROBE_RETRY_DELAYS", [0, 0])
 
     async def make_inline_call(*, non_retryable_predicate=None, max_retries_override=None):
         calls["count"] += 1
@@ -50,7 +51,7 @@ async def test_decided_chat_protocol_uses_normal_retry_settings(monkeypatch):
         seen["retries"] = max_retries_override
         return sentinel
 
-    monkeypatch.setattr(llm_mod, "_route_protocol_order", lambda base_url, model: ["chat"])
+    setattr_facade(monkeypatch, "backend.utils.llm_client", "_route_protocol_order", lambda base_url, model: ["chat"])
 
     result = await client._dispatch_non_streaming(
         model="model-a",

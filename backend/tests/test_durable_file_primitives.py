@@ -8,6 +8,7 @@ import pytest
 
 from backend.utils.files import atomic_write_bytes, atomic_write_text, atomic_write_json, atomic_copy_file, fsync_directory
 from backend.utils.crypto import sign_hmac_sha256, verify_hmac_sha256
+from backend.tests.split_facade import split_source
 
 
 class TestAtomicWrite:
@@ -120,7 +121,9 @@ class TestHmacDriftGuard:
         assert offenders == [], f"raw hmac.new in integrity modules: {offenders}"
 
     def test_sandbox_pkl_hmac_uses_shared_helper(self):
-        text = __import__("pathlib").Path("backend/utils/sandbox.py").read_text()
+        # The raw hmac.new( this caps moved into the parts package, so reading the
+        # facade alone would make the cap vacuous.
+        text = split_source("backend.utils.sandbox")
         # The non-streaming signer must use the shared helper.
         assert "sign_hmac_sha256" in text
         # The single remaining raw use is the streaming helper (allowlisted).

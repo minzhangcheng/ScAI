@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from backend import config as cfg
 from backend.models.schemas import AgentType
 from backend.routes import chat, session_config, reports
+from backend.tests.split_facade import defines
 
 
 def test_pi_agent_name_equals_agent_type_value():
@@ -22,9 +23,11 @@ def test_routes_import_from_config():
 
 
 def test_no_local_redefinitions():
-    # Each route module should NOT define its own _PI_AGENT_NAME.
+    # chat and reports are facades now, so a redefinition inside a part would not show
+    # up on the facade itself.
     for mod in (chat, session_config, reports):
-        assert not hasattr(mod, "_PI_AGENT_NAME"), (
-            f"{mod.__name__} still defines local _PI_AGENT_NAME; "
+        found = defines(mod.__name__, "_PI_AGENT_NAME")
+        assert not found, (
+            f"{[module.__name__ for module in found]} still define local _PI_AGENT_NAME; "
             "import PI_AGENT_NAME from backend.config instead"
         )

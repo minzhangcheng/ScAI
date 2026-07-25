@@ -12,6 +12,7 @@ import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from backend.tests.split_facade import patch_facade
 from backend.utils.llm_client import (
     OpenAICompatibleClient,
     EMPTY_CONTENT_PLACEHOLDER,
@@ -62,7 +63,7 @@ async def test_length_truncated_empty_content_retries_with_bigger_budget(client)
     recovered = _resp('{"severity": "none"}', finish_reason="stop")
     call = AsyncMock(side_effect=[truncated, recovered])
     with patch.object(client, "_call_with_temp_fallback", call), \
-         patch("backend.utils.llm_client.logger"):
+         patch_facade("backend.utils.llm_client", "logger"):
         result = await client._chat_inline("mimo-v2.5", [{"role": "user", "content": "x"}], max_tokens=512)
     assert result.content == '{"severity": "none"}'
     assert call.await_count == 2  # retried once after the truncated empty response
@@ -77,7 +78,7 @@ async def test_salvaged_truncated_reasoning_still_retries(client):
     recovered = _resp('{"severity": "warning"}', finish_reason="stop")
     call = AsyncMock(side_effect=[truncated, recovered])
     with patch.object(client, "_call_with_temp_fallback", call), \
-         patch("backend.utils.llm_client.logger"):
+         patch_facade("backend.utils.llm_client", "logger"):
         result = await client._chat_inline("mimo-v2.5", [{"role": "user", "content": "x"}], max_tokens=512)
     assert result.content == '{"severity": "warning"}'
     assert call.await_count == 2
@@ -89,7 +90,7 @@ async def test_non_truncated_empty_content_does_not_retry(client):
     stopped = _resp(None, finish_reason="stop")
     call = AsyncMock(side_effect=[stopped])
     with patch.object(client, "_call_with_temp_fallback", call), \
-         patch("backend.utils.llm_client.logger"):
+         patch_facade("backend.utils.llm_client", "logger"):
         result = await client._chat_inline("mimo-v2.5", [{"role": "user", "content": "x"}], max_tokens=512)
     assert result.content == EMPTY_CONTENT_PLACEHOLDER
     assert call.await_count == 1  # no retry
@@ -101,7 +102,7 @@ async def test_truncation_retry_capped_to_single_attempt(client):
     truncated = _resp(None, finish_reason="length")
     call = AsyncMock(side_effect=[truncated, truncated])
     with patch.object(client, "_call_with_temp_fallback", call), \
-         patch("backend.utils.llm_client.logger"):
+         patch_facade("backend.utils.llm_client", "logger"):
         result = await client._chat_inline("mimo-v2.5", [{"role": "user", "content": "x"}], max_tokens=512)
     assert result.content == EMPTY_CONTENT_PLACEHOLDER
     assert call.await_count == 2  # original + exactly one retry
@@ -114,7 +115,7 @@ async def test_empty_answer_zero_tokens_retries_then_recovers(client):
     call = AsyncMock(side_effect=[dead, recovered])
     with patch.object(client, "_call_with_temp_fallback", call), \
          patch("backend.utils.llm_client.asyncio.sleep", new=AsyncMock()), \
-         patch("backend.utils.llm_client.logger"):
+         patch_facade("backend.utils.llm_client", "logger"):
         result = await client._chat_inline(
             "gpt-5.5", [{"role": "user", "content": "x"}], max_tokens=512
         )
@@ -128,7 +129,7 @@ async def test_empty_answer_zero_tokens_raises_after_cap(client):
     call = AsyncMock(side_effect=[dead] * (EMPTY_RESPONSE_MAX_RETRIES + 1))
     with patch.object(client, "_call_with_temp_fallback", call), \
          patch("backend.utils.llm_client.asyncio.sleep", new=AsyncMock()), \
-         patch("backend.utils.llm_client.logger"):
+         patch_facade("backend.utils.llm_client", "logger"):
         with pytest.raises(UpstreamExhaustedError):
             await client._chat_inline(
                 "gpt-5.5", [{"role": "user", "content": "x"}], max_tokens=512
@@ -142,7 +143,7 @@ async def test_empty_answer_with_tokens_does_not_retry(client):
     call = AsyncMock(side_effect=[empty_but_billed])
     with patch.object(client, "_call_with_temp_fallback", call), \
          patch("backend.utils.llm_client.asyncio.sleep", new=AsyncMock()), \
-         patch("backend.utils.llm_client.logger"):
+         patch_facade("backend.utils.llm_client", "logger"):
         result = await client._chat_inline(
             "gpt-5.5", [{"role": "user", "content": "x"}], max_tokens=512
         )
@@ -156,7 +157,7 @@ async def test_probe_path_raises_transient_not_empty(client):
     call = AsyncMock(side_effect=[dead])
     with patch.object(client, "_call_with_temp_fallback", call), \
          patch("backend.utils.llm_client.asyncio.sleep", new=AsyncMock()), \
-         patch("backend.utils.llm_client.logger"):
+         patch_facade("backend.utils.llm_client", "logger"):
         with pytest.raises(EmptyResponseError):
             await client._chat_inline(
                 "gpt-5.5", [{"role": "user", "content": "x"}], max_tokens=512,
@@ -175,10 +176,10 @@ async def test_chat_dispatch_probe_never_returns_empty(client):
     dead = _resp(None, finish_reason="stop", completion_tokens=0)
     call = AsyncMock(return_value=dead)
     with patch.object(client, "_call_with_temp_fallback", call), \
-         patch("backend.utils.llm_client._route_protocol_order",
-               return_value=["chat", "bogus"]), \
+         patch_facade("backend.utils.llm_client", "_route_protocol_order",
+                      return_value=["chat", "bogus"]), \
          patch("backend.utils.llm_client.asyncio.sleep", new=AsyncMock()), \
-         patch("backend.utils.llm_client.logger"):
+         patch_facade("backend.utils.llm_client", "logger"):
         with pytest.raises(UpstreamExhaustedError):
             await client.chat(
                 "gpt-5.5", [{"role": "user", "content": "x"}], max_tokens=512
@@ -203,7 +204,7 @@ async def test_adapter_empty_zero_tokens_retries_then_recovers(client):
     call = AsyncMock(side_effect=[dead, recovered])
     with patch.object(client, "_call_with_temp_fallback", call), \
          patch("backend.utils.llm_client.asyncio.sleep", new=AsyncMock()), \
-         patch("backend.utils.llm_client.logger"):
+         patch_facade("backend.utils.llm_client", "logger"):
         result = await client._invoke_adapter(
             interaction_type="chat",
             model="gpt-5.5",
@@ -228,7 +229,7 @@ async def test_adapter_probe_path_raises_transient_not_empty(client):
     call = AsyncMock(side_effect=[dead])
     with patch.object(client, "_call_with_temp_fallback", call), \
          patch("backend.utils.llm_client.asyncio.sleep", new=AsyncMock()), \
-         patch("backend.utils.llm_client.logger"):
+         patch_facade("backend.utils.llm_client", "logger"):
         with pytest.raises(EmptyResponseError):
             await client._invoke_adapter(
                 interaction_type="chat",

@@ -1,4 +1,5 @@
 """Tests for Snapshot V2 cancellable restore jobs."""
+from backend.tests.split_facade import setattr_facade
 import asyncio
 import contextlib
 import json
@@ -11,6 +12,7 @@ import pytest_asyncio
 from backend.services.snapshot_v2.errors import SnapshotTransactionError
 from backend.services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
 from backend.state import snapshot_restore_jobs
+from backend.tests.snapshot_v2_fixtures import set_snapshot_service_session_states
 
 
 class _StatusOnlyService:
@@ -977,10 +979,7 @@ class TestCommittedJobLiveSideEffects:
             "backend.services.snapshot_v2.paths.get_integrity_dir",
             lambda sid: _sess_dir(sid) / "integrity",
         )
-        monkeypatch.setattr(
-            "backend.services.snapshot_v2.service.get_session_states",
-            lambda sid: _sess_dir(sid) / "states",
-        )
+        set_snapshot_service_session_states(monkeypatch, lambda sid: _sess_dir(sid) / "states")
 
         session_root = _sess_dir(session_id)
         workspace = session_root / "workspace"
@@ -1247,10 +1246,7 @@ class TestCommittedJobLiveSideEffects:
         monkeypatch.setattr(
             "backend.services.snapshot_v2.paths.get_session_dir", _sess_dir,
         )
-        monkeypatch.setattr(
-            "backend.services.snapshot_v2.service.get_session_states",
-            lambda sid: _sess_dir(sid) / "states",
-        )
+        set_snapshot_service_session_states(monkeypatch, lambda sid: _sess_dir(sid) / "states")
 
         session_root = _sess_dir(session_id)
         workspace = session_root / "workspace"
@@ -1476,10 +1472,7 @@ class TestCommittedJobLiveSideEffects:
         monkeypatch.setattr(
             "backend.services.snapshot_v2.paths.get_session_dir", _sess_dir,
         )
-        monkeypatch.setattr(
-            "backend.services.snapshot_v2.service.get_session_states",
-            lambda sid: _sess_dir(sid) / "states",
-        )
+        set_snapshot_service_session_states(monkeypatch, lambda sid: _sess_dir(sid) / "states")
 
         session_root = _sess_dir(session_id)
         workspace = session_root / "workspace"
@@ -1663,10 +1656,7 @@ class TestSafePointRetainedDuringPreRestore:
             "backend.config._config.get_session_states",
             lambda sid: _sess_dir(sid) / "states",
         )
-        monkeypatch.setattr(
-            "backend.services.snapshot_v2.service.get_session_states",
-            lambda sid: _sess_dir(sid) / "states",
-        )
+        set_snapshot_service_session_states(monkeypatch, lambda sid: _sess_dir(sid) / "states")
 
         for d in ("workspace", "states"):
             (_sess_dir(session_id) / d).mkdir(parents=True, exist_ok=True)
@@ -1740,10 +1730,7 @@ class TestSafePointRetainedDuringPreRestore:
             "backend.config._config.get_session_states",
             lambda sid: _sess_dir(sid) / "states",
         )
-        monkeypatch.setattr(
-            "backend.services.snapshot_v2.service.get_session_states",
-            lambda sid: _sess_dir(sid) / "states",
-        )
+        set_snapshot_service_session_states(monkeypatch, lambda sid: _sess_dir(sid) / "states")
 
         for d in ("workspace", "states"):
             (_sess_dir(session_id) / d).mkdir(parents=True, exist_ok=True)
@@ -2777,8 +2764,8 @@ async def test_chat_retry_still_blocked_when_failure_remains(monkeypatch):
         st.wait_input_reason = "snapshot_failure"
         st.status = TaskStatus.WAITING_INPUT
 
-    monkeypatch.setattr(
-        "backend.routes.chat.capture_post_chat_snapshot",
+    setattr_facade(
+        monkeypatch, "backend.routes.chat", "capture_post_chat_snapshot",
         fake_capture,
     )
     outcome = await default_retry_chat_capture(session_id, state, context)
@@ -2821,8 +2808,8 @@ async def test_retry_handlers_do_not_clear_gate_before_capture(monkeypatch):
         seen_status_during_capture["failure"] = st.snapshot_failure
         raise RequiredSnapshotBlocked("QUOTA", "still full")
 
-    monkeypatch.setattr(
-        "backend.routes.chat.capture_post_chat_snapshot",
+    setattr_facade(
+        monkeypatch, "backend.routes.chat", "capture_post_chat_snapshot",
         chat_capture_observing,
     )
     outcome = await default_retry_chat_capture(

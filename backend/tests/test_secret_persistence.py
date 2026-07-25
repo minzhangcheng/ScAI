@@ -1,3 +1,4 @@
+from backend.tests.split_facade import setattr_facade
 import io
 import json
 import logging
@@ -209,8 +210,8 @@ def test_portable_export_omits_installation_bound_checkpoint(tmp_path, monkeypat
     (states / "analysis.ipynb").write_text("{}", encoding="utf-8")
     legacy = tmp_path / "legacy"
     legacy.mkdir()
-    monkeypatch.setattr(export_import, "get_session_states", lambda _session_id: states)
-    monkeypatch.setattr(export_import, "STATE_DIR", legacy)
+    setattr_facade(monkeypatch, "backend.routes.export_import", "get_session_states", lambda _session_id: states)
+    setattr_facade(monkeypatch, "backend.routes.export_import", "STATE_DIR", legacy)
 
     archive_buffer = io.BytesIO()
     with tarfile.open(fileobj=archive_buffer, mode="w") as archive:

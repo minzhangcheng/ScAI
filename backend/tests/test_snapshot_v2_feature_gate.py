@@ -1,5 +1,6 @@
 """Feature-gate tests for the default-disabled Snapshot V2 subsystem."""
 
+from backend.tests.split_facade import setattr_facade
 import asyncio
 import io
 import os
@@ -112,7 +113,7 @@ async def test_disabled_post_chat_snapshot_producer_is_a_noop(monkeypatch):
 
     monkeypatch.setattr(_config, "SNAPSHOT_V2_ENABLED", False)
     capture = AsyncMock()
-    monkeypatch.setattr(chat_routes, "capture_post_chat_snapshot", capture)
+    setattr_facade(monkeypatch, "backend.routes.chat", "capture_post_chat_snapshot", capture)
     state = AnalysisState(
         id="snapshot-disabled-chat",
         name="Disabled",

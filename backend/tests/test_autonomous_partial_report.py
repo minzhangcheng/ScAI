@@ -15,16 +15,19 @@ from unittest.mock import AsyncMock
 from backend.workflow.core import SingleCellAnalysisWorkflow
 from backend.models.schemas import AnalysisState, TaskStatus
 from backend.config._config import SystemConfig
-import backend.workflow.reporting as reporting
+from backend.tests.split_facade import setattr_facade
 
 
 def _make_wf(monkeypatch):
     wf = SingleCellAnalysisWorkflow(config=SystemConfig(), session_id="test-sid")
     monkeypatch.setattr(wf, "_send_message", AsyncMock())
     monkeypatch.setattr(wf, "_send_state_sync", AsyncMock())
-    # Force the coverage gate to report "incomplete evidence".
-    monkeypatch.setattr(
-        reporting,
+    # Force the coverage gate to report "incomplete evidence". Patch across the
+    # reporting facade *and* its split package (reporting_parts.final_report),
+    # where _generate_final_report actually resolves the name.
+    setattr_facade(
+        monkeypatch,
+        "backend.workflow.reporting",
         "validate_complete_report_allowed",
         lambda state: (False, "incomplete evidence for test"),
     )

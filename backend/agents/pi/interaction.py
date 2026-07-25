@@ -1,0 +1,283 @@
+"""Human guidance and free-form user input handling.
+
+Moved verbatim out of backend/agents/pi_agent.py; composed into PIAgent.
+"""
+from typing import Dict, Any, List
+import logging
+
+
+# Configure logger
+logger = logging.getLogger(__name__)
+from ...models.schemas import AnalysisState
+from ...constants import STOP_KEYWORDS
+
+from .shared import (  # noqa: F401
+    _CONTROL_SIGNAL_RESULTS,
+    _BRIEF_PREFERRED_TYPES,
+    _BRIEF_QC_MARKERS,
+    _DIRECTION_CANDIDATE_LIST_FIELDS,
+    _normalize_supporting_data,
+    _normalize_direction_candidate,
+    _normalize_integration_scored_candidates,
+    _bounded_brief_fallback,
+    _format_database_priors_block,
+    _build_default_bio_tasks,
+)
+
+
+class InteractionMixin:
+    """Human guidance and free-form user input handling."""
+
+    async def process_human_guidance(
+        self,
+        state: AnalysisState,
+        human_input: str
+    ) -> Dict[str, Any]:
+        """
+        Process human researcher's guidance and adjust analysis direction
+
+        Args:
+            state: Current analysis state
+            human_input: Human researcher's guidance/instruction
+            
+        Returns:
+            Dict with:
+            - response: PI's response to human
+            - should_stop: Whether to stop analysis
+            - adjusted_instructions: New instructions for agents (if applicable)
+        """
+        # Build context from current state
+        context = self._build_context(state)
+        
+        prompt = f"""
+## Current Analysis Status
+Project: {state.name}
+Current Round: {state.current_round}
+Research Objective: {state.initial_instruction}
+
+{context}
+
+## Human Researcher Guidance
+The human researcher has provided the following guidance:
+"{human_input}"
+
+As the PI Agent, please:
+1. Carefully interpret what the human researcher wants
+2. Decide if they want to stop/conclude the analysis, or adjust the direction
+3. If adjusting direction, provide new specific instructions for each agent
+
+Common stop/conclude keywords: stop, terminate, end, finish, conclude, summarize
+
+Respond in JSON format:
+{{
+    "interpretation": "Your interpretation of what the human wants",
+    "response": "Your response to the human researcher (be helpful and professional)",
+    "should_stop": true/false,
+    "reason": "Why you decided to stop or continue",
+    "adjusted_instructions": {{
+        "pathology_tasks": ["task1", "task2"],
+        "bioinformatics_tasks": ["task1", "task2"],
+        "biochemistry_tasks": ["task1", "task2"],
+        "literature_topics": ["topic1", "topic2"]
+    }},
+    "focus_areas": ["key area 1", "key area 2"],
+    "deprioritize": ["area to skip or reduce focus"]
+}}
+
+If should_stop is true, adjusted_instructions can be empty.
+If adjusting direction, provide specific and actionable tasks.
+"""
+        
+        response = await self.chat(prompt, temperature=0.3)
+
+        # Use base class safe JSON parser
+        data = self._safe_parse_json(response, default={})
+
+        if data and "interpretation" in data:
+            return {
+                "interpretation": data.get("interpretation", ""),
+                "response": data.get("response", "Acknowledged. Adjusting analysis direction."),
+                "should_stop": data.get("should_stop", False),
+                "reason": data.get("reason", ""),
+                "adjusted_instructions": data.get("adjusted_instructions"),
+                "focus_areas": data.get("focus_areas", []),
+                "deprioritize": data.get("deprioritize", [])
+            }
+        else:
+            logger.warning(f"[PI] No valid JSON found in response, using fallback parsing. Response: {response[:200] if response else 'None'}...")
+        
+        # Fallback: check for stop keywords manually (English + Chinese)
+        human_lower = human_input.lower()
+
+        if any(keyword in human_lower for keyword in STOP_KEYWORDS):
+            return {
+                "interpretation": "Human requested to stop the analysis",
+                "response": "Understood. I will conclude the current analysis and generate a final report.",
+                "should_stop": True,
+                "reason": "Human explicitly requested to stop/conclude",
+                "adjusted_instructions": None
+            }
+        
+        # Default: treat as guidance to continue with adjustments
+        return {
+            "interpretation": human_input,
+            "response": f"Acknowledged. I will incorporate your guidance: {human_input}",
+            "should_stop": False,
+            "reason": "Continuing with adjusted focus based on human guidance",
+            "adjusted_instructions": {
+                "pathology_tasks": [f"Focus on: {human_input}"],
+                "bioinformatics_tasks": [f"Prioritize analysis related to: {human_input}"],
+                "biochemistry_tasks": [f"Review biochemistry aspects of: {human_input}"],
+                "literature_topics": [f"Search literature on: {human_input}"]
+            }
+        }
+
+    async def process_user_input(
+        self,
+        state: AnalysisState,
+        user_message: str,
+        uploaded_files: List[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Process user input after a round completes.
+        Classify uploaded files and determine next actions.
+        
+        Args:
+            state: Current analysis state
+            user_message: User's text message
+            uploaded_files: List of uploaded file info (type, filename, id)
+            
+        Returns:
+            Dict with:
+            - action: 'continue', 'stop', 'analyze_new_data'
+            - file_assignments: Which files go to which agents
+            - instructions: Updated instructions for agents
+            - response: Response to user
+        """
+        uploaded_files = uploaded_files or []
+        logger.info(f"[PI] Processing user input: {user_message[:100] if user_message else 'no message'}... ({len(uploaded_files)} files)")
+
+        # Quick path: synthetic control sentinels must deterministically continue
+        # and NOT be sent to the stop/continue LLM classifier — that path can
+        # non-deterministically return action="stop" and end the analysis after
+        # Round 1. [PI_DECIDE] (set by no-wait mode in synthesis.py) means "let
+        # the PI autonomously pick research directions"; _pi_planning's
+        # select_best_directions() later consumes it via user_chosen_direction.
+        if user_message and user_message.strip() in _CONTROL_SIGNAL_RESULTS:
+            response, reason = _CONTROL_SIGNAL_RESULTS[user_message.strip()]
+            logger.info(f"[PI] Control sentinel {user_message.strip()} detected, proceeding to next round")
+            return {
+                "action": "continue",
+                "response": response,
+                "file_assignments": {},
+                "biochemistry_values": {},
+                "adjusted_instructions": None,
+                "focus_areas": [],
+                "reason": reason,
+            }
+
+        # Build file description
+        file_descriptions = []
+        for f in uploaded_files:
+            file_descriptions.append(f"{f.get('type', 'unknown')}: {f.get('filename', 'unknown')}")
+        
+        prompt = f"""
+## Project Context
+Project Name: {state.name}
+Research Objective: {state.initial_instruction}
+
+## User Input Processing
+
+The user has provided input after Round {state.current_round} analysis.
+
+User message: "{user_message}"
+
+Uploaded files:
+{chr(10).join(file_descriptions) if file_descriptions else "None"}
+
+## Task
+1. Determine what the user wants:
+   - Continue to next round?
+   - Stop and generate final report?
+   - Analyze new data first?
+   - Adjust analysis direction?
+
+2. If files were uploaded, classify each file:
+   - Images of H&E, Sirius Red, Oil Red O, etc. → pathology
+   - Images of Western blots, gels → biochemistry
+   - Text describing biochemistry results → biochemistry
+   - Other data files → determine appropriate agent
+
+3. Extract any specific instructions from user message
+
+Respond in JSON format:
+{{
+    "action": "continue" | "stop" | "analyze_new_data",
+    "response": "Your response to the user",
+    "file_assignments": {{
+        "pathology": [
+            {{"filename": "example_image.png", "image_type": "user-specified stain", "reason": "Assess the feature defined by the study"}}
+        ],
+        "biochemistry": [
+            {{"filename": "xxx.txt", "data_type": "metabolic markers", "reason": "Enzyme activity values"}}
+        ]
+    }},
+    "biochemistry_values": {{
+        "Marker1": {{"value": 120, "unit": "U/L"}},
+        "Marker2": {{"value": 95, "unit": "U/L"}}
+    }},
+    "adjusted_instructions": {{
+        "pathology_tasks": ["specific task"],
+        "bioinformatics_tasks": ["specific task"],
+        "biochemistry_tasks": ["specific task"],
+        "literature_topics": ["specific topic"]
+    }},
+    "focus_areas": ["area to emphasize"],
+    "reason": "Why this action was chosen"
+}}
+
+Note: Extract biochemistry values from user message if they mention specific numbers (e.g., "ALT is 120 U/L").
+"""
+        
+        response = await self.chat(prompt, temperature=0.3)
+
+        # Use base class safe JSON parser
+        data = self._safe_parse_json(response, default={})
+
+        if data and "action" in data:
+            return {
+                "action": data.get("action", "continue"),
+                "response": data.get("response", "Acknowledged"),
+                "file_assignments": data.get("file_assignments", {}),
+                "biochemistry_values": data.get("biochemistry_values", {}),
+                "adjusted_instructions": data.get("adjusted_instructions"),
+                "focus_areas": data.get("focus_areas", []),
+                "reason": data.get("reason", "")
+            }
+        
+        # Fallback: check for stop keywords (English + Chinese)
+        user_lower = user_message.lower()
+        if any(keyword in user_lower for keyword in STOP_KEYWORDS):
+            return {
+                "action": "stop",
+                "response": "Understood. Generating final report.",
+                "file_assignments": {},
+                "biochemistry_values": {},
+                "adjusted_instructions": None,
+                "focus_areas": [],
+                "reason": "User requested to stop"
+            }
+        
+        # Default: continue
+        return {
+            "action": "continue" if not uploaded_files else "analyze_new_data",
+            "response": "Acknowledged. Proceeding with analysis.",
+            "file_assignments": {
+                "pathology": [{"filename": f["filename"], "image_type": "user_upload"} 
+                             for f in uploaded_files if f.get("type") == "image"]
+            },
+            "biochemistry_values": {},
+            "adjusted_instructions": None,
+            "focus_areas": [],
+            "reason": "Continuing analysis"
+        }

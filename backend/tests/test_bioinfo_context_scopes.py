@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from backend.agents import bioinformatics_agent as bio_mod
 from backend.agents.bioinformatics_agent import (
     BioinformaticsAgent,
     build_approved_plan_context,
@@ -17,6 +16,7 @@ from backend.models.schemas import (
     AnalysisState,
     PlanStep,
 )
+from backend.tests.split_facade import setattr_facade
 from backend.utils.llm_client import LLMToolResponse, ToolCall
 
 
@@ -235,7 +235,9 @@ async def test_resume_preserves_executor_messages_and_persists_new_plan(
         def should_checkpoint(self, step):
             return False
 
-    monkeypatch.setattr(bio_mod, "CheckpointManager", _Checkpoint)
+    setattr_facade(
+        monkeypatch, "backend.agents.bioinformatics_agent", "CheckpointManager", _Checkpoint
+    )
     state = AnalysisState(id="test-session", user_id="test-user")
     state.current_plan = _plan(plan_id="new-plan", revision_of="old-plan")
 
@@ -307,7 +309,9 @@ async def test_plan_revision_forces_immediate_executor_and_sandbox_checkpoint(
         def should_checkpoint(self, step):
             return False
 
-    monkeypatch.setattr(bio_mod, "CheckpointManager", _Checkpoint)
+    setattr_facade(
+        monkeypatch, "backend.agents.bioinformatics_agent", "CheckpointManager", _Checkpoint
+    )
     state = AnalysisState(id="test-session", user_id="test-user")
     state.current_plan = _plan(plan_id="old-plan")
 

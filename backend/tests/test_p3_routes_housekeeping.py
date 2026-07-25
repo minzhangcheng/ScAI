@@ -1,7 +1,8 @@
 import re
 import backend.routes.files as files_mod
 import backend.routes.sessions as sessions_mod
-import backend.routes.export_import as ei_mod
+
+from backend.tests.split_facade import split_source
 
 
 def test_files_resolve_uses_is_relative_to():
@@ -13,7 +14,8 @@ def test_files_resolve_uses_is_relative_to():
 
 def test_export_filename_capped():
     """P3-7: export filename construction must truncate to a max length."""
-    src = open(ei_mod.__file__).read()
+    # export_import.py is a pure re-export header; the cap lives in export_import_parts.
+    src = split_source("backend.routes.export_import")
     assert "200" in src or "MAX_EXPORT_NAME" in src or "[:200]" in src or "max_length" in src, \
         "P3-7: must cap export filename length"
 

@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from backend.services.snapshot_v2.errors import SnapshotCaptureError, SnapshotIntegrityError
+from backend.tests.split_facade import split_source
 from backend.services.snapshot_v2.models import (
     IdleCapsule,
     ObjectRef,
@@ -147,10 +148,9 @@ def test_restore_service_rejects_missing_declared_lineage_head(service):
 
 
 def test_restore_context_wires_resolved_previous_manifest():
-    source = (
-        __import__("pathlib").Path(__file__).resolve().parents[1]
-        / "services" / "snapshot_v2" / "service.py"
-    ).read_text(encoding="utf-8")
+    # Follow the split so the assertion keeps finding the wiring wherever it lives,
+    # instead of passing once it moves out of the facade.
+    source = split_source("backend.services.snapshot_v2.service")
     assert "prev_manifest=self._resolve_previous_manifest(analysis_state)" in source
 
 

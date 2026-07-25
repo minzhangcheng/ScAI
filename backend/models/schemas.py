@@ -28,880 +28,135 @@ DATA_TYPE_BULK_RNASEQ = "bulk RNA-seq"
 # Module-level lock for async-safe state version increments
 _version_lock = asyncio.Lock()
 
-class AgentType(str, Enum):
-    PI = "pi"
-    PATHOLOGY = "pathology"
-    BIOINFORMATICS = "bioinformatics"
-    BIOCHEMISTRY = "biochemistry"
-    LITERATURE = "literature"
-    PAINTER = "painter"
-    SUPERVISOR = "supervisor"
-    TECHNIQUE = "technique"
 
-class MessageRole(str, Enum):
-    USER = "user"
-    ASSISTANT = "assistant"
-    SYSTEM = "system"
-
-class TaskStatus(str, Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    WAITING_INPUT = "waiting_input"
-    WAITING_ANNOTATION = "waiting_annotation"  # Paused for user annotation confirmation
-    WAITING_PLAN_REVIEW = "waiting_plan_review"  # Paused for user plan review/approval
-    WAITING_SPECIES_INPUT = "waiting_species_input"  # Paused for user species input
-    PAUSED = "paused"
-    STOPPED = "stopped"
-    GENERATING_REPORT = "generating_report"
-
-class AnalysisPhase(str, Enum):
-    """Multi-phase workflow: exploration (Round 1), innovation (Round 2+), integration (cross-direction round)"""
-    EXPLORATION = "exploration"
-    INNOVATION = "innovation"
-    INTEGRATION = "integration"
-
-SnapshotPhase = Literal[
-    "pre_annotation", "post_annotation", "pre_direction", "post_direction",
-    "pre_round_wait",
-    "pre_execution_stage1", "pre_execution_stage2", "pre_execution_full",
-    "pre_major_revision", "post_report",
-    "manual",
-    "pre_integration_gate",
-    "post_chat",
-    "pre_restore",
-]
-
-AnalysisPhaseType = Literal["exploration", "innovation", "integration"]
-PlanStage = Literal["full", "stage1", "stage2"]
-PlanStatus = Literal["draft", "pi_reviewing", "user_reviewing", "approved", "rejected", "executing", "revised"]
-
-class FigureReviewStatus(str, Enum):
-    """Status of figure review by PI Agent"""
-    PENDING = "pending"
-    APPROVED = "approved"
-    ACCEPTED_WITH_RESERVATIONS = "accepted_with_reservations"
-    REVISION_REQUESTED = "revision_requested"
-
-
-class AgentError(BaseModel):
-    """Structured agent error record for tracking analysis failures"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    agent: AgentType
-    error_type: str  # "execution_error", "timeout", "data_missing", "llm_error"
-    message: str
-    details: Optional[str] = None
-    round_number: int = 0
-    timestamp: datetime = Field(default_factory=datetime.now)
-    resolved: bool = False
-    resolution: Optional[str] = None
+# Implementations live in ./schema_parts/; re-exported here so existing
+# importers and tests keep resolving them from this module.
+from .schema_parts.enums import (  # noqa: F401
+    AgentType,
+    MessageRole,
+    TaskStatus,
+    AnalysisPhase,
+    SnapshotPhase,
+    AnalysisPhaseType,
+    PlanStage,
+    PlanStatus,
+    FigureReviewStatus,
+)
+from .schema_parts.analysis import (  # noqa: F401
+    AgentError,
+    AgentMessage,
+    CodeExecution,
+    AnalysisStep,
+    ScoreDefinition,
+    TreatmentGroup,
+    DataFile,
+    BiochemistryIndicator,
+    LiteratureMechanismSignal,
+    DataDrivenMechanismProgram,
+    LiteratureReport,
+    CrossModalEvidenceItem,
+    CrossModalMechanismCandidate,
+    CrossModalSynthesis,
+)
+from .schema_parts.session import (  # noqa: F401
+    ClusterAnnotation,
+    AnnotationConfirmationState,
+    SelectionEntry,
+    DirectionSelectionRecord,
+    AnnotationClusterEntry,
+    AnnotationRecord,
+    AgentRoundCache,
+    DetailedReportSegment,
+    Snapshot,
+    PlanStep,
+    AnalysisPlan,
+    SpeciesTissueQualification,
+    DirectionSearchQuery,
+    PubMedArticle,
+    PubMedEvidenceItem,
+    DirectionLiteratureEvidence,
+    ResearchDirectionCandidate,
+    DirectionSelectionDecision,
+    tolerant_from_llm_dict,
+)
+from .schema_parts.outputs import (  # noqa: F401
+    ExplorationReport,
+    RoundResult,
+    PublicationFigure,
+    PublicationTable,
+    GraphicAbstract,
+    APIRequest,
+    APIResponse,
+    UploadRequest,
+    WebSocketMessage,
+)
 
 
-class AgentMessage(BaseModel):
-    """Message from/to an agent"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    agent: AgentType
-    role: MessageRole
-    content: str
-    timestamp: datetime = Field(default_factory=datetime.now)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+
+
+
+
+
+
     
-class CodeExecution(BaseModel):
-    """Record of code execution"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    code: str
-    output: Optional[str] = None
-    error: Optional[str] = None
-    figures: List[str] = Field(default_factory=list)  # Base64 encoded images
-    execution_time: Optional[float] = None
-    round_number: int = 0
-    evidence_eligible: bool = True
-    evidence_rejection_reason: Optional[str] = None
-    timestamp: datetime = Field(default_factory=datetime.now)
-
-class AnalysisStep(BaseModel):
-    """A single step in the bioinformatics agent analysis log, covering all tool call types"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    step_number: int
-    step_type: str  # "execute_code" | "consult_pi" | "search_literature" | "annotate_clusters" | "report_findings" | "generate_publication_figure" | "text_response"
-    timestamp: datetime = Field(default_factory=datetime.now)
-
-    # Agent reasoning (LLM response.content, truncated to 2000 chars)
-    agent_reasoning: Optional[str] = None
-
-    # execute_code fields
-    code: Optional[str] = None
-    code_output: Optional[str] = None
-    code_error: Optional[str] = None
-    code_description: Optional[str] = None
-    code_step_type: Optional[str] = None  # "technical" | "biological" (from tool arg step_type)
-    saved_figure_filenames: List[str] = Field(default_factory=list)  # disk PNG filenames, no base64
-
-    # consult_pi fields
-    pi_question: Optional[str] = None
-    pi_context: Optional[str] = None
-    pi_options: List[str] = Field(default_factory=list)
-    pi_response: Optional[str] = None
-
-    # search_literature fields
-    literature_topic: Optional[str] = None
-    literature_result: Optional[str] = None
-
-    # annotate_clusters fields
-    cluster_markers_summary: Optional[str] = None
-    annotation_tissue: Optional[str] = None
-    annotation_organism: Optional[str] = None
-    annotation_result_summary: Optional[str] = None
-    annotation_database_priors_summary: Optional[str] = None
-
-    # report_findings fields
-    findings: List[str] = Field(default_factory=list)
-    findings_summary: Optional[str] = None
-    findings_suggestions: List[str] = Field(default_factory=list)
-    evidence_execution_ids: List[str] = Field(default_factory=list)
-
-    # generate_publication_figure fields
-    pub_figure_name: Optional[str] = None
-    pub_figure_description: Optional[str] = None
-    pub_figure_type: Optional[str] = None
-    pub_figure_code: Optional[str] = None
-    pub_figure_result: Optional[str] = None
-
-    # text_response fields
-    text_content: Optional[str] = None
-
-    round_number: int = 1
-
-class ScoreDefinition(BaseModel):
-    """Definition of a computed score for methodology transparency in the final report"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    score_name: str          # e.g., "response_score", "custom_signature"
-    method: str              # e.g., "sc.tl.score_genes", "gseapy.ssgsea"
-    description: str         # What the score measures biologically
-    parameters: Dict[str, Any] = Field(default_factory=dict)
-    gene_list: List[str] = Field(default_factory=list)
-    gene_list_source: str = ""  # e.g., "curated gene set"
-    round_number: int = 0
-    timestamp: datetime = Field(default_factory=datetime.now)
-
-class TreatmentGroup(BaseModel):
-    """A treatment/experimental group definition"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    name: str                          # e.g., "Reference", "Condition A", "Treatment A"
-    description: str = ""              # Detailed description of what this group represents
-    sample_count: int = 1              # Number of samples/replicates in this group
-    order: int = 0                     # Display order
-
-class DataFile(BaseModel):
-    """Universal file record for all uploaded data (pathology, sequencing, biochemistry)"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    filename: str
-    file_path: str                     # Absolute path on disk
-
-    # Section: which data section this belongs to
-    section: Literal["pathology", "sequencing", "biochemistry"]
-
-    # Data type within the section (see DATA_TYPE_* constants for sequencing types)
-    # pathology: "H&E", "Sirius Red", "Perls Blue", "Oil Red O", "PAS", or custom
-    # sequencing: DATA_TYPE_SCRNASEQ, DATA_TYPE_BULK_RNASEQ, "loom"
-    # biochemistry: "image", "file"
-    data_type: str
-
-    # Group and sample assignment
-    group_id: Optional[str] = None     # TreatmentGroup.id, or None for "No group distinction"
-    sample_number: Optional[int] = None  # 1-based sample number, or None for "No sample distinction"
-
-    # Section-specific metadata
-    tiles: List[str] = Field(default_factory=list)       # For pathology: tile paths
-    analysis: Optional[str] = None                        # For pathology: analysis result
-    description: Optional[str] = None                     # User-provided description
-    extracted_data: Optional[Dict[str, Any]] = None       # For biochemistry: extracted values
-
-    timestamp: datetime = Field(default_factory=datetime.now)
-
-class BiochemistryIndicator(BaseModel):
-    """Manual biochemistry entry (indicator name + value + unit) with group/sample association"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    indicator: str
-    value: float
-    unit: str
-    reference_range: Optional[str] = None
-    interpretation: Optional[str] = None
-
-    # Group and sample
-    group_id: Optional[str] = None
-    sample_number: Optional[int] = None
-
-    timestamp: datetime = Field(default_factory=datetime.now)
-
-class LiteratureMechanismSignal(BaseModel):
-    """A biological mechanism extracted from retrieved literature that
-    co-occurs with this study's experimental observations (generic, not
-    mechanism-hardcoded)."""
-    mechanism: str                                  # mechanism name from the literature (not invented)
-    supporting_pmids: List[str] = Field(default_factory=list)  # may be empty when PMID unavailable (e.g. Deep Research)
-    evidence_type: Literal["experimental", "correlational", "review", "hypothesis", "unknown"] = "unknown"
-    relevance_to_current_study: str = ""            # 1-2 sentences
-    observed_data_links: List[str] = Field(default_factory=list)
-    limitations: List[str] = Field(default_factory=list)
-
-
-class DataDrivenMechanismProgram(BaseModel):
-    """A recurring, data-derived mechanism pattern captured by the bioinformatics
-    agent after downstream analysis. Labels are descriptive only; all downstream
-    interpretation relies on the structured evidence fields, never the label."""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    round_number: int = 0
-    phase: str = ""
-    stage: str = ""
-    source_agent: Literal["bioinformatics"] = "bioinformatics"
-
-    label: str
-    description: str = ""
-
-    cell_types: List[str] = Field(default_factory=list)
-    conditions_compared: str = ""
-
-    triggering_observations: List[str] = Field(default_factory=list)
-    supporting_genes: List[str] = Field(default_factory=list)
-    supporting_pathways: List[str] = Field(default_factory=list)
-    supporting_scores: List[str] = Field(default_factory=list)
-    supporting_tables: List[str] = Field(default_factory=list)
-    evidence_execution_ids: List[str] = Field(default_factory=list)
-
-    bulk_support: Literal[
-        "supported", "not_supported", "mixed", "not_available", "unknown",
-    ] = "unknown"
-
-    evidence_strength: Literal["strong", "moderate", "weak"] = "weak"
-    specificity: Literal["high", "medium", "low"] = "low"
-
-    alternative_explanations: List[str] = Field(default_factory=list)
-    missing_evidence: List[str] = Field(default_factory=list)
-
-    interpretation: str = ""
-    downstream_literature_queries: List[str] = Field(default_factory=list)
-    timestamp: datetime = Field(default_factory=datetime.now)
-
-    def to_prompt_text(
-        self,
-        *,
-        style: str = "compact",
-        max_observations: int = 2,
-        max_genes: int = 8,
-        max_pathways: int = 8,
-        max_alternatives: int = 2,
-        max_missing: int = 2,
-    ) -> str:
-        """Format this program as human-readable text for LLM prompts.
-
-        Styles (each is a deliberate unified format, not a 1:1 copy of any
-        single former ad-hoc site):
-
-          "compact"    — single-line with evidence/specificity/bulk, merged
-                         genes+pathways, alternatives, missing. Used by
-                         supervisor _build_report_prompt.
-          "detailed"   — multi-line block with per-field lines. Used by
-                         agents.py _build_observed_context_for_literature.
-          "direction"  — single-line with [candidate mechanism]/[exploratory signal]
-                         tag, strength/bulk, merged genes+pathways. Used by
-                         pi_agent generate_raw_direction_candidates and
-                         generate_integrated_report.
-        """
-        obs = "; ".join(self.triggering_observations[:max_observations])
-        genes_pathways = ", ".join(
-            (self.supporting_genes + self.supporting_pathways)[:max_genes]
-        )
-        alts = "; ".join(self.alternative_explanations[:max_alternatives])
-        miss = "; ".join(self.missing_evidence[:max_missing])
-
-        if style == "compact":
-            parts = [f"{self.label} (evidence {self.evidence_strength}, specificity {self.specificity}, bulk {self.bulk_support})"]
-            if obs:
-                parts.append(f"{obs}")
-            if genes_pathways:
-                parts.append(f"Genes/pathways: {genes_pathways}")
-            if alts:
-                parts.append(f"Alternatives: {alts}")
-            if miss:
-                parts.append(f"Missing evidence: {miss}")
-            return ". ".join(parts)
-
-        if style == "direction":
-            elevate = (
-                self.evidence_strength in ("moderate", "strong")
-                and len(self.triggering_observations) >= 2
-            )
-            tag = "candidate mechanism" if elevate else "exploratory signal"
-            cells = ", ".join(self.cell_types) if self.cell_types else "n/a"
-            parts = [f"[{tag}] {self.label} (cells: {cells}; strength {self.evidence_strength}, bulk {self.bulk_support})"]
-            if obs:
-                parts.append(f"{obs}")
-            if genes_pathways:
-                parts.append(f"Genes: {genes_pathways}")
-            if miss:
-                parts.append(f"Missing evidence: {miss}")
-            return ". ".join(parts)
-
-        # style == "detailed"
-        lines = [f"- Program: {self.label}"]
-        if self.cell_types:
-            lines.append(f"  Cell types: {', '.join(self.cell_types)}")
-        if obs:
-            lines.append(f"  Observations: {obs}")
-        if self.supporting_genes:
-            lines.append(f"  Genes: {', '.join(self.supporting_genes[:max_genes])}")
-        pathways = ", ".join(self.supporting_pathways[:max_pathways])
-        if pathways:
-            lines.append(f"  Pathways: {pathways}")
-        lines.append(f"  Bulk support: {self.bulk_support}")
-        if alts:
-            lines.append(f"  Alternatives: {alts}")
-        if miss:
-            lines.append(f"  Missing evidence: {miss}")
-        return "\n".join(lines)
-
-
-class LiteratureReport(BaseModel):
-    """Literature research report"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    topic: str
-    report: str
-    references: List[Dict[str, str]] = Field(default_factory=list)
-    mechanism_signals: Optional[List[LiteratureMechanismSignal]] = None
-    timestamp: datetime = Field(default_factory=datetime.now)
-
-class CrossModalEvidenceItem(BaseModel):
-    source: Literal["biochemistry", "pathology", "bioinformatics", "literature"]
-    evidence: str                                   # concrete observation
-    strength: Literal["strong", "moderate", "weak"]
-    limitation: str = ""
-
-
-class CrossModalMechanismCandidate(BaseModel):
-    # relation_to_current_direction semantics:
-    #   "central"       — candidate IS the current direction's main mechanism
-    #   "complementary" — supports/extends current direction, not competing
-    #   "downstream"    — consequence of current direction's mechanism
-    #   "alternative"   — competing hypothesis that would replace current direction
-    #   "uncovered"     — not addressed by current direction; distinct evidence base
-    theme: str
-    mechanism_statement: str
-    supporting_evidence: List[CrossModalEvidenceItem] = Field(default_factory=list)
-    evidence_consistency: Literal["high", "medium", "low", "conflicting"] = "low"
-    confidence: Literal["high", "medium", "low"] = "low"
-    novelty_relative_to_current_direction: Literal["high", "medium", "low"] = "low"
-    relation_to_current_direction: Literal["central", "complementary", "downstream", "alternative", "uncovered"] = "uncovered"
-    missing_evidence: List[str] = Field(default_factory=list)
-    report_recommendation: Literal["headline", "secondary", "future_direction", "do_not_emphasize"] = "future_direction"
-
-    def to_summary_dict(self) -> dict:
-        """Return a lightweight 5-field dict for WebSocket/API payloads and
-        report planning.  Omits supporting_evidence, evidence_consistency,
-        novelty_relative_to_current_direction, and missing_evidence to keep
-        round-summary payloads small."""
-        return {
-            "theme": self.theme,
-            "mechanism_statement": self.mechanism_statement,
-            "confidence": self.confidence,
-            "relation_to_current_direction": self.relation_to_current_direction,
-            "report_recommendation": self.report_recommendation,
-        }
-
-class CrossModalSynthesis(BaseModel):
-    matrix_markdown: str = ""                        # Markdown evidence matrix table (server-side only)
-    candidates: List[CrossModalMechanismCandidate] = Field(default_factory=list)
-    excluded_or_low_support_themes: List[str] = Field(default_factory=list)
-
-
-class ClusterAnnotation(BaseModel):
-    """Single cluster annotation for user review during exploration phase"""
-    cluster_id: str
-    cell_type: str
-    subtypes: List[str] = Field(default_factory=list)
-    key_markers: List[str] = Field(default_factory=list)
-    confidence: str = "low"  # "high" / "medium" / "low"
-    evidence: str = ""
-    n_cells: int = 0  # Number of cells in this cluster
-    group_proportions: Dict[str, float] = Field(default_factory=dict)
-    alternative_cell_types: List[str] = Field(default_factory=list)  # Other possible cell types
-    low_confidence_reason: str = ""  # Why confidence is low/medium
-    user_confirmed: bool = False
-    user_override: Optional[str] = None  # User-provided cell type override
-    # Validation round: signal that current clustering may be insufficient for this cluster
-    requires_reclustering: bool = False
-    reclustering_reason: str = ""
-    suggested_reclustering_scope: Optional[str] = None  # targeted_subcluster | higher_resolution_review | rerun_stage1_clustering
-
-class AnnotationConfirmationState(BaseModel):
-    """State for cell annotation confirmation pause during exploration phase"""
-    cluster_annotations: List[ClusterAnnotation] = Field(default_factory=list)
-    tissue: str = ""
-    organism: str = ""
-    tissue_summary: str = ""
-    analysis_summary: str = ""
-    pending: bool = False
-    confirmed: bool = False
-    proportion_group_labels: List[str] = Field(default_factory=list)
-    proportion_dimension: str = "group"
-    # Annotation validation round (all optional for backward/snapshot compatibility)
-    validation_attempt_id: Optional[str] = None
-    validation_status: Optional[str] = None  # not_run | completed | failed | partial | skipped
-    validation_plan: Optional[Dict[str, Any]] = None
-    validation_result: Optional[Dict[str, Any]] = None
-    validation_summary: Optional[str] = None
-    validation_text_summary: Optional[str] = None
-    reclustering_recommendations: Optional[List[Dict[str, Any]]] = None
-
-
-class SelectionEntry(BaseModel):
-    """One direction the user selected at a direction gate."""
-    direction: str = ""
-    notes: str = ""
-    is_custom: bool = False
-    candidate_index: Optional[int] = None
-
-
-class DirectionSelectionRecord(BaseModel):
-    """Immutable snapshot of one direction-selection gate event."""
-    record_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    round_number: int = 0
-    integration_cycle: Optional[int] = None
-    phase: str = "exploration"
-    event_type: str = "open"
-    timestamp: datetime = Field(default_factory=datetime.now)
-    let_pi_decide: bool = False
-    candidates: List[Dict[str, Any]] = Field(default_factory=list)
-    literature_evidence: List[Dict[str, Any]] = Field(default_factory=list)
-    selections: List[SelectionEntry] = Field(default_factory=list)
-    pi_selected: List[Dict[str, str]] = Field(default_factory=list)
-    supplementary_requests: List[str] = Field(default_factory=list)
-
-
-class AnnotationClusterEntry(BaseModel):
-    """One cluster's final annotation state at confirm time."""
-    cluster_id: str = ""
-    original_cell_type: str = ""
-    final_cell_type: str = ""
-    user_override: bool = False
-    confidence: str = "low"
-    key_markers: List[str] = Field(default_factory=list)
-    group_proportions: Dict[str, float] = Field(default_factory=dict)
-    alternative_cell_types: List[str] = Field(default_factory=list)
-    low_confidence_reason: str = ""
-
-
-class AnnotationRecord(BaseModel):
-    """Immutable snapshot of the annotation gate at confirm/auto-confirm time."""
-    timestamp: datetime = Field(default_factory=datetime.now)
-    organism: str = ""
-    tissue: str = ""
-    tissue_summary: str = ""
-    proportion_dimension: str = "group"
-    proportion_group_labels: List[str] = Field(default_factory=list)
-    clusters: List[AnnotationClusterEntry] = Field(default_factory=list)
-    supplementary_requests: List[str] = Field(default_factory=list)
-    auto_confirmed: bool = False
-
-
-class AgentRoundCache(BaseModel):
-    """Per-round agent-result cache for snapshot-restore idempotency.
-
-    Lives in AnalysisState (so snapshot/restore captures it), keyed by
-    AgentType value, holding each node's canonical return dict. Cleared at
-    the start of a genuinely-new round; preserved on snapshot restore so a
-    replayed workflow can short-circuit nodes whose results are already known.
-    """
-    round_number: int
-    results: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
-
-class DetailedReportSegment(BaseModel):
-    """One segment of the incrementally-built detailed report at each HITL checkpoint"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    phase: str  # "pre_annotation" | "exploration_complete" | "supplementary_annotation_N" | "supplementary_direction_N"
-    title: str  # Human-readable, e.g. "Pre-Annotation Analysis Summary"
-    content_html: str = ""  # Pre-rendered HTML
-    timestamp: datetime = Field(default_factory=datetime.now)
-    round_number: int = 0
-
-class Snapshot(BaseModel):
-    """A saved snapshot of analysis state for debugging rollback.
-
-    Derived compatibility cache for both V1 files and committed Snapshot V2
-    manifests. V2 listing projection may populate the optional V2 fields below.
-    """
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    name: str
-    description: str = ""
-    phase: SnapshotPhase  # Auto-created at key analysis points
-    round_number: int = 0
-    timestamp: datetime = Field(default_factory=datetime.now)
-    state_file: str = ""  # Filename within snapshots/ directory
-    size_bytes: int = 0
-    parent_id: Optional[str] = None  # Parent snapshot ID for tree view
-    notebook_file: str = ""  # Filename of ipynb backup within snapshots/ directory
-    workspace_manifest: Dict[str, List[str]] = Field(default_factory=dict)
-    # e.g. {"figures": ["fig_001.jpg"], "tables": ["markers.csv"], "reproducibility": []}
-    branch_label: Optional[str] = None  # "main", "branch-A", "branch-B", etc.
-    runtime_state_included: bool = False
-    skipped_files: List[Dict[str, str]] = Field(default_factory=list)
-    branch_id: Optional[str] = None
-    # Snapshot V2 projection fields (optional; absent for pure V1 records)
-    format_version: Optional[int] = None
-    runtime_status: Optional[Literal["complete", "missing", "state_only", "corrupt"]] = None
-    logical_size_bytes: Optional[int] = None
-    physical_added_bytes: Optional[int] = None
-    source_restore_transaction_id: Optional[str] = None
-    continuation_kind: Optional[str] = None
-
-class PlanStep(BaseModel):
-    """A single step in an analysis plan."""
-    id: int
-    title: str
-    method: str
-    input: str = ""
-    expected_output: str = ""
-    rationale: str = ""
-    depends_on: List[int] = []
-    status: str = "pending"  # pending | in_progress | completed | skipped
-    executed_at: Optional[datetime] = None
-
-
-class AnalysisPlan(BaseModel):
-    """Method-level analysis plan generated by bioinformatics agent."""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    phase: AnalysisPhaseType  # "exploration" or "innovation"
-    stage: PlanStage = "full"  # "full" or "stage1" (QC+clustering) or "stage2" (downstream)
-    overview: str = ""
-    steps: List[PlanStep] = Field(default_factory=list)
-    key_decision_points: List[str] = Field(default_factory=list)
-    expected_runtime: str = ""
-    status: PlanStatus = "draft"
-    revision_of: Optional[str] = None  # parent plan ID if this is a revision
-    revision_reason: Optional[str] = None  # why this plan was revised
-    round_number: int = 0
-    direction: str = ""
-    direction_key: str = ""
-    branch_id: Optional[str] = None
-    created_from_snapshot_id: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.now)
-    approved_at: Optional[datetime] = None
-
-
-SpeciesTissueQualification = Literal[
-    "",
-    "matched_species_tissue_available",
-    "no_matched_species_tissue_evidence",
-    "cross_tissue_only",
-    "cross_species_only",
-]
-
-
-class DirectionSearchQuery(BaseModel):
-    category: Literal[
-        "direct_prior_work",
-        "analogous_mechanism",
-        "contradictory_expectedness",
-        "methodological_precedent",
-        "gene_model_relaxed",
-        "cell_type_focused",
-        "pathway_focused",
-        "cross_species_or_tissue",
-        "challenge_contradiction",
-        "prior_art",
-        "tier3_support",
-        "tier3_challenge",
-    ]
-    query: str
-    result_count: int = 0
-    relevant_count: int = 0
-    degraded: bool = False
-    notes: str = ""
-
-
-class PubMedArticle(BaseModel):
-    """A single PubMed article reference for direction literature evidence."""
-    pubmed_id: str
-    title: str
-    authors: List[str] = Field(default_factory=list)
-    journal: str
-    publication_date: str
-    abstract: str = ""
-    url: str = ""
-
-
-class PubMedEvidenceItem(BaseModel):
-    pmid: str
-    title: str
-    year: Optional[str] = None
-    url: Optional[str] = None
-    relevance: Literal["high", "medium", "low"]
-    supports: Literal["direct", "analogous", "contradictory", "methodological"]
-    source: Literal["new_search", "session_cache"] = "new_search"
-    species_context: str = ""
-    tissue_context: str = ""
-    why_it_matters: str
-
-
-class DirectionLiteratureEvidence(BaseModel):
-    direction_id: str
-    direction: str
-    status: Literal["completed", "partial", "failed", "skipped"] = "partial"
-    search_tier: Literal["standard", "deep", "failed"] = "standard"
-    literature_novelty: Literal["high", "medium", "low", "unknown"] = "unknown"
-    confidence: Literal["high", "medium", "low", "failed"] = "low"
-    negative_validation_confidence: Literal["high", "medium", "low", "none"] = "none"
-    negative_validation_axes: Dict[str, bool] = Field(default_factory=dict)
-    direct_evidence_count: int = 0
-    analogous_evidence_count: int = 0
-    contradictory_evidence_count: int = 0
-    methodological_precedent_count: int = 0
-    direct_evidence: List[PubMedEvidenceItem] = Field(default_factory=list)
-    analogous_evidence: List[PubMedEvidenceItem] = Field(default_factory=list)
-    contradictory_evidence: List[PubMedEvidenceItem] = Field(default_factory=list)
-    methodological_precedent: List[PubMedEvidenceItem] = Field(default_factory=list)
-    queries: List[DirectionSearchQuery] = Field(default_factory=list)
-    species_tissue_qualification: SpeciesTissueQualification = ""
-    gap_assessment: str = ""
-    summary: str = ""
-    limitations: List[str] = Field(default_factory=list)
-    timeout_seconds: Optional[float] = None
-    timed_out: bool = False
-    support_level: Literal["strong", "moderate", "weak", "none", "unknown"] = "unknown"
-    contradiction_level: Literal["strong", "moderate", "weak", "none", "unknown"] = "unknown"
-    prior_art_level: Literal["high", "medium", "low", "unknown"] = "unknown"
-    novelty_status: Literal[
-        "genuine_novelty", "known_area", "unknown_due_to_failure",
-        "unknown_due_to_timeout", "unknown"
-    ] = "unknown"
-    similar_published_directions: List[Dict[str, Any]] = Field(default_factory=list)
-    knowledge_gap_summary: str = ""
-    fallback_tier: str = ""
-    scheduler_limitation: str = ""
-
-
-class ResearchDirectionCandidate(BaseModel):
-    direction_id: str
-    direction: str
-    rationale: str = ""
-    data_support_summary: str = ""
-    literature_support_summary: str = ""
-    data_reliability: str = ""
-    literature_novelty: str = ""
-    biology_expectedness: str = ""
-    data_novelty: str = ""
-    mechanistic_importance: str = ""
-    functional_impact: str = ""
-    data_sufficiency: str = ""
-    methodological_gap: str = ""
-    overall_priority: str = ""
-    risk_flags: List[str] = Field(default_factory=list)
-    prerequisite_dependencies: List[str] = Field(default_factory=list)
-    evidence_ref: Optional[str] = None
-
-
-class DirectionSelectionDecision(BaseModel):
-    """Record of user's direction selection decision with selected and rejected directions."""
-    selected_directions: List[Dict[str, str]] = Field(default_factory=list)
-    rejected_directions: List[Dict[str, str]] = Field(default_factory=list)
-    selection_rationale: str = ""
-
-
-def tolerant_from_llm_dict(cls: type, data: Dict[str, Any]) -> Any:
-    """Build a Pydantic model from loosely-typed LLM JSON, dropping any field
-    whose value fails type validation so a single malformed field cannot crash
-    the whole model.  Dropped fields fall back to their schema defaults.
-
-    This is a generalised version of ExplorationReport.from_llm_dict that
-    works for any BaseModel subclass that receives LLM-generated JSON.
-    """
-    def _normalize_list_field(annotation: Any, value: Any) -> Any:
-        """Recover safe dict-shaped LLM output for list-typed fields.
-
-        Models occasionally emit either a single object or an id-keyed object
-        map where the schema asks for a list.  Only dict inputs are normalized:
-        arbitrary scalar/string inputs remain invalid so prose is not silently
-        promoted into structured report fields.
-        """
-        from typing import get_args, get_origin
-
-        if get_origin(annotation) not in (list, List) or not isinstance(value, dict):
-            return value
-        args = get_args(annotation)
-        if not args:
-            return value
-        item_annotation = args[0]
-        item_adapter = TypeAdapter(item_annotation)
-
-        # An id-keyed map (for example {"dir_1": {...}, "dir_2": {...}})
-        # should become its ordered values before considering the whole mapping
-        # as one list item.  This ordering also prevents List[Dict[str, Any]]
-        # from accepting the outer map as a misleading singleton record.
-        mapped_values = list(value.values())
-        if mapped_values:
-            try:
-                for item in mapped_values:
-                    item_adapter.validate_python(item)
-            except ValidationError:
-                pass
-            else:
-                return mapped_values
-
-        # Otherwise treat the mapping as one structured item when that item
-        # itself satisfies the list element schema.
-        try:
-            item_adapter.validate_python(value)
-        except ValidationError:
-            return value
-        return [value]
-
-    clean: Dict[str, Any] = {}
-    for name, value in data.items():
-        field = cls.model_fields.get(name)
-        if field is None:
-            continue
-        normalized = _normalize_list_field(field.annotation, value)
-        try:
-            TypeAdapter(field.annotation).validate_python(normalized)
-        except ValidationError:
-            logger.warning(
-                "tolerant_from_llm_dict(%s) dropping field %r: value of "
-                "type %s failed validation against %s",
-                cls.__name__, name, type(value).__name__, field.annotation,
-            )
-            continue
-        if normalized is not value:
-            logger.warning(
-                "tolerant_from_llm_dict(%s) normalized dict field %r to a list",
-                cls.__name__, name,
-            )
-        clean[name] = normalized
-    return cls(**clean)
-
-
-class ExplorationReport(BaseModel):
-    """Structured exploration report (Report A) generated after Phase 1"""
-    cluster_overview: str = ""
-    data_quality_warnings: List[str] = Field(default_factory=list)
-    strongest_heterogeneity: List[str] = Field(default_factory=list)
-    key_pathway_changes: List[str] = Field(default_factory=list)
-    abnormal_markers: List[str] = Field(default_factory=list)
-    low_confidence_annotations: List[str] = Field(default_factory=list)
-    pi_direction_assessment: str = ""
-    research_direction_candidates: List[Dict[str, Any]] = Field(default_factory=list)
-    raw_direction_candidates: List[Dict[str, Any]] = Field(default_factory=list)
-    direction_literature_evidence: List[Dict[str, Any]] = Field(default_factory=list)
-    direction_dependency_graph: Dict[str, List[str]] = Field(default_factory=dict)
-    direction_selection_summary: Dict[str, Any] = Field(default_factory=dict)
-
-    @classmethod
-    def from_llm_dict(cls, data: Dict[str, Any]) -> "ExplorationReport":
-        """Build a report from loosely-typed LLM JSON, dropping any field whose
-        value fails type validation so a single malformed field cannot crash the
-        whole report.  Delegates to tolerant_from_llm_dict.
-        """
-        return tolerant_from_llm_dict(cls, data)
-
-
-class RoundResult(BaseModel):
-    """Result from one analysis round"""
-    round_number: int
-    pathology_findings: List[str] = Field(default_factory=list)
-    bioinformatics_findings: List[str] = Field(default_factory=list)
-    biochemistry_findings: List[str] = Field(default_factory=list)
-    literature_findings: List[str] = Field(default_factory=list)
-    pi_summary: str = ""
-    conflicts: List[Dict[str, Any]] = Field(default_factory=list)
-    next_steps: List[str] = Field(default_factory=list)
-    new_findings: bool = True
-    agents_for_next_round: List[str] = Field(
-        default_factory=lambda: ["bioinformatics", "pathology", "biochemistry", "literature"]
-    )
-    reanalysis_agents: List[str] = Field(default_factory=list)  # Agents needing reanalysis of existing data
-    phase: str = "exploration"  # "exploration" | "innovation" | "integration"
-    direction: str = ""  # Research direction for innovation rounds
-    exploration_report: Optional[ExplorationReport] = None  # Only for Phase 1
-    cross_modal_synthesis: Optional[CrossModalSynthesis] = None
-    data_driven_mechanism_programs: List[DataDrivenMechanismProgram] = Field(default_factory=list)
-    integration_report_summary: str = ""  # Excerpt from cross-direction integration report (integration phase only)
-    integration_candidates: List[Dict[str, Any]] = Field(default_factory=list)  # Scored candidate directions from integration (integration phase only)
-    lineage_id: str = "main"
-    branch_id: Optional[str] = None
-    branch_label: Optional[str] = None
-    source_snapshot_id: Optional[str] = None
-    restored_from_snapshot_id: Optional[str] = None
-    direction_key: str = ""
-    result_identity_key: str = ""
-    round_status: Literal["completed", "partial", "failed", "skipped"] = "completed"
-    evidence_status: Literal["substantive", "empty", "failed"] = "empty"
-    bioinformatics_evidence_verified: Optional[bool] = None
-    evidence_execution_ids: List[str] = Field(default_factory=list)
-    evidence_notes: List[str] = Field(default_factory=list)
-    # Whether this innovation round has enough core-agent evidence to satisfy
-    # direction-batch coverage. Optional modality degradation may leave the
-    # overall round_status as "partial" while the direction is still covered.
-    # None preserves the legacy interpretation for older persisted results.
-    direction_coverage_eligible: Optional[bool] = None
-    timestamp: datetime = Field(default_factory=datetime.now)
-
-
-class PublicationFigure(BaseModel):
-    """Publication-quality figure with PNG thumbnail and PDF high-res"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    name: str
-    description: str
-    figure_type: str  # umap, heatmap, violin, dotplot, barplot, trajectory, volcano, other
-    png_path: str  # Path to PNG thumbnail
-    pdf_path: str  # Path to high-res PDF
-    png_base64: Optional[str] = None  # Base64 encoded PNG for preview (compressed)
-    interpretation: Optional[str] = None  # Scientific interpretation of the figure
-    review_status: FigureReviewStatus = FigureReviewStatus.PENDING
-    pi_feedback: Optional[str] = None
-    revision_history: List[Dict[str, Any]] = Field(default_factory=list)  # Accumulated feedback from all revision rounds
-    revision_count: int = 0
-    round_number: int = 0
-    analysis_generation: int = 0
-    expression_provenance: Dict[str, Any] = Field(default_factory=dict)
-    is_current: bool = True
-    invalidated_at: Optional[datetime] = None
-    invalidation_reason: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.now)
-
-class PublicationTable(BaseModel):
-    """Publication-quality table"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    name: str
-    description: str
-    csv_path: str
-    columns: List[str] = Field(default_factory=list)
-    preview_data: List[Dict[str, Any]] = Field(default_factory=list)  # First few rows for preview
-    interpretation: Optional[str] = None  # Scientific interpretation of the table data
-    review_status: FigureReviewStatus = FigureReviewStatus.PENDING
-    pi_feedback: Optional[str] = None
-    round_number: int = 0
-    analysis_generation: int = 0
-    expression_provenance: Dict[str, Any] = Field(default_factory=dict)
-    is_current: bool = True
-    invalidated_at: Optional[datetime] = None
-    invalidation_reason: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.now)
-
-class GraphicAbstract(BaseModel):
-    """Graphic abstract generated by Painter Agent, or text-mode ASCII diagram drawn by Bio agent when Painter is unavailable"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    prompt: str  # The prompt used to generate the image / diagram
-    image_base64: str  # Base64 encoded image (final selected); empty string in text mode
-    text_diagram: Optional[str] = None  # ASCII/Unicode text diagram (only populated in text mode)
-    @property
-    def is_text_mode(self) -> bool:
-        """True when falling back to text-mode diagram (image_base64 == "")"""
-        return bool(self.text_diagram and not self.image_base64)
-    revision_count: int = 0  # Number of revisions performed
-    revision_history: List[Dict[str, Any]] = Field(default_factory=list)  # Reviewer feedback from each round
-    all_candidates: List[str] = Field(default_factory=list)  # All candidates: base64 strings in image mode, ASCII strings in text mode
-    selected_index: int = 0  # Index of selected best candidate
-    created_at: datetime = Field(default_factory=datetime.now)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 class AnalysisState(BaseModel):
     """Complete state of an analysis session"""
@@ -1557,74 +812,6 @@ class AnalysisState(BaseModel):
             for msg in self.realtime_messages
         ]
 
-class APIRequest(BaseModel):
-    """Request to start or resume analysis"""
-    session_id: Optional[str] = None
-    instruction: Optional[str] = None
-    action: Literal["start", "resume", "pause", "stop", "update_prompts"] = "start"
-    custom_prompts: Optional[Dict[str, str]] = None
 
-class APIResponse(BaseModel):
-    """Response from API"""
-    success: bool
-    message: str
-    session_id: Optional[str] = None
-    data: Optional[Dict[str, Any]] = None
 
-class UploadRequest(BaseModel):
-    """Request to upload data"""
-    session_id: str
-    section: Literal["pathology", "sequencing", "biochemistry"]
-    data_type: str
-    group_id: Optional[str] = None
-    sample_number: Optional[int] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
 
-class WebSocketMessage(BaseModel):
-    """Message for WebSocket communication"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    type: Literal[
-        "status", "message", "code", "result", "error", "figure", "progress",
-        "step", "prompt", "response", "thinking", "tool_call",
-        # New types for autonomous bioinformatics agent
-        "literature", "pi_question", "pi_response", "findings",
-        # Human intervention
-        "human_input_received", "human_input_requested",
-        # Round management
-        "round_summary", "data_request",
-        # Workflow lifecycle
-        "completed", "output",
-        # Publication figure review
-        "figure_review", "figure_approved", "figure_revision",
-        # Integrated report and graphic abstract
-        "integrated_report", "graphic_abstract", "detailed_report",
-        # State synchronization and error tracking
-        "state_sync", "parallel_errors",
-        # WebSocket reconnection recovery
-        "message_history",
-        # Cluster annotation
-        "annotation_result", "annotation_confirmation",
-        # Exploration report
-        "exploration_report",
-        # Multi-direction correlation analysis
-        "direction_correlation",
-        # Chat delegation
-        "chat_delegation", "chat_result", "chat_error",
-        # Supervisor monitoring
-        "supervisor_feedback", "supervisor_checkpoint", "supervisor_summary",
-        "snapshot_count",
-        # Collaborative planning
-        "plan_review", "plan_approved",
-        # Exploration failure (likely a data problem) — prompt user to check data
-        "exploration_failed",
-        # Modality warning (e.g. imaging data uploaded but its agent is disabled)
-        "modality_warning",
-        # Final report blocked (e.g. insufficient direction coverage) — awaits user
-        "report_blocked",
-        # Integration (cross-direction) round: gate for direction selection, and
-        # terminal completion when the PI selects no further directions / cap hit
-        "integration_gate", "integration_complete",
-    ]
-    agent: Optional[AgentType] = None
-    content: Any
-    timestamp: datetime = Field(default_factory=datetime.now)

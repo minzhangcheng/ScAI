@@ -1,6 +1,8 @@
 """C3 — STOP_KEYWORDS is a single source of truth, both PI paths see same set."""
 import pytest
 
+from backend.tests.split_facade import split_source
+
 
 def test_stop_keywords_exposed_in_constants():
     from backend.constants import STOP_KEYWORDS
@@ -15,14 +17,13 @@ def test_stop_keywords_exposed_in_constants():
 def test_pi_agent_uses_shared_stop_keywords():
     """Inspect pi_agent module: there must be no per-function literal stop-keyword list."""
     import re
-    from pathlib import Path
-    src = Path(__file__).resolve().parent.parent / "agents" / "pi_agent.py"
-    text = src.read_text(encoding="utf-8")
+
+    text = split_source("backend.agents.pi_agent")
     # No literal lists like ['stop', 'terminate', ...] should remain.
     # Match a list containing 'stop' immediately followed by 'terminate'.
     pattern = re.compile(r"\[\s*['\"]stop['\"]\s*,\s*['\"]terminate['\"]", re.UNICODE)
     assert not pattern.search(text), \
-        "pi_agent.py still defines a local stop-keyword list — must use constants.STOP_KEYWORDS"
+        "pi_agent still defines a local stop-keyword list — must use constants.STOP_KEYWORDS"
 
 
 @pytest.mark.parametrize("keyword", ["summarize", "report", "总结", "报告"])

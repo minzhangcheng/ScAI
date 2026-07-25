@@ -1,12 +1,15 @@
 """Verify dead-code removal: BioinformaticsCheckpoint should not exist in schemas."""
 import pytest
 
+from backend.tests.split_facade import defines
+
 
 def test_bioinformatics_checkpoint_removed():
     """BioinformaticsCheckpoint was dead code — confirm it no longer exists."""
-    from backend.models import schemas
-    assert not hasattr(schemas, "BioinformaticsCheckpoint"), (
-        "BioinformaticsCheckpoint should have been removed — it was never used"
+    found = defines("backend.models.schemas", "BioinformaticsCheckpoint")
+    assert not found, (
+        "BioinformaticsCheckpoint should have been removed — it was never used "
+        f"(defined in {[module.__name__ for module in found]})"
     )
 
 

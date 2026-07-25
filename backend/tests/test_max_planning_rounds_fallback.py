@@ -3,13 +3,14 @@ unilaterally finalize the plan from the dialogue history instead of returning
 an empty state that leads to infinite "revise" loops.
 """
 import re
+
 import backend.workflow.planning as planning_mod
-import backend.agents.pi_agent as pi_mod
+from backend.tests.split_facade import split_source
 
 
 def test_pi_generate_final_plan_method_exists():
     """P1-10: PI agent must expose method to unilaterally finalize plan."""
-    src = open(pi_mod.__file__).read()
+    src = split_source("backend.agents.pi_agent")
     assert (
         "def generate_final_plan_from_dialogue" in src
         or "async def generate_final_plan_from_dialogue" in src

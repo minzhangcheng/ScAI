@@ -11,6 +11,7 @@ import pytest
 
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
 from backend.models.schemas import AgentType
+from backend.tests.split_facade import setattr_facade
 from backend.utils.llm_client import UpstreamExhaustedError
 
 
@@ -90,7 +91,6 @@ class TestAutonomousLoopTextOnlyEscalation:
         from pathlib import Path
         from backend.utils.llm_client import LLMToolResponse
         from backend.models.schemas import AnalysisState
-        from backend.agents import bioinformatics_agent as bio_mod
 
         # --- Bypass __init__ ---
         agent = BioinformaticsAgent.__new__(BioinformaticsAgent)
@@ -172,7 +172,9 @@ class TestAutonomousLoopTextOnlyEscalation:
             def clear(self): pass
             def should_checkpoint(self, step): return False
 
-        monkeypatch.setattr(bio_mod, "CheckpointManager", _NullCheckpoint)
+        setattr_facade(
+            monkeypatch, "backend.agents.bioinformatics_agent", "CheckpointManager", _NullCheckpoint
+        )
 
         state = AnalysisState(id="test-session", user_id="test-user")
 

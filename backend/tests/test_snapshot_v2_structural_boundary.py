@@ -6,13 +6,15 @@ from pathlib import Path
 
 import pytest
 
+from backend.tests.split_facade import source_for_path
+
 
 def _repo_root() -> Path:
     return Path(__file__).parents[2]
 
 
 def _read(rel: str) -> str:
-    return (_repo_root() / rel).read_text(encoding="utf-8")
+    return source_for_path(rel)
 
 
 def test_retry_py_rethrows_required_snapshot_blocked():

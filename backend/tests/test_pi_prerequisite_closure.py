@@ -1,13 +1,13 @@
 import json
 from types import SimpleNamespace
-from pathlib import Path
 
 import pytest
 
 from backend.agents.pi_agent import PIAgent
 from backend.models.schemas import ExplorationReport
+from backend.tests.split_facade import split_source
 
-SRC = Path("backend/agents/pi_agent.py").read_text()
+SRC = split_source("backend.agents.pi_agent")
 
 
 def _make_pi_agent():

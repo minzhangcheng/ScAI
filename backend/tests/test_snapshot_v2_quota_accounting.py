@@ -10,12 +10,15 @@ import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
 from backend.services.snapshot_v2.models import ObjectRef
 from backend.services.snapshot_v2.object_store import ObjectStore
+from backend.tests.snapshot_v2_fixtures import (
+    patch_snapshot_service_session_states,
+    set_snapshot_service_session_states,
+)
 
 
 def test_physical_added_bytes_counts_created_runtime_refs():
@@ -135,10 +138,7 @@ async def test_prewrite_estimate_counts_known_workspace_and_state_artifacts(
     states = tmp_path / "states"
     states.mkdir()
     (states / "sess-quota.ipynb").write_bytes(b"n" * 123)
-    monkeypatch.setattr(
-        "backend.services.snapshot_v2.service.get_session_states",
-        lambda _sid: states,
-    )
+    set_snapshot_service_session_states(monkeypatch, lambda _sid: states)
 
     estimate = await service._estimate_capture_addition(
         _make_capture_request(),
@@ -166,10 +166,7 @@ async def test_prewrite_estimate_does_not_recount_existing_workspace_object(
 
     states = tmp_path / "states"
     states.mkdir()
-    monkeypatch.setattr(
-        "backend.services.snapshot_v2.service.get_session_states",
-        lambda _sid: states,
-    )
+    set_snapshot_service_session_states(monkeypatch, lambda _sid: states)
     request = _make_capture_request().model_copy(
         update={
             "analysis_state_ref": service.object_store.put_bytes(
@@ -216,10 +213,7 @@ async def test_pre_restore_can_use_bounded_grace_for_legacy_over_quota_store(
 
     states = tmp_path / "states"
     states.mkdir()
-    monkeypatch.setattr(
-        "backend.services.snapshot_v2.service.get_session_states",
-        lambda _sid: states,
-    )
+    set_snapshot_service_session_states(monkeypatch, lambda _sid: states)
     request = _make_capture_request().model_copy(
         update={
             "phase": "pre_restore",
@@ -278,10 +272,7 @@ async def test_pre_restore_grace_rejects_large_addition_to_over_quota_store(
     (workspace / "new.csv").write_bytes(b"12345")
     states = tmp_path / "states"
     states.mkdir()
-    monkeypatch.setattr(
-        "backend.services.snapshot_v2.service.get_session_states",
-        lambda _sid: states,
-    )
+    set_snapshot_service_session_states(monkeypatch, lambda _sid: states)
     request = _make_capture_request().model_copy(
         update={
             "phase": "pre_restore",
@@ -370,10 +361,7 @@ async def test_capture_path_physical_added_includes_workspace_and_is_not_recount
     sessions[session_id] = analysis_state
     try:
         service = SnapshotService(session_id, v2_paths)
-        with patch(
-            "backend.services.snapshot_v2.service.get_session_states",
-            return_value=states,
-        ):
+        with patch_snapshot_service_session_states(states):
             # Cold store: no objects before first capture.
             assert not any(v2_paths.objects.iterdir())
 
@@ -459,10 +447,7 @@ async def test_quota_failure_cannot_be_bypassed_by_identical_retry(tmp_path):
     try:
         service = SnapshotService(session_id, paths, session_quota_bytes=1)
         failures = []
-        with patch(
-            "backend.services.snapshot_v2.service.get_session_states",
-            return_value=states,
-        ):
+        with patch_snapshot_service_session_states(states):
             for _ in range(2):
                 record = await service._capture_locked(
                     _make_capture_request(session_id),

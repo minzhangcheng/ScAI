@@ -1,0 +1,510 @@
+// English UI strings. Split out of translations.ts verbatim.
+
+export const en = {
+    // App
+    appName: 'ScAI',
+    appSubtitle: 'Single Cell Sequencing Analysis Driven by AI',
+    appFullName: 'ScAI - Single Cell Sequencing Analysis Driven by AI',
+    loadingAnalysis: 'Loading analysis…',
+
+    // Tabs
+    tabAnalysis: 'Analysis',
+    tabData: 'Data',
+    tabPrompts: 'Agents',
+    tabResults: 'Results',
+    tabReport: 'Report',
+    tabChat: 'Chat',
+
+    // Sidebar
+    newAnalysis: 'New Analysis',
+    defaultProjectName: 'New Analysis Project',
+    defaultProjectDescription: 'Describe your research goals and experimental design...',
+    exportState: 'Export State',
+    importState: 'Import State',
+    exportSession: 'Export Session',
+    importSession: 'Import Session',
+    importing: 'Importing...',
+    exporting: 'Exporting...',
+    exportPackaging: 'Packaging...',
+    exportPackagingDetail: 'Compressing files, please wait...',
+    exportDownloadStarted: 'Download Started',
+    exportDownloadStartedDetail: 'File download has started, please check your browser download manager',
+    importSuccess: 'Import successful',
+    importFailed: 'Import failed',
+    exportFailed: 'Export failed',
+    confirm: 'Confirm',
+    apiSettings: 'API Settings',
+    
+    // Config Panel
+    apiConfig: 'API Configuration',
+    apiConfigDesc: 'Configure API keys for each platform',
+    openrouterKey: 'OpenRouter API Key',
+    openrouterDesc: 'For calling Gemini and Claude models',
+    googleKey: 'Google AI API Key',
+    googleDesc: 'For Gemini Deep Research',
+    getKey: 'Get Key',
+    required: 'Required',
+    cancel: 'Cancel',
+    saveConfig: 'Save Config',
+    saving: 'Saving...',
+    saved: 'Saved',
+    readMode: 'Read Mode',
+    readModeDesc: 'Browse existing analyses (no API Key needed)',
+    validatingApiKey: 'Validating API Key...',
+    apiKeyInvalid: 'API Key Validation Failed',
+    apiKeyInvalidDesc: 'Could not connect to the LLM server with this API Key. The key may be invalid or the server unreachable.',
+    apiKeyValidationUncertain: 'Unable to Verify API Key',
+    apiKeyValidationUncertainDesc: 'Could not connect to the LLM server for validation, but this may be a network issue.',
+    reconfigureApiKey: 'Reconfigure API Key',
+    ignoreError: 'Ignore Error',
+    readModeRestriction: 'Cannot start new analysis in Read Mode. Please configure API Key first.',
+    
+    // New Session Modal
+    createAnalysis: 'New Analysis',
+    createAnalysisDesc: 'Create a new analysis session',
+    sessionName: 'Session Name (Optional)',
+    sessionNamePlaceholder: 'e.g., Single-cell Analysis - Exp1',
+    researchGoal: 'Research Goal',
+    researchGoalPlaceholder: 'e.g., Analyze the tissue phenotype of gene knockout mice, focusing on cell type changes and related signaling pathways...',
+    create: 'Create',
+    
+    // Analysis Panel
+    analysisControl: 'Analysis Control',
+    startAnalysis: 'Start Analysis',
+    pause: 'Pause',
+    resume: 'Resume',
+    connected: 'Connected',
+    analyzing: 'Analysis in Progress',
+    analyzingDesc: 'Agents are collaborating on analysis...',
+    analysisComplete: 'Analysis Complete',
+    analysisFailed: 'Analysis Failed',
+    checkConfigAndRetry: 'Please check configuration and data, then retry',
+    agentStatus: 'Agent Status',
+    analysisRounds: 'Analysis Rounds',
+    findings: 'findings',
+    newSession: 'New',
+    
+    // Agent names
+    piAgent: 'PI Agent',
+    piAgentDesc: 'Principal Investigator, coordinates all',
+    pathologyAgent: 'Pathology Agent',
+    pathologyAgentDesc: 'Analyzes histological slides',
+    bioinformaticsAgent: 'Bioinformatics Agent',
+    bioinformaticsAgentDesc: 'Single-cell sequencing analysis',
+    biochemistryAgent: 'Biochemistry Agent',
+    biochemistryAgentDesc: 'Interprets biochemical data',
+    literatureAgent: 'Literature Agent',
+    literatureAgentDesc: 'Literature research support',
+    literatureResearchMode: 'Research Mode',
+    literatureGeminiDeepResearch: 'Gemini Deep Research',
+    literatureGeminiDesc: 'Comprehensive literature search via Google Gemini Deep Research API',
+    literatureGeminiNote: 'Requires Google AI API Key (set in API Settings)',
+    literatureDeepResearch: 'Deep Research Models',
+    literatureDeepResearchDesc: 'Literature search via LLM models with deep research ability such as o4-mini-deep-research and sonar-deep-research',
+    literatureDeepResearchModel: 'Deep Research Model',
+    literatureDeepResearchModelPlaceholder: 'e.g., o4-mini-deep-research',
+    literatureDeepResearchNote: 'Response time: 5-30 minutes. Recommended: o4-mini-deep-research, sonar-deep-research',
+    literatureDeepResearchServer: 'LLM Server',
+    literatureDeepResearchServerHint: 'Leave empty to use PubMed LLM server and API key',
+    literatureDeepResearchApiKey: 'API Key',
+    literaturePubmedLlm: 'PubMed + LLM Only',
+    literaturePubmedDesc: 'Search PubMed database only + LLM synthesis and analysis',
+    literaturePubmedEmailLabel: 'PubMed Email',
+    literaturePubmedEmailNote: 'NCBI E-utilities requires a contact email',
+    literatureGoogleApiKey: 'Google AI API Key',
+    literatureMaxSearchRounds: 'Max Search Rounds',
+    literatureMaxSearchRoundsNote: 'Agent dynamically adjusts queries and performs iterative multi-round search',
+    literaturePubmedSettings: 'PubMed Search Settings',
+    literaturePubmedSettingsNote: 'All modes fall back to PubMed search on failure',
+    painterAgent: 'Painter Agent',
+    painterAgentDesc: 'Graphic abstract generation',
+    supervisorAgent: 'Supervisor Agent',
+    supervisorAgentDesc: 'Real-time analysis monitoring and quality control',
+    techniqueAgent: 'Technique Agent',
+    techniqueAgentDesc: 'API documentation lookup & error summarization',
+
+    // Publication figures and reports
+    figureGallery: 'Figure Gallery',
+    figureApproved: 'Approved',
+    figurePending: 'Pending Review',
+    figureRevisionRequested: 'Revision Requested',
+    graphicAbstract: 'Graphic Abstract',
+    graphicAbstractTextMode: 'Graphic Abstract (Text Mode)',
+    graphicAbstractGenerated: 'Graphic Abstract Generated',
+    integratedReport: 'Integrated Report',
+    integratedReportGenerated: 'Integrated Report Generated',
+    downloadPDF: 'Download PDF',
+    downloadPNG: 'Download PNG',
+    downloadText: 'Download Text',
+    downloadHD: 'Download HD',
+    downloadAllFigures: 'Download All Figures',
+    downloadAllTables: 'Download All Tables',
+    generatingGraphicAbstract: 'Generating graphic abstract...',
+    graphicAbstractPrompt: 'Prompt: ',
+    generatedAt: 'Generated at ',
+    clickToEnlarge: 'Click to enlarge',
+    noFiguresYet: 'No figures yet',
+    noTablesYet: 'No tables yet',
+    piReviewingFigure: 'PI reviewing figure...',
+    figureApprovedSuccess: 'Figure approved',
+    figureNeedsRevision: 'Figure needs revision',
+    qualityScore: 'Quality Score',
+    
+    // Data Panel
+    pathologySlides: 'Pathology Slides',
+    pathologySlidesDesc: 'Upload H&E or special stain slides',
+    dragOrClick: 'Drag files here, or click to select',
+    supportedFormats: 'Supports PNG, JPEG, TIFF formats',
+    sequencingData: 'Sequencing Data',
+    sequencingDataDesc: 'Upload single-cell or bulk sequencing data',
+    uploadSequencing: 'Click or drag to upload sequencing data',
+    supportedH5ad: 'Supports .h5ad, .h5 (scRNA-seq), .csv/.tsv (bulk RNA-seq) or .loom (RNA velocity)',
+    dataUploaded: 'Data Uploaded',
+    biochemistryIndicators: 'Biochemistry Indicators',
+    biochemistryIndicatorsDesc: 'Upload data files or manually enter biochemistry indicators',
+    addIndicator: 'Add Indicator',
+    indicatorName: 'Indicator name (e.g., ALT)',
+    value: 'Value',
+    unit: 'Unit (e.g., U/L)',
+    add: 'Add',
+    noBiochemistryData: 'No biochemistry data',
+    indicator: 'Indicator',
+    uploadData: 'Upload Analysis Data',
+    uploadDataDesc: 'Please create an analysis session first, then upload pathology slides, single-cell sequencing data, and biochemistry indicators.',
+
+    // Treatment groups
+    treatmentGroups: 'Treatment Groups',
+    treatmentGroupsDesc: 'Define experimental groups and sample counts',
+    addGroup: 'Add Group',
+    groupName: 'Group Name',
+    groupNamePlaceholder: 'e.g., Control, Model',
+    groupDescription: 'Description',
+    groupDescPlaceholder: 'Detailed description (optional)',
+    sampleCount: 'Samples',
+    noGroupDistinction: 'No group distinction',
+    noSampleDistinction: 'No sample distinction',
+    deleteGroupConfirm: 'Deleting this group will also remove all associated data. Continue?',
+    noGroups: 'Please add treatment groups first',
+
+    // Data section
+    selectGroup: 'Select Group',
+    selectSample: 'Select Sample',
+    selectDataType: 'Select Data Type',
+    sample: 'Sample',
+    filename: 'Filename',
+    group: 'Group',
+    dataType: 'Type',
+    actions: 'Actions',
+    noFiles: 'No files',
+
+    // Data overview
+    dataOverview: 'Data Overview',
+    dataOverviewDesc: 'Upload status for each treatment group',
+    filesCount: '{n} files',
+    indicatorsCount: '{n} indicators',
+
+    // Stain types
+    heStain: 'H&E Stain',
+    siriusRed: 'Sirius Red (Fibrosis)',
+    perlsBlue: 'Perls Blue (Iron)',
+    oilRedO: 'Oil Red O (Lipid)',
+    pas: 'PAS (Glycogen)',
+    other: 'Other',
+    customType: 'Custom type',
+    customTypePlaceholder: 'e.g. Sirius Red',
+    customTypeRequired: 'Please enter a custom type name',
+
+    // Sequencing types
+    scRNASeq: 'scRNA-seq (h5ad/h5)',
+    loom: 'Loom (RNA velocity)',
+
+    // Biochemistry types
+    bioImage: 'Image',
+    bioFile: 'Data file (CSV/Excel)',
+    
+    // Prompts Panel
+    selectAgent: 'Select Agent',
+    agentLlmServer: 'LLM Server',
+    agentApiKey: 'API Key',
+    agentServerHint: 'Currently using default LLM server settings. Modify to use a different platform for this agent',
+    agentModelHint: 'Note: Model name format may vary by platform (e.g., OpenRouter uses provider/model format)',
+    agentDisableHint: 'Leave empty to disable this agent',
+    agentRequiredHint: 'This agent is required and cannot be disabled',
+
+    // LLM failure dialog
+    llmCallFailed: 'LLM Call Failed',
+    llmCallFailedBadge: 'LLM Call Failed',
+    llmAgent: 'Agent',
+    llmModel: 'Model',
+    llmServer: 'LLM Server',
+    llmErrorDetails: 'Error Details',
+    llmRetry: 'Retry',
+    llmRetryHint: 'Try up to 3 more times',
+    llmModifyAgent: 'Modify Agent Settings',
+    llmTerminate: 'Terminate Analysis',
+    llmSkip: 'Skip',
+    llmAutoSkip: 'Auto-skip in {seconds}s',
+    llmClose: 'Close',
+    agentDisabledTitle: 'Agent Disabled',
+    agentDisabledBody: 'The current step requires {agent}, but its model is empty. Choose:',
+    agentDisabledModifyAgent: 'Modify Agent (Recommended)',
+    llmReopenHint: 'After closing, click the "LLM Call Failed" badge to reopen',
+    configModified: 'Config Modified',
+    configModifiedDesc: 'Agent settings have been updated. Choose your next action:',
+    resumeAnalysis: 'Resume Analysis',
+    returnToSettings: 'Return to Settings',
+    backToTimeoutDialog: 'Back to Timeout Dialog',
+
+    visionSupport: 'Vision Support',
+    visionSupportEnabled: 'Model supports image input',
+    visionSupportDisabled: 'Model does not support image input',
+    visionHint_pi: 'When enabled, PI can directly review figure quality; when disabled, other vision-capable agents will review instead',
+    visionHint_bioinformatics: 'When enabled, the bioinformatics agent can see the current figure during revision',
+    visionHint_biochemistry: 'Enable if biochemistry result images are uploaded for recognition',
+    visionHint_painter: 'When enabled, Painter can see the current graphic abstract during revision for targeted improvements',
+    visionHint_supervisor: 'When enabled, Supervisor can visually inspect generated figures in real-time',
+    visionHint_technique: 'Technique Agent typically does not require vision capabilities',
+    reset: 'Reset',
+    save: 'Save',
+    promptTips: 'Prompt Writing Tips',
+    promptTip1: 'Define the agent\'s role and professional background',
+    promptTip2: 'List specific tasks and indicators to focus on',
+    promptTip3: 'Describe collaboration with other agents',
+    promptTip4: 'Specify output format and language preferences',
+    
+    // Results Panel
+    analysisResults: 'Analysis Results',
+    completedRounds: 'Completed {n} analysis rounds',
+    downloadReport: 'Download Report',
+    finalReport: 'Brief Analysis Result',
+    roundDetails: 'Round Details',
+    waitingResults: 'Waiting for Results',
+    waitingResultsDesc: 'Results and final report will appear here after analysis completes.',
+    pathologyFindings: 'Pathology Findings',
+    bioinformaticsFindings: 'Bioinformatics Findings',
+    biochemistryFindings: 'Biochemistry Findings',
+    literatureFindings: 'Literature Findings',
+    crossModalCandidates: 'Cross-Modal Mechanism Candidates',
+    crossModalConfidence: 'Evidence strength',
+    crossModalRelation: 'Relation to current direction',
+    
+    // Message Stream
+    realTimeMessages: 'Real-time Messages',
+    agentInteractions: 'Agent Interactions',
+    waitingStart: 'Waiting for analysis to start...',
+    code: 'Code',
+    output: 'Output',
+    chart: 'Chart',
+    
+    // Welcome screen
+    startNewAnalysis: 'Start New Analysis',
+    welcomeDesc: 'Create a new analysis session and upload data to begin multi-agent collaborative analysis. Supports pathology slides, sequencing data, and biochemistry indicators.',
+    
+    // Errors
+    pleaseEnterOpenrouterKey: 'Please enter OpenRouter API Key',
+    saveFailed: 'Save failed',
+    
+    // Default Prompts
+    promptPi: `You are a senior biomedical research PI (Principal Investigator), leading a multidisciplinary team for comprehensive analysis.
+
+Your responsibilities:
+1. Develop overall research strategy and analysis direction
+2. Coordinate work across pathology, bioinformatics, biochemistry, and literature teams
+3. Synthesize results from all parties and make scientific judgments
+4. Arbitrate conflicts and provide reasonable explanations
+5. Identify novel scientific discoveries and potential mechanisms
+
+Core issues to focus on:
+- Overall phenotypic characteristics of the samples
+- Degree and type of tissue damage
+- Changes in cell composition
+- Potential molecular mechanisms
+- Consistency with known literature and new findings
+
+Please analyze based on the specific research goals provided by the user. Respond in English and maintain scientific rigor.`,
+
+    promptPathology: `You are a professional pathology expert, skilled in analyzing various histological slides.
+
+Your tasks:
+1. Analyze stained slides to identify tissue structural abnormalities
+2. Assess lesion severity (mild/moderate/severe)
+3. Identify concrete, stain-interpretable features that are visible in the supplied images
+   and relevant to the stated study question; do not apply a fixed feature checklist
+4. Recommend special staining when necessary
+
+Please describe the pathological features you observe in detail and provide professional judgment. Respond in English.`,
+
+    promptBioinformatics: `You are a professional bioinformatics analyst, specializing in high-throughput sequencing data analysis (including single-cell RNA-seq, bulk RNA-seq, etc.).
+
+Your workflow:
+1. Write and execute Python code step by step
+2. Review results after each step before deciding the next
+3. Request literature support when encountering important biological questions
+
+Analysis pipeline (adjust based on data type):
+1. Quality Control (QC)
+2. Normalization and dimensionality reduction
+3. Clustering analysis
+4. Cell/sample annotation
+5. Differential expression analysis
+6. Pathway enrichment analysis
+7. Other specialized analyses
+
+Code requirements:
+- Use appropriate analysis libraries (scanpy, pydeseq2, etc.)
+- Set random_state=42 for reproducibility
+- Generate visualizations at each step
+- Save key intermediate results
+
+Please respond with analysis conclusions in English, with code comments in English.`,
+
+    promptBiochemistry: `You are a laboratory biochemistry expert, responsible for interpreting and integrating experimental results.
+
+Base the analysis on the biochemical indicators actually supplied by the user. Organize them
+by their measured role only after inspecting the data; do not assume a fixed panel.
+
+Your tasks:
+1. Integrate manually entered experimental data
+2. Assess the degree of abnormality for each indicator
+3. Hypothesize possible pathophysiological mechanisms
+4. Recommend supplementary experiments
+
+Please respond in English with professional analytical opinions.`,
+
+    promptLiterature: `Please help me conduct a literature review on the topic: {topic}
+
+Please search relevant biomedical literature, focusing on:
+1. Related molecular mechanisms
+2. Known gene/pathway associations
+3. Clinical/experimental correlations
+4. Latest research developments
+
+Please provide a detailed literature review report with specific citations.`,
+
+    // Round Feedback Dialog
+    roundComplete: 'Round {round} Complete',
+    roundSummaryTitle: 'Round Summary',
+    keyFindings: 'Key Findings',
+    additionalDataSuggested: 'Suggested Additional Data',
+    noFindings: 'No findings this round',
+    autoProceeding: 'Auto-proceeding...',
+    timerPaused: 'Timer paused',
+    skipRound: 'Continue',
+    pauseTimer: 'Pause',
+    resumeTimer: 'Resume',
+    sendInput: 'Send',
+    sendingInput: 'Sending...',
+    lastRoundNotice: 'This is the last round. Providing input will trigger an extra analysis round.',
+    selectTargetAgent: 'Target Agent',
+    uploadFilesDialog: 'Upload Files',
+    roundInputPlaceholder: 'Enter additional guidance or instructions for the next round...',
+    fileUploadedTo: 'Send to',
+    removeFile: 'Remove',
+
+    // Chat Panel
+    chatPlaceholder: 'Type a message...',
+    chatSend: 'Send',
+    chatEmpty: 'Start a conversation with PI Agent',
+    chatEmptyDesc: 'PI Agent can answer questions based on analysis results or analyze data you upload',
+    chatNoSession: 'Please create or select an analysis session first',
+    chatError: 'Failed to send, please try again',
+    chatStop: 'Stop',
+    chatCancelled: 'Cancelled',
+    chatAttach: 'Attach',
+    chatTargetAgent: 'Target Agent',
+    chatTargetPi: 'PI (auto-dispatch)',
+    chatTargetPathology: 'Pathology',
+    chatTargetBioinformatics: 'Bioinformatics',
+    chatTargetBiochemistry: 'Biochemistry',
+
+    // Supplementary Analysis
+    requestMoreAnalysis: 'Request More Analysis',
+    supplementaryAnalysisPrompt: 'Describe the additional analysis you need',
+    supplementaryAnalysisRunning: 'Running supplementary analysis...',
+    supplementaryAnalysisComplete: 'Supplementary analysis complete',
+    supplementarySubmit: 'Submit',
+    supplementaryPlaceholderAnnotation: 'e.g., Please analyze DEGs between cluster 3 and 5, and search relevant literature',
+    supplementaryPlaceholderDirection: 'e.g., Please search for more literature about XXX pathway to help determine research direction',
+    supplementaryDesc: 'Describe the additional analysis you need. The PI Agent will coordinate agents to run the analysis and update the report.',
+
+    // Detailed Report
+    viewDetailedReport: 'View Detailed Report',
+
+    // Snapshots
+    snapshots: 'Snapshots (Experimental)',
+    createSnapshot: 'Create Snapshot',
+    restoreSnapshot: 'Restore',
+    deleteSnapshot: 'Delete',
+    confirmDelete: 'Confirm Delete',
+    discardCurrent: 'Discard Current',
+    confirmDiscard: 'Confirm Discard',
+    restoreProgress: 'Restore Progress',
+    snapshotCreated: 'Snapshot created',
+    snapshotRestored: 'Restored to snapshot',
+    confirmRestore: 'Restore to this snapshot? Current analysis progress will be replaced.',
+    manualSnapshot: 'Manual snapshot',
+    noSnapshots: 'No snapshots',
+    snapshotName: 'Snapshot name (optional)',
+    phasePreAnnotation: 'Pre-Annotation',
+    phasePostAnnotation: 'Post-Annotation',
+    phasePreDirection: 'Pre-Direction',
+    phasePostDirection: 'Post-Direction',
+    phaseManual: 'Manual',
+    analysisSnapshots: 'Analysis Snapshots (Experimental)',
+    creating: 'Creating...',
+
+    // Plan Review Dialog
+    planReviewTitle: 'Analysis Plan Review',
+    planReviewDownloadLog: 'Download Chat Log',
+    planReviewOverview: 'Overview',
+    planReviewSteps: 'Analysis Steps ({n} steps)',
+    planReviewMethod: 'Method:',
+    planReviewInput: 'Input:',
+    planReviewExpectedOutput: 'Expected Output:',
+    planReviewRationale: 'Rationale:',
+    planReviewDependsOn: 'Depends On:',
+    planReviewKeyDecisions: 'Key Decisions',
+    planReviewEstimatedTime: 'Estimated Runtime:',
+    planReviewPlaceholder: 'Enter modification suggestions...',
+    planReviewCancel: 'Cancel',
+    planReviewSubmitting: 'Submitting...',
+    planReviewSubmitFeedback: 'Submit Feedback',
+    planReviewModify: 'Modify',
+    planReviewSkip: 'Skip (let PI decide)',
+    planReviewApprove: 'Approve Plan',
+    planReviewStageExplore: 'Explore',
+    planReviewStageInnovate: 'Innovate',
+    planReviewStage1: 'Stage 1: QC+Clustering+Annotation',
+    planReviewStage2: 'Stage 2: Downstream Analysis',
+    planReviewStageFull: 'Full Analysis',
+
+    integrationGateTitle: 'Integration Analysis (Cycle {cycle}) — Select New Research Direction',
+    integrationGateCountdown: 'Countdown:',
+    integrationGateContinue: 'Continue with Selected',
+    integrationGateLetPiDecide: 'Let PI Decide',
+    integrationGateFinalize: 'Write Report',
+    integrationGateSelectRequired: 'Select at least one research direction.',
+    integrationGateActionFailed: 'Action failed: {message}',
+
+    // Species input dialog
+    speciesInputTitle: 'Species Information',
+    speciesGeneValidationTitle: 'Gene Name Validation',
+    speciesInputPlaceholder: 'Enter species name, e.g., Homo sapiens, Mus musculus...',
+    speciesGeneValidationPlaceholder: 'Enter correct species name, or type "keep" to continue...',
+    waitingSpeciesInput: 'Waiting for species input...',
+
+    // Exploration failed dialog (likely a data problem)
+    explorationFailedTitle: 'Exploration Stage Did Not Complete',
+    explorationFailedMessage: 'Exploration (Stage 1: QC / clustering / annotation) did not complete successfully. This is most often caused by a problem with the uploaded data (format, contents, or missing fields). Please review or re-upload your data, then continue to retry Stage 1 — or stop the analysis.',
+    explorationFailedReasonLabel: 'Reason',
+    explorationFailedReason_did_not_converge: 'Analysis did not converge (reached the step limit or did not finish)',
+    explorationFailedReason_analysis_error: 'An error occurred during analysis',
+    explorationFailedGoToData: 'Go to Data Panel',
+    explorationFailedContinue: 'Continue (retry Stage 1)',
+    explorationFailedStop: 'Stop Analysis',
+
+    // Marker DB missing dialog
+    markerDbMissingTitle: 'Marker database download failed',
+    markerDbMissingDesc: 'Automatic download of the marker database TSV failed. Retry the download to enable DB priors, skip (literature-only annotation), or terminate analysis.',
+    markerDbFetch: 'Retry download',
+} as const

@@ -21,7 +21,30 @@ from backend.services.snapshot_v2.models import (
     SnapshotManifestV2,
     validate_system_commit,
 )
+from backend.tests.split_facade import patch_facade, setattr_facade
 from backend.utils.crypto import get_integrity_secret
+
+# Facade whose implementation lives in backend.services.snapshot_v2.service_parts;
+# the helpers below rebind names on the facade *and* every part that reads them.
+SNAPSHOT_SERVICE = "backend.services.snapshot_v2.service"
+
+
+def patch_snapshot_service_session_states(states):
+    """Patch snapshot_v2.service ``get_session_states`` to return ``states``.
+
+    Context manager; yields the MagicMock standing in for the real lookup.
+    """
+    return patch_facade(SNAPSHOT_SERVICE, "get_session_states", return_value=states)
+
+
+def set_snapshot_service_session_states(monkeypatch, resolver):
+    """monkeypatch snapshot_v2.service ``get_session_states`` to ``resolver``."""
+    setattr_facade(monkeypatch, SNAPSHOT_SERVICE, "get_session_states", resolver)
+
+
+def patch_snapshot_service_session_lock(**mock_kwargs):
+    """Patch snapshot_v2.service ``get_session_lock``, mock.patch keyword style."""
+    return patch_facade(SNAPSHOT_SERVICE, "get_session_lock", **mock_kwargs)
 
 
 def _ref(seed: str = "a", size: int = 1024, media_type: str = "application/json") -> ObjectRef:
@@ -207,12 +230,16 @@ def verify_manifest_hmac(
 
 
 __all__ = [
+    "SNAPSHOT_SERVICE",
     "complete_runtime",
     "dependency_manifest",
     "dill_dependency",
     "make_snapshot_v2_manifest",
     "minimal_manifest_payload",
+    "patch_snapshot_service_session_lock",
+    "patch_snapshot_service_session_states",
     "runtime_manifest",
+    "set_snapshot_service_session_states",
     "sign_manifest_bytes",
     "validate_system_commit",
     "verify_manifest_hmac",
