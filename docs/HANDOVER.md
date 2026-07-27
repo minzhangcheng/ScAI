@@ -1,40 +1,16 @@
 # ScAI Handover
 
-Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
+Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.36.3 · **Last updated**: 2026-07-25
+**Version**: 0.36.4 · **Last updated**: 2026-07-27
 
 ## 1. Runtime Architecture
 
-ScAI is a single-container web application: a React/Vite single-page frontend talks to a FastAPI backend over REST and a WebSocket. The backend orchestrates eight specialized agents, each making LLM calls against any **OpenAI-compatible endpoint** — verified endpoints include cloud aggregators (OpenRouter, n1n.ai), direct provider APIs (DeepSeek, Moonshot, Zhipu, MiniMax, Aliyun/Qwen), Google Gemini (Deep Research literature mode), and locally deployed open-source models via **Ollama** — other OpenAI-compatible endpoints are likely to work but have not been officially tested. Endpoint and model are configurable **per agent**, so flagship and open-source models can be mixed freely. The Bioinformatics Agent additionally drives a **local Jupyter kernel** for code execution. Sessions are persisted to disk (per-session directory) and cached in memory; users and auth live in a small SQLite database.
+ScAI is a React/Vite frontend backed by FastAPI, LangGraph, and local Jupyter execution. REST handles configuration and lifecycle operations; WebSockets stream workflow and report progress. Long-running workflows are background asyncio tasks, active analysis state is cached in process, and durable session artifacts are written to disk.
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│           Frontend  (React · TypeScript · Vite · Zustand)    │
-│  Tabbed shell — Data / Prompts / Analysis / Results /        │
-│                 Report / Chat; WebSocket client              │
-└───────────────────────────┬──────────────────────────────────┘
-                            │ REST (JWT) + WebSocket
-┌───────────────────────────▼──────────────────────────────────┐
-│           Backend  (FastAPI · Uvicorn · Pydantic)            │
-│                                                              │
-│  middleware/auth  →  routes/*  →  services/*  →  workflow.py │
-│                                          │                   │
-│                                          ▼                   │
-│                               Agents (backend/agents/*)      │
-│                                          │                   │
-│                    ┌─────────────────────┼─────────────────┐ │
-│                    ▼                     ▼                 ▼ │
-│       LLM endpoints               Jupyter kernel      Disk   │
-│  (any OpenAI-compatible;         (sandbox subprocess) store  │
-│   cloud or local Ollama;                                     │
-│   optional Google)                                           │
-│                                                              │
-│                             SQLite (users)                   │
-└──────────────────────────────────────────────────────────────┘
-```
+The workflow implementation is split across mixins under `backend/workflow/`. `SingleCellAnalysisWorkflow` in `core.py` composes routing, context, messaging, callbacks, annotation, planning, agent nodes, synthesis, initialization, graph construction, reporting, and integration behavior. The LangGraph internal entry node is `restore_entry`; ordinary runs route from it to `initialize_round`. It is an implementation detail used to select the correct continuation path, not a user-facing workflow phase.
 
-Long-running analysis runs on a background asyncio task owned by the backend; the frontend observes progress over the WebSocket and interacts through HITL endpoints (annotation confirmation, direction selection, round feedback).
+`WORKFLOW_GRAPH_NODES` in `backend/constants.py` is the authoritative registry for the 16 graph nodes: `restore_entry`, `initialize_round`, `pi_planning`, `planning_dialogue`, `user_review_gate`, `biochemistry_analysis`, `pathology_analysis`, `bioinformatics_analysis`, `literature_research`, `pi_synthesis`, `wait_for_user_input`, `check_convergence`, `integration_synthesis`, `generate_final_report`, `generate_graphic_abstract`, and `generate_detailed_report`. The principal route is planning, optional modality analyses, Bioinformatics Stage 1/2, literature grounding, PI synthesis, user feedback, and convergence routing. Conditional edges can return a plan for revision, begin another round, enter integration, or proceed to reporting. Planning failure can terminate directly at `END`; a blocked final report can also terminate before graphic-abstract and detailed-report generation.
 
 ## 2. Repository Layout
 
@@ -43,7 +19,7 @@ scai/
 ├── backend/            FastAPI app, agents, workflow engine
 ├── frontend/           React + Vite UI
 ├── clients/python/     Python SDK (scai_client)
-├── docs/               End-user documentation
+├── docs/               User, administrator, and technical documentation
 ├── Dockerfile          Multi-stage build image
 ├── docker-entrypoint.sh Container startup
 ├── start.sh / stop.sh  Native launch / shutdown
@@ -54,22 +30,18 @@ scai/
 
 ## 3. Backend Module Map (`backend/`)
 
-| Path                                   | Purpose                                                                                                                                                                            |
-|----------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `main.py`                              | FastAPI app factory: CORS, auth middleware, lifespan hooks for background cleanup tasks, route registration. Version string lives here.                                            |
-| `workflow.py`                          | Core orchestration engine — multi-agent round execution, HITL gates, state transitions, integrated-report generation.                                                              |
-| `state.py`                             | Per-process mutable state: active sessions cache, per-session locks, access-time tracking, prepared exports, import jobs, chat delegation tracking, WebSocket monitor tasks.       |
-| `agents/`                              | `base.py` + eight agents: `pi_agent`, `bioinformatics_agent`, `pathology_agent`, `biochemistry_agent`, `literature_agent`, `painter_agent`, `supervisor_agent`, `technique_agent`. |
-| `routes/`                              | 17 route modules (see §4). Each module is mounted by `main.py`; all mutable endpoints require auth unless the path is in `AUTH_OPTIONAL_PATHS`.                                    |
-| `services/`                            | Business logic between routes and agents. `config_io`, `session_store`, `workflow_runner`, `upload`, `user_cleanup`, and the `report/` sub-package (see §5).                       |
-| `models/`                              | Pydantic schemas: `schemas` (analysis state), `api_requests` (request/response bodies), `config_schema` (agent + LLM config), `user` (auth entities).                              |
-| `middleware/auth.py`                   | JWT validation; `AUTH_OPTIONAL_PATHS` tuple (`/api/session/`, `/api/file/`, `/api/download/`) delegates ownership checks to the route layer via `require_session_ownership`.       |
-| `utils/`                               | `llm_client`, `agent_llm`, `sandbox` (Jupyter execution), `error_parsing` (incl. shared `_TECHNICAL_ERROR_TYPES`), `report_html` / `report_css`, `image_utils`, `checkpoint`, `files`, `auth`, `db`, `formatting`, `upload`, `llm_logger`. |
-| `tasks/`                               | Background jobs started in lifespan: `session_cleanup` (idle + overflow eviction, stale import jobs), `ttl_cleanup` (upload TTL).                                                  |
-| `config/`                              | Package: `_config.py` (paths, timeouts, LLM defaults, `PI_AGENT_NAME`), `__init__.py` (backward-compatible re-exports), `agent_prompts.py` (`AgentPrompts` Pydantic model).        |
-| `tests/`                               | Pytest suite; shared `app_db` fixture in `conftest.py`; `route_snapshot.json` pins the route registry.                                                                             |
-| `migrate_to_session_dirs.py`           | One-shot migration helper for older data layouts.                                                                                                                                  |
-| `regenerate_report_html.py`            | CLI helper to rebuild a report's HTML from saved state.                                                                                                                            |
+| Path | Purpose |
+|------|---------|
+| `main.py` | FastAPI app setup, middleware, lifespan tasks, and registration of 19 mounted routers. |
+| `constants.py` | Application version, graph-node registry, node-to-agent mappings, workflow signals, and shared enums. |
+| `workflow/` | LangGraph orchestration split into the 12 mixins composed by `core.py`; `graph.py` declares nodes and edges. |
+| `agents/` | PI, Bioinformatics, Pathology, Biochemistry, Literature, Painter, Supervisor, and Technique implementations, with large agents split behind stable facades. |
+| `routes/` | HTTP and WebSocket boundary modules; several large routers are split into sibling `*_parts/` packages. |
+| `services/` | Session persistence, workflow task ownership, upload, cleanup, report generation, and other business services. |
+| `models/` | Pydantic request, configuration, user, and analysis-state models; large schemas are split under `schema_parts/`. |
+| `utils/` | LLM protocols, configuration resolution, Jupyter sandbox, authentication, storage, logging, and shared helpers. |
+| `state.py` | Process-local session, workflow, task, lock, WebSocket, chat, report, and import-job registries. |
+| `tests/` | Pytest suite, shared fixtures, structural guards, and pinned route registry. |
 
 ## 4. Routes (`backend/routes/`)
 
@@ -87,114 +59,88 @@ scai/
 | `files.py`         | File serving (uploaded data, generated figures).                                          |
 | `lifecycle.py`     | Start / pause / resume / stop analysis.                                                   |
 | `interaction.py`   | HITL inputs: human guidance, annotation confirmation, direction selection.                |
-| `snapshots.py`     | Create / restore analysis checkpoints.                                                    |
+| `snapshots.py`     | Internal checkpoint lifecycle and compatibility management endpoints.                    |
 | `export_import.py` | Session export (`.tar.gz` / `.zip`) and import with background job tracking.              |
 | `chat.py`          | PI-Agent chat endpoints, including on-the-fly file uploads and agent delegation.          |
 | `reports.py`       | Report generate / list / download / HTML / regenerate.                                    |
 | `websockets.py`    | `/ws/{session_id}` real-time stream; `/ws/report/{session_id}` report-generation stream.  |
 | `v1.py`            | Versioned API for the Python client.                                                      |
+| `user_config.py`   | Per-user LLM endpoint, model, and credential configuration.                              |
 
-## 5. Services (`backend/services/`)
+## 5. Configuration and Agents
 
-| Module                | Responsibility                                                                                                    |
-|-----------------------|-------------------------------------------------------------------------------------------------------------------|
-| `config_io.py`        | Load/save session config (agent models, temps, prompts, LLM server overrides).                                    |
-| `session_store.py`    | In-memory cache + atomic disk writes, save throttling, per-session locks.                                         |
-| `workflow_runner.py`  | Launches and supervises headless workflow tasks (used by API-based runs).                                         |
-| `upload.py`           | `ChunkedUploadManager` for multi-part uploads with resume and integrity checks.                                   |
-| `user_cleanup.py`     | Admin-driven purge of a user's sessions and files.                                                                |
-| `report/`             | Modular report pipeline:                                                                                          |
-| ├ `generator.py`      | Orchestrates end-to-end report generation.                                                                        |
-| ├ `regenerator.py`    | Rebuild report HTML from existing state; hosts `render_table_html()`, `get_agent_stats_html()`.                   |
-| ├ `planning.py`       | Derive report structure from analysis state.                                                                      |
-| ├ `sections.py`       | Section definitions (summary, methods, results, etc.).                                                            |
-| ├ `figures.py`        | Figure selection, annotation, and review workflow.                                                                |
-| ├ `analysis_log.py`   | Human-readable analysis transcript.                                                                               |
-| ├ `llm_calls.py`      | LLM interactions used during report generation.                                                                   |
-| ├ `pi_review.py`      | PI feedback pass before final rendering.                                                                          |
-| ├ `scoring.py`        | Figure / table quality scoring.                                                                                   |
-| └ `variants.py`       | Theme variants and visual options (uses shared `render_table_html`).                                              |
+Agent settings resolve through `AgentSettingsProvider` in three layers: global `SystemConfig` defaults, per-user credentials resolved by `config_resolver.py`, and per-session overrides stored on `AnalysisState`. Agent code must use the provider rather than reading global configuration directly; live session changes are visible on the next access.
+
+The core agents are PI, Bioinformatics, and Literature. A missing model for any core agent enters a user intervention gate. Pathology, Biochemistry, Painter, Supervisor, and Technique are optional and can be disabled when not needed. Most agents derive from `BaseAgent`; `SupervisorAgent` deliberately has a parallel interface and is not a subclass.
+
+Bioinformatics execution uses Stage 1 for broad QC, clustering, and annotation, followed by Stage 2 downstream analysis. Later rounds pursue approved directions, and the integration phase correlates completed directions before reporting. HITL gates cover plan review, annotation confirmation, direction selection, round guidance, and recoverable agent failures.
 
 ## 6. Frontend Module Map (`frontend/src/`)
 
-| Path                 | Purpose                                                                                                           |
-|----------------------|-------------------------------------------------------------------------------------------------------------------|
-| `main.tsx`           | Vite entry — mounts React 18 root.                                                                                |
-| `App.tsx`            | Root layout: tabbed shell (Data, Prompts, Analysis, Results, Report, Chat), WebSocket setup, startup config gate. |
-| `components/`        | Panel components (`DataPanel`, `PromptsPanel`, `AnalysisPanel`, `ResultsPanel`, `ReportPanel`, `ChatPanel`, `Sidebar`, `ConfigPanel`, `MessageStream`, `UserMenu`) and dialogs (`StopDialog`, `ValidationDialog`, `ExplorationReportDialog`, `RoundFeedbackDialog`, annotation dialogs, …). |
-| `hooks/useApi.ts`    | REST client + WebSocket management + session lifecycle helpers (the bulk of frontend/backend plumbing).           |
-| `hooks/useCountdownTimer.ts` | Wall-clock-deadline countdown with pause/resume; robust to backgrounded tabs.                               |
-| `hooks/useClickOutside.ts`   | Reusable click-outside handler.                                                                            |
-| `stores/appStore.ts` | Zustand store with `localStorage` persistence: auth, messages (pruned to ~7 days, images stripped), session data, per-agent configs, LLM overrides, vision/literature settings, UI state. |
-| `utils/`             | `messageTransform` (shared `transformRawMessage` / `restoreAgentErrors`), `image`, `download`, `logger`, `authStorage`, `dataTypes`. |
-| `constants/`         | `agents.ts` (icons/colors/gradients), auth constants, etc.                                                        |
-| `i18n/`              | Localization resources (Chinese / English, auto-switched).                                                        |
-| `pages/`             | Legacy route pages (Login, Register, Setup, Admin, ApiKeys) — most functionality has moved into tabbed panels.    |
-| `types.ts`           | Shared TypeScript interfaces (`RoundSummary`, session/response shapes).                                           |
-| `styles/`            | Global CSS.                                                                                                       |
+| Path | Purpose |
+|------|---------|
+| `main.tsx`, `App.tsx` | React entry, error boundary, application shell, and top-level lifecycle. |
+| `components/` | Panels and dialogs, split further into analysis, data, sidebar, report, and other feature modules. |
+| `hooks/useApi.ts`, `hooks/api/` | Stable API facade plus split REST, session, configuration, WebSocket, and lifecycle hooks. |
+| `stores/appStore.ts`, `stores/` | Stable Zustand facade plus split domain state, persistence, migrations, and store composition. |
+| `i18n/translations.ts`, `i18n/` | Stable translation facade plus English, Chinese, and prompt modules. |
+| `pages/` | Authentication, setup, administration, and configuration pages. |
+| `utils/`, `constants/`, `types.ts` | Shared transformations, browser storage, download helpers, constants, and TypeScript interfaces. |
 
 ## 7. Data & State
 
 | Where                                   | What                                                                                                           |
 |-----------------------------------------|----------------------------------------------------------------------------------------------------------------|
-| `backend/state.py` (in-process)         | Active sessions cache, per-session locks, WebSocket monitor tasks, prepared exports, import jobs.              |
-| Per-session disk directory              | `state.json`, workflow checkpoints, uploaded files, generated figures (PNG + PDF), notebooks, reports.         |
-| SQLite (users DB)                       | Users, credentials (bcrypt), status (`pending` / `readonly` / `active`), admin flag, profile metadata.         |
-| Frontend `localStorage`                 | JWT, API-key config (sent to backend), per-agent prompts/models/temps, recent session id, recent messages.     |
+| `backend/state.py` (in-process)         | Process-local registries for sessions, workflows, analysis/chat/report tasks, WebSockets, exports/imports, locks, access times, and internal checkpoint jobs.              |
+| Per-session disk directory | `session.json`, workspace files, uploads, state/checkpoint data, reports, and logs. |
+| SQLite | Users/auth, encrypted user LLM configuration, and application metadata. |
+| Frontend `localStorage` | Versioned Zustand UI persistence and JWT storage; server state is reloaded after migration. |
 
-**Session lifecycle**: the in-memory cache is authoritative during activity; `session_store` writes through to disk with throttling. `tasks/session_cleanup` evicts idle sessions (and handles overflow) back to disk. Pause / resume / snapshot / export all go through the same store so they compose cleanly.
+**Session lifecycle**: in-memory state is authoritative while active. `session_store.py` performs throttled disk writes and LRU eviction, while per-session locks serialize mutations. Portable export/import includes session data and generated artifacts; runtime workflow state remains managed by backend lifecycle services.
 
 ## 8. Request & Data Flow
 
 1. **Config** — first-run dialog posts API keys to `/api/config`; backend validates and persists.
-2. **Session create** — `POST /api/sessions` creates the session directory and DB row.
+2. **Session create** — `POST /api/session/start` creates and persists the initial session state; `GET /api/sessions` lists sessions.
 3. **Group + data upload** — biochemistry indicators via `/api/session/.../indicators`; files via chunked `/api/session/.../upload*`.
 4. **Start analysis** — `POST /api/session/.../start` schedules the workflow task; WebSocket `/ws/{id}` streams agent messages, figures, status.
-5. **HITL gates** — annotation confirmation, exploration-report review, round feedback — all posted to `routes/interaction.py`; the workflow task awaits these.
-6. **Report** — `POST /api/session/.../report/generate` runs the report pipeline in `services/report/`; `/ws/report/{id}` streams progress; final HTML is saved and downloadable.
+5. **HITL gates** — plan review, annotation confirmation, direction selection, and round feedback are submitted through interaction/lifecycle routes while the workflow waits.
+6. **Report** — report routes launch generation and stream progress; final HTML and supporting artifacts are persisted under the session.
 7. **Export / import** — tarball / zip created in the background, tracked as a job; import reverses the process.
 
-## 9. Deployment & Operations
+## 9. Reports and Operations
 
-**Docker (recommended)**
+Two detailed-report generators must remain aligned: `backend/agents/supervisor_agent.py` is the live generation path, while `backend/services/report/generator.py` is the fallback. Shared report services provide planning, sections, figures, rendering, scoring, variants, and regeneration. Exploration and integrated reports use the workflow/report variants alongside the detailed HTML report.
 
-- Image: `ghcr.io/minzhangcheng/scai:latest`; `Dockerfile` is multi-stage (Python + Node build).
-- Volumes: `/dep` (Python venv + Node modules, installed on first boot), `/data` (session store, uploads, reports, logs).
-- Entry: `docker-entrypoint.sh` — installs deps if `/dep` is empty, starts backend + serves built frontend.
-- Port: `3000` (frontend; backend sits behind it).
-
-**Native**
-
-- `start.sh` (flags: `--host`, `--port`, `--backport`, `--dev`, `--prod`) creates a venv, installs `requirements.txt`, builds or serves the frontend, launches Uvicorn.
-- `stop.sh` kills the PIDs and cleans temp dirs.
-- Requires Python 3.11+ and Node LTS.
-
-**Configuration**
-
-- API keys and proxy live in the per-user config saved through `/api/config`.
-- First-time installs require an admin password via the setup route; new user registrations default to `pending` until approved.
-- Logs: stdout of the process; Docker installs write `scai.log` under the `/data` volume.
+Docker and direct-run deployment are supported. For ports, volumes, environment variables, build flags, reverse proxy setup, user administration, backup, and troubleshooting, use the [Administrator Manual](admin-manual.md) or [管理员手册](admin-manual-zh.md) rather than duplicating operational parameters here.
 
 ## 10. Development Guide
 
 - **Dev loop**: `./start.sh --dev` — hot reload for both frontend and backend.
-- **Tests**:
-  - Backend: `pytest backend/tests` (uses shared `app_db` fixture in `conftest.py`; route registry pinned by `route_snapshot.json`).
-  - Python client: `pytest clients/python/tests`.
+- **Backend tests**: `pytest backend/tests`; `conftest.py` supplies isolated data and the route registry is pinned by `route_snapshot.json`.
+- **Focused backend test**: `pytest backend/tests/test_specific.py::test_name`.
+- **Frontend tests**: `cd frontend && npm test`.
+- **Python client tests**: `pytest clients/python/tests`.
 - **Adding a route**: create `backend/routes/<name>.py`, register it in `main.py`, update `route_snapshot.json` (`test_route_registry.py` will tell you if it drifts).
-- **Adding an agent**: subclass `backend/agents/base.py`, register defaults in `backend/config/agent_prompts.py`, wire it into `workflow.py`.
-- **Adding a report section**: extend `backend/services/report/sections.py` and, if needed, `planning.py` / `generator.py`.
+- **Adding an agent**: subclass `backend/agents/base.py` where appropriate, register settings, and wire the node through `backend/workflow/` and `backend/constants.py`.
+- **Adding a workflow node**: update the relevant mixin, `workflow/graph.py`, `WORKFLOW_GRAPH_NODES`, node mappings, and workflow state.
+- **Adding a report section**: update report services and keep both detailed-report generators in sync.
 - **Conventions**: Pydantic models validate at route boundaries; services contain logic; agents are thin LLM orchestrators; `utils/` holds cross-cutting helpers; config is centralized in `backend/config/` with `PI_AGENT_NAME` as the single source of truth for the PI identifier.
 
 ## 11. Python Client SDK (`clients/python/`)
 
-`scai_client` exposes a `Session` client for programmatic use: create a session, upload data, start analysis, poll status, export / import. `ImportJob` and `ExportJob` wrap the long-running background jobs with polling helpers. Chunked upload is handled automatically. Errors surface through the `errors` module as typed exceptions. See `clients/python/README.md` for usage.
+`scai_client` provides a `Client` and job-oriented batch API for submitting analysis configurations, waiting for completion, and downloading exports. Its package version is independent of the ScAI application version. See the [Python client README](../clients/python/README.md) for the authoritative API and examples.
 
 ## 12. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.36.x — (2026-07-25)**
+**0.36.x — (2026-07-25 onward)**
+
+- `0.36.4` — Documentation consolidation and version bump (2026-07-27):
+  - Added bilingual biomedical user guides with screenshots and migrated bilingual administrator manuals into `docs/`.
+  - Rewrote the README as a concise project entry point and moved/updated the technical handover under `docs/`.
+  - Removed public descriptions of unreleased functionality; corrected deployment, Python client, and session-management documentation.
 
 - `0.36.3` — New-session form default-value visual hint, form reset on creation, default instruction rewrite; version bump (2026-07-25):
   - **Default-value visual hint in NewSessionForm (`frontend/src/components/sidebar/NewSessionForm.tsx`)**: Session name and instruction fields now render their default values in placeholder-style gray (`text-surface-400`) when the content is still the unmodified default, switching to normal text (`text-surface-800`) once the user edits or focuses the field. Tracks `isDefaultName`/`isDefaultInstruction` and `isFocusedName`/`isFocusedInstruction` states so the gray hint disappears on focus and reappears on blur if the value is still the default. Imports `DEFAULT_SESSION_NAME` and `DEFAULT_SESSION_INSTRUCTION` from `sessionDefaults.ts` for comparison.
