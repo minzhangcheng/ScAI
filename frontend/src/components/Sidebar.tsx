@@ -293,8 +293,8 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
     // restorable on the same trusted instance and can add multi-GB per snapshot.
     const includeRuntime = window.confirm(
       language === 'zh'
-        ? '是否包含内核运行时状态 (session.pkl)？\n\n选择「确定」会让归档包含已加载的 adata 等内存变量，恢复时可继续 pause/resume，但归档体积会变大（每个 snapshot 可能多几 GB）。仅在你打算导入回同一个实例时勾选。\n\n选择「取消」打包不带运行时状态（推荐，体积小、跨实例可移植）。'
-        : 'Include kernel runtime state (session.pkl)?\n\nClicking OK bundles the live in-memory variables (adata etc.) so pause/resume can continue after import, but the archive can be GBs larger per snapshot. Only useful when importing back into the same instance.\n\nClick Cancel to skip runtime (recommended — smaller, portable across instances).'
+        ? '是否包含内核运行时状态 (session.pkl)？\n\n选择「确定」会让归档包含已加载的 adata 等内存变量和工作流断点，导入后（包括导入到其他实例）可以接着分析下去，但归档体积会变大（可能多几 GB）。\n\n选择「取消」打包不带运行时状态：体积小，数据、图表、报告和历史都在，但导入后无法继续分析，只能从数据重跑。'
+        : 'Include kernel runtime state (session.pkl)?\n\nClicking OK bundles the live in-memory variables (adata etc.) and the workflow checkpoint, so the analysis can carry on after import — including on a different instance. The archive can be GBs larger.\n\nClick Cancel for a smaller archive: data, figures, reports and history all travel, but the imported session cannot resume and must be re-run from the data.'
     )
 
     setExporting(true)
@@ -451,8 +451,8 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
     // the archive's origin. No backend restriction; entirely user judgment.
     const trustArchive = window.confirm(
       language === 'zh'
-        ? '是否信任此归档并恢复内核运行时状态 (session.pkl)？\n\n⚠️ 风险提示：归档中的 session.pkl 在加载时会执行其中保存的 Python 对象代码 (dill.load = 任意代码执行)。仅在归档来自你完全信任的来源（例如你自己在同一实例的备份）时勾选「确定」。\n\n选择「取消」会丢弃 pkl，只恢复数据/历史/图表（推荐，安全默认）。'
-        : 'Trust this archive and restore kernel runtime state (session.pkl)?\n\n⚠️ Warning: loading session.pkl runs arbitrary Python code (dill.load = arbitrary code execution). Only click OK for archives you fully trust (e.g. your own backup from the same instance).\n\nClick Cancel to drop pkl and restore only data/history/figures (recommended safe default).'
+        ? '是否信任此归档并恢复内核运行时状态 (session.pkl)？\n\n⚠️ 风险提示：归档中的 session.pkl 在加载时会执行其中保存的 Python 对象代码 (dill.load = 任意代码执行)。仅在归档来自你完全信任的来源（例如你自己导出的备份）时勾选「确定」——归档来自哪台实例都可以，但必须是你信得过的。\n\n选择「取消」会丢弃 pkl，只恢复数据/历史/图表（安全默认）；该会话将无法继续分析，只能从数据重跑。'
+        : 'Trust this archive and restore kernel runtime state (session.pkl)?\n\n⚠️ Warning: loading session.pkl runs arbitrary Python code (dill.load = arbitrary code execution). Only click OK for archives you fully trust (e.g. your own export). It may come from any instance — but it must be one you vouch for.\n\nClick Cancel to drop the pkl and restore only data/history/figures (safe default). That session will not be able to resume and must be re-run from the data.'
     )
 
     setImporting(true)

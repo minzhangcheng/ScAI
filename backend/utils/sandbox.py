@@ -322,6 +322,21 @@ except Exception as e:
         zstd writer. Compression therefore does not build a full in-memory pickle,
         while repetitive sparse/dataframe state no longer expands to multi-GB raw
         files. Required-variable failure leaves the previous atomic file intact.
+
+        The whole user namespace is a candidate, not a fixed name list. Two tiers:
+
+        * **Required** — tracker-declared names, canonical artifacts that are
+          live, and *every* AnnData regardless of its variable name. These are
+          fail-closed: missing or unpersistable aborts the save and keeps the
+          previous pkl.
+        * **Everything else** — saved best-effort. Values that cannot be pickled
+          (open loom/h5py handles, sockets, locks) are skipped and reported via
+          ``_last_save_skipped`` instead of failing the save, since one stray
+          file handle must not cost the user their entire runtime state.
+
+        Modules, functions, classes and methods are excluded — kernel init and
+        notebook replay re-establish them, and by-reference frames are what most
+        often break a restore in a different environment.
         """
         async with self._exec_lock:
             session_path = str(self.notebook_state.session_path.absolute())
@@ -343,35 +358,102 @@ except Exception as e:
                     sorted(stale_names),
                 )
 
+            # Canonical names only matter when they actually exist; a canonical
+            # name that is simply absent is not an error. Tracker-declared names
+            # stay fail-closed whether or not they are live (see _missing_required).
             from backend.services.snapshot_v2.runtime_registry import (
                 CANONICAL_RUNTIME_ARTIFACTS,
             )
-            required_names = self.get_runtime_dependency_names()
-            target_names = sorted(
-                set(CANONICAL_RUNTIME_ARTIFACTS)
-                | required_names
-            )
-            escaped_targets = repr(target_names)
+            required_names = set(self.get_runtime_dependency_names())
+            required_names |= set(CANONICAL_RUNTIME_ARTIFACTS) & set(live_names)
             escaped_required = repr(sorted(required_names))
 
             save_code = """\
 import dill
 import os
+import types
 import zstandard as zstd
-_vars_to_save = """ + escaped_targets + """
-_required_names = set(""" + escaped_required + """)
-_to_dump = []
-_missing_required = []
-for _var_name in _vars_to_save:
-    if _var_name in globals():
-        _to_dump.append((_var_name, globals()[_var_name]))
-    elif _var_name in _required_names:
-        _missing_required.append(_var_name)
 
+_required_names = set(""" + escaped_required + """)
+
+
+def _scai_is_anndata(_o):
+    try:
+        _t = type(_o)
+        return _t.__name__ == "AnnData" and "anndata" in (_t.__module__ or "").lower()
+    except Exception:
+        return False
+
+
+def _scai_stream_safe(_o):
+    # Numeric containers are both the largest values here and reliably
+    # dill-able, so they stream straight through instead of being buffered.
+    return (type(_o).__module__ or "").split(".")[0] in (
+        "numpy", "pandas", "scipy", "anndata",
+    )
+
+
+# Handles and connections are the dangerous case: dill often "succeeds" on them
+# by recording a path or fd, then reopens it on restore. On another machine that
+# path may not exist, and a raising frame aborts the whole restore -- so an open
+# loom/h5py/sqlite handle could cost the user every other variable. Exclude by
+# type rather than waiting for a pickling error that may never come.
+_scai_volatile_prefixes = (
+    "_io.", "io.", "socket.", "_socket.", "ssl.",
+    "_thread.", "threading.", "multiprocessing.", "concurrent.", "asyncio.",
+    "sqlite3.", "h5py.", "tables.", "loompy.", "zarr.",
+    "subprocess.", "tempfile.",
+)
+
+
+def _scai_is_volatile(_o):
+    _t = type(_o)
+    _q = ((_t.__module__ or "") + "." + _t.__name__).lower()
+    return _q.startswith(_scai_volatile_prefixes)
+
+
+# Modules, functions, classes and methods are re-established by kernel init and
+# notebook replay. They bloat the dump, and a by-reference frame is the single
+# most likely thing to fail on restore in a different environment.
+_scai_skip_kinds = (
+    types.ModuleType,
+    types.FunctionType,
+    types.BuiltinFunctionType,
+    types.MethodType,
+    type,
+)
+
+_live = {}
+for _scai_name in list(globals().keys()):
+    if not _scai_name.startswith('_'):
+        _live[_scai_name] = globals()[_scai_name]
+
+# Every AnnData is required no matter what it is called. Matching canonical
+# names alone silently dropped things like `adata_hepatocyte`, which is exactly
+# the state a resumed analysis cannot recompute.
+for _scai_name, _scai_obj in _live.items():
+    if _scai_is_anndata(_scai_obj):
+        _required_names.add(_scai_name)
+
+_missing_required = sorted(_n for _n in _required_names if _n not in _live)
 if _missing_required:
     raise RuntimeError(
         "required runtime variables are missing: " + ", ".join(_missing_required)
     )
+
+# Required values first so a failure aborts before any optional bytes are
+# written; the rest of the namespace follows on a best-effort basis.
+_to_dump = []
+for _scai_name in sorted(_live):
+    if _scai_name in _required_names:
+        _to_dump.append((_scai_name, _live[_scai_name], True))
+for _scai_name in sorted(_live):
+    _scai_obj = _live[_scai_name]
+    if _scai_name in _required_names:
+        continue
+    if isinstance(_scai_obj, _scai_skip_kinds) or _scai_is_volatile(_scai_obj):
+        continue
+    _to_dump.append((_scai_name, _scai_obj, False))
 
 _skipped_vars = []
 _saved_object_names = {}
@@ -385,19 +467,26 @@ try:
     with open(_tmp_path, 'wb') as _raw:
         _raw.write(_compression_magic)
         with zstd.ZstdCompressor(level=1).stream_writer(_raw, closefd=False) as _f:
-            for _var_name, _obj in _to_dump:
+            for _var_name, _obj, _is_required in _to_dump:
+                _object_id = id(_obj)
+                if _object_id in _saved_object_names:
+                    _frame = (
+                        "__SCAI_ALIAS__", _var_name,
+                        _saved_object_names[_object_id],
+                    )
+                else:
+                    _frame = (_var_name, _obj)
+                # Streaming writes bytes as it goes, so a failure mid-frame
+                # leaves the stream desynced and nothing after it can be read
+                # back. Only values we are prepared to abort on may stream;
+                # anything skippable is serialized in full first and written
+                # only once it is known good.
+                _streamed = _is_required or _scai_stream_safe(_obj)
                 try:
-                    _object_id = id(_obj)
-                    if _object_id in _saved_object_names:
-                        _frame = (
-                            "__SCAI_ALIAS__", _var_name,
-                            _saved_object_names[_object_id],
-                        )
+                    if _streamed:
+                        dill.dump(_frame, _f)
                     else:
-                        _frame = (_var_name, _obj)
-                    dill.dump(_frame, _f)
-                    _saved_object_names.setdefault(_object_id, _var_name)
-                    _saved_count += 1
+                        _f.write(dill.dumps(_frame))
                 except Exception as _e:
                     _skipped_vars.append((
                         _var_name,
@@ -407,9 +496,16 @@ try:
                     ))
                     _sv = _skipped_vars[-1]
                     print(f"__SCAI_SAVE_SKIPPED__\\t{_sv[0]}\\t{_sv[1]}\\t{_sv[2]}\\t{_sv[3]}")
-                    raise RuntimeError(
-                        "required runtime variable could not be persisted: " + _var_name
-                    ) from _e
+                    if _streamed:
+                        raise RuntimeError(
+                            ("required runtime variable could not be persisted: "
+                             if _is_required else
+                             "streamed runtime variable failed mid-write, "
+                             "aborting to avoid a desynced dump: ") + _var_name
+                        ) from _e
+                    continue
+                _saved_object_names.setdefault(_object_id, _var_name)
+                _saved_count += 1
     os.replace(_tmp_path, """ + escaped_path + """)
 except Exception:
     try:
@@ -436,6 +532,16 @@ print(f"Session saved: {_saved_count} variables")
             self._last_save_skipped = skipped
 
             if result.success:
+                if skipped:
+                    # Best-effort tier only: a required failure would have made
+                    # result.success False. Surfaced so a later restore that is
+                    # missing a value has a breadcrumb explaining why.
+                    logger.info(
+                        "[%s] Session saved; %d unpicklable value(s) skipped: %s",
+                        self.session_id,
+                        len(skipped),
+                        ", ".join(f"{sv['name']}({sv['type']})" for sv in skipped),
+                    )
                 logger.info("Session saved successfully")
 
                 # Write HMAC signature (host-side, outside sandbox-writable roots)

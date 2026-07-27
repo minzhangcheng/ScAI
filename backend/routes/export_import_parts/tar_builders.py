@@ -92,9 +92,18 @@ def _add_states_to_tar(tf, session_id: str, include_runtime: bool = False):
     """Add files under sessions/<id>/states/ to the tar.
 
     Skips the live sandbox pickle and LangGraph checkpoint unless
-    ``include_runtime`` is true. Checkpoints contain installation-key-encrypted
-    credentials and therefore belong only in same-instance runtime exports;
-    notebooks remain portable and are always included.
+    ``include_runtime`` is true; notebooks remain portable and are always
+    included.
+
+    The checkpoint travels with the pkl rather than on its own because the two
+    are only useful together: the checkpoint says which graph node to resume at,
+    and the pkl holds the kernel values that node expects to find. Importing one
+    without the other resumes into an empty kernel, which
+    ``_mark_runtime_availability_after_import`` deliberately blocks.
+
+    (Credentials sealed inside the checkpoint are no longer a reason to withhold
+    it — :func:`backend.utils.secret_redaction.open_secret` degrades a value it
+    cannot decrypt to empty instead of failing the load.)
     """
     def _add(state_file: Path):
         if not include_runtime and is_sandbox_pickle(state_file.name):

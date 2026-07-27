@@ -50,6 +50,73 @@ from .core import ImportCancelled, _IMPORT_PROGRESS_UPDATE_INTERVAL_S, _is_disab
 logger = logging.getLogger(__name__)
 
 
+def _mark_runtime_availability_after_import(state: AnalysisState) -> None:
+    """Record whether the imported session actually has a kernel to resume from.
+
+    ``runtime_restore_status`` rides along in session.json, so a session exported
+    mid-analysis arrives claiming ``complete`` even when the archive carried no
+    pkl (``include_runtime=false``, or ``trust=false`` on the way in). The
+    workflow would then resume against an empty kernel and the bioinformatics
+    agent would fail on a missing ``adata`` with no explanation.
+
+    Marking it ``unavailable`` routes resume through the existing
+    ``is_forward_resume_blocked`` gate, which tells the user to re-run from their
+    data. Completed sessions are deliberately unaffected — that gate exempts
+    them, so reports stay viewable and re-analysis still works.
+    """
+    from backend.utils.runtime_apply import _live_pkl
+
+    if state.current_round <= 0:
+        # Never executed anything; a fresh kernel is the correct starting point.
+        return
+    if _live_pkl(state.id).exists():
+        return
+    state.runtime_restore_status = "unavailable"
+    state.runtime_restore_warning = (
+        "This session was imported without kernel runtime state, so in-memory "
+        "values from the original run (adata and friends) are gone. Re-run the "
+        "analysis from the imported data to recompute them."
+    )
+    logger.info(
+        "[%s] Imported without a live sandbox pkl; marked runtime unavailable "
+        "(round=%s).",
+        state.id,
+        state.current_round,
+    )
+
+
+def _resign_imported_live_pkl(session_id: str) -> bool:
+    """Re-sign an imported live sandbox pkl with *this* installation's key.
+
+    The HMAC sidecar lives in ``<DATA_BASE_DIR>/integrity/<session_id>/``, outside
+    the session directory, so it is never part of a portable archive — and the
+    signing key is installation-scoped anyway, so shipping it would not help.
+    Without a local signature ``verify_live_pkl_or_raise`` refuses to rehydrate
+    the kernel and sandbox startup fails outright, which is strictly worse than
+    having no pkl at all.
+
+    Signing here mirrors what Snapshot V2 restore does in
+    ``runtime_apply.apply_runtime_pkl``: content arrives verified by other means
+    (the caller passed ``trust=true``), and integrity for local storage is
+    re-established under the destination key.
+
+    Returns True when a signature was written.
+    """
+    from backend.utils.runtime_apply import _live_pkl
+    from backend.utils.sandbox import _integrity_dir, _write_pkl_signature
+
+    pkl = _live_pkl(session_id)
+    if not pkl.exists():
+        return False
+    _write_pkl_signature(pkl, _integrity_dir(session_id))
+    logger.warning(
+        "[%s] Re-signed imported sandbox pkl under this installation's key; "
+        "the archive's origin is trusted on the caller's authority (trust=true).",
+        session_id,
+    )
+    return True
+
+
 async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: str, trust: bool = False):
     """Background task: extract tar.gz archive and load session."""
     logger.info(f"Import {import_job_id}: starting extraction from {tmp_path_str}")
@@ -166,6 +233,9 @@ def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = 
     session_id = None
     old_base_dir = ""
     state_json_data = None
+    # Only a pkl written by *this* import gets re-signed; a pre-existing live pkl
+    # left over from another session must keep whatever signature it already had.
+    wrote_sandbox_pkl = False
 
     archive_size = 0
     try:
@@ -265,7 +335,8 @@ def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = 
             validate_path_within(dest_path, DATA_BASE_DIR)
             # SECURITY (S4): sandbox pickles can execute arbitrary code via dill.load.
             # Drop them unless the caller passed trust=true to take responsibility.
-            if is_sandbox_pickle(dest_path.name):
+            is_pkl_member = is_sandbox_pickle(dest_path.name)
+            if is_pkl_member:
                 if not trust:
                     logger.warning(f"Skipping sandbox pickle from imported archive (untrusted): {member.name}")
                     continue
@@ -290,6 +361,8 @@ def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = 
             else:
                 with open(dest_path, 'wb') as out_f:
                     shutil.copyfileobj(f, out_f, length=UPLOAD_CHUNK_SIZE)
+                if is_pkl_member:
+                    wrote_sandbox_pkl = True
 
             # Progress accounting: count uncompressed member size (matches what
             # the user sees on disk). bytes_total is compressed archive size, so
@@ -307,6 +380,9 @@ def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = 
             job["bytes_processed"] = bytes_processed
             job["files_total"] = files_processed
             job["current_file"] = ""
+
+    if wrote_sandbox_pkl and session_id:
+        _resign_imported_live_pkl(session_id)
 
     if state_json_data is None:
         raise HTTPException(status_code=400, detail="Session state JSON not found in archive")
@@ -344,6 +420,7 @@ def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = 
     # original content rather than dangling @scai-blob tokens.
     state_data = inline_blobs(state_data, get_session_dir(session_id) / "blobs")
     state = AnalysisState(**state_data)
+    _mark_runtime_availability_after_import(state)
 
     return state
 
@@ -396,6 +473,7 @@ def _import_zip(content: bytes, user_id: str, trust: bool = False) -> AnalysisSt
             if trust:
                 logger.warning(f"Restoring sandbox pickle from zip (trust=true): {pkl_path}")
                 (states_dir / f"{session_id}_session.pkl").write_bytes(zf.read(pkl_path))
+                _resign_imported_live_pkl(session_id)
             else:
                 logger.warning(f"Skipping sandbox pickle from imported zip (untrusted): {pkl_path}")
 
@@ -421,4 +499,5 @@ def _import_zip(content: bytes, user_id: str, trust: bool = False) -> AnalysisSt
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 dest_path.write_bytes(zf.read(wf))
 
+    _mark_runtime_availability_after_import(state)
     return state

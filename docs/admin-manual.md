@@ -145,8 +145,8 @@ The release helper always builds both the selected tag and `latest`:
 ```
 
 ```bash
-./build.sh --version 0.36.5
-./build.sh --version 0.36.5 --push
+./build.sh --version 0.36.6
+./build.sh --version 0.36.6 --push
 ```
 
 Without `--version`, the helper uses the newest Git tag returned by `git describe --tags --abbrev=0`, or `latest` if none exists. `--push` pushes both tags to `ghcr.io/minzhangcheng/scai`; authenticate Docker to that registry before using it. The helper does not accept registry, image-name, platform, or build-argument flags.
@@ -209,7 +209,7 @@ For upgrades, back up, deploy the new code/image against the existing data root,
 
 Recovery procedure: stop the service, move the damaged data root aside, restore the complete backup to the original path, restore required ownership, supply the same secrets, start the matching application version, and validate before allowing users back in.
 
-Portable session export/import is useful for moving individual completed session content, but it is not a substitute for a complete service backup and does not preserve active in-memory execution.
+Portable session export/import moves individual sessions between installations. Exported with `include_runtime=true` it also carries the live kernel state and workflow checkpoint, so an imported session can continue analysing; the default export carries content only and cannot resume. Either way it is not a substitute for a complete service backup — see section 12 for the trade-off.
 
 ## 9. Monitoring and logs
 
@@ -350,7 +350,18 @@ Ordinary signature: `export_session(session_id: str, output_path: str | Path | N
 
 The server fully builds a temporary compressed tar file before sending the first response byte. Ensure `upload_temp/` has space for that additional archive and allow enough first-byte time for large sessions; `timeout=None` disables read/write/pool timeouts for this request while retaining the client's connect timeout.
 
-Portable export includes selected session metadata, uploads, workspace files (including figures/artifacts), reports, portable notebooks/state sidecars, externalized content, and an optional reproducibility bundle. It excludes session logs, active in-memory execution, live kernel files, and workflow checkpoint databases. It is a migration format, not a complete service backup, and an imported analysis may require rerunning work from portable inputs.
+Portable export includes selected session metadata, uploads, workspace files (including figures/artifacts), reports, portable notebooks/state sidecars, externalized content, and an optional reproducibility bundle. It excludes session logs and credentials in every case.
+
+Whether the imported session can *continue* analysing depends on one choice at export time:
+
+- **Default (`include_runtime=false`)** — no kernel pkl and no workflow checkpoint. Data, code, figures, reports and conversation history all survive and are viewable, but the session cannot resume: import marks its runtime `unavailable` and resume tells the user to re-run from the imported data. Use this to hand a session to someone else, or when only the results matter.
+- **With runtime (`include_runtime=true`)** — adds the live kernel pkl (in-memory values such as `adata`) and the LangGraph checkpoint, so the analysis picks up where it left off. Import must pass `X-Trust: true` to accept it, because loading a pkl executes code from the archive. The archive can be gigabytes larger.
+
+A runtime export resumes on a *different* installation as well as the original one. Two installation-scoped mechanisms are handled at import: the pkl's HMAC sidecar is regenerated under the destination's key (it is never shipped in the archive), and credentials sealed with the source installation's key are dropped rather than treated as corruption — reconfigure the API key after import. Snapshot V2 does not need to be enabled for any of this.
+
+Resuming needs a session that was exported while paused or waiting for input. A session exported after it completed has a checkpoint sitting at the end of the graph, so there is nothing to continue; re-analysis starts a fresh round instead.
+
+It remains a migration format, not a complete service backup.
 
 ## 13. Session Manager CLI
 

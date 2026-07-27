@@ -17,6 +17,8 @@ from typing import Any, Mapping
 from backend.utils.crypto import decrypt_value, encrypt_value
 
 
+logger = logging.getLogger(__name__)
+
 SEALED_SECRET_PREFIX = "@scai-secret:v1:"
 SECRET_FIELD_NAMES = frozenset({
     "api_key",
@@ -58,11 +60,35 @@ def seal_secret(value: str) -> str:
 
 
 def open_secret(value: str) -> str:
-    """Decrypt one sealed secret, preserving plaintext legacy values."""
+    """Decrypt one sealed secret, preserving plaintext legacy values.
+
+    A secret sealed under a *different* installation key cannot be opened here.
+    That is the normal case for a session imported from another instance, and
+    for any instance whose ``SCAI_CONFIG_SECRET`` was rotated. Degrading to an
+    empty value keeps the surrounding payload loadable: raising would abort
+    ``AnalysisState`` validation, which in turn makes an imported LangGraph
+    checkpoint impossible to deserialize and blocks the workflow from resuming.
+
+    Dropping the credential is the same outcome portable export already chooses
+    (:func:`strip_analysis_state_secrets` blanks these fields), and matches the
+    rule stated in :func:`preserve_runtime_secrets` — credentials are
+    operational configuration, not historical scientific state. The user
+    reconfigures them; nothing else about the session is lost.
+    """
     text = str(value or "")
     if not text.startswith(SEALED_SECRET_PREFIX):
         return text
-    return decrypt_value(text[len(SEALED_SECRET_PREFIX):])
+    try:
+        return decrypt_value(text[len(SEALED_SECRET_PREFIX):])
+    except Exception as exc:
+        # Never log the ciphertext itself — only why it could not be opened.
+        logger.warning(
+            "Sealed credential could not be decrypted (%s); treating it as unset. "
+            "This is expected for a session imported from another instance or "
+            "after SCAI_CONFIG_SECRET was rotated — reconfigure the API key.",
+            type(exc).__name__,
+        )
+        return ""
 
 
 def _transform_secret_fields(payload: Mapping[str, Any], transform) -> dict[str, Any]:
