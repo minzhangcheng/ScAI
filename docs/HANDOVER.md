@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.36.4 · **Last updated**: 2026-07-27
+**Version**: 0.36.5 · **Last updated**: 2026-07-28
 
 ## 1. Runtime Architecture
 
@@ -133,9 +133,13 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 
 ## 12. Version History (condensed)
 
-Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
+Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.36.x — (2026-07-25 onward)**
+
+- `0.36.5` — Painter agent protocol timeout increase, version bump (2026-07-28):
+  - **Painter protocol timeout increase (`backend/agents/painter_agent.py`)**: Per-protocol attempt timeout raised from 60s to 180s; revision total timeout raised from 75s to 720s. Accommodates slower image-generation endpoints (especially deep-research and multi-provider cascades) that routinely exceed the previous tight budgets, preventing premature aborts on valid in-progress requests.
+  - **HANDOVER version history back-fill**: Restored condensed version-history entries for 0.1.x–0.34.x that were truncated in prior edits; reordered 0.34.9 evidence/credential entries to their correct version position; added missing `0.32.11.1`, `0.31.5.fix`, `0.25.16` entries.
 
 - `0.36.4` — Documentation consolidation and version bump (2026-07-27):
   - Added bilingual biomedical user guides with screenshots and migrated bilingual administrator manuals into `docs/`.
@@ -218,6 +222,16 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.33.x–0.34.x — (2026-07-15)**
 
+- `0.34.9` — Credential encryption at rest, execution evidence provenance, dense-memory resource preflight, cluster cell counts, integration phase persistence, sandbox safety bypass; version bump (2026-07-21):
+  - **Credential encryption at rest (`backend/utils/secret_redaction.py`, `backend/models/schemas.py`, `backend/main.py`, `backend/routes/config.py`, `backend/routes/user_config.py`, `backend/routes/session_config.py`, `backend/routes/export_import.py`, `backend/services/snapshot_v2/service.py`)**: New `secret_redaction` module with `seal_analysis_state_payload()` / `open_analysis_state_payload()` for transparent AES-GCM encryption of `custom_models`, `agent_server_configs`, and `custom_prompts` in serialized `AnalysisState`. `seal_system_config_payload()` / `open_system_config_payload()` for global `api_key`/`proxy_url`. `mask_api_key()` shared masking utility. `strip_analysis_state_secrets()` for export/snapshot sanitization. `preserve_runtime_secrets()` for Snapshot V2 restore. `AnalysisState` uses Pydantic `model_serializer`/`model_validator` for automatic encrypt/decrypt on `model_dump`/`model_validate`. Global config migration on startup upgrades plaintext credentials to encrypted storage. User config route preserves masked preview values (no re-encryption of unchanged masked input). Agent server config route preserves masked preview. Export strips credentials from state JSON and excludes checkpoints from portable exports. Snapshot V2 capture strips credentials from serialized state.
+  - **Log security hardening (`backend/config/_config.py`)**: New `_OwnerOnlyRotatingFileHandler` sets `0o600` on log files after creation. `SecretRedactionFilter` redacts API keys and proxy URLs from all log handlers (file + console). Log directory set to `0o700`. Existing log files remediated to `0o600`. `aiosqlite` logger set to WARNING to prevent SQL bind-parameter leakage (LangGraph checkpoints contain serialized `AnalysisState` with credentials).
+  - **Execution evidence provenance (`backend/agents/bioinformatics_agent.py`, `backend/models/schemas.py`, `backend/workflow/synthesis.py`)**: New `evidence_execution_ids` field on `report_findings` and `register_mechanism_programs` tools — findings must cite at least one successful current-run `execute_code` ID. `execution_supports_evidence()` filters out failed/contradictory executions. `successful_evidence_executions()` scopes to current round. `validate_mechanism_program_payload()` requires `evidence_execution_ids`. `derive_round_completion_status()` marks rounds with unverified evidence as `partial` with `direction_coverage_eligible=False`. New `RoundResult.bioinformatics_evidence_verified`, `evidence_execution_ids`, `evidence_notes` fields. PI and Supervisor agents receive evidence qualification instructions to never upgrade unverified claims. `CodeExecution` gains `round_number`, `evidence_eligible`, `evidence_rejection_reason`, and nullable `execution_time`. `AnalysisStep` gains `evidence_execution_ids`. `DataDrivenMechanismProgram` gains `evidence_execution_ids`. Code-history dedup changed from code-hash to execution-ID to preserve evidence provenance across retries.
+  - **Dense-memory resource preflight (`backend/agents/bioinformatics_agent.py`)**: `_high_memory_referenced_names()` extended to detect `sc.pp.scale()` (unless `zero_center=False`) and `.X.toarray()`. `_build_resource_guard_preamble()` generates dense-matrix memory estimation (n_obs × n_vars × 8 bytes) with a hard cap at 1.5 GiB. `_HIGH_MEMORY_ANALYSIS_RE` made case-insensitive. Operation factor reduced to 2× for dense transforms vs 4–8× for graph operations.
+  - **Cluster cell counts in annotation (`backend/agents/bioinformatics_agent.py`, `backend/workflow/annotation.py`, `backend/models/schemas.py`)**: `compute_cluster_group_proportions()` now returns absolute `counts` alongside percentage `proportions`. `_apply_group_proportions()` populates `ClusterAnnotation.n_cells`. Report analysis log shows actual cell counts instead of placeholder text.
+  - **Integration phase persistence fix (`backend/workflow/integration.py`)**: `analysis_phase` set to `INTEGRATION` before the gate/stop branch, ensuring the terminal phase is persisted even when the integration node short-circuits to the final report.
+  - **Sandbox safety bypass for bioinfo wrappers (`backend/agents/bioinformatics_agent.py`)**: `execute_code`, `generate_publication_figure`, and auto-retry all use `skip_safety_check=True` since the code is already validated by the bioinformatics agent's own AST safety layer.
+  - **New tests**: `test_secret_persistence.py` (credential encryption round-trip), `test_bioinformatics_evidence_gate.py` (evidence execution IDs), `test_annotation_cell_proportions.py` (counts field), `test_annotation_validation_callback_behavior.py` (absolute cluster counts), `test_bioinformatics_runtime_guards.py` (dense-matrix preflight), `test_config_masking.py` (masked preview preservation), `test_integration_synthesis_node.py` (phase persistence), `test_mechanism_handler_return.py` (evidence_execution_ids), `test_mechanism_program_validation.py` (missing evidence rejection), `test_mechanism_tool_schema.py` (schema field), `test_round_completion_status.py` (unverified evidence → partial), `test_session_config_routes.py` (masked preview round-trip).
+
 - `0.34.10` — Bioinformatics executor checkpoint isolation, plan-revision context injection, planning context truncation; version bump (2026-07-21):
   - **Executor checkpoint isolation (`backend/agents/bioinformatics_agent.py`)**: New `_save_executor_checkpoint()` consolidates six inline checkpoint-save sites into one method. Checkpoint now includes `active_plan_id` for plan-identity tracking across resume. Plan-revision boundary triggers an immediate checkpoint (transcript + sandbox) instead of waiting for the periodic 5-step save. Pre-escalation checkpoints (empty-exhausted, text-only-exhausted) use distinct step names to prevent checkpoint-ID collisions.
   - **Plan-revision context injection on resume (`backend/agents/bioinformatics_agent.py`)**: New `build_approved_plan_context()` and `inject_revised_plan_context()` — on executor resume, if the current approved plan differs from the checkpoint's `active_plan_id`, the replacement plan is injected as a user message with revision reason and transition instructions. Legacy/rebuilt checkpoints (no plan ID) receive the plan once during migration. `_APPROVED_PLAN_PREFIX` tag enables downstream filtering.
@@ -226,14 +240,6 @@ Detailed release notes for every version are available through `git log` and rel
   - **Execution-triggered revision feedback (`backend/workflow/planning.py`)**: When `plan_revision_needed` is set, the planning dialogue now includes `execution_revision_feedback` — the revision context and a bounded result summary — so the PI can make informed revision decisions without re-executing.
   - **Bioinformatics agent history reset on planning entry (`backend/workflow/planning.py`)**: `reset_history()` called on the bioinformatics agent before planning dialogue to clear legacy multi-round transcripts from in-memory sessions created before context isolation.
   - **New tests**: (covered by existing executor checkpoint and planning dialogue test suites).
-  - **Execution evidence provenance (`backend/agents/bioinformatics_agent.py`, `backend/models/schemas.py`, `backend/workflow/synthesis.py`)**: New `evidence_execution_ids` field on `report_findings` and `register_mechanism_programs` tools — findings must cite at least one successful current-run `execute_code` ID. `execution_supports_evidence()` filters out failed/contradictory executions. `successful_evidence_executions()` scopes to current round. `validate_mechanism_program_payload()` requires `evidence_execution_ids`. `derive_round_completion_status()` marks rounds with unverified evidence as `partial` with `direction_coverage_eligible=False`. New `RoundResult.bioinformatics_evidence_verified`, `evidence_execution_ids`, `evidence_notes` fields. PI and Supervisor agents receive evidence qualification instructions to never upgrade unverified claims. `CodeExecution` gains `round_number`, `evidence_eligible`, `evidence_rejection_reason`, and nullable `execution_time`. `AnalysisStep` gains `evidence_execution_ids`. `DataDrivenMechanismProgram` gains `evidence_execution_ids`. Code-history dedup changed from code-hash to execution-ID to preserve evidence provenance across retries.
-  - **Credential encryption at rest (`backend/utils/secret_redaction.py`, `backend/models/schemas.py`, `backend/main.py`, `backend/routes/config.py`, `backend/routes/user_config.py`, `backend/routes/session_config.py`, `backend/routes/export_import.py`, `backend/services/snapshot_v2/service.py`)**: New `secret_redaction` module with `seal_analysis_state_payload()` / `open_analysis_state_payload()` for transparent AES-GCM encryption of `custom_models`, `agent_server_configs`, and `custom_prompts` in serialized `AnalysisState`. `seal_system_config_payload()` / `open_system_config_payload()` for global `api_key`/`proxy_url`. `mask_api_key()` shared masking utility. `strip_analysis_state_secrets()` for export/snapshot sanitization. `preserve_runtime_secrets()` for Snapshot V2 restore. `AnalysisState` uses Pydantic `model_serializer`/`model_validator` for automatic encrypt/decrypt on `model_dump`/`model_validate`. Global config migration on startup upgrades plaintext credentials to encrypted storage. User config route preserves masked preview values (no re-encryption of unchanged masked input). Agent server config route preserves masked preview. Export strips credentials from state JSON and excludes checkpoints from portable exports. Snapshot V2 capture strips credentials from serialized state.
-  - **Log security hardening (`backend/config/_config.py`)**: New `_OwnerOnlyRotatingFileHandler` sets `0o600` on log files after creation. `SecretRedactionFilter` redacts API keys and proxy URLs from all log handlers (file + console). Log directory set to `0o700`. Existing log files remediated to `0o600`. `aiosqlite` logger set to WARNING to prevent SQL bind-parameter leakage (LangGraph checkpoints contain serialized `AnalysisState` with credentials).
-  - **Dense-memory resource preflight (`backend/agents/bioinformatics_agent.py`)**: `_high_memory_referenced_names()` extended to detect `sc.pp.scale()` (unless `zero_center=False`) and `.X.toarray()`. `_build_resource_guard_preamble()` generates dense-matrix memory estimation (n_obs × n_vars × 8 bytes) with a hard cap at 1.5 GiB. `_HIGH_MEMORY_ANALYSIS_RE` made case-insensitive. Operation factor reduced to 2× for dense transforms vs 4–8× for graph operations.
-  - **Cluster cell counts in annotation (`backend/agents/bioinformatics_agent.py`, `backend/workflow/annotation.py`, `backend/models/schemas.py`)**: `compute_cluster_group_proportions()` now returns absolute `counts` alongside percentage `proportions`. `_apply_group_proportions()` populates `ClusterAnnotation.n_cells`. Report analysis log shows actual cell counts instead of placeholder text.
-  - **Integration phase persistence fix (`backend/workflow/integration.py`)**: `analysis_phase` set to `INTEGRATION` before the gate/stop branch, ensuring the terminal phase is persisted even when the integration node short-circuits to the final report.
-  - **Sandbox safety bypass for bioinfo wrappers (`backend/agents/bioinformatics_agent.py`)**: `execute_code`, `generate_publication_figure`, and auto-retry all use `skip_safety_check=True` since the code is already validated by the bioinformatics agent's own AST safety layer.
-  - **New tests**: `test_annotation_cell_proportions.py` (counts field), `test_annotation_validation_callback_behavior.py` (absolute cluster counts), `test_bioinformatics_runtime_guards.py` (dense-matrix preflight), `test_config_masking.py` (masked preview preservation), `test_integration_synthesis_node.py` (phase persistence), `test_mechanism_handler_return.py` (evidence_execution_ids), `test_mechanism_program_validation.py` (missing evidence rejection), `test_mechanism_tool_schema.py` (schema field), `test_round_completion_status.py` (unverified evidence → partial), `test_session_config_routes.py` (masked preview round-trip).
 
 - `0.34.8` — Planning dialogue stagnation detection, direction coverage eligibility, sandbox zstd compression, LLM log compaction, checkpoint SQLite pruning; version bump (2026-07-21):
   - **Planning dialogue stagnation detection (`backend/workflow/planning.py`)**: New `plans_materially_equivalent()` detects when a revision produces no material change via token similarity (≥0.97) and sequence similarity (≥0.94). When the dialogue converges without approval, PI finalizes unilaterally instead of looping to max rounds. New `finalization_reason` field (`no_material_plan_change` / `max_rounds`) in planning result.
@@ -486,6 +492,10 @@ Detailed release notes for every version are available through `git log` and rel
   - **Stable integration gate detection (`frontend/src/components/AnalysisPanel.tsx`)**: Extracted `isCurrentIntegrationGate` combining both `status === 'waiting_input'` and `analysisPhase === 'integration'`. The effect that opens the `IntegrationGatePanel` now depends only on this stable boolean instead of `currentSession?.status`, preventing spurious re-triggers. When not in integration gate, `integrationGateData` is reliably cleared (functional setState). `IntegrationGatePanel` renders only when `isCurrentIntegrationGate && integrationGateData`, and `RoundFeedbackDialog` excludes it with an additional render-level guard.
   - **`analysisPhase` type widening (`frontend/src/stores/appStore.ts`, `frontend/src/types.ts`)**: Added `'integration'` to the `analysisPhase` / `analysis_phase` union type, preventing TypeScript errors when the backend reports integration-phase sessions.
 
+- `0.32.11.1` — Sidebar default session name i18n, session defaults extraction (2026-07-09):
+  - **Session defaults extraction (`frontend/src/constants/sessionDefaults.ts`)**: New module with `DEFAULT_SESSION_NAME` and `DEFAULT_SESSION_INSTRUCTION` constants, shared between Sidebar and NewSessionForm.
+  - **Sidebar default session name i18n (`frontend/src/components/Sidebar.tsx`)**: Default session name now derived from i18n translation key instead of hardcoded string.
+
 - `0.32.10` — Integration gate robustness, frontend dialog guard for integration rounds (2026-07-07):
   - **Integration gate continue robustness (`backend/workflow/synthesis.py`)**: A generic continue signal (e.g. `/human-input` with no direction or any route that bypassed `/choose-direction`) at the integration gate now defaults to `PI_DECIDE_SIGNAL` instead of leaving the gate unresolved. Previously the graph would proceed to `initialize_round` with no integration direction selected; now the gate always resolves by delegating to PI.
   - **Frontend integration gate dialog guard (`frontend/src/components/AnalysisPanel.tsx`)**: The generic `RoundFeedbackDialog` is never opened during integration-phase rounds — the dedicated `IntegrationGatePanel` handles those. Added render-level guard (`!integrationGateData`) to defend against stale state on reconnect/rehydrate. The `feedbackRoundData.phase !== 'integration'` check prevents accidental dialog display when integration rounds share the same round number as a prior innovation round.
@@ -595,6 +605,9 @@ Detailed release notes for every version are available through `git log` and rel
   - **Health endpoint made public (`backend/middleware/auth.py`)**: `/api/health` added to `PUBLIC_EXACT` paths so container orchestrators and entrypoint probes never hit auth.
   - **Docker HEALTHCHECK & entrypoint probe (`Dockerfile`, `docker-entrypoint.sh`)**: Both changed from `curl ... /api/config/status` to `curl ... /api/health`, ensuring health checks work consistently across all deployment stages.
   - **Login/Register input trimming (`frontend/src/pages/Login.tsx`, `frontend/src/pages/Register.tsx`)**: Username field trimmed via `username.trim()` before submission, preventing accidental whitespace from causing login/registration failures.
+
+- `0.31.5.fix` — Config annotation_validation_timeout_seconds default fix (2026-07-03):
+  - **Annotation validation timeout default (`backend/config/_config.py`)**: `annotation_validation_timeout_seconds` default corrected from 180 to 600 to match the intended production value.
 
 - `0.31.4` — Docker image size reduction, Results figure discovery extraction & bounded brief-gallery fallback (2026-07-02):
   - **Docker image size reduction (`Dockerfile`, `.dockerignore`)**: Removed build-time `pip install -r requirements.txt` layer (previously added ~7 GB). `dep/` added to `.dockerignore`. The runtime entrypoint continues to install dependencies into `/dep/venv` at startup, restoring the pre-0.31.1 small-image contract (~1 GB).
@@ -1083,6 +1096,13 @@ Detailed release notes for every version are available through `git log` and rel
   - **Vite timeout hardening**: New `disableRequestTimeout()` plugin sets `requestTimeout`/`headersTimeout` to 0 on both dev and preview servers. Proxy timeouts raised to 24h (86400000ms) so multi-GB uploads through `vite dev`/`vite preview` don't get silently aborted.
   - **CLI timeout**: `session_manager.py` creates the SDK client with `timeout=86400` (24h) to match the server-side import polling behavior — large archives can take hours to transfer and extract.
 
+- `0.25.16` — Import route refactor, Sidebar export UX, SDK import overhaul (2026-06-04):
+  - **Import route refactor (`backend/routes/export_import.py`)**: Import route reworked (+412 lines changed) with improved streaming upload, progress tracking, and error handling.
+  - **Sidebar export UX (`frontend/src/components/Sidebar.tsx`)**: Sidebar expanded (+289 lines) with improved export/import interface and session management actions.
+  - **SDK import overhaul (`clients/python/scai_client/client.py`)**: Python client `import_session` expanded (+83 lines) with streaming upload, progress callback, and cancel support.
+  - **CLI session manager (`session_manager.py`)**: Expanded (+85 lines) with import/export subcommands.
+  - **Route snapshot update**: New routes pinned in `route_snapshot.json`.
+
 - `0.25.17` — import job `created_at` survival, SDK default timeout, vite preview proxy (2026-06-04):
   - **Import job `created_at` preservation**: Every job state transition (pending/extracting/completed/failed/cancelled) now carries forward `created_at` from the previous state instead of dropping it. Fixes a bug where the stale-job cleanup task in `session_cleanup.py` could never evict failed/cancelled jobs because `created_at` was lost on transition.
   - **SDK default timeout**: `Client.__init__` default `timeout` raised from 300s to 3600s — multi-GB archive uploads + extraction can legitimately exceed 5 minutes.
@@ -1565,3 +1585,146 @@ Detailed release notes for every version are available through `git log` and rel
 - Cell-type deconvolution mandatory when bulk + scRNA-seq present; standardized library names (pydeseq2, harmonypy, bbknn, scvi, decoupler) and PyDESeq2 fallback.
 - Dynamic PI task generation based on detected data types; added GIF/BMP/WebP/SVG image support.
 - Improved LLM prompt caching and cache-hit tracking; round-progress UI uses the real max-rounds setting.
+
+**0.18.x — LLM multi-protocol, snapshot system, report CSS extraction (2026-03-15 → 2026-04-09)**
+
+- LLM client reworked with multi-protocol support (Responses API, Chat Completions, Anthropic Messages API adapters).
+- Snapshot system introduced (`snapshot.py`, `SnapshotPanel.tsx`) for checkpoint/restore of analysis state.
+- Report CSS extracted into `report_css.py` for consistent HTML rendering.
+- Workflow greatly expanded with new node types and routing logic.
+- Bioinformatics agent refactored; PI agent enhanced; Supervisor agent refactored.
+- Formatting utilities and image utils expanded. 60 files, ~5.7K lines added.
+
+**0.17.x — TechniqueAgent, Painter expansion, sandbox hardening (2026-03-01 → 2026-03-15)**
+
+- TechniqueAgent added (346 lines) for documentation lookup via sandbox code execution + LLM summarization.
+- Painter agent expanded with multi-provider image generation support.
+- Bioinformatics agent enhanced with improved error handling and tool schemas.
+- Workflow expanded with new routing and callback logic.
+- Sandbox hardened with additional safety checks.
+- Error parsing utility and data type definitions added.
+- Frontend PromptsPanel rewritten; Sidebar reworked; CSS/Tailwind overhauled. 54 files, ~3.3K lines added.
+
+**0.16.x — Docker infrastructure, agent refinements (2026-02-20 → 2026-03-01)**
+
+- Docker infrastructure finalized (Dockerfile, build.sh, docker-entrypoint.sh).
+- Bioinformatics agent enhanced with improved planning and execution.
+- Supervisor agent expanded with additional evaluation criteria.
+- Frontend workflow controls improved. 17 files, ~458 lines added.
+
+**0.15.x — Supervisor expansion, Docker refinements (2026-02-10 → 2026-02-20)**
+
+- Supervisor agent expanded (+1249 lines) with enhanced step evaluation and detailed reporting.
+- Bioinformatics agent enhanced with additional tool support.
+- Docker and build infrastructure refined. 14 files, ~1.5K lines added.
+
+**0.14.x — SupervisorAgent, TechniqueAgent, Docker support (2026-01-20 → 2026-02-10)**
+
+- SupervisorAgent introduced (1311 lines) for step evaluation and detailed report generation.
+- TechniqueAgent added (346 lines) for documentation lookup.
+- Bioinformatics agent heavily refactored (+780 lines).
+- Sandbox massively expanded (+370 lines) with improved safety and execution.
+- LLM client reworked with better error handling.
+- Docker support added (Dockerfile, build.sh, docker-entrypoint.sh).
+- Frontend PromptsPanel rewritten. 50 files, ~5.5K lines added.
+
+**0.13.x — AnnotationConfirmation, ExplorationReport, checkpoint persistence (2026-01-10 → 2026-01-20)**
+
+- AnnotationConfirmationDialog added (334 lines) for cell-type annotation HITL gate.
+- ExplorationReportDialog added (486 lines) for direction selection.
+- Checkpoint persistence added (`checkpoint.py`) for bioinformatics state save/restore.
+- Bioinformatics agent refactored (+397 lines).
+- Sandbox expanded (+218 lines).
+- Session directory migration script added. 25 files, ~3.3K lines added.
+
+**0.12.x — Agent and report enhancements (2025-12-20 → 2026-01-10)**
+
+- Continued bioinformatics agent enhancements (+125 lines).
+- Deep research and sandbox improvements.
+- Schema evolution for new agent capabilities. 14 files, ~1.3K lines added.
+
+**0.11.x — PubMed search optimization (2025-12-10 → 2025-12-20)**
+
+- PubMed search optimization in literature agent.
+- Report generator expanded (+285 lines).
+- Bioinformatics agent enhanced.
+- Schema changes; sandbox and workflow improvements. 20 files, ~1.8K lines added.
+
+**0.10.x — Deep research mode (2025-11-20 → 2025-12-10)**
+
+- Deep research mode added to literature agent (+225 lines).
+- Painter agent refactored (+358 lines) with multi-provider image generation.
+- Report generator expanded (+1702 lines).
+- Bioinformatics and PI agents improved.
+- Config and data handling enhanced. 23 files, ~3.9K lines added.
+
+**0.9.x — Detailed report optimization, UI overhaul (2025-11-01 → 2025-11-20)**
+
+- Detailed report generation optimized; report generator massively expanded (+1318 lines).
+- About page added.
+- PI agent gained new capabilities.
+- LLM client improvements.
+- Sidebar redesigned. 14 files, ~2K lines added.
+
+**0.8.x — Multiple treatment and sample support (2025-10-10 → 2025-11-01)**
+
+- Multiple treatment groups and sample support.
+- Major DataPanel rewrite (1826 lines changed) for multi-sample data configuration.
+- PI agent enhanced for multi-condition analysis.
+- Bioinformatics agent expanded.
+- About page and DisclaimerDialog added. 20 files, ~2.3K lines changed.
+
+**0.7.x — Import/export, chat tab, pipeline stabilization (2025-09-20 → 2025-10-10)**
+
+- Import/export and chat tab added.
+- ChatPanel expanded to 561 lines with full PI-agent chat functionality.
+- DataPanel refactored for multi-sample support.
+- Workflow, schemas, and report generator expanded.
+- Input frame optimized.
+- Multiple rounds of bug fixes to stabilize the analysis pipeline. 30+ files changed.
+
+**0.6.x — Workflow architecture, deep research API (2025-09-01 → 2025-09-20)**
+
+- Workflow architecture changed with new node routing and agent orchestration.
+- Literature agent massively expanded (+823 lines) with deep research API support.
+- ChatPanel added (219 lines) for PI-agent chat.
+- Config and PromptsPanel enhanced for per-session settings.
+- LLM client reworked (+381 lines) with improved protocol handling.
+
+**0.5.x — Real-time messaging, round feedback (2025-08-10 → 2025-09-01)**
+
+- Real-time messaging optimization across WebSocket pipeline.
+- RoundFeedbackDialog added (474 lines) for user interaction during analysis rounds.
+- Workflow and report generator enhanced.
+- AnalysisPanel simplified/refactored.
+- WebSocket message streaming improved.
+
+**0.4.x — Biochemistry rewrite, agent refinements (2025-07-20 → 2025-08-10)**
+
+- Biochemistry agent rewritten (+864 lines changed).
+- PainterAgent refactored; Pathology agent enhanced.
+- Backend main.py expanded (+525 lines).
+- Report generator and sandbox improved. 32 files, ~2.5K lines changed.
+
+**0.3.x — "Basically works" milestone (2025-07-01 → 2025-07-20)**
+
+- PainterAgent added for image generation.
+- Upload service added for file handling.
+- Analysis subcomponents added (FigureGallery, GraphicAbstract, IntegratedReport, DownloadButtons).
+- Bioinformatics agent greatly expanded (+789 lines).
+- Workflow, main.py, and frontend hooks substantially reworked. 40 files, ~8K lines added.
+
+**0.2.x — Report generation rebuilt (2025-06-10 → 2025-07-01)**
+
+- Report generation rebuilt from scratch.
+- Major expansion of `report_generator.py` (+1337 lines).
+- Addition of `regenerate_report_html.py` (804 lines).
+- Reports went from "runs" to "works" — HTML report output pipeline reworked.
+
+**0.1.x — Project scaffolding and initial analysis pipeline (2025-05-20 → 2025-06-10)**
+
+- Full-stack app created with FastAPI backend, React/Vite/TailwindCSS frontend.
+- All core agents implemented: PI, Bioinformatics, Pathology, Biochemistry, Literature.
+- LLM client, Jupyter sandbox, workflow engine, report generator.
+- File upload, i18n (Chinese/English), WebSocket messaging.
+- 48 files, ~21K lines added.

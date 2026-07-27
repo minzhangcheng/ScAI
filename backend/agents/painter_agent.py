@@ -12,7 +12,7 @@ It selects the protocols that are compatible with the configured provider:
 Permanent failures disable only the affected protocol for the current operation;
 transient failures may be retried.  Revision is best-effort because a usable input
 image already exists, so it has a small wall-clock budget rather than repeating five
-full 60-second cascades.
+full 180-second cascades.
 """
 from typing import Dict, Any, Optional, List
 import logging
@@ -42,9 +42,9 @@ _ZHIPU_BASE_URL = "open.bigmodel.cn"
 # Protocol cascade tuning (see module docstring).
 _MAX_RETRY_ROUNDS = 5          # full-cascade rounds before giving up
 _REVISION_MAX_RETRY_ROUNDS = 2
-_REVISION_TOTAL_TIMEOUT = 75.0
+_REVISION_TOTAL_TIMEOUT = 720.0
 _INTER_PROTOCOL_DELAY = 1.0    # seconds to wait when switching protocols within a round
-_PROTOCOL_TIMEOUT = 60.0       # per-attempt timeout for Images API / Chat protocols
+_PROTOCOL_TIMEOUT = 180.0      # per-attempt timeout for Images API / Chat protocols
 
 
 def _estimate_tokens(text: str) -> int:
