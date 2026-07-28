@@ -1224,6 +1224,22 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         f"{step_count}; freezing until release"
                     )
                     await sp.wait_for(session_id)
+                    if sp.is_superseded(session_id):
+                        # A restore committed while we were frozen. This run's
+                        # graph position and checkpoint connection both predate
+                        # it, so continuing would write pre-restore state
+                        # forward over what the restore installed.
+                        from backend.workflow.helpers import (
+                            WorkflowSupersededError,
+                        )
+
+                        logger.info(
+                            f"[Bioinformatics] Run superseded by a snapshot "
+                            f"restore at step {step_count}; unwinding"
+                        )
+                        raise WorkflowSupersededError(
+                            "snapshot restore replaced this run's checkpoint"
+                        )
 
             step_count += 1
             force_break = False  # Reset per-iteration

@@ -683,13 +683,19 @@ print(f"I/O sandbox active: writes restricted to session directory")
         finally:
             self._restarting = False
 
-    async def stop(self):
-        """Stop the kernel and save state. Always shuts down kernel even if save fails."""
+    async def stop(self, *, save: bool = True):
+        """Stop the kernel and save state. Always shuts down kernel even if save fails.
+
+        ``save=False`` shuts the kernel down without persisting it. Used when a
+        snapshot restore has already installed the authoritative pkl/notebook for
+        this session: saving would overwrite them with the pre-restore kernel.
+        """
         # Try to save session before stopping, but don't let failure prevent kernel cleanup
         try:
-            await self.await_pending_saves()
-            await self.save_session()
-            self.notebook_state.save()
+            if save:
+                await self.await_pending_saves()
+                await self.save_session()
+                self.notebook_state.save()
         except Exception as e:
             logger.exception(f"Failed to save session during stop for {self.session_id}")
         finally:

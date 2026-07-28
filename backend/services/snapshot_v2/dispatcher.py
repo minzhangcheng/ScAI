@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from backend.constants import WORKFLOW_GRAPH_NODES
+from backend.constants import GATE_ANNOTATION_CONFIRMATION, WORKFLOW_GRAPH_NODES
 from backend.services.snapshot_v2.errors import SnapshotCaptureError
 from backend.services.snapshot_v2.object_store import ObjectStore
 
@@ -191,8 +191,22 @@ class ContinuationDispatcher:
             )
             analysis_state.wait_input_reason = wait_reason
             from backend.models.schemas import TaskStatus
+            # The gate - not the capsule kind - decides the status. Each HITL
+            # endpoint validates the one status it owns, so a restored session
+            # parked on the wrong one cannot be acted on at all:
+            # /confirm-annotations rejects anything but WAITING_ANNOTATION
+            # (routes/interaction.py), which is also what the live gate
+            # announces (workflow/annotation.py). round_wait,
+            # direction_selection and integration_selection are announced as
+            # WAITING_INPUT by their live counterparts (workflow/synthesis.py,
+            # workflow/integration.py), so they keep it.
+            gate_status = (
+                TaskStatus.WAITING_ANNOTATION
+                if staged.gate == GATE_ANNOTATION_CONFIRMATION
+                else TaskStatus.WAITING_INPUT
+            )
             try:
-                analysis_state.status = TaskStatus.WAITING_INPUT
+                analysis_state.status = gate_status
             except Exception:
                 pass
             # Rebuild gate payload fields present on AnalysisState.
@@ -222,6 +236,15 @@ class ContinuationDispatcher:
                 ss["restore_gate_payload"] = dict(staged.payload)
                 if "planning_stage" in staged.payload:
                     ss["planning_stage"] = staged.payload["planning_stage"]
+                # skip_nodes is the one frozen field with a real consumer:
+                # resume() reads sandbox_state["skip_nodes"] and injects it into
+                # the graph state so @with_retry honours a Skip the user already
+                # chose (core.py). Capture froze it, but activate only stashed it
+                # under restore_gate_payload — a key nothing reads — so every
+                # restore silently discarded those decisions and re-entered the
+                # node the user had skipped past.
+                if staged.payload.get("skip_nodes"):
+                    ss["skip_nodes"] = list(staged.payload["skip_nodes"])
                 analysis_state.sandbox_state = ss
         elif staged.kind == "terminal":
             analysis_state.restore_resume_kind = "terminal"

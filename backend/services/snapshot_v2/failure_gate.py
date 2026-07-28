@@ -229,6 +229,20 @@ def ensure_post_report_retry_context(
         return
 
     payload = dict(existing)
+
+    # Producer-aware, like ensure_workflow_boundary_retry_context. This helper is
+    # reachable from generate_report's entry guard with ANY gate already armed,
+    # and it used to rewrite both fields unconditionally. That converted a
+    # workflow_boundary — or a pre_restore — gate into a post_report one, which
+    # is wrong twice over: Retry then dispatches to the post_report producer and
+    # can never satisfy the original boundary, and the action set gains a Skip
+    # that pre_restore explicitly forbids (skip_snapshot_producer refuses it).
+    existing_producer = str(
+        (payload.get("retry_context") or {}).get("producer") or ""
+    )
+    if existing_producer and existing_producer != "post_report":
+        return
+
     # post_report is skippable: reports are already generated, so continuing
     # without the post-report snapshot only forfeits that restore point.
     payload["allowed_actions"] = list(SNAPSHOT_SKIPPABLE_GATE_ACTIONS)
@@ -648,6 +662,12 @@ def terminate_snapshot_failure(state: Any) -> None:
     state.termination_reason = "snapshot_failure"
     if hasattr(state, "pending_required_snapshot"):
         state.pending_required_snapshot = None
+    # A Skip armed before the user changed their mind and terminated must not
+    # outlive the run it was meant for. The marker is only consumed at a
+    # *matching* boundary, so an unconsumed one lingers on the session and would
+    # silently suppress the first required capture of some later run.
+    if hasattr(state, "skip_required_snapshot_phase"):
+        state.skip_required_snapshot_phase = None
 
 
 def _status_value(state: Any) -> str | None:
@@ -1006,19 +1026,37 @@ async def default_retry_workflow_boundary_capture(
     async with _state_lock:
         workflow = workflows.get(session_id)
 
+    if workflow is None or not hasattr(workflow, "_create_auto_snapshot"):
+        # No live workflow is the normal case here, not an anomaly:
+        # RequiredSnapshotBlocked unwinds the whole graph invocation, so
+        # run()/resume() return, the WebSocket handler's finally closes the
+        # workflow and drops it from ``backend.state.workflows``, and a
+        # reconnect while WAITING_INPUT takes the HITL-hold branch that never
+        # builds a replacement. Failing closed here made Retry unwinnable.
+        #
+        # Rebuilding a workflow (as post_report does) is not an option either:
+        # the capsule is frozen from the live ``_current_graph_state`` and the
+        # live kernel, both destroyed with the torn-down workflow, so an
+        # in-process recapture would commit a snapshot naming a boundary it
+        # cannot restore to.
+        #
+        # So Retry means what ``resume_policy="graph_checkpoint"`` says: clear
+        # the gate and let the graph re-drive from its checkpoint. The resume
+        # re-hits the same boundary and re-runs the capture against live state
+        # -- the mechanism Skip already relies on, minus the skip marker, so
+        # nothing passes the boundary without either a snapshot or a new gate.
+        retry_workflow_boundary(state)
+        return RetryOutcome(
+            success=True,
+            still_blocked=False,
+            message="Snapshot retry armed; workflow resumes to the boundary",
+            status=_status_value(state),
+            wait_input_reason=None,
+            snapshot_failure=None,
+        )
+
     try:
-        if workflow is not None and hasattr(workflow, "_create_auto_snapshot"):
-            await workflow._create_auto_snapshot(state, str(phase).strip())
-        else:
-            return _reenter_gate_on_failure(
-                state,
-                code="WORKFLOW_UNAVAILABLE",
-                message=(
-                    "Workflow is not available to recapture the "
-                    "workflow-boundary snapshot"
-                ),
-                context=context,
-            )
+        await workflow._create_auto_snapshot(state, str(phase).strip())
     except RequiredSnapshotBlocked as exc:
         return _reenter_gate_on_failure(
             state,

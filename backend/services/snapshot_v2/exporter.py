@@ -279,6 +279,8 @@ class SnapshotExporter:
         export_id = _new_export_id()
         _write_export_protection(self.paths, export_id, session_id, all_snapshot_ids)
 
+        tmp_path = None
+        exported = False
         try:
             # Verify all included objects (uses evidence cache when available)
             for m in manifests:
@@ -350,7 +352,23 @@ class SnapshotExporter:
                 meta_info.size = len(meta_bytes)
                 tf.addfile(meta_info, io.BytesIO(meta_bytes))
 
+            exported = True
             return Path(tmp_path)
 
         finally:
             _remove_export_protection(self.paths, export_id)
+            # The archive is a multi-GB temp file in the system temp dir. Any
+            # failure after mkstemp -- a missing object (ExportIntegrityError),
+            # a hash mismatch, ENOSPC mid-write -- propagates to the route,
+            # which turns it into an HTTP error and never sees tmp_path. Only
+            # the success path moves the file somewhere owned, so without this
+            # every failed export (and every user retry of it) leaves another
+            # partial archive behind until the host fills up -- which then also
+            # breaks session-metadata writes, since those use mkstemp too.
+            if not exported and tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    logger.warning(
+                        "Could not remove partial export archive %s", tmp_path,
+                    )

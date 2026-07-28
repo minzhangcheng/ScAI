@@ -592,7 +592,10 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             # read the pre-restore position and write it back, silently undoing
             # the restore. Unwind instead and let the next run rebuild the
             # workflow (and its connection) from the restored checkpoint.
-            if getattr(self, "_restore_superseded", False):
+            if (
+                sp.is_superseded(self.session_id)
+                or getattr(self, "_restore_superseded", False)
+            ):
                 logger.info(
                     f"[{self.session_id}] Run superseded by a snapshot restore; "
                     f"unwinding so the restored checkpoint takes effect"
@@ -1278,7 +1281,11 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             # here would overwrite exactly what the restore just installed.
             logger.info(f"[{self.session_id}] Run superseded by restore: {e}")
             from ..state import sessions as live_sessions
+            from ..services.snapshot_v2.safe_point import (
+                get_snapshot_safe_point_manager as _sp_clear,
+            )
 
+            _sp_clear().clear_superseded(self.session_id)
             return live_sessions.get(self.session_id) or initial_state
 
         except WorkflowTerminatedError as e:
@@ -1569,7 +1576,27 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         # A restore Retry may reconstruct the workflow after its new job has
         # already requested a safe point. Acknowledge before touching the
         # checkpointer, then remain frozen until the restore owner releases it.
-        await self.await_restore_safe_point()
+        #
+        # This await sits outside the try below, so a restore that commits while
+        # we are frozen here would otherwise escape resume() entirely and land
+        # in the caller's generic `except Exception` — which writes
+        # TaskStatus.FAILED over the state the restore just persisted. Unwind
+        # the same way the in-graph handlers do: quietly, returning the restored
+        # state untouched.
+        try:
+            await self.await_restore_safe_point()
+        except WorkflowSupersededError as exc:
+            logger.info(
+                f"[{self.session_id}] Resume superseded by restore before the "
+                f"graph was entered: {exc}"
+            )
+            from ..state import sessions as live_sessions
+            from ..services.snapshot_v2.safe_point import (
+                get_snapshot_safe_point_manager as _sp_clear,
+            )
+
+            _sp_clear().clear_superseded(self.session_id)
+            return live_sessions.get(self.session_id) or analysis_state
         if analysis_state is not None:
             from ..state import sessions as live_sessions
 
@@ -1642,7 +1669,11 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             except WorkflowSupersededError as e:
                 logger.info(f"[{self.session_id}] Resume superseded by restore: {e}")
                 from ..state import sessions as live_sessions
+                from ..services.snapshot_v2.safe_point import (
+                    get_snapshot_safe_point_manager as _sp_clear,
+                )
 
+                _sp_clear().clear_superseded(self.session_id)
                 return (
                     live_sessions.get(self.session_id)
                     or analysis_state
@@ -1707,7 +1738,11 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             except WorkflowSupersededError as e:
                 logger.info(f"[{self.session_id}] Resume superseded by restore: {e}")
                 from ..state import sessions as live_sessions
+                from ..services.snapshot_v2.safe_point import (
+                    get_snapshot_safe_point_manager as _sp_clear,
+                )
 
+                _sp_clear().clear_superseded(self.session_id)
                 return live_sessions.get(self.session_id) or analysis_state
 
             except WorkflowTerminatedError as e:
@@ -1795,10 +1830,22 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
     async def close(self):
         """Clean up resources and save state"""
         logger.info(f"[{self.session_id}] Closing workflow and cleaning up resources")
+        # sandbox.stop() ends with save_session() + a notebook save. After a
+        # restore superseded this run those writes would land on top of the pkl
+        # and notebook apply() just installed and _verify_live_restore verified —
+        # the same hazard the restore path avoids by tearing down before apply.
+        # Shut the kernel down, but do not let it persist itself.
+        from ..services.snapshot_v2.safe_point import (
+            get_snapshot_safe_point_manager as _sp_manager,
+        )
+
+        superseded = _sp_manager().is_superseded(self.session_id) or getattr(
+            self, "_restore_superseded", False
+        )
         if self.sandbox:
             try:
                 # This will save the notebook state before stopping
-                await self.sandbox.stop()
+                await self.sandbox.stop(save=not superseded)
                 logger.info(f"[{self.session_id}] Sandbox stopped")
             except Exception as e:
                 logger.exception(f"[{self.session_id}] Error stopping sandbox")

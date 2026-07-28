@@ -9,7 +9,11 @@ from ..constants import LlmFailureAction, NODE_TO_RESULT_KEY
 from ..models.schemas import AgentType
 from ..utils.llm_client import UpstreamExhaustedError
 from ..services.snapshot_v2.errors import RequiredSnapshotBlocked
-from .helpers import _retry_backoff_delay, WorkflowTerminatedError
+from .helpers import (
+    _retry_backoff_delay,
+    WorkflowSupersededError,
+    WorkflowTerminatedError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +121,14 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                     # User chose to abort (e.g. TERMINATE at a HITL gate, or a
                     # disabled-agent terminate). Must propagate, not be retried
                     # by the generic handler below.
+                    raise
+
+                except WorkflowSupersededError:
+                    # A snapshot restore replaced the state this run is built on.
+                    # Retrying the node would re-enter a graph position that no
+                    # longer exists, on a checkpointer connection the restore
+                    # already closed. Propagate to the run loop, which unwinds
+                    # without touching the state the restore just persisted.
                     raise
 
                 except Exception as e:

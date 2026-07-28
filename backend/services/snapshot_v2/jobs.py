@@ -401,7 +401,6 @@ class RestoreJobManager:
             state = sessions.get(session_id)
             if (
                 state is None
-                or workflow is not None
                 or session_id in initializing_sessions
                 or session_id in chat_sandboxes
                 or (run_task is not None and not run_task.done())
@@ -412,6 +411,25 @@ class RestoreJobManager:
 
             status = getattr(state, "status", None)
             status_value = getattr(status, "value", status)
+            parked_at_gate = str(status_value or "").lower().startswith("waiting")
+
+            # A workflow OBJECT outlives its run: once a HITL gate returns, the
+            # object stays registered in `workflows` while nothing executes. The
+            # cooperative handshake needs a *running* graph to reach a boundary
+            # and acknowledge — a session parked at a wait gate never will, and
+            # its only acknowledgement site is this one. Blocking on the mere
+            # presence of the object therefore left a restore requested at a
+            # gate with nowhere to be acknowledged: it waited out the full
+            # timeout and failed, on a session that was completely idle.
+            #
+            # Every executing path is already excluded above (run/report/chat
+            # tasks, initialization, chat sandboxes), so reaching here with a
+            # workflow object means the object is idle. Still require the gate
+            # status: anything else with a live workflow keeps the normal
+            # cooperative handshake and fails closed.
+            if workflow is not None and not parked_at_gate:
+                return False
+
             descriptor = {
                 "kernel_present": False,
                 "current_round": getattr(state, "current_round", 0) or 0,
@@ -648,12 +666,20 @@ class RestoreJobManager:
                 "retry_of_transaction_id": handle.record.retry_of_transaction_id,
             })
             # Persist restore_job envelope; never overwrites restore_apply.
-            failure = result.failure or {}
-            recovery_required = bool(failure.get("recovery_required"))
-            if result.status in ("committed", "cancelled", "timed_out") or (
-                result.status == "failed" and not recovery_required
-            ):
-                _persist_handle(handle)
+            #
+            # Every terminal outcome is written, recovery-required failures
+            # included. Skipping those left the journal on the last status
+            # ``_update`` wrote (waiting_safe_point) while the job was in fact
+            # over, and nothing ever reconciles it: recovery removes only
+            # *terminal* restore_job journals, so the stale one survives every
+            # session load and keeps compute_protected_snapshot_ids reporting
+            # the target as restore_target - the snapshot is undeletable and
+            # un-reclaimable for good, and status polls after a restart read
+            # waiting_safe_point forever. What still needs recovery is the
+            # restore_apply journal (left APPLYING) plus the session's
+            # recovery_blocked marker; those protect the half-applied session,
+            # not a job-status record that lies about the job's state.
+            _persist_handle(handle)
             if self._state_hook is not None:
                 asyncio.ensure_future(self._state_hook(handle.record))
             asyncio.ensure_future(self._emit_state_sync(handle.record, 0.0))
@@ -669,12 +695,41 @@ class RestoreJobManager:
         except asyncio.CancelledError:
             if handle.record.status not in ("cancelled", "committed", "failed", "timed_out"):
                 self._update(handle, "cancelled")
-            await self._safe_point.cancel_safe_point_request(session_id, owner_token)
             raise
         except Exception as exc:
             logger.exception("[snapshot-v2] Restore job %s failed: %s", tx_id, exc)
             self._update(handle, "failed", failure={"message": str(exc)})
-            await self._safe_point.cancel_safe_point_request(session_id, owner_token)
+        finally:
+            # The hold must not outlive the job on ANY path. Both handlers above
+            # persist a journal record before releasing, and that write can fail
+            # on its own (ENOSPC, EDQUOT, read-only mount) — which used to skip
+            # the release entirely and strand the safe point in the process-wide
+            # manager, so every later capture and restore for the session failed
+            # SAFE_POINT_BUSY until a restart. Same structural gap that was
+            # closed in SnapshotService._capture_impl.
+            #
+            # cancel_safe_point_request is idempotent: it withdraws a pending
+            # request and releases an acquired hold under matching ownership,
+            # and returns False without side effects when there is nothing to
+            # release — so calling it unconditionally is safe on the paths that
+            # already released.
+            #
+            # shield keeps the release itself from being cancelled partway; a
+            # failure here is logged rather than raised so it can never mask the
+            # exception that is already unwinding.
+            try:
+                await asyncio.shield(
+                    self._safe_point.cancel_safe_point_request(
+                        session_id, owner_token,
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "[snapshot-v2] Restore job %s: failed to release the safe "
+                    "point; the session may be left SAFE_POINT_BUSY", tx_id,
+                )
 
     # ── Helpers ──────────────────────────────────────────────────────
 

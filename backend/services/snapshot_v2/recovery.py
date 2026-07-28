@@ -520,6 +520,7 @@ class _RecoveryRestorer:
                 staged_checkpoint=None,
                 journal=journal,
                 require_analysis_state=True,
+                objects_root=self.paths.objects,
             )
         except ValueError as exc:
             failures = [p.strip() for p in str(exc).split(";") if p.strip()]
@@ -701,17 +702,44 @@ def _recover_import_envelope(
     paths,
     session_id: str,
     recovered_txns: list,
+    live_txns: list | None = None,
 ) -> None:
     """Import recovery: STAGING cleans import staging; STAGED reconciles;
     COMMITTED cleans up; FAILED remains visible (no restore masquerade).
+
+    An import that is still running in this process is not crash debris and is
+    deferred to itself; *live_txns* collects those transaction ids for the
+    caller.
     """
-    from backend.services.snapshot_v2.journal_store import JournalStore
+    from backend.services.snapshot_v2.journal_store import (
+        JOURNAL_OWNER_ID,
+        JournalStore,
+    )
     from backend.services.snapshot_v2.object_store import ManifestStore
 
     tx_id = envelope.transaction_id
     status = str(envelope.status or "").upper()
     store = JournalStore(paths)
     staging_root = Path(str(paths.staging))
+
+    # An in-flight journal stamped with this process's owner id belongs to an
+    # import still running in a worker thread, not to a crashed one. Recovery
+    # runs on the event loop for every request, so it can land in the middle of
+    # the import: at STAGING it would delete the journal and let the sweep below
+    # take the objects Pass 2 has already written, at STAGED it would also delete
+    # the manifests the import just published and its batch record. Neither is
+    # recoverable - the import continues from memory and commits manifests whose
+    # objects are gone. Defer instead; the import finishes its own transaction,
+    # and a process that actually crashed loses this tag with its pid.
+    owner = str((envelope.payload or {}).get("owner") or "")
+    if status in ("STAGING", "STAGED") and owner == JOURNAL_OWNER_ID:
+        if live_txns is not None:
+            live_txns.append(tx_id)
+        logger.info(
+            "Recovery [%s]: import %s is live in this process (%s) - deferred",
+            session_id, tx_id, status,
+        )
+        return
 
     if status == "STAGING":
         # Remove only import staging dirs prefixed with this txn
@@ -865,6 +893,28 @@ def _recover_export_protection_envelope(
     )
 
 
+def _gc_blocked_by_active_safe_point(session_id: str) -> bool:
+    """True when a capture or restore currently owns *session_id*'s safe point.
+
+    Fail-open (False) when the manager cannot be reached: recovery must still
+    reclaim on a process where the safe-point machinery is unavailable.
+    """
+    try:
+        from backend.services.snapshot_v2.safe_point import (
+            get_snapshot_safe_point_manager,
+        )
+
+        if not get_snapshot_safe_point_manager().is_paused(session_id):
+            return False
+    except Exception:
+        return False
+    logger.info(
+        "Recovery [%s]: skipping GC - a capture/restore owns the safe point",
+        session_id,
+    )
+    return True
+
+
 # -- Public recovery entry point ----------------------------------------------
 
 
@@ -896,6 +946,7 @@ async def recover_snapshot_transactions(
     restorer = _RecoveryRestorer(paths, session_dir, workspace_root, states_root)
     recovered_txns: list = []
     failed_txns: list = []
+    live_txns: list = []
     errors: list = []
     store = JournalStore(paths)
 
@@ -992,6 +1043,7 @@ async def recover_snapshot_transactions(
                     paths=paths,
                     session_id=session_id,
                     recovered_txns=recovered_txns,
+                    live_txns=live_txns,
                 )
             elif envelope.kind == "export_protection":
                 _recover_export_protection_envelope(
@@ -1031,7 +1083,12 @@ async def recover_snapshot_transactions(
     staging_dir = Path(str(paths.staging))
     if staging_dir.exists():
         known_failed = set(failed_txns)
+        # Staging of a deferred live transaction ("<tx>" dirs, "<tx>_*.json"
+        # staged manifests) is being written right now - it is not orphaned.
+        live_prefixes = tuple(live_txns)
         for entry in list(staging_dir.iterdir()):
+            if live_prefixes and entry.name.startswith(live_prefixes):
+                continue
             if entry.is_dir():
                 if entry.name in known_failed:
                     continue
@@ -1051,7 +1108,27 @@ async def recover_snapshot_transactions(
                 )
 
     # ── Post-recovery: safe GC ────────────────────────────────────
-    if not failed_txns:
+    # Never sweep while a safe point is held. This entry point runs on every
+    # ensure_session_loaded(), i.e. on every authenticated request for the
+    # session, and takes no session lock - so it interleaves with a capture
+    # parked in an await (runtime serialisation). A capture writes no journal,
+    # so mark() has nothing that protects the objects it has already put, and
+    # sweeping them lets that capture publish a committed manifest whose
+    # analysis_state/notebook/checkpoint refs point at deleted files. Deletion
+    # and import already refuse to touch the object store under an active safe
+    # point (_guard_active_safe_point); GC is the third object-store mutator
+    # and needs the same guard. Skipping only defers reclamation - the next
+    # load with no safe point held collects the same garbage.
+    # A live import is also a reason to skip: mark() protects objects only via
+    # committed manifests, pending-import markers and journal payloads, and an
+    # import between its first put_stream and its STAGED journal has none of
+    # those for the objects already on disk. GC is opportunistic - the import
+    # runs its own sweep at commit, and the next request retries this one.
+    if (
+        not failed_txns
+        and not live_txns
+        and not _gc_blocked_by_active_safe_point(session_id)
+    ):
         try:
             from backend.services.snapshot_v2.gc import SnapshotGarbageCollector
             gc = SnapshotGarbageCollector(session_id, paths)

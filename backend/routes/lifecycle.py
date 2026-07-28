@@ -37,6 +37,7 @@ from backend.state import (
     websockets,
     workflows,
     get_session_lock,
+    get_snapshot_action_lock,
 )
 from backend.services.session_store import update_session_cache as _update_session_cache
 from backend.routes._helpers import teardown_running_workflow
@@ -140,6 +141,15 @@ async def run_analysis(session_id: str, request: Request):
         and getattr(state, "restore_branch_id", None)
     ):
         state.restore_start_intent = "explicit_start"
+
+    # A Skip armed at a boundary the graph never reached again stays on the
+    # session forever — consume_snapshot_skip only clears it at a *matching*
+    # boundary. Starting a run is a fresh intent, so an unconsumed marker from a
+    # previous run must not silently suppress this run's first required capture
+    # (the wildcard form, armed when the failing phase is unknown, would
+    # suppress whichever capture happens to come first).
+    if getattr(state, "skip_required_snapshot_phase", None) is not None:
+        state.skip_required_snapshot_phase = None
 
     # Fresh rerun clears any snapshot restore state — new kernel will be built.
     state.runtime_restore_status = "complete"
@@ -731,6 +741,20 @@ async def snapshot_failure_retry(session_id: str, request: Request):
     invalid context returns 409 and leaves the gate intact. Never defaults
     a missing producer to workflow-boundary.
     """
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    # Serialize the three snapshot-failure actions. Retry is the longest-running
+    # mutator in the system - it re-runs the failed capture while the gate stays
+    # armed - and all three actions read-modify-persist the *same* cached
+    # AnalysisState. Without this, a Terminate issued mid-capture wins its
+    # is_snapshot_failure_blocked() check, tears the workflow down and persists
+    # STOPPED, and is then silently overwritten when this handler persists its
+    # own outcome below.
+    async with get_snapshot_action_lock(session_id):
+        return await _snapshot_failure_retry_locked(session_id, user_id)
+
+
+async def _snapshot_failure_retry_locked(session_id: str, user_id: str):
     from pydantic import ValidationError
 
     from backend.services.snapshot_v2.failure_gate import (
@@ -739,8 +763,6 @@ async def snapshot_failure_retry(session_id: str, request: Request):
     )
     from backend.services.snapshot_v2.models import SnapshotRetryContext
 
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if not is_snapshot_failure_blocked(state):
@@ -779,6 +801,25 @@ async def snapshot_failure_retry(session_id: str, request: Request):
 
     await _update_session_cache(session_id, state)
     await async_save_session(session_id, state)
+
+    # A workflow-boundary gate unwound the graph, so nothing is running and the
+    # re-drive only starts when a WebSocket reconnect rebuilds the workflow. The
+    # client holding the HITL connection never reconnects on its own, so close
+    # it with the same 4000 code the confirm/choose endpoints use to trigger the
+    # frontend's auto-reconnect. Skipped when a workflow is live: the capture
+    # then already ran in-process and that run owns the socket.
+    if outcome.success and context.producer == "workflow_boundary":
+        async with _state_lock:
+            ws = None if session_id in workflows else websockets.get(session_id)
+        if ws is not None:
+            try:
+                await ws.close(4000, "snapshot_retry_resume")
+            except Exception:
+                logger.debug(
+                    "[%s] Failed to close HITL WebSocket after snapshot retry",
+                    session_id,
+                    exc_info=True,
+                )
 
     data = {
         "status": outcome.status
@@ -823,13 +864,19 @@ async def snapshot_failure_skip(session_id: str, request: Request):
     (skipping would proceed with a restore that overwrites live state without a
     safety point) and returns 409.
     """
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    # Same gate, same cached state object as Retry/Terminate - must not interleave.
+    async with get_snapshot_action_lock(session_id):
+        return await _snapshot_failure_skip_locked(session_id, user_id)
+
+
+async def _snapshot_failure_skip_locked(session_id: str, user_id: str):
     from pydantic import ValidationError
 
     from backend.services.snapshot_v2.failure_gate import skip_snapshot_producer
     from backend.services.snapshot_v2.models import SnapshotRetryContext
 
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if not is_snapshot_failure_blocked(state):
@@ -889,12 +936,21 @@ async def snapshot_failure_terminate(session_id: str, request: Request):
     Delegates to existing workflow teardown — does NOT create a second
     kernel teardown. Clears the failure gate and stops the workflow.
     """
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    # Teardown pops the workflow, closes the kernel and deletes the graph
+    # checkpoint. Running that under an in-flight Retry would yank the sandbox
+    # out from under a live capture and then have the STOPPED write overwritten,
+    # so wait for any Retry/Skip on this gate to finish first.
+    async with get_snapshot_action_lock(session_id):
+        return await _snapshot_failure_terminate_locked(session_id, user_id)
+
+
+async def _snapshot_failure_terminate_locked(session_id: str, user_id: str):
     from backend.services.snapshot_v2.failure_gate import (
         terminate_snapshot_failure,
     )
 
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if not is_snapshot_failure_blocked(state):

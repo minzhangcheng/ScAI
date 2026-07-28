@@ -135,6 +135,7 @@ def verify_live_restore_components(
     staged_checkpoint: Any | None = None,
     journal: dict | None = None,
     require_analysis_state: bool = False,
+    objects_root: Path | str | None = None,
 ) -> dict[str, Any]:
     """Verify live restore side effects against the target snapshot contract.
 
@@ -185,13 +186,29 @@ def verify_live_restore_components(
         else:
             component_hashes["current_round"] = str(live_round)
 
-    # Optional: require analysis_state_ref object still exists in store
-    # (does NOT demand live session.json hash equality).
+    # Optional: require the analysis_state_ref OBJECT to still exist in the
+    # store (does NOT demand live session.json hash equality).
+    #
+    # This used to assert only that ref.sha256 was truthy — but sha256 is a
+    # non-optional, pattern-validated field on ObjectRef, so it is always a
+    # 64-hex string for any manifest the store could load. The check could not
+    # fail, and nothing here ever looked at the store. Recovery would then
+    # declare a COMMITTED restore verified and delete its journal while the
+    # snapshot it "verified" could no longer be staged at all (stage() raises
+    # OBJECT_NOT_FOUND). Verify the object is really there.
     if require_analysis_state and getattr(target_manifest, "analysis_state_ref", None) is not None:
         ref = target_manifest.analysis_state_ref
-        # Presence of ref is enough; hash equality is intentionally not checked.
-        if not getattr(ref, "sha256", None):
+        sha = getattr(ref, "sha256", None)
+        if not sha:
             failures.append("analysis_state_ref missing sha256")
+        elif objects_root is not None:
+            # Existence only: re-hashing a large state object on every recovery
+            # pass would be a needless cost, and content integrity is already
+            # the object store's own invariant.
+            if not (Path(str(objects_root)) / str(sha)).is_file():
+                failures.append(
+                    f"analysis_state object missing from store: {sha}"
+                )
 
     # --- scoped workspace ---
     workspace_hashes: dict[str, str] = {}

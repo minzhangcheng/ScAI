@@ -93,6 +93,7 @@ class SafePointManager:
         self._eligibility_trusted: dict[str, bool] = {}
         self._acquired_owners: dict[str, str] = {}
         self._generation_counters: dict[str, int] = {}
+        self._superseded: set[str] = set()
         self._availability_waiters: dict[str, set[asyncio.Event]] = {}
         self._lock = asyncio.Lock()
 
@@ -116,6 +117,23 @@ class SafePointManager:
             return
         for waiter in self._availability_waiters.pop(session_id, set()):
             waiter.set()
+
+    def mark_superseded(self, session_id: str) -> None:
+        """Record that a committed restore has invalidated the in-flight run.
+
+        Session-scoped rather than workflow-scoped on purpose: the restore evicts
+        the workflow object, so anything else frozen on this safe point — the
+        bioinformatics step loop, a node-entry gate — could not reach a flag
+        stored there. Cleared once the superseded run has unwound.
+        """
+        self._superseded.add(session_id)
+
+    def is_superseded(self, session_id: str) -> bool:
+        """True while a run predating a committed restore is still unwinding."""
+        return session_id in self._superseded
+
+    def clear_superseded(self, session_id: str) -> None:
+        self._superseded.discard(session_id)
 
     async def request_safe_point(
         self, session_id: str, owner_token: str

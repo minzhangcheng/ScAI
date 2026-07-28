@@ -125,6 +125,44 @@ class RestorePreflight:
                         "Workflow state content is not valid JSON"
                     )
 
+        # 4b. The capsule's resume target must exist in THIS build. Both checks
+        # are read-only and every input is already in hand, but until now they
+        # only ran in ContinuationDispatcher.stage_checkpoint — which happens
+        # AFTER restore_coordinator.apply() has already replaced the workspace,
+        # notebook, session.json, checkpoint and runtime. An archive imported
+        # from another instance, or a snapshot taken before an in-place upgrade
+        # that renamed a node, therefore passed preflight, destroyed the live
+        # session, and only then was rejected as UNKNOWN_NEXT_NODE /
+        # UNKNOWN_GATE, leaving the session recovery-blocked. Reject it while
+        # rejecting is still free.
+        from backend.services.snapshot_v2.dispatcher import (
+            _KNOWN_GATES,
+            _KNOWN_GRAPH_NODES,
+        )
+
+        capsule = manifest.continuation
+        capsule_kind = getattr(capsule, "kind", None)
+        if capsule_kind == "graph_node":
+            node = getattr(capsule, "next_node", None)
+            if not node:
+                result.compatibility_errors.append(
+                    "Graph-node capsule has no next_node"
+                )
+            elif node not in _KNOWN_GRAPH_NODES:
+                result.compatibility_errors.append(
+                    f"Graph-node capsule targets unknown graph node: {node}"
+                )
+        elif capsule_kind == "semantic_gate":
+            gate = getattr(capsule, "gate", None)
+            if not gate:
+                result.compatibility_errors.append(
+                    "Semantic-gate capsule has no gate"
+                )
+            elif gate not in _KNOWN_GATES:
+                result.compatibility_errors.append(
+                    f"Semantic-gate capsule targets unknown gate: {gate}"
+                )
+
         # 5. Determine status
         if objects_failed:
             result.status = "corrupted"

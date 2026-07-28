@@ -212,14 +212,29 @@ def _write_import_journal(
     status: str,
     payload: dict | None = None,
 ) -> None:
-    from backend.services.snapshot_v2.journal_store import JournalStore, make_envelope
+    from backend.services.snapshot_v2.journal_store import (
+        JOURNAL_OWNER_ID,
+        JournalStore,
+        make_envelope,
+    )
+
+    # Stamp the writing process. An import runs in a worker thread
+    # (SnapshotService.import_snapshots -> asyncio.to_thread) while the event
+    # loop keeps serving requests for the same session, and every request runs
+    # recovery (ensure_session_loaded -> recover_snapshot_transactions). Without
+    # this tag recovery cannot tell a running import from crash debris: it drops
+    # the STAGING journal and post-recovery GC then sweeps the objects Pass 2 has
+    # already streamed, so the manifests this import goes on to publish reference
+    # objects that no longer exist.
+    body = dict(payload or {})
+    body["owner"] = JOURNAL_OWNER_ID
 
     env = make_envelope(
         kind="import",
         transaction_id=transaction_id,
         session_id=session_id,
         status=status,
-        payload=payload or {},
+        payload=body,
     )
     JournalStore(paths).write(env)
 

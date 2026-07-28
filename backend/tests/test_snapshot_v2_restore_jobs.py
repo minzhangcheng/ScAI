@@ -2687,8 +2687,13 @@ async def test_workflow_boundary_retry_forwards_persisted_phase(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_workflow_boundary_retry_without_live_workflow_stays_blocked():
-    """Exact workflow-boundary recapture must fail closed without live state."""
+async def test_workflow_boundary_retry_without_live_workflow_arms_redrive():
+    """Without a live workflow, Retry arms the graph re-drive instead of failing.
+
+    The gate always tears the workflow down before the user can act, so failing
+    closed here made Retry impossible; the capture is re-attempted when the
+    resumed graph re-hits the same boundary.
+    """
     from backend.models.schemas import AnalysisState, TaskStatus
     from backend.services.snapshot_v2.failure_gate import (
         default_retry_workflow_boundary_capture,
@@ -2716,12 +2721,13 @@ async def test_workflow_boundary_retry_without_live_workflow_stays_blocked():
         session_id, state, context,
     )
 
-    assert outcome.success is False
-    assert outcome.still_blocked is True
-    assert state.status == TaskStatus.WAITING_INPUT
-    assert state.wait_input_reason == "snapshot_failure"
-    assert state.snapshot_failure is not None
-    assert state.snapshot_failure["code"] == "WORKFLOW_UNAVAILABLE"
+    assert outcome.success is True
+    assert outcome.still_blocked is False
+    assert state.status == TaskStatus.RUNNING
+    assert state.wait_input_reason is None
+    assert state.snapshot_failure is None
+    # Retry must not arm the skip marker: the re-drive has to capture again.
+    assert getattr(state, "skip_required_snapshot_phase", None) is None
 
 
 @pytest.mark.asyncio

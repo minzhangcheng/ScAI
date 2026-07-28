@@ -30,6 +30,7 @@ from backend.utils.blob_store import externalize_blobs, inline_blobs
 from backend.utils.files import validate_session_id
 from backend.state import (
     sessions, state_lock, session_access_times, last_save_times,
+    session_locks,
 )
 
 logger = logging.getLogger(__name__)
@@ -328,19 +329,47 @@ async def _recover_snapshot_v2_on_load(
     return recovery_blocked, recovery_failure
 
 
+def _snapshot_transaction_in_flight(session_id: str) -> bool:
+    """True while an in-process snapshot transaction owns this session's journals.
+
+    Journal recovery is *crash* recovery: a STAGED/APPLYING ``restore_apply``
+    journal is taken as proof that the process which wrote it died, so recovery
+    rolls the live session back to the pre_restore snapshot, removes the staging
+    tree and deletes the journal. That inference only holds when nobody is
+    mid-transaction — but this runs on EVERY authenticated request, including
+    the frontend's 2-second poll of the restore's own status endpoint.
+
+    ``SnapshotService.restore_snapshot`` holds the per-session lock from
+    ``stage()`` (journal STAGED) through ``commit()``, and yields inside that
+    window (closing the superseded checkpoint connection, ``asyncio.to_thread``
+    in ``async_save_session``). ``recover_snapshot_transactions`` has no awaits,
+    so a request served at one of those yields runs the entire rollback and
+    destroys the restore it was asked to report on.
+
+    Deferring is safe: the journal stays on disk for a later load, and genuine
+    crashes are covered by startup recovery, which runs before any request is
+    served.
+    """
+    lock = session_locks.get(session_id)
+    return lock is not None and lock.locked()
+
+
 async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
     validate_session_id(session_id)
 
     from backend.config import is_snapshot_v2_enabled
 
     snapshot_v2_enabled = is_snapshot_v2_enabled()
-    if snapshot_v2_enabled:
+    # Distinguishes "recovery ran and found nothing" from "recovery was
+    # deferred" — only the former may clear an existing recovery block.
+    recovery_evaluated = False
+    recovery_blocked = False
+    recovery_failure = None
+    if snapshot_v2_enabled and not _snapshot_transaction_in_flight(session_id):
+        recovery_evaluated = True
         recovery_blocked, recovery_failure = await _recover_snapshot_v2_on_load(
             session_id,
         )
-    else:
-        recovery_blocked = False
-        recovery_failure = None
 
     # Check cache before disk load
     cached = await _get_cached_session(session_id)
@@ -357,7 +386,7 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
         if recovery_blocked:
             mark_recovery_blocked(session_id, cached, recovery_failure)
             await _persist_recovery_marker(session_id, cached)
-        else:
+        elif recovery_evaluated:
             if clear_recovery_blocked(session_id, cached):
                 await _persist_recovery_marker(session_id, cached)
         return cached
@@ -367,7 +396,7 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
     if state is None:
         if recovery_blocked:
             mark_recovery_blocked(session_id, None, recovery_failure)
-        else:
+        elif recovery_evaluated:
             clear_recovery_blocked(session_id, None)
         return None
 

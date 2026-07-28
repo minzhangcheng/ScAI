@@ -140,6 +140,18 @@ class PreRestoreCapture:
             session_id=context.session_id,
             reason="pre_restore",
             phase="pre_restore",
+            # Declare the round of the state this capture actually freezes.
+            # live_verify compares manifest.round_number against the restored
+            # session.json current_round and gates on ``is not None``, so the
+            # model default (0) is asserted as a real expectation, never
+            # skipped. Left defaulted, every pre_restore snapshot taken past
+            # round 0 was unrestorable: apply() overwrites the live session
+            # first, the round check then fails, and the transaction is refused
+            # as LIVE_VERIFY_FAILED with the session recovery-blocked -- and
+            # this is the one snapshot a user reaches for to undo a restore.
+            round_number=int(
+                getattr(context.analysis_state, "current_round", 0) or 0
+            ),
             capsule=capsule,
         )
 
@@ -150,6 +162,11 @@ class PreRestoreCapture:
             req.analysis_state_ref = prev.analysis_state_ref
             req.notebook_ref = prev.notebook_ref
             req.checkpoint_ref = prev.checkpoint_ref
+            # The reused analysis_state_ref is prev serialized state, so the
+            # round must follow that state and not the live one: the revision
+            # check only proves the kernel is unchanged, and a session can
+            # advance a round without ever dirtying it.
+            req.round_number = prev.round_number
             sandbox = None  # skip kernel introspection
             logger.info(
                 "[%s] Reusing runtime for pre_restore capture",

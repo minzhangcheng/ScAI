@@ -101,6 +101,32 @@ _KNOWN_GRAPH_NODES: frozenset[str] = frozenset(
 )
 
 
+# Reverse of _PHASE_TO_GATE for the dynamic path, which knows the gate but not
+# the capture phase that would normally imply it.
+_GATE_TO_PHASE: dict[str, str] = {
+    gate: phase for phase, gate in _PHASE_TO_GATE.items()
+}
+
+# A live HITL gate is recorded on the session's status, not in the safe-point
+# descriptor. Only statuses whose gate is unambiguous appear here.
+_STATUS_TO_GATE: dict[str, str] = {
+    "waiting_annotation": "annotation_confirmation",
+    "waiting_plan_review": "plan_review",
+    "waiting_input": "round_wait",
+}
+
+
+def _gate_from_status(analysis_state: Any) -> str | None:
+    """Return the semantic gate a parked session is sitting at, or None."""
+    if analysis_state is None:
+        return None
+    status = getattr(analysis_state, "status", None)
+    status = getattr(status, "value", status)
+    if status is None:
+        return None
+    return _STATUS_TO_GATE.get(str(status).lower())
+
+
 class ContinuationRegistry:
     """Maps a SnapshotPhase to a ContinuationCapsule, serialising state on the fly."""
 
@@ -126,7 +152,11 @@ class ContinuationRegistry:
             )
 
         if phase in _DYNAMIC_PHASES:
-            return self.freeze_dynamic(live_safe_point or workflow_state or {})
+            return self.freeze_dynamic(
+                live_safe_point or workflow_state or {},
+                analysis_state=analysis_state,
+                workflow_state=workflow_state,
+            )
 
         if phase in _GRAPH_NODE_PHASES:
             return self._freeze_graph_node(phase, workflow_state)
@@ -139,6 +169,8 @@ class ContinuationRegistry:
     def freeze_dynamic(
         self,
         live_safe_point: dict[str, Any] | None,
+        analysis_state: Any = None,
+        workflow_state: dict | None = None,
     ) -> ContinuationCapsule:
         """Derive capsule from the acknowledged live safe-point descriptor.
 
@@ -205,6 +237,27 @@ class ContinuationRegistry:
 
 
         # Truly inactive / unknown → idle
+        # The descriptor-driven branches above read keys
+        # (`gate`/`semantic_gate`/`graph_node`/`next_node`) that no producer in
+        # the tree ever writes — WorkflowState declares none of them and the
+        # three descriptor builders emit only kernel_present / current_round /
+        # inactive / status. So every dynamic capture of a *running* session
+        # fell through to Idle, including pre_restore: the one snapshot a user
+        # reaches for to undo a restore recorded no position at all.
+        #
+        # The session's own status does record a live HITL gate, and a session
+        # parked at a gate is exactly the case where "idle" is wrong and the
+        # resume target is unambiguous. Anything else still yields Idle —
+        # recovering a mid-node graph position needs the checkpointer's `next`,
+        # which is not available here.
+        gate = _gate_from_status(analysis_state)
+        if gate is not None:
+            return self._freeze_semantic_gate(
+                _GATE_TO_PHASE.get(gate, gate),
+                analysis_state,
+                workflow_state or {},
+            )
+
         return IdleCapsule(graph_version=GRAPH_VERSION)
 
     # ── private helpers ─────────────────────────────────────────────────────

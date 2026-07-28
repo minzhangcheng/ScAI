@@ -6,6 +6,7 @@ workflow management logic.
 import asyncio
 import logging
 from backend.models.schemas import TaskStatus
+from backend.workflow.helpers import WorkflowSupersededError
 from backend.state import (
     sessions, workflows,
     state_lock as _state_lock,
@@ -119,6 +120,14 @@ async def _headless_workflow_runner(session_id: str):
             await workflow.run(state, session_id)
         logger.info(f"Headless workflow completed for session {session_id}")
 
+    except WorkflowSupersededError:
+        # A snapshot restore replaced the state this run was built on. The
+        # restore already persisted the authoritative state; writing FAILED
+        # here would overwrite exactly what it installed.
+        logger.info(
+            "Headless workflow superseded by a snapshot restore for session %s",
+            session_id,
+        )
     except Exception:
         logger.exception(f"Headless workflow failed for session {session_id}")
         state = sessions.get(session_id)

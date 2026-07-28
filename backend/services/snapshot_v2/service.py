@@ -723,13 +723,14 @@ class SnapshotService(
 
         if workflow is None:
             return
+        # Session-scoped: the eviction below makes the workflow object
+        # unreachable, so every other site frozen on this safe point (the
+        # bioinformatics step loop in particular) has to learn about it here.
+        self.safe_point.mark_superseded(self.session_id)
         try:
             workflow._restore_superseded = True
         except Exception:  # pragma: no cover - exotic workflow stand-ins
-            logger.warning(
-                "[%s] Could not mark workflow superseded after restore",
-                self.session_id,
-            )
+            pass
 
         conn = getattr(workflow, "_db_conn", None)
         if conn is not None:
@@ -1185,8 +1186,27 @@ class SnapshotService(
 
                 Returns the ObjectRef. The ``created`` flag controls
                 whether the size counts toward physical_added_bytes.
+
+                These objects were put before the runtime capture's awaits and
+                a capture writes no journal, so nothing marks them reachable in
+                between: a concurrent ensure_session_loaded() runs the
+                post-recovery GC, whose mark() sees only committed manifests
+                and journals. An ObjectPutResult therefore proves the object
+                existed *then*, not that it still exists - re-prove it here,
+                after the last suspension point, exactly as the workspace and
+                runtime refs below do, so the capture fails closed instead of
+                publishing a manifest with dangling refs.
                 """
                 ref = put_result.ref
+                if (
+                    self.object_store._get_evidence(ref.sha256) is None
+                    and not self.object_store.register_existing_ref(ref)
+                ):
+                    raise SnapshotCaptureError(
+                        "MISSING_TRANSACTION_EVIDENCE",
+                        f"Object {ref.sha256} was removed from the store "
+                        f"before this capture could publish",
+                    )
                 _record_transaction_evidence(ref)
                 _track_ref_with_result(ref, put_result)
                 return ref

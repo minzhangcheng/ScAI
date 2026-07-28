@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -22,6 +23,14 @@ from backend.utils.crypto import sign_hmac_sha256, verify_hmac_sha256
 from backend.utils.files import atomic_write_bytes as _atomic_write_bytes
 
 logger = logging.getLogger(__name__)
+
+# Identity of this process instance, stamped into the payload of journals whose
+# transaction can still be running while recovery scans the journal directory.
+# Recovery treats a journal carrying this exact id as live work, not crash
+# debris (see ``_recover_import_envelope``). Regenerated on every process start,
+# so a journal left behind by a crashed process can never claim to be live and
+# recovers exactly as it does today.
+JOURNAL_OWNER_ID = uuid.uuid4().hex
 
 
 def _legacy_unsigned(transaction_id: str, path: Path, message: str | None = None):
