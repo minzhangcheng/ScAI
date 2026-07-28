@@ -18,6 +18,23 @@ class WorkflowTerminatedError(RuntimeError):
     pass
 
 
+class WorkflowSupersededError(RuntimeError):
+    """Raised when a snapshot restore has replaced the state this run is built on.
+
+    A restore rewinds the session to an earlier point, so the graph position of
+    the run that was in flight is stale by definition — and its checkpointer is
+    still bound to the pre-restore database file, which the restore replaced by
+    rename. Letting it resume would write the old position back over the
+    restored checkpoint.
+
+    Unlike :class:`WorkflowTerminatedError` this must NOT touch session state:
+    the restore has already persisted the authoritative state, and overwriting it
+    with a terminal status is exactly the corruption we are avoiding. The run
+    loop catches this and returns the restored state untouched.
+    """
+    pass
+
+
 async def safe_pi_brief(make_awaitable, session_id: str, label: str) -> Optional[str]:
     """Run a PI brief factory, returning a stripped brief or None.
 

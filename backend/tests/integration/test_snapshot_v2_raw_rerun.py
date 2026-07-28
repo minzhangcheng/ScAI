@@ -127,7 +127,7 @@ print("custom_results created")
         capturer = RuntimeCapture(obj_store, v2_paths)
         manifest = await capturer.capture(sandbox, declared_outputs={"custom_results"})
 
-        assert "custom_results" in manifest.captured_residual_vars
+        assert "custom_results" in manifest.captured_residual_names
 
     @pytest.mark.asyncio
     async def test_required_variable_missing_raises(self, sandbox, v2_paths, service):
@@ -137,5 +137,13 @@ print("custom_results created")
 
         obj_store = ObjectStore(v2_paths)
         capturer = RuntimeCapture(obj_store, v2_paths)
+        # Since 0.33.6 the required set is tiered: an *advisory* declared output
+        # (declared_outputs/persistent_outputs) that is absent from globals is
+        # soft-skipped, because an LLM-declared name the analysis later deleted
+        # must not brick every future snapshot. A *mandatory* name — a
+        # continuation-critical checkpoint dependency — still fails closed, and
+        # that is the property this test exists to pin.
         with pytest.raises(SnapshotCaptureError):
-            await capturer.capture(sandbox, declared_outputs={"nonexistent_var"})
+            await capturer.capture(
+                sandbox, checkpoint_dependencies={"nonexistent_var"},
+            )

@@ -149,6 +149,18 @@ def sanitize_anndata_for_h5ad(adata):
         for k in list(mapping.keys()):
             v = mapping[k]
             try:
+                # h5py group names must be str. A cluster-id -> label map such as
+                # uns['cluster_labels'] = {0: 'T cell'} (or numpy integer keys)
+                # otherwise fails inside h5py with "'int' object has no attribute
+                # 'split'". Kept in sync with _SAVE_ANNDATA_TEMPLATE.
+                if not isinstance(k, str):
+                    new_k = str(k)
+                    del mapping[k]
+                    if new_k in mapping:
+                        # Renaming would clobber a real entry; drop instead.
+                        continue
+                    mapping[new_k] = v
+                    k = new_k
                 # Nested metadata dict: recurse, keep structure.
                 if isinstance(v, dict):
                     _sanitize_uns_mapping(v)

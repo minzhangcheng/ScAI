@@ -84,6 +84,23 @@ def _stream_copy(src: Path, dst: Path) -> None:
         os.close(dfd)
 
 
+def _discard_sqlite_db(db_path: Path) -> None:
+    """Remove a SQLite database together with its -wal/-shm companions.
+
+    A WAL-mode database is three files, so unlinking only the main one leaves
+    companions that the next connection replays into a half-existing database.
+    Callers use this when the whole DB should be gone — never when the main file
+    is being *replaced*, where the surviving WAL still belongs to it.
+    """
+    db_path = Path(str(db_path))
+    for path in (
+        db_path,
+        db_path.with_name(db_path.name + "-wal"),
+        db_path.with_name(db_path.name + "-shm"),
+    ):
+        path.unlink(missing_ok=True)
+
+
 def _clear_path(path) -> None:
     path = Path(str(path))
     if path.exists():
@@ -190,6 +207,9 @@ class _RecoveryRestorer:
 
         object_store = ObjectStore(self.paths)
         rsc = pre_manifest.runtime
+        # Object hashes are the h5ad file contents, so they are exactly what the
+        # live sidecar manifest must record (see the rewrite below).
+        restored_h5ad_hashes: dict[str, str] = {}
         if rsc is not None:
             for var_name, ref in (rsc.adata_refs or {}).items():
                 try:
@@ -203,6 +223,7 @@ class _RecoveryRestorer:
                         )
                     dst = runtime_h5ad_path(self.states_root, var_name)
                     _stream_copy(src, dst)
+                    restored_h5ad_hashes[var_name] = ref.sha256
                 except RecoveryFailure:
                     raise
                 except Exception as exc:
@@ -238,6 +259,39 @@ class _RecoveryRestorer:
                         f"failed to restore residual pkl: {exc}",
                     ) from exc
 
+        # Rewrite the live h5ad sidecar manifest to match what we just put back.
+        # The forward path does this via install_live_runtime_h5ad_set(), but
+        # rollback copied the sidecars with a bare _stream_copy and left the
+        # manifest describing the TARGET snapshot. The kernel checks each h5ad
+        # against those hashes on restore and refuses to rehydrate on mismatch,
+        # so the rollback meant to rescue the session was what stopped its kernel
+        # from starting. Written unconditionally — when pre_restore had no h5ad
+        # runtime the correct manifest is an empty one, not a stale one.
+        rollback_session_id = (
+            journal.get("session_id")
+            or getattr(pre_manifest, "session_id", "")
+            or ""
+        )
+        if rollback_session_id:
+            try:
+                from backend.utils.runtime_apply import (
+                    finalize_live_runtime_h5ad_set,
+                )
+
+                # Also quarantines sidecars the TARGET installed that pre_restore
+                # does not name — rewriting the manifest alone would leave those
+                # files live in the states dir, so the rollback would not fully
+                # undo the restore.
+                finalize_live_runtime_h5ad_set(
+                    rollback_session_id, restored_h5ad_hashes,
+                )
+            except Exception as exc:
+                raise RecoveryFailure(
+                    "PRE_RESTORE_APPLY_FAILED",
+                    f"failed to rewrite h5ad manifest during rollback: {exc}",
+                    details={"vars": sorted(restored_h5ad_hashes)},
+                ) from exc
+
         # Analysis state / notebook if declared on pre_restore
         if getattr(pre_manifest, "analysis_state_ref", None) is not None:
             try:
@@ -265,6 +319,55 @@ class _RecoveryRestorer:
                 raise RecoveryFailure(
                     "PRE_RESTORE_APPLY_FAILED",
                     f"failed to restore notebook: {exc}",
+                ) from exc
+
+        # The LangGraph checkpoint decides which graph node the session resumes
+        # at. apply() replaces it with the target snapshot's copy
+        # (restore_parts/coordinator.py), so a rollback that skips it leaves the
+        # session resuming from the TARGET position against a pre_restore
+        # workspace and runtime — the node's expected values simply are not
+        # there. forward_complete() already restores the checkpoint on its half
+        # of recovery; this is the missing mirror image. Restored last, so a
+        # crash mid-rollback leaves the journal and the next boot re-runs this
+        # (idempotent) rollback.
+        ckpt_dst = checkpoint_sqlite_path(self.states_root)
+        ckpt_ref = getattr(pre_manifest, "checkpoint_ref", None)
+        if ckpt_ref is not None:
+            try:
+                object_store.verify(ckpt_ref)
+                src = Path(str(self.paths.objects)) / ckpt_ref.sha256
+                if not src.exists():
+                    raise RecoveryFailure(
+                        "PRE_RESTORE_OBJECT_MISSING",
+                        f"checkpoint object missing: {ckpt_ref.sha256}",
+                        details={"sha256": ckpt_ref.sha256},
+                    )
+                # The -wal/-shm companions are deliberately left in place.
+                # LangGraph runs this DB in WAL mode and capture stored the MAIN
+                # FILE only, so commits still sitting in the WAL were never in
+                # the snapshot. apply() replaced only the main file, so that WAL
+                # still belongs to the very file being put back and replaying it
+                # restores the graph progress the snapshot could not capture.
+                # Measured: keeping it yields [PRE_A, PRE_IN_WAL] with
+                # integrity_check ok; deleting it silently drops PRE_IN_WAL.
+                _stream_copy(src, ckpt_dst)
+            except RecoveryFailure:
+                raise
+            except Exception as exc:
+                raise RecoveryFailure(
+                    "PRE_RESTORE_APPLY_FAILED",
+                    f"failed to restore checkpoint: {exc}",
+                ) from exc
+        else:
+            # pre_restore had no checkpoint DB, so the session had none either:
+            # whatever is live now was seeded by apply() from the target, and any
+            # companion can only belong to that. Remove the whole triple.
+            try:
+                _discard_sqlite_db(ckpt_dst)
+            except OSError as exc:
+                raise RecoveryFailure(
+                    "PRE_RESTORE_APPLY_FAILED",
+                    f"failed to discard target checkpoint during rollback: {exc}",
                 ) from exc
 
         logger.info(

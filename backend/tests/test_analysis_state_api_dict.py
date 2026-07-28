@@ -82,6 +82,11 @@ class TestAnalysisStateApiDictRoundTrip:
             "snapshot_failure",
             "snapshot_transaction",
             "pending_required_snapshot",
+            # Promoted onto the api dict in ver 0.34.7 and consumed by the
+            # frontend (utils/transformLoadResponse.ts, hooks/api/useWebSocket.ts).
+            "wait_input_reason",
+            "llm_failure_info",
+            "agent_disabled_info",
         }
         assert set(api.keys()) == expected_keys
 

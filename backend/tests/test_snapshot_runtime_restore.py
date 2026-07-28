@@ -54,7 +54,15 @@ async def test_rollback_preview_reports_runtime_status(monkeypatch):
 
     sid = "sess-preview-status"
     state = AnalysisState(session_id=sid, user_id="u1")
-    snap = Snapshot(name="t", phase="manual", runtime_state_included=False)
+    # rollback_preview goes through _require_v1_snapshot (ver 0.33.14), which
+    # rejects a snapshot with no state_file as "not a valid V1 file-backed
+    # snapshot". A real V1 inventory snapshot always has one.
+    snap = Snapshot(
+        name="t",
+        phase="manual",
+        runtime_state_included=False,
+        state_file="snap-t_state.json",
+    )
     state.snapshots.append(snap)
 
     async def fake_owner(session_id, user_id):

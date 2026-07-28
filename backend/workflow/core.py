@@ -64,7 +64,10 @@ from ..config import SystemConfig, get_session_workspace, get_session_states
 
 # Defined in helpers.py (dependency-free) and re-exported here for backward
 # compatibility — existing code imports it via `from .core import WorkflowTerminatedError`.
-from .helpers import WorkflowTerminatedError  # noqa: E402,F401
+from .helpers import (  # noqa: E402,F401
+    WorkflowSupersededError,
+    WorkflowTerminatedError,
+)
 
 
 class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, CallbacksMixin, AnnotationMixin, PlanningMixin, AgentNodesMixin, SynthesisMixin, InitializeMixin, GraphMixin, ReportingMixin, IntegrationMixin):
@@ -581,6 +584,23 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             await sp.wait_for(self.session_id)
             logger.info(f"[{self.session_id}] Restore safe-point released; resuming")
 
+            # If a restore committed while we were frozen, this run is finished.
+            # Its graph position predates the restore, and — decisively — its
+            # checkpointer still holds an open connection to the checkpoint
+            # database file that the restore replaced by rename. On POSIX that fd
+            # still points at the old, now-unlinked inode, so resuming here would
+            # read the pre-restore position and write it back, silently undoing
+            # the restore. Unwind instead and let the next run rebuild the
+            # workflow (and its connection) from the restored checkpoint.
+            if getattr(self, "_restore_superseded", False):
+                logger.info(
+                    f"[{self.session_id}] Run superseded by a snapshot restore; "
+                    f"unwinding so the restored checkpoint takes effect"
+                )
+                raise WorkflowSupersededError(
+                    "snapshot restore replaced this run's checkpoint"
+                )
+
     def signal_annotation_confirmed(self):
         """Signal that user has confirmed cell type annotations"""
         self._annotation_event.set()
@@ -925,6 +945,39 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         if not is_snapshot_v2_enabled():
             return None
 
+        from ..services.snapshot_v2.safe_point import (
+            get_snapshot_safe_point_manager,
+        )
+
+        # A restore job reserves the safe point and then waits for the workflow
+        # to acknowledge it at a boundary. This *is* that boundary, so hand the
+        # reservation over before capturing.
+        #
+        # Without this the capture below takes the normal acquire path, which
+        # refuses while any request is pending (safe_point._acquire_unlocked
+        # treats pending and held alike). The resulting SAFE_POINT_BUSY becomes
+        # RequiredSnapshotBlocked and aborts the whole graph invocation — so the
+        # workflow never reaches another acknowledgement site, the reservation is
+        # never honoured, and the restore waits out its full timeout while the
+        # session sits in the snapshot-failure gate. The user's restore request
+        # destroyed the running analysis and then failed.
+        #
+        # Only yield for a *pending* request. An already-acquired foreign hold
+        # must keep failing closed, so a leaked hold stays a visible gate rather
+        # than turning into an unbounded wait here.
+        if get_snapshot_safe_point_manager().has_pending_request(self.session_id):
+            import inspect
+
+            # getattr/isawaitable is this file family's idiom for boundary hooks
+            # (synthesis.py, planning.py, retry.py) and is required: tests bind
+            # _create_auto_snapshot onto bare mocks and harnesses that do not
+            # implement this method.
+            await_restore = getattr(self, "await_restore_safe_point", None)
+            if callable(await_restore):
+                result = await_restore()
+                if inspect.isawaitable(result):
+                    await result
+
         from ..services.snapshot_v2.failure_gate import consume_snapshot_skip
 
         if consume_snapshot_skip(state, phase):
@@ -1218,6 +1271,15 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             )
             logger.info(f"Workflow completed for {thread_id}")
             return final_state["analysis_state"]
+
+        except WorkflowSupersededError as e:
+            # Deliberately does NOT touch session state: the restore already
+            # persisted the authoritative state, and a terminal status written
+            # here would overwrite exactly what the restore just installed.
+            logger.info(f"[{self.session_id}] Run superseded by restore: {e}")
+            from ..state import sessions as live_sessions
+
+            return live_sessions.get(self.session_id) or initial_state
 
         except WorkflowTerminatedError as e:
             logger.warning(f"[{self.session_id}] Workflow terminated by user: {e}")
@@ -1577,6 +1639,16 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
                 )
                 logger.info(f"[{self.session_id}] Workflow resumed and completed")
                 return final_state["analysis_state"]
+            except WorkflowSupersededError as e:
+                logger.info(f"[{self.session_id}] Resume superseded by restore: {e}")
+                from ..state import sessions as live_sessions
+
+                return (
+                    live_sessions.get(self.session_id)
+                    or analysis_state
+                    or state.values.get("analysis_state")
+                )
+
             except WorkflowTerminatedError as e:
                 logger.warning(f"[{self.session_id}] Workflow terminated by user: {e}")
                 effective = analysis_state or state.values.get("analysis_state")
@@ -1632,6 +1704,12 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
                 logger.info(f"[{self.session_id}] Exact graph-node continuation completed")
                 self._consume_restore_resume_metadata(final_state["analysis_state"])
                 return final_state["analysis_state"]
+            except WorkflowSupersededError as e:
+                logger.info(f"[{self.session_id}] Resume superseded by restore: {e}")
+                from ..state import sessions as live_sessions
+
+                return live_sessions.get(self.session_id) or analysis_state
+
             except WorkflowTerminatedError as e:
                 logger.warning(f"[{self.session_id}] Workflow terminated by user: {e}")
                 if analysis_state:

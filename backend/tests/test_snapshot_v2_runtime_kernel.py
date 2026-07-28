@@ -74,9 +74,13 @@ print("adata created:", adata.shape)
         capturer = RuntimeCapture(obj_store, v2_paths)
         manifest = await capturer.capture(sandbox, declared_outputs={"adata"})
 
-        assert manifest.capture_command == "runtime_capture_v2"
-        assert manifest.kernel_id == sandbox.session_id
-        assert "adata" in manifest.captured_adata_vars
+        # capture_command/kernel_id were provenance echoes on the deleted
+        # _RuntimeCaptureResult wrapper and have no RuntimeManifest successor
+        # (provenance moved to SnapshotManifestV2.session_id/created_at).
+        # Assert the manifest's own completeness proof instead.
+        assert manifest.status == "complete"
+        assert "adata" in manifest.dependencies.required
+        assert "adata" in manifest.adata_refs
 
     @pytest.mark.asyncio
     async def test_anndata_with_raw_roundtrip(self, sandbox, v2_paths):
@@ -104,9 +108,9 @@ print("adata with raw/layers/obsm/varm/obsp/uns/categoricals created")
         capturer = RuntimeCapture(obj_store, v2_paths)
         manifest = await capturer.capture(sandbox, declared_outputs={"adata"})
 
-        assert "adata" in manifest.captured_adata_vars
-        assert len(manifest.captured_adata_refs) == 1
-        ref = manifest.captured_adata_refs["adata"]
+        assert "adata" in manifest.adata_refs
+        assert len(manifest.adata_refs) == 1
+        ref = manifest.adata_refs["adata"]
         assert ref.sha256 != "0" * 64
         assert ref.size > 0
 
@@ -132,9 +136,9 @@ print("three adata objects created")
         capturer = RuntimeCapture(obj_store, v2_paths)
         manifest = await capturer.capture(sandbox, declared_outputs=set())
 
-        assert "adata1" in manifest.captured_adata_vars
-        assert "adata2" in manifest.captured_adata_vars
-        assert "adata3" in manifest.captured_adata_vars
+        assert "adata1" in manifest.adata_refs
+        assert "adata2" in manifest.adata_refs
+        assert "adata3" in manifest.adata_refs
 
     @pytest.mark.asyncio
     async def test_cross_cell_promoted_variable(self, sandbox, v2_paths):
@@ -155,8 +159,8 @@ print("adata + shared_results created")
         capturer = RuntimeCapture(obj_store, v2_paths)
         manifest = await capturer.capture(sandbox, declared_outputs={"shared_results"})
 
-        assert "adata" in manifest.captured_adata_vars
-        assert "shared_results" in manifest.captured_residual_vars or "shared_results" in manifest.captured_adata_vars
+        assert "adata" in manifest.adata_refs
+        assert "shared_results" in manifest.captured_residual_names or "shared_results" in manifest.adata_refs
 
     @pytest.mark.asyncio
     async def test_required_variable_failure_raises_capture_error(self, sandbox, v2_paths):
@@ -166,8 +170,16 @@ print("adata + shared_results created")
 
         obj_store = ObjectStore(v2_paths)
         capturer = RuntimeCapture(obj_store, v2_paths)
+        # Since 0.33.6 the required set is tiered: an *advisory* declared output
+        # (declared_outputs/persistent_outputs) that is absent from globals is
+        # soft-skipped, because an LLM-declared name the analysis later deleted
+        # must not brick every future snapshot. A *mandatory* name — a
+        # continuation-critical checkpoint dependency — still fails closed, and
+        # that is the property this test exists to pin.
         with pytest.raises(SnapshotCaptureError):
-            await capturer.capture(sandbox, declared_outputs={"nonexistent_var"})
+            await capturer.capture(
+                sandbox, checkpoint_dependencies={"nonexistent_var"},
+            )
 
     @pytest.mark.asyncio
     async def test_sparse_anndata_h5ad(self, sandbox, v2_paths):
@@ -189,7 +201,7 @@ print("sparse adata created")
         capturer = RuntimeCapture(obj_store, v2_paths)
         manifest = await capturer.capture(sandbox, declared_outputs=set())
 
-        assert "adata_sparse" in manifest.captured_adata_vars
+        assert "adata_sparse" in manifest.adata_refs
 
     @pytest.mark.asyncio
     async def test_dense_anndata_h5ad(self, sandbox, v2_paths):
@@ -208,7 +220,7 @@ print("dense adata created")
         obj_store = ObjectStore(v2_paths)
         capturer = RuntimeCapture(obj_store, v2_paths)
         manifest = await capturer.capture(sandbox, declared_outputs=set())
-        assert "adata_dense" in manifest.captured_adata_vars
+        assert "adata_dense" in manifest.adata_refs
 
 
 class TestRuntimeFreeSpaceGate:
@@ -343,7 +355,7 @@ print("adata created")
         obj_store = ObjectStore(v2_paths)
         capturer = RuntimeCapture(obj_store, v2_paths)
         manifest = await capturer.capture(sandbox, declared_outputs=set())
-        assert "adata" in manifest.captured_adata_vars
+        assert "adata" in manifest.adata_refs
 
     @pytest.mark.asyncio
     async def test_disk_full_raises_error(self, sandbox, v2_paths):

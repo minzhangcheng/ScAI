@@ -475,6 +475,49 @@ class SnapshotService(
 
             _status("applying", recovery_mode=recovery_mode)
 
+            # A terminal/idle capsule resumes nothing, so the kernel that
+            # predates the restore must not survive as this session's runtime.
+            # Tear it down HERE, before apply.
+            #
+            # sandbox.stop() is not a bare shutdown: it ends with save_session()
+            # + a notebook save, which write the very live pkl and notebook that
+            # apply() installs and _verify_live_restore then hashes against the
+            # target manifest. Running it after apply meant the session's own
+            # teardown overwrote what the restore had just installed, and every
+            # terminal-capsule restore died LIVE_VERIFY_FAILED -> RECOVERY_BLOCKED.
+            # Run it before apply and that save is harmless: apply overwrites it
+            # moments later, and if apply fails nothing is lost — pre_restore
+            # captured the same kernel and rollback re-installs its residual.
+            # Retire the pre-restore run BEFORE apply replaces the checkpoint DB.
+            #
+            # This is a correctness requirement, not tidiness. LangGraph opens
+            # states/checkpoints.sqlite in WAL mode, so it is three files, and
+            # apply() replaces only the main one. Leave the live connection open
+            # and the stale -wal/-shm survive: a rebuilt connection replays them
+            # and reads the PRE-restore graph position, and when the stale
+            # connection finally closes it checkpoints those frames into the
+            # restored main file — destroying the restored bytes for good. The
+            # restore still reports committed, because _verify_live_restore
+            # hashes the main file while it does briefly hold the staged bytes.
+            # Closing first removes -wal/-shm, and only then is the os.replace
+            # visible to everyone afterwards.
+            await self._retire_superseded_workflow(workflow)
+
+            if capsule_kind in ("terminal", "idle"):
+                if workflow is not None and getattr(workflow, "sandbox", None):
+                    try:
+                        stop = getattr(workflow.sandbox, "stop", None)
+                        if stop is not None:
+                            maybe = stop()
+                            if asyncio.iscoroutine(maybe):
+                                await maybe
+                    except Exception as exc:
+                        logger.warning(
+                            "[%s] terminal/idle kernel teardown failed: %s",
+                            self.session_id, exc,
+                        )
+                    workflow.sandbox = None
+
             try:
                 applied_result = await self.restore_coordinator.apply(
                     staged,
@@ -566,28 +609,13 @@ class SnapshotService(
                     failure=self._partial_apply_failure(exc.code, str(exc)),
                 )
 
-            # Terminal/idle: quarantine unrelated live kernel before exposing session.
-            if staged_ckpt.kind in ("terminal", "idle"):
-                try:
-                    from backend.utils.runtime_apply import quarantine_live_runtime
-                    if request.runtime_choice == "reset" or staged_ckpt.kind == "terminal":
-                        quarantine_live_runtime(self.session_id)
-                    if workflow is not None and hasattr(workflow, "sandbox") and workflow.sandbox:
-                        # Do not trust live kernel as continuation runtime.
-                        try:
-                            stop = getattr(workflow.sandbox, "stop", None)
-                            if stop is not None:
-                                maybe = stop()
-                                if asyncio.iscoroutine(maybe):
-                                    await maybe
-                        except Exception:
-                            pass
-                        workflow.sandbox = None
-                except Exception as exc:
-                    logger.warning(
-                        "[%s] terminal/idle kernel quarantine failed: %s",
-                        self.session_id, exc,
-                    )
+            # NOTE: the terminal/idle kernel teardown that used to live here has
+            # moved to just before apply(). apply() is the sole authority on live
+            # runtime in every branch — it installs the target's pkl/h5ad set for
+            # a complete runtime, quarantines for empty-complete and for
+            # non-complete+reset, and deliberately keeps the live one for
+            # non-complete+keep — so anything touching runtime files after it ran
+            # was overwriting a decision apply had already made correctly.
 
             # semantic_gate: rebuild exact waiting payload via activate
             # graph_node: seed exact next-node via activate
@@ -668,6 +696,73 @@ class SnapshotService(
 
 
 
+
+    async def _retire_superseded_workflow(self, workflow: Any) -> None:
+        """Retire the pre-restore run so apply() can replace the checkpoint DB.
+
+        Three things, in this order:
+
+        1. Flag the run superseded. It is frozen in ``await_restore_safe_point``;
+           when the safe point releases it sees the flag and unwinds via
+           ``WorkflowSupersededError`` without touching session state (the
+           restore persists the authoritative state itself). Continuing is never
+           right — the run's graph position predates the restore by definition.
+        2. Close the checkpointer connection. REQUIRED: the DB is in WAL mode, so
+           an open connection means live ``-wal``/``-shm`` that survive apply()'s
+           replacement of the main file and are replayed over it afterwards.
+        3. Evict it, so the next run builds a fresh workflow and connection
+           against the restored file.
+
+        Deliberately does NOT call ``workflow.close()``: that stops the sandbox,
+        which ends in ``save_session()`` + a notebook save — writing the very
+        artifacts apply() is about to install.
+
+        Best-effort: a restore must not fail over bookkeeping.
+        """
+        from backend.state import workflows
+
+        if workflow is None:
+            return
+        try:
+            workflow._restore_superseded = True
+        except Exception:  # pragma: no cover - exotic workflow stand-ins
+            logger.warning(
+                "[%s] Could not mark workflow superseded after restore",
+                self.session_id,
+            )
+
+        conn = getattr(workflow, "_db_conn", None)
+        if conn is not None:
+            try:
+                await conn.close()
+            except Exception:
+                logger.warning(
+                    "[%s] Could not close the pre-restore checkpoint connection; "
+                    "stale -wal may shadow the restored checkpoint",
+                    self.session_id,
+                    exc_info=True,
+                )
+            # Cleared regardless: core.py rebuilds the checkpointer when
+            # _db_conn is None, and a half-closed handle must not be reused.
+            for attr in ("_db_conn", "checkpointer", "compiled_graph"):
+                try:
+                    setattr(workflow, attr, None)
+                except Exception:
+                    pass
+        try:
+            # Only evict the object we actually superseded — a workflow rebuilt
+            # concurrently is already reading the restored checkpoint.
+            if workflows.get(self.session_id) is workflow:
+                workflows.pop(self.session_id, None)
+                logger.info(
+                    "[%s] Retired the pre-restore workflow; the next run rebuilds "
+                    "it against the restored checkpoint",
+                    self.session_id,
+                )
+        except Exception:
+            logger.exception(
+                "[%s] Failed to evict superseded workflow", self.session_id,
+            )
 
     async def capture_required_snapshot(
         self,
@@ -912,6 +1007,11 @@ class SnapshotService(
         # create/release it or pre_restore capture would unpause the workflow.
         if not skip_safe_point_lifecycle:
             await self._create_safe_point(workflow_state or {})
+
+        # Released either at Step 11 (success) or by the finally below. The flag
+        # keeps the success path's ordering — release before returning the
+        # manifest — without letting the finally double-release.
+        safe_point_released = False
 
         try:
             # Consistency barrier: await pending saves before freezing execution.
@@ -1286,6 +1386,7 @@ class SnapshotService(
             # restore already owns the cooperative safe point).
             if not skip_safe_point_lifecycle:
                 await self._release_safe_point()
+                safe_point_released = True
 
             # Step 12 — return committed manifest + pending flag (no private attr)
             return reloaded, session_reconciliation_pending
@@ -1295,17 +1396,29 @@ class SnapshotService(
                 self._cleanup_unpublished_capture_objects(
                     existing_object_hashes_before_capture,
                 )
-            if not skip_safe_point_lifecycle:
-                await self._release_safe_point()
             raise
         except Exception as exc:
             if object_baseline_captured and not manifest_published:
                 self._cleanup_unpublished_capture_objects(
                     existing_object_hashes_before_capture,
                 )
-            if not skip_safe_point_lifecycle:
-                await self._release_safe_point()
             raise SnapshotCaptureError("CAPTURE_FAILED", str(exc))
+        finally:
+            # The safe point MUST NOT outlive this call, including when the
+            # capture task is cancelled. asyncio.CancelledError derives from
+            # BaseException, so the two except clauses above never saw it: a user
+            # pressing Stop (lifecycle.py task.cancel()) or a workflow teardown
+            # mid-capture left the hold in the process-wide SafePointManager
+            # forever, and from then on every capture and restore for that
+            # session failed SAFE_POINT_BUSY / blocked in await_restore_safe_point
+            # until the server was restarted.
+            #
+            # shield() keeps the release itself from being cancelled partway; if
+            # the surrounding task is cancelled again while we wait, the shielded
+            # release still runs to completion and the CancelledError propagates
+            # as it should.
+            if not skip_safe_point_lifecycle and not safe_point_released:
+                await asyncio.shield(self._release_safe_point())
 
     # ── Content capture helpers ──────────────────────────────────────
 

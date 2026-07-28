@@ -480,6 +480,25 @@ def _quarantine_unreferenced_live_h5ads(
         _quarantine_path(p)
 
 
+def finalize_live_runtime_h5ad_set(
+    session_id: str,
+    h5ad_hashes: dict[str, str],
+) -> None:
+    """Make the live sidecar set and its manifest describe exactly *h5ad_hashes*.
+
+    Sandbox restore refuses to rehydrate an h5ad whose sha256 disagrees with its
+    manifest entry, so the files and ``runtime_h5ad_manifest.json`` must never be
+    updated apart — and a sidecar nobody names must not be left lying in the
+    states dir, where the `*.h5ad` sweep would still find it.
+
+    Split out for callers that already placed the bytes themselves: recovery
+    rollback streams them straight out of the object store, so completing the set
+    must not cost a second full-size copy.
+    """
+    _quarantine_unreferenced_live_h5ads(session_id, set(h5ad_hashes))
+    write_runtime_h5ad_manifest(session_id, h5ad_hashes)
+
+
 def install_live_runtime_h5ad_set(
     session_id: str,
     staged_h5ads: dict[str, str],
@@ -496,6 +515,5 @@ def install_live_runtime_h5ad_set(
         h5ad_hashes[var_name] = atomic_replace_h5ad(
             session_id, h5ad_path, var_name=var_name,
         )
-    _quarantine_unreferenced_live_h5ads(session_id, set(h5ad_hashes))
-    write_runtime_h5ad_manifest(session_id, h5ad_hashes)
+    finalize_live_runtime_h5ad_set(session_id, h5ad_hashes)
     return h5ad_hashes

@@ -82,6 +82,12 @@ async def test_session_save_failure_after_publish_returns_committed_snapshot(
                         sandbox=None,
                         workflow_state={"kernel_present": False},
                         workspace_root=str(workspace),
+                        # This test holds the safe point itself; a caller that
+                        # does must hand the token down, or the capture tries to
+                        # re-acquire and gets SAFE_POINT_BUSY. Mirrors the one
+                        # production caller that pre-acquires
+                        # (workflow/reporting.py).
+                        safe_point_owner_token="test-owner",
                     )
     finally:
         await service.safe_point.release(session_id, "test-owner")
@@ -132,12 +138,14 @@ async def test_idempotent_retry_after_session_save_failure(tmp_path, v2_paths):
                         state, _req(), sandbox=None,
                         workflow_state={"kernel_present": False},
                         workspace_root=str(workspace),
+                        safe_point_owner_token="test-owner",
                     )
                 with patch.object(service, "_save_session_state", new=AsyncMock()):
                     second = await service.capture_required_snapshot(
                         state, _req(), sandbox=None,
                         workflow_state={"kernel_present": False},
                         workspace_root=str(workspace),
+                        safe_point_owner_token="test-owner",
                     )
     finally:
         await service.safe_point.release(session_id, "test-owner")

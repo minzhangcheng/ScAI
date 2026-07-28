@@ -104,7 +104,9 @@ class TestConfigV1Validation:
     def test_literature_max_search_rounds_default(self):
         cfg = _valid_config()
         c = ConfigV1.model_validate(cfg)
-        assert c.api_config.literature.max_search_rounds == 10
+        # Product default raised 10 -> 20 in ver 0.34.7 across every config
+        # layer (models/config_schema.py:35).
+        assert c.api_config.literature.max_search_rounds == 20
 
     def test_literature_max_search_rounds_bounds(self):
         cfg = _valid_config()

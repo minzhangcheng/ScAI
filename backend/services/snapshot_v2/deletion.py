@@ -478,24 +478,39 @@ class DeletionService:
         deleted_ids: list[str] = []
 
         for sid in snapshot_ids:
-            committed_path = Path(str(self.paths.committed)) / f"{sid}.json"
-            if not committed_path.exists():
+            marker_path = ManifestStore._pending_marker_path(
+                self.paths.committed, sid,
+            )
+            # The marker is what makes a manifest "pending import", so it is the
+            # only safe authorization to delete one. *snapshot_ids* is supplied
+            # by the caller (an import rollback), and a retried or stale rollback
+            # can name an id that has since been published — by this import's own
+            # successful retry, or by an unrelated capture that reused the id.
+            # Without this check that snapshot is silently destroyed.
+            if not marker_path.exists():
                 continue
 
-            try:
-                manifest = SnapshotManifestV2.model_validate_json(
-                    committed_path.read_bytes(),
-                )
-            except Exception:
-                continue  # skip unreadable; sweep will handle orphan objects
+            committed_path = Path(str(self.paths.committed)) / f"{sid}.json"
+            manifest = None
+            if committed_path.exists():
+                try:
+                    manifest = SnapshotManifestV2.model_validate_json(
+                        committed_path.read_bytes(),
+                    )
+                except Exception:
+                    # Unreadable pending manifest: drop it and let the sweep
+                    # reclaim its objects. Leaving it in place would keep the
+                    # marker alive and block GC (see below).
+                    manifest = None
 
-            # Remove only objects unique to this pending manifest
-            for sha256 in manifest.objects.keys():
-                if sha256 not in surviving_objects:
-                    obj_path = Path(str(self.paths.objects)) / sha256
-                    if obj_path.exists():
-                        freed_bytes += obj_path.stat().st_size
-                        obj_path.unlink()
+            if manifest is not None:
+                # Remove only objects unique to this pending manifest
+                for sha256 in manifest.objects.keys():
+                    if sha256 not in surviving_objects:
+                        obj_path = Path(str(self.paths.objects)) / sha256
+                        if obj_path.exists():
+                            freed_bytes += obj_path.stat().st_size
+                            obj_path.unlink()
 
             # Remove committed JSON
             committed_path.unlink(missing_ok=True)
@@ -504,10 +519,12 @@ class DeletionService:
             sig_path = Path(str(self.paths.integrity)) / f"{sid}.sig"
             sig_path.unlink(missing_ok=True)
 
-            # Remove pending-import marker
-            marker_path = ManifestStore._pending_marker_path(
-                self.paths.committed, sid,
-            )
+            # Remove the pending-import marker LAST, and unconditionally — an
+            # import that died between mark_pending_imports() and publish leaves
+            # a marker whose manifest never existed. This used to `continue`
+            # before reaching here, so that orphan survived every rollback and
+            # permanently failed GC (gc.py loads a manifest per marker) and
+            # therefore every delete for the session.
             marker_path.unlink(missing_ok=True)
 
             deleted_ids.append(sid)

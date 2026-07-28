@@ -336,6 +336,11 @@ class RuntimeCapture:
         # advisory names are removed from it and recorded as incidental skips.
         pruned_required = dict(dep_manifest.required)
 
+        # Advisory names dropped from the required set even though the value was
+        # LIVE in kernel globals. Dropping an absent name loses nothing (the user
+        # already deleted it); dropping a present one discards real state.
+        dropped_present: set[str] = set()
+
         def _soft_skip_absent(name: str, serializer: str) -> None:
             type_str = dep_manifest.required[name].type_name
             incidental_skips.append(
@@ -464,6 +469,7 @@ class RuntimeCapture:
                         )
                     )
                     pruned_required.pop(n, None)
+                    dropped_present.add(n)
                 if mandatory_skipped:
                     first = sorted(mandatory_skipped)[0]
                     self._raise_unpersistable(
@@ -506,6 +512,32 @@ class RuntimeCapture:
                         )
                     captured_residual_vars = list(residual_names_saved)
                     captured_residual_ref = ref
+
+            # Fail closed when a live kernel had a required value PRESENT in
+            # globals, it could not be serialized, and NOTHING survived capture.
+            # Advisory soft-skip exists so one unpersistable value cannot brick a
+            # snapshot that still holds real runtime — it must not publish a
+            # runtime marked "complete" with zero content. This is the
+            # post-pruning form of the rule already enforced above (a live kernel
+            # with an empty required set is fail-closed; empty is only valid when
+            # kernel_present=False), and it fails closed for the same reason.
+            if (
+                dropped_present
+                and not pruned_required
+                and not captured_adata_refs
+                and not captured_residual_vars
+            ):
+                first = sorted(dropped_present)[0]
+                self._raise_unpersistable(
+                    first,
+                    dep_manifest.required[first].type_name,
+                    dep_manifest.required[first].serializer,
+                    (
+                        "could not be serialized and no other required runtime "
+                        "value survived capture (dropped live values: "
+                        f"{sorted(dropped_present)})"
+                    ),
+                )
 
             # Capacity gate (post-write): objects are already in the store, so
             # disk free already accounts for payload. Require remaining free

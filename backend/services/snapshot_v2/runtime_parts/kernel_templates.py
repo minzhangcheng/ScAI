@@ -136,6 +136,23 @@ if _adata is not None:
         for _k in list(_mapping.keys()):
             _v = _mapping[_k]
             try:
+                # h5py group names must be str. A cluster-id -> label map under
+                # uns (integer or numpy-integer keys, which scanpy workflows
+                # produce routinely) otherwise fails deep inside h5py with
+                # "'int' object has no attribute 'split'" and takes the whole
+                # required capture down with it.
+                # NB: this is a .format() template — never write a literal brace
+                # here; str.format reads it as a replacement field.
+                if not isinstance(_k, str):
+                    _new_k = str(_k)
+                    del _mapping[_k]
+                    if _new_k in _mapping:
+                        # Renaming would clobber a real entry; drop instead of
+                        # silently overwriting the user's data.
+                        print('__H5AD_SANITIZE_DROP__:uns/' + _new_k + ':key-collision')
+                        continue
+                    _mapping[_new_k] = _v
+                    _k = _new_k
                 # Nested metadata dict (neighbors, log1p, pca,
                 # rank_genes_groups, ...): recurse, keep structure.
                 if isinstance(_v, dict):

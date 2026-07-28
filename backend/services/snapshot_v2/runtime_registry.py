@@ -35,10 +35,33 @@ CANONICAL_RUNTIME_ARTIFACTS: frozenset[str] = frozenset({
 
 
 def _is_anndata_type(type_str: str) -> bool:
+    """True only for AnnData itself — the one type the h5ad writer can handle.
+
+    ``type_str`` is ``<module>.<qualname>`` as produced by the kernel
+    introspection template.
+
+    This used to substring-match ``"anndata"``, which also matched the package's
+    internal helper types: ``anndata._core.raw.Raw``,
+    ``anndata._core.aligned_mapping.AxisArrays``,
+    ``anndata._core.views.ArrayView`` and friends. None of those have a
+    ``.write()`` method, yet every match was marked *required* with
+    ``serializer="h5ad"`` — so one ordinary ``raw = adata.raw`` left bound in the
+    namespace made the h5ad template raise ``AttributeError: 'Raw' object has no
+    attribute 'write'``, failed the required capture closed, and parked the
+    session behind the snapshot HITL gate where Retry reproduced it forever.
+
+    The kernel introspection template already makes the right call: it tags a
+    genuine AnnData (``isinstance`` check, so slices count too) as
+    ``"AnnData(<shape>)"`` and every other object as ``"<module>.<qualname>"``.
+    Matching those two shapes is therefore exact, and the helper types land in
+    dill — which serializes them fine. A slower path, never a stuck one.
+    """
     if not type_str:
         return False
-    lowered = type_str.lower()
-    return "anndata" in lowered or "AnnData" in type_str
+    text = type_str.strip()
+    if text.startswith("AnnData("):
+        return True
+    return text.rsplit(".", 1)[-1] == "AnnData"
 
 
 _KNOWN_UNPERSISTABLE_RESIDUAL_MARKERS: tuple[str, ...] = (

@@ -79,6 +79,22 @@ class SnapshotGarbageCollector:
             Path(str(self.paths.committed)),
         )
         for sid in pending_ids:
+            # An import marks every planned id pending BEFORE publishing any
+            # manifest, so a crash in between leaves a marker whose manifest
+            # never landed. Loading it raised, which aborted the whole sweep —
+            # and since GC is the only reclaimer and deletion re-verifies too,
+            # one orphan marker permanently bricked both, with no repair path.
+            # There is nothing to protect for a manifest that does not exist, so
+            # skip it; the import-rollback path removes the marker itself.
+            # A manifest that DOES exist but fails verification still raises —
+            # that is a real integrity problem, not a crash leftover.
+            committed_path = Path(str(self.paths.committed)) / f"{sid}.json"
+            if not committed_path.exists():
+                logger.warning(
+                    "Orphan pending-import marker with no manifest: %s "
+                    "(skipping during sweep)", sid,
+                )
+                continue
             manifest = self.manifest_store.load_pending_verified(sid)
             marked.update(manifest.objects.keys())
 

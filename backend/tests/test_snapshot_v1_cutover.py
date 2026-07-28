@@ -162,9 +162,21 @@ def test_v1_restore_body_has_no_snapshot_manager_restore():
 
 
 def test_no_snapshot_v2_enabled_branching_in_routes():
-    """Dead dual-path flags must not gate restore/list behavior."""
+    """Dead dual-path flags must not gate restore/list behavior.
+
+    What is forbidden is a runtime BRANCH on the feature flag — the V1/V2
+    dual-path this cutover removed. Depending on require_snapshot_v2_enabled
+    is a different thing and is allowed: it is the FastAPI dependency that makes
+    V2-only endpoints answer 404 when the subsystem is off, not a dual path.
+    Matching the bare substring caught that import and made this assertion fire
+    on legitimate code.
+    """
     snaps = (REPO_ROOT / "backend/routes/snapshots.py").read_text(encoding="utf-8")
-    assert "snapshot_v2_enabled" not in snaps
+    assert "is_snapshot_v2_enabled" not in snaps, (
+        "routes/snapshots.py branches on the feature flag at runtime; V1/V2 "
+        "dual paths were removed at cutover"
+    )
+    assert "SNAPSHOT_V2_ENABLED" not in snaps
     cfg = (REPO_ROOT / "backend/config/_config.py").read_text(encoding="utf-8")
     # Flag either removed or permanently True without consumers.
     if "snapshot_v2_enabled" in cfg:

@@ -12,6 +12,10 @@ from backend.models.schemas import AnalysisState
 _EXCLUDED_FIELDS = {
     "original_max_rounds",
     "pre_pause_status",
+    # Backend-internal artifact-invalidation bookkeeping (expression_contract,
+    # graphic_abstract, report generator). No frontend consumer — verified by
+    # grepping frontend/src — so it stays off the API surface.
+    "invalidated_artifact_stems",
     # annotation_state is deliberately exposed: the client rebuilds the
     # annotation gate from it after a reload.
     "exploration_report",
