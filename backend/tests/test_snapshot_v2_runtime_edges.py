@@ -1379,3 +1379,62 @@ async def test_run_clears_a_stale_skip_marker(monkeypatch):
         "a Skip from a previous run carried into this one and would suppress "
         "its first required capture"
     )
+
+
+# --- 15. A Skip must not outlive the run it was armed for -------------------
+#
+# consume_snapshot_skip only clears the marker at a *matching* boundary, so a
+# Skip armed at a boundary the graph never reached again stayed on the session
+# indefinitely and suppressed a required capture in some later, unrelated run.
+# The wildcard form ("*", armed when the failing phase is unknown) suppressed
+# whichever capture happened to come first.
+
+
+def test_terminate_clears_a_pending_skip_marker():
+    from backend.services.snapshot_v2.failure_gate import terminate_snapshot_failure
+
+    state = MagicMock()
+    state.skip_required_snapshot_phase = "pre_annotation"
+
+    terminate_snapshot_failure(state)
+
+    assert state.skip_required_snapshot_phase is None, (
+        "a Skip survived the Terminate that abandoned its run"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_clears_a_stale_skip_marker(monkeypatch):
+    from backend.models.schemas import TaskStatus
+    from backend.routes import lifecycle
+
+    state = MagicMock()
+    state.status = TaskStatus.COMPLETED
+    state.skip_required_snapshot_phase = "*"
+    state.restore_resume_kind = None
+    state.restore_branch_id = None
+    state.snapshot_failure = None
+    state.pending_required_snapshot = None
+    state.wait_input_reason = None
+
+    async def _owner(session_id, user_id):
+        return state
+
+    async def _save(*a, **k):
+        return None
+
+    monkeypatch.setattr(lifecycle, "require_session_ownership", _owner)
+    monkeypatch.setattr(lifecycle, "async_save_session", _save)
+    # A MagicMock attribute reads as a live journal to the recovery guard.
+    monkeypatch.setattr(lifecycle, "assert_recovery_clear", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "is_snapshot_failure_blocked", lambda _s: False)
+
+    class _Req:
+        state = type("S", (), {"user_id": "u1"})()
+
+    await lifecycle.run_analysis("skip-marker-probe", _Req())
+
+    assert state.skip_required_snapshot_phase is None, (
+        "a Skip from a previous run carried into this one and would suppress "
+        "its first required capture"
+    )
