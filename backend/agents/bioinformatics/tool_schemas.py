@@ -244,6 +244,44 @@ TOOLS = [
                             "publishes are both accepted."
                         )
                     },
+                    "partition_by_direction": {
+                        "type": "boolean",
+                        "description": (
+                            "Split the fetched set into direction-coherent parts instead "
+                            "of returning it whole. An ontology process term contains the "
+                            "genes that drive the process AND the genes that restrain it, "
+                            "so a single module score over it rises whether the process is "
+                            "running or being held in check -- the number looks like "
+                            "evidence while carrying almost none. This uses the ontology's "
+                            "own regulation terms to separate them, returning up to four "
+                            "panels: positive, negative, ambiguous (annotated to both "
+                            "directions, so unable to support a directional claim) and "
+                            "core (the genes that carry out the process rather than tuning "
+                            "it). Each part is a panel in its own right with its own "
+                            "provenance. Only the biological-process branch of the ontology "
+                            "publishes the regulation terms this needs; other collections "
+                            "return a clear refusal."
+                        )
+                    },
+                    "partition_by_direction": {
+                        "type": "boolean",
+                        "description": (
+                            "Split the fetched set into direction-coherent parts instead "
+                            "of returning it whole. An ontology process term contains the "
+                            "genes that drive the process AND the genes that restrain it, "
+                            "so a single module score over it rises whether the process is "
+                            "running or being held in check -- the number looks like "
+                            "evidence while carrying almost none. This uses the ontology's "
+                            "own regulation terms to separate them, returning up to four "
+                            "panels: positive, negative, ambiguous (annotated to both "
+                            "directions, so unable to support a directional claim) and "
+                            "core (the genes that carry out the process rather than tuning "
+                            "it). Each part is a panel in its own right with its own "
+                            "provenance. Only the biological-process branch of the ontology "
+                            "publishes the regulation terms this needs; other collections "
+                            "return a clear refusal."
+                        )
+                    },
                     "list_collections": {
                         "type": "boolean",
                         "description": (

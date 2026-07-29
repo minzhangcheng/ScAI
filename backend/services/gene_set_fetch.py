@@ -20,12 +20,17 @@ import httpx
 
 from .gene_set_resolver import (
     DEFAULT_HOMOLOGY_TYPES,
+    PARTITION_PARTS,
     ENSEMBL_SOURCE_SPECIES,
     GeneSetResult,
     MSIGDB_ORGANISMS,
     _DEFAULT_CACHE,
     build_provenance,
     cache_path,
+    describe_partition,
+    direction_sibling_ids,
+    partition_by_direction,
+    partition_provenance,
     msigdb_gmt_url,
     normalize_organism,
     normalize_version,
@@ -312,3 +317,65 @@ def resolve_gene_set(set_id: str, organism: str, *, version: str,
         projection=projection,
         provenance=provenance,
     ), None
+
+
+def resolve_partitioned_gene_set(set_id: str, organism: str, *, version: str,
+                                 collection: str, resource: str = "msigdb",
+                                 cache_dir=None):
+    """Fetch a set and split it into direction-coherent parts.
+
+    Returns ``(parts, error)`` where ``parts`` is a list of GeneSetResult, one
+    per non-empty part, each carrying its own provenance. An error is returned
+    when the collection publishes no direction siblings for the set -- most do
+    not, and silently returning the unsplit set would defeat the point of asking.
+    """
+    base, error = resolve_gene_set(
+        set_id, organism, version=version, collection=collection,
+        resource=resource, cache_dir=cache_dir)
+    if error:
+        return None, error
+
+    siblings = direction_sibling_ids(set_id)
+    if not siblings:
+        return None, (
+            f"{set_id!r} is already direction-marked or has no derivable "
+            f"siblings, so there is nothing to split."
+        )
+
+    fetched, missing = {}, []
+    for part, sibling_id in siblings.items():
+        result, err = resolve_gene_set(
+            sibling_id, organism, version=version, collection=collection,
+            resource=resource, cache_dir=cache_dir)
+        if err:
+            missing.append(part)
+        else:
+            fetched[part] = result.genes
+
+    if not fetched:
+        return None, (
+            f"{collection} publishes no direction-marked siblings for {set_id!r} "
+            f"(looked for {', '.join(sorted(siblings.values()))}). Only the "
+            f"biological-process branch of the ontology carries them; score the "
+            f"set whole and say so, or assemble a panel explicitly."
+        )
+
+    parts = partition_by_direction(base.genes, fetched)
+    out = []
+    for name in PARTITION_PARTS:
+        genes = parts.get(name) or []
+        if not genes:
+            continue
+        out.append(GeneSetResult(
+            set_id=f"{base.set_id}#{name}",
+            genes=genes,
+            resource=base.resource,
+            version=base.version,
+            collection=base.collection,
+            organism=base.organism,
+            source_organism=base.source_organism,
+            projected=base.projected,
+            projection=dict(base.projection),
+            provenance=partition_provenance(base.provenance, name),
+        ))
+    return out, None

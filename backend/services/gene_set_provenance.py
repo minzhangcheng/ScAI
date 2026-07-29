@@ -199,6 +199,11 @@ def assess_panel_power(n_genes: int, n_matched: Optional[int] = None) -> dict:
     nominal size. When ``n_matched`` is unknown the nominal size is used and the
     result is marked as such.
     """
+    # A panel cannot match more genes than it contains. Clamp rather than
+    # refuse: the score itself is still usable, and the caller is told.
+    overcounted = n_matched is not None and n_genes and n_matched > n_genes
+    if overcounted:
+        n_matched = n_genes
     effective = n_matched if n_matched is not None else n_genes
     # A panel with nothing left after mapping is the MOST underpowered case, not
     # an exempt one. The earlier `0 < effective` guard was meant to skip scores
@@ -218,6 +223,7 @@ def assess_panel_power(n_genes: int, n_matched: Optional[int] = None) -> dict:
         "supports_negative_claim": bool(declared_a_panel and not underpowered),
         "threshold": MIN_PANEL_SIZE_FOR_NEGATIVE_CLAIM,
         "basis": "matched" if n_matched is not None else "nominal",
+        "overcounted": bool(overcounted),
     }
 
 
@@ -229,6 +235,19 @@ def power_caveat(power: dict) -> str:
     the bare caveat if the corpus is unavailable -- guidance is an enhancement,
     never a dependency.
     """
+    if power.get("overcounted"):
+        # Surfaced even when the panel is well powered: the count is wrong, and
+        # a wrong count is worth knowing about wherever it appears.
+        note = (
+            f"n_genes_matched exceeded the panel size and was clamped to "
+            f"{power['effective_n']}. A panel cannot have more genes present in "
+            f"the matrix than it contains -- recount against the panel actually "
+            f"scored, not the set it was derived from."
+        )
+        if not power.get("underpowered"):
+            return note
+    else:
+        note = ""
     if not power.get("underpowered"):
         return ""
     if power.get("effective_n") == 0:
@@ -252,4 +271,4 @@ def power_caveat(power: dict) -> str:
         guidance = rule_text("minimum-gene-set-size", include_python=True)
     except Exception:
         guidance = ""
-    return f"{caveat} {guidance}".strip()
+    return f"{note} {caveat} {guidance}".strip()

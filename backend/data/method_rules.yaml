@@ -333,12 +333,22 @@ rules:
   applies_when: Scoring a gene set fetched from an external resource.
   rule: Inspect the members before scoring. When a set mixes genes that promote a process
     with genes that restrain it, split it and score the parts separately.
-  why: Ontology sets are frequently broad, small, and direction-mixed. A module score over
+  why: 'Ontology sets are frequently broad, small, and direction-mixed. A module score over
     such a set rises whether the process is active or being actively opposed, so the score
     cannot distinguish the two states -- the number looks like evidence while carrying almost
-    none.
-  python: fetch_gene_set returns the members; register_analysis_plan's partition operation
-    records the split and scores the parts as separate panels.
+    none. The ontology already draws the distinction the score destroys: measured on the installed
+    resource, its biological-process branch publishes explicit positive- and negative-regulation
+    terms, several hundred processes carry both, and the regulator genes sit inside the base
+    term. So the split is a mechanical operation on identifiers rather than a judgement call,
+    wherever those terms exist.'
+  python: 'fetch_gene_set returns the members. When the set is direction-mixed, call it again
+    with partition_by_direction=true: the ontology publishes explicit regulation terms for
+    a process, and the tool uses them to split the set into positive, negative, ambiguous
+    and core panels, each with its own provenance. Genes annotated to both directions are
+    separated rather than counted toward both arms. Only the biological-process branch carries
+    those terms, so elsewhere the split is refused and the mixing has to be stated in the
+    finding instead. register_analysis_plan''s partition operation remains available for splits
+    the ontology cannot make.'
   citations:
   - 'No upstream citation: this is ScAI''s own guidance, added because a direction-mixed set
     scores identically whether a process is active or suppressed. Not claimed as a bioSkills

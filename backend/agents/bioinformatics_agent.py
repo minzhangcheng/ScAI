@@ -553,12 +553,22 @@ PREFER A VERSIONED SET OVER A REMEMBERED ONE:
   because nobody -- including you in the next round -- can reconstruct it.
 
   But a curated set is NOT automatically the right panel. Ontology sets in
-  particular are often broad, small, and mixed-direction: the same set can contain
-  genes that drive a process and genes that suppress it, so a high module score is
+  particular are often broad and mixed-direction: the same set can contain genes
+  that drive a process and genes that suppress it, so a high module score is
   equally consistent with the process running and with it being held in check.
-  Read the members before scoring. When a set mixes directions, split it with
-  register_analysis_plan's partition operation and score the parts separately --
-  that judgement is yours to make and the database cannot make it for you.
+
+  You do not have to fix that by hand. Call fetch_gene_set with
+  partition_by_direction=true and the ontology's own regulation terms are used to
+  split the set into direction-coherent panels -- positive, negative, ambiguous
+  (annotated to both, so unable to support a directional claim) and core (the
+  genes that carry out the process rather than tuning it). Each part comes back
+  as a panel with its own provenance. Score them SEPARATELY; scoring them
+  together is the failure the split exists to prevent.
+
+  Only the biological-process branch of the ontology publishes the regulation
+  terms this needs, so other collections refuse the split and say so. When the
+  split is unavailable and the set is still direction-mixed, say that in the
+  finding rather than reporting one number as if it were directional.
 
   For an organism the resource does not publish natively, the set is projected
   through orthology and the mapping rate comes back with it. A low rate means most
@@ -2611,9 +2621,10 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         from ..services.gene_set_fetch import (
                             list_collections as list_gene_set_collections,
                             load_collection, resolve_gene_set,
+                            resolve_partitioned_gene_set,
                         )
                         from ..services.gene_set_resolver import (
-                            normalize_organism, suggest_similar,
+                            direction_sibling_ids, normalize_organism, suggest_similar,
                         )
 
                         set_id = str(args.get("set_id", "") or "").strip()
@@ -2714,6 +2725,77 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             })
                             continue
 
+                        if args.get("partition_by_direction"):
+                            parts, error = await asyncio.to_thread(
+                                resolve_partitioned_gene_set, set_id, organism,
+                                version=version, collection=collection,
+                            )
+                            if error:
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": f"fetch_gene_set could not partition: {error}",
+                                })
+                                analysis_log.append(AnalysisStep(
+                                    step_number=step_count, step_type="fetch_gene_set",
+                                    agent_reasoning=agent_reasoning,
+                                    code_description=(
+                                        f"FAILED: partition {set_id!r} -- {str(error)[:140]}"
+                                    ),
+                                ))
+                                continue
+
+                            lines = [
+                                f"Split {set_id} into {len(parts)} direction-coherent "
+                                f"panels. Score them SEPARATELY -- that is the point of "
+                                f"the split. Register each as its own plan and score."
+                            ]
+                            for part in parts:
+                                name = part.set_id.split("#")[-1]
+                                var = (
+                                    "gene_set_"
+                                    + re.sub(r"[^0-9A-Za-z_]", "_", part.set_id)[:60]
+                                )
+                                try:
+                                    await self.sandbox.execute(
+                                        f"{var} = {part.genes!r}",
+                                        save_to_history=False, skip_safety_check=True,
+                                    )
+                                    bound = f" bound as {var}"
+                                except Exception as exc:
+                                    logger.warning(
+                                        f"[{self.session_id}] partition injection "
+                                        f"failed: {exc}"
+                                    )
+                                    bound = f" genes: {', '.join(part.genes)}"
+                                lines.append(
+                                    f"[{name}] {part.n_genes} genes, "
+                                    f"provenance {part.provenance}{bound}."
+                                )
+                                if name == "ambiguous":
+                                    lines.append(
+                                        "The ambiguous part is annotated to both "
+                                        "directions; it cannot support a directional "
+                                        "claim and is separated so it does not count "
+                                        "toward either arm."
+                                    )
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": " ".join(lines),
+                            })
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count, step_type="fetch_gene_set",
+                                agent_reasoning=agent_reasoning,
+                                code_description=(
+                                    f"Partitioned {set_id} into "
+                                    + ", ".join(
+                                        f"{r.set_id.split('#')[-1]}({r.n_genes})"
+                                        for r in parts)
+                                ),
+                            ))
+                            continue
+
                         result, error = await asyncio.to_thread(
                             resolve_gene_set, set_id, organism,
                             version=version, collection=collection,
@@ -2765,6 +2847,13 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             lines.append(f"Genes: {', '.join(result.genes)}")
                         lines.extend(result.warnings())
                         lines.append(_method_rule_text("read-the-set-before-scoring-it"))
+                        if direction_sibling_ids(result.set_id):
+                            lines.append(
+                                "This set may be direction-mixed. Call again with "
+                                "partition_by_direction=true to split it into "
+                                "direction-coherent panels using the ontology's own "
+                                "regulation terms, rather than assembling one by hand."
+                            )
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,

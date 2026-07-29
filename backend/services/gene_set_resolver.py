@@ -75,7 +75,7 @@ LOW_MAPPING_RATE = 0.5
 #: introduce duplicate counting and ambiguity, so they are opt-in.
 DEFAULT_HOMOLOGY_TYPES = ("ortholog_one2one",)
 
-_SET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]*$")
+_SET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+#-]*$")
 
 
 def normalize_organism(organism: str) -> str:
@@ -148,6 +148,106 @@ class GeneSetResult:
                     f"exploratory and say so in any finding that rests on it."
                 )
         return out
+
+
+#: Infix markers an ontology uses to name the regulation of a process. Only the
+#: biological-process branch of the ontology carries them -- measured: 898/730
+#: in the mouse collection and 832/709 in the human one, against zero in the
+#: molecular-function, cellular-component, hallmark and pathway collections. The
+#: markers are naming structure, not biology: nothing here names a process.
+DIRECTION_MARKERS = {
+    "positive": "_POSITIVE_REGULATION_OF_",
+    "negative": "_NEGATIVE_REGULATION_OF_",
+}
+
+#: Separator between a set identifier and the part of it a panel represents.
+#: Chosen so a partitioned provenance stays parseable by the controlled
+#: vocabulary: ``database:<resource>:<version>:<set_id>#<part>``.
+PARTITION_SEPARATOR = "#"
+
+#: ``ambiguous`` holds genes annotated to BOTH directions of the same
+#: process. They cannot support a directional claim and are separated so
+#: they neither inflate both arms nor disappear.
+PARTITION_PARTS = ("positive", "negative", "ambiguous", "core")
+
+
+def direction_sibling_ids(set_id: str) -> dict:
+    """Identifiers of the direction-marked siblings of a base set.
+
+    Derived by name transformation only; the caller must confirm the results
+    exist in the collection, because most collections publish none of them.
+    Returns ``{}`` when the identifier is itself already direction-marked --
+    partitioning a set that is already one direction has nothing to split.
+    """
+    text = str(set_id or "").strip()
+    if not text:
+        return {}
+    if any(marker in text for marker in DIRECTION_MARKERS.values()):
+        return {}
+    prefix, _, rest = text.partition("_")
+    if not rest:
+        return {}
+    return {
+        part: f"{prefix}{marker}{rest}"
+        for part, marker in DIRECTION_MARKERS.items()
+    }
+
+
+def _canonical(genes):
+    """Order- and case-insensitive panel form.
+
+    Delegates to the plan module so a partitioned panel normalises identically
+    to the panel a plan freezes. Two different normalisations would let a plan
+    hash disagree with the panel that was actually scored, which is exactly the
+    drift the freeze exists to detect.
+    """
+    from .analysis_plan import canonical_panel
+
+    return canonical_panel(genes)
+
+
+def partition_by_direction(base_genes, sibling_genes: dict) -> dict:
+    """Split a base set into mutually exclusive, direction-coherent parts.
+
+    ``positive`` and ``negative`` hold genes annotated to exactly one direction.
+    ``ambiguous`` holds those annotated to both -- context-dependent regulators
+    that cannot support a directional claim, kept apart so they do not count
+    toward both arms. ``core`` is what remains once every regulator is removed:
+    the genes that carry out the process rather than tuning it.
+
+    The four parts are lossless (their union is the base) and disjoint. Parts
+    are returned even when empty so a caller can see that an arm contributed
+    nothing; callers should drop empty parts before scoring.
+    """
+    base = _canonical(base_genes)
+    lowered = {g.lower(): g for g in base}
+    in_base = set(lowered)
+
+    arms = {}
+    for name in DIRECTION_MARKERS:
+        members = {g.lower() for g in _canonical(sibling_genes.get(name))}
+        arms[name] = members & in_base
+
+    both = arms.get("positive", set()) & arms.get("negative", set())
+    parts = {
+        "positive": sorted(arms.get("positive", set()) - both),
+        "negative": sorted(arms.get("negative", set()) - both),
+        "ambiguous": sorted(both),
+        "core": sorted(in_base - arms.get("positive", set()) - arms.get("negative", set())),
+    }
+    return {name: [lowered[k] for k in keys] for name, keys in parts.items()}
+
+
+def partition_provenance(base_provenance: str, part: str) -> str:
+    """Provenance for one part, still re-fetchable to the set it came from."""
+    return f"{base_provenance}{PARTITION_SEPARATOR}{part}"
+
+
+def describe_partition(parts: dict) -> str:
+    """One-line summary of a split, for the tool result."""
+    return ", ".join(
+        f"{name}={len(parts.get(name) or [])}" for name in PARTITION_PARTS
+    )
 
 
 def build_provenance(resource: str, version: str, set_id: str) -> str:
