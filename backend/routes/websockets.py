@@ -43,6 +43,21 @@ def _in_integration_loop(state) -> bool:
     return active_batch_incomplete(state)
 
 
+def should_resume_workflow(state) -> bool:
+    """Whether this connection continues an existing run or starts a fresh one.
+
+    Named rather than inlined because it is the point where an imported session
+    is committed to a path: ``resume()`` refuses to invent a fresh
+    ``initialize_round`` run and moves only on an explicit restore intent, while
+    ``run()`` always starts one. A session that has executed at least one round
+    must take the former even after a runtime-less import, and one that never
+    got past round 0 must take the latter, or it holds without executing.
+    """
+    return state.current_round > 0 or state.status in (
+        TaskStatus.PAUSED, TaskStatus.WAITING_INPUT, TaskStatus.WAITING_ANNOTATION
+    )
+
+
 async def _send_restore_state_sync(websocket, state, session_id: str) -> None:
     """Emit a state_sync after a restored session connects.
 
@@ -650,9 +665,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             run_coro = workflow.generate_report(state, session_id)
         else:
             # Check if we should resume or start fresh
-            if state.current_round > 0 or state.status in (
-                TaskStatus.PAUSED, TaskStatus.WAITING_INPUT, TaskStatus.WAITING_ANNOTATION
-            ):
+            if should_resume_workflow(state):
                 logger.info(f"Resuming workflow for session {session_id}")
                 run_coro = workflow.resume(session_id, state)
             else:

@@ -119,6 +119,23 @@ def _import_archive(client, token, blob, *, trust):
     return job["session_id"]
 
 
+@pytest.fixture
+def snapshot_v2(request, monkeypatch):
+    """Pin the Snapshot V2 operator gate for the duration of a round trip.
+
+    The gate is a process-scoped module global, and the repo conftest turns it
+    *on* for the whole suite. An ordinary deployment leaves it off, and both
+    ``/run`` and ``/resume`` call ``normalize_disabled_snapshot_state`` only on
+    that path — so the configuration this round trip is supposed to certify was
+    the one configuration it never ran under.
+    """
+    from backend.config import _config
+
+    monkeypatch.setattr(_config, "SNAPSHOT_V2_ENABLED", request.param)
+    return request.param
+
+
+@pytest.mark.parametrize("snapshot_v2", [False, True], indirect=True)
 @pytest.mark.parametrize(
     "include_runtime, trust, keep_source",
     [
@@ -128,7 +145,9 @@ def _import_archive(client, token, blob, *, trust):
         (True, False, False),   # runtime exported, not trusted on the way in
     ],
 )
-def test_export_import_continue(client, include_runtime, trust, keep_source):
+def test_export_import_continue(
+    client, snapshot_v2, include_runtime, trust, keep_source
+):
     from backend.config import get_session_dir, get_session_states
     from backend.models.schemas import TaskStatus
     from backend.state import sessions
@@ -200,3 +219,139 @@ def test_export_import_continue(client, include_runtime, trust, keep_source):
             "without a kernel the run must be routed through restore_entry"
         )
     assert after.runtime_restore_status == "complete"
+
+    # --- ...and "moving forward" has to mean the graph is actually entered ---
+    # POST /run only records intent and hands back a WebSocket URL; the handler
+    # on the other end is what dispatches. Asserting the status /run itself just
+    # wrote says nothing about whether anything would execute, so check the
+    # branch that handler takes and where that branch enters the graph.
+    from backend.routes.websockets import should_resume_workflow
+    from backend.services.snapshot_v2.restore_entry import build_restore_entry_plan
+
+    assert should_resume_workflow(after) is True, (
+        "a session that has already run must continue, not start over"
+    )
+    if not kernel_present:
+        plan = build_restore_entry_plan(after)
+        assert plan.target_node == "initialize_round", (
+            "a kernel-less continuation must re-enter the round loop; anything "
+            "else holds without executing"
+        )
+        assert plan.preserve_round_on_initialize is True, (
+            "re-entry must redo the current round from the imported data, not "
+            "advance past it and lose it"
+        )
+
+
+@pytest.mark.parametrize("snapshot_v2", [False, True], indirect=True)
+def test_the_resume_button_moves_a_kernel_without_its_checkpoint(client, snapshot_v2):
+    """Re-import a runtime-carrying archive onto the instance that wrote it.
+
+    The id collides, so a new one is allocated and the checkpoint is dropped —
+    it is keyed by the archive's thread id. The kernel survives, which leaves
+    ``runtime_restore_status`` at ``complete``, and the frontend only offers
+    Re-run while the runtime is *un*available. So Resume is the sole control
+    here, and it never sets a start intent of its own: unless the import armed
+    one, ``resume()`` finds no checkpoint and no continuation target and holds
+    without executing.
+
+    Every other case in this file continues through ``POST /run``, which arms
+    the intent itself and therefore cannot tell whether the import did.
+    """
+    from backend.config import get_session_states
+    from backend.models.schemas import TaskStatus
+    from backend.routes.websockets import should_resume_workflow
+    from backend.services.snapshot_v2.restore_entry import build_restore_entry_plan
+    from backend.state import sessions
+    from backend.utils.runtime_apply import _live_pkl
+
+    token = _token(client)
+    started = client.post(
+        "/api/session/start",
+        json={"instruction": "cluster the cells"},
+        headers=_auth(token),
+    )
+    assert started.status_code == 200, started.text
+    src_id = started.json()["session_id"]
+
+    _populate(src_id, live_pkl=True)
+    _advance(src_id)
+    client.post(f"/api/session/{src_id}/save", headers=_auth(token))
+
+    blob = _export_download(client, token, src_id, include_runtime=True)
+    new_id = _import_archive(client, token, blob, trust=True)
+    assert new_id != src_id, "a colliding id must not be reused"
+
+    state = sessions[new_id]
+    assert _live_pkl(new_id).exists(), "the trusted kernel should have landed"
+    assert not (get_session_states(new_id) / "checkpoints.sqlite").exists(), (
+        "a checkpoint keyed by the archive's thread id must not be reused"
+    )
+    assert state.runtime_restore_status == "complete", (
+        "the kernel is here, so the UI will offer Resume and not Re-run"
+    )
+
+    resumed = client.post(f"/api/session/{new_id}/resume", headers=_auth(token))
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["success"] is True
+
+    after = sessions[new_id]
+    assert after.status == TaskStatus.RUNNING
+    assert should_resume_workflow(after) is True
+    plan = build_restore_entry_plan(after)
+    assert plan.target_node == "initialize_round", (
+        "Resume must re-enter the round loop; without an armed start intent "
+        "resume() holds and the button is a silent no-op"
+    )
+    assert plan.preserve_round_on_initialize is True
+
+
+@pytest.mark.parametrize("snapshot_v2", [False, True], indirect=True)
+def test_a_session_exported_before_its_first_round_still_starts(client, snapshot_v2):
+    """Export during the window between Start and the first round completing.
+
+    ``current_round`` is only incremented once PI planning returns, but the
+    status is RUNNING from the moment Start is pressed, so this window is wide
+    open in practice. Both import fixups bail out at round 0 — no runtime mark,
+    no restore intent — which leaves the frontend rendering neither Start (the
+    status is no longer PENDING) nor Re-run (the runtime never got marked
+    unavailable). Resume is the only control left, so it has to work.
+    """
+    from backend.models.schemas import TaskStatus
+    from backend.routes.websockets import should_resume_workflow
+    from backend.state import sessions
+
+    token = _token(client)
+    started = client.post(
+        "/api/session/start",
+        json={"instruction": "cluster the cells"},
+        headers=_auth(token),
+    )
+    assert started.status_code == 200, started.text
+    src_id = started.json()["session_id"]
+
+    _populate(src_id, live_pkl=False)
+    _advance(src_id, round_=0)
+    client.post(f"/api/session/{src_id}/save", headers=_auth(token))
+
+    blob = _export_download(client, token, src_id, include_runtime=False)
+    client.delete(f"/api/session/{src_id}", headers=_auth(token))
+    sessions.pop(src_id, None)
+
+    new_id = _import_archive(client, token, blob, trust=False)
+    state = sessions[new_id]
+    assert state.status == TaskStatus.PAUSED, "nothing here owns that run"
+    assert state.current_round == 0
+
+    resumed = client.post(f"/api/session/{new_id}/resume", headers=_auth(token))
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["data"].get("runtime_unavailable") is not True, (
+        "a session that never computed anything has no runtime to miss"
+    )
+
+    after = sessions[new_id]
+    assert after.status == TaskStatus.RUNNING
+    assert should_resume_workflow(after) is False, (
+        "round 0 must start a fresh run; resume() refuses to invent one and "
+        "would hold without executing anything"
+    )
