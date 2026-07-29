@@ -375,6 +375,9 @@ async def save_session(session_id: str, request: Request):
     """Manually save session to disk"""
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
-    await async_save_session(session_id, state)
+    # Forced: an explicit "save now" that the throttle can swallow is not a
+    # save. The endpoint reports success either way, so the user is told the
+    # session is on disk when it may not be.
+    await async_save_session(session_id, state, force=True)
 
     return APIResponse(success=True, message="Session saved")

@@ -190,6 +190,91 @@ async def test_run_signals_explicit_start_when_there_is_no_checkpoint(monkeypatc
     assert state.status == TaskStatus.RUNNING
 
 
+@pytest.mark.parametrize(
+    "write_pkl, expected_intent",
+    [
+        # Checkpoint plus the kernel it was written against: an exact
+        # continuation is possible, so no explicit start intent is armed.
+        (True, None),
+        # Checkpoint without a kernel. `include_runtime=true` exports the
+        # checkpoint unconditionally while the pkl needs `trust=true` on the way
+        # in, so this pairing is reachable from the UI's two separate prompts.
+        # Testing the file alone armed nothing and sent Re-run into an exact
+        # continuation against an empty kernel.
+        (False, "explicit_start"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_checkpoint_without_its_kernel_does_not_count(
+    monkeypatch, write_pkl, expected_intent,
+):
+    from backend.config import get_session_states
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.routes import lifecycle
+    from backend.utils.runtime_apply import _live_pkl
+
+    session_id = str(uuid.uuid4())
+    states = get_session_states(session_id)
+    states.mkdir(parents=True, exist_ok=True)
+    (states / "checkpoints.sqlite").write_bytes(b"SQLITE")
+    if write_pkl:
+        _live_pkl(session_id).write_bytes(b"KERNEL")
+
+    state = AnalysisState(id=session_id, user_id="u1", current_round=2)
+    state.status = TaskStatus.PAUSED
+
+    async def _owner(session_id, user_id):
+        return state
+
+    async def _save(*a, **k):
+        return None
+
+    monkeypatch.setattr(lifecycle, "require_session_ownership", _owner)
+    monkeypatch.setattr(lifecycle, "async_save_session", _save)
+    monkeypatch.setattr(lifecycle, "assert_recovery_clear", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "is_snapshot_failure_blocked", lambda _s: False)
+
+    class _Req:
+        state = type("S", (), {"user_id": "u1"})()
+
+    await lifecycle.run_analysis(session_id, _Req())
+
+    assert getattr(state, "restore_start_intent", None) == expected_intent
+
+
+@pytest.mark.asyncio
+async def test_completed_reanalysis_tells_the_agent_its_kernel_is_empty(monkeypatch):
+    """``/resume`` exempts COMPLETED from the block, then must honour the same
+    contract ``/run`` does: clearing an ``unavailable`` runtime is exactly the
+    moment the agent has to be told to reload its inputs from disk."""
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.routes import lifecycle
+
+    session_id = str(uuid.uuid4())
+    state = AnalysisState(id=session_id, user_id="u1", current_round=2)
+    state.status = TaskStatus.COMPLETED
+    state.runtime_restore_status = "unavailable"
+
+    async def _owner(session_id, user_id):
+        return state
+
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(lifecycle, "require_session_ownership", _owner)
+    monkeypatch.setattr(lifecycle, "async_save_session", _noop)
+    monkeypatch.setattr(lifecycle, "_update_session_cache", _noop)
+    monkeypatch.setattr(lifecycle, "teardown_running_workflow", _noop)
+    monkeypatch.setattr(lifecycle, "assert_recovery_clear", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "is_snapshot_failure_blocked", lambda _s: False)
+
+    await lifecycle._resume_analysis_locked(session_id, "u1")
+
+    assert state.runtime_recompute_pending is True
+    assert state.runtime_restore_status == "complete"
+    assert state.status == TaskStatus.RUNNING
+
+
 def test_explicit_start_routes_a_plain_session_into_the_round_loop():
     """The plan builder must not need Snapshot V2 metadata to honour the intent."""
     from backend.models.schemas import AnalysisState

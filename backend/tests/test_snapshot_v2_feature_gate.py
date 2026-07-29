@@ -305,6 +305,71 @@ def test_stale_post_report_snapshot_failure_completes_report():
     assert state.pending_required_snapshot is None
 
 
+def test_recovery_block_is_cleared_when_the_subsystem_is_off():
+    """Nothing else can ever clear it once V2 is disabled.
+
+    ``recovery_blocked`` is only ever set by journal recovery, which runs only
+    while V2 is enabled, and ``assert_recovery_clear`` refuses every start,
+    resume, WebSocket attach and kernel launch while it is set. Turning the
+    subsystem off would otherwise promote a recoverable session to a permanently
+    unstartable one, with every snapshot endpoint answering 404.
+    """
+    from backend.models.schemas import AnalysisState
+    from backend.services.session_store import assert_recovery_clear
+    from backend.services.snapshot_v2.feature_gate import (
+        normalize_disabled_snapshot_state,
+    )
+
+    state = AnalysisState(id="recovery-blocked", user_id="owner")
+    state.recovery_blocked = True
+    state.snapshot_transaction = {
+        "transaction_id": "restore-audit",
+        "recovery_error": {"code": "RECOVERY_UNEXPECTED", "message": "boom"},
+    }
+
+    assert normalize_disabled_snapshot_state(state) is True
+    assert state.recovery_blocked is False
+    # The audit trail survives; only the blocker is dropped.
+    assert state.snapshot_transaction == {"transaction_id": "restore-audit"}
+    assert_recovery_clear(state, session_id=state.id)
+    assert normalize_disabled_snapshot_state(state) is False
+
+
+def test_clearing_a_recovery_block_leaves_the_status_alone():
+    """A recovery block says nothing about where the run had got to.
+
+    The status reconciliation below belongs to the snapshot-failure gate, which
+    carries a ``previous_status``. Running it for a session that only has a
+    recovery block would read that missing field as unparseable and downgrade a
+    finished session to paused.
+    """
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.services.snapshot_v2.feature_gate import (
+        normalize_disabled_snapshot_state,
+    )
+
+    state = AnalysisState(id="finished", user_id="owner")
+    state.status = TaskStatus.COMPLETED
+    state.recovery_blocked = True
+
+    assert normalize_disabled_snapshot_state(state) is True
+    assert state.recovery_blocked is False
+    assert state.status == TaskStatus.COMPLETED
+
+
+def test_a_session_with_nothing_stale_is_untouched():
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.services.snapshot_v2.feature_gate import (
+        normalize_disabled_snapshot_state,
+    )
+
+    state = AnalysisState(id="clean", user_id="owner")
+    state.status = TaskStatus.PAUSED
+
+    assert normalize_disabled_snapshot_state(state) is False
+    assert state.status == TaskStatus.PAUSED
+
+
 def test_stale_untyped_snapshot_failure_falls_back_to_paused():
     from backend.services.snapshot_v2.feature_gate import (
         normalize_disabled_snapshot_state,
@@ -340,7 +405,9 @@ async def test_run_lifecycle_clears_stale_snapshot_gate_when_disabled(monkeypatc
     assert state.status.value == "running"
     assert state.snapshot_failure is None
     assert state.wait_input_reason is None
-    save.assert_awaited_once_with(state.id, state)
+    # Forced: the write carries the cleared gate and the start intent, and
+    # RUNNING does not bypass the save throttle on its own.
+    save.assert_awaited_once_with(state.id, state, force=True)
 
 
 @pytest.mark.asyncio

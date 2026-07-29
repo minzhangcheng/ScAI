@@ -259,6 +259,391 @@ class TestImportNeverOverwritesAnExistingSession:
         assert is_forward_resume_blocked(state.runtime_restore_status)
 
 
+# --- An imported session must land in a status this installation can back up -
+
+
+class TestAnImportedSessionAlwaysHasAWayForward:
+    """The reachable control must lead somewhere, not just some control.
+
+    ``POST /run`` arms the intent a checkpoint-less session needs, but the UI
+    only renders that button while ``isRerunEnabled()`` is true — i.e. while the
+    runtime is unavailable or intentionally kept. An import that carried a
+    kernel under a reallocated id has its runtime marked ``complete``, so the
+    user's only control is Resume, and Resume never arms anything.
+    """
+
+    def _occupy(self, session_id):
+        from backend.config import get_session_dir
+
+        get_session_dir(session_id).mkdir(parents=True, exist_ok=True)
+
+    def test_kernel_without_its_checkpoint_arms_the_restore_intent(self, tmp_path):
+        from backend.config import DATA_BASE_DIR, get_session_states
+        from backend.routes.export_import import _import_tar_gz
+        from backend.utils.runtime_apply import _live_pkl, is_forward_resume_blocked
+
+        session_id = str(uuid.uuid4())
+        self._occupy(session_id)
+        archive = _build_archive(
+            tmp_path / "kernel.tar.gz",
+            session_id,
+            {
+                f"{session_id}/states/{session_id}_session.pkl": b"KERNEL",
+                f"{session_id}/states/checkpoints.sqlite": b"SQLITE",
+            },
+            data_base_dir=str(DATA_BASE_DIR),
+            state_payload=_session_json(session_id, current_round=3),
+        )
+
+        state = _import_tar_gz(str(archive), user_id="importer", trust=True)
+
+        assert state.id != session_id
+        # The kernel came across, so the runtime is fine and Re-run is hidden.
+        assert _live_pkl(state.id).exists()
+        assert not is_forward_resume_blocked(state.runtime_restore_status)
+        # The checkpoint could not, so Resume needs an intent to act on.
+        assert not (get_session_states(state.id) / "checkpoints.sqlite").exists()
+        assert state.restore_start_intent == "explicit_start"
+
+    def test_a_usable_checkpoint_is_not_diverted(self, tmp_path):
+        """id kept + kernel + checkpoint: resume() must continue exactly."""
+        from backend.config import DATA_BASE_DIR
+        from backend.routes.export_import import _import_tar_gz
+
+        session_id = str(uuid.uuid4())
+        archive = _build_archive(
+            tmp_path / "exact.tar.gz",
+            session_id,
+            {
+                f"{session_id}/states/{session_id}_session.pkl": b"KERNEL",
+                f"{session_id}/states/checkpoints.sqlite": b"SQLITE",
+            },
+            data_base_dir=str(DATA_BASE_DIR),
+            state_payload=_session_json(session_id, current_round=3),
+        )
+
+        state = _import_tar_gz(str(archive), user_id="importer", trust=True)
+
+        assert state.id == session_id
+        assert getattr(state, "restore_start_intent", None) is None
+
+    def test_a_never_executed_session_is_left_alone(self, tmp_path):
+        from backend.config import DATA_BASE_DIR
+        from backend.routes.export_import import _import_tar_gz
+
+        session_id = str(uuid.uuid4())
+        archive = _build_archive(
+            tmp_path / "fresh.tar.gz",
+            session_id,
+            {},
+            data_base_dir=str(DATA_BASE_DIR),
+            state_payload=_session_json(session_id, current_round=0),
+        )
+
+        state = _import_tar_gz(str(archive), user_id="importer")
+
+        assert getattr(state, "restore_start_intent", None) is None
+
+
+class TestJsonImportCreatesASession:
+    """The .json path was the only one without id allocation.
+
+    It took the id straight from the uploaded document and then stamped the
+    caller's user_id onto it, so posting another user's session id handed that
+    session over.
+    """
+
+    def test_a_colliding_id_does_not_take_over_the_session(self):
+        from backend.config import get_session_dir, get_session_metadata_path
+        from backend.routes.export_import_parts import import_routes
+
+        victim_id = str(uuid.uuid4())
+        get_session_dir(victim_id).mkdir(parents=True, exist_ok=True)
+        get_session_metadata_path(victim_id).write_text(
+            json.dumps(_session_json(victim_id, name="victim")), encoding="utf-8"
+        )
+
+        payload = _session_json(victim_id, name="attacker", current_round=1)
+        state = _run_json_import(import_routes, payload, user_id="attacker")
+
+        assert state.id != victim_id, "json import must not reuse an occupied id"
+        victim = json.loads(
+            get_session_metadata_path(victim_id).read_text(encoding="utf-8")
+        )
+        assert victim["user_id"] == "owner"
+        assert victim["name"] == "victim"
+
+    def test_a_free_id_is_still_kept(self):
+        from backend.routes.export_import_parts import import_routes
+
+        session_id = str(uuid.uuid4())
+        payload = _session_json(session_id, name="mine")
+
+        state = _run_json_import(import_routes, payload, user_id="owner")
+
+        assert state.id == session_id
+
+
+def _run_json_import(import_routes, payload, *, user_id):
+    """Drive POST /api/session/import with a .json body."""
+    import asyncio
+
+    class _Stream:
+        def __init__(self, blob):
+            self._blob = blob
+
+        def __aiter__(self):
+            async def gen():
+                yield self._blob
+            return gen()
+
+    class _Req:
+        def __init__(self, blob, uid):
+            self.headers = {
+                "x-filename": "session.json",
+                "content-length": str(len(blob)),
+            }
+            self.state = type("S", (), {"user_id": uid})()
+            self.client = None
+            self._blob = blob
+
+        def stream(self):
+            return _Stream(self._blob).__aiter__()
+
+    blob = json.dumps(payload).encode()
+
+    saved = {}
+
+    async def _save(session_id, state, *a, **k):
+        saved["state"] = state
+
+    async def _cache(session_id, state):
+        saved["state"] = state
+
+    orig_save = import_routes.async_save_session
+    orig_cache = import_routes._update_session_cache
+    import_routes.async_save_session = _save
+    import_routes._update_session_cache = _cache
+    try:
+        asyncio.run(import_routes.import_state(_Req(blob, user_id), None))
+    finally:
+        import_routes.async_save_session = orig_save
+        import_routes._update_session_cache = orig_cache
+    return saved["state"]
+
+
+class TestImportedStatusIsHonest:
+    def test_a_session_exported_mid_run_lands_paused(self, tmp_path):
+        """Nothing here owns that run: no workflow, no kernel, no WebSocket.
+
+        The frontend reads the status literally and hides the controls that
+        would start one — including the re-run button a runtime-less import
+        depends on — so the session looks busy until the user stops it.
+        """
+        from backend.config import DATA_BASE_DIR
+        from backend.models.schemas import TaskStatus
+        from backend.routes.export_import import _import_tar_gz
+
+        archive_name = "midrun.tar.gz"
+        session_id = str(uuid.uuid4())
+        archive = _build_archive(
+            tmp_path / archive_name,
+            session_id,
+            {},
+            data_base_dir=str(DATA_BASE_DIR),
+            state_payload=_session_json(
+                session_id, current_round=2, status=TaskStatus.RUNNING
+            ),
+        )
+
+        state = _import_tar_gz(str(archive), user_id="importer")
+
+        assert state.status == TaskStatus.PAUSED
+
+    @pytest.mark.parametrize(
+        "status",
+        ["COMPLETED", "FAILED", "STOPPED", "PAUSED", "WAITING_INPUT"],
+    )
+    def test_other_statuses_survive_the_round_trip(self, tmp_path, status):
+        """Only a claimed live run is rewritten; the rest carry their meaning."""
+        from backend.config import DATA_BASE_DIR
+        from backend.models.schemas import TaskStatus
+        from backend.routes.export_import import _import_tar_gz
+
+        session_id = str(uuid.uuid4())
+        expected = getattr(TaskStatus, status)
+        archive = _build_archive(
+            tmp_path / f"{status}.tar.gz",
+            session_id,
+            {},
+            data_base_dir=str(DATA_BASE_DIR),
+            state_payload=_session_json(session_id, current_round=2, status=expected),
+        )
+
+        state = _import_tar_gz(str(archive), user_id="importer")
+
+        assert state.status == expected
+
+
+# --- states/ carries its session id in the filename, not in a path segment --
+
+
+class TestStatesMembersFollowTheDestinationId:
+    """Everything under ``states/`` is looked up by ``<session id><suffix>``.
+
+    ``uploads/``, ``workspace/`` and ``reports/`` carry the id as a path segment
+    the resolver strips and replaces. ``states/`` does not, so an import that
+    reallocated the id used to write these under the archive's name, where
+    nothing would ever look for them.
+    """
+
+    def _occupy(self, session_id: str) -> None:
+        """Make *session_id* unavailable so the import has to allocate a new one."""
+        from backend.config import get_session_dir
+
+        get_session_dir(session_id).mkdir(parents=True, exist_ok=True)
+
+    def _archive(self, tmp_path, session_id, members, **kwargs):
+        from backend.config import DATA_BASE_DIR
+
+        return _build_archive(
+            tmp_path / f"{session_id[:8]}.tar.gz",
+            session_id,
+            members,
+            data_base_dir=str(DATA_BASE_DIR),
+            state_payload=_session_json(session_id, current_round=3),
+            **kwargs,
+        )
+
+    def test_notebook_and_bioinfo_checkpoint_are_renamed(self, tmp_path):
+        """The default export carries both, and both used to be lost silently."""
+        from backend.config import get_session_states
+        from backend.routes.export_import import _import_tar_gz
+
+        session_id = str(uuid.uuid4())
+        self._occupy(session_id)
+        archive = self._archive(tmp_path, session_id, {
+            f"{session_id}/states/{session_id}.ipynb": b'{"cells":[]}',
+            f"{session_id}/states/{session_id}_bioinfo_checkpoint.json": b"{}",
+        })
+
+        state = _import_tar_gz(str(archive), user_id="importer")
+
+        assert state.id != session_id
+        states = get_session_states(state.id)
+        assert (states / f"{state.id}.ipynb").read_bytes() == b'{"cells":[]}'
+        assert (states / f"{state.id}_bioinfo_checkpoint.json").exists()
+        assert not (states / f"{session_id}.ipynb").exists()
+
+    def test_names_are_left_alone_when_the_id_is_kept(self, tmp_path):
+        from backend.config import get_session_states
+        from backend.routes.export_import import _import_tar_gz
+
+        session_id = str(uuid.uuid4())
+        archive = self._archive(tmp_path, session_id, {
+            f"{session_id}/states/{session_id}.ipynb": b'{"cells":[]}',
+        })
+
+        state = _import_tar_gz(str(archive), user_id="importer")
+
+        assert state.id == session_id
+        assert (get_session_states(session_id) / f"{session_id}.ipynb").exists()
+
+    def test_an_unrelated_states_filename_is_not_rewritten(self, tmp_path):
+        """Only the id prefix is rebound; other names pass through untouched."""
+        from backend.routes.export_import import _rebind_states_member_name
+
+        assert _rebind_states_member_name("notes.txt", "AAA", "BBB") == "notes.txt"
+        assert _rebind_states_member_name("AAA.ipynb", "AAA", "BBB") == "BBB.ipynb"
+        assert _rebind_states_member_name("AAA.ipynb", "AAA", "AAA") == "AAA.ipynb"
+        # The suffix must begin at a separator: a longer id that merely starts
+        # with this one is a different session's file, not this one's.
+        assert _rebind_states_member_name("AAAd_session.pkl", "AAA", "BBB") == "AAAd_session.pkl"
+        assert _rebind_states_member_name("AAA_session.pkl", "AAA", "BBB") == "BBB_session.pkl"
+
+    def test_a_case_variant_checkpoint_is_still_recognised(self):
+        """On a case-insensitive volume it would resolve to the real lookup."""
+        from backend.routes.export_import import _is_checkpoint_member
+
+        assert _is_checkpoint_member("states/checkpoints.sqlite")
+        assert _is_checkpoint_member("states/checkpoints.sqlite-wal")
+        assert _is_checkpoint_member("states/CHECKPOINTS.SQLITE")
+        assert not _is_checkpoint_member("states/notebook.ipynb")
+        assert not _is_checkpoint_member("uploads/checkpoints.sqlite")
+
+    def test_live_pkl_lands_where_the_sandbox_looks_for_it(self, tmp_path):
+        """A renamed pkl is the difference between a kernel and a false claim."""
+        from backend.routes.export_import import _import_tar_gz
+        from backend.utils.runtime_apply import _live_pkl, is_forward_resume_blocked
+
+        session_id = str(uuid.uuid4())
+        self._occupy(session_id)
+        archive = self._archive(tmp_path, session_id, {
+            f"{session_id}/states/{session_id}_session.pkl": b"KERNEL",
+        })
+
+        state = _import_tar_gz(str(archive), user_id="importer", trust=True)
+
+        assert state.id != session_id
+        assert _live_pkl(state.id).read_bytes() == b"KERNEL"
+        # The kernel really is there, so forward resume must not be blocked.
+        assert not is_forward_resume_blocked(state.runtime_restore_status)
+
+    def test_a_snapshot_pkl_alone_does_not_claim_a_kernel(self, tmp_path):
+        """``is_sandbox_pickle`` also matches per-snapshot ``.pkl.zst`` backups."""
+        from backend.routes.export_import import _import_tar_gz
+        from backend.utils.runtime_apply import _live_pkl, is_forward_resume_blocked
+
+        session_id = str(uuid.uuid4())
+        archive = self._archive(tmp_path, session_id, {
+            f"{session_id}/snapshots/snap1_session.pkl.zst": b"ZST",
+        })
+
+        state = _import_tar_gz(str(archive), user_id="importer", trust=True)
+
+        assert not _live_pkl(state.id).exists()
+        assert state.runtime_restore_status == "unavailable"
+        assert is_forward_resume_blocked(state.runtime_restore_status)
+
+    def test_checkpoint_is_dropped_when_the_id_changes(self, tmp_path):
+        """Its rows are keyed by the archive's thread_id and cannot be rebound.
+
+        Keeping the file would satisfy the ``has_checkpoint`` test in
+        ``lifecycle.run_analysis``, which then withholds the ``explicit_start``
+        intent — and resume, finding no row for this thread, executes nothing.
+        """
+        from backend.config import get_session_states
+        from backend.routes.export_import import _import_tar_gz
+
+        session_id = str(uuid.uuid4())
+        self._occupy(session_id)
+        archive = self._archive(tmp_path, session_id, {
+            f"{session_id}/states/checkpoints.sqlite": b"SQLITE",
+            f"{session_id}/states/checkpoints.sqlite-wal": b"WAL",
+        })
+
+        state = _import_tar_gz(str(archive), user_id="importer")
+
+        assert state.id != session_id
+        states = get_session_states(state.id)
+        assert not (states / "checkpoints.sqlite").exists()
+        assert not (states / "checkpoints.sqlite-wal").exists()
+
+    def test_checkpoint_survives_when_the_id_is_kept(self, tmp_path):
+        from backend.config import get_session_states
+        from backend.routes.export_import import _import_tar_gz
+
+        session_id = str(uuid.uuid4())
+        archive = self._archive(tmp_path, session_id, {
+            f"{session_id}/states/checkpoints.sqlite": b"SQLITE",
+        })
+
+        state = _import_tar_gz(str(archive), user_id="importer")
+
+        assert state.id == session_id
+        assert (get_session_states(session_id) / "checkpoints.sqlite").read_bytes() == b"SQLITE"
+
+
 # --- Members the old filters dropped, and members they should have ---------
 
 

@@ -46,8 +46,8 @@ export function RuntimeWarningBanner({
       <p className="text-xs mt-0.5 text-slate-600">
         {warning ||
           (isZh
-            ? '会话在无一致内核运行时的情况下恢复。继续分析已阻止；可只读查看，或从原始数据重新运行（/rerun）。'
-            : 'Session was restored without a consistent kernel runtime. Forward resume is blocked; view read-only or re-run from raw inputs (/rerun).')}
+            ? '会话在无一致内核运行时的情况下恢复。继续分析已阻止；可只读查看，或点击“重新运行”从原始数据重新计算。'
+            : 'Session was restored without a consistent kernel runtime. Forward resume is blocked; view read-only, or use the Re-run button to recompute from the raw inputs.')}
       </p>
     </div>
   )

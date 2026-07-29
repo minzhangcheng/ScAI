@@ -100,11 +100,71 @@ from .utils.agent_llm import (
 logger = logging.getLogger(__name__)
 
 
+def _warn_about_unrecovered_journals() -> None:
+    """Say so when startup is stepping over restore journals it will not touch.
+
+    A crash during the APPLYING stage of a restore leaves the session's files
+    half-swapped and a journal describing how to finish or roll back. With the
+    subsystem disabled that journal is never read, so the session loads and runs
+    against a mix of old and new files without anything being said. Recovery
+    genuinely cannot run here — it needs the object store — but the operator
+    should learn about it from a log line rather than from the results.
+    """
+    import json as _json
+
+    from backend.config._config import SESSION_DIR
+    from backend.services.snapshot_v2.paths import SnapshotV2Paths
+
+    if not SESSION_DIR.exists():
+        return
+
+    # Only a restore that never reached a terminal state describes a half-swapped
+    # tree. A COMMITTED or FAILED journal is just waiting for the next enabled
+    # startup to reap it, and warning about those would point at every session
+    # that has ever been restored.
+    unfinished = {"STAGED", "STAGING", "APPLYING"}
+    stranded = []
+    try:
+        for sess_dir in sorted(SESSION_DIR.iterdir()):
+            if not sess_dir.is_dir():
+                continue
+            journals = SnapshotV2Paths.for_session(sess_dir.name).journals
+            if not journals.is_dir():
+                continue
+            for entry in journals.iterdir():
+                if not entry.is_file():
+                    continue
+                try:
+                    doc = _json.loads(entry.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    # Unreadable or truncated is itself a sign of an interrupted
+                    # write, so it counts.
+                    stranded.append(sess_dir.name)
+                    break
+                if str(doc.get("status", "")).upper() in unfinished:
+                    stranded.append(sess_dir.name)
+                    break
+    except OSError as exc:
+        logger.debug("Could not scan for stranded restore journals: %s", exc)
+        return
+    if stranded:
+        logger.warning(
+            "Snapshot V2 is disabled, so %d session(s) with unfinished restore "
+            "journals were loaded without recovery: %s. If any of them crashed "
+            "mid-restore its files may mix pre- and post-restore content; "
+            "re-enable SCAI_ENABLE_SNAPSHOT_V2 to let recovery finish or roll "
+            "the restore back.",
+            len(stranded),
+            ", ".join(stranded[:10]) + ("…" if len(stranded) > 10 else ""),
+        )
+
+
 async def _recover_snapshots_on_startup() -> None:
     """Recover Snapshot V2 journals only for explicitly enabled deployments."""
     from backend.config import is_snapshot_v2_enabled
 
     if not is_snapshot_v2_enabled():
+        await asyncio.to_thread(_warn_about_unrecovered_journals)
         return
 
     try:

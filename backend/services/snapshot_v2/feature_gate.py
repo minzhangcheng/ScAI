@@ -37,15 +37,46 @@ def normalize_disabled_snapshot_state(
 ) -> bool:
     """Remove stale Snapshot V2-only blockers without starting snapshot work.
 
-    Restore transaction metadata is intentionally preserved for audit. A status
-    that claimed to be running is downgraded to paused when no live workflow
-    owns the session, so a persisted failure cannot become a phantom run.
+    Restore transaction metadata is preserved for audit, with one exception:
+    the ``recovery_error`` key is a blocker rather than a record, so it goes
+    with the flag it belongs to (and takes the whole ``snapshot_transaction``
+    with it when it was the only key left). A status that claimed to be running
+    is downgraded to paused when no live workflow owns the session, so a
+    persisted failure cannot become a phantom run.
+
+    ``recovery_blocked`` is cleared here too, and independently of the failure
+    gate above: it is set by journal recovery, which only ever runs while the
+    subsystem is enabled, and ``assert_recovery_clear`` refuses every start,
+    resume, WebSocket attach and kernel launch while it is set. With V2 off
+    nothing can ever clear it again and no snapshot endpoint is reachable to try
+    — so a session that was merely recoverable before the operator turned the
+    subsystem off would become permanently unstartable, as would any session
+    imported from an archive that carried the flag.
     """
     failure = getattr(state, "snapshot_failure", None)
     pending = getattr(state, "pending_required_snapshot", None)
     wait_reason = getattr(state, "wait_input_reason", None)
-    if not failure and not pending and wait_reason != "snapshot_failure":
+    transaction = getattr(state, "snapshot_transaction", None)
+
+    failure_gate = bool(failure) or bool(pending) or wait_reason == "snapshot_failure"
+    recovery_gate = bool(getattr(state, "recovery_blocked", False)) or (
+        isinstance(transaction, dict) and "recovery_error" in transaction
+    )
+    if not failure_gate and not recovery_gate:
         return False
+
+    recovery_cleared = False
+    if recovery_gate:
+        from backend.services.session_store import clear_recovery_blocked
+
+        recovery_cleared = clear_recovery_blocked(
+            str(getattr(state, "id", "") or ""), state
+        )
+
+    if not failure_gate:
+        # Nothing else to reconcile — in particular the status must be left
+        # alone, since a recovery block says nothing about where the run was.
+        return recovery_cleared
 
     retry_context = failure.get("retry_context", {}) if isinstance(failure, dict) else {}
     if not isinstance(retry_context, dict):
@@ -66,7 +97,7 @@ def normalize_disabled_snapshot_state(
             workflow_active=workflow_active,
         )
 
-    changed = False
+    changed = recovery_cleared
     if failure is not None:
         setattr(state, "snapshot_failure", None)
         changed = True

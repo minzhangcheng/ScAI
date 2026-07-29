@@ -146,11 +146,22 @@ async def run_analysis(session_id: str, request: Request):
     # executes nothing, so Start/Re-run looked like a silent no-op and the
     # session had no way forward at all.
     from backend.config import get_session_states
+    from backend.utils.runtime_apply import _live_pkl
 
-    has_checkpoint = (get_session_states(session_id) / "checkpoints.sqlite").exists()
+    # A checkpoint is only resumable together with the kernel it was written
+    # against: it names the graph node to continue from, and the pkl holds the
+    # values that node expects to find. Testing the file alone let an archive
+    # exported with include_runtime but imported without trust=true — the
+    # checkpoint travels unconditionally, the pkl does not — look resumable,
+    # which withheld the explicit_start intent and sent Re-run into an exact
+    # continuation on an empty kernel instead of a fresh round.
+    has_resumable_checkpoint = (
+        (get_session_states(session_id) / "checkpoints.sqlite").exists()
+        and _live_pkl(session_id).exists()
+    )
     if getattr(state, "restore_resume_kind", None) is None and (
         getattr(state, "restore_branch_id", None)
-        or (not has_checkpoint and state.current_round > 0)
+        or (not has_resumable_checkpoint and state.current_round > 0)
     ):
         state.restore_start_intent = "explicit_start"
 
@@ -172,7 +183,11 @@ async def run_analysis(session_id: str, request: Request):
     state.runtime_restore_status = "complete"
     state.runtime_restore_warning = None
     state.status = TaskStatus.RUNNING
-    await async_save_session(session_id, state)
+    # Forced: this write carries the cleared runtime block and the explicit
+    # start intent, and RUNNING is not one of the statuses that bypasses the
+    # 5s save throttle. Losing it to the throttle would leave a restarted
+    # backend still refusing to start the session the user just started.
+    await async_save_session(session_id, state, force=True)
 
     return APIResponse(
         success=True,
@@ -306,10 +321,18 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         # Clear both durable restore fields so the next run cannot mis-tag
         # plan/RoundResult from a prior restore (terminal/idle leave provenance).
         consume_restore_provenance(state)
+        # Same contract as POST /run: a re-analysis that is clearing an
+        # unavailable runtime has to tell the agent its kernel is empty, or it
+        # carries on as though adata were still loaded from the original run.
+        if is_forward_resume_blocked(getattr(state, "runtime_restore_status", "complete")):
+            state.runtime_recompute_pending = True
         state.runtime_restore_status = "complete"  # re-run recomputes kernel state
         state.runtime_restore_warning = None  # fresh rerun clears any restore warning
         await _update_session_cache(session_id, state)
-        await async_save_session(session_id, state)
+        # Forced for the same reason as POST /run: the cleared runtime block and
+        # the recompute flag must survive a restart, and RUNNING does not bypass
+        # the save throttle on its own.
+        await async_save_session(session_id, state, force=True)
         return APIResponse(
             success=True,
             message="Re-analysis started",

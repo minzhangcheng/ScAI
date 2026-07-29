@@ -239,6 +239,16 @@ export function AnalysisPanel() {
           return
         }
       } catch (error) {
+        // The subsystem was turned off under a tab that was open before the
+        // restart. Every further poll is a guaranteed 404, so stop and correct
+        // the stale capability flag instead of retrying until the tab closes.
+        // Matched on the error code rather than `instanceof ApiError` so the
+        // check survives a mocked api module and a second copy of the class.
+        if ((error as { code?: string } | null)?.code === 'SNAPSHOT_V2_DISABLED') {
+          useAppStore.getState().setSnapshotV2Enabled(false)
+          stopSnapshotRetryPolling()
+          return
+        }
         console.error('Failed to poll snapshot retry transaction:', error)
       }
       if (!pollState.cancelled) {
@@ -675,9 +685,33 @@ export function AnalysisPanel() {
     }
   }
 
+  // Every path that advances the analysis goes through this: Resume, the
+  // round-end dialog's Continue, and sending input from that dialog. Only
+  // Resume used to check, so the other two sent a request the backend refused
+  // and then marked the session running anyway — which hides the re-run button
+  // behind `!isRunning` and leaves a page reload as the only way back.
+  const blockForwardResume = useCallback((): boolean => {
+    if (!isForwardResumeBlocked()) return false
+    addMessage({
+      id: generateId(),
+      type: 'error',
+      content:
+        language === 'zh'
+          ? '当前会话禁止继续分析（运行时不可用或快照失败）。请使用重新运行或快照失败处置操作。'
+          : 'Forward resume is blocked (runtime unavailable or snapshot failure). Use re-run or snapshot failure actions.',
+      timestamp: new Date().toISOString(),
+    })
+    return true
+  }, [isForwardResumeBlocked, addMessage, language])
+
   // Dialog handler: Send user input with files (uploaded to agent-specific endpoints)
   const handleDialogSend = useCallback(async (message: string, files: UploadedFileWithAgent[]) => {
     if (!currentSession) return
+    // Leave the dialog mounted: its message and file selection are local state
+    // that is destroyed on unmount, and this path bails out before anything is
+    // uploaded. Closing here would discard what the user typed with nothing
+    // sent and nothing saved.
+    if (blockForwardResume()) return
 
     // Upload files to their respective agent endpoints
     const uploadedData: Array<{ type: string; filename: string; id?: string }> = []
@@ -740,10 +774,14 @@ export function AnalysisPanel() {
     }
 
     setShowFeedbackDialog(false)
-  }, [currentSession, resumeAnalysis, wsConnected, wsConnect])
+  }, [currentSession, resumeAnalysis, wsConnected, wsConnect, blockForwardResume])
 
   // Dialog handler: Skip/Continue (auto-proceed without input)
   const handleDialogSkip = useCallback(async () => {
+    if (blockForwardResume()) {
+      setShowFeedbackDialog(false)
+      return
+    }
     try {
       await continueRound()
       if (!wsConnected) {
@@ -753,7 +791,7 @@ export function AnalysisPanel() {
       console.error('Failed to continue round:', e)
     }
     setShowFeedbackDialog(false)
-  }, [continueRound, wsConnected, wsConnect])
+  }, [continueRound, wsConnected, wsConnect, blockForwardResume])
 
   // Pause handler
   const handlePause = useCallback(async () => {
@@ -766,18 +804,7 @@ export function AnalysisPanel() {
 
   // Resume handler — gated by backend runtime_restore_status / snapshot_failure
   const handleResume = useCallback(async () => {
-    if (isForwardResumeBlocked()) {
-      addMessage({
-        id: generateId(),
-        type: 'error',
-        content:
-          language === 'zh'
-            ? '当前会话禁止继续分析（运行时不可用或快照失败）。请使用重新运行或快照失败处置操作。'
-            : 'Forward resume is blocked (runtime unavailable or snapshot failure). Use re-run or snapshot failure actions.',
-        timestamp: new Date().toISOString(),
-      })
-      return
-    }
+    if (blockForwardResume()) return
     try {
       await resumeAnalysis()
       if (!wsConnected) {
@@ -786,7 +813,7 @@ export function AnalysisPanel() {
     } catch (e) {
       console.error('Failed to resume:', e)
     }
-  }, [resumeAnalysis, wsConnected, wsConnect, isForwardResumeBlocked, addMessage, language])
+  }, [resumeAnalysis, wsConnected, wsConnect, blockForwardResume])
 
   const handleRerun = useCallback(async () => {
     if (!currentSession) return
@@ -1324,7 +1351,7 @@ export function AnalysisPanel() {
                   ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
                   : 'bg-indigo-100 hover:bg-indigo-200 text-indigo-800'
               }`}
-              title={language === 'zh' ? '从原始数据重新运行 (/rerun)' : 'Re-run analysis from raw inputs (/rerun)'}
+              title={language === 'zh' ? '从原始数据重新运行' : 'Re-run analysis from raw inputs'}
             >
               <Play className="w-3.5 h-3.5" />
               {language === 'zh' ? '重新运行' : 'Re-run'}

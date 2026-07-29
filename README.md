@@ -2,7 +2,7 @@
 
 ScAI is a general-purpose, multi-agent platform for biomedical analysis. It coordinates sequencing analysis, pathology imaging, biochemical indicators, literature research, and human review in one iterative workflow. Models can be configured per agent through OpenAI-compatible endpoints, Google APIs, or local deployments.
 
-**Version**: 0.36.9 | **License**: Apache 2.0
+**Version**: 0.36.10 | **License**: Apache 2.0
 
 ## Core Capabilities
 

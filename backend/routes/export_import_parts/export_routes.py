@@ -148,8 +148,13 @@ async def export_state(session_id: str, request: Request, include_runtime: bool 
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    # Save latest state to disk first
-    await async_save_session(session_id, state)
+    # Save latest state to disk first. Forced: the packer reads session.json
+    # off the disk, and RUNNING is not one of the statuses that bypass the 5s
+    # save throttle — so a session exported while it is analysing would ship a
+    # session.json up to five seconds stale. A `current_round` that lands back
+    # at 0 that way also makes the importer skip its runtime-availability
+    # marking entirely, producing an archive that claims a kernel it lacks.
+    await async_save_session(session_id, state, force=True)
 
     # Write tar.gz to a temp file on disk (not in memory)
     import tempfile
@@ -192,8 +197,13 @@ async def export_prepare(session_id: str, request: Request, include_runtime: boo
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    # Save latest state to disk first
-    await async_save_session(session_id, state)
+    # Save latest state to disk first. Forced: the packer reads session.json
+    # off the disk, and RUNNING is not one of the statuses that bypass the 5s
+    # save throttle — so a session exported while it is analysing would ship a
+    # session.json up to five seconds stale. A `current_round` that lands back
+    # at 0 that way also makes the importer skip its runtime-availability
+    # marking entirely, producing an archive that claims a kernel it lacks.
+    await async_save_session(session_id, state, force=True)
 
     export_dir = UPLOAD_TEMP_DIR
     export_dir.mkdir(parents=True, exist_ok=True)

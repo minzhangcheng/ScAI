@@ -397,6 +397,13 @@ export function useSession() {
     if (!currentSession) throw new Error('No active session')
 
     const resp = await apiFetch<any>(`/session/${currentSession.id}/resume`, { method: 'POST' })
+    // A refusal to advance still answers 200: the backend reports it in the
+    // body rather than as an error. Marking the session running regardless is
+    // what hid the re-run control, which is the only way out of that state.
+    // Four refusals reach here — runtime unavailable, recovery blocked,
+    // snapshot failure, and a pending plan review — and only the first carries
+    // a dedicated flag, so `success === false` has to be honoured as well.
+    if (resp?.success === false || resp?.data?.runtime_unavailable) return
     updateSession({ status: 'running' })
     // If workflow doesn't exist (e.g., after backend restart), trigger WebSocket
     // reconnect which will create a new workflow instance on the server
@@ -410,6 +417,7 @@ export function useSession() {
     const session = useAppStore.getState().currentSession
     if (!session) throw new Error('No active session')
     const resp = await apiFetch<any>(`/session/${session.id}/resume`, { method: 'POST' })
+    if (resp?.success === false || resp?.data?.runtime_unavailable) return
     useAppStore.getState().updateSession({ status: 'running' })
     if (resp?.data?.needs_reconnect) {
       const { wsConnect: connectWs } = useAppStore.getState()

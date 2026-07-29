@@ -49,9 +49,14 @@ from urllib.parse import unquote
 from .core import ImportCancelled, MAX_INLINE_IMPORT_BYTES, _IMPORT_UPLOAD_PROGRESS_BYTES, check_inline_import_size, router
 
 from .import_impl import (
+    _allocate_import_session_id,
+    _arm_restore_intent_after_import,
     _import_zip,
     _mark_runtime_availability_after_import,
+    _normalize_imported_status,
     _process_import_job,
+    _rebind_session_id_values,
+    _remap_paths_in_text,
 )
 
 
@@ -329,17 +334,45 @@ async def import_state(
         # availability marking as every other import path -- without it a
         # round-7 session is allowed to resume against an empty kernel, which
         # is exactly what that marking exists to prevent.
-        from backend.config import get_session_dir
+        from backend.config import DATA_BASE_DIR, get_session_dir
         from backend.utils.blob_store import inline_blobs
 
         state_data = json.loads(content.decode('utf-8'))
+        archive_session_id = str(state_data.get("id") or "")
+        if not archive_session_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Session document has no id",
+            )
+        validate_session_id(archive_session_id)
+        # Importing creates a session, it never overwrites one — the same rule
+        # the tar.gz and zip paths follow. Without it this endpoint took the id
+        # straight from the uploaded document and then stamped the caller's
+        # user_id onto it, so posting {"id": "<someone else's session>"} handed
+        # that session over.
+        session_id = _allocate_import_session_id(archive_session_id)
+        state_data = inline_blobs(
+            state_data, get_session_dir(archive_session_id) / "blobs"
+        )
+        if session_id != archive_session_id:
+            state_data = json.loads(
+                _remap_paths_in_text(
+                    json.dumps(state_data, ensure_ascii=False),
+                    "",
+                    str(DATA_BASE_DIR),
+                    archive_session_id,
+                    session_id,
+                )
+            )
+            state_data = _rebind_session_id_values(
+                state_data, archive_session_id, session_id
+            )
+        state_data["id"] = session_id
         state_data["user_id"] = user_id
-        session_id_hint = str(state_data.get("id") or "")
-        if session_id_hint:
-            validate_session_id(session_id_hint)
-            state_data = inline_blobs(state_data, get_session_dir(session_id_hint) / "blobs")
         state = AnalysisState(**state_data)
         _mark_runtime_availability_after_import(state)
+        _normalize_imported_status(state)
+        _arm_restore_intent_after_import(state)
     else:
         raise HTTPException(
             status_code=400,

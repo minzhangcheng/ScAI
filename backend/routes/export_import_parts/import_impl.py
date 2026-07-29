@@ -106,6 +106,73 @@ def _mark_runtime_availability_after_import(
     )
 
 
+def _normalize_imported_status(state: AnalysisState) -> None:
+    """Land an imported session in a status this installation can back up.
+
+    A session exported mid-analysis arrives claiming ``running``, but nothing
+    here owns that run: no workflow object, no kernel, no WebSocket. The
+    frontend reads the status literally and hides the very controls that would
+    start one — including the "re-run from your data" button that a runtime-less
+    import depends on — so the session looks permanently busy and the user has
+    to stop it before anything else is reachable.
+    """
+    from backend.models.schemas import TaskStatus
+
+    # GENERATING_REPORT is the same claim with a different label, and the
+    # frontend has no branch for it at all: it is neither paused, nor waiting,
+    # nor running, so an imported session sitting in it renders no controls
+    # whatsoever.
+    unowned = {TaskStatus.RUNNING, TaskStatus.GENERATING_REPORT}
+    if state.status in unowned:
+        previous = state.status
+        state.status = TaskStatus.PAUSED
+        logger.info(
+            "[%s] Imported while marked %s; no workflow owns it here, so it "
+            "lands paused.",
+            state.id,
+            previous.value,
+        )
+
+
+def _arm_restore_intent_after_import(state: AnalysisState) -> None:
+    """Give a checkpoint-less imported session a way to re-enter the graph.
+
+    ``resume()`` deliberately refuses to invent a fresh ``initialize_round``
+    run, so a session with no usable checkpoint moves only when
+    ``restore_start_intent`` says where to go. ``POST /run`` sets it — but the
+    UI only offers that button while the runtime is unavailable. An import that
+    carried a kernel under a reallocated id has neither: its checkpoint was
+    dropped (it is keyed by the archive's thread id) yet its runtime is
+    ``complete``, so the user is left with Resume, which never sets the intent,
+    and the graph holds without executing anything on every attempt.
+
+    Arming it here, where the archive's contents are known, also covers the
+    Resume path rather than only the button that happens to call ``/run``.
+    """
+    if state.current_round <= 0:
+        # Never executed; a normal start already begins at initialize_round.
+        return
+    if getattr(state, "restore_resume_kind", None) is not None:
+        # An exact continuation target rides along in the state; honour it.
+        return
+
+    from backend.utils.runtime_apply import _live_pkl
+
+    checkpoint = get_session_states(state.id) / "checkpoints.sqlite"
+    if checkpoint.exists() and _live_pkl(state.id).exists():
+        # Checkpoint plus the kernel it was written against: resume() can
+        # continue exactly, and must not be diverted into a fresh round.
+        return
+
+    state.restore_start_intent = "explicit_start"
+    logger.info(
+        "[%s] Imported without a resumable checkpoint (round=%s); armed "
+        "explicit_start so Resume re-enters at initialize_round.",
+        state.id,
+        state.current_round,
+    )
+
+
 def _resign_imported_live_pkl(session_id: str) -> bool:
     """Re-sign an imported live sandbox pkl with *this* installation's key.
 
@@ -296,6 +363,43 @@ def _is_unsafe_member_name(name: str) -> bool:
     return any(segment == ".." for segment in name.split("/"))
 
 
+def _rebind_states_member_name(name: str, src_id: str, session_id: str) -> str:
+    """Rename a ``states/`` member after the destination session.
+
+    ``states/`` is the one archive root whose session id lives in the *filename*
+    rather than in a path segment the caller strips — ``<id>.ipynb``,
+    ``<id>_session.pkl`` and the ``<id>_*_checkpoint.json`` family are all
+    looked up by name against the id of the session that owns them. An import
+    that had to allocate a fresh id used to write them under the archive's name,
+    where nothing ever looks: the notebook was silently lost, and the pkl sat
+    next to a ``_live_pkl`` that reported no kernel at all.
+
+    The suffix must start at a ``.`` or ``_`` boundary. Session ids are uuid4
+    and therefore all the same length, so one cannot really prefix another — but
+    ids only have to satisfy ``validate_session_id``, and a hand-built archive
+    declaring ``abc`` would otherwise rewrite an unrelated ``abcd_session.pkl``.
+    """
+    if src_id == session_id or not name.startswith(src_id):
+        return name
+    rest = name[len(src_id):]
+    if rest and rest[0] not in "._":
+        return name
+    return f"{session_id}{rest}"
+
+
+def _is_checkpoint_member(relative_to_base: str) -> bool:
+    """Whether a member is the LangGraph checkpoint database (or its WAL/SHM).
+
+    Case-folded: the lookup in ``lifecycle.run_analysis`` spells the name in
+    lower case, so on a case-insensitive volume an archive carrying
+    ``CHECKPOINTS.SQLITE`` would resolve there while slipping past this filter.
+    """
+    if not relative_to_base.startswith("states/"):
+        return False
+    rest = relative_to_base[len("states/"):]
+    return "/" not in rest and rest.casefold().startswith("checkpoints.sqlite")
+
+
 def _resolve_import_dest(
     relative_to_base: str,
     session_id: str,
@@ -321,7 +425,9 @@ def _resolve_import_dest(
         return relative_to_base[len(prefix):]
 
     if relative_to_base.startswith("states/"):
-        return get_session_states(session_id) / _rest("states/")
+        return get_session_states(session_id) / _rebind_states_member_name(
+            _rest("states/"), src_id, session_id
+        )
     if relative_to_base.startswith(f"uploads/{src_id}/"):
         return get_session_uploads(session_id) / _rest(f"uploads/{src_id}/")
     if relative_to_base.startswith(f"workspace/{src_id}/"):
@@ -439,6 +545,8 @@ def _import_tar_gz(
     *outcome* receives ``session_id`` as soon as a destination is allocated so the
     caller can clean up a half-written session on cancel or failure.
     """
+    from backend.utils.runtime_apply import _live_pkl
+
     data_base_str = str(DATA_BASE_DIR)
 
     archive_session_id: Optional[str] = None
@@ -586,6 +694,22 @@ def _import_tar_gz(
                     state_json_data = f.read()
                 continue
 
+            # The checkpoint database is keyed by thread_id, which is the session
+            # id of the run that wrote it, and its blobs carry a serialized
+            # AnalysisState holding the same id. Under a reallocated id none of
+            # that can be renamed into place, so it is dropped: the file would
+            # otherwise satisfy the `has_checkpoint` test in lifecycle.run_analysis
+            # while holding no row this session can resume from, which withholds
+            # the explicit_start intent and leaves Start executing nothing.
+            if session_id != archive_session_id and _is_checkpoint_member(relative_to_base):
+                logger.warning(
+                    "Import allocated a new session id; dropping the checkpoint "
+                    "database from the archive (%s) so the session starts from "
+                    "its restored round instead of a thread it cannot resume.",
+                    member.name,
+                )
+                continue
+
             dest_path = _resolve_import_dest(relative_to_base, session_id, archive_session_id)
             if dest_path is None:
                 logger.warning(
@@ -617,7 +741,11 @@ def _import_tar_gz(
             else:
                 with open(dest_path, 'wb') as out_f:
                     shutil.copyfileobj(f, out_f, length=UPLOAD_CHUNK_SIZE)
-                if is_pkl_member:
+                # Only the live kernel pkl answers "can this session resume".
+                # `is_sandbox_pickle` also matches the per-snapshot
+                # `<snap_id>_session.pkl.zst` backups, and counting one of those
+                # let a session with no live kernel at all claim it had one.
+                if is_pkl_member and dest_path == _live_pkl(session_id):
                     wrote_sandbox_pkl = True
 
             # Progress accounting: count uncompressed member size (matches what
@@ -681,6 +809,8 @@ def _import_tar_gz(
     )
     state = AnalysisState(**inlined)
     _mark_runtime_availability_after_import(state, imported_pkl=wrote_sandbox_pkl)
+    _normalize_imported_status(state)
+    _arm_restore_intent_after_import(state)
 
     # Write the externalized JSON (with @scai-blob tokens intact) to disk.
     # This keeps session.json consistent with the extracted blob sidecars.
@@ -788,4 +918,6 @@ def _import_zip(content: bytes, user_id: str, trust: bool = False) -> AnalysisSt
 
     state = AnalysisState(**inline_blobs(state_data, get_session_dir(session_id) / "blobs"))
     _mark_runtime_availability_after_import(state, imported_pkl=wrote_sandbox_pkl)
+    _normalize_imported_status(state)
+    _arm_restore_intent_after_import(state)
     return state
