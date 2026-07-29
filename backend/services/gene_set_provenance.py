@@ -235,21 +235,16 @@ def power_caveat(power: dict) -> str:
     the bare caveat if the corpus is unavailable -- guidance is an enhancement,
     never a dependency.
     """
-    if power.get("overcounted"):
-        # Surfaced even when the panel is well powered: the count is wrong, and
-        # a wrong count is worth knowing about wherever it appears.
-        note = (
-            f"n_genes_matched exceeded the panel size and was clamped to "
-            f"{power['effective_n']}. A panel cannot have more genes present in "
-            f"the matrix than it contains -- recount against the panel actually "
-            f"scored, not the set it was derived from."
-        )
-        if not power.get("underpowered"):
-            return note
-    else:
-        note = ""
+    # Surfaced even when the panel is well powered: the count is wrong, and a
+    # wrong count is worth knowing about wherever it appears.
+    note = (
+        f"n_genes_matched exceeded the panel size and was clamped to "
+        f"{power['effective_n']}. A panel cannot have more genes present in "
+        f"the matrix than it contains -- recount against the panel actually "
+        f"scored, not the set it was derived from."
+    ) if power.get("overcounted") else ""
     if not power.get("underpowered"):
-        return ""
+        return note
     if power.get("effective_n") == 0:
         head = (
             "NONE of this panel's genes are present in the analysed matrix, so it "

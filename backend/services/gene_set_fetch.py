@@ -13,6 +13,7 @@ analysis mid-round.
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -27,7 +28,6 @@ from .gene_set_resolver import (
     _DEFAULT_CACHE,
     build_provenance,
     cache_path,
-    describe_partition,
     direction_sibling_ids,
     partition_by_direction,
     partition_provenance,
@@ -91,7 +91,8 @@ def load_collection(version: str, collection: str, organism: str,
             f"{sorted(MSIGDB_ORGANISMS)} only; {organism!r} must be projected."
         )
     release, suffix = normalize_version(version)
-    if not release or release == str(version).strip() and "." not in release:
+    # A bare token with no dot is a collection name, not a release identifier.
+    if "." not in release:
         raise ValueError(
             f"{version!r} is not a release identifier. Releases look like '2025.1' "
             f"or '2025.1.{code}'. Call with list_collections=true to see what a "
@@ -107,7 +108,7 @@ def load_collection(version: str, collection: str, organism: str,
     path = cache_path(cache_dir, version, collection, code)
 
     if path.exists():
-        return parse_gmt(path.read_text(encoding="utf-8"))
+        return _parse_cached_gmt(path)
 
     url = msigdb_gmt_url(version, collection, code)
     try:
@@ -133,6 +134,19 @@ def load_collection(version: str, collection: str, organism: str,
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)  # atomic: never leave a half-written GMT for the next read
     return sets
+
+
+@lru_cache(maxsize=8)
+def _parse_cached_gmt(path: Path) -> dict[str, list[str]]:
+    """Parse a cached GMT once per process.
+
+    The disk cache stops the re-download; without this the whole collection is
+    still re-read and re-parsed on every call, and the agent fetches many sets
+    from one collection inside a single run. Keyed on the path, which already
+    carries the release, so a version bump is a different entry rather than a
+    stale hit.
+    """
+    return parse_gmt(path.read_text(encoding="utf-8"))
 
 
 def project_genes(genes: Iterable[str], source_organism: str,

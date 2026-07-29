@@ -2,8 +2,8 @@ from dataclasses import dataclass
 from typing import Any, Iterable, List, Optional, Set
 
 from ..models.schemas import AnalysisPhase, AnalysisState, RoundResult
-from ..utils.direction_payload import candidate_for_state, direction_requirements
-from ..utils.plan_retention import uncovered_items
+from ..utils.direction_payload import normalize_direction_text, resolve_direction_context
+from ..utils.text_coverage import uncovered_items
 
 
 @dataclass(frozen=True)
@@ -15,7 +15,9 @@ class DirectionCoverageStatus:
 
 
 def normalize_direction_key(direction: str) -> str:
-    return " ".join((direction or "").strip().lower().split())
+    # One definition of "the same direction" for both the coverage ledger and
+    # the payload lookup; they must not drift apart.
+    return normalize_direction_text(direction)
 
 
 def current_lineage_id(state: AnalysisState) -> str:
@@ -87,12 +89,15 @@ def uncovered_direction_requirements(
     this direction". It does not answer "did the plan address what the
     direction was selected to resolve", so a round can be recorded as covering
     a direction while never testing anything the direction asked about.
+
+    Reads the resolved payload rather than the exploration candidate alone: a
+    candidate exists only for the first directions taken out of the exploration
+    report, so keying on it left this silent for most of a long run.
     """
-    candidate = candidate_for_state(state, direction)
-    requirements = direction_requirements(candidate)
-    if not requirements:
+    context = resolve_direction_context(state, direction)
+    if not context.requirements:
         return []
-    return uncovered_items(requirements, plan_text_for_coverage(plan))
+    return uncovered_items(context.requirements, plan_text_for_coverage(plan))
 
 
 def selected_direction_keys(

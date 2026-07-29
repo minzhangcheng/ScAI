@@ -12,10 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from backend.agents.bioinformatics.planning import (
-    render_pi_modifications,
-    render_plan_steps,
-)
+from backend.agents.bioinformatics.planning import render_pi_modifications
+from backend.utils.formatting import render_plan_steps
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
 from backend.models.schema_parts.outputs import ExplorationReport
 from backend.models.schemas import AnalysisPlan, AnalysisState, PlanStep
@@ -142,15 +140,16 @@ def test_rendered_steps_carry_every_field():
     assert "Depends on: [1]" in block
 
 
-def test_step_tag_may_vary_per_step():
+def test_untagged_render_labels_each_step_with_its_own_status():
     """A mixed list must still show which steps are locked."""
     plan = _rich_plan()
     plan.steps[0].status = "completed"
-    block = render_plan_steps(
-        plan.steps, lambda s: getattr(s, "status", "pending"), budget=100_000
-    )
+    block = render_plan_steps(plan.steps, budget=100_000)
     assert "[completed] Step 1:" in block
     assert "[pending] Step 2:" in block
+    assert "[TO REVISE] Step 1:" in render_plan_steps(
+        plan.steps, "TO REVISE", budget=100_000
+    )
 
 
 def test_rendering_shrinks_fields_rather_than_dropping_steps():
@@ -239,71 +238,33 @@ async def test_revision_keeps_working_without_the_new_context():
 # --- retention guard -------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_genericised_revision_triggers_one_repair_and_the_repair_wins(caplog):
-    agent = _agent()
-    agent.chat_without_history = AsyncMock(side_effect=[
-        _plan_json(generic=True),
-        _plan_json(generic=False),
-    ])
+async def test_revision_never_costs_a_second_model_call():
+    """One revision, one call — whatever the revision returns.
 
-    revised = await agent.revise_plan_incrementally(
-        state=_state(),
-        current_plan=_rich_plan(),
-        pi_feedback="Separate activity from execution.",
-        pi_tasks=["Score modules including modeA, modeB, and modeC programs."],
-    )
-
-    assert agent.chat_without_history.call_count == 2
-    repair_prompt = agent.chat_without_history.call_args_list[1].args[0]
-    assert "Retention Check FAILED" in repair_prompt
-    assert "modea" in repair_prompt.lower()
-    scoring_step = next(s for s in revised.steps if s.id == 2)
-    assert "modeA" in scoring_step.input
-    assert "modeC" in scoring_step.input
-
-
-@pytest.mark.asyncio
-async def test_faithful_revision_costs_no_extra_call():
-    agent = _agent()
-    agent.chat_without_history = AsyncMock(return_value=_plan_json(generic=False))
-
-    await agent.revise_plan_incrementally(
-        state=_state(),
-        current_plan=_rich_plan(),
-        pi_feedback="Separate activity from execution.",
-        pi_tasks=["Score modules including modeA, modeB, and modeC programs."],
-    )
-
-    assert agent.chat_without_history.call_count == 1
+    An earlier cut re-prompted when a revision appeared to drop content. That
+    trigger was calibrated on reasoning rather than data: across 45 real
+    revisions the retention ratio does not separate one that dropped the
+    study's mechanism vocabulary from one that kept it, and in production it
+    fired on 5 of 5 revisions and recovered nothing on all 5. What prevents the
+    loss is the prompt above, not a verdict after the fact.
+    """
+    for generic in (True, False):
+        agent = _agent()
+        agent.chat_without_history = AsyncMock(return_value=_plan_json(generic=generic))
+        revised = await agent.revise_plan_incrementally(
+            state=_state(),
+            current_plan=_rich_plan(),
+            pi_feedback="Separate activity from execution.",
+            pi_tasks=["Score modules including modeA, modeB, and modeC programs."],
+        )
+        assert agent.chat_without_history.call_count == 1
+        assert len(revised.steps) == 2
 
 
 @pytest.mark.asyncio
-async def test_repair_that_recovers_nothing_is_discarded():
+async def test_unparseable_revision_still_preserves_the_current_plan():
     agent = _agent()
-    agent.chat_without_history = AsyncMock(side_effect=[
-        _plan_json(generic=True),
-        _plan_json(generic=True),
-    ])
-
-    revised = await agent.revise_plan_incrementally(
-        state=_state(),
-        current_plan=_rich_plan(),
-        pi_feedback="Separate activity from execution.",
-        pi_tasks=["Score modules including modeA, modeB, and modeC programs."],
-    )
-
-    assert agent.chat_without_history.call_count == 2
-    assert len(revised.steps) == 2
-    assert revised.overview == "Descriptive module scoring with cautious interpretation."
-
-
-@pytest.mark.asyncio
-async def test_unparseable_repair_falls_back_to_the_original_revision():
-    agent = _agent()
-    agent.chat_without_history = AsyncMock(side_effect=[
-        _plan_json(generic=True),
-        "not json at all",
-    ])
+    agent.chat_without_history = AsyncMock(side_effect=["not json", "still not json"])
 
     revised = await agent.revise_plan_incrementally(
         state=_state(),
@@ -313,7 +274,7 @@ async def test_unparseable_repair_falls_back_to_the_original_revision():
     )
 
     assert len(revised.steps) == 2
-    assert revised.overview == "Descriptive module scoring with cautious interpretation."
+    assert "modeA" in revised.steps[1].input
 
 
 # --- workflow wiring -------------------------------------------------------

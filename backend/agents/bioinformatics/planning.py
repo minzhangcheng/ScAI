@@ -34,14 +34,17 @@ import json as _json
 from backend.services import ora_kernel
 from backend.services.marker_priors import MarkerDB, summarize_database_priors
 
-from ...utils.formatting import format_revision_history, truncate_for_llm
+from ...utils.formatting import (
+    format_revision_history,
+    render_plan_steps,
+    truncate_for_llm,
+)
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ...utils.direction_payload import (
+    DirectionContext,
     build_direction_context_block,
-    candidate_for_state,
-    direction_entities,
+    resolve_direction_context,
 )
-from ...utils.plan_retention import format_terms, missing_salient_terms
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -52,73 +55,6 @@ logger = logging.getLogger(__name__)
 # successive PI review rounds.
 _COMPLETED_STEPS_BUDGET = 16_000
 _AFFECTED_STEPS_BUDGET = 28_000
-# Per-field character caps, tried in order until the block fits its budget.
-_STEP_FIELD_CAPS = (600, 400, 260, 160, 90)
-
-_STEP_RENDER_FIELDS = (
-    ("Method", "method"),
-    ("Input", "input"),
-    ("Output", "expected_output"),
-    ("Rationale", "rationale"),
-)
-
-# A revision that loses fewer terms than this is ordinary rewording. Above it,
-# one bounded repair pass re-injects what disappeared.
-_RETENTION_REPAIR_MIN_MISSING = 5
-_RETENTION_REPORT_LIMIT = 40
-
-
-def _clip_field(value: Any, cap: int) -> str:
-    text = " ".join(str(value or "").split())
-    if not text:
-        return ""
-    return text if len(text) <= cap else text[: max(1, cap - 1)].rstrip() + "..."
-
-
-def _step_tag(tag: Any, step: Any) -> str:
-    """Resolve a fixed tag, or derive a per-step one (e.g. its status)."""
-    return str(tag(step) if callable(tag) else tag)
-
-
-def _render_plan_step(step: Any, tag: Any, cap: int) -> str:
-    lines = [f"  [{_step_tag(tag, step)}] Step {step.id}: {step.title}"]
-    for label, attr in _STEP_RENDER_FIELDS:
-        rendered = _clip_field(getattr(step, attr, ""), cap)
-        if rendered:
-            lines.append(f"    {label}: {rendered}")
-    depends = list(getattr(step, "depends_on", None) or [])
-    if depends:
-        lines.append(f"    Depends on: {depends}")
-    return "\n".join(lines)
-
-
-def render_plan_steps(steps: Any, tag: Any, *, budget: int) -> str:
-    """Render plan steps with their full field payload, never dropping a step.
-
-    Clipping a joined step list at a character budget truncates the tail, and
-    the tail is where interpretation and grading steps live. Shrinking the
-    per-field cap instead keeps every step's identity and intent visible, which
-    is what the revising model needs in order to preserve rather than reinvent.
-
-    ``tag`` is a fixed label, or a callable receiving each step when the label
-    has to vary (rendering a mixed list by per-step status, for instance).
-    """
-    step_list = list(steps or [])
-    if not step_list:
-        return ""
-    for cap in _STEP_FIELD_CAPS:
-        block = "\n".join(_render_plan_step(s, tag, cap) for s in step_list)
-        if len(block) <= budget:
-            return block
-    logger.warning(
-        "[Bioinformatics] %d plan steps exceed the %d-char budget even at the "
-        "tightest field cap; rendering titles and methods only",
-        len(step_list), budget,
-    )
-    return "\n".join(
-        f"  [{_step_tag(tag, s)}] Step {s.id}: {s.title} ({_clip_field(s.method, 120)})"
-        for s in step_list
-    )
 
 
 def render_pi_modifications(pi_modifications: Any, *, max_chars: int = 8_000) -> str:
@@ -516,10 +452,10 @@ Rejected plan steps (DO NOT COPY the structure):
                     existing_plan.steps, "REJECTED", budget=_AFFECTED_STEPS_BUDGET
                 )
             else:
+                # No tag: each step is labelled with its own status, which is
+                # what "completed steps MUST NOT be changed" below refers to.
                 completed_text = render_plan_steps(
-                    existing_plan.steps,
-                    lambda s: getattr(s, "status", "pending"),
-                    budget=_COMPLETED_STEPS_BUDGET,
+                    existing_plan.steps, budget=_COMPLETED_STEPS_BUDGET
                 )
                 revision_context = f"""
 ## Existing Plan (for incremental revision)
@@ -630,6 +566,7 @@ Return the plan as a JSON object:
         revision round re-derived the plan, nothing in its prompt stated what
         the study was for, so the model had no basis for keeping content the
         tasks had introduced.
+
         """
         parts: List[str] = []
         objective = truncate_for_llm(
@@ -642,139 +579,14 @@ Return the plan as a JSON object:
         if direction:
             parts.append(f"\n## Current Research Direction\n{direction}")
         try:
-            candidate = candidate_for_state(state, direction)
-        except Exception:  # defensive: a malformed report must not block planning
-            logger.warning("[Bioinformatics] Could not resolve direction candidate", exc_info=True)
-            candidate = None
-        block = build_direction_context_block(candidate)
+            context = resolve_direction_context(state, direction)
+        except Exception:  # defensive: malformed history must not block planning
+            logger.warning("[Bioinformatics] Could not resolve direction payload", exc_info=True)
+            context = DirectionContext()
+        block = build_direction_context_block(context)
         if block:
             parts.append(block)
         return "\n".join(parts)
-
-    def _direction_entity_text(self, state: AnalysisState) -> str:
-        """Named entities the active direction implicated, as flat text."""
-        try:
-            candidate = candidate_for_state(
-                state, str(getattr(state, "current_round_direction", "") or "")
-            )
-        except Exception:
-            return ""
-        return ", ".join(direction_entities(candidate))
-
-    @staticmethod
-    def _retention_source_text(
-        current_plan: 'AnalysisPlan',
-        tasks_text: str,
-        entity_text: str,
-        modifications_text: str,
-    ) -> str:
-        """Everything a revision is required to carry forward.
-
-        The plan under revision counts as source: its steps already encode the
-        content of earlier rounds, and losing that is the decay this guards.
-
-        Deliberately excludes the research objective and the direction's prose:
-        a plan legitimately paraphrases a rationale, so requiring that wording
-        verbatim would fire on every faithful revision and train the check into
-        noise. What a plan must not do is stop naming the things it analyses —
-        so the sources here are the plan's own fields, the PI's tasks, the
-        step-level asks, and the direction's named entities.
-        """
-        step_text = "\n".join(
-            " ".join(str(getattr(step, attr, "") or "") for _, attr in _STEP_RENDER_FIELDS)
-            + " " + str(getattr(step, "title", "") or "")
-            for step in (current_plan.steps or [])
-        )
-        decision_points = "\n".join(str(p) for p in (current_plan.key_decision_points or []))
-        return "\n".join([
-            tasks_text,
-            entity_text,
-            modifications_text,
-            str(current_plan.overview or ""),
-            step_text,
-            decision_points,
-        ])
-
-    @staticmethod
-    def _plan_data_text(plan_data: dict) -> str:
-        """Flatten a parsed plan payload for retention comparison."""
-        try:
-            return json.dumps(plan_data, ensure_ascii=False, default=str)
-        except Exception:
-            return str(plan_data)
-
-    async def _repair_lost_plan_content(
-        self,
-        *,
-        prompt: str,
-        plan_data: dict,
-        source_text: str,
-        priority_text: str = "",
-        reserved_step_ids: Optional[set] = None,
-    ) -> dict:
-        """Re-prompt once when a revision dropped content it had to keep.
-
-        Ordinary rewording loses a handful of terms. A plan that has
-        genericised loses dozens, and each one is a term the research objective
-        supplied that the model will not reinvent on its own. Firing only above
-        that noise floor keeps this to at most one extra call per revision, and
-        the repair is discarded unless it measurably improves coverage.
-        """
-        if not plan_data or plan_data.get("parse_error") or not plan_data.get("steps"):
-            return plan_data
-
-        missing = missing_salient_terms(
-            source_text,
-            self._plan_data_text(plan_data),
-            limit=_RETENTION_REPORT_LIMIT,
-            priority_text=priority_text,
-        )
-        if len(missing) < _RETENTION_REPAIR_MIN_MISSING:
-            return plan_data
-
-        logger.warning(
-            "[Bioinformatics] Plan revision dropped %d required terms, repairing: %s",
-            len(missing), format_terms(missing[:15]),
-        )
-        repair_prompt = (
-            prompt
-            + "\n\n## Retention Check FAILED\n"
-            "Your revised plan no longer mentions the following, all of which came from "
-            "the research context, the PI's tasks, or the plan you were revising:\n"
-            f"{format_terms(missing)}\n\n"
-            "Reinstate each one in the step that tests it, naming it in that step's "
-            "input, expected_output, or rationale. If one is genuinely out of scope for "
-            "this stage, say so in that step's rationale rather than deleting it. Keep "
-            "every other part of your revision. Return the FULL plan as JSON again."
-        )
-        repaired_response = await self.chat_without_history(repair_prompt, temperature=0.3)
-        repaired = self._prepare_plan_data(
-            self._safe_parse_json(repaired_response, default={}),
-            reserved_step_ids=reserved_step_ids,
-        )
-        if repaired.get("parse_error") or not repaired.get("steps"):
-            logger.warning(
-                "[Bioinformatics] Retention repair did not parse; keeping the original revision"
-            )
-            return plan_data
-
-        remaining = missing_salient_terms(
-            source_text,
-            self._plan_data_text(repaired),
-            limit=_RETENTION_REPORT_LIMIT,
-            priority_text=priority_text,
-        )
-        if len(remaining) >= len(missing):
-            logger.warning(
-                "[Bioinformatics] Retention repair recovered nothing; keeping the original revision"
-            )
-            return plan_data
-
-        logger.info(
-            "[Bioinformatics] Retention repair recovered %d of %d dropped terms",
-            len(missing) - len(remaining), len(missing),
-        )
-        return repaired
 
     async def revise_plan_incrementally(
         self,
@@ -892,19 +704,6 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
             plan_data,
             warn_on_double_failure=False,
             caller_name="revise_plan_incrementally",
-            reserved_step_ids=set(completed_step_ids),
-        )
-
-        # What the PI explicitly asked for outranks what the plan happened to
-        # say, so it is what survives the report's term cap.
-        entity_text = self._direction_entity_text(state)
-        plan_data = await self._repair_lost_plan_content(
-            prompt=prompt,
-            plan_data=plan_data,
-            source_text=self._retention_source_text(
-                current_plan, tasks_text, entity_text, modifications_text
-            ),
-            priority_text="\n".join([tasks_text, entity_text, modifications_text]),
             reserved_step_ids=set(completed_step_ids),
         )
 

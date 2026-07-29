@@ -12,6 +12,7 @@ import logging
 logger = logging.getLogger(__name__)
 from ...models.schemas import AnalysisState, RoundResult, DATA_TYPE_SCRNASEQ
 from ...constants import PI_REVIEW_FALLBACK_DECISION
+from ...utils.formatting import render_plan_steps
 
 from .shared import (  # noqa: F401
     _CONTROL_SIGNAL_RESULTS,
@@ -42,15 +43,10 @@ class ResearchPlanningMixin:
             Dict with keys: decision ("approved"/"revise"/"reject"), feedback (str),
             modifications (List[Dict] with step_id + suggestion)
         """
-        steps_text = "\n".join(
-            f"  Step {s.id}: {s.title}\n"
-            f"    Method: {s.method}\n"
-            f"    Input: {s.input}\n"
-            f"    Output: {s.expected_output}\n"
-            f"    Rationale: {s.rationale}\n"
-            f"    Depends on: {s.depends_on}"
-            for s in plan.steps
-        )
+        # Shared with the bioinformatics planner so the two sides of the
+        # dialogue read the same rendering, and so a long plan shrinks its
+        # fields to fit rather than losing its tail.
+        steps_text = render_plan_steps(plan.steps)
 
         decision_points = "\n".join(f"  - {d}" for d in plan.key_decision_points)
 
