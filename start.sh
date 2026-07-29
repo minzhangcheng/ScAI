@@ -127,6 +127,14 @@ else
         "${PIP_CMD[@]}" "${PIP_ARGS[@]}"
 fi
 
+# Packages whose declared constraints are provably tighter than their code
+# requires must be installed after the main graph, without dependencies, or
+# pip would downgrade a pin this project deliberately holds. Rationale for
+# every entry lives in requirements-nodeps.txt.
+if [ -f "$SCRIPT_DIR/requirements-nodeps.txt" ]; then
+    "${PIP_CMD[@]}" install -q --no-deps -r "$SCRIPT_DIR/requirements-nodeps.txt"
+fi
+
 # Setup frontend dependencies (must be done BEFORE building)
 # Create symlink for node_modules in frontend directory pointing to shared location
 if [ ! -d "$NODE_MODULES_DIR" ]; then

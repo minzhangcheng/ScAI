@@ -2,7 +2,7 @@
 
 ScAI is a general-purpose, multi-agent platform for biomedical analysis. It coordinates sequencing analysis, pathology imaging, biochemical indicators, literature research, and human review in one iterative workflow. Models can be configured per agent through OpenAI-compatible endpoints, Google APIs, or local deployments.
 
-**Version**: 0.36.8 | **License**: Apache 2.0
+**Version**: 0.36.8-rc1 | **License**: Apache 2.0
 
 ## Core Capabilities
 
@@ -72,7 +72,26 @@ See the [Python client documentation](clients/python/README.md) for authenticati
 - [管理员手册](docs/admin-manual-zh.md)
 - [Technical Handover](docs/HANDOVER.md)
 - [Python Client](clients/python/README.md)
+- [Third-Party Notices](THIRD_PARTY_NOTICES.md)
+
+## Acknowledgements
+
+The methodological rule corpus in `backend/data/method_rules.yaml` -- the
+statistical rules and literature citations ScAI applies to enrichment,
+differential-expression and clustering analyses -- is distilled from
+[bioSkills](https://github.com/GPTomics/bioSkills) (MIT licence, Copyright (c)
+2026 GPTomics). bioSkills targets an R/Bioconductor stack; each rule was
+re-expressed for ScAI's Python sandbox, so the Python translations, rule
+identifiers and enforcement mechanisms are ScAI's own. No bioSkills source file
+is vendored here.
+
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the full MIT licence
+text, the exact commit referenced, and the external data resources ScAI fetches
+at runtime.
 
 ## License
 
 Apache License 2.0
+
+Portions of `backend/data/method_rules.yaml` are derived from MIT-licensed
+material; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

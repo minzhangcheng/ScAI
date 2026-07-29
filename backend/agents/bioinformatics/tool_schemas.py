@@ -204,6 +204,155 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "fetch_gene_set",
+            "description": (
+                "Fetch a named gene set from a versioned external resource, for the "
+                "organism under analysis. Use this INSTEAD of writing a gene panel from "
+                "memory: a fetched set is citable, re-fetchable, and identical across "
+                "runs, whereas a remembered one is none of those. Sandbox code cannot "
+                "reach the network, so this tool does the fetch and returns the genes. "
+                "The resource publishes native collections for two organisms; for any "
+                "other organism the set is projected through orthology and the mapping "
+                "rate is returned with it. Note that a curated set is not automatically "
+                "the right panel: many are broad and mix genes that drive a process with "
+                "genes that suppress it. Read the genes before scoring them, and use "
+                "register_analysis_plan's partition operation when a set needs splitting."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "set_id": {
+                        "type": "string",
+                        "description": "Exact identifier of the gene set within the collection."
+                    },
+                    "collection": {
+                        "type": "string",
+                        "description": (
+                            "Collection to search, e.g. a hallmark, curated-pathway or "
+                            "ontology collection. Use list_sets=true first if unsure."
+                        )
+                    },
+                    "version": {
+                        "type": "string",
+                        "description": (
+                            "Concrete release identifier of the resource. Pinning it is "
+                            "what makes the panel re-fetchable later."
+                        )
+                    },
+                    "organism": {
+                        "type": "string",
+                        "description": (
+                            "Organism for the returned symbols. Defaults to the organism "
+                            "declared for this session."
+                        )
+                    },
+                    "list_sets": {
+                        "type": "boolean",
+                        "description": (
+                            "Return matching set identifiers instead of genes. Use with "
+                            "a partial set_id to discover what the collection contains."
+                        )
+                    }
+                },
+                "required": ["set_id", "collection", "version"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "register_analysis_plan",
+            "description": (
+                "Freeze a scoring plan BEFORE computing it. Call this first for any "
+                "gene-panel score, then compute, then call register_score citing the "
+                "returned plan_id. Freezing the panel in advance is what separates a "
+                "curation judgement from selecting the panel that gave the answer you "
+                "wanted -- once a result is visible, any change to the panel is "
+                "recorded as a departure from the plan."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "score_name": {
+                        "type": "string",
+                        "description": "Name of the score this plan governs; must match the later register_score call."
+                    },
+                    "method": {
+                        "type": "string",
+                        "description": "Computation you intend to use (e.g. 'sc.tl.score_genes', 'gseapy.prerank')."
+                    },
+                    "hypothesis": {
+                        "type": "string",
+                        "description": "What this score is meant to test, in one sentence."
+                    },
+                    "falsifier": {
+                        "type": "string",
+                        "description": (
+                            "What result would argue AGAINST the hypothesis. Stating this "
+                            "before seeing the result is what makes the test falsifiable."
+                        )
+                    },
+                    "panel_genes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "The exact gene panel you will score. This is what gets frozen."
+                    },
+                    "panel_source": {
+                        "type": "string",
+                        "description": "Provenance of the panel, same controlled vocabulary as register_score.gene_list_source."
+                    },
+                    "baseline_genes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "The unedited set from the versioned resource, when the panel was "
+                            "derived from one. Supplying it lets the report show curated and "
+                            "original side by side rather than only the edited version."
+                        )
+                    },
+                    "baseline_source": {
+                        "type": "string",
+                        "description": "Provenance of baseline_genes, same controlled vocabulary."
+                    },
+                    "edit_operations": {
+                        "type": "array",
+                        "description": (
+                            "Typed edits applied to the baseline. Each is "
+                            "{operation, genes, rationale}. Allowed operations: partition "
+                            "(split a mixed-direction set into direction-coherent subsets), "
+                            "union, intersect, restrict_to_measured, remove, add_bespoke. "
+                            "remove and add_bespoke are high-risk and require a rationale of "
+                            "at least 20 characters."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "operation": {"type": "string"},
+                                "genes": {"type": "array", "items": {"type": "string"}},
+                                "rationale": {"type": "string"}
+                            },
+                            "required": ["operation"]
+                        }
+                    },
+                    "testing_family": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Names of ALL gene sets you intend to pass to the same enrichment "
+                            "call / multiple-testing correction as this one. A GSEA q-value is "
+                            "computed across every set in the call, so the same panel with the "
+                            "same score can come out significant or not depending only on what "
+                            "else was in the family. Declare it so the result can be read."
+                        )
+                    }
+                },
+                "required": ["score_name", "method", "panel_genes", "panel_source"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "register_score",
             "description": "Register how a score was computed for the final report methodology section. Call this IMMEDIATELY AFTER computing any score (gene signature scores, pathway enrichment, TF activity, etc.).",
             "parameters": {
@@ -232,10 +381,41 @@ TOOLS = [
                     },
                     "gene_list_source": {
                         "type": "string",
-                        "description": "Source of the gene list (e.g., 'curated gene set', 'top 50 DEGs', 'PMID:12345678')"
+                        "description": (
+                            "REQUIRED. Where the gene panel came from, in one of four "
+                            "machine-checkable forms. "
+                            "(1) database:<resource>:<version>:<set_id> for a named set from a "
+                            "versioned resource - the version must be a concrete release, not "
+                            "'latest'. Prefer this whenever a curated set exists. "
+                            "(2) derived:<method>[:<detail>] when computed from this dataset. "
+                            "(3) literature:PMID:<id> or literature:DOI:<id>. "
+                            "(4) bespoke:<justification of at least 20 characters> when the "
+                            "panel was assembled by hand - allowed, but say why no versioned "
+                            "set fits, because hand-assembled panels are reported as such and "
+                            "weighed accordingly."
+                        )
+                    },
+                    "plan_id": {
+                        "type": "string",
+                        "description": (
+                            "REQUIRED when a gene panel is used: the plan_id returned by "
+                            "register_analysis_plan before this score was computed. The panel "
+                            "you register here is re-hashed against the frozen one; if it has "
+                            "changed, the difference is recorded on the score."
+                        )
+                    },
+                    "n_genes_matched": {
+                        "type": "integer",
+                        "description": (
+                            "How many genes of gene_list are actually present in the analysed "
+                            "matrix, e.g. len([g for g in gene_list if g in adata.var_names]). "
+                            "This, not the nominal panel size, governs statistical power: a "
+                            "panel whose genes are mostly absent from the data cannot support "
+                            "a negative conclusion. Supply it whenever a gene panel is used."
+                        )
                     }
                 },
-                "required": ["score_name", "method", "description"]
+                "required": ["score_name", "method", "description", "gene_list_source"]
             }
         }
     },
@@ -249,7 +429,19 @@ TOOLS = [
                 "properties": {
                     "function_path": {
                         "type": "string",
-                        "description": "Full dotted path to the function or module (e.g., 'scanpy.tl.umap', 'decoupler.op.collectri', 'gseapy.enrichr')"
+                        "description": "Full dotted path to the function or module (e.g., 'scanpy.tl.umap', 'decoupler.get_collectri', 'gseapy.enrichr')"
+                    },
+                    "method_question": {
+                        "type": "string",
+                        "description": (
+                            "A methodological question rather than an API one -- how to "
+                            "choose a test, what a statistic assumes, whether a claim is "
+                            "supportable by a given design. Searches the project's rule "
+                            "corpus, which carries the reasoning and the primary "
+                            "literature. Ask here BEFORE choosing a statistical approach; "
+                            "the corpus records where the usual shortcuts fail. May be "
+                            "given with or instead of function_path."
+                        )
                     },
                     "question": {
                         "type": "string",

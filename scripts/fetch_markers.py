@@ -19,6 +19,33 @@ SCHEMA_COLS = ["source", "species", "cell_type", "gene_symbol", "tissue", "evide
 _DEST_DIR = Path(__file__).resolve().parent.parent / "backend" / "data" / "markers"
 _SPECIES_MAP = {"Mm": "mouse", "mouse": "mouse", "Mus musculus": "mouse",
                 "Hs": "human", "human": "human", "Homo sapiens": "human"}
+# Case-insensitive view: CellMarker2 ships "Mouse"/"Human", PanglaoDB "Mm"/"Hs".
+_SPECIES_LOOKUP = {k.lower(): v for k, v in _SPECIES_MAP.items()}
+
+
+def map_species_tokens(value) -> list[str]:
+    """Map one raw species cell to the list of schema species it covers.
+
+    PanglaoDB encodes a marker that applies to both organisms as the single
+    value ``"Mm Hs"`` -- 7507 of its 8286 rows (90.6%). A plain ``.map()``
+    against _SPECIES_MAP yields NaN for those and they were silently dropped,
+    leaving only the 402 mouse-only + 344 human-only rows. Splitting the cell
+    and emitting one row per species recovers them.
+
+    Unrecognised tokens are skipped rather than failing the row, so a single
+    upstream typo (PanglaoDB has 3 rows with species "4") cannot take out an
+    otherwise valid dual-species marker.
+    """
+    raw = str(value).strip()
+    direct = _SPECIES_LOOKUP.get(raw.lower())
+    if direct:
+        return [direct]
+    out: list[str] = []
+    for token in raw.replace(",", " ").split():
+        mapped = _SPECIES_LOOKUP.get(token.lower())
+        if mapped and mapped not in out:
+            out.append(mapped)
+    return out
 
 # 上游来源（如失效需在此更新）
 PANGLAODB_URL = "https://panglaodb.se/markers/PanglaoDB_markers_27_Mar_2020.tsv.gz"
@@ -39,11 +66,14 @@ def project_to_schema(raw: pd.DataFrame, source: str, gene_col: str,
     out = pd.DataFrame()
     out["gene_symbol"] = raw[gene_col].astype(str).str.strip()
     out["cell_type"] = raw[celltype_col].astype(str).str.strip()
-    out["species"] = raw[species_col].map(_SPECIES_MAP)
-    out["tissue"] = raw[tissue_col].astype(str) if tissue_col and tissue_col in raw else ""
+    # One raw row may cover several species ("Mm Hs"); explode to one row each.
+    out["species"] = raw[species_col].map(map_species_tokens)
+    out["tissue"] = (raw[tissue_col].astype(str).str.strip()
+                     if tissue_col and tissue_col in raw else "")
     out["source"] = source
     out["evidence"] = ""
     out["ref"] = ""
+    out = out.explode("species", ignore_index=True)
     out = out[out["species"].isin(("mouse", "human"))]
     out = out[(out["gene_symbol"] != "") & (out["cell_type"] != "")]
     return out[SCHEMA_COLS].drop_duplicates().reset_index(drop=True)
@@ -61,8 +91,11 @@ def atomic_write_tsv(df: pd.DataFrame, dest: Path, source_version: str) -> None:
 
 def _download_panglaodb() -> pd.DataFrame:
     raw = pd.read_csv(PANGLAODB_URL, sep="\t", compression="gzip")
+    # "organ" is PanglaoDB's tissue field; without it every row landed in the
+    # table tissue-blind, so no tissue-restricted prior was ever possible.
     return project_to_schema(raw, "PanglaoDB", gene_col="official gene symbol",
-                             celltype_col="cell type", species_col="species")
+                             celltype_col="cell type", species_col="species",
+                             tissue_col="organ")
 
 
 def _http_get_bytes(url: str, verify: bool = True) -> bytes:

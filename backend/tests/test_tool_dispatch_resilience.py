@@ -82,7 +82,9 @@ class TestToolDispatchResilience:
                 "description": "test",
                 "parameters": {},
                 "gene_list": [],
-                "gene_list_source": "",
+                # register_score rejects unattributable panels; this test is about
+                # dispatch resilience, so give it a valid provenance string.
+                "gene_list_source": "derived:test",
             },
         )
         response_0 = LLMToolResponse(

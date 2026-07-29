@@ -50,6 +50,9 @@ _EXCLUDED_FIELDS = {
     "agent_vision_settings",
     "chat_messages",
     "score_definitions",
+    # Methodology records: these reach the user through the report, not the
+    # session API, exactly like score_definitions above.
+    "scoring_plans",
     "data_driven_mechanism_programs",
     "current_round_cache",
     "messages",
