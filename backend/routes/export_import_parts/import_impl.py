@@ -18,7 +18,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from backend.config import (
     DATA_BASE_DIR, REPORTS_DIR, SESSION_DIR, STATE_DIR, UPLOAD_DIR, WORKSPACE_DIR,
     UPLOAD_CHUNK_SIZE, UPLOAD_TEMP_DIR,
-    get_session_dir, get_session_metadata_path, get_session_reports,
+    get_session_dir, get_session_logs, get_session_metadata_path, get_session_reports,
     get_session_states, get_session_uploads, get_session_workspace, resolve_session_metadata_path,
 )
 from backend.models.schemas import AnalysisState, APIResponse
@@ -44,13 +44,28 @@ from backend.utils.secret_redaction import strip_analysis_state_secrets
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
 
-from .core import ImportCancelled, _IMPORT_PROGRESS_UPDATE_INTERVAL_S, _is_disabled_snapshot_v2_member, is_sandbox_pickle
+from .core import (
+    ImportCancelled,
+    MIN_FREE_DISK_BYTES,
+    _IMPORT_PROGRESS_UPDATE_INTERVAL_S,
+    _is_disabled_snapshot_v2_member,
+    free_disk_bytes,
+    is_sandbox_pickle,
+)
 
 
 logger = logging.getLogger(__name__)
 
+# Archive layouts this build knows how to read. Unknown values are imported on a
+# best-effort basis with a warning rather than rejected, so an archive from a
+# newer build is not simply unopenable.
+_SUPPORTED_ARCHIVE_VERSIONS = frozenset({"1.0", "2.0"})
 
-def _mark_runtime_availability_after_import(state: AnalysisState) -> None:
+
+def _mark_runtime_availability_after_import(
+    state: AnalysisState,
+    imported_pkl: Optional[bool] = None,
+) -> None:
     """Record whether the imported session actually has a kernel to resume from.
 
     ``runtime_restore_status`` rides along in session.json, so a session exported
@@ -60,16 +75,22 @@ def _mark_runtime_availability_after_import(state: AnalysisState) -> None:
     agent would fail on a missing ``adata`` with no explanation.
 
     Marking it ``unavailable`` routes resume through the existing
-    ``is_forward_resume_blocked`` gate, which tells the user to re-run from their
+    ``is_forward_resume_blocked`` gate, which offers the user a re-run from their
     data. Completed sessions are deliberately unaffected — that gate exempts
     them, so reports stay viewable and re-analysis still works.
+
+    *imported_pkl* says whether **this** import wrote the live pkl. A pkl that
+    was merely lying in the destination belongs to some other run, and trusting
+    it would mark a session resumable against a kernel that does not match the
+    state just imported. ``None`` keeps the historical "whatever is on disk"
+    answer for callers that cannot distinguish the two.
     """
     from backend.utils.runtime_apply import _live_pkl
 
     if state.current_round <= 0:
         # Never executed anything; a fresh kernel is the correct starting point.
         return
-    if _live_pkl(state.id).exists():
+    if imported_pkl if imported_pkl is not None else _live_pkl(state.id).exists():
         return
     state.runtime_restore_status = "unavailable"
     state.runtime_restore_warning = (
@@ -117,6 +138,65 @@ def _resign_imported_live_pkl(session_id: str) -> bool:
     return True
 
 
+def _session_id_is_taken(session_id: str) -> bool:
+    """Whether *session_id* already names a session on this installation.
+
+    Checks disk and the in-memory registries, because a session evicted from
+    ``sessions`` still owns its directory, and a session mid-creation may own a
+    workflow before its directory is fully populated.
+    """
+    from backend.state import sessions as _live_sessions, workflows as _live_workflows
+
+    if get_session_dir(session_id).exists():
+        return True
+    return session_id in _live_sessions or session_id in _live_workflows
+
+
+def _claim_session_id(session_id: str) -> bool:
+    """Take exclusive ownership of *session_id* by creating its directory.
+
+    ``mkdir(exist_ok=False)`` is the claim, so two imports racing for the same
+    id cannot both decide it is free: exactly one creates the directory and the
+    other falls through to a fresh id. Checking-then-creating would let both
+    extract into the same tree and interleave two sessions' files.
+    """
+    if _session_id_is_taken(session_id):
+        return False
+    try:
+        get_session_dir(session_id).mkdir(parents=True, exist_ok=False, mode=0o700)
+    except FileExistsError:
+        return False
+    except OSError as exc:
+        logger.warning("Cannot claim session directory for %s: %s", session_id, exc)
+        return False
+    return True
+
+
+def _allocate_import_session_id(archive_session_id: str) -> str:
+    """Pick the session id an archive should be extracted into, and claim it.
+
+    Reusing the archive's own id is what makes an import round-trip on the same
+    installation (re-import to restore a backup) *destructive*: the extraction
+    writes straight over the live session's files, and ``session.json`` is then
+    rewritten with the importer's ``user_id`` — which on a shared installation
+    silently transfers another user's session. Importing is therefore defined as
+    "create a session", never "overwrite one": on any collision the archive is
+    materialized under a fresh id and every embedded path is rebound to it.
+    """
+    if _claim_session_id(archive_session_id):
+        return archive_session_id
+    new_id = str(uuid.uuid4())
+    while not _claim_session_id(new_id):  # pragma: no cover - uuid4 collision
+        new_id = str(uuid.uuid4())
+    logger.warning(
+        "Import target %s already exists on this installation; extracting into "
+        "a new session %s instead of overwriting it.",
+        archive_session_id,
+        new_id,
+    )
+    return new_id
+
+
 async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: str, trust: bool = False):
     """Background task: extract tar.gz archive and load session."""
     logger.info(f"Import {import_job_id}: starting extraction from {tmp_path_str}")
@@ -128,6 +208,7 @@ async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: st
         _import_jobs[import_job_id] = {
             "status": "extracting",
             "phase": "extracting",
+            "user_id": user_id,
             "created_at": created_at,
             "bytes_total": archive_size,
             "bytes_processed": 0,
@@ -136,10 +217,15 @@ async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: st
             "current_file": "",
             "cancel_requested": prev.get("cancel_requested", False),
         }
-    extracted_session_id: Optional[str] = None
+    # Populated by the extraction worker the moment the destination id is known,
+    # so a cancel or a mid-archive failure can still remove what it created.
+    # The worker only ever writes into a session directory it allocated itself
+    # (see _allocate_import_session_id), which is what makes this cleanup safe.
+    outcome: Dict[str, Any] = {}
     try:
-        state = await asyncio.to_thread(_import_tar_gz, tmp_path_str, user_id, import_job_id, trust)
-        extracted_session_id = state.id
+        state = await asyncio.to_thread(
+            _import_tar_gz, tmp_path_str, user_id, import_job_id, trust, outcome
+        )
 
         validate_session_id(state.id)
 
@@ -149,6 +235,7 @@ async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: st
             _import_jobs[import_job_id] = {
                 "status": "completed",
                 "phase": "completed",
+                "user_id": user_id,
                 "created_at": created_at,
                 "session_id": state.id,
                 "name": state.name,
@@ -156,28 +243,33 @@ async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: st
         logger.info(f"Import {import_job_id}: completed, session_id={state.id}")
     except ImportCancelled as e:
         logger.info(f"Import {import_job_id}: cancelled by user ({e})")
-        # Best-effort cleanup: drop the half-extracted session directory.
-        if extracted_session_id:
-            await asyncio.to_thread(_cleanup_partial_session, extracted_session_id)
+        await asyncio.to_thread(_cleanup_partial_session, outcome.get("session_id"))
         async with _import_jobs_lock:
-            _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user", "created_at": created_at}
+            _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user", "user_id": user_id, "created_at": created_at}
     except HTTPException as e:
         logger.error(f"Import {import_job_id}: failed (HTTPException): {e.detail}")
+        await asyncio.to_thread(_cleanup_partial_session, outcome.get("session_id"))
         async with _import_jobs_lock:
-            _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": e.detail, "created_at": created_at}
+            _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": e.detail, "user_id": user_id, "created_at": created_at}
     except Exception as e:
         logger.exception(f"Import {import_job_id}: failed with exception")
+        await asyncio.to_thread(_cleanup_partial_session, outcome.get("session_id"))
         async with _import_jobs_lock:
-            _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": str(e), "created_at": created_at}
+            _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": str(e), "user_id": user_id, "created_at": created_at}
     finally:
         Path(tmp_path_str).unlink(missing_ok=True)
 
-def _cleanup_partial_session(session_id: str) -> None:
-    """Remove a partially-extracted session directory on cancel.
+def _cleanup_partial_session(session_id: Optional[str]) -> None:
+    """Remove a partially-extracted session directory on cancel or failure.
 
     Only touches the session-scoped directory under sessions/<id>/, leaving
     other sessions intact. Idempotent — safe if directory does not exist.
+
+    The caller must only pass an id the import allocated for itself; a partial
+    archive must never be a way to delete a session that already existed.
     """
+    if not session_id:
+        return
     try:
         validate_session_id(session_id)
     except Exception:
@@ -190,34 +282,150 @@ def _cleanup_partial_session(session_id: str) -> None:
     except Exception as e:
         logger.warning(f"Failed to clean up partial session {session_id}: {e}")
 
-def _resolve_import_dest(relative_to_base: str, session_id: str) -> Path:
-    """Map an archive-relative path to the destination path in the new session-centric layout."""
+
+def _is_unsafe_member_name(name: str) -> bool:
+    """Reject archive names that could escape the destination directory.
+
+    Segment-wise rather than substring-wise: ``a/../b`` escapes and must go,
+    while ``DEG_A..B.csv`` is an ordinary filename an analysis really produces —
+    the old ``'..' in name`` test dropped those silently, so the restored
+    session was missing files the archive actually contained.
+    """
+    if not name or name.startswith("/") or "\\" in name or "\x00" in name:
+        return True
+    return any(segment == ".." for segment in name.split("/"))
+
+
+def _resolve_import_dest(
+    relative_to_base: str,
+    session_id: str,
+    archive_session_id: Optional[str] = None,
+) -> Optional[Path]:
+    """Map an archive-relative path to a destination inside the session directory.
+
+    Returns ``None`` for anything outside the known session-centric layout, and
+    the caller skips those members. The previous catch-all
+    (``DATA_BASE_DIR / relative_to_base``) let a crafted archive place a member
+    anywhere under the data root — ``app.db`` (the account and API-key store),
+    ``.jwt_secret`` (the token signing key) and other users'
+    ``sessions/<id>/session.json`` were all reachable, because the only guard
+    was ``validate_path_within(dest, DATA_BASE_DIR)``.
+
+    *archive_session_id* is the id embedded in the archive's own member names;
+    it differs from *session_id* whenever the import had to allocate a fresh
+    destination id (see :func:`_allocate_import_session_id`).
+    """
+    src_id = archive_session_id or session_id
+
+    def _rest(prefix: str) -> str:
+        return relative_to_base[len(prefix):]
+
     if relative_to_base.startswith("states/"):
-        fname = relative_to_base.split("/", 1)[1]
-        return get_session_states(session_id) / fname
-    if relative_to_base.startswith(f"uploads/{session_id}/"):
-        rest = relative_to_base.split("/", 2)[2] if relative_to_base.count("/") >= 2 else ""
-        return get_session_uploads(session_id) / rest
-    if relative_to_base.startswith(f"workspace/{session_id}/"):
-        rest = relative_to_base.split("/", 2)[2] if relative_to_base.count("/") >= 2 else ""
-        return get_session_workspace(session_id) / rest
-    if relative_to_base.startswith(f"reports/{session_id}/"):
-        rest = relative_to_base.split("/", 2)[2] if relative_to_base.count("/") >= 2 else ""
-        return get_session_reports(session_id) / rest
+        return get_session_states(session_id) / _rest("states/")
+    if relative_to_base.startswith(f"uploads/{src_id}/"):
+        return get_session_uploads(session_id) / _rest(f"uploads/{src_id}/")
+    if relative_to_base.startswith(f"workspace/{src_id}/"):
+        return get_session_workspace(session_id) / _rest(f"workspace/{src_id}/")
+    if relative_to_base.startswith(f"reports/{src_id}/"):
+        return get_session_reports(session_id) / _rest(f"reports/{src_id}/")
     if relative_to_base.startswith("blobs/"):
         # Session-level externalized blob store sidecars.
-        fname = relative_to_base.split("/", 1)[1]
-        return get_session_dir(session_id) / "blobs" / fname
+        return get_session_dir(session_id) / "blobs" / _rest("blobs/")
     if relative_to_base.startswith("snapshots/"):
         # Snapshot sidecars: state json, notebook ipynb, compressed pkl,
         # AND per-snapshot blob subdirs `<snap_id>_blobs/<hash>.b64`. The
         # original code only handled top-level files; rglob in the export
         # now also brings in those nested blob files.
-        rest = relative_to_base.split("/", 1)[1]
-        return get_session_dir(session_id) / "snapshots" / rest
-    return DATA_BASE_DIR / relative_to_base
+        return get_session_dir(session_id) / "snapshots" / _rest("snapshots/")
+    if relative_to_base.startswith("logs/"):
+        return get_session_logs(session_id) / _rest("logs/")
+    if relative_to_base.startswith(f"{REPRODUCIBILITY_DIR_NAME}/"):
+        # The bundle lives under the workspace; the export also emits it at the
+        # archive root, and archives already in users' hands carry that form.
+        return (
+            get_session_workspace(session_id)
+            / REPRODUCIBILITY_DIR_NAME
+            / _rest(f"{REPRODUCIBILITY_DIR_NAME}/")
+        )
+    return None
 
-def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = None, trust: bool = False) -> AnalysisState:
+
+def _remap_paths_in_text(
+    text: str,
+    old_base_dir: str,
+    data_base_str: str,
+    archive_session_id: str,
+    session_id: str,
+) -> str:
+    """Rewrite absolute paths baked into a state/snapshot JSON document.
+
+    Two rules, both anchored so they cannot corrupt unrelated text:
+
+    * the source installation's data root is replaced only where it starts a
+      path — i.e. at a delimiter and followed by ``/``. An unanchored
+      ``str.replace`` of a short root such as the Docker image's ``/data``
+      rewrote every ``https://host/data/...`` URL and every ``/dataset/...``
+      literal in the document as well;
+    * the legacy flat layouts keep their existing three replacements.
+
+    When the destination had to allocate a different session id, the session
+    directory prefix and any standalone occurrence of the old id are rebound too.
+    """
+    def _anchored_replace(haystack: str, old: str, new: str) -> str:
+        old = old.rstrip("/")
+        new = new.rstrip("/")
+        if not old or old == new or len(old) < 2:
+            return haystack
+        pattern = re.compile(r"(?<![A-Za-z0-9_.\-/])" + re.escape(old) + r"(?=/)")
+        return pattern.sub(new.replace("\\", "\\\\"), haystack)
+
+    if old_base_dir and old_base_dir != data_base_str:
+        if os.path.isabs(old_base_dir):
+            text = _anchored_replace(text, old_base_dir, data_base_str)
+        else:
+            logger.warning(
+                "Archive recorded a relative data_base_dir (%r); skipping the "
+                "path remap rather than rewriting arbitrary substrings.",
+                old_base_dir,
+            )
+
+    # Legacy flat layout -> session-centric layout.
+    text = _anchored_replace(text, str(UPLOAD_DIR / archive_session_id), str(get_session_uploads(session_id)))
+    text = _anchored_replace(text, str(WORKSPACE_DIR / archive_session_id), str(get_session_workspace(session_id)))
+    text = _anchored_replace(text, str(REPORTS_DIR / archive_session_id), str(get_session_reports(session_id)))
+
+    if session_id != archive_session_id:
+        text = _anchored_replace(
+            text, str(get_session_dir(archive_session_id)), str(get_session_dir(session_id))
+        )
+    return text
+
+
+def _rebind_session_id_values(value: Any, old_id: str, new_id: str) -> Any:
+    """Replace standalone occurrences of *old_id* with *new_id* in a state tree.
+
+    Only exact string values are rewritten; paths that merely *contain* the id
+    were already handled by the anchored prefix rewrite, and a substring rule
+    here would corrupt free text.
+    """
+    if old_id == new_id:
+        return value
+    if isinstance(value, str):
+        return new_id if value == old_id else value
+    if isinstance(value, dict):
+        return {k: _rebind_session_id_values(v, old_id, new_id) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_rebind_session_id_values(v, old_id, new_id) for v in value]
+    return value
+
+
+def _import_tar_gz(
+    file_path: str,
+    user_id: str,
+    import_job_id: Optional[str] = None,
+    trust: bool = False,
+    outcome: Optional[Dict[str, Any]] = None,
+) -> AnalysisState:
     """Import from tar.gz archive file on disk with path remapping.
 
     Uses streaming iteration and chunked file writes to minimise memory usage,
@@ -227,10 +435,14 @@ def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = 
     via atomic single-key dict assignments (GIL-safe; no async-lock needed from a thread).
     Cancellation is cooperative: the cancel endpoint sets ``cancel_requested`` on the same
     dict and this loop checks it between members.
+
+    *outcome* receives ``session_id`` as soon as a destination is allocated so the
+    caller can clean up a half-written session on cancel or failure.
     """
     data_base_str = str(DATA_BASE_DIR)
 
-    session_id = None
+    archive_session_id: Optional[str] = None
+    session_id: Optional[str] = None
     old_base_dir = ""
     state_json_data = None
     # Only a pkl written by *this* import gets re-signed; a pre-existing live pkl
@@ -258,6 +470,18 @@ def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = 
         if job is not None and job.get("cancel_requested"):
             raise ImportCancelled("cancelled by user")
 
+    def _check_disk_space():
+        free = free_disk_bytes(DATA_BASE_DIR)
+        if free and free < MIN_FREE_DISK_BYTES:
+            raise HTTPException(
+                status_code=507,
+                detail=(
+                    "Not enough free disk space to finish the import "
+                    f"({free // (1024 * 1024)} MB left). The partially extracted "
+                    "session has been removed; free space and try again."
+                ),
+            )
+
     def _maybe_update_progress(current_name: str, force: bool = False):
         nonlocal last_progress_ts
         if not import_job_id:
@@ -273,6 +497,20 @@ def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = 
         job["files_processed"] = files_processed
         job["bytes_processed"] = bytes_processed
         job["current_file"] = current_name
+
+    def _bind_session(candidate: str) -> None:
+        """Latch the archive id and allocate the destination id exactly once."""
+        nonlocal archive_session_id, session_id
+        if archive_session_id is not None:
+            return
+        validate_session_id(candidate)
+        archive_session_id = candidate
+        session_id = _allocate_import_session_id(candidate)
+        if outcome is not None:
+            outcome["session_id"] = session_id
+            outcome["archive_session_id"] = archive_session_id
+
+    _check_disk_space()
 
     with tarfile.open(file_path, mode='r:gz') as tf:
         for member in tf:
@@ -302,7 +540,7 @@ def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = 
                 )
                 continue
 
-            if '..' in member.name or member.name.startswith('/'):
+            if _is_unsafe_member_name(member.name):
                 logger.warning(f"Skipping archive entry with suspicious path: {member.name}")
                 continue
 
@@ -310,8 +548,7 @@ def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = 
             if len(parts) < 2:
                 continue
 
-            if session_id is None:
-                session_id = parts[0]
+            _bind_session(parts[0])
 
             relative_to_base = parts[1]
 
@@ -319,20 +556,44 @@ def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = 
                 f = tf.extractfile(member)
                 if f:
                     manifest_data = json.loads(f.read().decode('utf-8'))
-                    session_id = manifest_data.get("session_id", session_id)
+                    manifest_session_id = manifest_data.get("session_id", "")
+                    if manifest_session_id and manifest_session_id != archive_session_id:
+                        # The top-level directory and the manifest disagree. Every
+                        # member seen so far was resolved against the directory
+                        # name, so silently switching now would scatter the archive
+                        # across two destinations.
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "Archive is inconsistent: manifest session_id "
+                                f"{manifest_session_id!r} does not match the archive "
+                                f"directory {archive_session_id!r}"
+                            ),
+                        )
                     old_base_dir = manifest_data.get("data_base_dir", "")
+                    manifest_version = str(manifest_data.get("version", ""))
+                    if manifest_version and manifest_version not in _SUPPORTED_ARCHIVE_VERSIONS:
+                        logger.warning(
+                            "Archive declares manifest version %s, which this build "
+                            "does not know; importing on a best-effort basis.",
+                            manifest_version,
+                        )
                 continue
 
-            if relative_to_base == f"sessions/{session_id}.json":
+            if relative_to_base == f"sessions/{archive_session_id}.json":
                 f = tf.extractfile(member)
                 if f:
                     state_json_data = f.read()
                 continue
 
-            validate_session_id(session_id)
-
-            dest_path = _resolve_import_dest(relative_to_base, session_id)
-            validate_path_within(dest_path, DATA_BASE_DIR)
+            dest_path = _resolve_import_dest(relative_to_base, session_id, archive_session_id)
+            if dest_path is None:
+                logger.warning(
+                    "Skipping archive entry outside the session layout: %s",
+                    member.name,
+                )
+                continue
+            validate_path_within(dest_path, get_session_dir(session_id))
             # SECURITY (S4): sandbox pickles can execute arbitrary code via dill.load.
             # Drop them unless the caller passed trust=true to take responsibility.
             is_pkl_member = is_sandbox_pickle(dest_path.name)
@@ -349,14 +610,9 @@ def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = 
 
             if relative_to_base.startswith("snapshots/") and dest_path.suffix == ".json":
                 content = f.read().decode("utf-8")
-                if old_base_dir and old_base_dir != data_base_str:
-                    content = content.replace(old_base_dir, data_base_str)
-                content = content.replace(
-                    str(UPLOAD_DIR / session_id), str(get_session_uploads(session_id)))
-                content = content.replace(
-                    str(WORKSPACE_DIR / session_id), str(get_session_workspace(session_id)))
-                content = content.replace(
-                    str(REPORTS_DIR / session_id), str(get_session_reports(session_id)))
+                content = _remap_paths_in_text(
+                    content, old_base_dir, data_base_str, archive_session_id, session_id
+                )
                 dest_path.write_text(content, encoding="utf-8")
             else:
                 with open(dest_path, 'wb') as out_f:
@@ -370,6 +626,8 @@ def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = 
             # the frontend should treat the ratio as a heuristic, not a hard %.
             files_processed += 1
             bytes_processed += getattr(member, "size", 0) or 0
+            if files_processed % 256 == 0:
+                _check_disk_space()
             _maybe_update_progress(relative_to_base)
 
     # Final progress flush so the poll sees 100% before completion is reported.
@@ -387,42 +645,56 @@ def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = 
     if state_json_data is None:
         raise HTTPException(status_code=400, detail="Session state JSON not found in archive")
 
-    # Path remapping: replace old data_base_dir with current one
-    state_json_str = state_json_data.decode('utf-8')
-    if old_base_dir and old_base_dir != data_base_str:
-        state_json_str = state_json_str.replace(old_base_dir, data_base_str)
-
-    # Remap legacy paths to new session-centric paths
-    state_json_str = state_json_str.replace(
-        str(UPLOAD_DIR / session_id), str(get_session_uploads(session_id)))
-    state_json_str = state_json_str.replace(
-        str(WORKSPACE_DIR / session_id), str(get_session_workspace(session_id)))
-    state_json_str = state_json_str.replace(
-        str(REPORTS_DIR / session_id), str(get_session_reports(session_id)))
+    # Path remapping: replace the source installation's data root with ours.
+    state_json_str = _remap_paths_in_text(
+        state_json_data.decode('utf-8'),
+        old_base_dir,
+        data_base_str,
+        archive_session_id,
+        session_id,
+    )
 
     state_data = json.loads(state_json_str)
+    state_data = _rebind_session_id_values(state_data, archive_session_id, session_id)
+    state_data["id"] = session_id
     state_data["user_id"] = user_id
+
+    # Validate BEFORE anything reaches session.json. A payload this build cannot
+    # load must not leave a directory behind that `list_saved_sessions` happily
+    # lists from raw JSON but `load_session_from_disk` then refuses — that
+    # combination produces a sidebar entry which can be neither opened nor
+    # deleted (both paths go through require_session_ownership and 404).
+    #
+    # Blob references are inlined for the in-memory state, and the inlined text
+    # is remapped again: strings >= 1 KB (long code history, report segments)
+    # live in blobs/*.b64 sidecars that are copied byte-for-byte, so they never
+    # saw the first remap and would keep the source machine's absolute paths.
+    inlined = inline_blobs(state_data, get_session_dir(session_id) / "blobs")
+    inlined = json.loads(
+        _remap_paths_in_text(
+            json.dumps(inlined, ensure_ascii=False),
+            old_base_dir,
+            data_base_str,
+            archive_session_id,
+            session_id,
+        )
+    )
+    state = AnalysisState(**inlined)
+    _mark_runtime_availability_after_import(state, imported_pkl=wrote_sandbox_pkl)
 
     # Write the externalized JSON (with @scai-blob tokens intact) to disk.
     # This keeps session.json consistent with the extracted blob sidecars.
     # async_save_session will re-externalize and overwrite, but writing here
-    # first ensures a valid session.json exists even if the process crashes
-    # before that step — the externalized form is always loadable.
-    # Re-serialize from state_data (not state_json_str) so the updated
-    # user_id is reflected on disk.
+    # ensures a valid session.json exists even if the process crashes before
+    # that step — the externalized form is always loadable.
     session_file = get_session_metadata_path(session_id)
     session_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     session_file.parent.chmod(0o700)
     session_file.write_text(json.dumps(state_data, ensure_ascii=False), encoding="utf-8")
     session_file.chmod(0o600)
 
-    # Inline blob references so the in-memory AnalysisState carries the
-    # original content rather than dangling @scai-blob tokens.
-    state_data = inline_blobs(state_data, get_session_dir(session_id) / "blobs")
-    state = AnalysisState(**state_data)
-    _mark_runtime_availability_after_import(state)
-
     return state
+
 
 def _import_zip(content: bytes, user_id: str, trust: bool = False) -> AnalysisState:
     """Legacy zip import (backward compatibility).
@@ -436,68 +708,84 @@ def _import_zip(content: bytes, user_id: str, trust: bool = False) -> AnalysisSt
         if not namelist:
             raise HTTPException(status_code=400, detail="Empty zip file")
 
-        session_id = namelist[0].split('/')[0]
-        validate_session_id(session_id)
+        archive_session_id = namelist[0].split('/')[0]
+        validate_session_id(archive_session_id)
+        session_id = _allocate_import_session_id(archive_session_id)
 
         # Extract state.json
-        state_json_path = f"{session_id}/state.json"
+        state_json_path = f"{archive_session_id}/state.json"
         if state_json_path not in namelist:
             raise HTTPException(status_code=400, detail="state.json not found in archive")
 
-        state_json_str = zf.read(state_json_path).decode('utf-8')
-
-        # Remap legacy paths to new session-centric paths
-        state_json_str = state_json_str.replace(
-            str(UPLOAD_DIR / session_id), str(get_session_uploads(session_id)))
-        state_json_str = state_json_str.replace(
-            str(WORKSPACE_DIR / session_id), str(get_session_workspace(session_id)))
-        state_json_str = state_json_str.replace(
-            str(REPORTS_DIR / session_id), str(get_session_reports(session_id)))
+        state_json_str = _remap_paths_in_text(
+            zf.read(state_json_path).decode('utf-8'),
+            "",
+            str(DATA_BASE_DIR),
+            archive_session_id,
+            session_id,
+        )
 
         state_data = json.loads(state_json_str)
+        state_data = _rebind_session_id_values(state_data, archive_session_id, session_id)
+        state_data["id"] = session_id
         state_data["user_id"] = user_id
-        state_data = inline_blobs(state_data, get_session_dir(session_id) / "blobs")
-        state = AnalysisState(**state_data)
+
+        session_dir = get_session_dir(session_id)
+
+        def _extract_tree(prefix: str, dest_root: Path) -> None:
+            """Copy every member under *prefix* into *dest_root*, traversal-checked."""
+            dest_root_resolved = dest_root.resolve()
+            for name in namelist:
+                if not name.startswith(prefix) or name.endswith('/'):
+                    continue
+                relative_path = name[len(prefix):]
+                if is_sandbox_pickle(relative_path) and not trust:
+                    logger.warning(f"Skipping sandbox pickle from imported zip (untrusted): {name}")
+                    continue
+                dest_path = (dest_root / relative_path).resolve()
+                # Robust traversal check via Path.is_relative_to (3.9+). Reject
+                # rather than silently skip — a malicious archive should fail loudly.
+                if not dest_path.is_relative_to(dest_root_resolved):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Archive entry escapes target directory: {name}",
+                    )
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                dest_path.write_bytes(zf.read(name))
 
         # Extract notebook if exists
         states_dir = get_session_states(session_id)
         states_dir.mkdir(parents=True, exist_ok=True)
-        notebook_path = f"{session_id}/notebook.ipynb"
+        notebook_path = f"{archive_session_id}/notebook.ipynb"
         if notebook_path in namelist:
             (states_dir / f"{session_id}.ipynb").write_bytes(zf.read(notebook_path))
 
         # SECURITY (S4): sandbox pickles can execute arbitrary code via dill.load.
         # Drop them unless the caller passed trust=true to take responsibility.
-        pkl_path = f"{session_id}/session.pkl"
+        wrote_sandbox_pkl = False
+        pkl_path = f"{archive_session_id}/session.pkl"
         if pkl_path in namelist:
             if trust:
                 logger.warning(f"Restoring sandbox pickle from zip (trust=true): {pkl_path}")
                 (states_dir / f"{session_id}_session.pkl").write_bytes(zf.read(pkl_path))
                 _resign_imported_live_pkl(session_id)
+                wrote_sandbox_pkl = True
             else:
                 logger.warning(f"Skipping sandbox pickle from imported zip (untrusted): {pkl_path}")
 
         # Extract metadata if exists
-        metadata_path = f"{session_id}/metadata.json"
+        metadata_path = f"{archive_session_id}/metadata.json"
         if metadata_path in namelist:
             (states_dir / f"{session_id}_state.json").write_bytes(zf.read(metadata_path))
 
-        # Extract workspace files with path traversal protection
-        ws_dir = get_session_workspace(session_id)
-        workspace_parent = ws_dir.resolve()
-        for wf in namelist:
-            if wf.startswith(f"{session_id}/workspace/") and not wf.endswith('/'):
-                relative_path = wf.replace(f"{session_id}/workspace/", "")
-                dest_path = (ws_dir / relative_path).resolve()
-                # Robust traversal check via Path.is_relative_to (3.9+). Reject
-                # rather than silently skip — a malicious archive should fail loudly.
-                if not dest_path.is_relative_to(workspace_parent):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Archive entry escapes target directory: {wf}",
-                    )
-                dest_path.parent.mkdir(parents=True, exist_ok=True)
-                dest_path.write_bytes(zf.read(wf))
+        # Workspace, uploads, reports and the blob sidecars. Without the last
+        # three the restored session points at files that never arrived and
+        # renders raw "@scai-blob:<hash>" tokens in its history.
+        _extract_tree(f"{archive_session_id}/workspace/", get_session_workspace(session_id))
+        _extract_tree(f"{archive_session_id}/uploads/", get_session_uploads(session_id))
+        _extract_tree(f"{archive_session_id}/reports/", get_session_reports(session_id))
+        _extract_tree(f"{archive_session_id}/blobs/", session_dir / "blobs")
 
-    _mark_runtime_availability_after_import(state)
+    state = AnalysisState(**inline_blobs(state_data, get_session_dir(session_id) / "blobs"))
+    _mark_runtime_availability_after_import(state, imported_pkl=wrote_sandbox_pkl)
     return state

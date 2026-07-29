@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import tarfile
 import time
@@ -63,6 +64,21 @@ router = APIRouter(prefix="", tags=["export_import"])
 # S3: 100 MB cap for inline zip/json imports to prevent OOM
 MAX_INLINE_IMPORT_BYTES = 100 * 1024 * 1024
 
+# tar.gz imports are deliberately uncapped -- real sessions run to tens of GB --
+# so the protection against an oversized or highly compressible archive is a
+# free-space floor rather than a size limit. Without it, extraction fills the
+# data volume and every other upload and analysis on the installation starts
+# failing on ENOSPC, with a multi-GB half-session left behind.
+MIN_FREE_DISK_BYTES = 1024 * 1024 * 1024
+
+
+def free_disk_bytes(path) -> int:
+    """Bytes still available on the volume holding *path* (0 if unknown)."""
+    try:
+        return shutil.disk_usage(str(path)).free
+    except OSError:
+        return 0
+
 def check_inline_import_size(content_length: Optional[int], max_bytes: int = MAX_INLINE_IMPORT_BYTES) -> None:
     """Fast-reject oversized inline imports based on the Content-Length header."""
     if content_length is not None and content_length > max_bytes:
@@ -112,14 +128,51 @@ def _is_disabled_snapshot_v2_member(name: str) -> bool:
     return len(parts) >= 2 and parts[1] in _SNAPSHOT_V2_SESSION_ROOTS
 
 # P3-7: cap export filename's slug portion to keep total filename below
-# filesystem limits (most FS allow 255 bytes). When truncation is needed,
+# filesystem limits (most FS allow 255 *bytes*). When truncation is needed,
 # append a short UUID suffix to preserve uniqueness across long names.
 MAX_EXPORT_NAME = 200
 
+# Manifest version stamped into every session archive this build writes. Both
+# export endpoints share it; they used to disagree (1.0 vs 2.0) for byte-identical
+# archives, which made the field useless for diagnosing a bad import.
+ARCHIVE_FORMAT_VERSION = "2.0"
+
+# Prepared-but-never-downloaded archives are full-size copies of a session. Nothing
+# reclaimed them: the only unlink hung off a successful download, so a user who
+# closed the "packaging complete" dialog left the bytes on disk forever.
+PREPARED_EXPORT_TTL = 6 * 3600
+
+
+def new_export_token() -> str:
+    """Mint the one-shot credential that authorizes an export download.
+
+    The browser downloads through a plain ``<a download>`` navigation and cannot
+    attach an Authorization header, so this token stands in for one. It must be
+    unguessable: the previous scheme keyed prepared exports by ``v1-<session_id>``,
+    which anyone holding a (deliberately auth-optional) report URL could derive.
+    """
+    return secrets.token_urlsafe(32)
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    """Trim *text* to at most *max_bytes* UTF-8 bytes without splitting a character."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
 def _build_export_filename(session_id: str, name: str, ext: str = ".tar.gz") -> str:
-    """Build a length-capped, unique export filename."""
+    """Build a length-capped, unique export filename.
+
+    The cap counts bytes, not characters: filesystem name limits are in bytes, so
+    a session named with ~78 CJK characters produced a 234-byte name that passed a
+    200-*character* check and then failed ``tarfile.open`` with ENAMETOOLONG —
+    leaving that session permanently un-exportable through the UI.
+    """
     safe_name = slugify_session_name(name)
-    if len(safe_name) > MAX_EXPORT_NAME:
+    truncated = _truncate_utf8(safe_name, MAX_EXPORT_NAME)
+    if truncated != safe_name:
         suffix = uuid.uuid4().hex[:8]
-        safe_name = f"{safe_name[:MAX_EXPORT_NAME]}_{suffix}"
+        safe_name = f"{truncated}_{suffix}"
     return f"export_{session_id[:8]}_{safe_name}{ext}"

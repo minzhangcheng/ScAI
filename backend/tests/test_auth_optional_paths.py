@@ -8,12 +8,24 @@ from backend.middleware.auth import _is_auth_optional
 
 
 class TestAuthOptionalSuffixes:
-    # /export: terminal suffix and its own subpaths
-    def test_export_exact(self):
-        assert _is_auth_optional("/api/session/abc/export") is True
+    # /export: only the token-redeeming download leg may skip authentication
+    def test_export_exact_requires_auth(self):
+        """The archive holds every upload, figure, report and message.
+
+        require_session_ownership degrades to an existence check when no token
+        is presented, so listing /export here made a whole-session archive
+        downloadable by anyone who learned the session id — e.g. from a shared
+        report URL, which is deliberately auth-optional.
+        """
+        assert _is_auth_optional("/api/session/abc/export") is False
+
+    def test_export_prepare_requires_auth(self):
+        assert _is_auth_optional("/api/session/abc/export/prepare") is False
 
     def test_export_subpath_download(self):
-        # /export/download is a real route — must remain auth-optional
+        # /export/download is fetched by <a download>, which cannot send an
+        # Authorization header; the one-shot token from /export/prepare
+        # authorizes it instead.
         assert _is_auth_optional("/api/session/abc/export/download") is True
 
     def test_export_substring_in_middle_rejected(self):

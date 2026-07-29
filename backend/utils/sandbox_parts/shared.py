@@ -725,9 +725,22 @@ class NotebookState:
             code_cell.outputs = cell_outputs
             nb.cells.append(code_cell)
         
-        # Write notebook file
-        with open(self.notebook_path, 'w', encoding='utf-8') as f:
-            nbformat.write(nb, f)
+        # Write notebook file atomically. The live notebook is rewritten in
+        # place on every save and is packed into every session export, so a
+        # truncate-and-rewrite window let the exporter capture a half-written
+        # file -- an archive that imports "successfully" with a corrupt notebook.
+        tmp_path = self.notebook_path.with_name(
+            f"{self.notebook_path.name}.{os.getpid()}.tmp"
+        )
+        try:
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                nbformat.write(nb, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.notebook_path)
+        except BaseException:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
         
         logger.info(f"Saved notebook: {self.notebook_path}")
     

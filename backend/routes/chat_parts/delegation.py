@@ -157,6 +157,32 @@ async def _execute_chat_agent(
 
     if agent_name == "bioinformatics":
         from backend.agents.bioinformatics_agent import BioinformaticsAgent
+        from backend.utils.runtime_apply import is_forward_resume_blocked
+
+        if is_forward_resume_blocked(getattr(state, "runtime_restore_status", "complete")):
+            # The workflow refuses to run forward on a kernel that does not match
+            # the state (lifecycle resume and workflow.run/resume all check this).
+            # Chat delegation used to bypass that entirely: it would start a fresh
+            # sandbox with nothing in it while the delegation prompt asserts every
+            # earlier result is still loaded, so the agent burns steps discovering
+            # that `adata` is undefined.
+            warning = (
+                "This session's kernel runtime is unavailable (it was restored or "
+                "imported without in-memory state), so bioinformatics analysis "
+                "cannot run from chat -- there are no variables from the earlier "
+                "run to build on. Use Re-run to recompute the analysis from the "
+                "session's data files first."
+            )
+            await _send_agent_msg("error", warning, agent_type)
+            return (
+                {
+                    "summary": warning,
+                    "findings": [],
+                    "figures": [],
+                    "error": "runtime_unavailable",
+                },
+                extra_clients,
+            )
 
         # Create sandbox with session restore
         sandbox = LocalJupyterSandbox(

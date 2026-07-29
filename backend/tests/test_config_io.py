@@ -83,7 +83,14 @@ class TestConfigRoundtrip:
         assert exported["agents"]["pi"]["model"] == "gpt-4o"
 
     def test_all_agents_get_fallback_server_config(self):
-        """Every agent gets server_config from default_llm if no override."""
+        """Every agent gets server_config from default_llm if no override.
+
+        The endpoint must be stored under the key the runtime reads. Writing
+        ``base_url`` here while ``AgentSettingsProvider.get_llm_client`` and
+        ``agent_llm.get_agent_llm_client`` both read ``llm_base_url`` dropped
+        the endpoint from every imported configuration and left the paired
+        credential to be sent to the destination's own global endpoint.
+        """
         config = ConfigV1.model_validate(_config_dict())
         state = apply_config_to_session(config, user_id="u1")
 
@@ -91,8 +98,29 @@ class TestConfigRoundtrip:
                      "literature", "painter", "supervisor", "technique"]:
             assert name in state.agent_server_configs, f"{name} missing from agent_server_configs"
             cfg = state.agent_server_configs[name]
-            assert cfg["base_url"] == "https://api.test.com"
+            assert cfg["llm_base_url"] == "https://api.test.com"
             assert cfg["api_key"] == "sk-test"
+
+    def test_agent_server_config_key_matches_what_the_runtime_reads(self):
+        """Pin the contract instead of a spelling: read it back the way agents do."""
+        import inspect
+
+        from backend.utils import agent_llm
+        from backend.utils import settings_provider
+
+        config = ConfigV1.model_validate(_config_dict())
+        state = apply_config_to_session(config, user_id="u1")
+
+        for module in (agent_llm, settings_provider):
+            source = inspect.getsource(module)
+            assert 'agent_cfg.get("llm_base_url"' in source, (
+                f"{module.__name__} no longer reads llm_base_url; "
+                "build_agent_server_configs must be updated to match"
+            )
+
+        assert all(
+            "llm_base_url" in cfg for cfg in state.agent_server_configs.values()
+        )
 
     def test_literature_config_roundtrip(self):
         """Literature config roundtrips through nested dict."""

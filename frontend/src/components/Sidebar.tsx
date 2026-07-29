@@ -308,7 +308,13 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
 
     try {
       // 等待服务端完成打包（不下载文件，只等元数据）
-      const meta = await apiFetch<{ status: string; size_bytes: number; filename: string }>(
+      const meta = await apiFetch<{
+        status: string
+        size_bytes: number
+        filename: string
+        export_token: string
+        download_url: string
+      }>(
         `/session/${currentSession.id}/export/prepare${includeRuntime ? '?include_runtime=true' : ''}`,
         { method: 'POST' },
       )
@@ -325,8 +331,13 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
         success: true,
         onConfirm: () => {
           // Phase 3: 触发浏览器流式下载（边下边存，不占内存）
+          // The <a download> navigation carries no Authorization header, so the
+          // one-shot token from /export/prepare is what authorizes it. Without a
+          // token the endpoint now refuses -- the archive holds every upload,
+          // figure, report and message of the session.
           const link = document.createElement('a')
-          link.href = `/api/session/${currentSession.id}/export/download`
+          link.href = meta.download_url
+            || `/api/session/${currentSession.id}/export/download?token=${encodeURIComponent(meta.export_token)}`
           link.download = meta.filename
           document.body.appendChild(link)
           link.click()
@@ -507,7 +518,11 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
             xhr.setRequestHeader(k, v)
           }
           xhr.setRequestHeader('Content-Type', 'application/octet-stream')
-          xhr.setRequestHeader('X-Filename', file.name)
+          // Percent-encode: header values are ByteStrings, and setRequestHeader
+          // throws outright on a code point above 255. Export filenames keep the
+          // session name verbatim, so every session named in Chinese produced an
+          // archive its own UI could not re-upload. The backend decodes it.
+          xhr.setRequestHeader('X-Filename', encodeURIComponent(file.name))
           xhr.setRequestHeader('X-Import-Id', preImportId)
           if (trustArchive) xhr.setRequestHeader('X-Trust', 'true')
 

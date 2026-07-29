@@ -4,8 +4,11 @@ import logging
 import time
 from typing import Any, Dict
 
+from pathlib import Path
+
 from backend.config import (
-    CLEANUP_INTERVAL, IMPORT_JOB_TTL, MAX_CACHED_SESSIONS, SESSION_CACHE_TTL,
+    CLEANUP_INTERVAL, IMPORT_JOB_TTL, MAX_CACHED_SESSIONS, PREPARED_EXPORT_TTL,
+    SESSION_CACHE_TTL,
 )
 from backend.services.session_store import async_save_session
 from backend.state import (
@@ -105,11 +108,46 @@ async def _cleanup_stale_import_jobs(
         logger.info(f"Cleaned up {len(stale)} stale import jobs")
 
 
+async def _cleanup_stale_prepared_exports(
+    current_time: float,
+    prepared_exports: Dict[str, dict],
+    prepared_exports_lock: asyncio.Lock,
+) -> None:
+    """Delete export archives that were built but never downloaded.
+
+    A prepared export is a full-size copy of the session on disk. The only
+    unlink hangs off a successful download, so closing the "packaging complete"
+    dialog -- or restarting the process -- used to strand the bytes forever,
+    with no way left to reach them once the in-memory token was gone.
+    """
+    async with prepared_exports_lock:
+        stale = [
+            (token, info)
+            for token, info in prepared_exports.items()
+            if current_time - float(info.get("created_at", 0) or 0) > PREPARED_EXPORT_TTL
+        ]
+        for token, _ in stale:
+            del prepared_exports[token]
+
+    for _, info in stale:
+        path = info.get("path")
+        if not path:
+            continue
+        try:
+            await asyncio.to_thread(Path(path).unlink, True)
+        except OSError as exc:
+            logger.warning("Failed to delete stale prepared export %s: %s", path, exc)
+    if stale:
+        logger.info(f"Cleaned up {len(stale)} stale prepared exports")
+
+
 async def cleanup_stale_sessions(
     chat_task_lock: asyncio.Lock,
     chat_sandboxes: Dict[str, Any],
     import_jobs: Dict[str, dict],
     import_jobs_lock: asyncio.Lock,
+    prepared_exports: Dict[str, dict] | None = None,
+    prepared_exports_lock: asyncio.Lock | None = None,
 ) -> None:
     while True:
         try:
@@ -125,6 +163,10 @@ async def cleanup_stale_sessions(
                 logger.info(f"Evicted {len(sessions_to_evict)} stale sessions from memory")
 
             await _cleanup_stale_import_jobs(current_time, import_jobs, import_jobs_lock)
+            if prepared_exports is not None and prepared_exports_lock is not None:
+                await _cleanup_stale_prepared_exports(
+                    current_time, prepared_exports, prepared_exports_lock
+                )
 
         except Exception:
             logger.exception("Error in session cleanup task")

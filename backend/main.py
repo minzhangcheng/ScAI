@@ -175,6 +175,8 @@ async def lifespan(app: FastAPI):
             chat_sandboxes=chat_sandboxes,
             import_jobs=import_jobs,
             import_jobs_lock=import_jobs_lock,
+            prepared_exports=prepared_exports,
+            prepared_exports_lock=prepared_exports_lock,
         )
     )
     from backend.tasks.ttl_cleanup import ttl_cleanup_task

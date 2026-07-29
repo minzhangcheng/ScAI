@@ -251,6 +251,15 @@ class BioinformaticsAgent(
     def _build_data_context(self, state: AnalysisState) -> str:
         """Build context about available data"""
         data_parts = ["=== Available Data ===\n"]
+        if getattr(state, "runtime_recompute_pending", False):
+            data_parts.append(
+                "**KERNEL STATE IS EMPTY.** This session was restored from an archive "
+                "that carried no kernel runtime, so no variables from the earlier run "
+                "exist -- `adata` and every other in-memory object are gone. Load the "
+                "input files listed below from disk before doing anything else, and "
+                "recompute whatever downstream objects you need. Do not assume any "
+                "variable is already defined.\n"
+            )
 
         # Experimental design overview
         design = state.build_experimental_design_summary()

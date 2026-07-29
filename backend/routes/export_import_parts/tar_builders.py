@@ -18,7 +18,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from backend.config import (
     DATA_BASE_DIR, REPORTS_DIR, SESSION_DIR, STATE_DIR, UPLOAD_DIR, WORKSPACE_DIR,
     UPLOAD_CHUNK_SIZE, UPLOAD_TEMP_DIR,
-    get_session_dir, get_session_metadata_path, get_session_reports,
+    get_session_dir, get_session_logs, get_session_metadata_path, get_session_reports,
     get_session_states, get_session_uploads, get_session_workspace, resolve_session_metadata_path,
 )
 from backend.models.schemas import AnalysisState, APIResponse
@@ -45,6 +45,94 @@ from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
 
 from .core import is_sandbox_pickle
+
+logger = logging.getLogger(__name__)
+
+
+class _PaddedReader:
+    """Serve exactly *size* bytes from *fh*, zero-padding a file that shrank.
+
+    ``tarfile`` writes a member header announcing the size it measured and then
+    copies that many bytes. A session being exported while its analysis is still
+    running has files rewritten underneath the packer: a file that shrinks makes
+    ``copyfileobj`` raise mid-member, which aborts the whole export *and* leaves
+    a structurally broken archive behind; a file that grows is silently cut at
+    the announced size. Padding keeps the archive readable no matter which
+    happens, and the caller logs the affected path instead of failing the export.
+    """
+
+    def __init__(self, fh, size: int):
+        self._fh = fh
+        self._remaining = size
+        self.padded = False
+
+    def read(self, size: int = -1) -> bytes:
+        if self._remaining <= 0:
+            return b""
+        want = self._remaining if size is None or size < 0 else min(size, self._remaining)
+        chunk = self._fh.read(want)
+        if len(chunk) < want:
+            chunk += b"\0" * (want - len(chunk))
+            self.padded = True
+        self._remaining -= len(chunk)
+        return chunk
+
+
+def _safe_add_file(tf, path: Path, arcname: str) -> bool:
+    """Add one regular file to *tf*, tolerating files that vanish or change.
+
+    The member is built from an already-open descriptor rather than from the
+    path, which is what turns symlinks and hardlinks into ordinary members: the
+    import side rejects every SYMTYPE/LNKTYPE entry outright (see
+    ``_import_tar_gz``), so a single ``os.symlink`` left in a workspace by
+    analysis code used to make the resulting archive permanently un-importable.
+
+    Returns True when a member was written.
+    """
+    try:
+        fh = open(path, "rb")
+    except OSError as exc:
+        logger.warning("Export: skipping %s (%s)", path, exc)
+        return False
+    try:
+        info = tf.gettarinfo(arcname=arcname, fileobj=fh)
+        info.name = arcname
+        # gettarinfo copies the descriptor's type bits; force a regular file so
+        # a device or fifo that slipped through cannot become a tar special.
+        info.type = tarfile.REGTYPE
+        reader = _PaddedReader(fh, info.size)
+        tf.addfile(info, reader)
+        if reader.padded:
+            logger.warning(
+                "Export: %s shrank while it was being packed; the archived copy "
+                "was zero-padded to the announced size.",
+                path,
+            )
+        return True
+    except OSError as exc:
+        logger.warning("Export: skipping %s (%s)", path, exc)
+        return False
+    finally:
+        fh.close()
+
+
+def _add_tree_to_tar(tf, root: Path, arc_prefix: str) -> None:
+    """Add every regular file under *root* as ``<arc_prefix>/<relative path>``."""
+    if not root.exists():
+        return
+    try:
+        entries = sorted(root.rglob("*"))
+    except OSError as exc:
+        logger.warning("Export: cannot walk %s (%s)", root, exc)
+        return
+    for file_path in entries:
+        try:
+            if not file_path.is_file():
+                continue
+        except OSError:
+            continue
+        rel = file_path.relative_to(root)
+        _safe_add_file(tf, file_path, f"{arc_prefix}/{rel.as_posix()}")
 
 
 def _add_json_bytes(tf, arcname: str, payload: dict) -> None:
@@ -77,16 +165,23 @@ def _add_snapshots_to_tar(tf, session_id: str, include_runtime: bool = False):
     snapshots_dir = get_session_dir(session_id) / "snapshots"
     if not snapshots_dir.exists():
         return
-    for snap_file in snapshots_dir.rglob("*"):
-        if snap_file.is_file():
-            if not include_runtime and is_sandbox_pickle(snap_file.name):
+    for snap_file in sorted(snapshots_dir.rglob("*")):
+        try:
+            if not snap_file.is_file():
                 continue
-            rel = snap_file.relative_to(snapshots_dir)
-            arcname = f"{session_id}/snapshots/{rel.as_posix()}"
-            if snap_file.suffix.casefold() == ".json":
+        except OSError:
+            continue
+        if not include_runtime and is_sandbox_pickle(snap_file.name):
+            continue
+        rel = snap_file.relative_to(snapshots_dir)
+        arcname = f"{session_id}/snapshots/{rel.as_posix()}"
+        if snap_file.suffix.casefold() == ".json":
+            try:
                 _add_portable_state_json(tf, snap_file, arcname)
-            else:
-                tf.add(str(snap_file), arcname=arcname)
+            except (OSError, ValueError) as exc:
+                logger.warning("Export: skipping snapshot json %s (%s)", snap_file, exc)
+        else:
+            _safe_add_file(tf, snap_file, arcname)
 
 def _add_states_to_tar(tf, session_id: str, include_runtime: bool = False):
     """Add files under sessions/<id>/states/ to the tar.
@@ -110,15 +205,15 @@ def _add_states_to_tar(tf, session_id: str, include_runtime: bool = False):
             return
         if not include_runtime and state_file.name.startswith("checkpoints.sqlite"):
             return
-        tf.add(str(state_file), arcname=f"{session_id}/states/{state_file.name}")
+        _safe_add_file(tf, state_file, f"{session_id}/states/{state_file.name}")
 
     states_dir = get_session_states(session_id)
     if states_dir.exists():
-        for sf in states_dir.iterdir():
+        for sf in sorted(states_dir.iterdir()):
             if sf.is_file():
                 _add(sf)
     # Legacy fallback (flat STATE_DIR layout)
-    for sf in STATE_DIR.glob(f"{session_id}*"):
+    for sf in sorted(STATE_DIR.glob(f"{session_id}*")):
         if sf.is_file():
             _add(sf)
 
@@ -133,9 +228,20 @@ def _add_session_blobs_to_tar(tf, session_id: str):
     blob_dir = get_session_dir(session_id) / "blobs"
     if not blob_dir.exists():
         return
-    for blob_file in blob_dir.iterdir():
+    for blob_file in sorted(blob_dir.iterdir()):
         if blob_file.is_file():
-            tf.add(str(blob_file), arcname=f"{session_id}/blobs/{blob_file.name}")
+            _safe_add_file(tf, blob_file, f"{session_id}/blobs/{blob_file.name}")
+
+def _add_session_logs_to_tar(tf, session_id: str):
+    """Add sessions/<id>/logs/ — the only per-call record of LLM usage.
+
+    ``get_agent_llm_stats`` reads these files to fill the Agent Configuration
+    chapter of the detailed report. A session migrated without them regenerates
+    that report claiming every agent made zero calls and spent zero tokens,
+    silently under-reporting the work it is describing, and nothing in
+    ``AnalysisState`` can reconstruct the numbers.
+    """
+    _add_tree_to_tar(tf, get_session_logs(session_id), f"{session_id}/logs")
 
 def _add_reproducibility_to_tar(tf, session_id: str):
     """Add reproducibility bundle files to tar archive."""
@@ -146,7 +252,8 @@ def _add_reproducibility_to_tar(tf, session_id: str):
     if repro_dir.exists():
         for file_path in sorted(repro_dir.iterdir()):
             if file_path.is_file():
-                tf.add(
-                    str(file_path),
-                    arcname=f"{session_id}/{REPRODUCIBILITY_DIR_NAME}/{file_path.name}",
+                _safe_add_file(
+                    tf,
+                    file_path,
+                    f"{session_id}/{REPRODUCIBILITY_DIR_NAME}/{file_path.name}",
                 )

@@ -44,9 +44,15 @@ from backend.utils.secret_redaction import strip_analysis_state_secrets
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
 
+from urllib.parse import unquote
+
 from .core import ImportCancelled, MAX_INLINE_IMPORT_BYTES, _IMPORT_UPLOAD_PROGRESS_BYTES, check_inline_import_size, router
 
-from .import_impl import _import_zip, _process_import_job
+from .import_impl import (
+    _import_zip,
+    _mark_runtime_availability_after_import,
+    _process_import_job,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -169,14 +175,26 @@ async def import_state(
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required to import sessions")
 
-    filename = (request.headers.get("x-filename") or "").strip()
-    if not filename:
+    # HTTP header values are ByteStrings, so a name outside Latin-1 cannot be
+    # sent verbatim -- and `slugify_session_name` keeps CJK characters, so every
+    # archive exported from a Chinese-named session has one. The client
+    # percent-encodes; decoding is a no-op for the plain ASCII names older
+    # clients send.
+    raw_filename = (request.headers.get("x-filename") or "").strip()
+    if not raw_filename:
         logger.warning("Import rejected: missing X-Filename header from client %s", request.client)
         raise HTTPException(status_code=400, detail="X-Filename header is required")
+    try:
+        filename = unquote(raw_filename, errors="strict")
+    except (UnicodeDecodeError, ValueError):
+        filename = raw_filename
     # Reject obviously malicious filenames before they touch disk paths.
     if '/' in filename or '\\' in filename or '\x00' in filename:
         logger.warning("Import rejected: bad X-Filename %r from client %s", filename, request.client)
         raise HTTPException(status_code=400, detail="X-Filename must not contain path separators")
+    # Dispatch on the extension case-insensitively: a browser or an OS that
+    # normalises the case of a download must not change how the body is read.
+    lowered = filename.lower()
 
     import_id = request.headers.get("x-import-id") or None
     trust = (request.headers.get("x-trust") or "").lower() in ("true", "1", "yes")
@@ -192,13 +210,24 @@ async def import_state(
         request.headers.get("x-forwarded-for", "N/A"),
     )
 
-    if filename.endswith(('.tar.gz', '.tgz')):
+    if lowered.endswith(('.tar.gz', '.tgz')):
         # ---- tar.gz: stream body directly to disk, then extract in background ----
         import_job_id = import_id or str(uuid.uuid4())
         async with _import_jobs_lock:
+            # X-Import-Id is client-chosen so the frontend can keep polling
+            # across a lost response. That also means one client can name
+            # another client's live job; refuse rather than overwrite its
+            # progress (and, via cancel_requested, its outcome).
+            existing = _import_jobs.get(import_job_id)
+            if existing is not None and existing.get("user_id") not in (None, user_id):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Import id is already in use by another import job",
+                )
             _import_jobs[import_job_id] = {
                 "status": "uploading",
                 "phase": "uploading",
+                "user_id": user_id,
                 "created_at": time.time(),
                 "bytes_total": content_length,
                 "bytes_processed": 0,
@@ -231,14 +260,14 @@ async def import_state(
             logger.info(f"Import {import_job_id}: cancelled during upload")
             async with _import_jobs_lock:
                 created_at = _import_jobs.get(import_job_id, {}).get("created_at", time.time())
-                _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user", "created_at": created_at}
+                _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user", "user_id": user_id, "created_at": created_at}
             tmp_path.unlink(missing_ok=True)
             return APIResponse(success=False, message="Import cancelled", data={"import_id": import_job_id, "status": "cancelled"})
         except Exception as e:
             logger.error("Import %s: upload failed after %.1fs: %s", import_job_id, time.time() - import_start_time, e, exc_info=True)
             async with _import_jobs_lock:
                 created_at = _import_jobs.get(import_job_id, {}).get("created_at", time.time())
-                _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": f"Upload failed: {str(e)}", "created_at": created_at}
+                _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": f"Upload failed: {str(e)}", "user_id": user_id, "created_at": created_at}
             tmp_path.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail=f"Upload failed: {str(e)}")
 
@@ -250,6 +279,7 @@ async def import_state(
             _import_jobs[import_job_id] = {
                 "status": "pending",
                 "phase": "pending",
+                "user_id": user_id,
                 "created_at": created_at,
                 "bytes_total": archive_size,
                 "bytes_processed": archive_size,
@@ -261,7 +291,7 @@ async def import_state(
         if cancel_flag:
             tmp_path.unlink(missing_ok=True)
             async with _import_jobs_lock:
-                _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user", "created_at": created_at}
+                _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user", "user_id": user_id, "created_at": created_at}
             return APIResponse(success=False, message="Import cancelled", data={"import_id": import_job_id, "status": "cancelled"})
 
         background_tasks.add_task(_process_import_job, str(tmp_path), import_job_id, user_id, trust)
@@ -290,13 +320,34 @@ async def import_state(
         buf.extend(chunk)
     content = bytes(buf)
 
-    if filename.endswith('.zip'):
+    if lowered.endswith('.zip'):
         state = _import_zip(content, user_id, trust=trust)
-    else:
-        # Plain JSON
+    elif lowered.endswith('.json'):
+        # Plain JSON: a bare session document with no sidecar files. It still
+        # needs blob inlining (otherwise "@scai-blob:<hash>" tokens are saved
+        # back verbatim and render as literal text) and the same runtime
+        # availability marking as every other import path -- without it a
+        # round-7 session is allowed to resume against an empty kernel, which
+        # is exactly what that marking exists to prevent.
+        from backend.config import get_session_dir
+        from backend.utils.blob_store import inline_blobs
+
         state_data = json.loads(content.decode('utf-8'))
         state_data["user_id"] = user_id
+        session_id_hint = str(state_data.get("id") or "")
+        if session_id_hint:
+            validate_session_id(session_id_hint)
+            state_data = inline_blobs(state_data, get_session_dir(session_id_hint) / "blobs")
         state = AnalysisState(**state_data)
+        _mark_runtime_availability_after_import(state)
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unsupported import format. Expected a .tar.gz/.tgz session archive, "
+                f"or a legacy .zip/.json export; got {filename!r}."
+            ),
+        )
 
     validate_session_id(state.id)
     await async_save_session(state.id, state)
@@ -310,29 +361,38 @@ async def import_state(
     )
 
 @router.get("/api/session/import/{import_id}")
-async def get_import_status(import_id: str):
+async def get_import_status(import_id: str, request: Request):
     """Poll the status of a background tar.gz import job.
 
     Response carries phase/bytes/files progress fields so the client can render
     a live progress bar instead of guessing whether the job is still alive.
+
+    Scoped to the user who started the job: the id is client-supplied, so
+    without this check knowing one is enough to watch (and cancel) somebody
+    else's import. Unknown and other-user ids are both reported as 404 so the
+    endpoint cannot be used to probe for live imports.
     """
+    user_id = getattr(request.state, "user_id", "")
     async with _import_jobs_lock:
-        if import_id not in _import_jobs:
+        job = _import_jobs.get(import_id)
+        if job is None or job.get("user_id") not in (None, user_id):
             raise HTTPException(status_code=404, detail="Import job not found")
-        job = _import_jobs[import_id].copy()
+        job = job.copy()
+    job.pop("user_id", None)
     return {"import_id": import_id, **job}
 
 @router.post("/api/session/import/{import_id}/cancel")
-async def cancel_import(import_id: str):
+async def cancel_import(import_id: str, request: Request):
     """Request cancellation of an in-progress tar.gz import.
 
     Cooperative cancellation: sets a flag that the upload loop and extraction
     worker check between chunks/members. Already-completed or already-failed
-    jobs are left as-is.
+    jobs are left as-is. Scoped to the job's owner — see ``get_import_status``.
     """
+    user_id = getattr(request.state, "user_id", "")
     async with _import_jobs_lock:
         job = _import_jobs.get(import_id)
-        if job is None:
+        if job is None or job.get("user_id") not in (None, user_id):
             raise HTTPException(status_code=404, detail="Import job not found")
         terminal = job.get("status") in ("completed", "failed", "cancelled")
         if terminal:

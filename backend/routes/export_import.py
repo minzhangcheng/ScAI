@@ -34,12 +34,18 @@ from .export_import_parts.core import (  # noqa: F401
     logger,
     router,
     MAX_INLINE_IMPORT_BYTES,
+    MIN_FREE_DISK_BYTES,
     check_inline_import_size,
+    free_disk_bytes,
     is_sandbox_pickle,
     _SNAPSHOT_V2_SESSION_ROOTS,
     _SNAPSHOT_V2_OBJECT_MEMBER,
     _is_disabled_snapshot_v2_member,
     MAX_EXPORT_NAME,
+    ARCHIVE_FORMAT_VERSION,
+    PREPARED_EXPORT_TTL,
+    new_export_token,
+    _truncate_utf8,
     _build_export_filename,
 )
 from .export_import_parts.tar_builders import (  # noqa: F401
@@ -48,13 +54,17 @@ from .export_import_parts.tar_builders import (  # noqa: F401
     _add_snapshots_to_tar,
     _add_states_to_tar,
     _add_session_blobs_to_tar,
+    _add_session_logs_to_tar,
     _add_reproducibility_to_tar,
+    _add_tree_to_tar,
+    _safe_add_file,
 )
 from .export_import_parts.export_routes import (  # noqa: F401
     export_state,
     export_prepare,
     export_download,
     export_v2,
+    _build_session_tar,
 )
 from .export_import_parts.import_routes import (  # noqa: F401
     import_v2,
@@ -68,6 +78,13 @@ from .export_import_parts.import_impl import (  # noqa: F401
     _resolve_import_dest,
     _import_tar_gz,
     _import_zip,
+    _allocate_import_session_id,
+    _claim_session_id,
+    _is_unsafe_member_name,
+    _mark_runtime_availability_after_import,
+    _rebind_session_id_values,
+    _remap_paths_in_text,
+    _session_id_is_taken,
 )
 
 

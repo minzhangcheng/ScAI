@@ -13,7 +13,10 @@ AGENT_NAME_SET = set(AGENT_NAMES)
 
 
 class AnalysisSection(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
+    # No max_length: session names are not length-limited where they are set
+    # (StartRequest.session_name), so a cap here only made an existing session
+    # un-exportable rather than preventing anything.
+    name: str = Field(min_length=1)
     initial_instruction: str
     round_wait_seconds: int = Field(ge=-1, le=3600)
 
@@ -41,8 +44,10 @@ class ApiConfigSection(BaseModel):
 
 
 class GroupEntry(BaseModel):
-    key: str = Field(min_length=1, max_length=50)
-    name: str = Field(min_length=1, max_length=100)
+    # Same reasoning as AnalysisSection.name: GroupUpdateRequest imposes no
+    # bounds, so bounds here only block export of state that already exists.
+    key: str = Field(min_length=1)
+    name: str = Field(min_length=1)
     description: str = ""
     sample_count: int = Field(ge=1, le=100)
     order: int = 0
@@ -61,7 +66,11 @@ class FileEntry(BaseModel):
 class IndicatorEntry(BaseModel):
     indicator: str = Field(min_length=1, max_length=200)
     value: float
-    unit: str = Field(min_length=1, max_length=50)
+    # A unit is optional in the sessions this schema has to describe: the PI
+    # agent writes `data.get("unit", "")` when it parses an indicator out of a
+    # document, and requiring one here made config export fail with a 500 for
+    # any session that had one -- permanently, since the value is already stored.
+    unit: str = Field(default="", max_length=50)
     reference_range: Optional[str] = None
     interpretation: Optional[str] = None
     group: Optional[str] = None

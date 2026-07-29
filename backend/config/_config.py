@@ -16,10 +16,13 @@ from backend.models.schemas import AgentType
 # All data is stored in ../data/ relative to the backend directory
 # Can be overridden with SCAI_DATA_DIR environment variable
 _BACKEND_DIR = Path(__file__).parent
+# Resolved to an absolute path: session import rewrites the source
+# installation's data root out of every stored path, and a relative value such
+# as "./data" would degrade that rewrite into a search for the bare word "data".
 DATA_BASE_DIR = Path(os.environ.get(
     'SCAI_DATA_DIR',
     str((_BACKEND_DIR.parent.parent.parent / "data").resolve())
-))
+)).expanduser().resolve()
 
 _ENABLE_REPRODUCIBILITY = os.environ.get("SCAI_ENABLE_REPRODUCIBILITY", "").lower() in (
     "1",
@@ -73,6 +76,7 @@ MAX_CACHED_SESSIONS = 50  # Maximum sessions to keep in memory
 MAX_REALTIME_MESSAGES = 1000  # Maximum realtime messages per session
 SESSION_CACHE_TTL = 3600  # Seconds before inactive session eviction (1 hour)
 IMPORT_JOB_TTL = 3600  # Cleanup completed/failed import jobs after (seconds)
+PREPARED_EXPORT_TTL = 6 * 3600  # Delete prepared-but-undownloaded export archives after (seconds)
 CLEANUP_INTERVAL = 300  # Background cleanup task interval (seconds)
 WS_RECEIVE_TIMEOUT = 60.0  # WebSocket receive timeout (seconds) — increased from 30s
 CHAT_DELEGATION_TIMEOUT = 600  # Chat delegation global timeout (seconds)

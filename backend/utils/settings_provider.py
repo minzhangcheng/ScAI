@@ -106,6 +106,23 @@ class AgentSettingsProvider:
            (not agent_key or agent_key == self._config.api.api_key):
             return self._global_client
 
+        if agent_url and agent_url != self._config.api.llm_base_url and not agent_key:
+            # A custom endpoint whose credential is gone — the state of every
+            # session that arrives through export/import, because export blanks
+            # credentials and keeps everything else. Falling through would build
+            # a client that sends *this* installation's key to an endpoint the
+            # archive chose, which fails every call and hands the credential to
+            # a host the operator never configured. Use the global client until
+            # the endpoint is reconfigured with its own key.
+            logger.warning(
+                "[%s] agent %s has a custom endpoint but no credential of its own; "
+                "using the global LLM client instead of pairing it with the "
+                "installation key.",
+                self._session_id,
+                agent_name,
+            )
+            return self._global_client
+
         cache_key = (
             agent_name,
             agent_url or self._config.api.llm_base_url,

@@ -12,6 +12,11 @@ from backend.models.schemas import AnalysisState
 _EXCLUDED_FIELDS = {
     "original_max_rounds",
     "pre_pause_status",
+    # One-shot marker set by POST /run when the run exists to rebuild a kernel
+    # that is gone. Read only by the bioinformatics data context and cleared by
+    # the bioinformatics node; the client already learns the situation from
+    # runtime_restore_status / runtime_restore_warning.
+    "runtime_recompute_pending",
     # Backend-internal artifact-invalidation bookkeeping (expression_contract,
     # graphic_abstract, report generator). No frontend consumer — verified by
     # grepping frontend/src — so it stays off the API surface.

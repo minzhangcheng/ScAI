@@ -115,9 +115,31 @@ describe('AnalysisPanel snapshot-failure retry gate', () => {
     expect(screen.queryByRole('dialog', { name: /snapshot failure/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('dialog', { name: /analysis snapshots/i })).not.toBeInTheDocument()
     expect(screen.queryByText(/snapshot count reminder/i)).not.toBeInTheDocument()
-    expect(screen.queryByText(/snapshot runtime unavailable/i)).not.toBeInTheDocument()
+    // The runtime-restore banner is NOT Snapshot V2 UI. An ordinary session
+    // *import* sets runtime_restore_status='unavailable' with Snapshot V2 off,
+    // and gating the banner on the feature flag left the Resume button disabled
+    // with no explanation of why.
+    expect(screen.getByText(/snapshot runtime unavailable/i)).toBeInTheDocument()
     expect(mockGetSnapshotTransaction).not.toHaveBeenCalled()
     expect(mockListSnapshotsV2).not.toHaveBeenCalled()
+  })
+
+  it('explains a runtime-unavailable session even with Snapshot V2 disabled', async () => {
+    useAppStore.setState({
+      snapshotV2Enabled: false,
+      snapshotFailure: null,
+      snapshotTransaction: null,
+      showSnapshotCleanupReminder: false,
+      runtimeRestoreStatus: 'unavailable',
+      runtimeRestoreWarning: 'imported without kernel runtime state',
+    })
+
+    render(<AnalysisPanel />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(screen.getByText(/imported without kernel runtime state/i)).toBeInTheDocument()
   })
 
   it('does not clear gate when retry returns success:false / still_blocked', async () => {

@@ -1271,8 +1271,12 @@ export function AnalysisPanel() {
         />
       )}
 
-      {/* Runtime restore safety banner (persists across reload) */}
-      {snapshotV2Enabled && (runtimeRestoreStatus === 'unavailable' || runtimeRestoreStatus === 'intentionally_kept') && (
+      {/* Runtime restore safety banner (persists across reload).
+          Not gated on snapshotV2Enabled: an ordinary session *import* sets
+          runtime_restore_status='unavailable' with Snapshot V2 switched off, and
+          hiding the banner there left the Resume button disabled with the
+          explanation suppressed. */}
+      {(runtimeRestoreStatus === 'unavailable' || runtimeRestoreStatus === 'intentionally_kept') && (
         <div className="mb-2">
           <RuntimeWarningBanner
             runtimeRestoreStatus={runtimeRestoreStatus}

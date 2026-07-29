@@ -272,6 +272,11 @@ class AnalysisState(BaseModel):
     # "intentionally_kept": user override kept a mismatched live runtime (risk accepted).
     runtime_restore_status: Literal["complete", "unavailable", "intentionally_kept"] = "complete"
     runtime_restore_warning: Optional[str] = None
+    # Set when a run is started specifically to recompute a kernel that is gone
+    # (the usual cause is an import without runtime state). Consumed by the
+    # bioinformatics data context so the agent reloads its inputs instead of
+    # referencing variables from a session it can no longer see.
+    runtime_recompute_pending: bool = False
 
     # Audit reason when a session is terminated (e.g. snapshot_failure).
     termination_reason: Optional[str] = None

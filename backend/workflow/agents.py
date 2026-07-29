@@ -429,6 +429,9 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         plan_revision_requested = bool(result.get("plan_revision_needed"))
         action = decide_bioinfo_post_execution(planning_stage, plan_revision_requested)
 
+        # One-shot: the recompute prompt has now been delivered and acted on.
+        analysis_state.runtime_recompute_pending = False
+
         result_state = {
             **state,
             "analysis_state": analysis_state,

@@ -141,9 +141,50 @@ def open_analysis_state_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return _transform_secret_fields(payload, open_secret)
 
 
+# Endpoint fields are not credentials, but they are just as installation-bound:
+# an archive that keeps them points the destination's agents at a host only the
+# source could reach, and — since the paired api_key is stripped — invites the
+# destination to send its own credential there.
+ENDPOINT_FIELD_NAMES = frozenset({
+    "llm_base_url",
+    "base_url",
+    "deep_research_llm_base_url",
+    "proxy_url",
+})
+
+
+def _blank_nested_endpoint_fields(value: Any) -> Any:
+    """Copy a config tree, blanking recognized endpoint fields."""
+    if isinstance(value, dict):
+        return {
+            key: ("" if key in ENDPOINT_FIELD_NAMES and item else _blank_nested_endpoint_fields(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_blank_nested_endpoint_fields(item) for item in value]
+    return value
+
+
 def strip_analysis_state_secrets(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a portable payload with credential values removed entirely."""
-    return _transform_secret_fields(payload, lambda _value: "")
+    """Return a portable payload with credentials and endpoints removed entirely."""
+    result = _transform_secret_fields(payload, lambda _value: "")
+
+    servers = result.get("agent_server_configs")
+    if isinstance(servers, dict):
+        result["agent_server_configs"] = {
+            agent: (_blank_nested_endpoint_fields(config) if isinstance(config, dict) else config)
+            for agent, config in servers.items()
+        }
+
+    literature = result.get("literature_config")
+    if isinstance(literature, dict):
+        result["literature_config"] = _blank_nested_endpoint_fields(literature)
+
+    snapshot = result.get("config_snapshot")
+    if isinstance(snapshot, dict):
+        result["config_snapshot"] = _blank_nested_endpoint_fields(snapshot)
+
+    return result
 
 
 def seal_system_config_payload(payload: Mapping[str, Any]) -> dict[str, Any]:

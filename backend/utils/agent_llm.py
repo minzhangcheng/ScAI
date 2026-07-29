@@ -1,4 +1,5 @@
 """Per-agent LLM client factory + session-path ownership helper."""
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -9,6 +10,8 @@ from backend.config._config import get_session_dir
 from backend.models.schemas import AnalysisState
 from backend.utils.auth import require_session_ownership
 from backend.utils.llm_client import OpenAICompatibleClient
+
+logger = logging.getLogger(__name__)
 
 
 async def validate_file_path_ownership(
@@ -87,6 +90,17 @@ def get_agent_llm_client(
     agent_cfg = state.agent_server_configs.get(agent_name, {})
     agent_url = agent_cfg.get("llm_base_url", "")
     agent_key = agent_cfg.get("api_key", "")
+    if agent_url and agent_url != cfg.api.llm_base_url and not agent_key:
+        # Custom endpoint, no credential of its own (the shape an imported
+        # session always has, since export blanks credentials but not URLs).
+        # Pairing it with the installation key would leak that key to a host
+        # chosen by the archive. Twin of the guard in AgentSettingsProvider.
+        logger.warning(
+            "Agent %s has a custom endpoint but no credential of its own; "
+            "falling back to the global endpoint.",
+            agent_name,
+        )
+        agent_url = ""
     effective_url = agent_url if (agent_url and agent_url != cfg.api.llm_base_url) else cfg.api.llm_base_url
     effective_key = agent_key if (agent_key and agent_key != cfg.api.api_key) else cfg.api.api_key
 

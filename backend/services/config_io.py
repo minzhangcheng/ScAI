@@ -13,13 +13,21 @@ from backend.models.schemas import AnalysisState, TaskStatus, TreatmentGroup, Da
 
 
 def build_agent_server_configs(config: ConfigV1) -> Dict[str, Dict[str, Any]]:
-    """Build per-agent LLM server config dict (base_url, api_key, model, temperature)."""
+    """Build per-agent LLM server config dict (llm_base_url, api_key, model, temperature).
+
+    The endpoint key must be ``llm_base_url``: every consumer reads that name
+    (``AgentSettingsProvider.get_llm_client``, ``agent_llm.get_agent_llm_client``),
+    so writing ``base_url`` here silently dropped the endpoint while keeping the
+    key that goes with it — an imported configuration then sent the user's
+    per-agent credential to whatever global endpoint the destination happened to
+    have configured.
+    """
     default_llm = config.api_config.default_llm
     result: Dict[str, Dict[str, Any]] = {}
     for name in AGENT_NAMES:
         ov = (config.agents or {}).get(name) or AgentOverride()
         result[name] = {
-            "base_url": ov.llm_base_url or default_llm.llm_base_url,
+            "llm_base_url": ov.llm_base_url or default_llm.llm_base_url,
             "api_key": ov.api_key or default_llm.api_key,
             "model": ov.model or default_llm.model,
             "temperature": float(ov.temperature if ov.temperature is not None else 0.7),

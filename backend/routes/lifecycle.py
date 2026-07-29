@@ -136,9 +136,21 @@ async def run_analysis(session_id: str, request: Request):
 
     # Idle-restored session: signal explicit_start so the graph node
     # preserves the restored round and plan rather than auto-incrementing.
-    if (
-        getattr(state, "restore_resume_kind", None) is None
-        and getattr(state, "restore_branch_id", None)
+    #
+    # The same signal is what makes an *imported* session runnable at all. A
+    # session that has already run (current_round > 0) is dispatched to
+    # workflow.resume() by the WebSocket handler, and resume() refuses to
+    # "invent a fresh initialize_round run" when it finds no checkpoint --
+    # which an import never carries unless include_runtime was set. Without an
+    # explicit start intent it logs, flips the status back to PAUSED and
+    # executes nothing, so Start/Re-run looked like a silent no-op and the
+    # session had no way forward at all.
+    from backend.config import get_session_states
+
+    has_checkpoint = (get_session_states(session_id) / "checkpoints.sqlite").exists()
+    if getattr(state, "restore_resume_kind", None) is None and (
+        getattr(state, "restore_branch_id", None)
+        or (not has_checkpoint and state.current_round > 0)
     ):
         state.restore_start_intent = "explicit_start"
 
@@ -152,6 +164,11 @@ async def run_analysis(session_id: str, request: Request):
         state.skip_required_snapshot_phase = None
 
     # Fresh rerun clears any snapshot restore state — new kernel will be built.
+    # Remember *why* it is being cleared: this run is the "re-run from your data"
+    # the blocked-resume message promises, so the bioinformatics agent has to be
+    # told its kernel is empty rather than left to trip over a missing adata.
+    if is_forward_resume_blocked(getattr(state, "runtime_restore_status", "complete")):
+        state.runtime_recompute_pending = True
     state.runtime_restore_status = "complete"
     state.runtime_restore_warning = None
     state.status = TaskStatus.RUNNING

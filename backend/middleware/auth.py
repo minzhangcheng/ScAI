@@ -60,7 +60,14 @@ AUTH_OPTIONAL_PATHS = (
 SESSION_AUTH_OPTIONAL_SUFFIXES = (
     "/report/",    # /report/html, /report/figure/*, /report/table/*
     "-report/",    # /exploration-report/*, /annotation-report/*, /detailed-report/*
-    "/export",     # /export, /export/download (Sidebar link.click() without auth headers)
+    # Only the token-redeeming download leg is auth-optional: the browser fetches
+    # it through <a download>, which carries no Authorization header, and the
+    # one-shot unguessable token minted by /export/prepare stands in for one.
+    # /export and /export/prepare are NOT listed -- they hand out a full archive
+    # of every upload, figure, report and message in the session, and their only
+    # ownership check degrades to "does this session exist" when no token is
+    # presented (see require_session_ownership).
+    "/export/download",
     "/figure/",    # /figure/{fid}/png, /figure/{fid}/pdf (FigureGallery <img src> without auth headers)
 )
 

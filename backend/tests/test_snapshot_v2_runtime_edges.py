@@ -628,6 +628,8 @@ async def test_run_clears_a_stale_skip_marker(monkeypatch):
     state.skip_required_snapshot_phase = "*"
     state.restore_resume_kind = None
     state.restore_branch_id = None
+    state.current_round = 0
+    state.runtime_restore_status = "complete"
     state.snapshot_failure = None
     state.pending_required_snapshot = None
     state.wait_input_reason = None
