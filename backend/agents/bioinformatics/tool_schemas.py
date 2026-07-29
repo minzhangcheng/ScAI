@@ -228,15 +228,29 @@ TOOLS = [
                     "collection": {
                         "type": "string",
                         "description": (
-                            "Collection to search, e.g. a hallmark, curated-pathway or "
-                            "ontology collection. Use list_sets=true first if unsure."
+                            "Collection identifier within the resource. These are "
+                            "ORGANISM-SPECIFIC and not guessable -- call with "
+                            "list_collections=true FIRST to see what this organism and "
+                            "release actually publish, then pick one. Passing another "
+                            "organism's identifier fails."
                         )
                     },
                     "version": {
                         "type": "string",
                         "description": (
-                            "Concrete release identifier of the resource. Pinning it is "
-                            "what makes the panel re-fetchable later."
+                            "Release identifier of the resource, e.g. '2025.1'. Pinning "
+                            "it is what makes the panel re-fetchable later. The bare "
+                            "release and the organism-stamped form the resource "
+                            "publishes are both accepted."
+                        )
+                    },
+                    "list_collections": {
+                        "type": "boolean",
+                        "description": (
+                            "Return the collection identifiers available for this "
+                            "organism and release, instead of fetching a set. Start "
+                            "here when you do not already know the identifier -- "
+                            "guessing produces a 404, not a useful suggestion."
                         )
                     },
                     "organism": {
@@ -254,7 +268,7 @@ TOOLS = [
                         )
                     }
                 },
-                "required": ["set_id", "collection", "version"]
+                "required": ["version"]
             }
         }
     },

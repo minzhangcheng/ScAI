@@ -2609,6 +2609,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 
                     elif tool_name == "fetch_gene_set":
                         from ..services.gene_set_fetch import (
+                            list_collections as list_gene_set_collections,
                             load_collection, resolve_gene_set,
                         )
                         from ..services.gene_set_resolver import (
@@ -2633,6 +2634,37 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             })
                             continue
 
+                        if args.get("list_collections"):
+                            # Discovery first: the identifiers are organism-specific
+                            # and a guess fails with a 404 that teaches nothing.
+                            try:
+                                available = await asyncio.to_thread(
+                                    list_gene_set_collections, version, organism
+                                )
+                                content = (
+                                    f"Collections available for {organism} in release "
+                                    f"{version}: {', '.join(available)}. "
+                                    f"Pick one and call again with collection=<id> and "
+                                    f"either list_sets=true to browse or set_id=<id> to "
+                                    f"fetch."
+                                )
+                            except Exception as exc:
+                                content = (
+                                    f"fetch_gene_set could not list collections for "
+                                    f"{organism} in release {version!r}: {exc}"
+                                )
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": content,
+                            })
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count, step_type="fetch_gene_set",
+                                agent_reasoning=agent_reasoning,
+                                code_description=f"Listed collections for {organism} {version}",
+                            ))
+                            continue
+
                         if args.get("list_sets"):
                             # Discovery path: never fabricate an identifier, look it up.
                             try:
@@ -2648,6 +2680,14 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                         f"v{version!r} for {organism}: {exc}"
                                     ),
                                 })
+                                analysis_log.append(AnalysisStep(
+                                    step_number=step_count, step_type="fetch_gene_set",
+                                    agent_reasoning=agent_reasoning,
+                                    code_description=(
+                                        f"FAILED: browse {collection!r} v{version!r} "
+                                        f"({organism})"
+                                    ),
+                                ))
                                 continue
                             hits = (suggest_similar(set_id, available.keys(), limit=25)
                                     if set_id else sorted(available)[:25])
@@ -2657,6 +2697,19 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 "content": (
                                     f"{len(available)} sets in {collection} v{version} "
                                     f"({organism}). Matching: {', '.join(hits) or 'none'}"
+                                ),
+                            })
+                            continue
+
+                        if not set_id or not collection:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": (
+                                    "fetch_gene_set needs both collection and set_id to "
+                                    "fetch. Call with list_collections=true to see the "
+                                    "identifiers this organism publishes, then "
+                                    "list_sets=true to browse that collection."
                                 ),
                             })
                             continue
@@ -2671,6 +2724,15 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 "tool_call_id": tool_call.id,
                                 "content": f"fetch_gene_set failed: {error}",
                             })
+                            # Record the attempt. Without this a failed fetch is
+                            # invisible in session.json, and a later reader
+                            # concludes the tool was never called -- which is the
+                            # opposite of what happened in the first run.
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count, step_type="fetch_gene_set",
+                                agent_reasoning=agent_reasoning,
+                                code_description=f"FAILED: {set_id!r} -- {str(error)[:160]}",
+                            ))
                             continue
 
                         # Hand the genes to the kernel as data rather than asking the

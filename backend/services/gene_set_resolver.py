@@ -155,14 +155,55 @@ def build_provenance(resource: str, version: str, set_id: str) -> str:
     return f"database:{resource}:{version}:{set_id}"
 
 
+_VERSION_RE = re.compile(r"^v?(?P<release>\d+\.\d+)(?:\.(?P<organism>[A-Za-z]{2}))?$")
+
+
+def normalize_version(version: str) -> tuple[str, str]:
+    """Split a release string into its bare release and any organism suffix.
+
+    The resource publishes releases as ``2025.1.Mm``, so a caller reading its
+    documentation naturally passes that whole string -- and the first production
+    run did exactly that. Appending the organism code to it a second time
+    produced ``2025.1.Mm.Mm`` and a 404. Accept every form a caller might
+    reasonably use: ``2025.1``, ``2025.1.Mm``, ``v2025.1.Mm``.
+    """
+    text = str(version or "").strip()
+    match = _VERSION_RE.match(text)
+    if not match:
+        return text, ""
+    return match.group("release"), (match.group("organism") or "")
+
+
+def release_index_url(version: str, organism_code: str) -> str:
+    """Directory index for one release, used to discover collections."""
+    release, _ = normalize_version(version)
+    return f"{MSIGDB_BASE}/{release}.{organism_code}/"
+
+
 def msigdb_gmt_url(version: str, collection: str, organism_code: str) -> str:
     """URL of one MSigDB collection GMT.
 
-    The release identifier is part of the path, which is what makes an MSigDB
-    citation re-fetchable: ``2025.1.Mm`` names an immutable file.
+    The release identifier is part of the path, which is what makes a citation
+    re-fetchable: the stamp names an immutable file.
     """
-    stamp = f"{version}.{organism_code}"
+    release, suffix = normalize_version(version)
+    if suffix and suffix.lower() != organism_code.lower():
+        # A caller asking for one organism's release while the analysis is on
+        # another is a mistake worth surfacing rather than silently overriding.
+        raise ValueError(
+            f"version {version!r} names organism {suffix!r} but the requested "
+            f"organism maps to {organism_code!r}"
+        )
+    stamp = f"{release}.{organism_code}"
     return f"{MSIGDB_BASE}/{stamp}/{collection}.v{stamp}.symbols.gmt"
+
+
+def parse_release_index(html: str, version: str, organism_code: str) -> list[str]:
+    """Collection identifiers available in a release, from its directory index."""
+    release, _ = normalize_version(version)
+    stamp = re.escape(f"{release}.{organism_code}")
+    pattern = re.compile(r'href="([A-Za-z0-9._]+)\.v%s\.symbols\.gmt"' % stamp)
+    return sorted(set(pattern.findall(html)))
 
 
 def parse_gmt(text: str) -> dict[str, list[str]]:
@@ -187,7 +228,8 @@ def parse_gmt(text: str) -> dict[str, list[str]]:
 
 def cache_path(cache_dir: Path, version: str, collection: str,
                organism_code: str) -> Path:
-    return Path(cache_dir) / f"{collection}.v{version}.{organism_code}.symbols.gmt"
+    release, _ = normalize_version(version)
+    return Path(cache_dir) / f"{collection}.v{release}.{organism_code}.symbols.gmt"
 
 
 def validate_set_id(set_id: str) -> Optional[str]:

@@ -28,7 +28,10 @@ from .gene_set_resolver import (
     cache_path,
     msigdb_gmt_url,
     normalize_organism,
+    normalize_version,
     parse_gmt,
+    parse_release_index,
+    release_index_url,
     summarize_projection,
     suggest_similar,
     validate_set_id,
@@ -49,6 +52,24 @@ def _get_text(url: str, timeout: int = _HTTP_TIMEOUT) -> str:
         return response.text
 
 
+def list_collections(version: str, organism: str) -> list[str]:
+    """Collection identifiers published for one organism and release.
+
+    Exists because the identifiers are organism-specific and a caller has no way
+    to know them. Without this the only route is to guess, and a guess that is
+    valid for another organism fails with a 404 that explains nothing.
+    """
+    organism = normalize_organism(organism)
+    code = MSIGDB_ORGANISMS.get(organism)
+    if not code:
+        raise ValueError(
+            f"the resource publishes collections for {sorted(MSIGDB_ORGANISMS)} "
+            f"only; {organism!r} must be projected from one of those"
+        )
+    html = _get_text(release_index_url(version, code))
+    return parse_release_index(html, version, code)
+
+
 def load_collection(version: str, collection: str, organism: str,
                     cache_dir: Optional[Path] = None) -> dict[str, list[str]]:
     """Return {set_id: genes} for one MSigDB collection, caching the GMT on disk.
@@ -64,6 +85,18 @@ def load_collection(version: str, collection: str, organism: str,
             f"MSigDB publishes native collections for "
             f"{sorted(MSIGDB_ORGANISMS)} only; {organism!r} must be projected."
         )
+    release, suffix = normalize_version(version)
+    if not release or release == str(version).strip() and "." not in release:
+        raise ValueError(
+            f"{version!r} is not a release identifier. Releases look like '2025.1' "
+            f"or '2025.1.{code}'. Call with list_collections=true to see what a "
+            f"release publishes."
+        )
+    if suffix and suffix.lower() != code.lower():
+        raise ValueError(
+            f"version {version!r} names organism {suffix!r}, but the analysis "
+            f"organism maps to {code!r}"
+        )
     cache_dir = Path(cache_dir) if cache_dir else _DEFAULT_CACHE
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = cache_path(cache_dir, version, collection, code)
@@ -72,7 +105,22 @@ def load_collection(version: str, collection: str, organism: str,
         return parse_gmt(path.read_text(encoding="utf-8"))
 
     url = msigdb_gmt_url(version, collection, code)
-    text = _get_text(url)
+    try:
+        text = _get_text(url)
+    except Exception as exc:
+        # A bare 404 tells the caller nothing it can act on. Enumerate what the
+        # release actually contains so the next attempt can succeed.
+        try:
+            available = parse_release_index(
+                _get_text(release_index_url(version, code)), version, code)
+        except Exception:
+            available = []
+        if available and collection not in available:
+            raise ValueError(
+                f"{collection!r} is not published for {organism} in this release. "
+                f"Available: {', '.join(available)}"
+            ) from exc
+        raise
     sets = parse_gmt(text)
     if not sets:
         raise ValueError(f"{url} parsed to zero gene sets")
@@ -205,12 +253,14 @@ def resolve_gene_set(set_id: str, organism: str, *, version: str,
             f"({len(sets)} sets available).{hint_text}"
         )
 
-    provenance = build_provenance(resource, f"{version}.{MSIGDB_ORGANISMS[source_organism]}", set_id)
+    release, _ = normalize_version(version)
+    stamp = f"{release}.{MSIGDB_ORGANISMS[source_organism]}"
+    provenance = build_provenance(resource, stamp, set_id)
 
     if native:
         return GeneSetResult(
             set_id=set_id, genes=list(genes), resource=resource,
-            version=f"{version}.{MSIGDB_ORGANISMS[organism]}",
+            version=f"{release}.{MSIGDB_ORGANISMS[organism]}",
             collection=collection, organism=organism,
             source_organism=organism, projected=False,
             provenance=provenance,
@@ -256,7 +306,7 @@ def resolve_gene_set(set_id: str, organism: str, *, version: str,
     projection["n_unresolved_symbols"] = n_unresolved
     return GeneSetResult(
         set_id=set_id, genes=unique, resource=resource,
-        version=f"{version}.{MSIGDB_ORGANISMS[source_organism]}",
+        version=stamp,
         collection=collection, organism=organism,
         source_organism=source_organism, projected=True,
         projection=projection,
