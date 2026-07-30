@@ -1,0 +1,335 @@
+"""End-to-end post-execution review with the REAL PI and bioinformatics agents.
+
+The pieces were built against a written contract, so the risk this covers is
+contract drift: a PI prompt that cannot be built, a JSON shape the orchestrator
+does not read, or an executor result whose keys the merge step drops. Only the
+LLM and the kernel are stubbed.
+"""
+import json
+import pytest
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+from backend.agents.bioinformatics_agent import BioinformaticsAgent
+from backend.agents.pi_agent import PIAgent
+from backend.models.schemas import AnalysisState, CodeExecution
+from backend.models.schema_parts.session import AnalysisPlan, PlanStep
+from backend.workflow.post_execution import PostExecutionReviewMixin
+
+_SIGNATURE = {
+    "id": "adata-1", "n_obs": 1000, "n_vars": 2000, "obs_columns": ["leiden", "group"],
+    "cluster_counts": {"0": 600, "1": 400}, "layers": ["counts"], "x_id": "x-1",
+    "x_sum": 12345.0, "x_nnz": 999, "obs_hash": "oh", "var_hash": "vh",
+    "layers_fingerprint": "lf",
+}
+
+_REVIEW_JSON = json.dumps({
+    "gaps": ["The approved pathway-activity step produced no result."],
+    "supplementary_tasks": ["Run decoupler run_ulm on the existing object and report the top regulons."],
+    "out_of_scope": ["Measure protein abundance — needs new laboratory work."],
+    "verdict": "supplement",
+    "rationale": "Repairing the one approved step that left no evidence.",
+})
+
+_ASSESS_JSON = json.dumps({
+    "verdict": "resolved",
+    "summary": "The pathway-activity gap is now closed by an executed analysis.",
+    "resolved_gaps": ["The approved pathway-activity step produced no result."],
+    "remaining_gaps": [],
+})
+
+
+def _provider():
+    provider = MagicMock()
+    provider.get_model.return_value = "test/model"
+    provider.get_system_prompt.return_value = ""
+    provider.get_temperature.return_value = 0.2
+    return provider
+
+
+class _Harness(PostExecutionReviewMixin):
+    def __init__(self, pi, bio):
+        self.session_id = "sess-int"
+        self.pi_agent = pi
+        self.bioinformatics_agent = bio
+        self.config = SimpleNamespace(
+            enable_post_execution_review=True,
+            post_execution_review_max_tasks=5,
+            post_execution_review_max_iterations=3,
+            post_execution_review_timeout_seconds=60,
+            max_rounds=3,
+        )
+        self.sent = []
+
+    async def _send_message(self, kind, payload, agent=None):
+        self.sent.append(kind)
+
+
+def _pi_agent(replies):
+    agent = PIAgent(settings_provider=_provider())
+    agent.set_session("sess-int")
+    calls = []
+
+    async def _chat(prompt, **kwargs):
+        calls.append(prompt)
+        return replies[min(len(calls) - 1, len(replies) - 1)]
+
+    agent.chat = _chat
+    agent.refresh_runtime_config_if_needed = lambda *a, **k: None
+    agent.prompts_seen = calls
+    return agent
+
+
+def _bio_agent(replies, exec_output="top regulons: A, B", exec_error=None):
+    sandbox = MagicMock()
+    executed = []
+
+    async def _execute(code, **kwargs):
+        executed.append(code)
+        return SimpleNamespace(output=exec_output, error=exec_error, figures=[])
+
+    sandbox.execute = _execute
+    agent = BioinformaticsAgent(settings_provider=_provider(), sandbox=sandbox)
+    agent.set_session("sess-int")
+    calls = []
+
+    async def _chat(prompt, **kwargs):
+        calls.append(prompt)
+        return replies[min(len(calls) - 1, len(replies) - 1)]
+
+    agent.chat = _chat
+    agent.refresh_runtime_config_if_needed = lambda *a, **k: None
+
+    async def _introspect(_hint):
+        return {"var": "adata", "cluster_key": "leiden", "artifact_dir": "supplementary"}
+
+    async def _capture(var_name, cluster_key):
+        return dict(_SIGNATURE)
+
+    agent.introspect_validation_metadata = _introspect
+    agent.capture_main_object_signature = _capture
+    agent.executed_code = executed
+    agent.prompts_seen = calls
+    return agent
+
+
+def _state_and_plan():
+    """A round whose first approved step ran and whose second left no evidence."""
+    state = AnalysisState(user_id="u1", name="Project", initial_instruction="analyze the comparison")
+    state.current_round = 2
+    state.max_rounds = 3
+    state.current_round_direction = "a test direction"
+    state.current_plan = AnalysisPlan(
+        phase="innovation",
+        steps=[
+            PlanStep(id=1, title="Marker detection",
+                     method="Run sc.tl.rank_genes_groups per cluster"),
+            PlanStep(id=2, title="Pathway activity",
+                     method="Run decoupler run_ulm on the collected regulons"),
+        ],
+    )
+    state.code_history.append(
+        CodeExecution(code="sc.tl.rank_genes_groups(adata, 'leiden')", round_number=2)
+    )
+    return state
+
+
+def _result():
+    return {"findings": ["Cluster 0 differs from cluster 1."], "figures": [],
+            "status": "completed", "analysis_log": [], "code_history": [],
+            "evidence_execution_ids": ["e1"]}
+
+
+@pytest.mark.asyncio
+async def test_real_agents_complete_the_review_and_merge_back():
+    state = _state_and_plan()
+    pi = _pi_agent([_REVIEW_JSON, _ASSESS_JSON])
+    bio = _bio_agent([
+        json.dumps({"code": "import decoupler as dc\ndc.run_ulm(adata, net=net)"}),
+        json.dumps({"done": True, "result": {
+            "summary": "Ran the pathway activity task.",
+            "findings": ["Regulon A is elevated in the compared group."],
+        }}),
+    ])
+    bio._current_analysis_state = state
+    harness = _Harness(pi, bio)
+    result = _result()
+
+    audit_summary = harness._audit_round_plan_execution(state, result)
+    assert audit_summary["n_unmet"] == 1, "the un-run decoupler step must be the trigger"
+
+    meta, merge = await harness._run_post_execution_review(state, result, audit_summary, "full")
+
+    # The PI actually saw the audit, and its prompt named the unmet step.
+    assert "Pathway activity" in pi.prompts_seen[0]
+    assert meta["review_status"] in ("completed", "partial")
+    assert meta["assessment"]["verdict"] == "resolved"
+    assert bio.executed_code and "run_ulm" in bio.executed_code[0]
+
+    # The executor's findings survive sanitizing and reach the merge payload.
+    assert merge["findings"] == ["Regulon A is elevated in the compared group."]
+    assert merge["code_history"], "executions must come back for evidence provenance"
+    assert all(c.round_number == 2 for c in merge["code_history"])
+
+    findings, _ = harness._merge_supplementary_into_round(
+        state, result, result["findings"], result["figures"], merge)
+    assert findings[-1] == "[Supplementary] Regulon A is elevated in the compared group."
+    assert [c.code for c in state.code_history][-1] == bio.executed_code[-1]
+
+    # Re-audit: the repair closes the gap the review was triggered by.
+    reaudit = harness._audit_round_plan_execution(state, result)
+    assert reaudit["n_unmet"] == 0
+    assert [s.status for s in state.current_plan.steps] == ["completed", "completed"]
+
+
+@pytest.mark.asyncio
+async def test_denylisted_code_is_rejected_without_touching_the_kernel():
+    """A supplement that tries to re-cluster must be refused, not executed."""
+    state = _state_and_plan()
+    pi = _pi_agent([_REVIEW_JSON, _ASSESS_JSON])
+    bio = _bio_agent([
+        json.dumps({"code": "sc.tl.leiden(adata, resolution=2.0)"}),
+        json.dumps({"done": True, "result": {"summary": "Could not complete.", "findings": []}}),
+    ])
+    bio._current_analysis_state = state
+    harness = _Harness(pi, bio)
+    result = _result()
+
+    audit_summary = harness._audit_round_plan_execution(state, result)
+    meta, merge = await harness._run_post_execution_review(state, result, audit_summary, "full")
+
+    assert bio.executed_code == [], "re-clustering must never reach the sandbox"
+    assert meta["review_status"] in ("completed", "partial", "failed")
+    assert merge["findings"] == []
+    # The rejection is fed back to the model so it can correct itself.
+    assert any("rejected" in p for p in bio.prompts_seen[1:])
+
+
+@pytest.mark.asyncio
+async def test_pi_declining_reaches_no_executor_call():
+    state = _state_and_plan()
+    pi = _pi_agent([json.dumps({
+        "gaps": [], "supplementary_tasks": [], "out_of_scope": ["Needs new sequencing."],
+        "verdict": "no_action", "rationale": "Nothing runnable on the loaded data.",
+    })])
+    bio = _bio_agent([json.dumps({"done": True, "result": {}})])
+    bio._current_analysis_state = state
+    harness = _Harness(pi, bio)
+    result = _result()
+
+    audit_summary = harness._audit_round_plan_execution(state, result)
+    meta, merge = await harness._run_post_execution_review(state, result, audit_summary, "full")
+
+    assert meta["review_status"] == "no_action"
+    assert bio.executed_code == [] and bio.prompts_seen == []
+    assert merge == {}
+
+
+@pytest.mark.asyncio
+async def test_unparseable_pi_answer_degrades_to_no_action():
+    state = _state_and_plan()
+    pi = _pi_agent(["I think we should probably look into a few more things."])
+    bio = _bio_agent([json.dumps({"done": True, "result": {}})])
+    bio._current_analysis_state = state
+    harness = _Harness(pi, bio)
+    result = _result()
+
+    audit_summary = harness._audit_round_plan_execution(state, result)
+    meta, merge = await harness._run_post_execution_review(state, result, audit_summary, "full")
+
+    assert meta["review_status"] in ("no_action", "failed")
+    assert bio.executed_code == [] and merge == {}
+
+
+@pytest.mark.asyncio
+async def test_a_slow_step_is_interrupted_and_the_pass_continues():
+    """A step that overruns its budget must not abandon the pass: the kernel is
+    interrupted, the executor is told, and the remaining steps still run."""
+    import asyncio
+
+    state = _state_and_plan()
+    interrupts = []
+    executed = []
+
+    async def _slow_then_fast(code, **kwargs):
+        executed.append(code)
+        if len(executed) == 1:
+            await asyncio.sleep(5)  # never completes within the step budget
+        return SimpleNamespace(output="ok", error=None, figures=[])
+
+    bio = _bio_agent([
+        json.dumps({"code": "run_the_expensive_thing(adata)"}),
+        json.dumps({"code": "dc.run_ulm(adata, net=net)"}),
+        json.dumps({"done": True, "result": {
+            "summary": "Second route worked.",
+            "findings": ["Regulon A is elevated in the compared group."],
+        }}),
+    ])
+    bio.sandbox.execute = _slow_then_fast
+    bio.sandbox.km = SimpleNamespace(interrupt_kernel=lambda: interrupts.append(1))
+    bio._current_analysis_state = state
+
+    result = await bio.run_supplementary_tasks(
+        tasks=["Run decoupler run_ulm and report the top regulons"],
+        context_summary="", direction="d",
+        max_iterations=4, timeout_seconds=1, total_timeout_seconds=60,
+    )
+
+    assert interrupts == [1], "the overrunning cell must be interrupted"
+    assert len(executed) == 2, "the pass must keep going after a slow step"
+    assert result["status"] in ("completed", "partial")
+    assert any("exceeded its" in w for w in result["warnings"])
+    # The executor is told what happened so it can choose a cheaper route.
+    assert any("[timeout]" in p for p in bio.prompts_seen[1:])
+    # Only the step that actually finished is recorded as evidence.
+    assert [c.code for c in result["code_history"]] == ["dc.run_ulm(adata, net=net)"]
+
+
+@pytest.mark.asyncio
+async def test_total_budget_still_backstops_a_non_converging_pass():
+    """The total ceiling remains, for a pass that keeps producing cheap steps
+    forever rather than one expensive one."""
+    import asyncio
+
+    state = _state_and_plan()
+    interrupts = []
+
+    async def _always_slow(code, **kwargs):
+        await asyncio.sleep(5)
+        return SimpleNamespace(output="ok", error=None, figures=[])
+
+    bio = _bio_agent([json.dumps({"code": "keep_going(adata)"})])
+    bio.sandbox.execute = _always_slow
+    bio.sandbox.km = SimpleNamespace(interrupt_kernel=lambda: interrupts.append(1))
+    bio._current_analysis_state = state
+
+    result = await bio.run_supplementary_tasks(
+        tasks=["Do the thing"], context_summary="", direction="d",
+        max_iterations=8, timeout_seconds=1, total_timeout_seconds=2,
+    )
+
+    assert result["status"] == "partial"
+    assert any("timeout" in w for w in result["warnings"])
+    assert interrupts, "the total ceiling must interrupt the kernel too"
+
+
+@pytest.mark.asyncio
+async def test_no_active_object_fails_the_pass_not_the_round():
+    state = _state_and_plan()
+    pi = _pi_agent([_REVIEW_JSON, _ASSESS_JSON])
+    bio = _bio_agent([json.dumps({"done": True, "result": {}})])
+    bio._current_analysis_state = state
+
+    async def _no_object(_hint):
+        return {}
+
+    bio.introspect_validation_metadata = _no_object
+    harness = _Harness(pi, bio)
+    result = _result()
+
+    audit_summary = harness._audit_round_plan_execution(state, result)
+    meta, merge = await harness._run_post_execution_review(state, result, audit_summary, "full")
+
+    assert meta["review_status"] == "failed"
+    assert bio.executed_code == []
+    assert merge["findings"] == []

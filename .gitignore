@@ -32,3 +32,5 @@ backend/data/markers/*.tsv
 !backend/data/markers/LICENSE
 .superpowers/
 states/
+backend/data/gene_sets/*
+review.md

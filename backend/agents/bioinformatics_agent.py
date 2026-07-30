@@ -31,6 +31,21 @@ import json as _json
 from backend.services.marker_priors import MarkerDB, summarize_database_priors
 from ..utils.formatting import format_revision_history, truncate_for_llm
 from ..utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
+from ..services.statistical_gates import run_gates as run_statistical_gates
+
+
+def _method_rule_text(rule_id: str) -> str:
+    """Governing rule for a refusal, or '' when the corpus is unavailable.
+
+    Retrieved guidance must never be able to break an analysis, so every lookup
+    failure degrades to silence rather than raising.
+    """
+    try:
+        from ..services.method_rules import rule_text
+
+        return rule_text(rule_id)
+    except Exception:  # pragma: no cover - corpus is optional by design
+        return ""
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -157,6 +172,7 @@ from .bioinformatics import (  # noqa: F401
     LoopControlMixin,
     IntrospectionMixin,
     ValidationMixin,
+    SupplementaryMixin,
     PlanningMixin,
     FiguresMixin,
     DiagramsMixin,
@@ -167,6 +183,7 @@ class BioinformaticsAgent(
     LoopControlMixin,
     IntrospectionMixin,
     ValidationMixin,
+    SupplementaryMixin,
     PlanningMixin,
     FiguresMixin,
     DiagramsMixin,
@@ -394,11 +411,19 @@ You are conducting {modality} analysis. You have access to tools:
 4. annotate_clusters - Annotate ALL cell clusters at once with literature evidence (use INSTEAD of per-cluster consult_pi)
 5. report_findings - Report conclusions ONLY after ALL assigned tasks are complete (including annotate_clusters in exploration)
 6. generate_publication_figure - Generate publication-quality figures with PI review
-7. register_score - Register a computed score's methodology for the final report
-8. lookup_documentation - Look up API docs for an installed Python function.
+7. fetch_gene_set - Fetch a named gene set from a versioned resource (any organism)
+8. register_analysis_plan - Freeze a gene panel BEFORE scoring it; returns a plan_id
+9. register_score - Register a computed score's methodology for the final report
+10. register_mechanism_programs - Register data-driven mechanism programs with cited evidence
+11. validate_species_genes - Check gene-name convention against the declared organism
+12. lookup_documentation - Look up API docs for an installed Python function, OR
+    ask a methodological question via method_question (which test is defensible,
+    what a statistic assumes, whether a claim is supportable by this design).
+    The method corpus records where the usual shortcuts fail in THIS stack --
+    consult it before choosing a statistical approach, not after being refused.
    Returns concise summary (signature, key params, example).
    Use when unsure about API usage, especially for: decoupler, gseapy, scvelo, cellrank.
-   Example: lookup_documentation(function_path="decoupler.op.collectri")
+   Example: lookup_documentation(function_path="decoupler.get_collectri")
    IMPORTANT: Figure code MUST use actual analysis data from the sandbox (e.g., adata object).
    NEVER generate dummy/fabricated data. Only plot groups that exist in the experimental design.
    Inside the `code` parameter of THIS tool (generate_publication_figure): do NOT include plt.close(), plt.show(), or plt.savefig() — this tool wraps saving internally with its own filename. (Note: the separate execute_code tool DOES allow plt.savefig — the two tools have different conventions.)
@@ -510,9 +535,63 @@ When you need to compute ANY score (gene signature, pathway enrichment, TF activ
    - Question: "I plan to compute [score name] using [method]. Gene list source: [source]. Is this appropriate?"
    - Context: Include why this score is relevant to the current analysis
    - Options: List alternative methods if applicable
-2. After PI confirms/modifies, execute the computation via execute_code
-3. IMMEDIATELY after, call register_score to record the methodology
+2. Call register_analysis_plan to FREEZE the panel before you compute it. Give the
+   exact gene list, its source, the hypothesis, and what result would count against
+   the hypothesis. It returns a plan_id.
+3. After PI confirms/modifies, execute the computation via execute_code
+4. IMMEDIATELY after, call register_score with that plan_id to record the methodology
 This applies to: sc.tl.score_genes, gseapy.ssgsea, gseapy.prerank, gseapy.enrichr, decoupler, custom scoring functions.
+
+WHY THE PLAN COMES FIRST:
+  Curating a panel is a real judgement -- an ontology term routinely mixes genes that
+  drive a process with genes that suppress it, and scoring them as one module answers
+  nothing. Splitting such a set is exactly what you should do, and the partition edit
+  operation exists for it. But the panel has to be fixed BEFORE the result is visible.
+  Revising a panel after seeing which genes carry the signal is selection on the
+  outcome, and it is indistinguishable in the final report from having got it right
+  the first time -- unless the plan is on record. If you genuinely need to change the
+  panel afterwards, do it and say why; the change is recorded either way.
+
+PREFER A VERSIONED SET OVER A REMEMBERED ONE:
+  Call fetch_gene_set rather than writing a gene panel from memory. It returns the
+  genes plus a provenance string to pass straight into panel_source /
+  gene_list_source, and it binds the genes as a sandbox variable so you never retype
+  them -- retyping is how a fetched panel quietly becomes a remembered one again.
+  Use list_sets=true with a partial identifier to discover what a collection holds
+  instead of guessing an identifier.
+
+  A panel assembled from memory is recorded as bespoke and carries less weight,
+  because nobody -- including you in the next round -- can reconstruct it.
+
+  But a curated set is NOT automatically the right panel. Ontology sets in
+  particular are often broad and mixed-direction: the same set can contain genes
+  that drive a process and genes that suppress it, so a high module score is
+  equally consistent with the process running and with it being held in check.
+
+  You do not have to fix that by hand. Call fetch_gene_set with
+  partition_by_direction=true and the ontology's own regulation terms are used to
+  split the set into direction-coherent panels -- positive, negative, ambiguous
+  (annotated to both, so unable to support a directional claim) and core (the
+  genes that carry out the process rather than tuning it). Each part comes back
+  as a panel with its own provenance. Score them SEPARATELY; scoring them
+  together is the failure the split exists to prevent.
+
+  Only the biological-process branch of the ontology publishes the regulation
+  terms this needs, so other collections refuse the split and say so. When the
+  split is unavailable and the set is still direction-mixed, say that in the
+  finding rather than reporting one number as if it were directional.
+
+  For an organism the resource does not publish natively, the set is projected
+  through orthology and the mapping rate comes back with it. A low rate means most
+  of the original set did not survive and the survivors are not a random sample;
+  treat such a set as exploratory and say so in any finding that rests on it.
+
+DECLARE THE TESTING FAMILY:
+  A GSEA q-value is computed across every gene set in the same call. The identical
+  panel with the identical enrichment score comes out significant or not depending
+  only on what else you passed alongside it -- padding a call with uninformative sets
+  inflates the q-values of the informative ones. List every set going into the same
+  call in testing_family so the result can be read.
 
 GENE MODULE SCORING — USE FULL GENE SET (CRITICAL):
   sc.tl.score_genes() on HVG-filtered data will miss most genes. Always:
@@ -532,7 +611,7 @@ SPECIES-AWARE GENE NAMES:
 PACKAGE API LOOKUP:
   If unsure about the correct API for any package (decoupler, gseapy, scvelo, cellrank, etc.),
   call lookup_documentation BEFORE writing code.
-  Example: lookup_documentation(function_path="decoupler.op.collectri")
+  Example: lookup_documentation(function_path="decoupler.get_collectri")
   The system automatically consults the Technique Agent for documentation when it detects a
   repeated OR caught-and-skipped API error, but you must NOT rely on that as an excuse to skip.
   NEVER swallow an API error (AttributeError / TypeError / ImportError / ModuleNotFoundError) with
@@ -1168,7 +1247,16 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             for s in analysis_log
         ))
         mechanism_gate_reject_count = 0
+        stats_gate_reject_count = 0  # statistical-validity checks
+        score_gate_reject_count = 0  # register_score provenance / plan checks
+        # register_score rejections are recoverable in one retry for provenance
+        # but need a prior register_analysis_plan call for plan_id, so give the
+        # agent room to make that connection before accepting an unverified score.
+        MAX_SCORE_GATE_REJECTIONS = 4
         MAX_MECHANISM_REJECTIONS = 2
+        # Bounded like the other report_findings gates: a check the agent
+        # cannot satisfy must not trap the loop, and an escape is recorded.
+        MAX_STATS_GATE_REJECTIONS = 3
         integration_reject_count = 0  # Track rejections for bulk/scRNA-seq integration gate
         MAX_INTEGRATION_REJECTIONS = 2  # Escape hatch: allow through after N rejections
         deconv_reject_count = 0  # Track rejections for cell-type deconvolution gate
@@ -2232,6 +2320,69 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         # (exploration / stage1 / innovation) can read it post-gate.
                         _escaped_notes = []
 
+                        # Gate S (statistical validity). Runs against structured
+                        # state -- registered scores and frozen plans -- rather
+                        # than the agent's code text, so it observes what the
+                        # analysis actually did. Bounded like the other gates:
+                        # a check that can never be satisfied must not trap the
+                        # loop, and an escape is recorded in the report.
+                        _stats_report = run_statistical_gates(
+                            args.get("findings"),
+                            score_definitions=state.score_definitions,
+                            scoring_plans=state.scoring_plans,
+                            samples_per_group={
+                                g.name: g.sample_count
+                                for g in (state.treatment_groups or [])
+                                if getattr(g, "sample_count", None) is not None
+                            },
+                            # cluster_labels deliberately not supplied: measured,
+                            # feeding annotation vocabulary to the composition
+                            # check costs 7 false positives and gains nothing,
+                            # because recall is already 1.000 without it.
+                        )
+                        # Advisories ride along with an accepted call: they are
+                        # notes the model cannot suppress, not refusals.
+                        _stats_advice = _stats_report.advisory_message()
+                        if _stats_advice:
+                            _escaped_notes.append(_stats_advice)
+
+                        # A design defect the model cannot repair mid-run must not
+                        # be argued with three times. Every session in the corpus
+                        # this was measured on has one cell-resolved library per
+                        # condition, so a cell-level-inference rejection has
+                        # exactly one satisfiable response: reword the claim as
+                        # descriptive. Asking twice more trains the phrasing, not
+                        # the analysis, and burns two steps doing it.
+                        _unsatisfiable = {"cell-level-inference", "unidentifiable-design"}
+                        _cap = (1 if all(f.gate in _unsatisfiable
+                                         for f in _stats_report.blocking)
+                                else MAX_STATS_GATE_REJECTIONS)
+
+                        if not _stats_report.passed:
+                            if stats_gate_reject_count < _cap:
+                                stats_gate_reject_count += 1
+                                logger.warning(
+                                    f"[Bioinformatics] report_findings rejected: "
+                                    f"statistical validity "
+                                    f"({stats_gate_reject_count}/{_cap})"
+                                )
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": _stats_report.message(),
+                                })
+                                continue
+                            logger.warning(
+                                "[Bioinformatics] statistical gate: max rejections "
+                                "reached, allowing report_findings"
+                            )
+                            _escaped_notes.append(
+                                "Statistical validity checks did not pass after "
+                                + str(_cap)
+                                + " attempt(s) and were force-released: "
+                                + "; ".join(f.detail for f in _stats_report.blocking)
+                            )
+
                         # Gate M (mandatory data-driven mechanism program capture) — Stage 2
                         # downstream exploration only. Flag + bounded counter (NOT keyword gate):
                         # a legitimate empty-programs call with no_program_reason sets the flag.
@@ -2477,16 +2628,468 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         completed = True
                         break
 
+                    elif tool_name == "fetch_gene_set":
+                        from ..services.gene_set_fetch import (
+                            list_collections as list_gene_set_collections,
+                            load_collection, resolve_gene_set,
+                            resolve_partitioned_gene_set,
+                        )
+                        from ..services.gene_set_resolver import (
+                            direction_sibling_ids, normalize_organism, suggest_similar,
+                        )
+
+                        set_id = str(args.get("set_id", "") or "").strip()
+                        collection = str(args.get("collection", "") or "").strip()
+                        version = str(args.get("version", "") or "").strip()
+                        organism = normalize_organism(
+                            args.get("organism") or state.species or ""
+                        )
+
+                        if not organism:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": (
+                                    "fetch_gene_set rejected: no organism is known for this "
+                                    "session and none was supplied."
+                                ),
+                            })
+                            continue
+
+                        if args.get("list_collections"):
+                            # Discovery first: the identifiers are organism-specific
+                            # and a guess fails with a 404 that teaches nothing.
+                            try:
+                                available = await asyncio.to_thread(
+                                    list_gene_set_collections, version, organism
+                                )
+                                content = (
+                                    f"Collections available for {organism} in release "
+                                    f"{version}: {', '.join(available)}. "
+                                    f"Pick one and call again with collection=<id> and "
+                                    f"either list_sets=true to browse or set_id=<id> to "
+                                    f"fetch."
+                                )
+                            except Exception as exc:
+                                content = (
+                                    f"fetch_gene_set could not list collections for "
+                                    f"{organism} in release {version!r}: {exc}"
+                                )
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": content,
+                            })
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count, step_type="fetch_gene_set",
+                                agent_reasoning=agent_reasoning,
+                                code_description=f"Listed collections for {organism} {version}",
+                            ))
+                            continue
+
+                        if args.get("list_sets"):
+                            # Discovery path: never fabricate an identifier, look it up.
+                            try:
+                                available = await asyncio.to_thread(
+                                    load_collection, version, collection, organism
+                                )
+                            except Exception as exc:
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": (
+                                        f"fetch_gene_set could not load {collection!r} "
+                                        f"v{version!r} for {organism}: {exc}"
+                                    ),
+                                })
+                                analysis_log.append(AnalysisStep(
+                                    step_number=step_count, step_type="fetch_gene_set",
+                                    agent_reasoning=agent_reasoning,
+                                    code_description=(
+                                        f"FAILED: browse {collection!r} v{version!r} "
+                                        f"({organism})"
+                                    ),
+                                ))
+                                continue
+                            hits = (suggest_similar(set_id, available.keys(), limit=25)
+                                    if set_id else sorted(available)[:25])
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": (
+                                    f"{len(available)} sets in {collection} v{version} "
+                                    f"({organism}). Matching: {', '.join(hits) or 'none'}"
+                                ),
+                            })
+                            continue
+
+                        if not set_id or not collection:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": (
+                                    "fetch_gene_set needs both collection and set_id to "
+                                    "fetch. Call with list_collections=true to see the "
+                                    "identifiers this organism publishes, then "
+                                    "list_sets=true to browse that collection."
+                                ),
+                            })
+                            continue
+
+                        if args.get("partition_by_direction"):
+                            parts, error = await asyncio.to_thread(
+                                resolve_partitioned_gene_set, set_id, organism,
+                                version=version, collection=collection,
+                            )
+                            if error:
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": f"fetch_gene_set could not partition: {error}",
+                                })
+                                analysis_log.append(AnalysisStep(
+                                    step_number=step_count, step_type="fetch_gene_set",
+                                    agent_reasoning=agent_reasoning,
+                                    code_description=(
+                                        f"FAILED: partition {set_id!r} -- {str(error)[:140]}"
+                                    ),
+                                ))
+                                continue
+
+                            lines = [
+                                f"Split {set_id} into {len(parts)} direction-coherent "
+                                f"panels. Score them SEPARATELY -- that is the point of "
+                                f"the split. Register each as its own plan and score."
+                            ]
+                            for part in parts:
+                                name = part.set_id.split("#")[-1]
+                                var = (
+                                    "gene_set_"
+                                    + re.sub(r"[^0-9A-Za-z_]", "_", part.set_id)[:60]
+                                )
+                                try:
+                                    await self.sandbox.execute(
+                                        f"{var} = {part.genes!r}",
+                                        save_to_history=False, skip_safety_check=True,
+                                    )
+                                    bound = f" bound as {var}"
+                                except Exception as exc:
+                                    logger.warning(
+                                        f"[{self.session_id}] partition injection "
+                                        f"failed: {exc}"
+                                    )
+                                    bound = f" genes: {', '.join(part.genes)}"
+                                lines.append(
+                                    f"[{name}] {part.n_genes} genes, "
+                                    f"provenance {part.provenance}{bound}."
+                                )
+                                if name == "ambiguous":
+                                    lines.append(
+                                        "The ambiguous part is annotated to both "
+                                        "directions; it cannot support a directional "
+                                        "claim and is separated so it does not count "
+                                        "toward either arm."
+                                    )
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": " ".join(lines),
+                            })
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count, step_type="fetch_gene_set",
+                                agent_reasoning=agent_reasoning,
+                                code_description=(
+                                    f"Partitioned {set_id} into "
+                                    + ", ".join(
+                                        f"{r.set_id.split('#')[-1]}({r.n_genes})"
+                                        for r in parts)
+                                ),
+                            ))
+                            continue
+
+                        result, error = await asyncio.to_thread(
+                            resolve_gene_set, set_id, organism,
+                            version=version, collection=collection,
+                        )
+                        if error:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": f"fetch_gene_set failed: {error}",
+                            })
+                            # Record the attempt. Without this a failed fetch is
+                            # invisible in session.json, and a later reader
+                            # concludes the tool was never called -- which is the
+                            # opposite of what happened in the first run.
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count, step_type="fetch_gene_set",
+                                agent_reasoning=agent_reasoning,
+                                code_description=f"FAILED: {set_id!r} -- {str(error)[:160]}",
+                            ))
+                            continue
+
+                        # Hand the genes to the kernel as data rather than asking the
+                        # model to retype them: retyping is where a fetched panel
+                        # silently becomes a remembered one again.
+                        var_name = f"gene_set_{re.sub(r'[^0-9A-Za-z_]', '_', set_id)[:60]}"
+                        try:
+                            await self.sandbox.execute(
+                                f"{var_name} = {result.genes!r}",
+                                save_to_history=False, skip_safety_check=True,
+                            )
+                            injected = True
+                        except Exception as exc:
+                            logger.warning(
+                                f"[{self.session_id}] gene set injection failed: {exc}"
+                            )
+                            injected = False
+
+                        lines = [
+                            f"Fetched {result.set_id}: {result.n_genes} genes. "
+                            f"Provenance: {result.provenance}. "
+                            f"Pass this string as gene_list_source / panel_source."
+                        ]
+                        if injected:
+                            lines.append(
+                                f"The genes are bound in the sandbox as {var_name} -- use "
+                                f"that variable directly rather than retyping them."
+                            )
+                        else:
+                            lines.append(f"Genes: {', '.join(result.genes)}")
+                        lines.extend(result.warnings())
+                        lines.append(_method_rule_text("read-the-set-before-scoring-it"))
+                        if direction_sibling_ids(result.set_id):
+                            lines.append(
+                                "This set may be direction-mixed. Call again with "
+                                "partition_by_direction=true to split it into "
+                                "direction-coherent panels using the ontology's own "
+                                "regulation terms, rather than assembling one by hand."
+                            )
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": " ".join(lines),
+                        })
+
+                        analysis_log.append(AnalysisStep(
+                            step_number=step_count, step_type="fetch_gene_set",
+                            agent_reasoning=agent_reasoning,
+                            code_description=(
+                                f"Fetched {result.set_id} ({result.n_genes} genes) "
+                                f"from {result.provenance}"
+                            ),
+                        ))
+
+                    elif tool_name == "register_analysis_plan":
+                        from ..models.schemas import ScoringPlan
+                        from ..services.analysis_plan import (
+                            canonical_panel, panel_hash, summarize_edits,
+                            validate_edit_operations,
+                        )
+                        from ..services.gene_set_provenance import parse_provenance
+
+                        panel = canonical_panel(args.get("panel_genes"))
+                        if not panel:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": (
+                                    "register_analysis_plan rejected: panel_genes is empty. "
+                                    "Freeze the exact panel you intend to score."
+                                ),
+                            })
+                            continue
+
+                        _prov, prov_error = parse_provenance(args.get("panel_source"))
+                        if prov_error:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": f"register_analysis_plan rejected: {prov_error}",
+                            })
+                            continue
+
+                        edits, edit_error = validate_edit_operations(
+                            args.get("edit_operations")
+                        )
+                        if edit_error:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": f"register_analysis_plan rejected: {edit_error}",
+                            })
+                            continue
+
+                        plan = ScoringPlan(
+                            score_name=args.get("score_name", ""),
+                            method=args.get("method", ""),
+                            hypothesis=args.get("hypothesis", ""),
+                            falsifier=args.get("falsifier", ""),
+                            panel_genes=panel,
+                            panel_hash=panel_hash(panel),
+                            panel_source=args.get("panel_source", ""),
+                            baseline_genes=canonical_panel(args.get("baseline_genes")),
+                            baseline_source=args.get("baseline_source", ""),
+                            edit_operations=edits,
+                            testing_family=[str(t) for t in (args.get("testing_family") or [])],
+                            registered_at_step=step_count,
+                            round_number=state.current_round,
+                        )
+                        state.scoring_plans.append(plan)
+
+                        plan_lines = [
+                            f"Plan frozen. plan_id={plan.id}. "
+                            f"Panel: {len(panel)} gene(s), hash {plan.panel_hash}. "
+                            f"Cite this plan_id when you call register_score."
+                        ]
+                        edit_summary = summarize_edits(edits)
+                        if edit_summary:
+                            plan_lines.append(edit_summary + ".")
+                        if not plan.falsifier:
+                            plan_lines.append(
+                                "No falsifier was stated. A score with no result that "
+                                "would count against it cannot support a conclusion "
+                                "either way."
+                            )
+                        if not plan.testing_family:
+                            plan_lines.append(
+                                "No testing_family was declared. If this panel goes into a "
+                                "shared enrichment call, its q-value depends on the other "
+                                "sets in that call and cannot be interpreted alone."
+                            )
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": " ".join(plan_lines),
+                        })
+
+                        analysis_log.append(AnalysisStep(
+                            step_number=step_count, step_type="register_analysis_plan",
+                            agent_reasoning=agent_reasoning,
+                            code_description=(
+                                f"Plan {plan.id} for {plan.score_name}: "
+                                f"{len(panel)} genes via {plan.method}"
+                            ),
+                        ))
+
                     elif tool_name == "register_score":
-                        has_register_score = True
                         from ..models.schemas import ScoreDefinition
+                        from ..services.analysis_plan import (
+                            describe_drift, diff_panels, panel_hash,
+                        )
+                        from ..services.gene_set_provenance import (
+                            assess_panel_power, parse_provenance, power_caveat,
+                        )
+
+                        gene_list = args.get("gene_list") or []
+                        provenance, prov_error = parse_provenance(
+                            args.get("gene_list_source")
+                        )
+                        gate_note = ""
+                        if prov_error:
+                            # Reject rather than record an unattributable panel: an
+                            # unsourced gene list is indistinguishable downstream from
+                            # a versioned one, which is how two runs of the same
+                            # analysis ended up with different panels and no record.
+                            if score_gate_reject_count < MAX_SCORE_GATE_REJECTIONS:
+                                score_gate_reject_count += 1
+                                logger.warning(
+                                    f"[Bioinformatics] register_score rejected: provenance "
+                                    f"({score_gate_reject_count}/{MAX_SCORE_GATE_REJECTIONS})"
+                                )
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": (
+                                        f"register_score rejected: {prov_error} "
+                                        f"Re-call register_score with a valid gene_list_source. "
+                                        + _method_rule_text("cite-the-resource-version")
+                                    ),
+                                })
+                                continue
+                            # Ceiling reached: record the score so the methodology
+                            # section is not simply empty, but mark what is missing.
+                            logger.warning(
+                                "[Bioinformatics] register_score provenance gate: max "
+                                "rejections reached, recording score as unattributed"
+                            )
+                            provenance, _ = parse_provenance(
+                                "bespoke:provenance not supplied after repeated requests; "
+                                "this panel is unattributed and not reproducible"
+                            )
+                            gate_note = (
+                                "Recorded WITHOUT valid provenance after "
+                                f"{MAX_SCORE_GATE_REJECTIONS} attempts; treat this panel "
+                                "as unattributed."
+                            )
+
+                        # A panel score must cite the plan that froze the panel.
+                        plan_id = str(args.get("plan_id", "") or "").strip()
+                        plan = next(
+                            (pl for pl in state.scoring_plans if pl.id == plan_id),
+                            None,
+                        )
+                        drift = {}
+                        if gene_list:
+                            if not plan_id or plan is None:
+                                if score_gate_reject_count < MAX_SCORE_GATE_REJECTIONS:
+                                    score_gate_reject_count += 1
+                                    known = ", ".join(pl.id for pl in state.scoring_plans[-5:])
+                                    detail = (
+                                        "this score uses a gene panel, so it must cite the "
+                                        "plan_id returned by register_analysis_plan. Call "
+                                        "register_analysis_plan FIRST with this panel, then "
+                                        "re-call register_score with the plan_id it returns."
+                                        if not plan_id else
+                                        f"no frozen plan with plan_id={plan_id!r}. "
+                                        f"Recent plan_ids: {known or 'none'}."
+                                    )
+                                    logger.warning(
+                                        f"[Bioinformatics] register_score rejected: plan "
+                                        f"({score_gate_reject_count}/{MAX_SCORE_GATE_REJECTIONS})"
+                                    )
+                                    messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": tool_call.id,
+                                        "content": f"register_score rejected: {detail}",
+                                    })
+                                    continue
+                                logger.warning(
+                                    "[Bioinformatics] register_score plan gate: max rejections "
+                                    "reached, recording score without a frozen plan"
+                                )
+                                gate_note = (gate_note + " " if gate_note else "") + (
+                                    f"Recorded WITHOUT a frozen plan after "
+                                    f"{MAX_SCORE_GATE_REJECTIONS} attempts; the panel was not "
+                                    f"pre-specified, so it cannot be distinguished from one "
+                                    f"chosen after seeing the result."
+                                )
+                                plan_id = ""
+                            else:
+                                drift = diff_panels(plan.panel_genes, gene_list)
+
+                        n_matched = args.get("n_genes_matched")
+                        try:
+                            n_matched = int(n_matched) if n_matched is not None else None
+                        except (TypeError, ValueError):
+                            n_matched = None
+                        power = assess_panel_power(len(gene_list), n_matched)
+
+                        has_register_score = True
                         score_def = ScoreDefinition(
                             score_name=args.get("score_name", ""),
                             method=args.get("method", ""),
                             description=args.get("description", ""),
                             parameters=args.get("parameters", {}),
-                            gene_list=args.get("gene_list", []),
+                            gene_list=gene_list,
                             gene_list_source=args.get("gene_list_source", ""),
+                            provenance=provenance.to_dict(),
+                            n_genes=len(gene_list),
+                            n_genes_matched=n_matched,
+                            power=power,
+                            plan_id=plan_id,
+                            panel_hash=panel_hash(gene_list),
+                            plan_drift=drift,
                             round_number=state.current_round,
                         )
                         # Deduplicate: update existing score with same name, or append new
@@ -2502,10 +3105,46 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             await self._notify("status", f"Registered score: {score_def.score_name} ({score_def.method})")
 
                         action_word = "updated" if existing_idx is not None else "registered"
+                        result_lines = [
+                            f"Score '{score_def.score_name}' {action_word}. "
+                            f"Method: {score_def.method}. "
+                            f"Provenance: {provenance.citation()}. "
+                            f"This will appear in the report methodology."
+                        ]
+                        if provenance.is_bespoke:
+                            result_lines.append(
+                                "This panel is recorded as hand-assembled. If a versioned "
+                                "database set covers the same concept, prefer it: bespoke "
+                                "panels are reported as such and carry less weight."
+                            )
+                        if n_matched is None and gene_list:
+                            result_lines.append(
+                                "n_genes_matched was not supplied, so power was assessed on "
+                                "the nominal panel size. Report the number of panel genes "
+                                "actually present in the matrix for an accurate assessment."
+                            )
+                        if gate_note:
+                            # The escape must reach the report, not just the log.
+                            score_def.plan_drift = dict(score_def.plan_drift or {})
+                            score_def.plan_drift["gate_escape"] = gate_note.strip()
+                        drift_text = describe_drift(drift) if drift else ""
+                        if drift_text:
+                            result_lines.append(
+                                f"NOTE: the scored panel departs from plan {plan_id}: "
+                                f"{drift_text}. This is recorded on the score and will "
+                                f"appear in the report. If the change was deliberate, say "
+                                f"why in the findings; if not, re-score the frozen panel. "
+                                + _method_rule_text("prespecify-the-family-before-results")
+                            )
+                        if gate_note:
+                            result_lines.append(gate_note.strip())
+                        caveat = power_caveat(power)
+                        if caveat:
+                            result_lines.append(caveat)
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": f"Score '{score_def.score_name}' {action_word}. Method: {score_def.method}. This will appear in the report methodology."
+                            "content": " ".join(result_lines),
                         })
 
                         analysis_log.append(AnalysisStep(
@@ -2628,6 +3267,47 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                     elif tool_name == "lookup_documentation":
                         function_path = args.get("function_path", "")
                         question = args.get("question", "")
+                        method_question = args.get("method_question", "")
+
+                        # Methodological lookups are answered from the rule corpus
+                        # rather than from a docstring: the question is which test
+                        # is defensible, not what the signature is.
+                        method_answer = ""
+                        if method_question:
+                            try:
+                                from ..services.method_rules import (
+                                    format_rule, search_rules,
+                                )
+
+                                hits = search_rules(method_question, limit=3)
+                                if hits:
+                                    method_answer = "\n\n".join(
+                                        format_rule(r) for r in hits
+                                    )
+                                else:
+                                    method_answer = (
+                                        "No rule in the corpus covers that question. "
+                                        "Proceed with standard practice and state your "
+                                        "reasoning in the findings."
+                                    )
+                            except Exception as exc:
+                                logger.warning(
+                                    f"[Bioinformatics] method rule lookup failed: {exc}"
+                                )
+
+                        if method_question and not function_path:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": method_answer or "Method guidance unavailable.",
+                            })
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count,
+                                step_type="lookup_documentation",
+                                agent_reasoning=agent_reasoning,
+                                code_description=f"Method lookup: {method_question[:80]}",
+                            ))
+                            continue
 
                         if self.technique_agent:
                             await self._notify("status", f"Looking up docs: {function_path}...")
@@ -2641,6 +3321,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         else:
                             doc_result = "Documentation lookup not available."
 
+                        if method_answer:
+                            doc_result = f"{doc_result}\n\n{method_answer}"
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,

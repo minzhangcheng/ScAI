@@ -1,0 +1,642 @@
+# Methodological rules applied to bioinformatics analyses.
+#
+# PROVENANCE
+#   Distilled from bioSkills (https://github.com/GPTomics/bioSkills), MIT
+#   licence, Copyright (c) 2026 GPTomics, at commit
+#   076137114dda666202a17d2f6b9a7215cc00c888. See THIRD_PARTY_NOTICES.md.
+#
+#   bioSkills is written for an R/Bioconductor stack (clusterProfiler, limma,
+#   edgeR, Seurat). ScAI executes Python in a Jupyter sandbox, so every rule
+#   below was re-expressed against the installed Python stack: the statistical
+#   claim and its citations come from bioSkills, the `python` field is ScAI's
+#   own translation and is not upstream content. Where the R recommendation has
+#   no Python equivalent (rotation tests, for instance) the rule says so rather
+#   than substituting something that only looks similar.
+#
+# SCOPE
+#   Rules are selected by ScAI's *capability surface* -- what the installed
+#   packages can actually do -- not by any past analysis. Selecting them from
+#   previous runs would overfit the platform to whatever biology those runs
+#   happened to involve. ScAI is general-purpose (see CLAUDE.md), so every rule
+#   here is stated without reference to any organism, tissue, disease or
+#   pathway, and a test enforces that.
+#
+# FIELDS
+#   id            stable identifier, referenced by gates in code
+#   enforcement   gate     -> the call is REFUSED in code; the model cannot talk
+#                             past it. Reserved for checks that actually reject.
+#                 advisory -> surfaced in code as a note the model cannot
+#                             suppress, but the call proceeds. For checks whose
+#                             coverage is too narrow to justify spending a
+#                             rejection, a retry, and a step from a 200-step
+#                             budget.
+#                 guidance -> retrieved on demand through lookup_documentation;
+#                             the model applies judgement.
+#   applies_when  human-readable trigger
+#   rule          the prescriptive statement
+#   why           the mechanism, so the rule can be argued with rather than obeyed
+#   python        how it lands in this stack
+#   citations     primary literature, as given by bioSkills
+#   source_skill  path within bioSkills
+
+meta:
+  source: bioSkills
+  source_url: https://github.com/GPTomics/bioSkills
+  source_commit: 076137114dda666202a17d2f6b9a7215cc00c888
+  source_license: MIT
+  source_copyright: Copyright (c) 2026 GPTomics
+  translated_for: ScAI Python sandbox (scanpy / pydeseq2 / gseapy). decoupler is pinned in
+    requirements-nodeps.txt but the shared venv may still hold an unimportable 1.6.0; rules
+    must not assume it is available.
+rules:
+- id: testing-family-must-be-declared
+  title: A q-value is meaningless without the family it was computed over
+  enforcement: gate
+  applies_when: Any enrichment call that returns adjusted p-values or FDR q-values.
+  rule: Declare every gene set that goes into the same enrichment call before running it.
+    Report the family alongside any q-value derived from it.
+  why: 'What counts as "the family" is an analyst decision, and different choices are different
+    alpha budgets. In a preranked GSEA the q-value is computed across all sets in the call:
+    the normalised score is per-set, but the false-discovery estimate compares the observed
+    score distribution to the pooled null across every set submitted. Padding a call with
+    uninformative sets shrinks the observed-positive denominator and inflates the q-values
+    of the informative ones. The identical panel with the identical enrichment score can therefore
+    come out significant or not depending only on what else was passed alongside it.'
+  python: gseapy.prerank(gene_sets={...}) computes FDR across the whole dict. Submitting mechanism
+    panels and exploratory sets in one call mixes their budgets; group sets into families
+    and correct within each, or use a size-matched empirical null per panel.
+  citations:
+  - Wijesooriya et al. 2022 -- most published GSEA analyses report none of the choices that
+    determine the result
+  - Subramanian et al. 2005 PNAS 102:15545
+  source_skill: pathway-analysis/gsea
+- id: prespecify-the-family-before-results
+  title: Fix the testing family before seeing any result from it
+  enforcement: guidance
+  applies_when: Planning any scored panel or enrichment family.
+  rule: Pre-specify the family, and the panel, before the first result is visible.
+  why: 'Choosing what to correct over after seeing the p-values is part of the garden of forking
+    paths. Correcting within one contrast, across all contrasts, or across a whole study are
+    different budgets, and picking whichever gives the wanted answer is unfalsifiable from
+    the output alone. In code this reaches the model as a note on plan drift rather than as
+    a refusal: register_score accepts a panel that departs from its frozen plan and records
+    the difference, because refusing would leave no way to record a deliberate change.'
+  python: register_analysis_plan freezes the panel and the intended family and returns a plan_id;
+    register_score cites it and the panel is re-hashed.
+  citations:
+  - Benjamini & Hochberg 1995 J R Stat Soc B 57:289-300
+  - Wijesooriya et al. 2022 PLoS Comput Biol 18(3):e1009935 -- unreported analytic choices
+    make enrichment results unfalsifiable
+  source_skill: experimental-design/multiple-testing
+- id: choose-correction-to-match-dependence
+  title: BH assumes independence or positive dependence
+  enforcement: guidance
+  applies_when: Correcting p-values across correlated features or gene sets.
+  rule: Use Benjamini-Hochberg for discovery under independence or positive regression dependence;
+    use Benjamini-Yekutieli under arbitrary or negative dependence; use FWER control for a
+    small confirmatory panel.
+  why: The BH guarantee is conditional on a dependence structure. Overlapping gene sets and
+    co-expressed genes are strongly dependent, and applying BH as though tests were independent
+    understates the true error rate.
+  python: statsmodels.stats.multitest.multipletests defaults to method='hs' (Holm-Sidak, an
+    FWER method), NOT Benjamini-Hochberg. Always pass method='fdr_bh' or 'fdr_by' explicitly.
+  citations:
+  - Benjamini & Yekutieli 2001 Ann Stat 29:1165
+  - Storey & Tibshirani 2003 PNAS 100:9440
+  source_skill: experimental-design/multiple-testing
+- id: minimum-gene-set-size
+  title: Gene sets must be bounded at both ends
+  enforcement: guidance
+  applies_when: Any gene-set score or enrichment test.
+  rule: Bound set size from below and above after mapping into the analysed matrix. Do not
+    lower the tool default. Report the matched count, not the nominal panel size.
+  why: 'Below the floor the running-sum statistic is dominated by a handful of genes and the
+    permutation null is too coarse to separate signal from noise. Above the ceiling the opposite
+    failure appears: very broad sets enrich for almost any ranking, at trivial fold, because
+    they overlap a large fraction of the transcriptome. Only the lower bound is usually remembered,
+    so the broad-set false positive passes unchallenged. The number that governs power is
+    how many panel genes are present in the matrix, not how many were written down. In code
+    this reaches the model as a caveat attached to the score and carried into the report,
+    not as a refusal. The refusable consequence -- a negative conclusion drawn from such a
+    panel -- is enforced separately by no-negative-claim-from-an-underpowered-panel.'
+  python: 'gseapy.prerank already defaults to min_size=15 and max_size=500, which is stricter
+    than the 10 that clusterProfiler uses as its floor. Do not lower it: passing min_size
+    below the default admits panels the tool would otherwise refuse. The ceiling is not uniform
+    across the toolkit -- gseapy.gsva defaults to max_size=1000 -- so pass both bounds explicitly
+    rather than relying on whichever entry point you happened to call.'
+  citations:
+  - Subramanian et al. 2005 PNAS 102:15545 -- the weighted running-sum statistic
+  - Yu et al. 2012 OMICS 16:284-287 -- clusterProfiler, source of the minGSSize/maxGSSize
+    convention
+  source_skill: pathway-analysis/gsea
+- id: no-negative-claim-from-an-underpowered-panel
+  title: Absence of evidence from a small panel is not evidence of absence
+  enforcement: gate
+  applies_when: A non-significant result is used to argue against a mechanism.
+  rule: A non-significant result from a panel below the minimum size does not support a negative
+    conclusion. Report it as underpowered, or widen the panel and re-test.
+  why: 'Failing to reject with almost no power says nothing about the null. The asymmetry
+    is real: such a panel may still be reported as a positive observation when it does reach
+    significance, because significance despite low power is a stronger signal, not a weaker
+    one.'
+  python: services.gene_set_provenance.assess_panel_power marks this; the finding gate refuses
+    a negative claim resting on an underpowered panel.
+  citations:
+  - Hoenig & Heisey 2001 Am Stat 55:19 -- observed power is a monotone function of the p-value
+  source_skill: experimental-design/power-analysis
+- id: never-report-observed-power
+  title: Post-hoc power cannot justify a null result
+  enforcement: guidance
+  applies_when: Explaining why a comparison was not significant.
+  rule: Report the effect size and its confidence interval, never observed (post-hoc) power.
+  why: Observed power is a deterministic function of the p-value, so quoting it restates the
+    p-value and adds no information. Prospective power belongs in the design of the next experiment,
+    not the defence of this one.
+  python: Report the estimate with its CI from the fitted model rather than recomputing power
+    from the observed effect.
+  citations:
+  - Hoenig & Heisey 2001 Am Stat 55:19
+  source_skill: experimental-design/power-analysis
+- id: biological-replicate-is-the-unit
+  title: Samples replicate, cells do not
+  enforcement: gate
+  applies_when: Any cross-condition claim from single-cell data. Also applies to a count of
+    differentially expressed features from a per-cell condition contrast, which presupposes
+    a per-cell significance threshold even when no p-value is quoted.
+  rule: The unit of replication for a condition-level claim is the biological sample or donor.
+    Thousands of cells from one sample are one draw. Test at the sample level (pseudobulk
+    or a mixed model), not the cell level.
+  why: 'Cell-level tests treat cells as independent, which they are not: cells from one animal
+    share its genotype, batch, dissociation and depth. The resulting p-values are inflated
+    by orders of magnitude, and the effect is worst exactly where cell counts are largest.'
+  python: SUM raw integer counts per sample per cell type, then run pydeseq2 on that matrix.
+    Averaging log-normalised values is the common error and breaks the negative-binomial model
+    the test assumes. scanpy.tl.rank_genes_groups across conditions is a cell-level test and
+    its p-values must not be reported as condition-level inference.
+  citations:
+  - Squair et al. 2021 Nat Commun 12:5692 -- confronting false discoveries in single-cell
+    differential expression
+  source_skill: single-cell/differential-abundance
+- id: one-sample-per-condition-is-unidentifiable
+  title: With n=1 per group the effect is not estimable at all
+  enforcement: gate
+  applies_when: A design has a single sample, library or donor per condition.
+  rule: When condition is perfectly confounded with sample, report contrasts as descriptive
+    observations about those specimens. Do not present them as condition-level effects, with
+    or without a p-value.
+  why: This is not a power problem that more cells can fix -- the condition effect and the
+    sample effect are the same parameter, so nothing in the data can separate them. Tools
+    will still emit confident statistics; they are quantifying specimen idiosyncrasy.
+  python: 'Pseudobulk cannot rescue this: aggregating to one sample per group leaves one observation
+    per group. Label such contrasts descriptive and say what would be needed to make them
+    estimable.'
+  citations:
+  - Squair et al. 2021 Nat Commun 12:5692
+  source_skill: single-cell/differential-abundance
+- id: post-clustering-inference-is-invalid
+  title: Marker p-values from clusters you defined are circular
+  enforcement: guidance
+  applies_when: Reporting p-values from marker detection on data-derived clusters.
+  rule: Treat cluster-marker p-values as a ranking device only. They are not merely inflated
+    -- they are invalid, and no multiple-testing correction repairs them, because the p-values
+    are already invalid before adjustment. Never report them as evidence that a cluster is
+    real.
+  why: The clustering was chosen to maximise separation and the marker test is then conditioned
+    on that choice. Under a single homogeneous population the procedure still returns extremely
+    small p-values, and the type-I error rate approaches 1 as resolution rises. Correction
+    assumes valid p-values under the null; these are not.
+  python: scanpy.tl.rank_genes_groups p-values are double-dipped in exactly this way, and
+    note that it already defaults to corr_method='benjamini-hochberg' -- the adjustment is
+    applied and still does not make the p-values valid. Methods that do test cluster reality
+    (scSHC, CHOIR, ClusterDE, count splitting) are NOT installed in this stack, so within
+    ScAI the honest options are to use markers for ranking only, or to validate a split against
+    held-out data or an external reference.
+  citations:
+  - Grabski, Street & Irizarry 2023 Nat Methods 20:1196-1202 (scSHC)
+  - Neufeld et al. 2024 Biostatistics 25(1):270-287 (count splitting)
+  source_skill: single-cell/clustering
+- id: rank-by-signed-variance-calibrated-statistic
+  title: The ranking metric is the experiment
+  enforcement: guidance
+  applies_when: Building the ranked vector for preranked enrichment.
+  rule: Rank by a signed, variance-calibrated statistic. A raw p-value is unusable because
+    it erases direction, not because it is a p-value; a signed transform of it is acceptable
+    as a fallback. Never rank by an unshrunken fold change.
+  why: A preranked result reports the structure of the ranking it was handed, nothing more.
+    An unsigned p-value collapses up- and down-regulated genes together and makes the normalised
+    score uninterpretable. An unshrunken fold change lets a few low-count genes with unstable
+    ratios dominate the leading edge -- a gene at 2 versus 8 counts produces a huge ratio
+    with almost no evidence behind it.
+  python: With pydeseq2 rank by the Wald statistic. If a fold change is unavoidable, shrink
+    it first with DeseqStats.lfc_shrink(coeff='<contrast column>') -- coeff is required, an
+    argument-less call raises TypeError; ranking on the raw log2FoldChange column is the failure
+    mode above. Where no signed statistic exists, sign(log2FC) * -log10(max(pvalue, 1e-300))
+    preserves direction and clamps p=0 from becoming infinite.
+  citations:
+  - Subramanian et al. 2005 PNAS 102:15545
+  source_skill: pathway-analysis/gsea
+- id: gene-permutation-is-anticonservative
+  title: Preranked enrichment assumes genes are independent, and they never are
+  enforcement: gate
+  applies_when: Any preranked enrichment call, at any sample size.
+  rule: Preranked enrichment uses a gene-permutation null, which treats genes as independent
+    and is therefore anti-conservative for correlated sets. This holds at every sample size.
+    Report the permutation type alongside every q-value, and treat a preranked q-value as
+    a ranking device rather than a calibrated error rate.
+  why: 'Co-regulated gene sets are built out of exactly the correlation that a gene-permutation
+    null destroys, so the null is too narrow and the resulting q-values are optimistic. Nothing
+    about a larger sample fixes this: the permutation is over genes, not samples, so the defect
+    is independent of n. Correlation-aware competitive tests exist but not in this stack.'
+  python: gseapy.prerank is forced into gene permutation at any n. gseapy.gsea does phenotype
+    permutation, which preserves the correlation structure, but needs the expression matrix.
+    R offers camera (variance-inflation corrected competitive test) and roast/fry (self-contained
+    rotation, valid at any n); there is no equivalent in the installed Python stack. Where
+    a competitive test is not available, report effect sizes and cross-platform direction
+    concordance.
+  citations:
+  - Wu & Smyth 2012 Nucleic Acids Res 40:e133 (camera)
+  - Wu et al. 2010 Bioinformatics 26:2176 (roast)
+  - Subramanian et al. 2005 PNAS 102:15545
+  source_skill: pathway-analysis/gsea
+- id: report-adjusted-not-raw-p
+  title: Report the adjusted quantity, and say which one it is
+  enforcement: guidance
+  applies_when: Reporting any enrichment or differential result.
+  rule: Report the adjusted p-value or q-value, never the raw p-value, and never a quantity
+    you invented. State the correction method.
+  why: 'Raw p-values from thousands of simultaneous tests have no error-rate interpretation.
+    Different adjusted quantities answer different questions: an adjusted p asks for the expected
+    fraction of false discoveries, a local FDR asks for a per-feature posterior, and they
+    are not interchangeable.'
+  python: Read the exact column the tool produced rather than renaming one; gseapy and pydeseq2
+    use different column names for adjusted values.
+  citations:
+  - Storey 2003 Ann Stat 31:2013
+  source_skill: differential-expression/de-results
+- id: cluster-resolution-must-be-swept
+  title: Resolution is an unidentifiable nuisance parameter
+  enforcement: guidance
+  applies_when: Choosing a clustering resolution.
+  rule: Sweep a range of resolutions rather than fixing one. Record the range swept, the value
+    chosen, and what the choice was based on. Confirm the main conclusion survives at neighbouring
+    resolutions.
+  why: 'There is no ground truth for the number of clusters, so resolution cannot be validated
+    from within the data. Tuning it until clusters match an expectation is confirmation bias
+    wearing the clothes of analysis. Worse, the choice can silently determine whether an analysis
+    exists at all: a coarse setting can leave a comparison unestimable that a finer one makes
+    available, and nothing in the output records that a different setting was possible. This
+    rule is guidance rather than a gate because a sweep leaves no trace in structured state:
+    verifying it would mean pattern-matching the agent''s own code, which checks that a word
+    appeared rather than that the work was done.'
+  python: Loop scanpy.tl.leiden over roughly 0.2 to 2.0, storing each partition under its
+    own key, then compare cluster flow across the sweep and check that each cluster carries
+    distinct markers.
+  citations:
+  - Zappia & Oshlack 2018 GigaScience 7:giy083 -- clustering trees across multiple resolutions
+  source_skill: single-cell/clustering
+- id: subclustering-compounds-double-dipping
+  title: Stop subclustering when splits stop carrying distinct markers
+  enforcement: guidance
+  applies_when: Subclustering a population already derived from clustering.
+  rule: Recompute the embedding within the subset rather than reusing the global one, and
+    stop when a split no longer carries distinct markers.
+  why: Reusing the global principal components imports axes that are uninformative inside
+    a homogeneous subset and manufactures artefactual splits. Cells selected twice compound
+    the circularity of post-clustering inference.
+  python: Recompute highly variable genes, PCA and the neighbor graph on the subset before
+    clustering it (scanpy.pp.neighbors, not the global graph).
+  citations:
+  - Neufeld et al. 2024 Biostatistics 25(1):270-287 (count splitting)
+  - Grabski, Street & Irizarry 2023 Nat Methods 20:1196-1202
+  source_skill: single-cell/clustering
+- id: trajectory-direction-needs-external-evidence
+  title: Ordering is not direction, and neither is time
+  enforcement: guidance
+  applies_when: Claiming a temporal or causal progression from cross-sectional data.
+  rule: Adjacency and pseudotime give ordering, not direction. State a direction only with
+    evidence that does not come from the same embedding, and never call a cross-sectional
+    ordering a time course.
+  why: Pseudotime direction depends on the chosen root, and velocity direction can be weak
+    or sign-inconsistent between samples. An ordering that is stable under reanalysis is still
+    not evidence that cells travel along it.
+  python: scanpy.tl.dpt takes its root from adata.uns['iroot'], which you choose (there is
+    no root parameter); scvelo latent time is model-dependent. Report the gate you set for
+    accepting a direction and whether it passed, rather than the ordering alone.
+  citations:
+  - 'Bergen et al. 2021 Mol Syst Biol -- RNA velocity: current challenges and future perspectives'
+  - Gorin, Fang, Chari & Pachter 2022 PLoS Comput Biol -- RNA velocity unraveled
+  - Saelens et al. 2019 Nat Biotechnol 37:547-554
+  source_skill: single-cell/trajectory-inference
+- id: read-the-set-before-scoring-it
+  title: A curated set is not automatically the right panel
+  enforcement: guidance
+  applies_when: Scoring a gene set fetched from an external resource.
+  rule: Inspect the members before scoring. When a set mixes genes that promote a process
+    with genes that restrain it, split it and score the parts separately.
+  why: 'Ontology sets are frequently broad, small, and direction-mixed. A module score over
+    such a set rises whether the process is active or being actively opposed, so the score
+    cannot distinguish the two states -- the number looks like evidence while carrying almost
+    none. The ontology already draws the distinction the score destroys: measured on the installed
+    resource, its biological-process branch publishes explicit positive- and negative-regulation
+    terms, several hundred processes carry both, and the regulator genes sit inside the base
+    term. So the split is a mechanical operation on identifiers rather than a judgement call,
+    wherever those terms exist.'
+  python: 'fetch_gene_set returns the members. When the set is direction-mixed, call it again
+    with partition_by_direction=true: the ontology publishes explicit regulation terms for
+    a process, and the tool uses them to split the set into positive, negative, ambiguous
+    and core panels, each with its own provenance. Genes annotated to both directions are
+    separated rather than counted toward both arms. Only the biological-process branch carries
+    those terms, so elsewhere the split is refused and the mixing has to be stated in the
+    finding instead. register_analysis_plan''s partition operation remains available for splits
+    the ontology cannot make.'
+  citations:
+  - 'No upstream citation: this is ScAI''s own guidance, added because a direction-mixed set
+    scores identically whether a process is active or suppressed. Not claimed as a bioSkills
+    rule.'
+  source_skill: pathway-analysis/gsea
+- id: cite-the-resource-version
+  title: An unversioned gene set is not reproducible
+  enforcement: gate
+  applies_when: Using any externally sourced gene set.
+  rule: Record the resource, its concrete release identifier, and the set identifier. "Latest"
+    is not a version.
+  why: 'Curated resources are revised: set membership changes between releases, so a result
+    quoted against an unpinned source cannot be reproduced, and a later disagreement cannot
+    be attributed either to the analysis or to the resource having moved underneath it.'
+  python: fetch_gene_set returns a provenance string carrying the release; pass it unchanged
+    to panel_source and gene_list_source.
+  citations:
+  - Wijesooriya et al. 2022
+  source_skill: pathway-analysis/gsea
+- id: ora-universe-must-be-the-measured-genes
+  title: The background set is the null hypothesis, not a setting
+  enforcement: gate
+  applies_when: Any over-representation analysis (ORA / Enrichr-style enrichment).
+  rule: Set the background to the genes the assay actually measured. Omitting it is a bug,
+    not a default.
+  why: 'ORA compares the overlap between a selected list and a term against what overlap would
+    be expected by chance, and ''by chance'' is defined entirely by the background. With no
+    background the universe silently becomes every annotated gene in the organism, including
+    genes the experiment could never have selected because they were never measured. Terms
+    dominated by tissue-restricted or lowly-expressed genes then appear significant purely
+    because the denominator was inflated. Change the background and every p-value in the table
+    changes. The check reads the declared method_kind and the declared background rather than
+    pattern-matching the method string: the earlier version fired on any method naming a web-API
+    client, including the correct call that passes a background.'
+  python: 'Pass the measured genes explicitly -- gseapy.enrichr accepts a background and,
+    in 1.3.0, forwards it to the Speedrichr endpoints rather than silently discarding it as
+    older versions did. Do not rely on the default: with no background the universe becomes
+    the union of genes in the gene sets themselves, which is not the set of genes your assay
+    could have detected. The most controllable route is to materialise the library first --
+    lib = gseapy.get_library(name, organism) -- then gseapy.enrich(gene_list, gene_sets=lib,
+    background=measured_genes), where measured_genes is adata.var_names or the genes surviving
+    DE filtering. That also pins the library content, which a named-library web call cannot.'
+  citations:
+  - Goeman & Buhlmann 2007 Bioinformatics 23:980-987 -- competitive gene-set testing and the
+    choice of universe
+  - Timmons, Szkop & Gallagher 2015 Genome Biol 16:186 -- multiple sources of bias in functional
+    enrichment
+  - Wijesooriya et al. 2022 PLoS Comput Biol 18(3):e1009935
+  source_skill: pathway-analysis/go-enrichment
+- id: composition-lives-on-a-simplex
+  title: Proportions are not independent, so per-cluster tests on them are invalid
+  enforcement: gate
+  applies_when: Comparing cell-type or cluster proportions between conditions. Also applies
+    to a contingency-table test run over cells on a per-cell categorical breakdown, which
+    is the same simplex violation counted rather than proportioned.
+  rule: Do not run a per-cluster t-test, Wilcoxon or chi-square on proportions as the primary
+    test of composition change. Use a compositional model, or report proportions descriptively
+    with intervals.
+  why: 'Proportions sum to one, so they live on a simplex and are mechanically coupled: when
+    one population expands, every other proportion is forced down even if its absolute count
+    never moved. A per-cluster test reads that arithmetic as biology, and the resulting false
+    positives are correlated across clusters, so they look like a coherent story rather than
+    noise.'
+  python: 'No compositional model is installed in this stack -- scCODA, sccomp, pertpy, propeller
+    and milopy are all absent, so the recommended tools are unavailable. Within ScAI the defensible
+    options are: report proportions with confidence intervals as description, or apply a variance-stabilising
+    transform by hand (centred log-ratio, or arcsin-sqrt) and fit a sample-level linear model
+    on the transformed values. Say which was done.'
+  citations:
+  - Buttner et al. 2021 Nat Commun 12:6876 -- scCODA, Bayesian Dirichlet-multinomial compositional
+    analysis
+  - Phipson et al. 2022 Bioinformatics 38(20):4720 -- propeller, arcsin-sqrt plus limma for
+    proportion testing
+  - Mangiola et al. 2023 PNAS 120(33):e2203828120 -- sccomp, outlier-robust Bayesian differential
+    composition
+  - Dann et al. 2022 Nat Biotechnol 40:245-253 -- Milo, differential abundance on kNN neighbourhoods
+  source_skill: single-cell/differential-abundance
+- id: abundance-can-masquerade-as-expression
+  title: A cluster-level expression change can be pure composition
+  enforcement: guidance
+  applies_when: Interpreting pseudobulk or cluster-level differential expression.
+  rule: Pair any condition-level expression claim with a composition analysis, and interpret
+    them together.
+  why: 'If a cluster mixes substates and the condition shifts their ratio, the aggregated
+    profile changes although no gene changed expression in any cell. Run only differential
+    expression and this is invisible: it presents as a coherent transcriptional program rather
+    than as a change in which cells were counted.'
+  python: Compare cell counts per cluster per sample alongside the pseudobulk contrast, and
+    check whether the leading genes are markers of a substate whose share changed.
+  citations:
+  - Crowell et al. 2020 Nat Commun 11:6077 -- muscat, subpopulation-specific state transitions
+  - Dann et al. 2022 Nat Biotechnol 40:245-253 -- Milo
+  source_skill: single-cell/differential-abundance
+- id: magnitude-claims-need-a-threshold-test
+  title: Post-hoc fold-change filtering does not control FDR for the magnitude claim
+  enforcement: advisory
+  applies_when: Reporting how many features exceed a fold-change threshold at a given FDR.
+  rule: To claim a magnitude, test against that magnitude. Filtering a significance table
+    by fold change afterwards does not give an error rate for the magnitude claim.
+  why: 'The adjusted p-value answers ''is the effect non-zero''. Selecting rows from that
+    table where the estimate happens to exceed a threshold answers a different question, and
+    the FDR does not transfer: a gene whose true effect is just under the threshold can land
+    above it by noise and carries no error control for having done so. A statement of the
+    form ''N features changed more than k-fold at FDR 5%'' is therefore false as usually computed.
+    Enforced as an advisory rather than a refusal: measured over 168 real report_findings
+    payloads, only 5 state a fold-change threshold at all, and a check with that coverage
+    does not earn a channel that costs a rejection and a retry. The note still reaches the
+    report.'
+  python: 'pydeseq2 supports this directly: DeseqStats(..., lfc_null=log2(k), alt_hypothesis=''greaterAbs'')
+    tests against the threshold rather than against zero. Use it instead of filtering on abs(log2FoldChange)
+    after the fact.'
+  citations:
+  - McCarthy & Smyth 2009 Bioinformatics 25:765 (TREAT)
+  source_skill: differential-expression/de-results
+- id: adjusted-p-na-is-a-flag-not-a-gap
+  title: A missing adjusted p-value records which filter removed the feature
+  enforcement: guidance
+  applies_when: Handling differential-expression results with missing adjusted p-values.
+  rule: Do not drop rows with a missing adjusted p-value without checking why they are missing.
+    The three causes need different handling.
+  why: A missing adjusted p-value is not absent data; it flags an exclusion. Independent filtering
+    removes low-mean features before adjustment; a distance-based outlier check removes features
+    where one sample dominates; all-zero features are removed outright. Blanket dropping silently
+    discards real signal, most often from low-count regulators that are biologically interesting
+    and statistically inconvenient.
+  python: 'pydeseq2 exposes both switches: DeseqStats(..., cooks_filter=False, independent_filter=False)
+    recovers the excluded rows so the cause can be identified before deciding.'
+  citations:
+  - Bourgon, Gentleman & Huber 2010 PNAS 107:9546
+  source_skill: differential-expression/de-results
+- id: filter-must-be-independent-under-the-null
+  title: A pre-test filter must not use the contrast it will be tested on
+  enforcement: guidance
+  applies_when: Filtering features before differential testing.
+  rule: Filter on a statistic that is independent of the test statistic under the null, such
+    as overall mean abundance. Never filter on anything computed from the group labels.
+  why: Filtering before testing increases power only when the filter carries no information
+    about the contrast under the null. Filtering on something like the minimum count within
+    one group, or on variance computed across the conditions being compared, selects features
+    that already look different and inflates the type-I error of the subsequent test. Most
+    pipelines do this without noticing.
+  python: Filter on mean or total counts across all samples, not on a per-group quantity.
+    Note that selecting highly variable genes before a condition contrast is exactly this
+    violation when the variance is driven by the condition.
+  citations:
+  - Bourgon, Gentleman & Huber 2010 PNAS 107:9546
+  source_skill: differential-expression/de-results
+- id: inspect-the-p-value-histogram
+  title: The p-value histogram diagnoses model misspecification for free
+  enforcement: guidance
+  applies_when: After any large-scale differential test, before interpreting results.
+  rule: Plot the raw p-value histogram and read its shape before trusting the adjusted values.
+  why: A correct analysis gives a uniform histogram with a spike near zero. A U-shape with
+    mass at both ends indicates unmodelled structure such as a hidden batch or a misestimated
+    dispersion. A histogram depleted near zero and peaked near one indicates over-correction,
+    usually too many covariates for the sample size. A spike only at one indicates discreteness
+    artefacts from very low counts. Each has a different fix, and the diagnosis costs one
+    plot.
+  python: Histogram the raw pvalue column from the results table, not the adjusted one --
+    adjustment destroys the shape that carries the diagnosis.
+  citations:
+  - Storey 2003 Ann Stat 31(6):2013-2035
+  - Leek et al. 2010 Nat Rev Genet 11:733-739
+  source_skill: differential-expression/de-results
+- id: embedding-distances-are-not-metric
+  title: Distances and gaps in a 2-D embedding carry no quantitative meaning
+  enforcement: guidance
+  applies_when: Interpreting or narrating a UMAP or t-SNE plot.
+  rule: Cluster on the graph or on the reduced representation, never on embedding coordinates.
+    Do not read inter-cluster distance, relative cluster size, or apparent gaps in a 2-D embedding
+    as biology.
+  why: These embeddings optimise local neighbourhood preservation, and their global geometry
+    is an artefact of that objective plus its initialisation. Two clusters drawn far apart
+    are not more different than two drawn close together; a wide gap is not a population boundary.
+    That an embedding preserves global structure is folklore, and treating it as evidence
+    is one of the easiest errors to make because the picture is so persuasive.
+  python: Cluster from the scanpy.pp.neighbors graph or from PCA space, and describe a UMAP
+    as a layout rather than as a measurement. Quantitative claims belong to the space the
+    analysis was actually run in.
+  citations:
+  - Chari & Pachter 2023 PLoS Comput Biol 19(8):e1011288
+  - Kobak & Berens 2019 Nat Commun 10:5416
+  source_skill: single-cell/clustering
+- id: batch-confounded-with-condition-is-unidentifiable
+  title: A batch that tracks the condition cannot be corrected away
+  enforcement: guidance
+  applies_when: Any design where processing batch may align with the condition.
+  rule: Cross-tabulate batch against condition before modelling. Where they are perfectly
+    aligned, the term is unidentifiable and no correction method recovers the effect.
+  why: If every sample of one condition was processed in one batch, the batch effect and the
+    condition effect are the same parameter. Integration methods will still run and produce
+    a well-mixed embedding, which looks like success and is instead the removal of the signal
+    along with the artefact. The remedy is experimental -- distribute conditions across batches
+    -- not statistical.
+  python: pandas.crosstab(obs['batch'], obs['condition']) before any integration. Running
+    harmony or an equivalent over a confounded design does not make the contrast estimable.
+  citations:
+  - Nygaard, Rodland & Hovig 2016 Biostatistics 17:29-39 -- removing batch effects while retaining
+    group differences exaggerates confidence
+  - Leek et al. 2010 Nat Rev Genet 11:733-739 -- batch effects in high-throughput data
+  - Luecken et al. 2022 Nat Methods 19:41-50 -- benchmarking atlas-level integration
+  source_skill: single-cell/batch-integration
+- id: small-n-exaggerates-significant-effects
+  title: Underpowered studies overstate the effects that reach significance
+  enforcement: guidance
+  applies_when: Reporting effect sizes from a design with few replicates per group.
+  rule: In a small design, report significant effect sizes as upper bounds and say they are
+    likely exaggerated. Do not quote them as point estimates.
+  why: Low power does not only miss true effects. Conditional on passing a significance threshold,
+    an estimate from a noisy design must be large -- so the surviving effects systematically
+    overstate magnitude, and in the worst case have the wrong sign. The published effect is
+    then bigger than the real one by a factor that grows as power falls, which is why small-study
+    effects so often fail to replicate at their reported size.
+  python: Report the confidence interval alongside every effect and let its width carry the
+    uncertainty. Shrunken estimates (DeseqStats.lfc_shrink(coeff=...)) are less exaggerated
+    than raw ones for exactly this reason.
+  citations:
+  - Gelman & Carlin 2014 Perspect Psychol Sci 9:641 (Type-S and Type-M)
+  - Button et al. 2013 Nat Rev Neurosci 14:365
+  - Schurch et al. 2016 RNA 22:839
+  source_skill: experimental-design/power-analysis
+- id: read-fold-enrichment-with-the-p-value
+  title: A large term beats a small one on p-value alone
+  enforcement: guidance
+  applies_when: Ranking or reporting over-representation results.
+  rule: Report fold enrichment alongside the adjusted p-value, and do not rank terms by p-value
+    alone.
+  why: 'Significance scales with term size: a very large term at a marginal enrichment can
+    outrank a small term at a strong one, because the p-value reflects how surprising the
+    overlap is given the size rather than how concentrated it is. Ranking on p-value therefore
+    promotes broad, uninformative terms over specific ones.'
+  python: gseapy.enrich returns Overlap as a 'k/M' string and an Odds Ratio, but neither the
+    query size n nor the background size N, so fold enrichment (k/n)/(M/N) has to be computed
+    by the caller from its own record of those two numbers. The Odds Ratio column is already
+    there and answers the same question if you would rather not keep that record.
+  citations:
+  - Goeman & Buhlmann 2007 Bioinformatics 23:980-987
+  - Yu et al. 2012 OMICS 16:284-287 -- clusterProfiler
+  source_skill: pathway-analysis/go-enrichment
+- id: ontology-ancestors-are-not-independent-hits
+  title: One signal lights up a whole ontology lineage
+  enforcement: guidance
+  applies_when: Reporting enriched ontology terms.
+  rule: Do not count parent and child terms as separate findings. Collapse a lineage to its
+    most informative member before reporting a count.
+  why: Ontology annotation propagates to every ancestor of a term, so a single real signal
+    necessarily produces a chain of significant related terms. Reporting them as separate
+    hits multiplies one observation into an apparent convergence of evidence.
+  python: Semantic-similarity pruning (GOSemSim simplify) and the topGO elim/weight algorithms
+    have no equivalent in the installed Python stack. Collapse by hand using the term hierarchy,
+    or report the leading term of each lineage and say that is what was done.
+  citations:
+  - Ashburner et al. 2000 Nat Genet 25:25-29 -- the Gene Ontology and the true-path rule
+  - Alexa, Rahnenfuhrer & Lengauer 2006 Bioinformatics 22(13):1600-1607 -- decorrelating GO
+    graph structure
+  - Wang et al. 2007 Bioinformatics 23(10):1274-1281 -- semantic similarity of GO terms
+  source_skill: pathway-analysis/go-enrichment
+- id: check-the-leading-edge-and-the-weight
+  title: Two more implicit choices decide a preranked result
+  enforcement: guidance
+  applies_when: Interpreting a preranked enrichment result.
+  rule: Inspect the leading edge before believing an enrichment, and record the weight exponent
+    used.
+  why: 'A preranked result is a deterministic function of three choices: the ranking statistic,
+    the weight exponent, and what was permuted. The weight is the one nobody reports, yet
+    it decides how much the statistic''s magnitude counts relative to its rank. Separately,
+    a leading edge of one or two genes means an outlier drove the score, not a coordinated
+    shift of the set -- the enrichment is real arithmetic about a fluke.'
+  python: gseapy exposes the leading edge as res2d['Lead_genes']; check its length against
+    the set size. The weight defaults differ per function (prerank 1.0, ssgsea 0.25), so state
+    which was used.
+  citations:
+  - Subramanian et al. 2005 PNAS 102:15545
+  - Korotkevich et al. 2021 bioRxiv 060012
+  source_skill: pathway-analysis/gsea
+- id: module-scores-are-not-comparable-across-panels
+  title: A gene-module score is relative to its control pool
+  enforcement: guidance
+  applies_when: Comparing module scores between panels of different sizes.
+  rule: Do not compare module scores across panels directly. Compare each panel against its
+    own control condition.
+  why: A module score subtracts the mean of a control set sampled to match the expression
+    bins of the panel genes. The control pool therefore depends on the panel, and two panels
+    of different size or expression profile are scored on different scales. The numbers look
+    comparable and are not.
+  python: scanpy.tl.score_genes(ctrl_size=50, n_bins=25) governs the control pool. Keep these
+    fixed across panels being compared, and even then treat between-panel differences as qualitative.
+  citations:
+  - Tirosh et al. 2016 Science 352:189-196 -- control-set module scoring underlying score_genes
+    / AddModuleScore
+  source_skill: single-cell/markers-annotation

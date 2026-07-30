@@ -57,6 +57,7 @@ from .pi import (  # noqa: F401
     FiguresMixin,
     ReportsMixin,
     InteractionMixin,
+    ExecutionReviewMixin,
 )
 class PIAgent(
     InstructionsMixin,
@@ -70,6 +71,7 @@ class PIAgent(
     FiguresMixin,
     ReportsMixin,
     InteractionMixin,
+    ExecutionReviewMixin,
     BaseAgent,
 ):
     """

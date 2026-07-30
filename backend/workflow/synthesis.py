@@ -540,18 +540,49 @@ class SynthesisMixin:
                     {"status": status, "findings": findings}, ensure_ascii=False
                 )
             elif agent_name == "bioinformatics":
+                # The plan audit and the executor's own suggestions are included so
+                # the PI synthesizes against what the round actually ran, not only
+                # against the findings it chose to report. An unmet approved step is
+                # the strongest signal that a conclusion should stay hedged.
+                review = result.get("post_execution_review") or {}
+                audit = result.get("plan_audit") or {}
+                # Three states, not two. `None` means the binding status was never
+                # recorded — a cached result, a restored snapshot, or a path that did
+                # not carry it — and it must not read as verified. Treating unknown
+                # as verified is what told the PI its findings were bound to
+                # successful executions on every round, whatever actually happened.
+                evidence_verified = result.get("evidence_verified")
+                if evidence_verified is True:
+                    evidence_note = "Findings are linked to successful execution records."
+                elif evidence_verified is False:
+                    evidence_note = (
+                        "Treat these findings as partial/unverified and do not use "
+                        "validated, confirmed, or dominant wording."
+                    )
+                else:
+                    evidence_note = (
+                        "Evidence binding for these findings is unknown; treat them as "
+                        "unverified and do not use validated, confirmed, or dominant wording."
+                    )
                 agent_results[agent_name] = json.dumps(
                     {
                         "status": status or "completed",
                         "findings": findings,
-                        "evidence_verified": result.get("evidence_verified"),
+                        "evidence_verified": evidence_verified,
                         "evidence_execution_ids": result.get("evidence_execution_ids", []),
-                        "evidence_note": (
-                            "Treat these findings as partial/unverified and do not use "
-                            "validated, confirmed, or dominant wording."
-                            if result.get("evidence_verified") is False
-                            else "Findings are linked to successful execution records."
-                        ),
+                        "evidence_note": evidence_note,
+                        "agent_suggestions": result.get("agent_suggestions", []),
+                        "plan_coverage": {
+                            k: audit.get(k)
+                            for k in ("n_steps", "n_completed", "n_skipped", "n_unmet",
+                                      "unmet_titles", "unmet_families")
+                            if audit.get(k) is not None
+                        } or None,
+                        "supplementary_pass": {
+                            "status": review.get("review_status"),
+                            "verdict": (review.get("assessment") or {}).get("verdict"),
+                            "remaining_gaps": (review.get("assessment") or {}).get("remaining_gaps", []),
+                        } if review.get("review_status") in ("completed", "partial", "failed") else None,
                     },
                     ensure_ascii=False,
                 )

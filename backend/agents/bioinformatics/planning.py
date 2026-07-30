@@ -34,11 +34,72 @@ import json as _json
 from backend.services import ora_kernel
 from backend.services.marker_priors import MarkerDB, summarize_database_priors
 
-from ...utils.formatting import format_revision_history, truncate_for_llm
+from ...utils.formatting import (
+    format_revision_history,
+    render_plan_steps,
+    truncate_for_llm,
+)
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
+from ...utils.direction_payload import (
+    DirectionContext,
+    build_direction_context_block,
+    resolve_direction_context,
+)
 
 # Configure logger
 logger = logging.getLogger(__name__)
+
+# Prompt budgets for rendered plan steps. Generous on purpose: a revision that
+# cannot see what a step consumed and why will regenerate those fields from the
+# title alone, which is how a plan's biology decays into pure methodology over
+# successive PI review rounds.
+_COMPLETED_STEPS_BUDGET = 16_000
+_AFFECTED_STEPS_BUDGET = 28_000
+
+
+def render_pi_modifications(pi_modifications: Any, *, max_chars: int = 8_000) -> str:
+    """Flatten the PI's structured per-step suggestions into prompt text.
+
+    Plan review returns prose feedback plus a list of step-scoped suggestions.
+    Only the prose used to reach the revising agent, so the concrete asks — the
+    part naming what a step should actually cover — were dropped every round
+    while the prose caution accumulated.
+
+    Accepts either a flat list of suggestion dicts or the round-wrapped form
+    ``[{"round": n, "modifications": [...]}]``.
+    """
+    if not pi_modifications:
+        return ""
+
+    def _emit(entry: Any, round_label: str) -> Optional[str]:
+        if isinstance(entry, dict):
+            step_id = entry.get("step_id", entry.get("step", ""))
+            suggestion = str(
+                entry.get("suggestion", entry.get("change", entry.get("text", "")))
+            ).strip()
+            if not suggestion:
+                return None
+            head = f"  {round_label}Step {step_id}: " if step_id != "" else f"  {round_label}"
+            return head + suggestion
+        text = str(entry or "").strip()
+        return f"  {round_label}{text}" if text else None
+
+    lines: List[str] = []
+    for item in pi_modifications:
+        if isinstance(item, dict) and isinstance(item.get("modifications"), list):
+            label = f"[Round {item.get('round', '?')}] "
+            for entry in item["modifications"]:
+                rendered = _emit(entry, label)
+                if rendered:
+                    lines.append(rendered)
+            continue
+        rendered = _emit(item, "")
+        if rendered:
+            lines.append(rendered)
+
+    if not lines:
+        return ""
+    return truncate_for_llm("\n".join(lines), max_chars=max_chars)
 
 
 from .shared import (  # noqa: F401
@@ -383,21 +444,18 @@ Use these results to plan the downstream analysis steps."""
                 revision_context = f"""
 ## Previous Plan was REJECTED by PI
 
-The following plan was completely rejected. Generate a COMPLETELY NEW approach. Do NOT reuse any structure or methods from the rejected plan. The PI's feedback will be provided in the dialogue — use it to understand what to avoid.
+The following plan was completely rejected. Generate a COMPLETELY NEW approach. Do NOT reuse any structure or methods from the rejected plan. The PI's feedback will be provided in the dialogue — use it to understand what to avoid. Rejecting the approach does NOT reject the biology: every entity, hypothesis, and named mechanism the rejected plan covered must still be covered by the replacement.
 
 Rejected plan overview: {existing_plan.overview}
-Rejected plan steps (DO NOT COPY):
-""" + truncate_for_llm("\n".join(
-                    f"  Step {s.id}: {s.title} ({s.method})"
-                    for s in existing_plan.steps
-                ), max_chars=12_000)
+Rejected plan steps (DO NOT COPY the structure):
+""" + render_plan_steps(
+                    existing_plan.steps, "REJECTED", budget=_AFFECTED_STEPS_BUDGET
+                )
             else:
-                completed_text = truncate_for_llm(
-                    "\n".join(
-                        f"  [{s.status}] Step {s.id}: {s.title} ({s.method})"
-                        for s in existing_plan.steps
-                    ),
-                    max_chars=12_000,
+                # No tag: each step is labelled with its own status, which is
+                # what "completed steps MUST NOT be changed" below refers to.
+                completed_text = render_plan_steps(
+                    existing_plan.steps, budget=_COMPLETED_STEPS_BUDGET
                 )
                 revision_context = f"""
 ## Existing Plan (for incremental revision)
@@ -412,11 +470,13 @@ You are REVISING the remaining steps based on new findings."""
             state.build_experimental_design_summary(),
             max_chars=8_000,
         )
-        
+        research_context = self._research_context_block(state)
+
         prompt = f"""You are planning a single-cell RNA-seq bioinformatics analysis. Generate a method-level analysis plan.
 
 ## Data Context
 {data_desc}
+{research_context}
 
 ## PI's Analysis Goals
 Overview: {bounded_overview}
@@ -426,6 +486,9 @@ Tasks:
 {stage_guidance}
 {previous_context}
 {revision_context}
+
+## Evidence Policy
+{MECHANISM_EVIDENCE_POLICY}
 
 ## Instructions
 Generate a detailed, method-level analysis plan. For each step specify:
@@ -442,6 +505,7 @@ Rules:
 - Include ALL steps needed to complete the PI's tasks
 - Steps should form a logical, dependency-ordered pipeline
 - Identify 2-4 key decision points where PI input may be needed
+- Carry every entity, hypothesis, and named mechanism from the research context and the PI's tasks into the step that tests it. Name them in that step's input, expected_output, or rationale — a category label such as "relevant gene modules" is not a substitute for the specific set the tasks asked for
 
 Return the plan as a JSON object:
 {{
@@ -495,20 +559,64 @@ Return the plan as a JSON object:
         logger.info(f"[Bioinformatics] Generated plan: {len(steps)} steps, phase={phase}, stage={planning_stage}")
         return plan
 
+    def _research_context_block(self, state: AnalysisState) -> str:
+        """Objective, active direction, and that direction's own open questions.
+
+        Planning prompts previously carried only the PI's task list. When a
+        revision round re-derived the plan, nothing in its prompt stated what
+        the study was for, so the model had no basis for keeping content the
+        tasks had introduced.
+
+        """
+        parts: List[str] = []
+        objective = truncate_for_llm(
+            str(getattr(state, "initial_instruction", "") or ""),
+            max_chars=3_000,
+        )
+        if objective:
+            parts.append(f"\n## Research Objective\n{objective}")
+        direction = str(getattr(state, "current_round_direction", "") or "").strip()
+        if direction:
+            parts.append(f"\n## Current Research Direction\n{direction}")
+        try:
+            context = resolve_direction_context(state, direction)
+        except Exception:  # defensive: malformed history must not block planning
+            logger.warning("[Bioinformatics] Could not resolve direction payload", exc_info=True)
+            context = DirectionContext()
+        block = build_direction_context_block(context)
+        if block:
+            parts.append(block)
+        return "\n".join(parts)
+
     async def revise_plan_incrementally(
         self,
         state: AnalysisState,
         current_plan: 'AnalysisPlan',
         pi_feedback: str,
         completed_step_ids: Optional[List[int]] = None,
+        pi_tasks: Optional[List[Any]] = None,
+        overview: str = "",
+        pi_modifications: Optional[List[Any]] = None,
     ) -> 'AnalysisPlan':
         """Incrementally revise a plan based on PI feedback, preserving completed steps.
+
+        The prompt carries the plan's full step payload, not just titles and
+        methods. Rendering a step as ``title (method)`` and then asking for a
+        FULL plan back forces the model to regenerate input, expected_output,
+        and rationale from a name alone — so whatever biology those fields held
+        is replaced by generic methodology. PI feedback accumulates across
+        rounds while the plan is re-derived each time, so the caution compounds
+        and the content decays; after four or five review rounds nothing
+        specific survives.
 
         Args:
             state: Current analysis state
             current_plan: The existing plan to revise
             pi_feedback: PI's feedback on what to change
             completed_step_ids: IDs of steps that have been successfully executed (must not change)
+            pi_tasks: PI's assigned tasks for this round — still binding on the revision
+            overview: PI's overall strategy description
+            pi_modifications: PI's structured per-step suggestions from plan review
 
         Returns:
             Revised AnalysisPlan with revision_of pointing to current_plan
@@ -521,35 +629,51 @@ Return the plan as a JSON object:
         affected_steps = [s for s in current_plan.steps if s.id not in completed_step_ids]
         completed_steps = [s for s in current_plan.steps if s.id in completed_step_ids]
 
-        completed_text = truncate_for_llm(
-            "\n".join(
-                f"  [COMPLETED - DO NOT CHANGE] Step {s.id}: {s.title} ({s.method})"
-                for s in completed_steps
-            ),
-            max_chars=12_000,
+        completed_text = render_plan_steps(
+            completed_steps, "COMPLETED - DO NOT CHANGE", budget=_COMPLETED_STEPS_BUDGET
         )
-        affected_text = truncate_for_llm(
-            "\n".join(
-                f"  [TO REVISE] Step {s.id}: {s.title} ({s.method})"
-                for s in affected_steps
-            ),
-            max_chars=16_000,
+        affected_text = render_plan_steps(
+            affected_steps, "TO REVISE", budget=_AFFECTED_STEPS_BUDGET
         )
         bounded_feedback = truncate_for_llm(str(pi_feedback), max_chars=12_000)
 
+        tasks_text = truncate_for_llm(
+            "\n".join(f"- {t}" for t in (pi_tasks or [])),
+            max_chars=8_000,
+        )
+        goals_context = ""
+        if tasks_text or overview:
+            goals_context = "\n## PI's Analysis Goals (still binding on this revision)\n"
+            if overview:
+                goals_context += f"Overview: {truncate_for_llm(str(overview), max_chars=4_000)}\n"
+            if tasks_text:
+                goals_context += f"\nTasks:\n{tasks_text}\n"
+
+        modifications_text = render_pi_modifications(pi_modifications)
+        modifications_context = ""
+        if modifications_text:
+            modifications_context = (
+                "\n## PI's Step-Level Modifications (apply each one)\n" + modifications_text + "\n"
+            )
+
+        research_context = self._research_context_block(state)
         stage_guidance = _stage_guidance_text(current_plan.stage or "full")
 
         prompt = f"""Revise an analysis plan based on PI feedback. Only modify affected steps — completed steps are locked.
-
+{research_context}
+{goals_context}
 ## PI's Feedback
 {bounded_feedback}
-
+{modifications_context}
 ## Completed Steps (LOCKED)
 {completed_text}
 
 ## Steps To Revise
 {affected_text}
 {stage_guidance}
+
+## Evidence Policy
+{MECHANISM_EVIDENCE_POLICY}
 
 ## Revision Rules
 - Stay strictly within the stage scope above — do NOT introduce steps that belong to a different stage.
@@ -558,6 +682,9 @@ Return the plan as a JSON object:
 - You may insert NEW steps between completed steps and revised steps.
 - Every step ID and every depends_on entry MUST be a positive integer. Do not use labels such as "S2_Step_1".
 - Updated plan must maintain logical dependency order.
+- The feedback tells you how to analyse, not what to stop analysing. Every entity, gene, pathway, module, hypothesis, and named mechanism present in the current plan, the PI's tasks, or the research context MUST still appear in the revised plan unless the feedback explicitly says to drop it. Dropping one because the evidence for it is weak is not permitted — keep the step and state the limitation.
+- Return every step with a populated input, expected_output, and rationale. Do not replace a concrete list with a category label: "curated gene sets for A, B, C" must not become "relevant gene modules".
+- A caution about how strongly a result may be interpreted is not a reason to stop measuring it.
 
 Return the FULL revised plan as JSON (include ALL steps, both completed and revised):
 {{

@@ -17,7 +17,11 @@ from ..services.interaction_record_capture import (
 )
 from ..utils.llm_client import UpstreamExhaustedError
 from ..utils.formatting import truncate_for_llm
-from .direction_coverage import current_lineage_id, normalize_direction_key
+from .direction_coverage import (
+    current_lineage_id,
+    normalize_direction_key,
+    uncovered_direction_requirements,
+)
 from .helpers import _diff_plan_steps, _get_task_text, _normalize_tasks, _DIFF_LABELS, wait_with_skip_time
 from .provenance import restore_provenance_id
 from .retry import MAX_NODE_RETRIES, _retry_backoff_delay, with_retry
@@ -765,10 +769,22 @@ class PlanningMixin:
                             f"User feedback: {user_feedback}" if user_feedback else "",
                         ) if part]
                         combined_feedback = "\n\n".join(feedback_parts)
+                        # Feedback accumulates every round; the plan is re-derived
+                        # every round. Without the tasks and the step-level asks
+                        # travelling alongside it, the caution compounds while the
+                        # content it was written about decays out of the plan.
+                        all_pi_modifications = [
+                            {"round": d.get("round"), "modifications": d.get("pi_modifications") or []}
+                            for d in dialogue_history
+                            if d.get("pi_modifications")
+                        ]
                         plan = await self.bioinformatics_agent.revise_plan_incrementally(
                             state=analysis_state,
                             current_plan=existing_plan,
                             pi_feedback=combined_feedback,
+                            pi_tasks=bioinf_tasks,
+                            overview=overview,
+                            pi_modifications=all_pi_modifications,
                         )
                         # Clear only after a successful revise call.
                         if user_feedback:
@@ -1025,7 +1041,41 @@ class PlanningMixin:
                 analysis_state.status = TaskStatus.FAILED
                 await self._send_state_sync(analysis_state, "planning_aborted")
 
+        await self._report_direction_coverage_gaps(analysis_state)
         return state
+
+    async def _report_direction_coverage_gaps(self, analysis_state) -> None:
+        """Surface direction requirements the settled plan does not address.
+
+        Direction coverage elsewhere answers "did a round run for this
+        direction". It cannot tell the user that the plan about to execute
+        dropped the questions the direction was selected to resolve — which is
+        what a long revision dialogue tends to produce. Reported at the plan
+        review gate so the user can add them back before execution starts.
+        """
+        plan = analysis_state.current_plan
+        if plan is None or not getattr(plan, "steps", None):
+            return
+        try:
+            gaps = uncovered_direction_requirements(analysis_state, plan)
+        except Exception:
+            logger.warning(
+                "[%s] Direction coverage check failed", self.session_id, exc_info=True
+            )
+            return
+        if not gaps:
+            return
+        logger.warning(
+            "[%s] Settled plan does not address %d direction requirement(s)",
+            self.session_id, len(gaps),
+        )
+        preview = "\n".join(f"- {item}" for item in gaps[:8])
+        await self._send_message(
+            "status",
+            "Plan review: the following questions this direction was selected to "
+            f"resolve are not addressed by the plan ({len(gaps)} total):\n{preview}",
+            AgentType.PI,
+        )
 
     async def _approve_plan(
         self, state: WorkflowState, plan, analysis_state, action: str

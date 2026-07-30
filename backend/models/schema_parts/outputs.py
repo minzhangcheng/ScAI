@@ -51,6 +51,13 @@ class RoundResult(BaseModel):
     conflicts: List[Dict[str, Any]] = Field(default_factory=list)
     next_steps: List[str] = Field(default_factory=list)
     new_findings: bool = True
+    # The PI's own verdict on whether the direction is answered. It has always
+    # been asked for in the synthesis prompt and was previously dropped on parse,
+    # so reports could not distinguish "the science concluded" from "the round
+    # budget ran out". Advisory only: convergence remains bookkeeping-driven,
+    # because in practice this is False almost every round.
+    should_stop: bool = False
+    stop_reason: str = ""
     agents_for_next_round: List[str] = Field(
         default_factory=lambda: ["bioinformatics", "pathology", "biochemistry", "literature"]
     )
@@ -194,6 +201,8 @@ class WebSocketMessage(BaseModel):
         # Supervisor monitoring
         "supervisor_feedback", "supervisor_checkpoint", "supervisor_summary",
         "snapshot_count",
+        # Plan-vs-evidence audit and the bounded supplementary pass that follows it
+        "post_execution_review",
         # Collaborative planning
         "plan_review", "plan_approved",
         # Exploration failure (likely a data problem) — prompt user to check data

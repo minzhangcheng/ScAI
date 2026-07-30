@@ -212,6 +212,8 @@ INNOVATION PHASE — focused synthesis:
                 conflicts=data.get("conflicts", []),
                 next_steps=self._extract_next_steps(data),
                 new_findings=data.get("new_findings", True),
+                should_stop=bool(data.get("should_stop", False)),
+                stop_reason=str(data.get("stop_reason", "") or ""),
                 agents_for_next_round=agents_next,
                 reanalysis_agents=reanalysis_next,
             )

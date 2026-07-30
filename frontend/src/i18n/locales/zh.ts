@@ -409,6 +409,10 @@ Please provide a detailed literature review report with specific citation inform
     roundInputPlaceholder: '输入补充说明或对下一步分析的指导意见...',
     fileUploadedTo: '发送给',
     removeFile: '移除',
+    roundRequestSupplementary: '请求补充分析',
+    roundSupplementaryRunning: '补充分析中...',
+    roundSupplementaryHint: '立即执行并返回本审阅节点，不会结束本轮分析。',
+    roundSupplementaryPlaceholder: '例如：请针对本轮的关键发现补充一项对比分析，并检索相关文献',
 
     // Chat Panel
     chatPlaceholder: '输入消息...',

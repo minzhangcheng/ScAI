@@ -1,5 +1,6 @@
 import inspect
 
+from backend.agents.bioinformatics_agent import BioinformaticsAgent
 from backend.agents.pi_agent import PIAgent
 from backend.agents.supervisor_agent import SupervisorAgent
 from backend.services.report.planning import PlanningMixin
@@ -16,6 +17,30 @@ def test_shared_policy_is_domain_neutral_and_balances_recall_with_caution():
     assert "causal mechanism execution" in low
     for hardcoded_example in ("ferroptosis", "apoptosis", "cuproptosis", "nrf2"):
         assert hardcoded_example not in low
+
+
+def test_policy_leads_with_recall_so_caution_does_not_dominate():
+    """Order matters: the clause an agent reads first is the one it applies.
+
+    Leading with the caution produced agents that described a mechanism their
+    own results had already identified in generic terms rather than naming it.
+    """
+    low = MECHANISM_EVIDENCE_POLICY.lower()
+    assert low.index("name it explicitly") < low.index("do not assume or privilege")
+    assert "never drop one silently" in low
+
+
+def test_bioinformatics_planning_prompts_use_shared_policy():
+    """Planning is where a mechanism is scheduled to be measured at all.
+
+    The policy previously reached only the PI's prompts, so plan drafting and
+    revision — the steps that decide what gets computed — ran without it.
+    """
+    for method in (
+        BioinformaticsAgent.generate_analysis_plan,
+        BioinformaticsAgent.revise_plan_incrementally,
+    ):
+        assert "MECHANISM_EVIDENCE_POLICY" in inspect.getsource(method)
 
 
 def test_pi_discovery_and_synthesis_prompts_use_shared_policy():

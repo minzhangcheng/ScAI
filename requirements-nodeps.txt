@@ -1,0 +1,43 @@
+# ============================================
+# Dependency-isolated installs (pip --no-deps)
+# ============================================
+#
+# Packages listed here are installed WITHOUT their declared dependencies,
+# after requirements.txt has resolved the full graph. Use this file only when
+# an upstream package declares a constraint that is provably tighter than its
+# code requires, and that constraint would otherwise force a downgrade of a
+# pin this project deliberately holds.
+#
+# Every entry MUST document:
+#   1. the offending upstream constraint,
+#   2. why the local pin cannot move,
+#   3. the empirical evidence that the code works anyway.
+#
+# --------------------------------------------------------------------------
+# decoupler 1.8.0
+# --------------------------------------------------------------------------
+# Upstream constraint : numba>=0.60.0,<0.61.0   (poetry "^0.60.0")
+# Local pin held      : numba==0.61.2, numpy==1.26.4 (see requirements.txt)
+#
+# Why the pin cannot move:
+#   numpy/numba/llvmlite are pinned as a set against AnnData/Scanpy; moving
+#   them breaks the analysis runtime. decoupler >=1.9.0 additionally requires
+#   numpy>=2, which is out of the question for the same reason.
+#
+# Why 1.8.0 rather than the previously pinned 1.6.0:
+#   decoupler 1.6.0 calls np.arange(start=..., stop=..., step=..., dtype=...)
+#   inside an eagerly signature-compiled @nb.njit in method_gsva.py and
+#   method_aucell.py. numba 0.61 rejects the positional-only `start` passed as
+#   a keyword, and because the njit carries an explicit signature it compiles
+#   at import time -- so `import decoupler` itself raises TypingError. That
+#   takes down CollecTRI, PROGENy, DoRothEA, OmniPath resource access and all
+#   TF-activity methods, not just GSVA. decoupler 1.7.0 removed the keyword
+#   form; 1.8.0 is the newest release that still declares numpy>=1,<2.
+#
+# Empirical verification (decoupler 1.8.0 + numba 0.61.2 + numpy 1.26.4):
+#   `import decoupler` succeeds, and get_collectri / get_progeny /
+#   get_dorothea / get_resource / run_ulm / run_mlm / run_gsva / run_aucell /
+#   run_ora are all importable.
+#
+# Re-check this entry whenever numba or numpy is bumped.
+decoupler==1.8.0

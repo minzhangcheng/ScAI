@@ -229,3 +229,78 @@ def format_revision_history(entries: List[Dict[str, Any]], include_reviewer: boo
             lines.append(f"  Round {r}: {fb}")
 
     return "Previous feedback:\n" + "\n".join(lines)
+
+
+# --- analysis-plan step rendering -------------------------------------------
+
+# Field caps tried largest-first until the rendered block fits its budget.
+PLAN_STEP_FIELD_CAPS = (600, 400, 260, 160, 90)
+
+_PLAN_STEP_FIELDS = (
+    ("Method", "method"),
+    ("Input", "input"),
+    ("Output", "expected_output"),
+    ("Rationale", "rationale"),
+)
+
+
+def _collapse(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def render_plan_steps(steps: Any, tag: Any = None, *, budget: int = 24_000) -> str:
+    """Render analysis-plan steps with their full field payload for a prompt.
+
+    Never drops a step. Clipping a joined step list at a character budget
+    truncates the tail, and the tail is where a plan's interpretation and
+    grading steps live; shrinking the per-field cap instead keeps every step's
+    identity and intent visible. That distinction is the whole point — a step
+    rendered as ``title (method)`` tells a revising model nothing about what it
+    analyses, so the model regenerates the missing fields generically.
+
+    ``tag`` labels each step: a fixed string, or ``None`` to use the step's own
+    ``status``.
+    """
+    step_list = list(steps or [])
+    if not step_list:
+        return ""
+
+    # Normalize once. The cap only decides where to cut, so re-collapsing
+    # whitespace for every candidate cap is pure repeat work.
+    normalized = [
+        (
+            str(tag) if tag is not None else str(getattr(s, "status", "pending")),
+            s.id,
+            _collapse(getattr(s, "title", "")),
+            [(label, _collapse(getattr(s, attr, ""))) for label, attr in _PLAN_STEP_FIELDS],
+            list(getattr(s, "depends_on", None) or []),
+        )
+        for s in step_list
+    ]
+
+    def render(cap: Optional[int]) -> str:
+        blocks = []
+        for label, step_id, title, fields, depends in normalized:
+            lines = [f"  [{label}] Step {step_id}: {title}"]
+            if cap is None:
+                if fields[0][1]:
+                    lines[0] += f" ({fields[0][1][:120]})"
+            else:
+                for name, value in fields:
+                    if value:
+                        clipped = value if len(value) <= cap else value[: cap - 1].rstrip() + "..."
+                        lines.append(f"    {name}: {clipped}")
+                if depends:
+                    lines.append(f"    Depends on: {depends}")
+            blocks.append("\n".join(lines))
+        return "\n".join(blocks)
+
+    for cap in PLAN_STEP_FIELD_CAPS:
+        block = render(cap)
+        if len(block) <= budget:
+            return block
+    logger.warning(
+        "%d plan steps exceed the %d-char budget even at the tightest field cap; "
+        "rendering titles and methods only", len(step_list), budget,
+    )
+    return render(None)

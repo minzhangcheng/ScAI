@@ -93,8 +93,14 @@ celltypist>=1.6.0,<2.0
 # ============================================
 # Pathway & Gene Set Analysis
 # ============================================
-decoupler==1.6.0
+# decoupler is installed from requirements-nodeps.txt with --no-deps.
+# 1.6.0 cannot import under the pinned numba 0.61.2; 1.8.0 fixes the code
+# but declares numba<0.61. See requirements-nodeps.txt for the full rationale.
 gseapy>=1.1.0,<2.0
+
+# Methodological rule corpus (backend/data/method_rules.yaml) is YAML.
+# Present transitively already; pinned explicitly because backend code imports it.
+pyyaml>=6.0,<7.0
 
 # ============================================
 # Gene Regulatory Networks

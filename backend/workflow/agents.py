@@ -385,6 +385,24 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
                 for i in sorted(seen_fig_names.values())
             ]
 
+        # Step 2b: audit the approved plan against what actually ran, then — only
+        # on hard structural signals — let the PI commission a bounded repair pass.
+        # Both run inside this node so the round still produces exactly one
+        # RoundResult for one direction: max_rounds, the direction queue and the
+        # integration bookkeeping are untouched. Neither can fail the round.
+        audit_summary = self._audit_round_plan_execution(analysis_state, result)
+        review_meta, review_merge = await self._run_post_execution_review(
+            analysis_state, result, audit_summary, planning_stage
+        )
+        if review_merge:
+            all_findings, all_figures = self._merge_supplementary_into_round(
+                analysis_state, result, all_findings, all_figures, review_merge
+            )
+            # Re-audit so the persisted plan reflects the repair, not the state
+            # that triggered it.
+            audit_summary = self._audit_round_plan_execution(analysis_state, result)
+            review_meta["plan_audit"] = audit_summary
+
         # Step 3: PI summarizes results
         await self._send_message("status", "PI is reviewing analysis results...", AgentType.PI)
 
@@ -400,6 +418,22 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             "steps_executed": result.get("steps_executed", 0),
             "status": result.get("status", "completed"),
             "mechanism_programs": result.get("mechanism_programs", []),
+            # Evidence binding must survive this dict. It is read by three
+            # consumers that all fail silently without it: the completeness gate in
+            # derive_round_completion_status (which withholds direction-coverage
+            # eligibility from a round whose findings are not bound to successful
+            # executions), the evidence note handed to the PI at synthesis, and the
+            # report's hedging. Dropping the keys made every round look verified,
+            # because each of those consumers tests `is False` and an absent key
+            # reads as None.
+            "evidence_verified": result.get("evidence_verified"),
+            "evidence_execution_ids": list(result.get("evidence_execution_ids") or []),
+            # The executing agent's own view of what is left undone. It is present
+            # in every real report_findings call and used to be dropped here, so
+            # the PI synthesizing the round never saw it.
+            "agent_suggestions": self._collect_agent_suggestions(result),
+            "plan_audit": audit_summary,
+            "post_execution_review": review_meta,
         }
 
         _saved_fig_count = count_saved_figures(result.get("analysis_log", []))

@@ -218,7 +218,7 @@ except ImportError as e:
 
         Args:
             sandbox: LocalJupyterSandbox instance
-            function_path: e.g. 'scanpy.tl.umap', 'decoupler.op.collectri'
+            function_path: e.g. 'scanpy.tl.umap', 'decoupler.get_collectri'
             question: optional specific question about the API
 
         Returns:

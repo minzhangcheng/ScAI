@@ -79,6 +79,18 @@ else
         "${PIP_CMD[@]}" "${PIP_ARGS[@]}"
 fi
 
+# Packages whose declared constraints are provably tighter than their code
+# requires must be installed after the main graph, without dependencies, or
+# pip would downgrade a pin this project deliberately holds. Rationale for
+# every entry lives in requirements-nodeps.txt.
+if [ -f "$APP_DIR/requirements-nodeps.txt" ]; then
+    NODEPS_ARGS=(install -q --no-deps -r "$APP_DIR/requirements-nodeps.txt")
+    if [ -n "$PIP_INDEX_URL" ]; then
+        NODEPS_ARGS+=(-i "$PIP_INDEX_URL")
+    fi
+    "${PIP_CMD[@]}" "${NODEPS_ARGS[@]}"
+fi
+
 # ── Node.js dependencies ─────────────────────────────────────────
 # Symlink node_modules from dep volume into frontend directory
 mkdir -p "$NODE_MODULES_DIR"

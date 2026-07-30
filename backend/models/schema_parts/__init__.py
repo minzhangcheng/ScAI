@@ -11,6 +11,7 @@ from .enums import (  # noqa: F401
     FigureReviewStatus,
 )
 from .analysis import (  # noqa: F401
+    ScoringPlan,
     AgentError,
     AgentMessage,
     CodeExecution,

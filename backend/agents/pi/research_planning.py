@@ -12,6 +12,7 @@ import logging
 logger = logging.getLogger(__name__)
 from ...models.schemas import AnalysisState, RoundResult, DATA_TYPE_SCRNASEQ
 from ...constants import PI_REVIEW_FALLBACK_DECISION
+from ...utils.formatting import render_plan_steps
 
 from .shared import (  # noqa: F401
     _CONTROL_SIGNAL_RESULTS,
@@ -42,15 +43,10 @@ class ResearchPlanningMixin:
             Dict with keys: decision ("approved"/"revise"/"reject"), feedback (str),
             modifications (List[Dict] with step_id + suggestion)
         """
-        steps_text = "\n".join(
-            f"  Step {s.id}: {s.title}\n"
-            f"    Method: {s.method}\n"
-            f"    Input: {s.input}\n"
-            f"    Output: {s.expected_output}\n"
-            f"    Rationale: {s.rationale}\n"
-            f"    Depends on: {s.depends_on}"
-            for s in plan.steps
-        )
+        # Shared with the bioinformatics planner so the two sides of the
+        # dialogue read the same rendering, and so a long plan shrinks its
+        # fields to fit rather than losing its tail.
+        steps_text = render_plan_steps(plan.steps)
 
         decision_points = "\n".join(f"  - {d}" for d in plan.key_decision_points)
 
@@ -415,16 +411,42 @@ Respond in JSON:
         Args:
             state: Current analysis state
             user_request: User's free-text description of what additional analysis they want
-            context: "annotation" or "direction" - which HITL checkpoint
+            context: "annotation", "direction" or "round" - which HITL checkpoint
 
         Returns:
             Dict with keys: bioinformatics_tasks, literature_topics, summary
         """
-        context_desc = (
-            "cell type annotation confirmation (the user wants more information before confirming cluster annotations)"
-            if context == "annotation"
-            else "research direction selection (the user wants more information before choosing innovation directions)"
-        )
+        # The round checkpoint used to fall into the `direction` branch, so the PI
+        # was told it was choosing research directions while the user was in fact
+        # asking for more work on a round that had just finished — and it received
+        # none of that round's results to plan against.
+        if context == "annotation":
+            context_desc = ("cell type annotation confirmation (the user wants more information "
+                            "before confirming cluster annotations)")
+        elif context == "round":
+            context_desc = ("review of a completed analysis round (the round's results are already "
+                            "reported; the user is asking for additional analysis on the SAME "
+                            "research topic before the workflow moves on)")
+        else:
+            context_desc = ("research direction selection (the user wants more information before "
+                            "choosing innovation directions)")
+
+        round_context = ""
+        if context == "round":
+            last_round = state.round_results[-1] if state.round_results else None
+            direction = (getattr(state, "current_round_direction", "") or "").strip()
+            bits = []
+            if direction:
+                bits.append(f"- Research direction this round: {direction}")
+            if last_round is not None:
+                if last_round.pi_summary:
+                    bits.append(f"- What this round concluded: {last_round.pi_summary[:1200]}")
+                findings = list(last_round.bioinformatics_findings or [])[:10]
+                if findings:
+                    bits.append("- Bioinformatics findings already reported:\n"
+                                + "\n".join(f"    - {str(f)[:300]}" for f in findings))
+            if bits:
+                round_context = "\n\nResults this request follows on from:\n" + "\n".join(bits)
 
         prompt = f"""You are the PI Agent coordinating a supplementary analysis requested by the user.
 
@@ -437,6 +459,7 @@ Current analysis state:
 - Round: {state.current_round}
 - Phase: {state.analysis_phase}
 - Clusters annotated: {len(state.annotation_state.cluster_annotations) if state.annotation_state else 0}
+{round_context}
 
 Based on the user's request, plan specific supplementary analysis tasks.
 Return a JSON object with these keys (empty lists for agents that don't need to run):

@@ -110,9 +110,57 @@ class ScoreDefinition(BaseModel):
     description: str         # What the score measures biologically
     parameters: Dict[str, Any] = Field(default_factory=dict)
     gene_list: List[str] = Field(default_factory=list)
-    gene_list_source: str = ""  # e.g., "curated gene set"
+    gene_list_source: str = ""  # controlled vocabulary, see services/gene_set_provenance
+    # Parsed form of gene_list_source. Empty when the score predates provenance
+    # enforcement or carries no gene panel at all.
+    provenance: Dict[str, Any] = Field(default_factory=dict)
+    # Nominal panel size and how many genes actually mapped into the analysed
+    # matrix. n_genes_matched is what governs power; without it a panel that
+    # looks large can be almost entirely absent from the data.
+    n_genes: int = 0
+    n_genes_matched: Optional[int] = None
+    # Result of services.gene_set_provenance.assess_panel_power.
+    power: Dict[str, Any] = Field(default_factory=dict)
+    # Plan this score was registered against, and whether the scored panel
+    # still matched the frozen one. Empty plan_id means the score predates
+    # plan enforcement or carries no gene panel.
+    plan_id: str = ""
+    panel_hash: str = ""
+    plan_drift: Dict[str, Any] = Field(default_factory=dict)
     round_number: int = 0
     timestamp: datetime = Field(default_factory=datetime.now)
+
+class ScoringPlan(BaseModel):
+    """A scoring plan frozen before its result is known.
+
+    Curating a gene panel is a legitimate judgement; revising it after seeing
+    the enrichment result is selection on the outcome. Freezing the panel makes
+    the difference auditable -- see services/analysis_plan for what this does
+    and does not prove.
+    """
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    score_name: str                    # links the plan to the score it governs
+    method: str                        # intended computation
+    hypothesis: str = ""               # what this score is meant to test
+    falsifier: str = ""                # what result would argue against it
+    # The frozen panel and its digest. panel_hash is what register_score checks.
+    panel_genes: List[str] = Field(default_factory=list)
+    panel_hash: str = ""
+    panel_source: str = ""             # provenance of the panel as scored
+    # The unedited database set this panel was derived from, when there is one.
+    # Keeping it lets the report show the curated and original side by side
+    # instead of only whichever one was finally used.
+    baseline_genes: List[str] = Field(default_factory=list)
+    baseline_source: str = ""
+    edit_operations: List[Dict[str, Any]] = Field(default_factory=list)
+    # Every gene set intended to go into the same multiple-testing correction.
+    # GSEA q-values depend on which other sets share the call, so a family that
+    # is not declared cannot be checked.
+    testing_family: List[str] = Field(default_factory=list)
+    registered_at_step: int = 0
+    round_number: int = 0
+    timestamp: datetime = Field(default_factory=datetime.now)
+
 
 class TreatmentGroup(BaseModel):
     """A treatment/experimental group definition"""

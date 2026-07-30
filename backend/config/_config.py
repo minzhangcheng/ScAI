@@ -426,6 +426,33 @@ class SystemConfig(BaseModel):
         description="Max code-generation iterations for the annotation validation executor (hard-capped at 8 in code).",
     )
 
+    enable_post_execution_review: bool = Field(
+        default=True,
+        description="Enable the gated post-execution review (plan-versus-evidence audit -> PI triage -> restricted supplementary execution -> PI re-assessment) at the end of a bioinformatics execution. The plan audit itself always runs; this flag only controls the supplementary pass.",
+    )
+    post_execution_review_max_tasks: int = Field(
+        default=5,
+        ge=0,
+        le=10,
+        description="Max supplementary tasks the PI may commission per execution. This is the cost ceiling: a PI asked what else could be done proposes something every time, so the budget is fixed here rather than left to its judgment. 0 disables commissioning while keeping the audit.",
+    )
+    post_execution_review_max_iterations: int = Field(
+        default=5,
+        ge=1,
+        le=8,
+        description="Max code-generation iterations for the supplementary executor (hard-capped at 8 in code).",
+    )
+    post_execution_review_timeout_seconds: int = Field(
+        default=0,
+        ge=0,
+        description="Wall-clock budget (seconds) for ONE supplementary step — its code generation, its execution and the main-object invariant check. 0 (default) derives it from sandbox_timeout plus an LLM allowance, so a heavy analysis (GRN inference, deconvolution training, full ligand-receptor aggregation) gets its whole allowance rather than inheriting what earlier steps left over. Individual cells are also bounded and interrupted by sandbox_timeout itself. A step that overruns interrupts the kernel and is reported back to the executor, which then picks a cheaper route — it does not abandon the pass.",
+    )
+    post_execution_review_total_timeout_seconds: int = Field(
+        default=0,
+        ge=0,
+        description="Wall-clock ceiling (seconds) for the whole supplementary pass. 0 (default) derives it as the sum of the per-step budgets, i.e. it never becomes the thing that cuts a step off and only backstops a pass that never converges. Lower it to cap the worst case (all steps running to their limit); it is always raised to at least one step's budget.",
+    )
+
     # Snapshot V2 settings (V2 is the authoritative lifecycle; V1 restore cut over)
     snapshot_v2_enabled: bool = Field(
         default=_ENABLE_SNAPSHOT_V2,

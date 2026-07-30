@@ -43,6 +43,7 @@ from .schema_parts.enums import (  # noqa: F401
     FigureReviewStatus,
 )
 from .schema_parts.analysis import (  # noqa: F401
+    ScoringPlan,
     AgentError,
     AgentMessage,
     CodeExecution,
@@ -353,6 +354,16 @@ class AnalysisState(BaseModel):
 
     # Score definitions (methodology tracking for report transparency)
     score_definitions: List[ScoreDefinition] = Field(default_factory=list)
+
+    # Scoring plans frozen before their results were known. register_score cites
+    # one of these; the handler re-hashes the panel to detect post-hoc revision.
+    scoring_plans: List[ScoringPlan] = Field(default_factory=list)
+
+    # Post-execution review records, one per audited bioinformatics execution.
+    # Carries the plan-versus-evidence audit and, when a supplementary pass ran,
+    # its plan and outcome. Keyed by a deterministic attempt id so node retry and
+    # snapshot restore reuse a completed review instead of paying for it twice.
+    post_execution_reviews: List[Dict[str, Any]] = Field(default_factory=list)
 
     # Agent prompts (can be customized per session)
     custom_prompts: Dict[str, str] = Field(default_factory=dict)
