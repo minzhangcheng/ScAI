@@ -68,7 +68,27 @@ def test_handler_records_power_assessment():
     block = src[start:end]
     assert "assess_panel_power" in block
     assert "power=power" in block
-    assert "n_genes=len(gene_list)" in block
+    assert "n_genes=len(panel_members)" in block
+
+
+def test_power_is_assessed_on_the_frozen_panel_not_the_reported_excerpt():
+    """gene_list is documented as an excerpt; the frozen plan is the panel.
+
+    Sizing power from gene_list understates every panel longer than the excerpt
+    cap, which is exactly the case where the underpowered flag matters. The
+    handler must take its counts and its hash from plan.panel_genes when a plan
+    is cited, and use gene_list only for the drift comparison.
+    """
+    src = inspect.getsource(bio_mod)
+    start = src.index('elif tool_name == "register_score":')
+    end = src.index('elif tool_name == "register_mechanism_programs":', start)
+    block = src[start:end]
+    assert "panel_members = list(plan.panel_genes)" in block
+    assert "assess_panel_power(len(panel_members)" in block
+    assert "panel_hash(panel_members)" in block
+    assert "diff_panels(plan.panel_genes, gene_list)" in block, (
+        "drift must still compare the frozen panel against what was reported"
+    )
 
 
 def test_score_definition_carries_provenance_fields():

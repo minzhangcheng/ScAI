@@ -566,10 +566,14 @@ class SynthesisMixin:
                         "evidence_execution_ids": result.get("evidence_execution_ids", []),
                         "evidence_note": evidence_note,
                         "agent_suggestions": result.get("agent_suggestions", []),
+                        # n_unverifiable belongs here even though nothing acts on
+                        # it: without it the counts do not sum to n_steps, and a
+                        # coverage report that silently omits what it did not
+                        # check reads as a completeness claim the audit never made.
                         "plan_coverage": {
                             k: audit.get(k)
                             for k in ("n_steps", "n_completed", "n_skipped", "n_unmet",
-                                      "unmet_titles", "unmet_families")
+                                      "n_unverifiable", "unmet_titles", "unmet_families")
                             if audit.get(k) is not None
                         } or None,
                         "supplementary_pass": {

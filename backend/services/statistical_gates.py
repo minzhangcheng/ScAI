@@ -29,6 +29,12 @@ from .method_rules import rule_text
 #: versus 3 there are only 10, so nothing below ~0.1 is reachable at all.
 MIN_SAMPLES_PER_GROUP_FOR_PERMUTATION = 7
 
+#: Shared membership, as a fraction of the SMALLER panel, above which two panels
+#: tested together are disclosed as one line of evidence rather than two. Set at
+#: a majority: below it the panels still have independent content, above it the
+#: smaller one's result is mostly the larger one's result.
+PANEL_REDUNDANCY_CONTAINMENT = 0.5
+
 #: Wording that asserts a mechanism is absent. Matching is deliberately narrow:
 #: a false positive here blocks a legitimate finding, which is worse than
 #: missing one, since the underpowered caveat is attached to the score either
@@ -209,6 +215,44 @@ _ALT_INFERENCE = re.compile(
     r'|\b(?:fwer|family[-\s]wise\s+error)\b'
     r'|\bz\s*[=<>]\s*[-+]?[\d.]'
     r'|\bt\s*=\s*[-+]?[\d.]{2,})', re.I)
+
+
+#: Same grammar as _P_NUMERIC, but capturing the comparator and the number so a
+#: quoted value can be checked against the resolution the method could attain.
+_P_NUMERIC_VALUE = re.compile(
+    r'\b(?:p|p[-_ ]?val(?:ue)?s?|p[-_ ]?adj|padj|adj[-_. ]?p(?:[-_ ]?val(?:ue)?)?|'
+    r'adjusted\s+p(?:[-_ ]?val(?:ue)?)?|q|q[-_ ]?val(?:ue)?|fdr|bh)\b'
+    r'\s*(?:[-_ ]?adjusted)?\s*'
+    r'(?:([<>=~≤≥≈]{1,2})|\b(below|under|less\s+than|at\s+most|above|'
+    r'greater\s+than|at\s+least|of|was|were|is|are)\b'
+    r'|(?<=\s))\s*~?\s*(\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)', re.I)
+
+#: Comparators that already state the value as a bound. A floor reported as an
+#: inequality is the correct reporting, and must not be refused.
+_BOUNDED_COMPARATORS = ("<", "<=", "≤", "below", "under", "less than", "at most")
+
+#: Vocabulary specific to a resampling-based enrichment result. Used so the
+#: floor check cannot fire on an analytic p-value, which has no floor: a
+#: model-fit adjusted p-value may legitimately be arbitrarily small.
+_RESAMPLED_RESULT = re.compile(
+    r'\b(?:nes\b|gsea|pre-?rank(?:ed)?|enrichment\s+score|'
+    r'permutation|resampl(?:e|ed|ing)|bootstrap|monte\s*carlo)', re.I)
+
+#: Keys under which a resample count may have been declared on a score.
+_RESAMPLE_PARAM_KEYS = (
+    "n_resamples", "permutation_num", "n_perm", "nperm", "permutations",
+    "n_permutations", "n_bootstrap", "n_boot",
+)
+
+#: Conventional error-rate cutoffs. A repeated value equal to one of these is a
+#: threshold being restated, not a shared resolution floor.
+_CONVENTIONAL_CUTOFFS = (0.05, 0.01, 0.001, 0.1, 0.25, 0.2)
+
+#: Tolerance on the floor comparison, because a floor value is almost always
+#: quoted rounded: 1/501 is written "0.002". The next attainable value up is
+#: 2/501, roughly double, so this cannot reach a value that is genuinely above
+#: the floor -- it only catches the floor wearing fewer digits.
+_FLOOR_ROUNDING_TOLERANCE = 1.02
 
 
 def _has_p(clause):
@@ -712,6 +756,196 @@ def check_permutation_at_small_n(findings, score_definitions, samples_per_group)
     return out
 
 
+def _declared_resamples(score) -> Optional[int]:
+    """The resample count a score declared, or None when it declared none."""
+    params = getattr(score, "parameters", None) or {}
+    if not isinstance(params, dict):
+        return None
+    for key in _RESAMPLE_PARAM_KEYS:
+        if key not in params:
+            continue
+        try:
+            value = int(params[key])
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def _quoted_p_values(text):
+    """(comparator, value) for every p/q-like number stated in a text."""
+    out = []
+    for match in _P_NUMERIC_VALUE.finditer(str(text)):
+        symbol, word, number = match.group(1), match.group(2), match.group(3)
+        comparator = (symbol or word or "").strip().lower()
+        try:
+            out.append((comparator, float(number)))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def check_resampling_resolution(findings, score_definitions):
+    """A resampling p-value quoted below the resolution its draws can attain.
+
+    Three separate observations, deliberately at different severities.
+
+    The refusable one is narrow by construction: it fires only when the model
+    itself declared how many resamples it drew AND then quoted a value at or
+    under the floor those draws imply, as an equality rather than a bound. That
+    is a self-contradiction in the model's own record, not a judgement about the
+    analysis -- and the fix is a rewording it can perform without recomputing
+    anything.
+
+    The other two only advise. Absence of a declared count is left advisory
+    because the method kind is inferred by matching tokens in a free-text field,
+    and a mis-tokenised method must not cost a rejection. A shared value across
+    findings is advisory because a coincidence, however unlikely, is not an
+    error.
+    """
+    texts = _texts(findings)
+    if not texts:
+        return []
+
+    out = []
+    ranked = [s for s in (score_definitions or ()) if score_kind(s) == "ranked_enrichment"]
+    declared = {
+        getattr(s, "score_name", ""): _declared_resamples(s) for s in ranked
+    }
+    counts = [n for n in declared.values() if n]
+
+    # (1) A resampling result whose resolution is simply not on record.
+    undeclared = [name for name, n in declared.items() if name and not n]
+    if undeclared:
+        out.append(GateFinding(
+            gate="resample-count-undeclared",
+            rule_id="resampling-p-has-a-resolution-floor",
+            severity="advise",
+            subject=", ".join(sorted(undeclared)[:4]),
+            detail=(
+                "this score is a resampling-based enrichment, but no resample count "
+                "is on record for it, so the smallest p-value it could have produced "
+                "is unknown and a reader cannot tell an estimate from a bound. "
+                f"Re-register it with the count in parameters (any of: "
+                f"{', '.join(_RESAMPLE_PARAM_KEYS[:4])})."),
+        ))
+
+    # (2) A floor value quoted as though it were an estimate.
+    if counts:
+        floor = 1.0 / (min(counts) + 1)
+        for text in texts:
+            if not _RESAMPLED_RESULT.search(str(text)):
+                continue
+            for comparator, value in _quoted_p_values(text):
+                if comparator in _BOUNDED_COMPARATORS:
+                    continue
+                if value <= 0 or value > floor * _FLOOR_ROUNDING_TOLERANCE:
+                    continue
+                out.append(GateFinding(
+                    gate="p-below-resampling-resolution",
+                    rule_id="resampling-p-has-a-resolution-floor",
+                    also_see=("gene-permutation-is-anticonservative",),
+                    detail=(
+                        f"this finding states a resampling p-value of {value:g} as an "
+                        f"estimate, but the smallest value {min(counts)} resamples can "
+                        f"produce is {floor:.2g}. Every result at that value is tied "
+                        f"with every other one there, so the number carries no ordering "
+                        f"and no precision. State it as an inequality (p < "
+                        f"{floor:.2g}), rank on the effect statistic instead, or "
+                        f"re-run with more resamples."),
+                ))
+                break
+            if out and out[-1].gate == "p-below-resampling-resolution":
+                break
+
+    # (3) One value shared across several findings is the floor showing through.
+    repeated = {}
+    for text in texts:
+        for _, value in _quoted_p_values(text):
+            if value <= 0 or any(abs(value - c) < 1e-12 for c in _CONVENTIONAL_CUTOFFS):
+                continue
+            repeated.setdefault(value, 0)
+            repeated[value] += 1
+    tied = sorted(v for v, n in repeated.items() if n >= 3)
+    if tied:
+        out.append(GateFinding(
+            gate="adjusted-p-tied-across-results",
+            rule_id="resampling-p-has-a-resolution-floor",
+            severity="advise",
+            detail=(
+                f"the same p/q-value ({', '.join(f'{v:g}' for v in tied[:3])}) is quoted "
+                f"for three or more separate results. Independent tests do not normally "
+                f"agree to full precision; a shared value is usually a resolution floor, "
+                f"which multiplicity adjustment preserves. Say which results are tied and "
+                f"do not rank them against each other on that value."),
+        ))
+    return out
+
+
+def check_panel_redundancy(score_definitions, scoring_plans):
+    """Panels tested together whose membership is largely the same panel.
+
+    Advisory, never blocking, and the distinction matters. Overlap is not an
+    error: a broad set and a focused component of it are both legitimate tests,
+    and partitions of one parent set are subsets of each other by construction.
+    Refusing here would be the platform overruling a design decision it is not
+    entitled to make. What the platform IS entitled to do is refuse to let the
+    overlap go unstated, because that is what turns one observation into an
+    apparent agreement between two.
+
+    Containment rather than Jaccard: a small panel wholly inside a large one is
+    entirely redundant with it, yet scores low on Jaccard precisely because the
+    large panel has other members.
+    """
+    from .analysis_plan import panel_overlap
+
+    panels = []
+    for score in (score_definitions or ()):
+        name = str(getattr(score, "score_name", "") or "")
+        genes = list(getattr(score, "gene_list", None) or [])
+        if name and len(genes) >= MIN_PANEL_SIZE_FOR_NEGATIVE_CLAIM:
+            panels.append((name, genes))
+    if len(panels) < 2:
+        return []
+
+    seen = set()
+    pairs = []
+    for i, (name_a, genes_a) in enumerate(panels):
+        for name_b, genes_b in panels[i + 1:]:
+            if name_a == name_b:
+                continue
+            key = tuple(sorted((name_a, name_b)))
+            if key in seen:
+                continue
+            overlap = panel_overlap(genes_a, genes_b)
+            if overlap["containment"] < PANEL_REDUNDANCY_CONTAINMENT:
+                continue
+            seen.add(key)
+            pairs.append((key, overlap))
+    if not pairs:
+        return []
+
+    pairs.sort(key=lambda item: -item[1]["containment"])
+    lines = [
+        f"{a} and {b} share {o['n_shared']} of {min(o['n_a'], o['n_b'])} members "
+        f"(containment {o['containment']:.2f})"
+        for (a, b), o in pairs[:4]
+    ]
+    return [GateFinding(
+        gate="overlapping-panels",
+        rule_id="overlapping-sets-are-not-independent-evidence",
+        severity="advise",
+        detail=(
+            "these panels were tested in the same analysis and are largely the same "
+            "panel: " + "; ".join(lines) + ". Their statistics are not independent, so "
+            "adjusting across them as separate tests understates the error rate, and "
+            "reporting both results side by side reads as convergence where there is "
+            "one observation. Name one as the test and the other as a sensitivity "
+            "analysis, or show that the members they do not share carry the result."),
+    )]
+
+
 def check_analysis_unit(findings, samples_per_group):
     """A single sample per condition cannot support a condition-level claim."""
     if not samples_per_group:
@@ -768,6 +1002,10 @@ def run_gates(
         check_declared_testing_family(score_definitions, scoring_plans))
     report.findings.extend(
         check_permutation_at_small_n(findings, score_definitions, samples_per_group))
+    report.findings.extend(
+        check_resampling_resolution(findings, score_definitions))
+    report.findings.extend(
+        check_panel_redundancy(score_definitions, scoring_plans))
     report.findings.extend(check_analysis_unit(findings, samples_per_group))
     report.findings.extend(check_cell_level_inference(findings, samples_per_group))
     report.findings.extend(check_ora_background(score_definitions))

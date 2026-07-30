@@ -355,6 +355,7 @@ class PostExecutionReviewMixin:
         await self._send_message("status", "PI is reviewing execution completeness...", AgentType.PI)
         agent_suggestions = self._collect_agent_suggestions(result)
         direction = str(getattr(analysis_state, "current_round_direction", "") or "")
+        session_names = await self._collect_session_names(analysis_state, result, has_runtime)
         try:
             raw_plan = await self.pi_agent.review_round_execution(
                 state=analysis_state,
@@ -367,6 +368,7 @@ class PostExecutionReviewMixin:
                 is_terminal_round=is_terminal,
                 max_tasks=max_tasks,
                 trigger_reason=reason,
+                session_names=session_names,
             )
         except Exception as e:
             logger.warning(f"[{self.session_id}] post-execution review planning failed: {e}")
@@ -569,6 +571,71 @@ class PostExecutionReviewMixin:
                 if len(suggestions) >= _MAX_AGENT_SUGGESTIONS:
                     return suggestions
         return suggestions
+
+    async def _collect_session_names(
+        self, analysis_state, result: Dict[str, Any], has_runtime: bool
+    ) -> Dict[str, Any]:
+        """The identifiers this session actually holds, for the review prompt.
+
+        The PI is asked for tasks specific enough to execute unmodified, and is
+        otherwise given only prose to write them from — so it names what a task
+        of that shape would plausibly be called. Every such guess is an iteration
+        of a budget in single digits. The names are already in `AnalysisState` and
+        one kernel round-trip away; this assembles them.
+
+        Never raises and never blocks the review: an empty dict renders as no
+        block at all, which leaves the previous behaviour exactly as it was.
+        """
+        names: Dict[str, Any] = {}
+
+        try:
+            scores = [
+                str(getattr(s, "score_name", "") or "")
+                for s in (getattr(analysis_state, "score_definitions", None) or [])
+            ]
+            registered = [s for s in scores if s]
+            if registered:
+                # Reverse order: the scores this round registered are the ones a
+                # repair task will reach for, and they are appended last.
+                names["registered_scores"] = list(dict.fromkeys(registered[::-1]))
+        except Exception as e:
+            logger.debug(f"[{self.session_id}] score-name collection failed: {e}")
+
+        try:
+            artifacts = []
+            for figure in (result.get("figures") or []):
+                label = figure.get("filename") or figure.get("name") if isinstance(figure, dict) else figure
+                if label:
+                    artifacts.append(str(label))
+            for table in (result.get("tables") or []):
+                label = table.get("filename") or table.get("name") if isinstance(table, dict) else table
+                if label:
+                    artifacts.append(str(label))
+            if artifacts:
+                names["artifacts"] = list(dict.fromkeys(artifacts))
+        except Exception as e:
+            logger.debug(f"[{self.session_id}] artifact-name collection failed: {e}")
+
+        if not has_runtime:
+            return names
+
+        try:
+            metadata = await self.bioinformatics_agent.introspect_validation_metadata(None)
+        except Exception as e:
+            logger.debug(f"[{self.session_id}] object introspection for review failed: {e}")
+            return names
+        if isinstance(metadata, dict) and metadata:
+            for source_key, target_key in (
+                ("obs_columns", "obs_columns"),
+                ("layers", "layers"),
+            ):
+                values = [str(v) for v in (metadata.get(source_key) or [])]
+                if values:
+                    names[target_key] = values
+            variable = str(metadata.get("var") or "").strip()
+            if variable:
+                names["variables"] = [variable]
+        return names
 
     @staticmethod
     def _build_supplementary_context(result: Dict[str, Any], review_plan: Dict[str, Any]) -> str:

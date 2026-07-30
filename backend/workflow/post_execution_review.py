@@ -123,6 +123,20 @@ _UNAVAILABLE_ERROR_MARKERS: Tuple[str, ...] = (
     "cannot import name", "is not installed",
 )
 
+#: The module an import failure actually named. Python states it directly in the
+#: common forms; when it does not -- "cannot import name 'x'" carries the symbol
+#: but not always its module -- there is nothing to extract and the fallback
+#: applies.
+_FAILED_MODULE_PATTERNS: Tuple[Any, ...] = (
+    re.compile(r"no module named ['\"]?([\w.]+)", re.I),
+    re.compile(r"cannot import name ['\"][\w.]+['\"] from ['\"]?([\w.]+)", re.I),
+    re.compile(r"['\"]?([\w.]+)['\"]? is not installed", re.I),
+)
+
+#: An import statement, which is the only part of a cell that can be the subject
+#: of an import failure.
+_IMPORT_LINE = re.compile(r"^\s*(?:import|from)\s+", re.M)
+
 _MAX_TEXT = 4000
 
 
@@ -183,13 +197,34 @@ def unavailable_method_families(code_history: Sequence[Any]) -> Set[str]:
 
     Not round-filtered: a package missing in round 5 was missing in round 2, and
     an earlier import error is still valid evidence about the environment.
+
+    Scoped to what the failure was actually about. Matching against the whole
+    cell source let one import failure condemn every family named anywhere in
+    that cell -- and a cell that imports several packages before doing anything
+    is the ordinary shape of a first cell. The verdict is permanent and the PI is
+    instructed never to propose an unavailable method, so a family swept in by
+    co-location is retired from the entire analysis on evidence that never
+    mentioned it.
+
+    Two narrowing steps, in order. Python usually names the module it could not
+    load, and that name alone is the evidence. When it does not -- "cannot import
+    name 'x'" need not carry a module -- fall back to the cell's import lines,
+    which is still far narrower than its body: the subject of an import failure
+    is always an import statement, never a call three lines further down.
     """
     unavailable: Set[str] = set()
     for execution in code_history or []:
         error = str(getattr(execution, "error", "") or "").lower()
         if not error or not any(m in error for m in _UNAVAILABLE_ERROR_MARKERS):
             continue
-        haystack = error + " " + str(getattr(execution, "code", "") or "").lower()
+        named = [m.group(1) for p in _FAILED_MODULE_PATTERNS
+                 for m in [p.search(error)] if m]
+        if named:
+            haystack = error + " " + " ".join(named)
+        else:
+            code = str(getattr(execution, "code", "") or "").lower()
+            imports = [ln for ln in code.splitlines() if _IMPORT_LINE.match(ln)]
+            haystack = error + " " + " ".join(imports)
         for family, tokens in METHOD_SIGNATURES.items():
             if any(token in haystack for token in tokens):
                 unavailable.add(family)

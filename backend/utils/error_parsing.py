@@ -25,6 +25,15 @@ TECHNICAL_ERROR_TYPES: FrozenSet[str] = frozenset({
     "UnboundLocalError",
     # Library-specific technical errors
     "InvalidIndexError", "AnnDataReadError", "SparseDataError",
+    # Network and transport failures. Absent from this set, a failed remote call
+    # is classified as nothing at all: it reaches neither the documentation
+    # lookup nor the swallowed-error detector, so the round records a capability
+    # as unavailable on the strength of one transient response.
+    "ConnectionError", "ConnectionResetError", "ConnectionRefusedError",
+    "ConnectionAbortedError", "TimeoutError", "SSLError", "HTTPError",
+    "URLError", "RemoteDisconnected", "IncompleteRead", "ChunkedEncodingError",
+    "ReadTimeout", "ConnectTimeout", "RequestException", "ProtocolError",
+    "JSONDecodeError",
 })
 
 # Regex to strip ANSI escape sequences from Jupyter tracebacks.

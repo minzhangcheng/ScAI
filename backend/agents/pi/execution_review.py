@@ -6,7 +6,7 @@ backend/workflow/post_execution_review.py — this module holds only the two
 judgements that need the PI's model, and both are written to fail soft: an
 unparseable answer returns {} and the caller proceeds as if nothing was proposed.
 """
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import json
 import logging
 
@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 # of audit facts; a longer list buys no accuracy and crowds out the instructions.
 _MAX_PROMPT_ITEMS = 12
 _MAX_PROMPT_ITEM_LEN = 400
+
+# The name inventory is the one block where breadth beats brevity: a task that
+# names an identifier the session does not hold is dead on arrival, and the
+# executor's budget is spent finding that out. Capped per category rather than
+# in total so a wide `obs` cannot crowd out the score names.
+_MAX_NAMES_PER_CATEGORY = 60
+_MAX_NAME_LEN = 80
 
 
 class ExecutionReviewMixin:
@@ -35,9 +42,17 @@ class ExecutionReviewMixin:
         is_terminal_round: bool,
         max_tasks: int,
         trigger_reason: str,
+        session_names: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """PI triages a completed round into at most `max_tasks` supplementary
         analyses.
+
+        `session_names` is the inventory of identifiers this session actually
+        holds — object columns, layers, registered score names, artifact names.
+        It is optional so the review still runs when no live kernel is attached,
+        but supplying it is what keeps a task addressable: the executor resolves
+        the names verbatim, and one that does not exist costs an iteration from
+        a budget measured in single digits.
 
         Returns the raw dict for `sanitize_review_plan` (gaps,
         supplementary_tasks, out_of_scope, verdict, rationale); {} on failure,
@@ -47,6 +62,7 @@ class ExecutionReviewMixin:
         logger.info(f"[PI] Reviewing round {state.current_round} execution ({trigger_reason})")
 
         audit_block = self._format_execution_audit(plan_audit, admissions)
+        names_block = self._format_session_names(session_names)
         findings_block = self._format_review_items(findings) or "None reported."
         suggestions_block = self._format_review_items(agent_suggestions) or "None."
         # Mirror sanitize_review_plan's own clamp so the prompt never advertises a
@@ -89,6 +105,7 @@ Why this review was triggered: {trigger_reason or "N/A"}
 ## Follow-ups the analysis agent itself suggested
 {suggestions_block}
 
+{names_block}
 ## What may become a supplementary task
 A supplementary task is handed to a restricted code generator that runs against THE DATA
 ALREADY LOADED IN THIS SESSION'S KERNEL, in this round, with no new inputs of any kind.
@@ -119,6 +136,10 @@ matters, name an available method that serves it, or record it in `out_of_scope`
   exact comparison, grouping, or object it applies to. No multi-part tasks, no "and then",
   and nothing that merely asks to investigate or explore a topic.
 - Do not re-request work the audit already evidenced as executed.
+- When a task refers to something that already exists, use its identifier VERBATIM from the
+  inventory above. A plausible-looking name that the session does not hold fails on the
+  first line and costs one of the {cap} task(s). When a task asks for something new to be
+  computed, say so explicitly and describe it from the identifiers that do exist.
 
 ## "No action" is a correct answer
 If the approved plan was carried out and nothing runnable on the loaded data would change
@@ -211,6 +232,45 @@ Reply with STRICT JSON only:
             f"- {str(item)[:_MAX_PROMPT_ITEM_LEN]}"
             for item in (items or [])[:_MAX_PROMPT_ITEMS]
             if str(item).strip()
+        )
+
+    #: Rendered in this order, so the identifiers a repair task is most likely to
+    #: need survive the per-category cap even on a wide object.
+    _NAME_CATEGORIES = (
+        ("registered_scores", "Registered score names"),
+        ("obs_columns", "Columns on the active object"),
+        ("layers", "Layers on the active object"),
+        ("artifacts", "Files this round wrote"),
+        ("variables", "Kernel variables holding the analysis objects"),
+    )
+
+    @classmethod
+    def _format_session_names(cls, session_names: Optional[Dict[str, Any]]) -> str:
+        """Render the inventory of identifiers this session actually holds.
+
+        Returns "" when nothing is known, which is the honest rendering: an empty
+        heading would read as "the session holds nothing" and push the review
+        toward `out_of_scope` for work that is in fact runnable.
+        """
+        names = session_names or {}
+        lines: List[str] = []
+        for key, label in cls._NAME_CATEGORIES:
+            values = [
+                str(v)[:_MAX_NAME_LEN] for v in (names.get(key) or []) if str(v).strip()
+            ]
+            if not values:
+                continue
+            shown = values[:_MAX_NAMES_PER_CATEGORY]
+            suffix = f" (+{len(values) - len(shown)} more)" if len(values) > len(shown) else ""
+            lines.append(f"- {label}: {', '.join(shown)}{suffix}")
+        if not lines:
+            return ""
+        return (
+            "## Identifiers this session actually holds\n"
+            "These are read from the live analysis objects and this round's registrations, "
+            "not from prose. Anything not listed here does not exist yet.\n"
+            + "\n".join(lines)
+            + "\n"
         )
 
     @classmethod

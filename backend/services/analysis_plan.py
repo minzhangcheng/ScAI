@@ -127,6 +127,33 @@ def diff_panels(frozen: Sequence[str], actual: Sequence[str]) -> dict:
     }
 
 
+def panel_overlap(a: Sequence[str], b: Sequence[str]) -> dict:
+    """How much two panels share, as containment rather than Jaccard.
+
+    Containment -- the shared count over the SMALLER panel -- is the statistic
+    that matters here. Jaccard punishes a size difference that is not the issue:
+    a small panel wholly inside a large one is entirely redundant with it, yet
+    scores low on Jaccard precisely because the large one has other members. The
+    question being asked is whether one panel's result is already contained in
+    the other's, and containment is that question.
+
+    Symmetric, so callers need not order the arguments.
+    """
+    left = {g.lower(): g for g in canonical_panel(a)}
+    right = {g.lower(): g for g in canonical_panel(b)}
+    shared_keys = sorted(set(left) & set(right))
+    union = len(set(left) | set(right))
+    smaller = min(len(left), len(right))
+    return {
+        "shared": [left[k] for k in shared_keys],
+        "n_shared": len(shared_keys),
+        "n_a": len(left),
+        "n_b": len(right),
+        "jaccard": (len(shared_keys) / union) if union else 0.0,
+        "containment": (len(shared_keys) / smaller) if smaller else 0.0,
+    }
+
+
 def describe_drift(diff: dict) -> str:
     """One-line description of a plan/score panel mismatch, or '' when clean."""
     if diff.get("matches"):

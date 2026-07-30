@@ -149,6 +149,40 @@ def test_unavailable_families_come_from_import_errors_across_rounds():
     assert "unavailable" in audit.steps[0].reason.lower()
 
 
+def test_one_import_failure_does_not_condemn_its_neighbours():
+    """The verdict is permanent, so it must be about what actually failed.
+
+    A first cell that imports several packages before doing anything is the
+    ordinary shape. Matching the whole cell source made one ImportError retire
+    every family named anywhere in it for the rest of the analysis -- and the PI
+    is instructed never to propose a method the audit lists as unavailable.
+    """
+    history = [CodeExecution(
+        code="import gseapy\nimport liana\nimport cell2location\n"
+             "sc.tl.rank_genes_groups(adata, 'leiden')",
+        error="ModuleNotFoundError: No module named 'cell2location'",
+    )]
+    assert unavailable_method_families(history) == {"deconvolution"}
+
+
+def test_a_failure_naming_no_module_falls_back_to_the_import_lines():
+    """Not every ImportError names its module, and the signal is still real."""
+    history = [CodeExecution(
+        code="x = 1\nfrom infercnvpy import cnv\nresult = cnv.tl.infercnv(adata)",
+        error="ImportError: cannot import name 'cnv'",
+    )]
+    assert unavailable_method_families(history) == {"copy_number"}
+
+
+def test_the_fallback_does_not_reach_past_the_import_lines():
+    """Only an import statement can be the subject of an import failure."""
+    history = [CodeExecution(
+        code="from infercnvpy import cnv\n# then hand the ranking to gseapy.prerank",
+        error="ImportError: cannot import name 'cnv'",
+    )]
+    assert unavailable_method_families(history) == {"copy_number"}
+
+
 def test_audit_assigns_all_five_verdicts():
     audit = audit_plan_execution(_audited_plan(), _audited_history(), round_number=2)
     by_id = {s.step_id: s for s in audit.steps}

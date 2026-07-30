@@ -1284,6 +1284,12 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         MAX_EMPTY_RESPONSES = 3  # transient upstream truncation → bounded retry
         figure_iteration_count = 0
         MAX_FIGURE_ITERATIONS = 5  # Max figure-only iterations excluded from step count
+        # Counted separately from the iteration budget above, and only when the
+        # figure list actually grew. The two diverge whenever a figure fails, is
+        # skipped, or replaces one of the same name -- and the refusal message
+        # quotes a figure count, so quoting the iteration counter there states a
+        # number that can simply be false.
+        figures_produced = 0
         consecutive_errors = 0
         MAX_CONSECUTIVE_ERRORS = 5  # Force report_findings after this many consecutive code errors
         total_errors = 0
@@ -1588,7 +1594,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             
             # Track what kind of work this iteration contains for step budget decisions
             has_substantive_work = False   # execute_code/consult_pi/search_literature/annotate_clusters/report_findings
-            has_figure_work = False        # generate_publication_figure
+            has_figure_work = False        # generate_publication_figure actually rendered
             has_register_score = False     # register_score
             _plan_revision_needed = False  # Set when PI indicates plan needs revision
             _plan_revision_context = {}
@@ -3046,6 +3052,17 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             None,
                         )
                         drift = {}
+                        # A set's size is a property of the set, not of the excerpt
+                        # reported alongside it. `gene_list` is documented as an
+                        # excerpt, so sizing and hashing the panel from it mis-states
+                        # every panel above that cap: n_genes, match_rate, the
+                        # underpowered flag and the drift hash all come out wrong, and
+                        # the power gate then fires -- or fails to fire -- on a number
+                        # that describes the excerpt. The frozen plan carries the full
+                        # canonicalised membership; use it when one is cited, and keep
+                        # the excerpt for what it is for, which is detecting drift
+                        # away from that record.
+                        panel_members = list(gene_list)
                         if gene_list:
                             if not plan_id or plan is None:
                                 if score_gate_reject_count < MAX_SCORE_GATE_REJECTIONS:
@@ -3083,13 +3100,15 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 plan_id = ""
                             else:
                                 drift = diff_panels(plan.panel_genes, gene_list)
+                                if plan.panel_genes:
+                                    panel_members = list(plan.panel_genes)
 
                         n_matched = args.get("n_genes_matched")
                         try:
                             n_matched = int(n_matched) if n_matched is not None else None
                         except (TypeError, ValueError):
                             n_matched = None
-                        power = assess_panel_power(len(gene_list), n_matched)
+                        power = assess_panel_power(len(panel_members), n_matched)
 
                         has_register_score = True
                         score_def = ScoreDefinition(
@@ -3101,11 +3120,11 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             gene_list_source=args.get("gene_list_source", ""),
                             background_source=str(args.get("background_source", "") or ""),
                             provenance=provenance.to_dict(),
-                            n_genes=len(gene_list),
+                            n_genes=len(panel_members),
                             n_genes_matched=n_matched,
                             power=power,
                             plan_id=plan_id,
-                            panel_hash=panel_hash(gene_list),
+                            panel_hash=panel_hash(panel_members),
                             plan_drift=drift,
                             round_number=state.current_round,
                         )
@@ -3176,6 +3195,13 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             round_number=state.current_round,
                             phase=str(getattr(state.analysis_phase, "value", state.analysis_phase)),
                             stage=planning_stage,
+                            # The provenance of every registered score, so a claim
+                            # cannot be graded above what its instruments support.
+                            score_provenance={
+                                sd.score_name: (sd.provenance or {})
+                                for sd in state.score_definitions
+                                if getattr(sd, "score_name", "")
+                            },
                         )
                         if err:
                             messages.append({
@@ -3354,7 +3380,6 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         ))
 
                     elif tool_name == "generate_publication_figure":
-                        has_figure_work = True
                         code = args.get("code", "")
                         figure_name = args.get("figure_name", f"figure_{len(state.publication_figures) + 1}")
                         description = args.get("description", "")
@@ -3373,16 +3398,23 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 "Please move on to the next analysis step or generate a different figure."
                             )
                         elif figure_iteration_count >= MAX_FIGURE_ITERATIONS:
-                            # Budget exhausted: refuse figure generation, redirect to analysis
+                            # Budget exhausted: refuse figure generation, redirect to
+                            # analysis. `has_figure_work` stays false — nothing was
+                            # rendered, so charging the budget for the refusal would
+                            # let a refused call push the counter further past its
+                            # own limit.
                             logger.warning(f"[Bioinformatics] Figure budget exhausted, rejecting {figure_name}")
                             tool_result = (
-                                f"Figure generation budget exhausted ({MAX_FIGURE_ITERATIONS} figures already generated). "
+                                f"Figure generation budget exhausted after {figure_iteration_count} "
+                                f"figure iteration(s); {figures_produced} figure(s) accepted so far. "
                                 "Do NOT generate any more figures. Focus on completing the remaining analysis steps "
                                 "(differential expression, pathway enrichment, etc.) and then call report_findings."
                             )
                         else:
+                            has_figure_work = True
                             await self._notify("status", f"Generating publication figure: {figure_name} (attempt {fig_attempts[figure_name]})")
 
+                            figures_before = len(state.publication_figures)
                             # Generate the figure with PI review
                             tool_result = await self._handle_generate_publication_figure(
                                 code=code,
@@ -3392,6 +3424,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 state=state,
                                 review_callback=review_callback
                             )
+                            if len(state.publication_figures) > figures_before:
+                                figures_produced += 1
 
                         # Pass publication figure to supervisor for vision review
                         safe_fig_name = "".join(c if c.isalnum() or c == '_' else '_' for c in figure_name)
@@ -3584,7 +3618,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                     figure_iteration_count += 1
                     if figure_iteration_count <= MAX_FIGURE_ITERATIONS:
                         step_count -= 1
-                        logger.debug(f"[Bioinformatics] Metadata-only step excluded ({figure_iteration_count}/{MAX_FIGURE_ITERATIONS}), step_count={step_count}")
+                        logger.debug(f"[Bioinformatics] Metadata-only step excluded ({figure_iteration_count}/{MAX_FIGURE_ITERATIONS} figure iterations, {figures_produced} accepted), step_count={step_count}")
                     else:
                         logger.warning(f"[Bioinformatics] Figure iteration budget ({MAX_FIGURE_ITERATIONS}) exhausted, accepting last version and moving on")
                 elif has_register_score:

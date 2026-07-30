@@ -118,7 +118,11 @@ class ContextMixin:
         recent = analysis_state.code_history[-max_entries:]
         parts = [
             "\n\n## Previous Code Execution History",
-            "Below is a summary of previously executed code. Reference these results — do NOT re-run completed steps.\n",
+            "Below is a summary of previously executed code. Reference the results of cells "
+            "that SUCCEEDED — do NOT re-run completed steps. Cells marked FAILED did not "
+            "produce their result: whatever they were for is still undone, and a call that "
+            "failed once on a fixable argument is worth one corrected retry before it is "
+            "recorded as a limitation.\n",
         ]
         for i, rec in enumerate(recent):
             code_lines = rec.code.strip().split("\n")
@@ -130,9 +134,17 @@ class ContextMixin:
             if len(rec.output or "") > 200:
                 output += "..."
 
-            entry = f"**Cell {i + 1}**:\n```python\n{preview}\n```"
+            # A failed cell rendered without its error is indistinguishable from a
+            # successful one, and this block is headed "do NOT re-run completed
+            # steps" -- so an unrendered failure is replayed as settled work and
+            # its limitation hardens into a fact about the environment.
+            error = (getattr(rec, "error", None) or "").strip()
+            status = " — FAILED" if error else ""
+            entry = f"**Cell {i + 1}**{status}:\n```python\n{preview}\n```"
             if output:
                 entry += f"\nOutput: {output}"
+            if error:
+                entry += f"\nError: {error[:300]}{'...' if len(error) > 300 else ''}"
             if rec.figures:
                 entry += f"\n[Generated {len(rec.figures)} figure(s)]"
             parts.append(entry)

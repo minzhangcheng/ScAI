@@ -500,6 +500,13 @@ Rules:
 - Each step should be ONE distinct analytical action
 - Methods should reference actual scanpy/numpy/pandas/liana/gseapy functions
 - Include ALL steps needed to complete the PI's tasks
+- This session has NO route to any external dataset. The inputs are the data already
+  loaded plus the pinned reference collections reachable through the provided retrieval
+  tool — nothing else can be downloaded, and there is no step that can acquire it. A step
+  that needs data from outside this session is not executable here: say so in its rationale
+  and drop it, rather than restating it as something that looks runnable. A step written
+  that way is not skipped when it cannot run; it is silently satisfied by whatever the
+  executor can improvise, and the substitution then carries the weight of the real thing
 - Steps should form a logical, dependency-ordered pipeline
 - Identify 2-4 key decision points where PI input may be needed
 - Carry every entity, hypothesis, and named mechanism from the research context and the PI's tasks into the step that tests it. Name them in that step's input, expected_output, or rationale — a category label such as "relevant gene modules" is not a substitute for the specific set the tasks asked for

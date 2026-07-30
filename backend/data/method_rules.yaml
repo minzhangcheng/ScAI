@@ -13,6 +13,11 @@
 #   no Python equivalent (rotation tests, for instance) the rule says so rather
 #   than substituting something that only looks similar.
 #
+#   Rules whose `source_skill` reads `scai-native/...` are NOT derived from
+#   bioSkills. They are this project's own, written to the same shape and held
+#   to the same evidentiary bar (a prescriptive claim, its mechanism, its Python
+#   translation, and primary citations). They carry no upstream copyright.
+#
 # SCOPE
 #   Rules are selected by ScAI's *capability surface* -- what the installed
 #   packages can actually do -- not by any past analysis. Selecting them from
@@ -37,7 +42,8 @@
 #   why           the mechanism, so the rule can be argued with rather than obeyed
 #   python        how it lands in this stack
 #   citations     primary literature, as given by bioSkills
-#   source_skill  path within bioSkills
+#   source_skill  path within bioSkills, or `scai-native/...` for rules this
+#                 project wrote itself
 
 meta:
   source: bioSkills
@@ -258,6 +264,33 @@ rules:
   - Wu et al. 2010 Bioinformatics 26:2176 (roast)
   - Subramanian et al. 2005 PNAS 102:15545
   source_skill: pathway-analysis/gsea
+- id: resampling-p-has-a-resolution-floor
+  title: A resampling p-value cannot be smaller than one over the number of resamples
+  enforcement: gate
+  applies_when: Any p-value or q-value estimated by permutation, bootstrap or other resampling.
+  rule: A p-value estimated from B resamples cannot fall below 1/(B+1). Declare B alongside
+    the result. A value at that floor is a bound, not an estimate, so report it as an inequality
+    and rank competing results on the effect statistic rather than on the adjusted p-value.
+    To report a smaller value, increase B.
+  why: 'The estimator counts how many resamples reached the observed statistic, so its
+    resolution is fixed by how many were drawn: with B resamples there are only B+1 attainable
+    values, and everything more extreme than every resample collapses onto the smallest of
+    them. Two consequences are routinely missed. Results tied at the floor are indistinguishable
+    from each other, so ordering them is ordering noise -- and multiplicity adjustment
+    preserves ties, so an identical adjusted value shared across many results is the floor
+    showing through rather than a coincidence. And a floor value quoted as though it were
+    an estimate overstates the evidence by however much smaller the true value might have
+    been, which is unbounded.'
+  python: gseapy.prerank takes permutation_num (1000 by default, so a floor near 1e-3); scipy.stats.permutation_test
+    takes n_resamples. Record the count in the score's parameters as n_resamples so the floor
+    is checkable after the fact, and quote floor values as "p < 1/(B+1)".
+  citations:
+  - 'Phipson & Smyth 2010 Stat Appl Genet Mol Biol 9: Article 39 -- permutation p-values should
+    never be zero'
+  - North, Curtis & Sham 2002 Am J Hum Genet 71:439-441 -- calculating empirical p-values from
+    Monte Carlo procedures
+  - Davison & Hinkley 1997, Bootstrap Methods and their Application, ch. 4 -- Monte Carlo tests
+  source_skill: scai-native/statistical-gates
 - id: report-adjusted-not-raw-p
   title: Report the adjusted quantity, and say which one it is
   enforcement: guidance
@@ -606,6 +639,35 @@ rules:
     graph structure
   - Wang et al. 2007 Bioinformatics 23(10):1274-1281 -- semantic similarity of GO terms
   source_skill: pathway-analysis/go-enrichment
+- id: overlapping-sets-are-not-independent-evidence
+  title: Two sets that share most of their members are one test reported twice
+  enforcement: advisory
+  applies_when: Two or more gene sets are scored or tested within the same analysis.
+  rule: 'Report the membership overlap between sets tested together, as the shared count over
+    the smaller set. Where that fraction is high, the sets are not independent evidence:
+    name one as the test and the other as a sensitivity analysis, or merge them. Claiming
+    two such results converge requires showing that the members they do NOT share carry the
+    result.'
+  why: 'Curated collections are assembled by different groups against overlapping concepts,
+    so near-duplicate sets are the norm rather than the exception, and the duplication is
+    invisible from the identifiers alone. Two harms follow. Statistically, adjusting across
+    them as if they were separate tests understates the error rate, because the shared members
+    make the statistics move together. Rhetorically -- and this is the larger one -- placing
+    two nearly identical results side by side manufactures an appearance of convergence from
+    a single observation, which reads as corroboration to every later consumer of the report.
+    Overlap is not itself an error: testing a broad process and a focused component of it is
+    legitimate and common. What is an error is not saying so.'
+  python: 'services.analysis_plan.panel_overlap returns the shared members, the containment
+    coefficient and the Jaccard index for two frozen panels. Containment is the statistic to
+    read: a small set wholly inside a large one is entirely redundant with it while scoring
+    low on Jaccard, so Jaccard misses exactly the case that matters. Surfaced when a panel is
+    frozen and again on the finding that cites both.'
+  citations:
+  - Goeman & Buhlmann 2007 Bioinformatics 23(8):980-987 -- methodological issues in gene set
+    analysis, including the independence assumptions of competitive tests
+  - Maleki et al. 2020 Front Genet 11:654 -- gene set analysis, including redundancy and
+    overlap across annotation resources
+  source_skill: scai-native/statistical-gates
 - id: check-the-leading-edge-and-the-weight
   title: Two more implicit choices decide a preranked result
   enforcement: guidance

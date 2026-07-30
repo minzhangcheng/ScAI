@@ -168,6 +168,11 @@ class SupplementaryMixin:
 
             transcript: List[str] = []
             tolerated: Set[str] = set()
+            # The NAMES of what this pass added, not just which signature keys
+            # moved. A quantity computed and then not named is indistinguishable
+            # downstream from one never computed, and is the more expensive of
+            # the two: the next pass re-requests it under a guessed name.
+            added_columns: Set[str] = set()
             final_result: Optional[Dict[str, Any]] = None
 
             abort_envelope: Optional[Dict[str, Any]] = None
@@ -267,6 +272,12 @@ class SupplementaryMixin:
                     # against the object it actually starts from; comparing every cell
                     # to the original signature would let a later in-place edit hide
                     # behind an earlier column addition.
+                    added_columns.update(
+                        str(c) for c in (
+                            set(post_sig.get("obs_columns") or [])
+                            - set(baseline.get("obs_columns") or [])
+                        )
+                    )
                     tolerated.update(changed)
                     baseline = post_sig
                 return "continue"
@@ -302,15 +313,39 @@ class SupplementaryMixin:
                         "failed", "Supplementary pass aborted.", ["aborted"])
 
             if tolerated:
-                warnings.append(
-                    "Supplementary pass extended the analysis object: "
-                    + ", ".join(sorted(tolerated)))
+                detail = (
+                    "added " + ", ".join(sorted(added_columns)[:40])
+                    if added_columns else ", ".join(sorted(tolerated))
+                )
+                warnings.append("Supplementary pass extended the analysis object: " + detail)
 
             if final_result is None:
+                # Ending on the iteration limit does not mean nothing was computed.
+                # Name what landed on the object and which cells produced it, so the
+                # assessor can read out a result the pass ran out of budget to report
+                # -- and so the next pass addresses it by its real name.
+                orphan_warnings = ["max_iterations reached"]
+                if added_columns:
+                    orphan_warnings.append(
+                        "Computed but not reported: "
+                        + ", ".join(sorted(added_columns)[:40])
+                        + ". These exist on the live object; read them out rather than "
+                        "recomputing them."
+                    )
+                    if produced:
+                        orphan_warnings.append(
+                            "Produced by execution_id(s): "
+                            + ", ".join(str(rec.id) for rec in produced[-5:])
+                        )
                 return _envelope(
                     "partial",
-                    "Supplementary pass reached its iteration limit before reporting a result.",
-                    ["max_iterations reached"],
+                    "Supplementary pass reached its iteration limit before reporting a result."
+                    + (
+                        f" It did leave {len(added_columns)} new column(s) on the analysis "
+                        f"object; see warnings for their names."
+                        if added_columns else ""
+                    ),
+                    orphan_warnings,
                 )
 
             status = str(final_result.get("status", "") or "").strip().lower()
@@ -374,6 +409,69 @@ class SupplementaryMixin:
                 f"after supplementary timeout: {e}"
             )
 
+    @staticmethod
+    def _render_object_metadata(metadata: Dict[str, Any]) -> str:
+        """Render the live object's metadata field by field, longest last.
+
+        Slicing the serialised document instead cuts it mid-structure: the
+        per-column value summaries dominate the payload, so a fixed character
+        budget is spent inside them and the object's shape, its layers and its
+        raw-slot flag — the fields a task needs in order to be addressable at
+        all — fall off the end. Truncating the lists rather than the string keeps
+        every field present and keeps the block parseable.
+        """
+        metadata = metadata or {}
+        if not metadata:
+            return "(no live object detected)"
+
+        def _names(key: str, limit: int) -> str:
+            values = [str(v) for v in (metadata.get(key) or [])]
+            if not values:
+                return ""
+            shown = values[:limit]
+            suffix = f" (+{len(values) - len(shown)} more)" if len(values) > len(shown) else ""
+            return ", ".join(shown) + suffix
+
+        lines: List[str] = []
+        for key, label in (
+            ("var", "Object variable"),
+            ("cluster_key", "Cluster key"),
+            ("n_obs", "Observations"),
+            ("n_vars", "Features"),
+            ("has_raw", "Has .raw"),
+            ("output_dir_writable", "Workspace writable"),
+        ):
+            value = metadata.get(key)
+            if value not in (None, ""):
+                lines.append(f"- {label}: {value}")
+        for key, label, limit in (
+            ("layers", "Layers", 20),
+            ("candidate_cluster_keys", "Candidate cluster keys", 20),
+            ("condition_like", "Condition-like columns", 20),
+            ("sample_like", "Sample-like columns", 20),
+            ("batch_like", "Batch-like columns", 20),
+            ("qc_like", "QC-like columns", 30),
+            ("obs_columns", "All obs columns", 120),
+        ):
+            rendered = _names(key, limit)
+            if rendered:
+                lines.append(f"- {label}: {rendered}")
+
+        summaries = metadata.get("obs_summaries") or {}
+        if isinstance(summaries, dict) and summaries:
+            # Last, and capped: useful for choosing a grouping, but it is the
+            # field that used to consume the whole budget.
+            rows = []
+            for column, info in list(summaries.items())[:25]:
+                if not isinstance(info, dict):
+                    continue
+                top = ", ".join(str(t) for t in (info.get("top") or [])[:5])
+                rows.append(f"  - {column}: {info.get('n_categories', '?')} categories [{top}]")
+            if rows:
+                lines.append("- Category columns and their values:")
+                lines.extend(rows)
+        return "\n".join(lines)
+
     def _build_supplementary_executor_prompt(
         self,
         tasks: List[str],
@@ -399,7 +497,7 @@ analysis tools, literature search, PI consultation, or autonomous re-planning.
 {(context_summary or '(no summary available)')[:4000]}
 
 ## Active object metadata
-{json.dumps(metadata, ensure_ascii=False)[:2000]}
+{self._render_object_metadata(metadata)}
 
 ## Hard rules
 - Work on the LIVE object `{main_var}`. NEVER assign to `{main_var}` itself; write
