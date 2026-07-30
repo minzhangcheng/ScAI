@@ -274,7 +274,31 @@ def resolve_direction_context(state: Any, direction: str = "") -> DirectionConte
     # mechanism programs, so keying on the immediate predecessor goes blank for
     # every direction round that follows one. Skipping an empty result loses
     # nothing, because there was nothing in it to lose.
+    #
+    # Carrying a *predecessor* round's asks forward is deliberate — a later
+    # direction is often generated from the previous round's next steps. A
+    # *sibling* of the same batch is different: it was chosen alongside this
+    # direction, never asked to resolve its questions, so adopting its asks
+    # manufactures requirements this direction was never given and then reports
+    # them as coverage gaps.
+    key = normalize_direction_text(
+        direction or _get(state, "current_round_direction", "") or ""
+    )
+    # With no direction to be a sibling *of* -- the exploration round clears
+    # current_round_direction -- there is no sibling relationship to reason
+    # about, and filtering on an empty key would discard the whole batch.
+    siblings: set = set()
+    if key:
+        siblings = {
+            normalize_direction_text(_get(entry, "direction", ""))
+            for entry in (_get(state, "active_direction_batch", None) or [])
+        } - {"", key}
     for result in reversed(list(getattr(state, "round_results", None) or [])):
+        result_key = normalize_direction_text(
+            _get(result, "direction_key", "") or _get(result, "direction", "")
+        )
+        if result_key and result_key in siblings:
+            continue
         ctx = context_from_round_result(result)
         if ctx:
             return ctx

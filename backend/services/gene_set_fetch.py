@@ -39,6 +39,7 @@ from .gene_set_resolver import (
     release_index_url,
     summarize_projection,
     suggest_similar,
+    validate_collection,
     validate_set_id,
 )
 
@@ -83,6 +84,13 @@ def load_collection(version: str, collection: str, organism: str,
     forever and a version bump is a different file rather than a silent change
     under the same name.
     """
+    # The collection is model-chosen and lands in both a cache filename and the
+    # release URL, so it is validated for the same reason set_id is. Without
+    # this a traversal prefix writes the downloaded GMT outside the cache
+    # directory, in the FastAPI process rather than the sandbox.
+    problem = validate_collection(collection)
+    if problem:
+        raise ValueError(problem)
     organism = normalize_organism(organism)
     code = MSIGDB_ORGANISMS.get(organism)
     if not code:

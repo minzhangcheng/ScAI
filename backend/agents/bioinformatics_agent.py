@@ -2332,12 +2332,34 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         # loop, and an escape is recorded in the report.
                         _stats_report = run_statistical_gates(
                             args.get("findings"),
-                            score_definitions=state.score_definitions,
+                            # Scores accumulate for the whole session. A stale
+                            # record from an earlier round must not re-refuse a
+                            # later round's unrelated findings -- there is no
+                            # de-register tool, so the block would never clear.
+                            # round_number is stamped at registration; 0 means
+                            # pre-tracking or restored state, so it is kept.
+                            score_definitions=[
+                                s for s in (state.score_definitions or [])
+                                if getattr(s, "round_number", 0)
+                                in (0, state.current_round)
+                            ],
+                            # scoring_plans stays unfiltered: the gate uses it as
+                            # a plan_id lookup table, and a current-round score
+                            # may legitimately cite a plan frozen earlier.
                             scoring_plans=state.scoring_plans,
+                            # sample_count defaults to 1 in the schema, so a 1 is
+                            # indistinguishable from "never edited". Believe it
+                            # only when the upload actually resolves per-sample
+                            # files for that group; absent information must not
+                            # read as a violation.
                             samples_per_group={
                                 g.name: g.sample_count
                                 for g in (state.treatment_groups or [])
                                 if getattr(g, "sample_count", None) is not None
+                                and (g.sample_count > 1
+                                     or any(f.group_id == g.id
+                                            and f.sample_number is not None
+                                            for f in (state.data_files or [])))
                             },
                             # cluster_labels deliberately not supplied: measured,
                             # feeding annotation vocabulary to the composition
@@ -3087,6 +3109,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             parameters=args.get("parameters", {}),
                             gene_list=gene_list,
                             gene_list_source=args.get("gene_list_source", ""),
+                            background_source=str(args.get("background_source", "") or ""),
                             provenance=provenance.to_dict(),
                             n_genes=len(gene_list),
                             n_genes_matched=n_matched,

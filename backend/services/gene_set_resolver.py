@@ -84,6 +84,13 @@ DEFAULT_HOMOLOGY_TYPES = ("ortholog_one2one",)
 
 _SET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+#-]*$")
 
+#: Collection ids look like ``mh.all``, ``c2.cp.reactome``, ``m5.go.bp``. The
+#: character class is deliberately tighter than the one for set ids: a
+#: collection is interpolated into a cache filename and into the release URL,
+#: so a path separator or a dot-dot segment would place the cached GMT outside
+#: the cache directory.
+_COLLECTION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
 
 def normalize_organism(organism: str) -> str:
     """Map an organism string to a canonical key, or return it lowercased."""
@@ -346,6 +353,16 @@ def validate_set_id(set_id: str) -> Optional[str]:
         return "set_id is required."
     if not _SET_ID_RE.match(text):
         return f"set_id {text!r} is not a valid identifier."
+    return None
+
+
+def validate_collection(collection: str) -> Optional[str]:
+    """Return an error message if the collection id is unusable, else None."""
+    text = str(collection or "").strip()
+    if not text:
+        return "collection is required."
+    if ".." in text or not _COLLECTION_RE.match(text):
+        return f"collection {text!r} is not a valid identifier."
     return None
 
 

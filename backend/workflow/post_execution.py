@@ -133,6 +133,13 @@ class PostExecutionReviewMixin:
         """
         try:
             current = str(getattr(analysis_state, "current_round_direction", "") or "").strip()
+            if not current:
+                # No active direction means no batch at all: the exploration
+                # round clears it, and the legacy next-steps path never sets
+                # it. Neither is the last direction of a batch, and an empty
+                # queue must not be read as "the batch just ended". Signals
+                # 1-3 still cover those rounds.
+                return False
             for entry in (getattr(analysis_state, "directions_queue", None) or []):
                 direction = str((entry or {}).get("direction", "") or "").strip()
                 if direction and direction != current:

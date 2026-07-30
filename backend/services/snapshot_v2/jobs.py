@@ -435,8 +435,20 @@ class RestoreJobManager:
             if workflow is not None and not parked_at_gate:
                 return False
 
+            # Idle is not the same as kernel-less. A session parked at a gate
+            # keeps its workflow object, and that object keeps its sandbox: the
+            # WebSocket runner drops the run task before `workflow.close()`
+            # stops the kernel, so the namespace can still be live right here.
+            # `_resolve_kernel_present` trusts this descriptor over the sandbox
+            # it is handed, so a blanket False would make the pre_restore
+            # capture believe there is no runtime to save and commit an
+            # empty-complete manifest over a kernel full of state.
+            kernel_present = (
+                getattr(getattr(workflow, "sandbox", None), "km", None) is not None
+            )
+
             descriptor = {
-                "kernel_present": False,
+                "kernel_present": kernel_present,
                 "current_round": getattr(state, "current_round", 0) or 0,
                 "inactive": True,
                 "status": str(status_value or "idle"),

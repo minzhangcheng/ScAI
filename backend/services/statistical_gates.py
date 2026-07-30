@@ -646,7 +646,8 @@ def check_ora_background(score_definitions):
                 "detected, and every p-value in the table changes with it. Pass the "
                 "measured genes -- lib = gseapy.get_library(name, organism); "
                 "gseapy.enrich(genes, gene_sets=lib, background=measured_genes) -- and "
-                "record it in background_source.")))
+                "record it in the background_source argument of register_score, "
+                "e.g. background_source='measured:adata.var_names (n=18234)'.")))
     return out
 
 

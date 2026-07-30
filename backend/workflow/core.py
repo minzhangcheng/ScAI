@@ -1638,6 +1638,13 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         logger.info(
             f"[{self.session_id}] Report generation superseded by restore: {exc}"
         )
+        # Keep a workflow-scoped record before dropping the session-scoped one.
+        # The report runner's `finally` calls close(), which reads both to decide
+        # `save=not superseded`; a report workflow is never registered in
+        # `state.workflows`, so `_retire_superseded_workflow` cannot set the flag
+        # on it and close() would otherwise start a kernel purely to re-dump the
+        # runtime the restore just installed and verified.
+        self._restore_superseded = True
         _sp_clear().clear_superseded(self.session_id)
         return live_sessions.get(self.session_id) or initial_state
 

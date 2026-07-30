@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,12 @@ from backend.utils.files import atomic_write_bytes, fsync_directory
 
 CHUNK_SIZE = 1 * 1024 * 1024
 _EVIDENCE_CACHE_MAX = 4096
+
+#: How old a ``staging/.{sha}.*`` temp must be before a sweep may reclaim it.
+#: Comfortably longer than any single put_* of a multi-GB h5ad, so a live
+#: transfer is never mistaken for debris. Public because recovery's
+#: orphan-staging sweep applies the same rule and the two must not drift.
+STAGING_TEMP_TTL_SECONDS = 24 * 3600
 
 
 @dataclass(frozen=True)
@@ -331,10 +338,11 @@ class ObjectStore:
 
         self._ensure_store_dirs()
         # ``delete=False`` means an error anywhere below leaves the partial temp
-        # behind. Nothing else reclaims it: recovery's orphan-staging sweep skips
-        # dot-prefixed names and quota accounting only sums ``objects/``, so an
-        # ENOSPC here (the likeliest failure, on the largest objects in the
-        # system) would leak a near-complete copy on every HITL Retry.
+        # behind. Quota accounting only sums ``objects/``, and the staging sweeps
+        # reclaim a dot-prefixed name only once it is a day old, so an ENOSPC
+        # here (the likeliest failure, on the largest objects in the system)
+        # would otherwise leak a near-complete copy on every HITL Retry and only
+        # get it back a day later.
         tmp_path: Path | None = None
         copied = 0
         copied_hash = hashlib.sha256()
@@ -454,10 +462,10 @@ class ObjectStore:
         # two integrity branches but left ``os.replace`` outside all of them —
         # the last of the three put_* writers whose install could leak. An
         # ENOSPC or EIO there stranded a fully written, up-to-single-member-limit
-        # temp in staging/ that nothing reclaims: recovery's orphan-staging sweep
-        # and ManifestStore.reconcile() both skip dot-prefixed names by contract,
-        # import recovery matches only ``{txn}``-prefixed entries, and quota sums
-        # only ``objects/``. One finally spans the whole thing instead; after a
+        # temp in staging/ that only the day-old TTL sweep in recovery and
+        # ManifestStore.reconcile() would ever reclaim -- import recovery matches
+        # only ``{txn}``-prefixed entries, and quota sums only ``objects/``.
+        # One finally spans the whole thing instead; after a
         # successful rename the unlink is a no-op via ``missing_ok``.
         tmp_path: Path | None = None
         try:
@@ -843,11 +851,24 @@ class ManifestStore:
                 # under the per-session lock that capture also holds — so this
                 # exemption is a contract, not a bug fix: it makes reconcile
                 # safe on its own terms rather than on its callers', and matches
-                # the filter recovery's orphan-staging sweep already applies
-                # (``not entry.name.startswith(".")``). write_staging only ever
-                # produces ``{prefix}{snapshot_id}.json``, so nothing reconcile
-                # is meant to reclaim starts with a dot.
+                # the filter recovery's orphan-staging sweep already applies.
+                # write_staging only ever produces ``{prefix}{snapshot_id}.json``,
+                # so nothing reconcile is meant to reclaim starts with a dot.
                 if entry.name.startswith("."):
+                    # An in-flight temp is never this old; anything older was
+                    # stranded by a hard kill (OOM, container stop, power loss),
+                    # where the put_* ``finally`` never ran. Nothing else walks
+                    # ``staging/``, so an unreclaimed temp is invisible to GC and
+                    # to quota accounting and counts against the free-space
+                    # reserve forever. Its stem is a content hash, not a snapshot
+                    # id, so it must not enter removed_staging_ids.
+                    try:
+                        if (entry.is_file()
+                                and time.time() - entry.stat().st_mtime
+                                > STAGING_TEMP_TTL_SECONDS):
+                            entry.unlink()
+                    except OSError:
+                        pass
                     continue
                 if entry.is_file() or entry.is_symlink():
                     removed_staging_ids.append(entry.stem)

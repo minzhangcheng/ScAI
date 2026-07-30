@@ -323,6 +323,11 @@ except Exception as e:
             # abort start-up so the workflow can react (retry / fresh kernel / restore
             # from earlier snapshot).
             self._session_restore_failed = True
+            # Mark of how much work the kernel had done when persistence was
+            # latched off. `runtime_revision` advances only on a successful
+            # user cell, so anything above this mark is a namespace the agent
+            # rebuilt rather than restore residue -- see save_session.
+            self._restore_failed_at_revision = getattr(self, "runtime_revision", 0)
             detail = result.error or result.output or "unknown error"
             logger.error(
                 f"[{self.session_id}] dill session restore failed: {detail}"
@@ -364,14 +369,35 @@ except Exception as e:
         silently truncated runtime, still reporting ``runtime_restore_status`` as
         complete. The pkl on disk is better evidence than anything this kernel
         now holds.
+
+        That stops being true the moment the agent rebuilds. ``_restart_kernel``
+        deliberately keeps a kernel alive whose restore failed, so the analysis
+        carries on and recomputes its state from the uploaded data; refusing
+        forever meant none of that work was ever written, and the next resume
+        silently rehydrated the pre-crash pkl instead. ``runtime_revision``
+        advances only on a successful user cell, so a revision above the mark
+        taken when the latch was set is a namespace this kernel built, not
+        restore residue, and it is the better evidence.
         """
         if getattr(self, "_session_restore_failed", False):
-            logger.error(
-                "[%s] refusing to persist a kernel whose restore failed; "
-                "keeping the previous pkl",
+            mark = getattr(self, "_restore_failed_at_revision", None)
+            revision = getattr(self, "runtime_revision", 0)
+            if mark is None or revision <= mark:
+                logger.error(
+                    "[%s] refusing to persist a kernel whose restore failed and "
+                    "which has executed nothing since; keeping the previous pkl",
+                    self.session_id,
+                )
+                return
+            logger.warning(
+                "[%s] restore failed earlier, but %d cell(s) have run since; "
+                "persisting the rebuilt namespace over the previous pkl",
                 self.session_id,
+                revision - mark,
             )
-            return
+            # The latch is cleared only once the write has actually landed --
+            # see the end of this method. Clearing it here would drop the
+            # protection permanently the first time a save raised.
 
         async with self._exec_lock:
             session_path = str(self.notebook_state.session_path.absolute())
@@ -466,9 +492,26 @@ for _scai_name in list(globals().keys()):
 # Every AnnData is required no matter what it is called. Matching canonical
 # names alone silently dropped things like `adata_hepatocyte`, which is exactly
 # the state a resumed analysis cannot recompute.
-for _scai_name, _scai_obj in _live.items():
-    if _scai_is_anndata(_scai_obj):
-        _required_names.add(_scai_name)
+#
+# Backed AnnData is the exception: it wraps an open h5py handle that dill
+# refuses ("h5py objects cannot be pickled"), and its matrix already lives in
+# the .h5ad on disk. Promoting one would turn a single read-only file handle
+# into a total save abort, so it is dropped from the namespace instead --
+# including from _required_names, which the host computed before it could know
+# the object was backed.
+for _scai_name, _scai_obj in list(_live.items()):
+    if not _scai_is_anndata(_scai_obj):
+        continue
+    if getattr(_scai_obj, 'isbacked', False):
+        _required_names.discard(_scai_name)
+        _live.pop(_scai_name, None)
+        print(
+            "__SCAI_SAVE_SKIPPED__\\t" + _scai_name + "\\tAnnData\\tBackedMode"
+            "\\tbacked AnnData is not picklable; its matrix stays in the .h5ad "
+            "on disk and the variable must be reopened after resume"
+        )
+        continue
+    _required_names.add(_scai_name)
 
 _missing_required = sorted(_n for _n in _required_names if _n not in _live)
 if _missing_required:
@@ -601,6 +644,14 @@ print(f"Session saved: {_saved_count} variables")
                     f"Sandbox runtime save failed for session {self.session_id}: "
                     f"{result.error or 'unknown error'}"
                 )
+
+            # A rebuilt namespace is now on disk, so the pkl the latch was
+            # protecting no longer exists to protect. Clearing here rather than
+            # at the guard keeps the protection in place across a save that
+            # raised, which would otherwise disarm it permanently.
+            if getattr(self, "_session_restore_failed", False):
+                self._session_restore_failed = False
+                self._restore_failed_at_revision = None
 
             return True
 

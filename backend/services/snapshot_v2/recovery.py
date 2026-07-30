@@ -19,13 +19,18 @@ typed recovery failures that leave the journal in place and set
 import logging
 import os
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from backend.services.snapshot_v2.checkpoint_paths import checkpoint_sqlite_path
 from backend.services.snapshot_v2.errors import SnapshotIntegrityError
-from backend.services.snapshot_v2.object_store import ManifestStore, ObjectStore
+from backend.services.snapshot_v2.object_store import (
+    ManifestStore,
+    ObjectStore,
+    STAGING_TEMP_TTL_SECONDS,
+)
 from backend.services.snapshot_v2.runtime_names import runtime_h5ad_path
 from backend.services.snapshot_v2.workspace import WorkspaceScope
 
@@ -1285,7 +1290,24 @@ async def recover_snapshot_transactions(
                             "Recovery [%s]: removed orphan staging dir %s",
                             session_id, entry.name,
                         )
-            elif entry.is_file() and not entry.name.startswith("."):
+            elif entry.is_file():
+                if entry.name.startswith("."):
+                    # An ObjectStore.put_* temp. Its ``finally`` covers every
+                    # in-process path, so one still here after a full day was
+                    # stranded by a hard kill. Nothing else walks staging/, and
+                    # the bytes count against the free-space reserve, so this is
+                    # the only place they are ever reclaimed.
+                    try:
+                        if (time.time() - entry.stat().st_mtime
+                                > STAGING_TEMP_TTL_SECONDS):
+                            entry.unlink()
+                            logger.info(
+                                "Recovery [%s]: removed stranded object temp %s",
+                                session_id, entry.name,
+                            )
+                    except OSError:
+                        pass
+                    continue
                 entry.unlink()
                 logger.info(
                     "Recovery [%s]: removed orphan staging file %s",

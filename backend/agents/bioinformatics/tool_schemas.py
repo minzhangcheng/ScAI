@@ -446,6 +446,20 @@ TOOLS = [
                             "panel whose genes are mostly absent from the data cannot support "
                             "a negative conclusion. Supply it whenever a gene panel is used."
                         )
+                    },
+                    "background_source": {
+                        "type": "string",
+                        "description": (
+                            "REQUIRED for over-representation tests (enrichr, Fisher, "
+                            "hypergeometric): the gene universe the test was run "
+                            "against. The universe IS the null -- with none supplied it "
+                            "silently becomes the union of genes in the gene sets rather "
+                            "than the genes this assay could have detected, and every "
+                            "p-value changes with it. State what you actually passed, "
+                            "e.g. 'measured:adata.var_names (n=18234)' or "
+                            "'measured:genes surviving DE filtering (n=9120)'. "
+                            "'default', 'none' and 'genome' are not accepted."
+                        )
                     }
                 },
                 "required": ["score_name", "method", "description", "gene_list_source"]

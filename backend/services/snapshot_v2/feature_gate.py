@@ -18,6 +18,42 @@ def require_snapshot_v2_enabled() -> None:
         )
 
 
+def _has_unfinished_restore_journal(session_id: str) -> bool:
+    """True while a STAGED/STAGING/APPLYING journal describes a half-swapped tree.
+
+    Mirrors the startup scan in ``backend/main.py``. Only a restore that never
+    reached a terminal state leaves the session's files mixing pre- and
+    post-restore content; COMMITTED and FAILED journals are merely waiting to be
+    reaped. Anything unreadable counts as unfinished, because a truncated write
+    is itself evidence of an interrupted one.
+    """
+    import json
+
+    from backend.services.snapshot_v2.paths import SnapshotV2Paths
+
+    if not session_id:
+        return False
+    unfinished = {"STAGED", "STAGING", "APPLYING"}
+    try:
+        journals = SnapshotV2Paths.for_session(session_id).journals
+        if not journals.is_dir():
+            return False
+        for entry in journals.iterdir():
+            if not entry.is_file():
+                continue
+            try:
+                doc = json.loads(entry.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return True
+            if str(doc.get("status", "")).upper() in unfinished:
+                return True
+    except OSError:
+        # Unknown means fail closed: the flag exists to stop a half-applied
+        # restore from being driven forward.
+        return True
+    return False
+
+
 def _stable_status(value: object, *, workflow_active: bool) -> TaskStatus:
     try:
         status = value if isinstance(value, TaskStatus) else TaskStatus(str(value))
@@ -52,6 +88,13 @@ def normalize_disabled_snapshot_state(
     — so a session that was merely recoverable before the operator turned the
     subsystem off would become permanently unstartable, as would any session
     imported from an archive that carried the flag.
+
+    That unblocking stops at evidence of an actual half-applied restore: when an
+    unfinished journal is still on disk the flag stays, because clearing it would
+    let the graph run against a session whose state, notebook, checkpoint and
+    workspace describe different points in the run. Such a session needs
+    ``SCAI_ENABLE_SNAPSHOT_V2`` back on so recovery can finish or roll back —
+    being unstartable is the correct outcome until then.
     """
     failure = getattr(state, "snapshot_failure", None)
     pending = getattr(state, "pending_required_snapshot", None)
@@ -66,7 +109,9 @@ def normalize_disabled_snapshot_state(
         return False
 
     recovery_cleared = False
-    if recovery_gate:
+    if recovery_gate and not _has_unfinished_restore_journal(
+        str(getattr(state, "id", "") or "")
+    ):
         from backend.services.session_store import clear_recovery_blocked
 
         recovery_cleared = clear_recovery_blocked(

@@ -311,11 +311,10 @@ async def export_download(session_id: str, request: Request, token: str | None =
 
     async with _prepared_exports_lock:
         info = _prepared_exports.get(token)
-        # Bind the token to its session before consuming it, so a wrong-session
-        # request cannot pop (and thereby destroy) somebody else's export.
-        if info is not None and info.get("session_id") == session_id:
-            _prepared_exports.pop(token, None)
-        else:
+        # Peek only. Binding, existence and ownership must all pass before the
+        # token is consumed: popping first means any rejected request destroys
+        # the owner's prepared archive, which then has to be packed again.
+        if info is not None and info.get("session_id") != session_id:
             info = None
 
     if not info or not os.path.exists(info["path"]):
@@ -325,6 +324,12 @@ async def export_download(session_id: str, request: Request, token: str | None =
     if user_id:
         # Authenticated caller: ownership still decides.
         await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    async with _prepared_exports_lock:
+        # Consume last. A racing second redemption finds it gone and 404s, so
+        # the one-shot guarantee is unchanged.
+        if _prepared_exports.pop(token, None) is None:
+            raise HTTPException(status_code=404, detail="Export not prepared. Call POST /export/prepare first.")
 
     return FileResponse(
         info["path"],

@@ -111,6 +111,10 @@ class ScoreDefinition(BaseModel):
     parameters: Dict[str, Any] = Field(default_factory=dict)
     gene_list: List[str] = Field(default_factory=list)
     gene_list_source: str = ""  # controlled vocabulary, see services/gene_set_provenance
+    # Universe an over-representation test was run against. The universe is the
+    # null, so a score that does not name it cannot be checked -- see
+    # services/statistical_gates.check_ora_background.
+    background_source: str = ""
     # Parsed form of gene_list_source. Empty when the score predates provenance
     # enforcement or carries no gene panel at all.
     provenance: Dict[str, Any] = Field(default_factory=dict)

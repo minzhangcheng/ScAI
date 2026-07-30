@@ -40,7 +40,7 @@ from backend.state import (
 from backend.utils.auth import require_session_ownership
 from backend.utils.blob_store import inline_blobs
 from backend.utils.files import slugify_session_name, validate_path_within, validate_session_id, temp_file_on_error
-from backend.utils.secret_redaction import strip_analysis_state_secrets
+from backend.utils.secret_redaction import ENDPOINT_FIELD_NAMES, strip_analysis_state_secrets
 from backend.utils.runtime_apply import RUNTIME_H5AD_MANIFEST_FILENAME
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
@@ -126,9 +126,25 @@ def _add_tree_to_tar(tf, root: Path, arc_prefix: str) -> None:
     except OSError as exc:
         logger.warning("Export: cannot walk %s (%s)", root, exc)
         return
+    try:
+        root_resolved = root.resolve()
+    except OSError as exc:
+        logger.warning("Export: cannot resolve %s (%s)", root, exc)
+        return
     for file_path in entries:
         try:
             if not file_path.is_file():
+                continue
+            # ``_safe_add_file`` builds the member from an open descriptor, so a
+            # symlink is packed with its *target's* bytes rather than as a link.
+            # A link that escapes the tree would put out-of-session content in an
+            # archive whose scope is a single session, so it is dropped here --
+            # the same fail-closed rule services/snapshot_v2/workspace.py applies.
+            if (file_path.is_symlink()
+                    and not file_path.resolve().is_relative_to(root_resolved)):
+                logger.warning(
+                    "Export: skipping %s (symlink escapes %s)", file_path, root
+                )
                 continue
         except OSError:
             continue
@@ -256,8 +272,70 @@ def _add_session_logs_to_tar(tf, session_id: str):
     that report claiming every agent made zero calls and spent zero tokens,
     silently under-reporting the work it is describing, and nothing in
     ``AnalysisState`` can reconstruct the numbers.
+
+    JSONL records are rewritten on the way in so the endpoint fields carry no
+    value. ``session.json`` is already stripped of them by
+    ``strip_analysis_state_secrets``; a log that keeps them defeats that for the
+    same reason -- it points the destination's operator at a host only the
+    source could reach, next to an api_key the archive deliberately dropped.
     """
-    _add_tree_to_tar(tf, get_session_logs(session_id), f"{session_id}/logs")
+    logs_dir = get_session_logs(session_id)
+    if not logs_dir.exists():
+        return
+    try:
+        entries = sorted(logs_dir.rglob("*"))
+        logs_resolved = logs_dir.resolve()
+    except OSError as exc:
+        logger.warning("Export: cannot walk %s (%s)", logs_dir, exc)
+        return
+    for log_file in entries:
+        try:
+            if not log_file.is_file():
+                continue
+            # Same containment rule _add_tree_to_tar applies: a link out of the
+            # tree would be packed with its target's bytes, and for a .jsonl it
+            # would additionally be parsed and re-emitted as this session's log.
+            if (log_file.is_symlink()
+                    and not log_file.resolve().is_relative_to(logs_resolved)):
+                logger.warning(
+                    "Export: skipping %s (symlink escapes %s)", log_file, logs_dir
+                )
+                continue
+        except OSError:
+            continue
+        arcname = f"{session_id}/logs/{log_file.relative_to(logs_dir).as_posix()}"
+        if log_file.suffix.casefold() != ".jsonl":
+            _safe_add_file(tf, log_file, arcname)
+            continue
+        buf = io.BytesIO()
+        try:
+            mtime = log_file.stat().st_mtime
+            with open(log_file, "rb") as fh:
+                for raw in fh:
+                    try:
+                        record = json.loads(raw)
+                    except ValueError:
+                        # A torn final line from a concurrent write is still the
+                        # user's data; pass it through rather than dropping it,
+                        # so a truncated file never exports as an empty one.
+                        buf.write(raw if raw.endswith(b"\n") else raw + b"\n")
+                        continue
+                    if isinstance(record, dict):
+                        for key in ENDPOINT_FIELD_NAMES:
+                            if key in record:
+                                record[key] = ""
+                    buf.write(
+                        json.dumps(record, ensure_ascii=False).encode("utf-8") + b"\n"
+                    )
+        except OSError as exc:
+            logger.warning("Export: skipping log %s (%s)", log_file, exc)
+            continue
+        data = buf.getvalue()
+        info = tarfile.TarInfo(name=arcname)
+        info.size = len(data)
+        info.mode = 0o600
+        info.mtime = int(mtime)
+        tf.addfile(info, io.BytesIO(data))
 
 def _add_reproducibility_to_tar(tf, session_id: str):
     """Add reproducibility bundle files to tar archive."""
