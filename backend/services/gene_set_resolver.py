@@ -41,9 +41,16 @@ from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
-#: Where cached GMTs live. Mirrors backend/data/markers; both are runtime caches
-#: rather than tracked content, so nothing curated ships with the repository.
-_DEFAULT_CACHE = Path(__file__).resolve().parent.parent / "data" / "gene_sets"
+def runtime_gene_sets_dir() -> Path:
+    """Runtime home of the cached MSigDB GMTs: ``$SCAI_DATA_DIR/gene_sets``.
+
+    Outside the code tree for the same reason as the marker tables: these are
+    downloaded caches, and a cache inside the tree gets captured by ``COPY . .``
+    and then shipped as if it were curated content. Nothing curated ships with
+    ScAI, and a stale GMT baked into an image would be invisible.
+    """
+    from backend.config import DATA_BASE_DIR
+    return Path(DATA_BASE_DIR) / "gene_sets"
 
 MSIGDB_BASE = "https://data.broadinstitute.org/gsea-msigdb/msigdb/release"
 

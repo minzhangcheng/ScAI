@@ -5,9 +5,25 @@ import tempfile
 import pytest
 
 
-def test_no_plaintext_marker_url():
-    src = pathlib.Path("scripts/fetch_markers.py").read_text()
-    assert "http://117.50.127.228" not in src
+def test_marker_sources_are_https_named_hosts():
+    """CellMarker used to be fetched from a bare IP, which cannot be authenticated.
+
+    That is why the download had to choose between pinning a checksum and
+    refusing to run -- and unpinned, it refused, so the supplementary source was
+    never once available. Its own domain presents a valid TLS chain; going back
+    to an IP, or to plain http, resurrects the whole dilemma.
+
+    Asserts the constants' values rather than grepping the file, so the comments
+    can still record the history that motivated this.
+    """
+    mod = _load_fetch_markers()
+    for name in ("PANGLAODB_URL", "CELLMARKER_URL"):
+        url = getattr(mod, name)
+        assert url.startswith("https://"), f"{name} must use TLS: {url}"
+        host = url.split("/")[2]
+        assert not re.fullmatch(r"[\d.]+", host), (
+            f"{name} points at raw IP {host}; TLS cannot be verified against it"
+        )
 
 
 def test_lock_acquire_no_toctou(tmp_path):
@@ -62,22 +78,6 @@ def test_acquire_lock_active_skips(tmp_path):
     assert fd is None, "should skip fresh lock"
 
 
-def test_cellmarker2_rejects_bad_checksum(monkeypatch):
-    """SHA-256 mismatch on CellMarker2 download raises ValueError."""
-    from importlib import util
-    spec = util.spec_from_file_location(
-        "fetch_markers_cksum",
-        pathlib.Path(__file__).resolve().parent.parent.parent / "scripts" / "fetch_markers.py",
-    )
-    mod = util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    monkeypatch.setattr(mod, "CELLMARKER2_SHA256", "0" * 64)
-    monkeypatch.setattr(mod, "_http_get_bytes", lambda url, verify=True: b"corrupted-bytes")
-    with pytest.raises(ValueError, match="checksum"):
-        mod._download_cellmarker2()
-
-
 def _load_fetch_markers():
     from importlib import util
     spec = util.spec_from_file_location(
@@ -89,39 +89,88 @@ def _load_fetch_markers():
     return mod
 
 
-def test_cellmarker2_default_is_fail_secure_requires_valid_tls(monkeypatch):
-    """With no pinned checksum (default None), the download MUST require a valid
-    TLS chain (verify=True) — never accept unverified data over verify=False."""
+def test_cellmarker_download_always_verifies_tls(monkeypatch):
+    """verify=True is unconditional now that the source is an authenticated domain.
+
+    A marker table steers cell-type annotation, so accepting one over an
+    unauthenticated transport would let a network attacker choose cell labels.
+    There is no availability argument left for relaxing this: the domain works.
+    """
     mod = _load_fetch_markers()
-    assert mod.CELLMARKER2_SHA256 is None  # ships unpinned
 
     seen = {}
+
     def _fake_get(url, verify=True):
+        seen["url"] = url
         seen["verify"] = verify
         return b"any-bytes"
+
     monkeypatch.setattr(mod, "_http_get_bytes", _fake_get)
-    monkeypatch.setattr(mod.pd, "read_excel", lambda *_a, **_k: "PARSED")
+    monkeypatch.setattr(mod.pd, "read_csv", lambda *_a, **_k: "PARSED")
     monkeypatch.setattr(mod, "project_to_schema", lambda raw, *a, **k: raw)
 
-    assert mod._download_cellmarker2() == "PARSED"
-    assert seen["verify"] is True  # fail-secure: TLS must be verified when unpinned
+    assert mod._download_cellmarker() == "PARSED"
+    assert seen["verify"] is True
+    assert seen["url"].startswith("https://bio-bigdata.hrbmu.edu.cn/")
 
 
-def test_cellmarker2_pinned_checksum_allows_insecure_transport(monkeypatch):
-    """When a SHA-256 is pinned, the raw-IP transport (verify=False) is allowed
-    but content is verified against the pinned digest."""
-    import hashlib
+def test_cellmarker_download_has_no_verify_false_branch():
+    """The old code had one, gated on a checksum pin nobody ever set.
+
+    Comments are stripped first: the code must not contain the escape hatch, but
+    it should still be allowed to explain why.
+    """
+    import inspect
+
     mod = _load_fetch_markers()
-    payload = b"real-bytes"
-    monkeypatch.setattr(mod, "CELLMARKER2_SHA256", hashlib.sha256(payload).hexdigest())
+    code = "\n".join(ln.split("#", 1)[0]
+                     for ln in inspect.getsource(mod._download_cellmarker).splitlines())
+    assert "verify=False" not in code
+    assert "verify=True" in code
 
+
+def test_cellmarker_reads_the_zip_wrapped_tsv_with_narrow_columns(monkeypatch):
+    """CellMarker 3.0 ships a 148 MB TSV inside a zip and 22 columns.
+
+    Reading it whole, or as .xlsx like the 2.0 path did, either fails outright or
+    balloons memory in the backend process that fetches it.
+    """
+    mod = _load_fetch_markers()
     seen = {}
-    def _fake_get(url, verify=True):
-        seen["verify"] = verify
-        return payload
-    monkeypatch.setattr(mod, "_http_get_bytes", _fake_get)
-    monkeypatch.setattr(mod.pd, "read_excel", lambda *_a, **_k: "PARSED")
+
+    monkeypatch.setattr(mod, "_http_get_bytes", lambda url, verify=True: b"zipbytes")
+
+    def _fake_read_csv(buf, **kw):
+        seen.update(kw)
+        return "PARSED"
+
+    monkeypatch.setattr(mod.pd, "read_csv", _fake_read_csv)
     monkeypatch.setattr(mod, "project_to_schema", lambda raw, *a, **k: raw)
 
-    assert mod._download_cellmarker2() == "PARSED"
-    assert seen["verify"] is False  # pinned checksum permits untrusted transport
+    mod._download_cellmarker()
+    assert seen["compression"] == "zip"
+    assert seen["sep"] == "\t"
+    assert seen["usecols"] == mod.CELLMARKER_COLS
+    assert set(mod.CELLMARKER_COLS) == {"species", "cell_name", "symbol", "tissue_type"}
+
+
+def test_cellmarker_projection_shape(monkeypatch):
+    """The upstream column names changed in 3.0 (Symbol -> symbol)."""
+    import pandas as pd
+
+    mod = _load_fetch_markers()
+    raw = pd.DataFrame({
+        "species": ["Mouse", "Human", "Mouse"],
+        "cell_name": ["Kupffer cell", "Kupffer cell", ""],
+        "symbol": ["Clec4f", "CLEC4F", "Foo"],
+        "tissue_type": ["Liver", "Liver", "Liver"],
+    })
+    monkeypatch.setattr(mod, "_http_get_bytes", lambda url, verify=True: b"zipbytes")
+    monkeypatch.setattr(mod.pd, "read_csv", lambda *_a, **_k: raw)
+
+    out = mod._download_cellmarker()
+    assert list(out.columns) == mod.SCHEMA_COLS
+    assert set(out["species"]) == {"mouse", "human"}
+    assert set(out["source"]) == {"CellMarker"}
+    assert (out["tissue"] == "Liver").all()
+    assert "Foo" not in set(out["gene_symbol"]), "rows with no cell type must drop"

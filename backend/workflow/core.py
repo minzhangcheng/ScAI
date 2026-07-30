@@ -494,13 +494,17 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         )
 
     async def _marker_db_intervention_callback(self) -> LlmFailureAction:
-        """传给 bio agent 的回调：缺 marker DB 时默认自动联网补齐，不打扰用户；
-        仅当下载失败才弹 HITL 让用户选择重试 / 跳过 / 终止。"""
+        """传给 bio agent 的回调：marker DB 不可用时默认自动联网补齐，不打扰用户；
+        仅当下载失败才弹 HITL 让用户选择重试 / 跳过 / 终止。
+
+        "不可用" 包含缺文件与陈旧 revision 两种：后者是表移到运行时数据目录后仍
+        会遇到的情况 —— 同一数据卷跨版本复用时，旧投影写下的表还留在原处。
+        """
         from backend.services import marker_priors
 
         # 默认行为：自动下载，无需用户确认
         await self._send_message(
-            "status", "Marker database missing; downloading automatically...",
+            "status", "Marker database unavailable; downloading automatically...",
             AgentType.BIOINFORMATICS)
         ok = await asyncio.to_thread(marker_priors.trigger_fetch)
         if ok:

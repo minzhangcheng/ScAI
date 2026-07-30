@@ -79,14 +79,21 @@ SOFTWARE.
 ## External data resources
 
 ScAI fetches gene sets and marker tables from external resources at runtime.
-Nothing from these resources is redistributed with this repository; the caches
-under `backend/data/` are gitignored. Users are responsible for observing each
-resource's own terms, which differ -- some restrict commercial use.
+Nothing from these resources is redistributed with this repository. Every cache
+lives under the data volume, outside the code tree, so no release can carry a
+copy: marker tables in `$SCAI_DATA_DIR/markers` (with the applicable licence
+terms written alongside them) and MSigDB GMTs in `$SCAI_DATA_DIR/gene_sets`.
+Users are responsible for observing each resource's own terms, which differ --
+some restrict commercial use.
+
+PanglaoDB is licensed CC BY-NC 4.0; CellMarker 3.0 publishes its terms on its
+own site. Marker coverage is human and mouse. Both are fetched for offline
+non-commercial research use; commercial use requires reviewing those terms.
 
 | Resource | Used by | Fetched at runtime |
 |---|---|---|
 | MSigDB | `backend/services/gene_set_fetch.py` | Collection GMTs, per pinned release |
 | Ensembl REST | `backend/services/gene_set_fetch.py` | Orthology and gene-symbol lookup |
 | PanglaoDB | `scripts/fetch_markers.py` | Cell-type marker table |
-| CellMarker 2.0 | `scripts/fetch_markers.py` | Cell-type marker table |
+| CellMarker 3.0 | `scripts/fetch_markers.py` | Cell-type marker table |
 | OmniPath / CollecTRI | `decoupler` (runtime dependency) | Transcription-factor regulons |

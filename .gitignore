@@ -26,11 +26,12 @@ Thumbs.db
 *.swp
 *~
 
-# Marker database TSVs (fetched by scripts/fetch_markers.py)
-backend/data/markers/*.tsv
-!backend/data/markers/README.md
-!backend/data/markers/LICENSE
+# Marker database TSVs live under $SCAI_DATA_DIR/markers, outside the code tree
+# entirely (see scripts/fetch_markers.py). This rule is a backstop against a
+# stray copy being committed and then baked into a container image.
+backend/data/markers/
 .superpowers/
 states/
-backend/data/gene_sets/*
+# Cached MSigDB GMTs live under $SCAI_DATA_DIR/gene_sets now; backstop only.
+backend/data/gene_sets/
 review.md

@@ -203,7 +203,9 @@ if [ "$MODE" = "prod" ]; then
 fi
 
 # Optional: fetch marker databases for ORA priors (off by default; never blocks startup)
-if [ "${SCAI_AUTO_FETCH_MARKERS:-0}" = "1" ] && [ ! -f backend/data/markers/panglaodb.tsv ]; then
+# The script writes to $SCAI_DATA_DIR/markers and returns early when the table is
+# already at the current schema revision, so no on-disk check is needed here.
+if [ "${SCAI_AUTO_FETCH_MARKERS:-0}" = "1" ]; then
     echo "Fetching marker databases (SCAI_AUTO_FETCH_MARKERS=1)..."
     "$VENV_DIR/bin/python" scripts/fetch_markers.py || echo "WARNING: marker DB fetch failed; DB priors will be skipped"
 fi

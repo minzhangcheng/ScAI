@@ -39,7 +39,7 @@ fm = _load_fetch_markers()
         ("Hs", ["human"]),
         ("Mus musculus", ["mouse"]),     # multi-word key must not be tokenised
         ("Homo sapiens", ["human"]),
-        ("Mouse", ["mouse"]),            # CellMarker2 capitalisation
+        ("Mouse", ["mouse"]),            # CellMarker capitalisation
         ("HUMAN", ["human"]),
         ("Mm, Hs", ["mouse", "human"]),  # comma-separated variant
         ("4", []),                       # upstream junk (3 real rows)

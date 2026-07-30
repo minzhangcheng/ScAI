@@ -917,15 +917,20 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 
 
     async def _compute_database_priors(self, adata_var, cluster_key, rank_key,
-                                       organism, workspace_dir) -> dict:
-        """sandbox 内算 ORA 先验。任何失败返回 {}（绝不抛、绝不阻断注释）。"""
+                                       organism, workspace_dir, tissue="") -> dict:
+        """sandbox 内算 ORA 先验。任何失败返回 {}（绝不抛、绝不阻断注释）。
+
+        ``tissue`` 只用于给每条先验标注"是否在本次分析的组织中被注释过"，不做过滤：
+        两侧组织名都是自由文本，匹配不上绝不能丢掉一条正确命中。
+        """
         try:
             if not marker_priors_write(organism, workspace_dir):
                 return {}
             src = _ORA_KERNEL_SRC
             call = (
                 f"\n_priors = compute_ora_priors({adata_var}, "
-                f"'tables/marker_priors_input.tsv', {cluster_key!r}, {rank_key!r})\n"
+                f"'tables/marker_priors_input.tsv', {cluster_key!r}, {rank_key!r}, "
+                f"tissue={str(tissue or '')!r})\n"
                 f"import json as __j; print(__j.dumps(_priors))\n"
             )
             result = await self.sandbox.execute(src + call, save_to_history=False,
@@ -2116,8 +2121,9 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 
                         await self._notify("status", f"Annotating {n_clusters} clusters using literature evidence ({organism} {tissue})...")
 
-                        # 缺文件 HITL 门控（必须在算 priors 之前）
-                        if not _get_marker_db().present() and self.marker_db_intervention_callback:
+                        # marker DB 不可用（缺文件 / 陈旧 revision）时的 HITL 门控
+                        # （必须在算 priors 之前）
+                        if not _get_marker_db().usable() and self.marker_db_intervention_callback:
                             from backend.constants import LlmFailureAction as _LFA
                             from backend.workflow.helpers import WorkflowTerminatedError
                             action = await self.marker_db_intervention_callback()
@@ -2129,7 +2135,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         database_priors = {}
                         if workspace_dir is not None:
                             database_priors = await self._compute_database_priors(
-                                adata_var, cluster_key, rank_key_hint, organism, workspace_dir)
+                                adata_var, cluster_key, rank_key_hint, organism,
+                                workspace_dir, tissue=tissue)
 
                         annotation_result: Dict[str, Any] = {}
                         if self.annotate_clusters_callback:

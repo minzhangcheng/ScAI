@@ -25,7 +25,7 @@ from .gene_set_resolver import (
     ENSEMBL_SOURCE_SPECIES,
     GeneSetResult,
     MSIGDB_ORGANISMS,
-    _DEFAULT_CACHE,
+    runtime_gene_sets_dir,
     build_provenance,
     cache_path,
     direction_sibling_ids,
@@ -103,7 +103,7 @@ def load_collection(version: str, collection: str, organism: str,
             f"version {version!r} names organism {suffix!r}, but the analysis "
             f"organism maps to {code!r}"
         )
-    cache_dir = Path(cache_dir) if cache_dir else _DEFAULT_CACHE
+    cache_dir = Path(cache_dir) if cache_dir else runtime_gene_sets_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = cache_path(cache_dir, version, collection, code)
 

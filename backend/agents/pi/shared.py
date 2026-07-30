@@ -173,6 +173,37 @@ def _bounded_brief_fallback(
     return ordered
 
 
+def _prior_label(hit) -> str:
+    """Name the hit, folding in the synonyms that fired on the same genes.
+
+    The kernel collapses those into one entry so they cannot fill the top-k;
+    they still belong in the prompt as alternative readings of one signal.
+    """
+    name = str(hit.get("cell_type", "?"))
+    also = [str(a) for a in (hit.get("also_matched") or [])]
+    if not also:
+        return name
+    shown = " / ".join([name] + also[:2])
+    return shown + (f" (+{len(also) - 2} more)" if len(also) > 2 else "")
+
+
+def _tissue_note(hit) -> str:
+    """Say whether the cell type is annotated in the tissue under analysis.
+
+    Deliberately not a list of organ names: a cell type may be annotated in
+    dozens, and showing an arbitrary few misrepresents it (an earlier version
+    labelled CD8 T cells "Kidney"). Absent tissue data yields no note at all,
+    which is the case for any table written before the organ column was carried.
+    """
+    match = hit.get("tissue_match")
+    n = hit.get("n_tissues") or 0
+    if match is None:
+        return f", tissue: annotated in {n} organs" if n > 3 else ""
+    if match:
+        return ", tissue: matches"
+    return f", tissue: other organs only ({n})" if n else ", tissue: other organs only"
+
+
 def _format_database_priors_block(database_priors) -> str:
     if not database_priors:
         return ""
@@ -181,7 +212,8 @@ def _format_database_priors_block(database_priors) -> str:
         parts = []
         for h in hits:
             ov = ", ".join(h.get("overlap", []))
-            parts.append(f"{h.get('cell_type','?')}: padj={h.get('p_adj', 1.0):.2g} (overlap: {ov})")
+            parts.append(f"{_prior_label(h)}: padj={h.get('p_adj', 1.0):.2g} "
+                         f"(overlap: {ov}{_tissue_note(h)})")
         if parts:
             lines.append(f"Cluster {cid} \u2192 " + "; ".join(parts))
     if not lines:
@@ -189,6 +221,11 @@ def _format_database_priors_block(database_priors) -> str:
     return ("\n\n=== DATABASE PRIORS (offline ORA, supportive evidence) ===\n"
             "These are quantitative priors from offline marker databases; literature remains primary. "
             "If a prior contradicts the literature, favor biological plausibility and the literature.\n"
+            "The databases span all organs and mix granularities, so a cell type from an unrelated "
+            "tissue, or a subtype far finer than the data supports, can still score well on a couple "
+            "of shared genes. Weigh the overlap size and the tissue note, not the ranking alone; "
+            "'tissue: other organs only' is a reason to discount a hit, and a cell type annotated "
+            "across many organs carries no tissue evidence either way.\n"
             + "\n".join(lines) + "\n")
 
 

@@ -1,11 +1,23 @@
 # scripts/fetch_markers.py
-"""下载 PanglaoDB + CellMarker 2.0，投影为固定 schema，原子写到 backend/data/markers/。
+"""下载 PanglaoDB + CellMarker 3.0，投影为固定 schema，原子写到运行时数据目录。
+
+目标目录是 ``$SCAI_DATA_DIR/markers``（见 default_dest_dir），**不是**代码目录:
+这些表是缓存，放在代码树里会被容器镜像固化，而"文件已存在就不重下"意味着镜像
+里那一份会比后续任何投影修复都活得久。
+
+写出的每张表首行带 ``SCHEMA_REVISION``，由 ``backend/services/marker_priors.py``
+校验；revision 不符即视为陈旧并重下。
 
 后端调用入口: fetch_and_write(dest_dir)（经 asyncio.to_thread 调用，勿走 shell）。
 CLI: python scripts/fetch_markers.py
+
+数据来源与许可（fetch 时会把 LICENSE 一并写到目标目录）:
+  PanglaoDB      主源       CC BY-NC 4.0  https://panglaodb.se/
+  CellMarker 3.0 补稀有/亚型  见官网       https://bio-bigdata.hrbmu.edu.cn/CellMarker/
+覆盖 human / mouse。仅离线非商业研究用途；商用需自行复核许可。
+补充源失败只 warning，不阻断主源写出。
 """
 from __future__ import annotations
-import hashlib
 import os
 import logging
 from io import BytesIO
@@ -16,10 +28,26 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 SCHEMA_COLS = ["source", "species", "cell_type", "gene_symbol", "tissue", "evidence", "ref"]
-_DEST_DIR = Path(__file__).resolve().parent.parent / "backend" / "data" / "markers"
+
+#: Stamped into every table written here and validated by
+#: ``marker_priors.MARKER_SCHEMA_REVISION`` — the two must be bumped together.
+#: 2 = dual-species rows expanded + PanglaoDB's ``organ`` carried as ``tissue``.
+#: 3 = CellMarker reachable at last (authenticated domain), so the supplementary
+#:     source is present for the first time. Revision 2 tables are PanglaoDB-only
+#:     and must be re-fetched to gain it — which is exactly what a bump buys.
+SCHEMA_REVISION = 3
+
+#: Written next to the tables so the attribution travels with the data rather
+#: than living in the code tree the data is deliberately kept out of.
+DATA_LICENSE_TEXT = (
+    "PanglaoDB: CC BY-NC 4.0 (https://creativecommons.org/licenses/by-nc/4.0/).\n"
+    "CellMarker 3.0: see https://bio-bigdata.hrbmu.edu.cn/CellMarker/ for terms.\n"
+    "Downloaded for offline non-commercial research use only; not redistributed.\n"
+)
+
 _SPECIES_MAP = {"Mm": "mouse", "mouse": "mouse", "Mus musculus": "mouse",
                 "Hs": "human", "human": "human", "Homo sapiens": "human"}
-# Case-insensitive view: CellMarker2 ships "Mouse"/"Human", PanglaoDB "Mm"/"Hs".
+# Case-insensitive view: CellMarker ships "Mouse"/"Human", PanglaoDB "Mm"/"Hs".
 _SPECIES_LOOKUP = {k.lower(): v for k, v in _SPECIES_MAP.items()}
 
 
@@ -47,17 +75,43 @@ def map_species_tokens(value) -> list[str]:
             out.append(mapped)
     return out
 
+
+def default_dest_dir() -> Path:
+    """``$SCAI_DATA_DIR/markers``, or ``<repo>/../data/markers`` when unset.
+
+    Mirrors ``backend.config.DATA_BASE_DIR`` exactly — this module must stay
+    importable without the backend package (it is loaded by path from both the
+    CLI and ``marker_priors.trigger_fetch``), so the rule is duplicated rather
+    than imported, and a test pins the two together.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    base = Path(os.environ.get(
+        "SCAI_DATA_DIR", str((repo_root.parent / "data").resolve())
+    )).expanduser().resolve()
+    return base / "markers"
+
+
 # 上游来源（如失效需在此更新）
 PANGLAODB_URL = "https://panglaodb.se/markers/PanglaoDB_markers_27_Mar_2020.tsv.gz"
-CELLMARKER2_URL = "https://117.50.127.228/CellMarker/CellMarker_download_files/file/Cell_marker_All.xlsx"
-# Integrity pin for Cell_marker_All.xlsx.
-#   - Set to a real SHA-256 to fetch over the raw-IP endpoint (verify=False) with
-#     content verified by the checksum (available AND integrity-checked).
-#   - Leave None to fail-secure: the download requires a valid TLS chain
-#     (verify=True); a raw IP without a valid cert will fail and CellMarker2 is
-#     skipped rather than trusted unverified. Compute a digest once via:
-#       curl -sk <CELLMARKER2_URL> | sha256sum
-CELLMARKER2_SHA256 = None
+#: panglaodb.se rejects requests whose User-Agent looks like a scraper (a plain
+#: curl UA gets 403 "we don't permit curl access anymore, b/c bots"). Identify
+#: the client honestly and explicitly instead of inheriting whatever UA the
+#: HTTP library of the day happens to send.
+USER_AGENT = "ScAI/marker-fetch (single-cell analysis platform; offline ORA priors)"
+#: CellMarker's own domain, which presents a valid TLS chain. The previous URL
+#: was a raw IP (``https://117.50.127.228/...``) that could not be authenticated,
+#: so the fetch had to choose between a pinned checksum and refusing to run —
+#: unpinned, it refused, and the supplementary source was never once available.
+#: On the real domain ``verify=True`` both authenticates and works.
+#:
+#: Upstream is now CellMarker 3.0 and ships ``.zip``-wrapped TSV rather than
+#: ``.xlsx``. ``single_cell_marker`` is the single-cell-derived subset — the
+#: relevant one for cluster annotation, and 12 MB against 71 MB for the full
+#: table, whose uncompressed 811 MB buys only bulk/antibody-derived rows.
+CELLMARKER_URL = "https://bio-bigdata.hrbmu.edu.cn/CellMarker/file/single_cell_marker.zip"
+#: Columns actually projected. The file carries 22 (pmid, journal, method
+#: details, ...); reading four keeps a 148 MB TSV to a manageable frame.
+CELLMARKER_COLS = ["species", "cell_name", "symbol", "tissue_type"]
 
 
 def project_to_schema(raw: pd.DataFrame, source: str, gene_col: str,
@@ -84,13 +138,17 @@ def atomic_write_tsv(df: pd.DataFrame, dest: Path, source_version: str) -> None:
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     from datetime import date
     with open(tmp, "w") as f:
-        f.write(f"# SOURCE_VERSION={source_version} DOWNLOAD_DATE={date.today().isoformat()}\n")
+        f.write(f"# SOURCE_VERSION={source_version} SCHEMA_REVISION={SCHEMA_REVISION} "
+                f"DOWNLOAD_DATE={date.today().isoformat()}\n")
         df.to_csv(f, sep="\t", index=False)
     os.replace(tmp, dest)  # 原子 rename，避免半截文件被读
 
 
 def _download_panglaodb() -> pd.DataFrame:
-    raw = pd.read_csv(PANGLAODB_URL, sep="\t", compression="gzip")
+    # Read the bytes ourselves rather than handing the URL to pandas: pandas
+    # would send urllib's UA, and this host 403s UAs it reads as scrapers.
+    raw = pd.read_csv(BytesIO(_http_get_bytes(PANGLAODB_URL)),
+                      sep="\t", compression="gzip")
     # "organ" is PanglaoDB's tissue field; without it every row landed in the
     # table tissue-blind, so no tissue-restricted prior was ever possible.
     return project_to_schema(raw, "PanglaoDB", gene_col="official gene symbol",
@@ -99,29 +157,21 @@ def _download_panglaodb() -> pd.DataFrame:
 
 
 def _http_get_bytes(url: str, verify: bool = True) -> bytes:
-    with httpx.Client(verify=verify, timeout=120, follow_redirects=True) as c:
+    with httpx.Client(verify=verify, timeout=120, follow_redirects=True,
+                      headers={"User-Agent": USER_AGENT}) as c:
         r = c.get(url)
         r.raise_for_status()
         return r.content
 
 
-def _download_cellmarker2() -> pd.DataFrame:
-    # Security posture: never accept unverified data over the unauthenticated
-    # raw-IP endpoint. Two safe modes:
-    #   1. A SHA-256 is pinned  -> integrity is guaranteed by the checksum, so
-    #      the untrusted transport (verify=False) is acceptable.
-    #   2. No SHA-256 pinned    -> require a valid TLS chain (verify=True); if the
-    #      endpoint has no valid certificate the fetch fails and CellMarker2 is
-    #      skipped (fail-secure). Pin CELLMARKER2_SHA256 to enable it over raw IP.
-    if CELLMARKER2_SHA256:
-        content = _http_get_bytes(CELLMARKER2_URL, verify=False)
-        digest = hashlib.sha256(content).hexdigest()
-        if digest != CELLMARKER2_SHA256:
-            raise ValueError(f"CellMarker2 checksum mismatch: {digest}")
-    else:
-        content = _http_get_bytes(CELLMARKER2_URL, verify=True)
-    raw = pd.read_excel(BytesIO(content))
-    return project_to_schema(raw, "CellMarker2", gene_col="Symbol",
+def _download_cellmarker() -> pd.DataFrame:
+    # verify=True unconditionally: the source is now an authenticated domain, so
+    # there is no availability/integrity trade-off left to make. Never relax this
+    # to verify=False -- an unauthenticated marker table steers cell annotation.
+    content = _http_get_bytes(CELLMARKER_URL, verify=True)
+    raw = pd.read_csv(BytesIO(content), sep="\t", compression="zip",
+                      usecols=CELLMARKER_COLS, dtype=str)
+    return project_to_schema(raw, "CellMarker", gene_col="symbol",
                              celltype_col="cell_name", species_col="species",
                              tissue_col="tissue_type")
 
@@ -148,13 +198,32 @@ def _acquire_lock(lock: Path):
         return None
 
 
-def fetch_and_write(dest_dir: Path | None = None) -> bool:
-    """下载并原子写两表。带文件锁防并发（陈旧锁自动夺取）。失败返回 False（不抛）。
+def is_current_revision(path: Path) -> bool:
+    """True when ``path`` carries this module's SCHEMA_REVISION in its header."""
+    try:
+        first = path.read_text().splitlines()[0]
+    except (OSError, IndexError):
+        return False
+    if not first.startswith("#"):
+        return False
+    return f"SCHEMA_REVISION={SCHEMA_REVISION}" in first.lstrip("#").split()
 
-    注：CellMarker2 为 .xlsx，pd.read_excel 需 openpyxl；若缺则该源失败但 PanglaoDB 仍写（补充源失败不阻断）。
+
+def fetch_and_write(dest_dir: Path | None = None, force: bool = False) -> bool:
+    """下载并原子写两表到 dest_dir（默认 default_dest_dir()）。
+
+    带文件锁防并发（陈旧锁自动夺取）。失败返回 False（不抛）。
+
+    ``force=False`` 时，若主源已是当前 SCHEMA_REVISION 则直接返回 True 而不联网 —
+    这让启动脚本可以无条件调用；revision 不符（含旧投影写下的表）仍会重下。
+
+    CellMarker 是补充源：失败只 warning，PanglaoDB 仍写出（注释仍有主源先验）。
     """
-    dest = Path(dest_dir) if dest_dir else _DEST_DIR
+    dest = Path(dest_dir) if dest_dir else default_dest_dir()
     dest.mkdir(parents=True, exist_ok=True)
+    if not force and is_current_revision(dest / "panglaodb.tsv"):
+        logger.info(f"marker DB already at schema revision {SCHEMA_REVISION}; skipping fetch")
+        return True
     lock = dest / ".fetch.lock"
     fd = _acquire_lock(lock)
     if fd is None:
@@ -162,10 +231,12 @@ def fetch_and_write(dest_dir: Path | None = None) -> bool:
         return False
     try:
         atomic_write_tsv(_download_panglaodb(), dest / "panglaodb.tsv", "PanglaoDB_27_Mar_2020")
+        # Attribution travels with the data, which lives outside the code tree.
+        (dest / "LICENSE").write_text(DATA_LICENSE_TEXT)
         try:
-            atomic_write_tsv(_download_cellmarker2(), dest / "cellmarker2.tsv", "CellMarker2.0")
+            atomic_write_tsv(_download_cellmarker(), dest / "cellmarker.tsv", "CellMarker3.0")
         except Exception as e:
-            logger.warning(f"CellMarker2 fetch failed (PanglaoDB still written): {e}")
+            logger.warning(f"CellMarker fetch failed (PanglaoDB still written): {e}")
         return True
     except Exception as e:
         logger.warning(f"marker fetch failed: {e}")
@@ -179,6 +250,15 @@ def fetch_and_write(dest_dir: Path | None = None) -> bool:
 
 
 if __name__ == "__main__":
+    import argparse
+
     logging.basicConfig(level=logging.INFO)
-    ok = fetch_and_write()
-    raise SystemExit(0 if ok else 1)
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--dest", type=Path, default=None,
+                    help="target directory (default: $SCAI_DATA_DIR/markers)")
+    ap.add_argument("--force", action="store_true",
+                    help="re-download even if the table is already current")
+    ns = ap.parse_args()
+    dest = ns.dest or default_dest_dir()
+    logger.info(f"marker DB destination: {dest}")
+    raise SystemExit(0 if fetch_and_write(dest, force=ns.force) else 1)

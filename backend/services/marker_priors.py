@@ -9,34 +9,107 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 REQUIRED_COLS = ["source", "species", "cell_type", "gene_symbol", "tissue", "evidence", "ref"]
-_DEFAULT_DIR = Path(__file__).resolve().parent.parent / "data" / "markers"
-_TSV_NAMES = ("panglaodb.tsv", "cellmarker2.tsv")  # PanglaoDB 优先
+_TSV_NAMES = ("panglaodb.tsv", "cellmarker.tsv")  # PanglaoDB 优先
 _SPECIES_NORM = {"mouse": "mouse", "mus musculus": "mouse", "mmusculus": "mouse", "mm": "mouse",
                  "human": "human", "homo sapiens": "human", "hsapiens": "human", "hs": "human"}
+
+#: Projection revision the loader accepts. ``fetch_markers.py`` stamps it into
+#: the header of every table it writes; a table carrying any other value is
+#: ignored here and re-fetched.
+#:
+#: This exists because the tables are a *cache* whose correct contents changed.
+#: Revision 1 mapped PanglaoDB's species column with a plain lookup, so the
+#: single value ``"Mm Hs"`` -- 7507 of the file's 8286 rows -- became NaN and was
+#: dropped, leaving 746 rows (~9%) with an empty tissue column. Revision 2
+#: expands dual-species rows and carries ``organ`` as ``tissue``. Revision 3 adds
+#: the CellMarker table, which had never once been fetched because its only
+#: endpoint was an unauthenticatable raw IP. Bump this whenever a fix changes what
+#: a correct table holds, or deployments that already downloaded once will keep
+#: serving the old projection forever.
+MARKER_SCHEMA_REVISION = 3
 
 
 def normalize_species(organism: str) -> str:
     return _SPECIES_NORM.get(str(organism).strip().lower(), str(organism).strip().lower())
 
 
+def runtime_markers_dir() -> Path:
+    """Runtime home of the marker TSVs: ``$SCAI_DATA_DIR/markers``.
+
+    Deliberately outside the code tree. When these lived in ``backend/data/``
+    they were captured by the container image, and since nothing re-downloads a
+    file that already exists, an image shipped one frozen table to every
+    deployment built from it. On the data volume the tables are what they are --
+    a cache -- and are fetched by whichever release is actually running.
+    """
+    from backend.config import DATA_BASE_DIR
+    return Path(DATA_BASE_DIR) / "markers"
+
+
+def parse_table_header(path: Path) -> Dict[str, str]:
+    """Parse the leading ``# KEY=VALUE ...`` line written by fetch_markers.
+
+    Returns ``{}`` for a missing, unreadable or header-less file so callers can
+    treat "no metadata" and "wrong metadata" alike.
+    """
+    try:
+        first = path.read_text().splitlines()[0]
+    except Exception:
+        return {}
+    if not first.startswith("#"):
+        return {}
+    out: Dict[str, str] = {}
+    for token in first.lstrip("#").split():
+        if "=" in token:
+            key, value = token.split("=", 1)
+            out[key] = value
+    return out
+
+
+def _is_current_revision(path: Path) -> bool:
+    return parse_table_header(path).get("SCHEMA_REVISION") == str(MARKER_SCHEMA_REVISION)
+
+
+#: Separator for the multi-valued tissue field. ``ora_kernel`` splits on it.
+TISSUE_SEP = ";"
+
+
+def _join_tissues(values) -> str:
+    """Union the organs a (cell type, gene) pair is annotated in.
+
+    Taking ``"first"`` here -- what the dedup used to do -- discarded all but one
+    organ per pair. CellMarker annotates the same marker across many tissues, so
+    that collapsed e.g. CD8 T cells to a single arbitrary organ and made the
+    kernel's tissue check answer "not in this tissue" for cell types that are.
+    """
+    seen = {}
+    for value in values:
+        if value is None:
+            continue
+        for part in str(value).split(TISSUE_SEP):
+            part = part.strip()
+            # str() on a missing pandas value yields the literal 'nan'; it is not
+            # an organ, and neither is a stringified None.
+            if part and part.lower() not in ('nan', 'none'):
+                seen[part] = None
+    return TISSUE_SEP.join(seen)
+
+
 class MarkerDB:
     def __init__(self, markers_dir: Optional[Path] = None):
-        self.markers_dir = Path(markers_dir) if markers_dir else _DEFAULT_DIR
+        self.markers_dir = Path(markers_dir) if markers_dir else runtime_markers_dir()
         self._versions: Dict[str, str] = {}
         self._by_species: Dict[str, List[dict]] = {}
         self._loaded = False
 
-    def present(self) -> bool:
-        return any((self.markers_dir / n).exists() for n in _TSV_NAMES)
+    def usable(self) -> bool:
+        """True only when a table written by the CURRENT projection is on disk.
 
-    def _parse_version(self, path: Path) -> str:
-        try:
-            first = path.read_text().splitlines()[0]
-            if first.startswith("#") and "SOURCE_VERSION=" in first:
-                return first.split("SOURCE_VERSION=", 1)[1].split()[0]
-        except Exception:
-            pass
-        return "unknown"
+        Mere existence is not enough — see MARKER_SCHEMA_REVISION. Callers use
+        this to decide whether to fetch, so a stale table must read as absent.
+        """
+        return any(p.exists() and _is_current_revision(p)
+                   for p in (self.markers_dir / n for n in _TSV_NAMES))
 
     def _load(self) -> None:
         if self._loaded:
@@ -46,7 +119,15 @@ class MarkerDB:
             path = self.markers_dir / name
             if not path.exists():
                 continue
-            self._versions[name.replace(".tsv", "")] = self._parse_version(path)
+            if not _is_current_revision(path):
+                logger.warning(
+                    "ignoring stale %s (SCHEMA_REVISION=%s, expected %s); "
+                    "re-fetch required before DB priors are available",
+                    path, parse_table_header(path).get("SCHEMA_REVISION", "absent"),
+                    MARKER_SCHEMA_REVISION)
+                continue
+            self._versions[name.replace(".tsv", "")] = (
+                parse_table_header(path).get("SOURCE_VERSION", "unknown"))
             df = pd.read_csv(path, sep="\t", comment="#", dtype=str).fillna("")
             missing = [c for c in REQUIRED_COLS if c not in df.columns]
             if missing:
@@ -58,7 +139,8 @@ class MarkerDB:
             key = ["species", "cell_type", "gene_symbol"]
             agg = (merged.groupby(key, sort=False)
                           .agg({"source": lambda s: "+".join(dict.fromkeys(s)),
-                                "tissue": "first", "evidence": "first", "ref": "first"})
+                                "tissue": _join_tissues,
+                                "evidence": "first", "ref": "first"})
                           .reset_index())
             for species, grp in agg.groupby("species"):
                 self._by_species[species] = grp.to_dict("records")
@@ -91,7 +173,12 @@ class MarkerDB:
         tables = Path(workspace_dir) / "tables"
         tables.mkdir(parents=True, exist_ok=True)
         out = tables / "marker_priors_input.tsv"
-        df = pd.DataFrame(rows)[["cell_type", "gene_symbol", "source"]]
+        # tissue travels through so the kernel can label each prior with the
+        # organ its cell type came from. Adding CellMarker took the candidate
+        # pool from 178 cell types to ~1000, many of them fine-grained entries
+        # from unrelated organs whose small gene sets score well on two hits; an
+        # organ label lets the reader discount those instead of being misled.
+        df = pd.DataFrame(rows)[["cell_type", "gene_symbol", "source", "tissue"]]
         df.to_csv(out, sep="\t", index=False)
         return out
 
@@ -99,8 +186,12 @@ class MarkerDB:
 _fetch_mod = None
 
 
-def trigger_fetch() -> bool:
-    """同步下载 marker DB（供 asyncio.to_thread 调用）。失败返回 False，不抛。"""
+def trigger_fetch(force: bool = False) -> bool:
+    """同步下载 marker DB 到 runtime_markers_dir()（供 asyncio.to_thread 调用）。
+
+    失败返回 False，不抛。``force`` 绕过"已是当前 revision 则跳过"的短路，供
+    HITL 重试路径重下一个已存在但可疑的文件。
+    """
     global _fetch_mod
     if _fetch_mod is None:
         import importlib.util
@@ -109,7 +200,7 @@ def trigger_fetch() -> bool:
         _fetch_mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(_fetch_mod)
     try:
-        return bool(_fetch_mod.fetch_and_write())
+        return bool(_fetch_mod.fetch_and_write(runtime_markers_dir(), force=force))
     except Exception as e:
         logger.warning(f"trigger_fetch failed: {e}")
         return False

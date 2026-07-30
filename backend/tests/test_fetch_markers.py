@@ -28,4 +28,25 @@ def test_atomic_write_tsv_has_version_header(tmp_path):
     fetch_markers.atomic_write_tsv(df, dest, source_version="vX")
     head = dest.read_text().splitlines()[0]
     assert head.startswith("# SOURCE_VERSION=vX")
+    assert f"SCHEMA_REVISION={fetch_markers.SCHEMA_REVISION}" in head
     assert not (tmp_path / "panglaodb.tsv.tmp").exists()  # tmp 已 rename 掉
+
+
+def test_is_current_revision_round_trips_what_we_write(tmp_path):
+    df = pd.DataFrame([{c: "" for c in fetch_markers.SCHEMA_COLS}])
+    dest = tmp_path / "panglaodb.tsv"
+    fetch_markers.atomic_write_tsv(df, dest, source_version="vX")
+    assert fetch_markers.is_current_revision(dest) is True
+    assert fetch_markers.is_current_revision(tmp_path / "absent.tsv") is False
+
+
+def test_is_current_revision_rejects_older_and_headerless_tables(tmp_path):
+    older = tmp_path / "older.tsv"
+    older.write_text(
+        f"# SOURCE_VERSION=vX SCHEMA_REVISION={fetch_markers.SCHEMA_REVISION - 1} "
+        "DOWNLOAD_DATE=2026-07-18\nsource\n")
+    assert fetch_markers.is_current_revision(older) is False
+
+    headerless = tmp_path / "headerless.tsv"
+    headerless.write_text("source\tspecies\n")
+    assert fetch_markers.is_current_revision(headerless) is False
