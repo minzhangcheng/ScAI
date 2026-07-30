@@ -38,6 +38,87 @@ _ENABLE_SNAPSHOT_V2 = os.environ.get("SCAI_ENABLE_SNAPSHOT_V2", "").lower() in (
 SNAPSHOT_V2_ENABLED = _ENABLE_SNAPSHOT_V2
 
 
+# ── Snapshot V2 capacity (operator-tunable before backend startup) ───────────
+#
+# Both overrides are given in GiB, because that is the unit an operator sizing a
+# data volume works in; every check downstream uses the byte fields these feed.
+# They are read once at import, like the feature gate above, so a running
+# backend has one consistent view of its own ceilings.
+SNAPSHOT_SESSION_QUOTA_GB_DEFAULT = 500
+SNAPSHOT_FREE_SPACE_RESERVE_GB_DEFAULT = 50
+
+#: Advisory floor for the per-session quota. Below this a session cannot hold a
+#: realistic multi-round analysis: a single runtime capture of a large AnnData
+#: is already tens of GB, and the store retains every distinct object across the
+#: lineage rather than only the newest one. Configuring less is permitted — an
+#: operator may simply have a small volume — but it is warned about, because the
+#: symptom is not gradual degradation: the capture that crosses the ceiling
+#: fails closed and parks the run on a snapshot-failure gate mid-analysis.
+SNAPSHOT_SESSION_QUOTA_ADVISORY_MINIMUM_GB = 100
+
+
+def _parse_capacity_gb_env(name: str, default_gb: int) -> int:
+    """Return bytes for a GiB-valued operator override, falling back on default.
+
+    A missing, non-integer or non-positive value logs and falls back rather than
+    raising: this runs at import time, so refusing would turn a typo in a
+    deployment environment into a backend that cannot start at all.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default_gb * 1024 ** 3
+    try:
+        value_gb = int(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "%s=%r is not an integer number of GiB; using the default %d GiB",
+            name, raw, default_gb,
+        )
+        return default_gb * 1024 ** 3
+    if value_gb <= 0:
+        logging.getLogger(__name__).warning(
+            "%s=%d must be positive; using the default %d GiB",
+            name, value_gb, default_gb,
+        )
+        return default_gb * 1024 ** 3
+    return value_gb * 1024 ** 3
+
+
+SNAPSHOT_SESSION_QUOTA_BYTES = _parse_capacity_gb_env(
+    "SCAI_SNAPSHOT_SESSION_QUOTA_GB", SNAPSHOT_SESSION_QUOTA_GB_DEFAULT,
+)
+SNAPSHOT_FREE_SPACE_RESERVE_BYTES = _parse_capacity_gb_env(
+    "SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB", SNAPSHOT_FREE_SPACE_RESERVE_GB_DEFAULT,
+)
+
+def warn_if_quota_below_advisory(quota_bytes: int) -> bool:
+    """Log and report whether *quota_bytes* is under the advised floor.
+
+    Returns True when a warning was emitted, so this can be exercised directly
+    rather than by reloading the module (a reload rebinds ``default_config``,
+    which every import-time consumer has already captured by reference).
+    """
+    if quota_bytes >= SNAPSHOT_SESSION_QUOTA_ADVISORY_MINIMUM_GB * 1024 ** 3:
+        return False
+    logging.getLogger(__name__).warning(
+        "SCAI_SNAPSHOT_SESSION_QUOTA_GB is set to %d GiB, below the advised "
+        "minimum of %d GiB. A single runtime capture of a large AnnData can "
+        "exceed this, and the capture that crosses the ceiling fails closed on "
+        "a snapshot-failure gate rather than degrading gracefully.",
+        quota_bytes // 1024 ** 3,
+        SNAPSHOT_SESSION_QUOTA_ADVISORY_MINIMUM_GB,
+    )
+    return True
+
+
+warn_if_quota_below_advisory(SNAPSHOT_SESSION_QUOTA_BYTES)
+
+#: Fraction of the per-session quota at which the UI starts advising a cleanup.
+#: Owned here rather than in the frontend so the threshold the user is warned at
+#: and the ceiling that will actually refuse the capture can never disagree.
+SNAPSHOT_QUOTA_WARNING_RATIO = 0.9
+
+
 def is_snapshot_v2_enabled() -> bool:
     """Return the process-scoped Snapshot V2 operator feature gate."""
     return SNAPSHOT_V2_ENABLED
@@ -354,9 +435,24 @@ class SystemConfig(BaseModel):
         ),
     )
     snapshot_safe_point_timeout_seconds: int | None = None
-    snapshot_v2_session_quota_bytes: int = 100 * 1024 ** 3
+    snapshot_v2_session_quota_bytes: int = Field(
+        default=SNAPSHOT_SESSION_QUOTA_BYTES,
+        description=(
+            "Per-session ceiling on the snapshot object store, in bytes. "
+            "Override with SCAI_SNAPSHOT_SESSION_QUOTA_GB (in GiB) before "
+            "backend startup. Values below "
+            f"{SNAPSHOT_SESSION_QUOTA_ADVISORY_MINIMUM_GB} GiB are not advised."
+        ),
+    )
     snapshot_v2_pre_restore_quota_grace_bytes: int = 64 * 1024 ** 2
-    snapshot_v2_free_space_reserve_bytes: int = 5 * 1024 ** 3
+    snapshot_v2_free_space_reserve_bytes: int = Field(
+        default=SNAPSHOT_FREE_SPACE_RESERVE_BYTES,
+        description=(
+            "Free space that must remain on the data volume after a capture, "
+            "in bytes. Override with SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB (in "
+            "GiB) before backend startup."
+        ),
+    )
     snapshot_v1_restore_cutover: bool = True
     snapshot_v2_import_compressed_bytes: int = 20 * 1024 ** 3
     snapshot_v2_import_uncompressed_bytes: int = 100 * 1024 ** 3

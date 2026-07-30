@@ -145,8 +145,8 @@ docker build -t ghcr.io/minzhangcheng/scai:latest .
 ```
 
 ```bash
-./build.sh --version 0.36.11
-./build.sh --version 0.36.11 --push
+./build.sh --version 0.36.13
+./build.sh --version 0.36.13 --push
 ```
 
 如果未指定 `--version`，辅助脚本使用 `git describe --tags --abbrev=0` 返回的最新 Git 标签；如果不存在标签，则使用 `latest`。`--push` 会将两个标签推送到 `ghcr.io/minzhangcheng/scai`；使用前请先向该注册表进行 Docker 身份验证。该辅助脚本不接受注册表、镜像名称、平台或构建参数 flags。
@@ -185,7 +185,86 @@ Docker 使用 `/data`；直接启动通常使用同级 `data` 目录，除非 `S
 
 Docker `/dep` 包含 `/dep/venv` 和 `/dep/node_modules`。直接启动使用 `<REPO>/../dep/venv` 和 `<REPO>/../dep/node_modules`。依赖项可重现并可重新构建，但持久化可缩短重启时间。
 
-## 8. 备份、升级、恢复与回滚
+## 8. 快照（实验性 —— 开发中）
+
+> **状态：开发中、不稳定、默认关闭。** 仅在可以承受丢失快照的实例上启用。磁盘布局
+> 与 API 形态可能在没有迁移路径的情况下变更，因此某一版本创建的快照不保证能在后续
+> 版本中恢复。端到端行为尚未在真实部署上完成验收 —— 自动化覆盖包含真实内核的捕获与
+> 恢复，但没有记录过运维验收流程。该功能有意不写入用户手册；启用后快照页面会带有实
+> 验性标识。请勿向最终用户宣告它是受支持的成果保护手段，也不要把它当作备份机制 ——
+> 备份请参见第 9 节与第 13 节。
+
+快照用于把会话回退到分析过程中较早的某个时点。一次快照会捕获会话的分析状态、
+notebook、工作区文件、工作流 checkpoint，以及在分析内核在线时的 Jupyter 运行时（含
+已加载的数据集）。恢复快照会回退会话；若该快照记录了可恢复的位置，分析还能从该处
+继续。
+
+### 启用方式
+
+只有在后端启动时 `SCAI_ENABLE_SNAPSHOT_V2` 为真值，快照才会开启：
+
+```bash
+docker run -d --name scai \
+  -e SCAI_ENABLE_SNAPSHOT_V2=true \
+  ...
+```
+
+该变量在启动时读取一次，修改后需重启。未设置时，快照 API 按未启用响应，且不会写入
+任何快照存储。`GET /api/config` 会以 `snapshot_v2_enabled` 返回解析后的取值。
+
+### 快照的存储位置
+
+位于数据根目录下每个会话的目录内：
+
+```
+sessions/<id>/v2/          快照根目录
+├── objects/               内容寻址的数据块
+├── committed/             每个快照一份带签名的 manifest
+├── staging/               进行中的工作区
+├── journals/              崩溃恢复所使用的事务记录
+└── integrity/             签名材料
+```
+
+数据块采用内容寻址，因此未发生变化的数据集只保存一份、由引用它的所有快照共享。存储
+增长取决于真正的新数据，而非快照数量 —— 但一旦数据确实发生变化，内核持有大型数据集
+的会话每次捕获仍可能增加数十 GB。
+
+快照属于会话目录的一部分，因此常规的数据根目录备份（第 9 节）会一并包含它们，删除
+会话也会删除其快照。快照存储使用由本实例 `SCAI_CONFIG_SECRET` 派生的完整性密钥签名；
+在不同密钥下恢复数据根目录会使其失效。
+
+### 容量与清理
+
+两道上限、对应的环境变量以及建议下限，请参见第 17 节的[快照容量](#快照容量)。日常
+运维需要注意两点：
+
+- **垃圾回收是事件驱动的，而非定时执行。** 不再被引用的对象所占空间是在删除快照时回
+  收的（导入与崩溃恢复时也会触发），永远不会定时进行。持续累积快照的会话不会自行
+  变小。
+- **配额是按会话计的。** 最坏情况下的磁盘总占用为单会话配额乘以持有快照的会话数；剩
+  余空间保留是唯一的卷级约束。请按预期的并发分析数量规划数据卷容量。
+
+当某会话占用达到其配额的 90% 时，快照面板会提示用户清理。越过上限后，必需的捕获会
+fail-closed 并把该分析停在一个需用户处理的门上，因此实际的失效表现是运行停滞，而不
+是静默的数据丢失。
+
+### 恢复行为
+
+恢复过程是事务性的：会先创建一个 `pre_restore` 快照，因此恢复本身也可回滚，且每一步
+都有 journal 记录。若进程在操作中途终止，下一次启动（以及下一次加载该会话）会将每个
+未完成的 journal 推进到终态 —— 能回滚的就回滚，否则将该会话标记为 recovery-blocked，
+而不是提供一个半应用的状态。被标记的会话在阻塞解除前拒绝运行；该状态及其原因会在会
+话的快照状态中报告。
+
+### 监控
+
+- 快照活动记录在该会话的日志目录下（第 10 节）。
+- 每个会话的存储占用可在快照面板中查看，也可通过
+  `GET /api/session/{id}/snapshots-v2` 的 `store_status` 字段获取。
+- 捕获失败会以门的形式呈现给用户，而不是静默报错；因此当某个分析停滞且状态中带有
+  `snapshot_failure` 时，应首先检查磁盘容量。
+
+## 9. 备份、升级、恢复与回滚
 
 应优先执行静止状态下的文件级备份，使 SQLite 与会话文件保持一致：
 
@@ -209,9 +288,9 @@ docker start scai
 
 恢复过程：停止服务，将损坏的数据根目录移到一旁，将完整备份恢复到原路径，恢复所需所有权，提供相同密钥，启动匹配的应用版本，并在重新允许用户访问前完成验证。
 
-可移植会话导出/导入用于在实例之间迁移单个会话。以 `include_runtime=true` 导出时会一并携带在线内核状态和工作流 checkpoint，导入后可继续分析；默认导出只携带内容，无法继续。两种方式都不能替代完整服务备份——权衡详见第 12 节。
+可移植会话导出/导入用于在实例之间迁移单个会话。以 `include_runtime=true` 导出时会一并携带在线内核状态和工作流 checkpoint，导入后可继续分析；默认导出只携带内容，无法继续。两种方式都不能替代完整服务备份——权衡详见第 13 节。
 
-## 9. 监控与日志
+## 10. 监控与日志
 
 使用后端健康端点进行基本存活检查：
 
@@ -238,7 +317,7 @@ ps -fp "$(awk -F= '/_PID=/{printf "%s,", $2}' .scai.pid | sed 's/,$//')"
 
 请监控数据、依赖项及临时上传文件系统上的可用磁盘和 inode 容量；进程内存/CPU；容器重启次数；健康检查延迟；重复身份验证失败；模型提供商错误；以及 `logs/`、上传文件、工作区和报告的增长情况。由于上传和报告生成可能占用大量空间，应在磁盘耗尽前发出警报。
 
-## 10. Python 客户端安装与身份验证
+## 11. Python 客户端安装与身份验证
 
 `scai-client` 版本 `0.2.0` 要求 Python `>=3.10` 和 `httpx>=0.26.0`。从仓库 checkout 安装：
 
@@ -269,7 +348,7 @@ with Client("http://localhost:8000", api_key="<API_KEY>") as client:
 
 常规生命周期公共方法为 `close() -> None`、`__enter__() -> Client` 和 `__exit__(*args) -> None`。凭据缺失或 HTTP 401 响应会引发 `AuthError`。
 
-## 11. Python 客户端分析作业与产物
+## 12. Python 客户端分析作业与产物
 
 ### 客户端作业方法
 
@@ -306,7 +385,7 @@ with Client("http://localhost:8000", api_key="<API_KEY>") as client:
 
 客户端异常包括 `ScaiError`（基类）、`AuthError`、`FileIntegrityError`、`UploadError`、`JobFailed` 和 `ImportFailed`。文件访问也可能引发标准 `OSError`/`FileNotFoundError`；JSON 解析可能引发 `json.JSONDecodeError`；轮询可能引发 `TimeoutError`；网络故障可能表现为 `httpx` 异常。
 
-## 12. Python 客户端可移植会话管理
+## 13. Python 客户端可移植会话管理
 
 `list_sessions() -> list[dict]` 返回经身份验证用户拥有的会话，包括标识符、名称、状态、轮次和时间戳。
 
@@ -363,7 +442,7 @@ with Client("http://localhost:8000", api_key="<API_KEY>") as client:
 
 它仍然是一种迁移格式，并非完整服务备份。
 
-## 13. Session Manager CLI
+## 14. Session Manager CLI
 
 使用仓库辅助程序前，请安装本地客户端包：
 
@@ -388,7 +467,7 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 
 `list` 显示 ID、名称、状态、当前轮次和创建时间。`import` 显示启发式提取进度（可能超过 100%），并在没有轮询期限的情况下等待；HTTP 客户端超时为 24 小时。它保留归档的会话 ID，因此使用前请列出并备份现有会话。`export` 写入压缩归档；省略输出时使用客户端默认名称；服务器需要临时磁盘在下载开始前完成构建。请引用 secrets 和路径，并避免将密钥或异步导入作业 ID 存入 shell 历史记录或日志。
 
-## 14. 安全实践
+## 15. 安全实践
 
 - 通过受保护的环境注入设置强且稳定的 `SCAI_JWT_SECRET` 和 `SCAI_CONFIG_SECRET`。需要接受相同令牌的共享实例必须使用相同的 JWT 密钥。
 - 切勿随意更改 `SCAI_CONFIG_SECRET`：先前存储的加密模型凭据可能无法读取。请将其与数据分开备份，并给予同等保护。
@@ -401,7 +480,7 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 - 对静态和传输中的备份进行加密，在需要时保留离线/不可变副本，并定期测试恢复。
 - 在 staging 和备份验证后，保持主机 OS、Docker、Python/Node 依赖项及 ScAI 镜像为最新版本。
 
-## 15. 故障排除
+## 16. 故障排除
 
 | 症状 | 检查与纠正操作 |
 |---|---|
@@ -420,7 +499,7 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 | 删除失败 | 工作流处于活动或初始化状态时，`Job.delete` 返回 HTTP 409。请停止工作流并等待清理。用户删除和角色更改也会实施自身/最后管理员保护。 |
 | 磁盘用量增长 | 检查上传文件、工作区、报告、日志、临时上传、遗留的 `.partial` 文件和保留的会话。通过应用删除受支持的数据前请先备份。 |
 
-## 16. 参数与默认值参考
+## 17. 参数与默认值参考
 
 ### 端口、路径与限制
 
@@ -449,11 +528,41 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 | `SCAI_JWT_SECRET` | 生成并存储为 `.jwt_secret` | HS256 JWT 签名 |
 | `SCAI_CONFIG_SECRET` | 生成的本地加密材料 | 加密存储的用户/模型 secrets |
 | `SCAI_ENABLE_REPRODUCIBILITY` | Disabled | 真值 `1`、`true` 或 `yes` 启用可重现性 bundles |
+| `SCAI_ENABLE_SNAPSHOT_V2` | Disabled | 真值 `1`、`true` 或 `yes` 为该实例启用 Snapshot V2 |
+| `SCAI_SNAPSHOT_SESSION_QUOTA_GB` | `500` | 每个会话的快照存储上限，单位 GiB。**不建议设置为小于 100 GiB** —— 参见[快照容量](#快照容量) |
+| `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB` | `50` | 一次捕获完成后数据卷上必须保留的剩余空间，单位 GiB |
 | `SCAI_MODE` | `prod` | Docker 入口程序模式（`prod` 或 `dev`） |
 | `PIP_INDEX_URL` | pip environment/default | Docker Python 软件包 index |
 | `SCAI_AUTO_FETCH_MARKERS` | `0` | 直接启动；`1` 尝试下载标记数据库 |
 | `SCAI_HOST` | Set internally | Vite 代理主机；脚本根据启动上下文设置 |
 | `SCAI_BACKPORT` | Set internally | Vite 代理后端端口；脚本根据启动上下文设置 |
+
+
+### 快照容量
+
+Snapshot V2 有两道上限，均在捕获写入之前检查一次、写入落盘之后再检查一次：
+
+- **单会话存储配额** —— `SCAI_SNAPSHOT_SESSION_QUOTA_GB`，默认 500 GiB。以该会话
+  对象库中的物理字节数计算。存储是内容寻址的，因此未发生变化的 AnnData 只保存一
+  份、由引用它的所有快照共享；真正增长该数值的是新数据，而不是快照的数量。
+- **数据卷剩余空间保留** —— `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB`，默认 50 GiB。
+  一次捕获完成后仍必须保持空闲的空间，以免单个会话占满所有会话都要写入元数据的
+  那个卷。
+
+两者都在后端启动时读取一次；请在启动前设置，修改后需重启生效。
+
+**请勿将单会话配额设置为小于 100 GiB。** 一次大型 AnnData 的运行时捕获本身就可达
+数十 GB，而存储会保留该会话快照谱系中每一个不同的对象，而非仅保留最新的一份。小
+于这个量级的配额不会表现为性能逐步下降：越过上限的那次捕获会 fail-closed，并将分
+析停在快照失败门上，需用户处理后才能继续。小于 100 GiB 的取值仍会生效，但启动时会
+记录一条告警。
+
+配额是按会话计的，因此最坏情况下的总量为配额乘以持有快照的会话数；剩余空间保留是
+唯一的卷级约束。请按预期的并发分析数量来规划卷容量，并注意垃圾回收是在删除快照时
+触发的，而非定时执行 —— 被取代对象所占空间在删除时回收。
+
+当某个会话占用达到其配额的 90% 时，快照面板会提示用户清理，因此通常会在接近上限前
+得到预警，而不是毫无察觉地撞上。
 
 ### Shell 选项
 

@@ -74,6 +74,11 @@ class SnapshotImportLimits(BaseModel):
     :param max_snapshot_count: Maximum number of unique snapshot IDs (10,000).
     :param session_quota_bytes: Session-level store quota (from SystemConfig).
     :param free_space_reserve_bytes: Free-space reserve (from SystemConfig).
+
+    The two capacity defaults below mirror ``SystemConfig``; this module takes a
+    duck-typed config rather than importing ``backend.config``, so they cannot
+    reference it directly. ``test_capacity_defaults_mirror_system_config`` fails
+    if the mirror drifts.
     """
     max_compressed_bytes: int = 20 * 1024 ** 3
     max_uncompressed_bytes: int = 100 * 1024 ** 3
@@ -81,8 +86,8 @@ class SnapshotImportLimits(BaseModel):
     max_member_count: int = 200000
     max_manifest_count: int = 10000
     max_snapshot_count: int = 10000
-    session_quota_bytes: int = 100 * 1024 ** 3
-    free_space_reserve_bytes: int = 5 * 1024 ** 3
+    session_quota_bytes: int = 500 * 1024 ** 3
+    free_space_reserve_bytes: int = 50 * 1024 ** 3
     #: Caps for the two member kinds the importer reads *whole* into memory.
     #: Without them both were bounded only by max_single_member_bytes (80 GB),
     #: and since JSON compresses at ~1000:1 a few MB of upload could force a
@@ -113,10 +118,10 @@ class SnapshotImportLimits(BaseModel):
                 config, "snapshot_v2_import_snapshot_count", 10000,
             ),
             session_quota_bytes=getattr(
-                config, "snapshot_v2_session_quota_bytes", 100 * 1024 ** 3,
+                config, "snapshot_v2_session_quota_bytes", 500 * 1024 ** 3,
             ),
             free_space_reserve_bytes=getattr(
-                config, "snapshot_v2_free_space_reserve_bytes", 5 * 1024 ** 3,
+                config, "snapshot_v2_free_space_reserve_bytes", 50 * 1024 ** 3,
             ),
         )
 

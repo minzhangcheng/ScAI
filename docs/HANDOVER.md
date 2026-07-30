@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.36.12 · **Last updated**: 2026-07-30
+**Version**: 0.36.13 · **Last updated**: 2026-07-30
 
 ## 1. Runtime Architecture
 
@@ -98,7 +98,101 @@ Bioinformatics execution uses Stage 1 for broad QC, clustering, and annotation, 
 
 **Session lifecycle**: in-memory state is authoritative while active. `session_store.py` performs throttled disk writes and LRU eviction, while per-session locks serialize mutations. Portable export/import includes session data and generated artifacts; runtime workflow state remains managed by backend lifecycle services.
 
-## 8. Request & Data Flow
+## 8. Snapshot V2 (in development — not stable)
+
+> **Status: in development, disabled by default, not stable.** The feature is off
+> unless an operator sets `SCAI_ENABLE_SNAPSHOT_V2=true`, and the UI marks it
+> experimental when it is on. On-disk layout, manifest schema and API shapes may
+> change without a migration path, and the end-to-end behaviour has not been
+> accepted on a real deployment — only under test, including real-kernel
+> capture/restore acceptance. Treat stored snapshots as disposable: do not rely
+> on one taken by an earlier build still restoring under a later one, and do not
+> present the feature to end users. It is intentionally absent from the user
+> guide.
+
+Snapshot V2 captures a session's analysis state, notebook, workspace files,
+LangGraph checkpoint and — when a kernel is live — the Jupyter runtime, so a
+session can be returned to an earlier point of its analysis. It replaces the V1
+checkpoint mechanism, whose restore path now answers HTTP 410; V1 records remain
+listable and deletable for cleanup only.
+
+### Storage model
+
+Everything lives under the session directory, laid out by
+`backend/services/snapshot_v2/paths.py`:
+
+```
+sessions/<id>/v2/          Snapshot V2 root
+├── objects/               Content-addressed blobs, named by sha256
+├── committed/             Published manifests (one JSON per snapshot), HMAC-signed
+├── staging/               In-flight capture and restore working area
+├── journals/              Transaction intent records (capture/restore/import/export/delete)
+└── integrity/             Signature and evidence material
+```
+
+Objects are content-addressed, so an unchanged AnnData is stored once and shared
+by every snapshot that references it — what grows the store is genuinely new
+data, not the number of snapshots. A manifest names the objects a snapshot
+consists of and carries a `root_hash` over its own canonical form; both the
+manifest and the integrity material are HMAC-signed with the installation key.
+
+### Lifecycle
+
+| Operation | Entry point | Notes |
+|---|---|---|
+| Capture | `SnapshotService.capture` (`service.py`, steps in `service_parts/capture_steps.py`) | Required captures at workflow boundaries are fail-closed; auto-captures are best-effort |
+| Restore | `RestoreJobManager` → `RestoreCoordinator.apply` (`jobs.py`, `restore_parts/`) | Runs as a background job with a safe-point handshake; a pre_restore snapshot is taken first so the restore itself is undoable |
+| Rollback | `recovery.py` `_RecoveryRestorer.rollback` | Reinstates the pre_restore image when a restore fails past its point of no return |
+| Crash recovery | `recover_snapshot_transactions` (`recovery.py`), run at startup and on session load | Drives every non-terminal journal to a terminal state, or blocks the session |
+| GC | `SnapshotGarbageCollector` (`gc.py`) | Mark-and-sweep over reachable objects. Runs on delete/import/recovery — **not** on a timer |
+| Export / import | `exporter.py`, `importer.py` | Snapshots travel inside portable session archives; import defaults to `trust_runtime=false` |
+
+### Concurrency and the safe point
+
+Capture, restore, chat delegation and report generation can all be in flight
+against one session, so mutating operations fence through a generation-scoped
+cooperative safe point (`safe_point.py`). A capture or restore *requests* the
+safe point; the workflow *acknowledges* it at a quiescent moment — a graph node
+entry, a step boundary in the bioinformatics loop, or inside a HITL gate via the
+gate's `safe_point_hook`. A busy owner surfaces as `SAFE_POINT_BUSY` → HTTP 409.
+A restore that commits marks the superseded run, which unwinds with
+`WorkflowSupersededError` rather than writing its stale position back.
+
+### Continuation capsules
+
+A snapshot records *where the workflow was*, not just its data. The graph's entry
+node is `restore_entry`, and `build_restore_entry_plan` / `_route_from_restore_entry`
+use the capsule to resume: `IdleCapsule` for a session with no live position,
+`SemanticGateCapsule` for one parked at a resumable HITL gate, and a graph-node
+capsule for a mid-round position. Do not assume a run always begins at
+`initialize_round`.
+
+### Capacity
+
+Two ceilings, both checked before a capture writes and again after it lands: a
+per-session store quota (`SCAI_SNAPSHOT_SESSION_QUOTA_GB`, default 500 GiB) and a
+data-volume free-space reserve (`SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB`, default 50
+GiB). The quota is per session, so the worst case is the quota times the number
+of sessions holding snapshots; the reserve is the only volume-wide bound. The
+snapshot panel advises a cleanup at 90% of the quota. See the
+[Administrator Manual](admin-manual.md) for operator guidance.
+
+### Known limits
+
+- **Not stable.** Layout, schema and API may change without migration.
+- **No object alias identity across restore.** Supported top-level values and
+  workflow continuation are preserved, but the same AnnData embedded inside an
+  arbitrary nested container is not guaranteed to be the *same object* after a
+  restore. Code must not rely on identity checks such as `nested["adata"] is adata`.
+- **GC is event-driven, not scheduled.** Space from superseded objects is
+  reclaimed when snapshots are deleted.
+- **No cross-session total.** Only the per-session quota and the volume reserve
+  bound disk use.
+- **Not accepted end to end on a real deployment.** Coverage is automated,
+  including real-kernel capture/restore acceptance and a fault-barrier matrix,
+  but no operator acceptance run has been recorded.
+
+## 9. Request & Data Flow
 
 1. **Config** — first-run dialog posts API keys to `/api/config`; backend validates and persists.
 2. **Session create** — `POST /api/session/start` creates and persists the initial session state; `GET /api/sessions` lists sessions.
@@ -108,13 +202,13 @@ Bioinformatics execution uses Stage 1 for broad QC, clustering, and annotation, 
 6. **Report** — report routes launch generation and stream progress; final HTML and supporting artifacts are persisted under the session.
 7. **Export / import** — tarball / zip created in the background, tracked as a job; import reverses the process.
 
-## 9. Reports and Operations
+## 10. Reports and Operations
 
 Two detailed-report generators must remain aligned: `backend/agents/supervisor_agent.py` is the live generation path, while `backend/services/report/generator.py` is the fallback. Shared report services provide planning, sections, figures, rendering, scoring, variants, and regeneration. Exploration and integrated reports use the workflow/report variants alongside the detailed HTML report.
 
 Docker and direct-run deployment are supported. For ports, volumes, environment variables, build flags, reverse proxy setup, user administration, backup, and troubleshooting, use the [Administrator Manual](admin-manual.md) or [管理员手册](admin-manual-zh.md) rather than duplicating operational parameters here.
 
-## 10. Development Guide
+## 11. Development Guide
 
 - **Dev loop**: `./start.sh --dev` — hot reload for both frontend and backend.
 - **Backend tests**: `pytest backend/tests`; `conftest.py` supplies isolated data and the route registry is pinned by `route_snapshot.json`.
@@ -127,15 +221,26 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 - **Adding a report section**: update report services and keep both detailed-report generators in sync.
 - **Conventions**: Pydantic models validate at route boundaries; services contain logic; agents are thin LLM orchestrators; `utils/` holds cross-cutting helpers; config is centralized in `backend/config/` with `PI_AGENT_NAME` as the single source of truth for the PI identifier.
 
-## 11. Python Client SDK (`clients/python/`)
+## 12. Python Client SDK (`clients/python/`)
 
 `scai_client` provides a `Client` and job-oriented batch API for submitting analysis configurations, waiting for completion, and downloading exports. Its package version is independent of the ScAI application version. See the [Python client README](../clients/python/README.md) for the authoritative API and examples.
 
-## 12. Version History (condensed)
+## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.36.x — (2026-07-25 onward)**
+
+- `0.36.13` — Snapshot V2 capacity and honest labelling: per-session quota raised to 500 GiB and the free-space reserve to 50 GiB, both made operator-tunable before startup; the panel advises a cleanup at 90% instead of letting the ceiling refuse a capture unannounced; and the subsystem is finally documented for developers and operators — as in development and not stable, still absent from the user guide, and marked experimental in the UI (2026-07-30):
+  - **The two ceilings are operator-tunable (`backend/config/_config.py`, `docs/admin-manual.md`, `admin-manual-zh.md`)**: `snapshot_v2_session_quota_bytes` and `snapshot_v2_free_space_reserve_bytes` had defaults but no way to set them — no environment binding (unlike the `SCAI_ENABLE_SNAPSHOT_V2` gate beside them) and no route exposing them, so `/api/config` reported only the boolean and an operator wanting different capacity had to edit code. New `SCAI_SNAPSHOT_SESSION_QUOTA_GB` and `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB` are read once at import through `_parse_capacity_gb_env`, in GiB because that is the unit someone sizing a data volume works in while every check downstream is in bytes. An unset, non-integer or non-positive value logs and falls back rather than raising: this is import-time, so refusing would turn a typo in a deployment environment into a backend that cannot start. Defaults move from 100 GiB / 5 GiB to **500 GiB / 50 GiB**.
+  - **A quota below the advised floor is warned about, not clamped (`backend/config/_config.py`)**: `warn_if_quota_below_advisory` logs at startup when the per-session quota is under `SNAPSHOT_SESSION_QUOTA_ADVISORY_MINIMUM_GB` (100 GiB) and returns whether it fired. The operator's value still applies — a small volume is a legitimate reason — but the symptom of an undersized quota is not gradual: a single runtime capture of a large AnnData already runs to tens of GB, and the store retains every distinct object across a session's lineage rather than only the newest, so the capture that crosses the ceiling fails closed and parks the analysis on a snapshot-failure gate. It is a callable rather than a bare `if` at module scope so it can be tested without reloading the module: a reload rebinds `default_config`, and every consumer that captured it by reference at import time keeps the old object, which leaks a different ceiling into the rest of the test session.
+  - **The two modules that cannot import config no longer drift from it (`backend/services/snapshot_v2/object_store.py`, `runtime_parts/proof.py`)**: `SnapshotImportLimits` takes a duck-typed config and `proof.py` holds `RUNTIME_CAPTURE_FREE_SPACE_RESERVE_BYTES` at module scope, so both carry a hand-copied default — and a `SystemConfig` change that forgot them would leave the import path and the runtime-capture path enforcing the old ceiling while everything else moved. Both mirrors are updated and `test_capacity_defaults_mirror_system_config` now fails if they diverge again.
+  - **The listing endpoint reports usage against the ceiling that will refuse the next capture (`backend/services/snapshot_v2/management.py`, `service_parts/queries.py`)**: `SnapshotStoreStatus` gains `quota_bytes`, `quota_usage_ratio` and `quota_warning`, resolved server-side so the fraction a user is advised at and the ceiling `_check_quota` enforces cannot disagree. The ratio compares *physical* bytes, matching what the quota counts — logical bytes count every reference and would warn far too early on a lineage that dedups well — and is deliberately not clamped at 1.0, since a store can legitimately sit above the ceiling after an operator lowers the quota or via the pre_restore grace allowance, and reporting 1.0 there would hide how far over it is. A non-positive quota yields no warning rather than a 100%-full store: that is "no ceiling known here", and advice the user cannot act on. `store_status()` passes the service's own resolved quota, because the constructor accepts a per-instance override and a status measured against the global default would advise a cleanup at the wrong point.
+  - **The panel advises a cleanup at 90% (`frontend/src/components/SnapshotPanel.tsx`, `frontend/src/types/snapshotV2.ts`)**: an amber `role="alert"` block above the storage summary, in both languages, showing the percentage and both figures. It renders on the backend's `quota_warning` flag and never re-derives a threshold from the ratio, so the number the user sees and the number the capture enforces stay one value owned in one place. The quota trio is typed optional: a response without it — an older backend, or a fixture predating the fields — renders nothing rather than "NaN%".
+  - **Snapshots are documented, and documented as experimental (`docs/HANDOVER.md`, `docs/admin-manual.md`, `admin-manual-zh.md`)**: the subsystem had no prose anywhere — only scattered route-table rows and changelog entries — so an operator had no way to learn what it stores, where, what it costs, or that it is not finished. HANDOVER gains section 8 (storage model, lifecycle table, the safe-point handshake, continuation capsules, capacity, and a known-limits list including the object-alias-identity residual); both administrator manuals gain section 8 (how to enable it, where snapshots live, event-driven GC, the per-session quota's worst case, transactional restore and recovery-blocking, what to monitor). Every new section opens with a status block: in development, not stable, disabled by default, layout and API may change without migration, no operator acceptance run recorded, and not a backup mechanism. Inserting a section shifted the numbering in all three files — the one prose cross-reference that moved (`section 12` → `13` for portable sessions) was updated, and the new sections' own references were corrected to the post-shift numbers.
+  - **The user guide still says nothing (`docs/user-guide.md`, `user-guide-cn.md`)**: deliberately untouched, and verified to contain zero mentions. The feature is not offered to end users while it is experimental, so documenting it there would advertise a guarantee that does not exist.
+  - **The snapshot panel says it is experimental (`frontend/src/components/SnapshotPanel.tsx`)**: an amber `Experimental` badge beside the title, with a hover explanation, and a one-line caveat strip under the header stating that the format may change and older snapshots are not guaranteed to restore. Both are unconditional rather than flag-driven: the panel is only reachable on an instance whose operator set `SCAI_ENABLE_SNAPSHOT_V2`, so rendering at all means the feature is on. The caveat sits outside the loading branch so a slow listing cannot make it look like a settled feature. Three tests in `SnapshotQuotaWarning.test.tsx` pin the marking in both languages and before the listing resolves, so it cannot be dropped silently.
+  - **New tests (`backend/tests/test_snapshot_v2_capacity.py`, `frontend/src/components/__tests__/SnapshotQuotaWarning.test.tsx`)**: 22 backend cases and 7 frontend cases covering the new defaults, the mirror guard, the parser's fallback behaviour on six unusable values, the advisory floor firing and not firing, the threshold's inclusive boundary at exactly 90%, an over-quota store, an unknown ceiling, physical-vs-logical comparison, a per-instance quota override, the panel's three render paths, and the experimental marking. Backend 3489 passed / 79 skipped, frontend 236 passed.
 
 - `0.36.12` — Snapshot V2 edge-case hardening, in two audit passes over the whole subsystem (the second one auditing the first): the restore a user asks for at a HITL gate can be acknowledged at every one of the seven gates, quiescence is re-proved rather than assumed once, rollback is neither undone by the session cache nor half-reported, a crashed restore job or export stops protecting its target forever, object writes prove what they wrote and cannot leak their temp, the pre-write ceilings actually fire, pre_restore records a position that agrees with its own capsule, the discard-current escape hatch is both reachable and able to succeed, import/export atomicity and admission control, and the frontend effects that erased state or defeated their own bounds (2026-07-30):
   - **All seven HITL gates hand the safe point over (`backend/workflow/helpers.py`, `core.py`, `synthesis.py`, `annotation.py`, `planning.py`, `callbacks.py`)**: every HITL gate blocks *inside* a graph node, so the run task stays in flight and the graph never reaches another node entry — the only site that acknowledged the cooperative safe point. A restore requested while the user sat at a gate therefore had no acknowledger at all: `_acknowledge_if_quiescent` declines on the live run task and the graph is parked in `event.wait()`. It waited out its full 300s timeout and failed, while its pending request made every other snapshot operation answer `SAFE_POINT_BUSY` — and the gate is exactly where a user reaches for a restore. `wait_with_skip_time` now takes an optional `safe_point_hook` (the workflow's `await_restore_safe_point`), polled while blocked; time spent frozen is added back to the countdown so a restore hold cannot trip the auto-skip. Its five call sites cover the round, direction, integration, annotation, plan-review and species gates; the sixth gate is `_drive_hitl_gate` in `core.py`, the shared scaffold behind the LLM-failure, disabled-agent and marker-DB dialogs, which blocked on a bare `await event.wait()` with no hook *and no timeout* while `wait_with_skip_time` sat imported in the file and called nowhere in it. It now routes through the same helper, whose `wait_seconds=-1`-plus-hook branch preserves block-forever semantics exactly. Because the hook re-raises `WorkflowSupersededError` once a restore commits, that exception joins `asyncio.CancelledError` in the scaffold's cleanup branch so the gate does not leave `wait_input_reason` and its info attribute pinned on a state nobody will resume. A guard test fails if a gate is added without the hook.

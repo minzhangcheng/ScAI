@@ -145,8 +145,8 @@ The release helper always builds both the selected tag and `latest`:
 ```
 
 ```bash
-./build.sh --version 0.36.11
-./build.sh --version 0.36.11 --push
+./build.sh --version 0.36.13
+./build.sh --version 0.36.13 --push
 ```
 
 Without `--version`, the helper uses the newest Git tag returned by `git describe --tags --abbrev=0`, or `latest` if none exists. `--push` pushes both tags to `ghcr.io/minzhangcheng/scai`; authenticate Docker to that registry before using it. The helper does not accept registry, image-name, platform, or build-argument flags.
@@ -185,7 +185,103 @@ Docker uses `/data`; direct startup normally uses the sibling `data` directory u
 
 Docker `/dep` contains `/dep/venv` and `/dep/node_modules`. Direct startup uses `<REPO>/../dep/venv` and `<REPO>/../dep/node_modules`. Dependencies are reproducible and may be rebuilt, but persistence reduces restart time.
 
-## 8. Backup, upgrade, recovery, and rollback
+## 8. Snapshots (experimental — in development)
+
+> **Status: in development, not stable, disabled by default.** Enable it only on
+> instances where you can afford to lose the snapshots. On-disk layout and API
+> shapes may change without a migration path, so a snapshot taken by one build is
+> not guaranteed to restore under a later one. The end-to-end behaviour has not
+> been accepted on a real deployment — automated coverage includes real-kernel
+> capture and restore, but no operator acceptance run has been recorded. The
+> feature is deliberately absent from the user guide; when it is enabled the
+> snapshot page carries an experimental marker. Do not announce it to end users
+> as a supported way to protect their work, and do not treat it as a backup
+> mechanism — for that, see sections 9 and 13.
+
+Snapshots let a session be returned to an earlier point of its analysis. A
+snapshot captures the session's analysis state, notebook, workspace files, the
+workflow checkpoint and — when an analysis kernel is live — the Jupyter runtime
+including loaded datasets. Restoring one rewinds the session and, where the
+snapshot recorded a resumable position, lets the analysis continue from there.
+
+### Enabling
+
+Snapshots are off unless the backend starts with a truthy
+`SCAI_ENABLE_SNAPSHOT_V2`:
+
+```bash
+docker run -d --name scai \
+  -e SCAI_ENABLE_SNAPSHOT_V2=true \
+  ...
+```
+
+It is read once at startup, so changing it requires a restart. With the flag
+unset, the snapshot API answers as disabled and no snapshot storage is written.
+`GET /api/config` reports the resolved value as `snapshot_v2_enabled`.
+
+### Where snapshots are stored
+
+Inside each session directory, under the data root:
+
+```
+sessions/<id>/v2/          Snapshot root
+├── objects/               Content-addressed data blobs
+├── committed/             One signed manifest per snapshot
+├── staging/               In-flight working area
+├── journals/              Transaction records used by crash recovery
+└── integrity/             Signature material
+```
+
+Blobs are content-addressed, so a dataset that has not changed is stored once and
+shared by every snapshot referencing it. Store growth tracks genuinely new data,
+not the number of snapshots — but a session whose kernel holds large datasets can
+still add tens of GB per capture once the data does change.
+
+Snapshots are part of the session directory, so an ordinary data-root backup
+(section 9) includes them, and deleting a session deletes its snapshots.
+Snapshot storage is signed with the installation's `SCAI_CONFIG_SECRET`-derived
+integrity key; restoring a data root under a different secret invalidates it.
+
+### Capacity and cleanup
+
+See [Snapshot capacity](#snapshot-capacity) in section 17 for the two ceilings,
+their environment variables and the advisory floor. Two operational points
+matter day to day:
+
+- **Garbage collection is event-driven, not scheduled.** Space held by objects no
+  longer referenced is reclaimed when a snapshot is deleted (also during import
+  and crash recovery) — never on a timer. A session that accumulates snapshots
+  does not shrink on its own.
+- **The quota is per session.** Worst-case total disk use is the per-session
+  quota multiplied by the number of sessions holding snapshots; the free-space
+  reserve is the only volume-wide bound. Size the data volume for the number of
+  concurrent analyses you expect.
+
+Users are warned in the snapshot panel once a session reaches 90% of its quota.
+Past the ceiling a required capture fails closed and pauses that analysis on a
+gate the user must resolve, so the practical failure mode is a stalled run rather
+than silent data loss.
+
+### Recovery behaviour
+
+A restore is transactional: a `pre_restore` snapshot is taken first, so the
+restore itself can be rolled back, and every step is journalled. If the process
+dies mid-operation, the next startup (and the next load of that session) drives
+each unfinished journal to a terminal state — rolling back where it can, and
+otherwise marking the session recovery-blocked rather than serving a half-applied
+state. A recovery-blocked session refuses to run until the block clears; the
+condition and its cause are reported in the session's snapshot status.
+
+### Monitoring
+
+- Snapshot activity is logged under the session's log directory (section 10).
+- Store usage per session is visible in the snapshot panel, and in the
+  `store_status` field of `GET /api/session/{id}/snapshots-v2`.
+- Capture failures surface to the user as a gate rather than a silent error, so a
+  stalled analysis with `snapshot_failure` in its state is the signal to check
+  disk capacity first.
+
+## 9. Backup, upgrade, recovery, and rollback
 
 Prefer a quiescent file-level backup so SQLite and session files agree:
 
@@ -209,9 +305,9 @@ For upgrades, back up, deploy the new code/image against the existing data root,
 
 Recovery procedure: stop the service, move the damaged data root aside, restore the complete backup to the original path, restore required ownership, supply the same secrets, start the matching application version, and validate before allowing users back in.
 
-Portable session export/import moves individual sessions between installations. Exported with `include_runtime=true` it also carries the live kernel state and workflow checkpoint, so an imported session can continue analysing; the default export carries content only and cannot resume. Either way it is not a substitute for a complete service backup — see section 12 for the trade-off.
+Portable session export/import moves individual sessions between installations. Exported with `include_runtime=true` it also carries the live kernel state and workflow checkpoint, so an imported session can continue analysing; the default export carries content only and cannot resume. Either way it is not a substitute for a complete service backup — see section 13 for the trade-off.
 
-## 9. Monitoring and logs
+## 10. Monitoring and logs
 
 Use the backend health endpoint as the basic liveness check:
 
@@ -238,7 +334,7 @@ ps -fp "$(awk -F= '/_PID=/{printf "%s,", $2}' .scai.pid | sed 's/,$//')"
 
 Monitor free disk and inode capacity on the data, dependency, and temporary-upload filesystems; process memory/CPU; container restart count; health latency; repeated authentication failures; model-provider errors; and growth of `logs/`, uploads, workspaces, and reports. Alert before disk exhaustion because uploads and report generation can be large.
 
-## 10. Python client installation and authentication
+## 11. Python client installation and authentication
 
 `scai-client` version `0.2.0` requires Python `>=3.10` and `httpx>=0.26.0`. Install from the repository checkout:
 
@@ -269,7 +365,7 @@ with Client("http://localhost:8000", api_key="<API_KEY>") as client:
 
 Public ordinary lifecycle methods are `close() -> None`, `__enter__() -> Client`, and `__exit__(*args) -> None`. Missing credentials or HTTP 401 responses raise `AuthError`.
 
-## 11. Python client analysis jobs and artifacts
+## 12. Python client analysis jobs and artifacts
 
 ### Client job methods
 
@@ -306,7 +402,7 @@ All Job HTTP calls raise `AuthError` for HTTP 401 and may raise `httpx.HTTPStatu
 
 Client exceptions are `ScaiError` (base), `AuthError`, `FileIntegrityError`, `UploadError`, `JobFailed`, and `ImportFailed`. File access may also raise standard `OSError`/`FileNotFoundError`; JSON parsing may raise `json.JSONDecodeError`; polling may raise `TimeoutError`; and network failures may surface as `httpx` exceptions.
 
-## 12. Python client portable session management
+## 13. Python client portable session management
 
 `list_sessions() -> list[dict]` returns sessions owned by the authenticated user, including identifiers, names, status, round, and timestamps.
 
@@ -363,7 +459,7 @@ Resuming needs a session that was exported while paused or waiting for input. A 
 
 It remains a migration format, not a complete service backup.
 
-## 13. Session Manager CLI
+## 14. Session Manager CLI
 
 Install the local client package before using the repository helper:
 
@@ -388,7 +484,7 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 
 `list` displays ID, name, status, current round, and creation time. `import` shows heuristic extraction progress (which can exceed 100%) and waits without a polling deadline; the HTTP client timeout is 24 hours. It retains the archived session ID, so list and back up existing sessions before use. `export` writes a compressed archive, using the client default name when output is omitted; the server needs temporary disk to finish building it before download starts. Quote secrets and paths, and avoid storing keys or asynchronous import job IDs in shell history or logs.
 
-## 14. Security practices
+## 15. Security practices
 
 - Set strong, stable `SCAI_JWT_SECRET` and `SCAI_CONFIG_SECRET` values through protected environment injection. Shared instances intended to accept the same tokens must use the same JWT secret.
 - Never casually change `SCAI_CONFIG_SECRET`: previously encrypted stored model credentials may become unreadable. Back it up separately from data, with equivalent protection.
@@ -401,7 +497,7 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 - Encrypt backups at rest and in transit, maintain offline/immutable copies where required, and test recovery regularly.
 - Keep host OS, Docker, Python/Node dependencies, and ScAI images updated after staging and backup validation.
 
-## 15. Troubleshooting
+## 16. Troubleshooting
 
 | Symptom | Checks and corrective action |
 |---|---|
@@ -420,7 +516,7 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 | Delete fails | `Job.delete` returns HTTP 409 while a workflow is active or initializing. Stop it and wait for cleanup. User deletion and role changes also enforce self/last-admin protections. |
 | Disk usage grows | Review uploads, workspaces, reports, logs, temporary uploads, abandoned `.partial` files, and retained sessions. Back up before deleting supported data through the application. |
 
-## 16. Parameter and default-value reference
+## 17. Parameter and default-value reference
 
 ### Ports, paths, and limits
 
@@ -449,11 +545,49 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 | `SCAI_JWT_SECRET` | Generated and stored as `.jwt_secret` | HS256 JWT signing |
 | `SCAI_CONFIG_SECRET` | Generated local encryption material | Encrypts stored user/model secrets |
 | `SCAI_ENABLE_REPRODUCIBILITY` | Disabled | Truthy `1`, `true`, or `yes` enables reproducibility bundles |
+| `SCAI_ENABLE_SNAPSHOT_V2` | Disabled | Truthy `1`, `true`, or `yes` opts the instance into Snapshot V2 |
+| `SCAI_SNAPSHOT_SESSION_QUOTA_GB` | `500` | Per-session snapshot store ceiling, in GiB. **Values below 100 GiB are not advised** — see [Snapshot capacity](#snapshot-capacity) |
+| `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB` | `50` | Free space that must remain on the data volume after a capture, in GiB |
 | `SCAI_MODE` | `prod` | Docker entrypoint mode (`prod` or `dev`) |
 | `PIP_INDEX_URL` | pip environment/default | Docker Python package index |
 | `SCAI_AUTO_FETCH_MARKERS` | `0` | Direct startup; `1` attempts marker-database download |
 | `SCAI_HOST` | Set internally | Vite proxy host; scripts set it from startup context |
 | `SCAI_BACKPORT` | Set internally | Vite proxy backend port; scripts set it from startup context |
+
+
+### Snapshot capacity
+
+Snapshot V2 enforces two ceilings, both checked before a capture writes anything
+and again after it lands:
+
+- **Per-session store quota** — `SCAI_SNAPSHOT_SESSION_QUOTA_GB`, default 500
+  GiB. Measured against the physical bytes in that session's object store. The
+  store is content-addressed, so one copy of an unchanged AnnData is shared by
+  every snapshot that references it; what grows the figure is genuinely new
+  data, not the number of snapshots.
+- **Data-volume free-space reserve** — `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB`,
+  default 50 GiB. Space that must still be free after a capture completes, so a
+  session cannot fill the volume every other session writes its metadata to.
+
+Both are read once at backend startup; set them before starting, and restart to
+change them.
+
+**Do not set the per-session quota below 100 GiB.** A single runtime capture of a
+large AnnData already runs to tens of GB, and the store retains every distinct
+object across a session's snapshot lineage rather than only the newest. A quota
+smaller than that does not degrade gradually: the capture that crosses the
+ceiling fails closed and parks the analysis on a snapshot-failure gate, which the
+user must resolve before the run continues. A value under 100 GiB is honoured but
+logs a warning at startup.
+
+The quota is per session, so the worst-case total is the quota multiplied by the
+number of sessions holding snapshots; the free-space reserve is the only
+volume-wide bound. Size the volume for the number of concurrent analyses you
+expect, and note that garbage collection runs when snapshots are deleted, not on
+a timer — space from superseded objects is reclaimed at deletion.
+
+The snapshot panel warns the user to clean up once a session reaches 90% of its
+quota, so the ceiling is normally approached with notice rather than hit blind.
 
 ### Shell options
 

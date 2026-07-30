@@ -377,10 +377,20 @@ class QueriesMixin:
         return {"manifest": manifest.model_dump(mode="json")}
 
     def store_status(self) -> Any:
-        """Compute store-level usage statistics from verified manifests."""
+        """Compute store-level usage statistics from verified manifests.
+
+        Reports against *this service's* quota, not the global default: the
+        constructor accepts a per-instance override, and a status that measured
+        a different ceiling than the next capture will enforce would advise a
+        cleanup at the wrong time.
+        """
         from backend.services.snapshot_v2.management import compute_store_status
 
-        return compute_store_status(self.paths, self.manifest_store)
+        return compute_store_status(
+            self.paths,
+            self.manifest_store,
+            quota_bytes=self.session_quota_bytes,
+        )
 
     def rebuild_snapshots_from_manifests(self, existing: list | None = None) -> list:
         """Rebuild AnalysisState.snapshots listing from verified committed manifests.

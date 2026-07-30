@@ -10,6 +10,7 @@ import {
 } from '../hooks/useApi'
 import { useAppStore } from '../stores/appStore'
 import { StorageSummary } from './snapshots/StorageSummary'
+import { formatBytes } from '../utils/snapshotV2'
 import { SnapshotTree } from './snapshots/SnapshotTree'
 import { SnapshotPreview } from './snapshots/SnapshotPreview'
 import { DiscardCurrentDialog } from './snapshots/DiscardCurrentDialog'
@@ -338,6 +339,21 @@ export function SnapshotPanel({
             <h2 className="text-lg font-semibold text-slate-900">
               {isZh ? '分析快照' : 'Analysis Snapshots'}
             </h2>
+            {/*
+              The feature ships disabled and is reached only by an operator who
+              set SCAI_ENABLE_SNAPSHOT_V2, so this panel rendering at all means
+              it is on. The marker is unconditional rather than tied to a flag:
+              anyone looking at this screen is looking at the experimental
+              feature, and it is deliberately undocumented for end users.
+            */}
+            <span
+              className="px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide bg-amber-100 text-amber-700 border border-amber-200"
+              title={isZh
+                ? '实验性功能：仍在开发中，行为与存储格式可能变化，请勿作为唯一的成果保护手段。'
+                : 'Experimental: in development. Behaviour and storage format may change; do not rely on it as your only safeguard.'}
+            >
+              {isZh ? '实验性' : 'Experimental'}
+            </span>
             {snapshots.length > 0 && (
               <span className="text-xs text-slate-400 ml-1">({snapshots.length})</span>
             )}
@@ -345,6 +361,12 @@ export function SnapshotPanel({
           <button onClick={onClose} className="p-1 hover:bg-slate-100 rounded-lg" aria-label="Close">
             <X className="w-5 h-5 text-slate-400" />
           </button>
+        </div>
+
+        <div className="px-6 py-2 bg-amber-50/60 border-b border-amber-100 text-[11px] text-amber-800">
+          {isZh
+            ? '此功能仍在开发中，尚不稳定：快照格式可能在后续版本中变更，旧快照不保证能被恢复。请勿将其作为唯一的成果保护手段。'
+            : 'This feature is in development and not yet stable: the snapshot format may change in a later build, and older snapshots are not guaranteed to restore. Do not rely on it as your only safeguard.'}
         </div>
 
         <div className="flex-1 overflow-auto p-4">
@@ -356,6 +378,17 @@ export function SnapshotPanel({
             </div>
           ) : (
             <div className="flex flex-col gap-4">
+              {storeStatus?.quota_warning && (
+                <div
+                  role="alert"
+                  className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800"
+                >
+                  {isZh
+                    ? `快照已占用会话配额的 ${Math.round((storeStatus.quota_usage_ratio ?? 0) * 100)}%（${formatBytes(storeStatus.physical_bytes)} / ${formatBytes(storeStatus.quota_bytes ?? 0)}）。请删除不再需要的快照以释放空间：配额用尽后，后续快照会失败并暂停分析。`
+                    : `Snapshots use ${Math.round((storeStatus.quota_usage_ratio ?? 0) * 100)}% of the session quota (${formatBytes(storeStatus.physical_bytes)} / ${formatBytes(storeStatus.quota_bytes ?? 0)}). Delete snapshots you no longer need to free space — once the quota is reached, further captures fail and pause the analysis.`}
+                </div>
+              )}
+
               {storeStatus && <StorageSummary status={storeStatus} />}
 
               <div className="flex gap-4">

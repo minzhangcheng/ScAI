@@ -136,6 +136,23 @@ export interface SnapshotStoreStatus {
   dedup_savings: number
   object_count: number
   manifest_count: number
+  /**
+   * Per-session ceiling the store is measured against, in bytes.
+   *
+   * The quota trio is optional because the backend resolves it and older
+   * responses (and fixtures built before it existed) simply omit it — a panel
+   * that assumed it present would render "NaN%" against them rather than
+   * staying quiet.
+   */
+  quota_bytes?: number
+  /** physical_bytes / quota_bytes. Not capped at 1: a store can sit above. */
+  quota_usage_ratio?: number
+  /**
+   * Set by the backend once usage reaches the advisory fraction of the quota.
+   * The threshold lives there, with the ceiling that enforces it, so the client
+   * must not re-derive one from the ratio.
+   */
+  quota_warning?: boolean
 }
 
 export interface SnapshotTransactionRecord {
