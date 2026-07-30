@@ -10,6 +10,7 @@ from .bioinfo_liaison import BioinfoLiaisonMixin  # noqa: F401
 from .figures import FiguresMixin  # noqa: F401
 from .reports import ReportsMixin  # noqa: F401
 from .interaction import InteractionMixin  # noqa: F401
+from .execution_review import ExecutionReviewMixin  # noqa: F401
 
 __all__ = [
     "InstructionsMixin",
@@ -23,4 +24,5 @@ __all__ = [
     "FiguresMixin",
     "ReportsMixin",
     "InteractionMixin",
+    "ExecutionReviewMixin",
 ]

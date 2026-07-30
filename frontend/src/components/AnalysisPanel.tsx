@@ -155,6 +155,10 @@ export function AnalysisPanel() {
 
   // Supplementary analysis state
   const [isSupplementaryRunning, setIsSupplementaryRunning] = useState(false)
+  // The annotation and direction gates re-open on a fresh gate message once their
+  // supplementary pass finishes. The round gate has no such message — the workflow
+  // simply returns to the same wait — so latch the request and re-arm on status.
+  const roundSupplementaryPendingRef = useRef(false)
 
   // Snapshot panel state
   const [showSnapshotPanel, setShowSnapshotPanel] = useState(false)
@@ -575,18 +579,22 @@ export function AnalysisPanel() {
     setIntegrationGateData(null)
   }
 
-  const handleSupplementaryAnalysis = useCallback(async (requestText: string, target: 'annotation' | 'direction') => {
+  const handleSupplementaryAnalysis = useCallback(async (requestText: string, target: 'annotation' | 'direction' | 'round') => {
     if (!currentSession) return
     setIsSupplementaryRunning(true)
+    if (target === 'round') roundSupplementaryPendingRef.current = true
     try {
       await apiFetch(`/session/${currentSession.id}/supplementary-analysis`, {
         method: 'POST',
         body: JSON.stringify({ request_text: requestText, target }),
       })
-      // isSupplementaryRunning will be reset when new annotation_confirmation or exploration_report message arrives
+      // isSupplementaryRunning will be reset when a new annotation_confirmation or
+      // exploration_report message arrives, or — for the round gate — when the
+      // workflow returns to waiting_input
     } catch (error) {
       console.error('Supplementary analysis error:', error)
       setIsSupplementaryRunning(false)
+      roundSupplementaryPendingRef.current = false
     }
   }, [currentSession])
 
@@ -1110,6 +1118,18 @@ export function AnalysisPanel() {
       setShowFeedbackDialog(false)
     }
   }, [currentSession?.status, showFeedbackDialog])
+
+  // Re-arm the round dialog after a round-target supplementary pass: it returns to
+  // the same gate without emitting a new round summary, so the per-round guard above
+  // would never re-open it. Depending on status alone is what makes this safe — the
+  // request is issued while already waiting_input, so it cannot consume its own latch.
+  useEffect(() => {
+    if (currentSession?.status !== 'waiting_input') return
+    if (!roundSupplementaryPendingRef.current) return
+    roundSupplementaryPendingRef.current = false
+    setIsSupplementaryRunning(false)
+    setShowFeedbackDialog(true)
+  }, [currentSession?.status])
 
   // Detect annotation_confirmation messages and show dialog (supports data refresh for supplementary analysis)
   useEffect(() => {
@@ -1684,6 +1704,8 @@ export function AnalysisPanel() {
           treatmentGroups={currentSession.treatmentGroups || []}
           onSend={handleDialogSend}
           onSkip={handleDialogSkip}
+          onRequestSupplementary={(text) => handleSupplementaryAnalysis(text, 'round')}
+          isSupplementaryRunning={isSupplementaryRunning}
           onStopImmediate={() => handleStop('immediate')}
           onStopSummarize={() => handleStop('summarize')}
         />

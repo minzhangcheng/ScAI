@@ -540,6 +540,12 @@ class SynthesisMixin:
                     {"status": status, "findings": findings}, ensure_ascii=False
                 )
             elif agent_name == "bioinformatics":
+                # The plan audit and the executor's own suggestions are included so
+                # the PI synthesizes against what the round actually ran, not only
+                # against the findings it chose to report. An unmet approved step is
+                # the strongest signal that a conclusion should stay hedged.
+                review = result.get("post_execution_review") or {}
+                audit = result.get("plan_audit") or {}
                 agent_results[agent_name] = json.dumps(
                     {
                         "status": status or "completed",
@@ -552,6 +558,18 @@ class SynthesisMixin:
                             if result.get("evidence_verified") is False
                             else "Findings are linked to successful execution records."
                         ),
+                        "agent_suggestions": result.get("agent_suggestions", []),
+                        "plan_coverage": {
+                            k: audit.get(k)
+                            for k in ("n_steps", "n_completed", "n_skipped", "n_unmet",
+                                      "unmet_titles", "unmet_families")
+                            if audit.get(k) is not None
+                        } or None,
+                        "supplementary_pass": {
+                            "status": review.get("review_status"),
+                            "verdict": (review.get("assessment") or {}).get("verdict"),
+                            "remaining_gaps": (review.get("assessment") or {}).get("remaining_gaps", []),
+                        } if review.get("review_status") in ("completed", "partial", "failed") else None,
                     },
                     ensure_ascii=False,
                 )

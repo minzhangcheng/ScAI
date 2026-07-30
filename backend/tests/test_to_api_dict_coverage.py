@@ -54,6 +54,12 @@ _EXCLUDED_FIELDS = {
     # session API, exactly like score_definitions above.
     "scoring_plans",
     "data_driven_mechanism_programs",
+    # Plan-audit / supplementary-pass records. Live progress is pushed as a
+    # `post_execution_review` websocket message and the durable form reaches the
+    # user through the report; no frontend consumer reads it back off the session
+    # API — verified by grepping frontend/src — and it is per-execution, so
+    # keeping it off the load response keeps that payload bounded.
+    "post_execution_reviews",
     "current_round_cache",
     "messages",
     "revision_history",

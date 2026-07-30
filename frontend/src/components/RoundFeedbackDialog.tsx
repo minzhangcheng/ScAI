@@ -18,6 +18,7 @@ import {
   CheckCircle2
 } from 'lucide-react'
 import { useTranslation, Language } from '../i18n/translations'
+import { SupplementaryAnalysisModal } from './SupplementaryAnalysisModal'
 import { TreatmentGroup } from '../stores/appStore'
 import type { RoundSummary } from '../types'
 import { AGENT_OPTIONS } from '../constants/agents'
@@ -45,8 +46,10 @@ interface RoundFeedbackDialogProps {
   treatmentGroups: TreatmentGroup[]
   onSend: (message: string, files: UploadedFileWithAgent[]) => Promise<void>
   onSkip: () => Promise<void>
+  onRequestSupplementary: (requestText: string) => Promise<void>
   onStopImmediate?: () => void
   onStopSummarize?: () => void
+  isSupplementaryRunning?: boolean
 }
 
 export function RoundFeedbackDialog({
@@ -58,8 +61,10 @@ export function RoundFeedbackDialog({
   treatmentGroups,
   onSend,
   onSkip,
+  onRequestSupplementary,
   onStopImmediate,
   onStopSummarize,
+  isSupplementaryRunning = false,
 }: RoundFeedbackDialogProps) {
   const { t } = useTranslation(language)
 
@@ -72,6 +77,7 @@ export function RoundFeedbackDialog({
   const [files, setFiles] = useState<UploadedFileWithAgent[]>([])
   const [sending, setSending] = useState(false)
   const [customTypeError, setCustomTypeError] = useState('')
+  const [showSupplementaryInput, setShowSupplementaryInput] = useState(false)
 
   // Timer state
   const [timerPaused, setTimerPaused] = useState(false)
@@ -130,6 +136,13 @@ export function RoundFeedbackDialog({
   const handleSkip = useCallback(async () => {
     await onSkip()
   }, [onSkip])
+
+  const openSupplementaryInput = useCallback(() => {
+    // Composing a request takes as long as typing guidance does, so it must not
+    // race the auto-continue countdown either.
+    setTimerPaused(true)
+    setShowSupplementaryInput(true)
+  }, [])
 
   const handleSend = useCallback(async () => {
     if (sending) return
@@ -275,13 +288,14 @@ export function RoundFeedbackDialog({
             {/* Continue button (renamed from Skip) */}
             <button
               onClick={handleSkip}
-              disabled={sending}
+              disabled={sending || isSupplementaryRunning}
               className="flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg bg-blue-100 hover:bg-blue-200 text-blue-700 transition-colors disabled:opacity-50"
             >
               <Play className="w-3.5 h-3.5" />
               {t('skipRound')}
             </button>
-            {/* Terminate immediately */}
+            {/* Terminate immediately — left enabled during a supplementary run, since
+                stopping must stay reachable while the gate waits */}
             {onStopImmediate && (
               <button
                 onClick={onStopImmediate}
@@ -536,13 +550,28 @@ export function RoundFeedbackDialog({
               {/* Send button */}
               <button
                 onClick={handleSend}
-                disabled={sending || (!userInput.trim() && files.length === 0)}
+                disabled={sending || isSupplementaryRunning || (!userInput.trim() && files.length === 0)}
                 className="p-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:bg-slate-300"
                 title={t('sendInput')}
               >
                 {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
               </button>
             </div>
+          </div>
+
+          {/* Supplementary analysis — an alternative to the guidance above: it runs
+              now and comes back to this same gate instead of ending the round. */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={openSupplementaryInput}
+              disabled={sending || isSupplementaryRunning}
+              className="px-4 py-2.5 rounded-xl text-sm font-medium border border-amber-300 text-amber-700 hover:bg-amber-50 transition-all disabled:opacity-50"
+            >
+              {isSupplementaryRunning
+                ? t('roundSupplementaryRunning')
+                : t('roundRequestSupplementary')}
+            </button>
+            <span className="text-xs text-slate-500">{t('roundSupplementaryHint')}</span>
           </div>
 
           {/* Sending status */}
@@ -564,6 +593,15 @@ export function RoundFeedbackDialog({
           />
         </div>
       </div>
+
+      {showSupplementaryInput && (
+        <SupplementaryAnalysisModal
+          language={language}
+          placeholder={t('roundSupplementaryPlaceholder')}
+          onSubmit={onRequestSupplementary}
+          onClose={() => setShowSupplementaryInput(false)}
+        />
+      )}
     </div>
   )
 }

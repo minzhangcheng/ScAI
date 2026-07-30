@@ -400,6 +400,10 @@ Please provide a detailed literature review report with specific citations.`,
     roundInputPlaceholder: 'Enter additional guidance or instructions for the next round...',
     fileUploadedTo: 'Send to',
     removeFile: 'Remove',
+    roundRequestSupplementary: 'Request More Analysis',
+    roundSupplementaryRunning: 'Analyzing...',
+    roundSupplementaryHint: 'Runs now and comes back to this review point — it does not end the round.',
+    roundSupplementaryPlaceholder: 'e.g., Please add one more comparison for the key findings of this round and search relevant literature',
 
     // Chat Panel
     chatPlaceholder: 'Type a message...',

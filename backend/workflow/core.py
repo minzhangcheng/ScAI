@@ -37,6 +37,7 @@ from .initialize import InitializeMixin
 from .graph import GraphMixin
 from .reporting import ReportingMixin
 from .integration import IntegrationMixin
+from .post_execution import PostExecutionReviewMixin
 
 from ..services.snapshot_v2.errors import RequiredSnapshotBlocked
 from ..services.snapshot_v2.restore_entry import build_restore_entry_plan
@@ -70,7 +71,7 @@ from .helpers import (  # noqa: E402,F401
 )
 
 
-class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, CallbacksMixin, AnnotationMixin, PlanningMixin, AgentNodesMixin, SynthesisMixin, InitializeMixin, GraphMixin, ReportingMixin, IntegrationMixin):
+class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, CallbacksMixin, AnnotationMixin, PlanningMixin, AgentNodesMixin, PostExecutionReviewMixin, SynthesisMixin, InitializeMixin, GraphMixin, ReportingMixin, IntegrationMixin):
     """
     Multi-agent workflow for single-cell analysis using LangGraph
     """
