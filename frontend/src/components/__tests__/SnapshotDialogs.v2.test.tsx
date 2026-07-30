@@ -28,6 +28,7 @@ describe('SnapshotFailureDialog', () => {
       <SnapshotFailureDialog
         failure={baseFailure}
         onRetry={vi.fn()}
+        onProceed={vi.fn()}
         onSkip={vi.fn()}
         onManage={vi.fn()}
         onTerminate={vi.fn()}
@@ -49,6 +50,7 @@ describe('SnapshotFailureDialog', () => {
       <SnapshotFailureDialog
         failure={{ ...baseFailure, allowed_actions: ['retry', 'skip', 'manage', 'terminate'] }}
         onRetry={vi.fn()}
+        onProceed={vi.fn()}
         onSkip={onSkip}
         onManage={vi.fn()}
         onTerminate={vi.fn()}
@@ -64,6 +66,7 @@ describe('SnapshotFailureDialog', () => {
       <SnapshotFailureDialog
         failure={baseFailure}
         onRetry={vi.fn()}
+        onProceed={vi.fn()}
         onSkip={vi.fn()}
         onManage={vi.fn()}
         onTerminate={vi.fn()}
@@ -88,6 +91,7 @@ describe('SnapshotFailureDialog', () => {
           },
         }}
         onRetry={onRetry}
+        onProceed={vi.fn()}
         onSkip={vi.fn()}
         onManage={vi.fn()}
         onTerminate={vi.fn()}
@@ -115,6 +119,7 @@ describe('SnapshotFailureDialog', () => {
           failure: { ...baseFailure.failure, message: hugeMessage },
         }}
         onRetry={vi.fn()}
+        onProceed={vi.fn()}
         onSkip={vi.fn()}
         onManage={vi.fn()}
         onTerminate={vi.fn()}
@@ -144,6 +149,7 @@ describe('SnapshotFailureDialog', () => {
           },
         }}
         onRetry={vi.fn()}
+        onProceed={vi.fn()}
         onSkip={vi.fn()}
         onManage={vi.fn()}
         onTerminate={vi.fn()}
@@ -155,6 +161,60 @@ describe('SnapshotFailureDialog', () => {
     expect(dialog.textContent).toMatch(
       /current workflow remains|no live mutation|before.*mutation/i,
     )
+  })
+
+  it('memory gate offers Proceed and Skip but never Retry', () => {
+    // Retry is absent by construction: the preflight is deterministic, so a
+    // retry would measure the same objects and refuse again forever.
+    const onProceed = vi.fn()
+    render(
+      <SnapshotFailureDialog
+        failure={{
+          failure: {
+            ...baseFailure.failure,
+            code: 'snapshot_memory_insufficient',
+            message:
+              "Snapshot capture needs about 22.0 GiB to copy 'adata' (20.0 GiB) "
+              + 'before writing it, but only 10.0 GiB of memory headroom is available',
+            details: { name: 'adata', phase: 'pre_execution_stage2' },
+          },
+          allowed_actions: ['proceed', 'skip', 'terminate'],
+        }}
+        onRetry={vi.fn()}
+        onProceed={onProceed}
+        onSkip={vi.fn()}
+        onManage={vi.fn()}
+        onTerminate={vi.fn()}
+      />,
+    )
+
+    expect(screen.queryByRole('button', { name: /^retry$/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /manage/i })).toBeNull()
+    const proceed = screen.getByRole('button', { name: /capture anyway/i })
+    fireEvent.click(proceed)
+    expect(onProceed).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: /skip snapshot/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /terminate/i })).toBeTruthy()
+  })
+
+  it('memory gate explains that the analysis itself was not interrupted', () => {
+    render(
+      <SnapshotFailureDialog
+        failure={{
+          failure: { ...baseFailure.failure, code: 'snapshot_memory_insufficient' },
+          allowed_actions: ['proceed', 'skip', 'terminate'],
+        }}
+        onRetry={vi.fn()}
+        onProceed={vi.fn()}
+        onSkip={vi.fn()}
+        onManage={vi.fn()}
+        onTerminate={vi.fn()}
+      />,
+    )
+
+    const dialog = screen.getByRole('dialog', { name: /snapshot failure/i })
+    expect(dialog.textContent).toMatch(/only the snapshot was refused/i)
+    expect(dialog.textContent).not.toMatch(/Retry re-enters capture only/i)
   })
 })
 

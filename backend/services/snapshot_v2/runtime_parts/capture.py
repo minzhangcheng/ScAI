@@ -13,7 +13,12 @@ import shutil
 import uuid
 from pathlib import Path
 
-from backend.services.snapshot_v2.errors import SnapshotCaptureError
+from backend.config import SNAPSHOT_MEMORY_SAFETY_RATIO
+from backend.services.snapshot_v2.errors import (
+    SNAPSHOT_FAILURE_ACTIONS_MEMORY,
+    SNAPSHOT_MEMORY_INSUFFICIENT_CODE,
+    SnapshotCaptureError,
+)
 from backend.utils.error_parsing import strip_ansi
 from backend.services.snapshot_v2.models import (
     ObjectRef,
@@ -39,6 +44,125 @@ from backend.services.snapshot_v2.runtime_registry import (
 
 from .kernel_templates import _INTROSPECT_CODE, _SAVE_ANNDATA_TEMPLATE, _SAVE_DILL_TEMPLATE
 from .proof import RUNTIME_CAPTURE_FREE_SPACE_RESERVE_BYTES, _parse_dill_name_line, _parse_dill_saved_names, _parse_dill_skipped, _parse_dill_verified_names, _validate_h5ad_file
+
+
+#: Multiplier applied to the largest captured AnnData when estimating what the
+#: capture will allocate. The h5ad template deep-copies the object before
+#: sanitizing it, so one full copy is the floor; the surcharge covers the
+#: sanitize pass, which can convert individual obsm/varm slots to fresh arrays.
+_CAPTURE_COPY_OVERHEAD = 1.1
+
+
+def _parse_memory_payload(output: str) -> dict | None:
+    """Extract the optional memory probe from introspection output.
+
+    Returns ``None`` whenever the probe is absent or unreadable. A capture must
+    never be refused because the evidence for refusing it could not be read.
+    """
+    begin_marker = "__RUNTIME_MEMORY_BEGIN__"
+    end_marker = "__RUNTIME_MEMORY_END__"
+    start = output.find(begin_marker)
+    if start == -1:
+        return None
+    start += len(begin_marker)
+    end = output.find(end_marker, start)
+    if end == -1:
+        return None
+    try:
+        parsed = json.loads(output[start:end].strip())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _consume_memory_preflight_override(sandbox) -> bool:
+    """One-shot check-and-consume of the user's "proceed anyway" decision.
+
+    Mirrors ``consume_snapshot_skip``: the flag is armed by the proceed endpoint
+    when the user accepts the OOM risk, and is cleared here so that a later
+    capture is preflighted afresh instead of silently inheriting the override.
+    """
+    session_id = getattr(sandbox, "session_id", None)
+    if not session_id:
+        return False
+    try:
+        from backend.state import sessions
+    except Exception:
+        return False
+    state = sessions.get(session_id)
+    if state is None or not getattr(state, "force_snapshot_memory_override", False):
+        return False
+    state.force_snapshot_memory_override = False
+    return True
+
+
+def _preflight_capture_memory(
+    memory_meta: dict | None,
+    h5ad_names: list[str],
+    *,
+    safety_ratio: float = SNAPSHOT_MEMORY_SAFETY_RATIO,
+) -> None:
+    """Refuse a capture whose AnnData copy would not fit in measured headroom.
+
+    This is the only memory check in the analysis path, and it exists because
+    the capture itself allocates: ``_SAVE_ANNDATA_TEMPLATE`` deep-copies each
+    AnnData before writing it. Ordinary analysis code is deliberately not
+    checked — predicting arbitrary user code is unreliable, whereas the size of
+    a copy this process is about to make is a measured fact.
+
+    Objects are captured one at a time, so the peak is driven by the largest
+    single object rather than by their sum.
+
+    Raises ``SnapshotCaptureError`` with the memory action set; returns silently
+    when the probe is missing, when nothing goes through h5ad, or when headroom
+    is unknown.
+    """
+    if not memory_meta or not h5ad_names:
+        return
+    headroom = memory_meta.get("headroom")
+    if not isinstance(headroom, int) or headroom <= 0:
+        return
+    sizes = memory_meta.get("bytes")
+    if not isinstance(sizes, dict):
+        return
+
+    measured = {
+        name: int(sizes[name])
+        for name in h5ad_names
+        if isinstance(sizes.get(name), int)
+    }
+    if not measured:
+        return
+
+    largest_name = max(measured, key=lambda n: measured[n])
+    largest_bytes = measured[largest_name]
+    required = int(largest_bytes * _CAPTURE_COPY_OVERHEAD)
+    budget = int(headroom * safety_ratio)
+    if required <= budget:
+        return
+
+    gib = 1024 ** 3
+    raise SnapshotCaptureError(
+        SNAPSHOT_MEMORY_INSUFFICIENT_CODE,
+        (
+            f"Snapshot capture needs about {required / gib:.1f} GiB to copy "
+            f"'{largest_name}' ({largest_bytes / gib:.1f} GiB) before writing it, "
+            f"but only {headroom / gib:.1f} GiB of memory headroom is available "
+            f"({budget / gib:.1f} GiB usable at the configured "
+            f"{safety_ratio:.0%} safety ratio). Capturing now risks an "
+            f"out-of-memory kill that would lose the live analysis state."
+        ),
+        details={
+            "name": largest_name,
+            "largest_object_bytes": largest_bytes,
+            "required_bytes": required,
+            "headroom_bytes": headroom,
+            "budget_bytes": budget,
+            "safety_ratio": safety_ratio,
+            "kernel_rss_bytes": memory_meta.get("rss"),
+            "allowed_actions": list(SNAPSHOT_FAILURE_ACTIONS_MEMORY),
+        },
+    )
 
 
 class RuntimeCapture:
@@ -126,7 +250,17 @@ class RuntimeCapture:
         )
 
 
-    async def _introspect_globals(self, sandbox, *, exec_lock_held: bool = False) -> dict[str, str]:
+    async def _introspect_globals(
+        self, sandbox, *, exec_lock_held: bool = False,
+    ) -> tuple[dict[str, str], dict | None]:
+        """Read kernel globals metadata and the memory probe in one round-trip.
+
+        Returns ``(globals_meta, memory_meta)``. The globals payload is
+        authoritative and its absence is fatal. The memory payload is advisory:
+        a kernel that could not produce it (older template, unreadable /proc)
+        yields ``None``, and the caller then skips the memory preflight rather
+        than refusing a capture on missing evidence.
+        """
         result = await self._run_kernel(
             sandbox, _INTROSPECT_CODE, exec_lock_held=exec_lock_held
         )
@@ -170,7 +304,10 @@ class RuntimeCapture:
                 "RUNTIME_INTROSPECT_PARSE_ERROR",
                 f"Globals payload is not a dict: {type(parsed).__name__}",
             )
-        return {str(k): str(v) for k, v in parsed.items()}
+        return (
+            {str(k): str(v) for k, v in parsed.items()},
+            _parse_memory_payload(output),
+        )
 
     async def _capture_adata(
         self, sandbox, var_name: str, type_str: str, capture_dir: Path,
@@ -337,7 +474,7 @@ class RuntimeCapture:
                 )
             return empty_complete_runtime()
 
-        globals_meta = await self._introspect_globals(
+        globals_meta, memory_meta = await self._introspect_globals(
             sandbox, exec_lock_held=exec_lock_held
         )
 
@@ -404,6 +541,12 @@ class RuntimeCapture:
                     h5ad_names.append(name)
                 else:
                     dill_names.append(name)
+
+            # Refuse before allocating anything if the copy this capture is
+            # about to make would not fit. Raised here rather than inside
+            # _capture_adata so nothing has been written to the staging dir yet.
+            if not _consume_memory_preflight_override(sandbox):
+                _preflight_capture_memory(memory_meta, h5ad_names)
 
             for var_name in sorted(h5ad_names):
                 type_str = globals_meta.get(var_name, dep_manifest.required[var_name].type_name)

@@ -897,7 +897,12 @@ export function AnalysisPanel() {
     }
   }, [currentSession, wsConnected, wsConnect, addMessage])
 
-  const handleSnapshotFailureRetry = useCallback(async () => {
+  // Retry and Proceed are the same capture dispatch. Proceed differs only in
+  // that the backend arms a one-shot memory-preflight override before running
+  // it, so both share this handler rather than keeping two copies in sync.
+  const runSnapshotFailureCapture = useCallback(async (
+    action: 'retry' | 'proceed',
+  ) => {
     if (!currentSession) return
     try {
       // Capture-only retry — must not regenerate completed reports
@@ -907,11 +912,13 @@ export function AnalysisPanel() {
           status?: TaskStatus
           still_blocked?: boolean
           snapshot_failure?: Record<string, unknown> | null
-          snapshot_failure_allowed_actions?: Array<'retry' | 'skip' | 'manage' | 'terminate'>
+          snapshot_failure_allowed_actions?: Array<
+            'retry' | 'proceed' | 'skip' | 'manage' | 'terminate'
+          >
           transaction_id?: string
           snapshot_transaction?: SnapshotTransactionRecord
         }
-      }>(`/session/${currentSession.id}/snapshot-failure/retry`, {
+      }>(`/session/${currentSession.id}/snapshot-failure/${action}`, {
         method: 'POST',
         body: JSON.stringify({ regenerate_reports: false }),
       })
@@ -946,9 +953,19 @@ export function AnalysisPanel() {
         setTimeout(() => wsConnect?.(), 100)
       }
     } catch (e) {
-      console.error('Snapshot failure retry failed:', e)
+      console.error(`Snapshot failure ${action} failed:`, e)
     }
   }, [currentSession, clearSnapshotFailure, monitorSnapshotRetry, wsConnected, wsConnect])
+
+  const handleSnapshotFailureRetry = useCallback(
+    () => runSnapshotFailureCapture('retry'),
+    [runSnapshotFailureCapture],
+  )
+
+  const handleSnapshotFailureProceed = useCallback(
+    () => runSnapshotFailureCapture('proceed'),
+    [runSnapshotFailureCapture],
+  )
 
   const handleSnapshotFailureSkip = useCallback(async () => {
     if (!currentSession) return
@@ -1875,6 +1892,9 @@ export function AnalysisPanel() {
           isZh={language === 'zh'}
           onRetry={() => {
             void handleSnapshotFailureRetry()
+          }}
+          onProceed={() => {
+            void handleSnapshotFailureProceed()
           }}
           onSkip={() => {
             void handleSnapshotFailureSkip()

@@ -16,17 +16,126 @@ _INTROSPECT_CODE = """
 import anndata as _runtime_ad
 import json as _runtime_json
 _globals = {}
+_sizes = {}
+
+
+def _runtime_matrix_bytes(_value, _seen):
+    # Sparse matrices carry their payload in data/indices/indptr, each with its
+    # own nbytes; the container's own nbytes is meaningless. Dense arrays have
+    # none of those parts, so nbytes on the value itself is the answer. ``_seen``
+    # keeps a matrix shared between slots (e.g. a layer aliasing X) from being
+    # counted twice.
+    if _value is None or id(_value) in _seen:
+        return 0
+    _seen.add(id(_value))
+    _total = 0
+    _has_sparse_parts = False
+    for _part_name in ('data', 'indices', 'indptr'):
+        _part = getattr(_value, _part_name, None)
+        if _part is not None and id(_part) not in _seen:
+            _has_sparse_parts = True
+            _seen.add(id(_part))
+            _total += int(getattr(_part, 'nbytes', 0) or 0)
+    if not _has_sparse_parts:
+        _total = int(getattr(_value, 'nbytes', 0) or 0)
+    return _total
+
+
+def _runtime_adata_bytes(_adata):
+    # Must mirror what AnnData.copy() duplicates, because that copy is exactly
+    # what the h5ad capture template allocates. .raw is included: it is a full
+    # second matrix and copy() carries it along.
+    _seen = set()
+    _total = _runtime_matrix_bytes(getattr(_adata, 'X', None), _seen)
+    try:
+        _raw = getattr(_adata, 'raw', None)
+    except Exception:
+        _raw = None
+    if _raw is not None:
+        _total += _runtime_matrix_bytes(getattr(_raw, 'X', None), _seen)
+    for _mapping_name in ('layers', 'obsp', 'varp', 'obsm', 'varm'):
+        _mapping = getattr(_adata, _mapping_name, None)
+        if _mapping is not None:
+            try:
+                for _value in _mapping.values():
+                    _total += _runtime_matrix_bytes(_value, _seen)
+            except Exception:
+                pass
+    return _total
+
+
+def _runtime_memory_headroom():
+    # Whichever of host-available and cgroup-remaining is tighter is the real
+    # ceiling this kernel can allocate against. None means neither could be
+    # read, and the host must then treat headroom as unknown.
+    _limits = []
+    try:
+        with open('/proc/meminfo', 'r', encoding='utf-8') as _meminfo:
+            for _line in _meminfo:
+                if _line.startswith('MemAvailable:'):
+                    _limits.append(int(_line.split()[1]) * 1024)
+                    break
+    except Exception:
+        pass
+    for _max_path, _cur_path in (
+        ('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.current'),
+        ('/sys/fs/cgroup/memory/memory.limit_in_bytes',
+         '/sys/fs/cgroup/memory/memory.usage_in_bytes'),
+    ):
+        try:
+            with open(_max_path, 'r', encoding='utf-8') as _f:
+                _maximum = _f.read().strip()
+            with open(_cur_path, 'r', encoding='utf-8') as _f:
+                _current = int(_f.read().strip())
+            if _maximum != 'max':
+                _maximum_int = int(_maximum)
+                if 0 < _maximum_int < (1 << 60):
+                    _limits.append(max(0, _maximum_int - _current))
+        except Exception:
+            pass
+    return min(_limits) if _limits else None
+
+
+def _runtime_self_rss():
+    try:
+        with open('/proc/self/status', 'r', encoding='utf-8') as _status:
+            for _line in _status:
+                if _line.startswith('VmRSS:'):
+                    return int(_line.split()[1]) * 1024
+    except Exception:
+        pass
+    return None
+
+
 for _name, _obj in list(globals().items()):
     if _name.startswith('_'):
         continue
     if isinstance(_obj, _runtime_ad.AnnData):
         _shape = str(getattr(_obj, 'shape', '?'))
         _globals[_name] = 'AnnData(' + _shape + ')'
+        try:
+            _sizes[_name] = _runtime_adata_bytes(_obj)
+        except Exception:
+            pass
     else:
         _globals[_name] = type(_obj).__module__ + '.' + type(_obj).__qualname__
 print('__RUNTIME_GLOBALS_BEGIN__')
 print(_runtime_json.dumps(_globals))
 print('__RUNTIME_GLOBALS_END__')
+print('__RUNTIME_MEMORY_BEGIN__')
+print(_runtime_json.dumps({
+    'bytes': _sizes,
+    'rss': _runtime_self_rss(),
+    'headroom': _runtime_memory_headroom(),
+}))
+print('__RUNTIME_MEMORY_END__')
+for _cleanup_name in (
+    '_globals', '_sizes', '_name', '_obj', '_shape',
+    '_runtime_matrix_bytes', '_runtime_adata_bytes',
+    '_runtime_memory_headroom', '_runtime_self_rss',
+):
+    globals().pop(_cleanup_name, None)
+globals().pop('_cleanup_name', None)
 """
 
 _SAVE_ANNDATA_TEMPLATE = """

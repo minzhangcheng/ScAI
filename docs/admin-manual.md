@@ -17,6 +17,68 @@ The supported deployment choices are:
 
 Size storage for uploaded datasets, generated artifacts, logs, temporary uploads, and dependencies. The host must be able to reach configured model endpoints and package registries during startup. Docker startup installs Python requirements and may install Node dependencies, so the first start can be substantially slower.
 
+### Memory sizing
+
+Almost all of an instance's memory is consumed by the analysis kernels, not by
+the backend. **Each session with a live analysis holds its own kernel process**,
+so a host running N concurrent analyses needs N times the per-analysis figure
+below plus the fixed platform overhead.
+
+Single-cell workflows are memory-hungry for a structural reason: a stage-1 run
+simultaneously holds the per-sample matrices, their QC-filtered copies, and a
+merged object carrying a counts layer, a lognorm layer and `.raw`. That is six
+to ten copies of the same expression data before any dense transformation.
+
+**Reference measurement.** On the reference deployment, a session with 2 samples,
+19,128 cells and 22,804 genes (392 MB on disk as `.h5ad`) reached a resident set
+of **6.4 GiB** in its kernel, alongside 0.96 GiB for the backend process. The
+sizing model below is fitted to that point:
+
+```
+kernel peak (GiB) ≈ 0.4 + (cells × 330 KB) + (samples × 50 MB)
+platform overhead ≈ 1.6 GiB   (backend, frontend, OS headroom)
+```
+
+The recommended figures include **30% safety margin** over the modelled peak.
+
+| Samples | Total cells | Kernel peak | **Recommended (no snapshots)** | **Recommended (snapshots on)** |
+|--------:|------------:|------------:|-------------------------------:|-------------------------------:|
+| 2  | 10,000  | 3.6 GiB   | **7 GiB**    | **9 GiB**    |
+| 2  | 20,000  | 6.8 GiB   | **11 GiB**   | **14 GiB**   |
+| 4  | 40,000  | 13.2 GiB  | **20 GiB**   | **26 GiB**   |
+| 6  | 60,000  | 19.6 GiB  | **28 GiB**   | **37 GiB**   |
+| 8  | 100,000 | 32.3 GiB  | **44 GiB**   | **59 GiB**   |
+| 12 | 200,000 | 63.9 GiB  | **86 GiB**   | **115 GiB**  |
+| 20 | 500,000 | 158.7 GiB | **209 GiB**  | **281 GiB**  |
+
+Both recommended columns are **per concurrent analysis**. The snapshot column is
+explained in [section 8](#memory-impact-of-snapshots); if snapshots are disabled,
+use the middle column.
+
+**Assumptions and limits of this table.**
+
+- Whole-transcriptome data with 15,000–35,000 genes. Panel data with far fewer
+  genes uses proportionally less; targeted assays with very deep per-cell
+  detection use more.
+- Cell count dominates. Memory scales with the number of non-zero entries, which
+  grows with cells, not with the size of the gene annotation.
+- The model is fitted to **one** measured deployment. Treat the 200,000- and
+  500,000-cell rows as extrapolation, not measurement, and verify before
+  committing hardware at that scale.
+- Peaks are transient. A dense transformation of a full matrix costs
+  `cells × genes × 4 bytes` on top of the table — 1.6 GiB for the reference
+  dataset, and it scales with the gene count rather than with detected genes.
+  Analyses that restrict such work to highly variable genes stay far below this.
+
+**Do not run an instance without a memory ceiling.** An unbounded kernel that
+exhausts host memory invites the kernel OOM killer to terminate an arbitrary
+process, potentially another service on the same host. Set a container limit
+sized from the table:
+
+```bash
+docker run -d --name scai --memory=32g ... ghcr.io/minzhangcheng/scai:latest
+```
+
 ## 3. Docker deployment
 
 ### Pull and run
@@ -145,8 +207,8 @@ The release helper always builds both the selected tag and `latest`:
 ```
 
 ```bash
-./build.sh --version 0.37.1
-./build.sh --version 0.37.1 --push
+./build.sh --version 0.37.3
+./build.sh --version 0.37.3 --push
 ```
 
 Without `--version`, the helper uses the newest Git tag returned by `git describe --tags --abbrev=0`, or `latest` if none exists. `--push` pushes both tags to `ghcr.io/minzhangcheng/scai`; authenticate Docker to that registry before using it. The helper does not accept registry, image-name, platform, or build-argument flags.
@@ -261,6 +323,75 @@ Users are warned in the snapshot panel once a session reaches 90% of its quota.
 Past the ceiling a required capture fails closed and pauses that analysis on a
 gate the user must resolve, so the practical failure mode is a stalled run rather
 than silent data loss.
+
+### Memory impact of snapshots
+
+Snapshots cost disk permanently and **memory transiently**. Capturing a live
+kernel raises that kernel's peak memory for the duration of the capture, because
+both serializers materialise a second copy of the data they are writing:
+
+- **AnnData objects (`h5ad` serializer).** The capture must not mutate the live
+  analysis object, so it sanitizes a full `.copy()` before writing. While that
+  object is being captured, its expression matrices, layers and `.raw` exist
+  twice in the kernel.
+- **Everything else (`dill` serializer).** After writing, the capture reads the
+  file back and deserializes it to verify the payload round-trips. The readback
+  is a second, independent copy of the value being verified.
+
+Two properties bound the cost. Objects are captured **one at a time**, so the
+extra peak is driven by the single largest captured object, not by the sum of all
+of them. And capture targets only AnnData objects plus a fixed set of canonical
+result names, not the whole namespace.
+
+For planning, budget **an extra 35% of the kernel's resident memory** during
+capture. On the reference deployment (6.4 GiB kernel) the main `adata` — counts
+layer, lognorm layer, `.raw`, neighbours graph and embeddings — accounts for
+roughly 1.3 GiB, so its copy adds about 20%; the 35% figure leaves room for the
+dill readback and for sessions whose largest object is a bigger share of the
+total. This is the difference between the two recommended columns in
+[Memory sizing](#memory-sizing).
+
+Operationally this matters because **capture happens at workflow-determined
+points, not when the host is idle**. A run that fits in memory with no margin
+will fail specifically during a capture, and a required capture that fails parks
+the session on a gate. If an instance is memory-constrained, leaving snapshots
+disabled is the cheaper choice; enabling them on a host sized without this margin
+converts a disk-capacity feature into a memory-capacity problem.
+
+#### The capture memory preflight
+
+Because the cost above is predictable, the capture measures it before paying it.
+Immediately before copying anything, the kernel reports the true byte size of
+each AnnData it is about to capture, its own resident size, and the memory
+headroom it can actually allocate against (host `MemAvailable` and the cgroup
+limit, whichever is tighter). If the largest object's copy would not fit, the
+capture is refused **before it allocates**, and the session stops on a gate
+offering three choices:
+
+| Choice | Effect |
+|---|---|
+| **Capture anyway** | Runs the capture with the preflight bypassed, accepting the risk that the copy exhausts memory and the kernel is killed. The override is one-shot: a later capture is judged afresh. |
+| **Skip snapshot & continue** | Proceeds without capturing, forfeiting only the restore point at that boundary. Not offered before a restore, whose snapshot is the only safety point. |
+| **Terminate** | Stops the analysis. |
+
+Retry is deliberately absent from this gate. The preflight is deterministic, so
+retrying would measure the same objects against the same headroom and refuse
+again — the gate could never clear.
+
+Two scoping rules matter:
+
+- **With snapshots disabled, nothing is checked.** No probe runs and no memory
+  is measured; sizing the host is entirely the operator's responsibility, per
+  [Memory sizing](#memory-sizing).
+- **Ordinary analysis code is never checked either.** The preflight covers only
+  the copy the capture itself is about to make. An analysis step that exhausts
+  memory on its own is not intercepted — that is what the container memory limit
+  is for.
+
+The margin is tunable with `SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO` (default `0.8`,
+see section 17). Missing evidence never refuses a capture: if the probe cannot
+be read, or headroom cannot be determined, the capture proceeds as it would
+have before.
 
 ### Recovery behaviour
 
@@ -548,6 +679,7 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 | `SCAI_ENABLE_SNAPSHOT_V2` | Disabled | Truthy `1`, `true`, or `yes` opts the instance into Snapshot V2 |
 | `SCAI_SNAPSHOT_SESSION_QUOTA_GB` | `500` | Per-session snapshot store ceiling, in GiB. **Values below 100 GiB are not advised** — see [Snapshot capacity](#snapshot-capacity) |
 | `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB` | `50` | Free space that must remain on the data volume after a capture, in GiB |
+| `SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO` | `0.8` | Fraction of measured kernel memory headroom a capture may plan against — see [Memory impact of snapshots](#memory-impact-of-snapshots). Values outside `(0, 1]` are ignored with a warning |
 | `SCAI_MODE` | `prod` | Docker entrypoint mode (`prod` or `dev`) |
 | `PIP_INDEX_URL` | pip environment/default | Docker Python package index |
 | `SCAI_AUTO_FETCH_MARKERS` | `0` | Direct startup; `1` attempts marker-database download |

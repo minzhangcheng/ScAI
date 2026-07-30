@@ -1,14 +1,8 @@
-import io
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from backend.agents.bioinformatics_agent import (
-    _build_exec_autosave_wrapper,
-    _build_resource_guard_preamble,
-    _high_memory_referenced_names,
-)
+from backend.agents.bioinformatics_agent import _build_exec_autosave_wrapper
 from backend.utils.sandbox import validate_code_safety
 
 
@@ -34,66 +28,6 @@ def test_scientific_stack_is_pinned_to_bounded_compatible_versions():
         "scvi-tools==1.3.3",
     ):
         assert requirement in pinned
-
-
-def test_velocity_code_gets_a_memory_preflight_for_referenced_anndata():
-    code = "scv.pp.moments(adata_mes)\nscv.tl.velocity_graph(adata_mes)"
-    assert "adata_mes" in _high_memory_referenced_names(code)
-    preamble = _build_resource_guard_preamble(code)
-    assert "ScAI resource preflight" in preamble
-    assert "MemoryError" in preamble
-    assert "cgroup" in preamble
-
-
-def test_regular_scanpy_code_does_not_get_velocity_memory_guard():
-    assert _build_resource_guard_preamble("sc.tl.umap(adata)") == ""
-
-
-def test_full_matrix_scale_and_toarray_get_dense_memory_guard():
-    assert _high_memory_referenced_names("sc.pp.scale(adata)") == ["adata"]
-    assert _high_memory_referenced_names("dense = adata.X.toarray()") == ["adata"]
-    assert "full-matrix dense transformation" in _build_resource_guard_preamble(
-        "sc.pp.scale(adata)"
-    )
-
-
-def test_sparse_scale_without_centering_does_not_get_dense_guard():
-    assert _build_resource_guard_preamble("sc.pp.scale(adata, zero_center=False)") == ""
-
-
-def test_memory_preflight_targets_call_argument_not_source_used_to_build_subset():
-    code = "adata_small = adata[mask].copy()\nscv.tl.velocity_graph(adata_small)"
-    assert _high_memory_referenced_names(code) == ["adata_small"]
-
-
-def test_cellrank_mention_without_operation_does_not_trigger_guard():
-    code = "# cellrank may be considered later\nprint(adata.n_obs)"
-    assert _high_memory_referenced_names(code) == []
-
-
-def test_velocity_memory_preflight_fails_before_operation_when_headroom_is_low():
-    class _Matrix:
-        nbytes = 900 * 1024**2
-
-    adata = SimpleNamespace(
-        n_obs=100_000,
-        n_vars=2_000,
-        X=_Matrix(),
-        layers={},
-        obsp={},
-        varp={},
-        obsm={},
-        varm={},
-    )
-
-    def _fake_open(path, *args, **kwargs):
-        if path == "/proc/meminfo":
-            return io.StringIO("MemAvailable: 1048576 kB\n")
-        raise FileNotFoundError(path)
-
-    namespace = {"adata_mes": adata, "open": _fake_open}
-    with pytest.raises(MemoryError, match="Subset/downsample"):
-        exec(_build_resource_guard_preamble("scv.tl.velocity_graph(adata_mes)"), namespace)
 
 
 def test_autosave_cleanup_reimports_matplotlib_after_user_namespace_mutation(tmp_path):

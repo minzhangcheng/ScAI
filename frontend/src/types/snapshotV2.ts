@@ -189,7 +189,14 @@ export interface SnapshotTransactionResponse {
   cancel_url: string
 }
 
-export type SnapshotFailureAction = 'retry' | 'skip' | 'manage' | 'terminate'
+export type SnapshotFailureAction =
+  | 'retry'
+  // Offered only by the memory-preflight gate, in place of retry: capture
+  // anyway, accepting the risk that the copy exhausts memory.
+  | 'proceed'
+  | 'skip'
+  | 'manage'
+  | 'terminate'
 
 export interface SnapshotFailureInfo {
   failure: SnapshotFailureRecord

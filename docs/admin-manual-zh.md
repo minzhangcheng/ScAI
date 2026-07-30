@@ -17,6 +17,59 @@ ScAI 由运行在端口 `3000` 的 Vite/React 前端、运行在端口 `8000` �
 
 请为上传的数据集、生成的产物、日志、临时上传文件和依赖项预留存储空间。主机必须能够访问已配置的模型端点，并在启动期间访问软件包注册表。Docker 启动会安装 Python requirements，并可能安装 Node 依赖项，因此首次启动可能明显较慢。
 
+### 内存容量规划
+
+实例的内存几乎全部消耗在分析内核上，而不是后端。**每个处于分析中的会话各自持有一个
+内核进程**，因此主机若要并发运行 N 个分析，所需内存为下表单次分析数值的 N 倍，再加
+上固定的平台开销。
+
+单细胞流程内存开销大有其结构性原因：stage-1 运行会同时持有各样本矩阵、它们经 QC 过
+滤后的副本，以及一个带 counts 层、lognorm 层和 `.raw` 的合并对象。在做任何稠密变换之
+前，同一份表达数据就已存在六到十份拷贝。
+
+**基准实测。** 在参考部署上，一个包含 2 个样本、19,128 个细胞、22,804 个基因的会话
+（`.h5ad` 落盘 392 MB），其内核常驻内存达到 **6.4 GiB**，同时后端进程占用 0.96 GiB。
+下面的估算模型即拟合于该实测点：
+
+```
+内核峰值 (GiB) ≈ 0.4 + (细胞数 × 330 KB) + (样本数 × 50 MB)
+平台开销      ≈ 1.6 GiB   （后端、前端、操作系统余量）
+```
+
+推荐值已在模型峰值之上包含 **30% 的安全冗余**。
+
+| 样本数 | 细胞总数 |  内核峰值 | **推荐配置（不启用快照）** | **推荐配置（启用快照）** |
+| -----: | -------: | --------: | -------------------------------: | -----------------------------: |
+|      2 |   10,000 |   3.6 GiB |                  **7 GiB** |                **9 GiB** |
+|      2 |   20,000 |   6.8 GiB |                 **11 GiB** |               **14 GiB** |
+|      4 |   40,000 |  13.2 GiB |                 **20 GiB** |               **26 GiB** |
+|      6 |   60,000 |  19.6 GiB |                 **28 GiB** |               **37 GiB** |
+|      8 |  100,000 |  32.3 GiB |                 **44 GiB** |               **59 GiB** |
+|     12 |  200,000 |  63.9 GiB |                 **86 GiB** |              **115 GiB** |
+|     20 |  500,000 | 158.7 GiB |                **209 GiB** |              **281 GiB** |
+
+两个推荐列均为**单次并发分析**的数值。快照列的依据见[第 8 节](#快照的内存影响)；若不
+启用快照，请使用中间那一列。
+
+**本表的假设与适用边界。**
+
+- 假设为全转录组数据，基因数 15,000–35,000。基因数远少于此的 panel 数据按比例递减；
+  每细胞检出深度很高的靶向实验则更高。
+- 主导因素是细胞数。内存随非零元素个数增长，而非零元素随细胞数增长，与基因注释的
+  大小无关。
+- 模型仅拟合于**一个**实测部署。200,000 与 500,000 细胞两行属于外推而非实测，在按该
+  规模采购硬件前请先行验证。
+- 峰值是瞬时的。对完整矩阵做稠密变换会在表格数值之外额外消耗
+  `细胞数 × 基因数 × 4 字节` —— 对基准数据集为 1.6 GiB，且该项随总基因数而非检出基因
+  数增长。把此类操作限制在高变基因上的分析远低于此值。
+
+**不要在没有内存上限的情况下运行实例。** 失控的内核耗尽主机内存后，会招致内核 OOM
+killer 终止任意进程，且可能是同一主机上的其他服务。请依据上表设置容器限额：
+
+```bash
+docker run -d --name scai --memory=32g ... ghcr.io/minzhangcheng/scai:latest
+```
+
 ## 3. Docker 部署
 
 ### 拉取并运行
@@ -145,8 +198,8 @@ docker build -t ghcr.io/minzhangcheng/scai:latest .
 ```
 
 ```bash
-./build.sh --version 0.37.1
-./build.sh --version 0.37.1 --push
+./build.sh --version 0.37.3
+./build.sh --version 0.37.3 --push
 ```
 
 如果未指定 `--version`，辅助脚本使用 `git describe --tags --abbrev=0` 返回的最新 Git 标签；如果不存在标签，则使用 `latest`。`--push` 会将两个标签推送到 `ghcr.io/minzhangcheng/scai`；使用前请先向该注册表进行 Docker 身份验证。该辅助脚本不接受注册表、镜像名称、平台或构建参数 flags。
@@ -167,21 +220,21 @@ docker build -t ghcr.io/minzhangcheng/scai:latest .
 
 Docker 使用 `/data`；直接启动通常使用同级 `data` 目录，除非 `SCAI_DATA_DIR` 将其覆盖。
 
-| 数据根目录下的路径 | 用途 |
-|---|---|
-| `app.db` | SQLite 用户、API 密钥哈希、全局设置和加密的用户模型设置 |
-| `.jwt_secret` | 未提供环境密钥时自动生成的 JWT 签名密钥 |
-| `.config_secret` | 未提供配置密钥时使用的本地加密材料 |
-| `sessions/<SESSION_ID>/` | 每个会话的权威元数据和文件 |
-| `sessions/<SESSION_ID>/session.json` | 会话元数据 |
-| `sessions/<SESSION_ID>/uploads/` | 会话输入 |
-| `sessions/<SESSION_ID>/workspace/` | 分析代码和图形 |
-| `sessions/<SESSION_ID>/states/` | 工作流/checkpoint 文件 |
-| `sessions/<SESSION_ID>/reports/` | 生成的报告 |
-| `sessions/<SESSION_ID>/logs/` | 会话日志 |
-| `uploads/`, `states/`, `workspace/`, `reports/` | 旧版顶层存储和兼容路径 |
-| `logs/` | 服务日志；Docker 写入 `logs/scai.log` |
-| `upload_temp/` | 正在进行的上传数据 |
+| 数据根目录下的路径                                      | 用途                                                    |
+| ------------------------------------------------------- | ------------------------------------------------------- |
+| `app.db`                                              | SQLite 用户、API 密钥哈希、全局设置和加密的用户模型设置 |
+| `.jwt_secret`                                         | 未提供环境密钥时自动生成的 JWT 签名密钥                 |
+| `.config_secret`                                      | 未提供配置密钥时使用的本地加密材料                      |
+| `sessions/<SESSION_ID>/`                              | 每个会话的权威元数据和文件                              |
+| `sessions/<SESSION_ID>/session.json`                  | 会话元数据                                              |
+| `sessions/<SESSION_ID>/uploads/`                      | 会话输入                                                |
+| `sessions/<SESSION_ID>/workspace/`                    | 分析代码和图形                                          |
+| `sessions/<SESSION_ID>/states/`                       | 工作流/checkpoint 文件                                  |
+| `sessions/<SESSION_ID>/reports/`                      | 生成的报告                                              |
+| `sessions/<SESSION_ID>/logs/`                         | 会话日志                                                |
+| `uploads/`, `states/`, `workspace/`, `reports/` | 旧版顶层存储和兼容路径                                  |
+| `logs/`                                               | 服务日志；Docker 写入`logs/scai.log`                  |
+| `upload_temp/`                                        | 正在进行的上传数据                                      |
 
 Docker `/dep` 包含 `/dep/venv` 和 `/dep/node_modules`。直接启动使用 `<REPO>/../dep/venv` 和 `<REPO>/../dep/node_modules`。依赖项可重现并可重新构建，但持久化可缩短重启时间。
 
@@ -247,6 +300,57 @@ sessions/<id>/v2/          快照根目录
 当某会话占用达到其配额的 90% 时，快照面板会提示用户清理。越过上限后，必需的捕获会
 fail-closed 并把该分析停在一个需用户处理的门上，因此实际的失效表现是运行停滞，而不
 是静默的数据丢失。
+
+### 快照的内存影响
+
+快照对磁盘是持久开销，对内存则是**瞬时开销**。捕获活动内核会在捕获期间抬高该内核的
+内存峰值，原因是两种序列化器都会为正在写出的数据额外生成一份副本：
+
+- **AnnData 对象（`h5ad` 序列化器）。** 捕获不能改动活动的分析对象，因此会先完整
+  `.copy()` 一份再做清洗和写出。在该对象被捕获期间，它的表达矩阵、各 layer 和 `.raw`
+  在内核中同时存在两份。
+- **其余对象（`dill` 序列化器）。** 写出后，捕获会把文件读回并反序列化以验证数据可完
+  整往返。这次回读是被验证值的第二份独立副本。
+
+有两个特性限制了该开销的规模。对象是**逐个捕获**的，因此额外峰值取决于单个最大的被捕
+获对象，而非所有对象之和。同时，捕获的目标仅为 AnnData 对象加上一组固定的规范结果变
+量名，而不是整个命名空间。
+
+规划时请按捕获期间**额外预留内核常驻内存的 35%** 计算。在参考部署上（内核 6.4 GiB），
+主对象 `adata` —— 含 counts 层、lognorm 层、`.raw`、邻接图与降维结果 —— 约占 1.3 GiB，
+其副本带来约 20% 的增量；35% 这一取值为 dill 回读，以及最大对象占比更高的会话留出了
+余量。这一差额即[内存容量规划](#内存容量规划)中两个推荐列的区别。
+
+这一点在运维上的意义在于：**捕获发生在工作流决定的时点，而不是主机空闲的时候。** 一个
+恰好卡着内存上限跑得下来的分析，会偏偏在捕获时失败；而必需捕获失败会把会话停在门上。
+若实例内存本就紧张，保持快照关闭是更划算的选择；在未按上述余量规划的主机上启用快照，
+等于把一个磁盘容量特性变成内存容量问题。
+
+#### 捕获前的内存预检
+
+正因为上述开销是可预测的，捕获会在付出这笔开销之前先测量它。在复制任何东西之前，内核
+会报告即将捕获的每个 AnnData 的真实字节数、内核自身的常驻内存，以及它实际可分配的内存
+余量（取主机 `MemAvailable` 与 cgroup 限额中更紧的一个）。若最大对象的副本放不下，捕获
+会在**分配之前**被拒绝，会话停在一个提供三个选择的门上：
+
+| 选择 | 效果 |
+|---|---|
+| **仍然创建快照** | 绕过预检执行捕获，接受副本耗尽内存、内核被终止的风险。该豁免是一次性的：后续捕获会重新判断。 |
+| **跳过快照并继续** | 不捕获直接继续，仅损失该边界上的恢复点。恢复操作之前不提供此选项，因为那次快照是唯一的安全点。 |
+| **终止** | 停止整个分析。 |
+
+此门上有意没有"重试"。预检是确定性的，重试会用同样的测量对同样的余量再判断一次，结果
+必然相同 —— 门将永远无法解除。
+
+两条适用范围需要注意：
+
+- **快照关闭时，完全不做任何检测。** 不运行探针，不测量内存；主机容量规划完全由管理员
+  负责，参见[内存容量规划](#内存容量规划)。
+- **常规分析代码同样不检测。** 预检只覆盖捕获自身即将进行的那次复制。分析步骤自己耗尽
+  内存不会被拦截 —— 那是容器内存限额要解决的问题。
+
+余量可通过 `SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO` 调整（默认 `0.8`，见第 17 节）。证据缺失
+绝不会导致拒绝：若探针读不到，或余量无法确定，捕获会按未引入预检时的行为继续执行。
 
 ### 恢复行为
 
@@ -372,14 +476,14 @@ with Client("http://localhost:8000", api_key="<API_KEY>") as client:
 
 `Job(client: httpx.Client, job_id: str)` 通常由 `Client` 创建；可通过 `job.job_id` 获取 `job_id`。
 
-| 方法 | 行为与返回值 |
-|---|---|
-| `status() -> dict` | 获取当前作业元数据。 |
-| `wait(interval: int = 60, timeout: int | None = None) -> dict` | 轮询直至 `completed`；状态为 `failed` 时引发 `JobFailed`，超过时限后引发 `TimeoutError`。它不会将 `stopped`、`paused` 或任何 `waiting_*` 状态视为终止状态，因此 `timeout=None` 可能永久轮询。请使用有限超时，并检查 `status()` 中是否存在需要运维人员/用户干预的状态。 |
-| `artifacts() -> list` | 返回当前状态响应的 `artifacts` 列表；若无则返回 `[]`。 |
-| `download_artifact(name: str, dest: str | Path) -> Path` | 下载一个指定名称的产物，创建父目录，并返回目标路径。 |
-| `download_export(dest: str | Path) -> Path` | 如果会话工作区顶层存在 `*.zip`，下载找到的第一个文件；否则构建并返回会话目录的 ZIP。其内容不是稳定的可移植会话契约。可移植会话传输请使用 `Client.export_session`。 |
-| `delete() -> dict` | 仅当没有活动或正在初始化的工作流拥有该作业时才能删除。服务器可能返回 HTTP 409；请停止分析并等待初始化/清理结束后重试。 |
+| 方法                                    | 行为与返回值                                                                                                           |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `status() -> dict`                    | 获取当前作业元数据。                                                                                                   |
+| `wait(interval: int = 60, timeout: int  | None = None) -> dict`                                                                                                  |
+| `artifacts() -> list`                 | 返回当前状态响应的`artifacts` 列表；若无则返回 `[]`。                                                              |
+| `download_artifact(name: str, dest: str | Path) -> Path`                                                                                                         |
+| `download_export(dest: str              | Path) -> Path`                                                                                                         |
+| `delete() -> dict`                    | 仅当没有活动或正在初始化的工作流拥有该作业时才能删除。服务器可能返回 HTTP 409；请停止分析并等待初始化/清理结束后重试。 |
 
 所有 Job HTTP 调用在收到 HTTP 401 时引发 `AuthError`，其他失败响应可能引发 `httpx.HTTPStatusError`。
 
@@ -482,61 +586,61 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 
 ## 16. 故障排除
 
-| 症状 | 检查与纠正操作 |
-|---|---|
-| 容器持续不健康 | 运行 `docker logs scai`；检查 `/data/logs/scai.log`；验证依赖项安装、磁盘空间、DNS/提供商访问，并在容器内使用 `curl` 访问后端健康端点。 |
-| 前端可打开但 API 调用失败 | 检查后端端口/进程、`curl http://127.0.0.1:8000/api/health`、启动程序设置的前端代理变量，以及浏览器/服务器日志。 |
-| 直接启动提示实例正在运行 | 读取 `.scai.pid` 并验证每个 PID。在专用主机上运行 `./stop.sh`；在共享主机上仅停止已验证的 PID。只有全部记录的服务均已停止时才能删除 PID 文件。 |
-| 地址已被占用 | 使用 `lsof -i:<PORT>`，识别所有者，仅停止目标进程，或选择 `--port`/`--backport`。`stop.sh` 可能终止 3000/8000 的任何占用者，且不会清理自定义端口。 |
-| 未找到 `python3.12` | 安装 Python 3.12 及其 venv 支持；`start.sh` 会先检查通用 `python3`，但首次创建环境时会明确调用 `python3.12`。 |
-| Node/npm 或软件包安装失败 | 验证 Node.js/npm、注册表访问、代理/index 设置、可用空间及依赖项目录所有权。重试前保留日志。 |
-| 模型配置已保存但分析失败 | 保存不会验证凭据。使用验证操作，确认 base URL/代理/密钥、模型可用性、配额和出站连接。 |
-| 存储的模型密钥消失或无法解密 | 从受保护备份恢复原始 `SCAI_CONFIG_SECRET` 或 `.config_secret`，然后重启。诊断期间不要覆盖数据库。 |
-| 重启后现有登录令牌停止工作 | 恢复稳定的 `SCAI_JWT_SECRET` 或 `.jwt_secret`。用户可重新登录以获取新 JWT；API 密钥由数据库支持。 |
-| 上传/导入失败 | 检查支持的格式、源可读性、ID 冲突、数据/临时可用空间和 inode、客户端/服务器日志、HTTP 超时、所有权、成员数/膨胀情况及归档完整性。 |
-| 客户端收到 401 | 确认密钥前缀/值、所有权、撤销状态、账户状态、服务器 URL，以及 Authorization header 能否到达后端。 |
-| 客户端作业等待永不结束 | `Job.wait` 仅识别 `completed` 和 `failed`；检查 `job.status()` 中的 `stopped`、`paused` 和 `waiting_*`，查看服务器/提供商日志，设置有限超时，并处理 `TimeoutError`。 |
-| 删除失败 | 工作流处于活动或初始化状态时，`Job.delete` 返回 HTTP 409。请停止工作流并等待清理。用户删除和角色更改也会实施自身/最后管理员保护。 |
-| 磁盘用量增长 | 检查上传文件、工作区、报告、日志、临时上传、遗留的 `.partial` 文件和保留的会话。通过应用删除受支持的数据前请先备份。 |
+| 症状                         | 检查与纠正操作                                                                                                                                                                       |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 容器持续不健康               | 运行`docker logs scai`；检查 `/data/logs/scai.log`；验证依赖项安装、磁盘空间、DNS/提供商访问，并在容器内使用 `curl` 访问后端健康端点。                                         |
+| 前端可打开但 API 调用失败    | 检查后端端口/进程、`curl http://127.0.0.1:8000/api/health`、启动程序设置的前端代理变量，以及浏览器/服务器日志。                                                                    |
+| 直接启动提示实例正在运行     | 读取`.scai.pid` 并验证每个 PID。在专用主机上运行 `./stop.sh`；在共享主机上仅停止已验证的 PID。只有全部记录的服务均已停止时才能删除 PID 文件。                                    |
+| 地址已被占用                 | 使用`lsof -i:<PORT>`，识别所有者，仅停止目标进程，或选择 `--port`/`--backport`。`stop.sh` 可能终止 3000/8000 的任何占用者，且不会清理自定义端口。                            |
+| 未找到`python3.12`         | 安装 Python 3.12 及其 venv 支持；`start.sh` 会先检查通用 `python3`，但首次创建环境时会明确调用 `python3.12`。                                                                  |
+| Node/npm 或软件包安装失败    | 验证 Node.js/npm、注册表访问、代理/index 设置、可用空间及依赖项目录所有权。重试前保留日志。                                                                                          |
+| 模型配置已保存但分析失败     | 保存不会验证凭据。使用验证操作，确认 base URL/代理/密钥、模型可用性、配额和出站连接。                                                                                                |
+| 存储的模型密钥消失或无法解密 | 从受保护备份恢复原始`SCAI_CONFIG_SECRET` 或 `.config_secret`，然后重启。诊断期间不要覆盖数据库。                                                                                 |
+| 重启后现有登录令牌停止工作   | 恢复稳定的`SCAI_JWT_SECRET` 或 `.jwt_secret`。用户可重新登录以获取新 JWT；API 密钥由数据库支持。                                                                                 |
+| 上传/导入失败                | 检查支持的格式、源可读性、ID 冲突、数据/临时可用空间和 inode、客户端/服务器日志、HTTP 超时、所有权、成员数/膨胀情况及归档完整性。                                                    |
+| 客户端收到 401               | 确认密钥前缀/值、所有权、撤销状态、账户状态、服务器 URL，以及 Authorization header 能否到达后端。                                                                                    |
+| 客户端作业等待永不结束       | `Job.wait` 仅识别 `completed` 和 `failed`；检查 `job.status()` 中的 `stopped`、`paused` 和 `waiting_*`，查看服务器/提供商日志，设置有限超时，并处理 `TimeoutError`。 |
+| 删除失败                     | 工作流处于活动或初始化状态时，`Job.delete` 返回 HTTP 409。请停止工作流并等待清理。用户删除和角色更改也会实施自身/最后管理员保护。                                                  |
+| 磁盘用量增长                 | 检查上传文件、工作区、报告、日志、临时上传、遗留的`.partial` 文件和保留的会话。通过应用删除受支持的数据前请先备份。                                                                |
 
 ## 17. 参数与默认值参考
 
 ### 端口、路径与限制
 
-| 项目 | 默认值/值 | 范围 |
-|---|---|---|
-| 前端端口 | `3000` | Docker 和直接启动 |
-| 后端端口 | `8000` | Docker 内部后端和直接启动 |
-| Docker 映射 | `3000:3000` | 推荐的主机映射 |
-| Docker 数据/依赖项 | `/data`, `/dep` | 持久卷 |
-| 直接运行依赖项 | `<REPO>/../dep` | `start.sh` |
-| 直接运行数据 | `<REPO>/../data` | 除非环境覆盖后端根目录 |
-| PID 文件 | `<REPO>/.scai.pid` | 直接启动 |
-| 上传分块 | `10 MiB` | 后端/客户端上传 |
-| 最大上传量 | `10 GiB` | 后端 |
-| JWT 生命周期 | `72 hours` | 登录令牌 |
-| 客户端 HTTP 超时 | `3600 seconds` | `Client` 默认值 |
-| 作业轮询间隔 | `60 seconds` | `Job.wait` 默认值 |
-| 导入轮询间隔 | `2.0 seconds` | `Client.import_session` 默认值 |
-| 导出流分块 | `1 MiB` | `Client.export_session` 默认值 |
+| 项目               | 默认值/值            | 范围                             |
+| ------------------ | -------------------- | -------------------------------- |
+| 前端端口           | `3000`             | Docker 和直接启动                |
+| 后端端口           | `8000`             | Docker 内部后端和直接启动        |
+| Docker 映射        | `3000:3000`        | 推荐的主机映射                   |
+| Docker 数据/依赖项 | `/data`, `/dep`  | 持久卷                           |
+| 直接运行依赖项     | `<REPO>/../dep`    | `start.sh`                     |
+| 直接运行数据       | `<REPO>/../data`   | 除非环境覆盖后端根目录           |
+| PID 文件           | `<REPO>/.scai.pid` | 直接启动                         |
+| 上传分块           | `10 MiB`           | 后端/客户端上传                  |
+| 最大上传量         | `10 GiB`           | 后端                             |
+| JWT 生命周期       | `72 hours`         | 登录令牌                         |
+| 客户端 HTTP 超时   | `3600 seconds`     | `Client` 默认值                |
+| 作业轮询间隔       | `60 seconds`       | `Job.wait` 默认值              |
+| 导入轮询间隔       | `2.0 seconds`      | `Client.import_session` 默认值 |
+| 导出流分块         | `1 MiB`            | `Client.export_session` 默认值 |
 
 ### 环境变量
 
-| 变量 | 默认值 | 效果 |
-|---|---|---|
-| `SCAI_DATA_DIR` | 解析后的同级 `data` 目录 | 后端数据根目录；Docker 入口程序强制设为 `/data`。覆盖后，直接运行的 `start.sh` 仍会创建/打印同级 data。 |
-| `SCAI_JWT_SECRET` | 生成并存储为 `.jwt_secret` | HS256 JWT 签名 |
-| `SCAI_CONFIG_SECRET` | 生成的本地加密材料 | 加密存储的用户/模型 secrets |
-| `SCAI_ENABLE_REPRODUCIBILITY` | Disabled | 真值 `1`、`true` 或 `yes` 启用可重现性 bundles |
-| `SCAI_ENABLE_SNAPSHOT_V2` | Disabled | 真值 `1`、`true` 或 `yes` 为该实例启用 Snapshot V2 |
-| `SCAI_SNAPSHOT_SESSION_QUOTA_GB` | `500` | 每个会话的快照存储上限，单位 GiB。**不建议设置为小于 100 GiB** —— 参见[快照容量](#快照容量) |
-| `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB` | `50` | 一次捕获完成后数据卷上必须保留的剩余空间，单位 GiB |
-| `SCAI_MODE` | `prod` | Docker 入口程序模式（`prod` 或 `dev`） |
-| `PIP_INDEX_URL` | pip environment/default | Docker Python 软件包 index |
-| `SCAI_AUTO_FETCH_MARKERS` | `0` | 直接启动；`1` 尝试下载标记数据库 |
-| `SCAI_HOST` | Set internally | Vite 代理主机；脚本根据启动上下文设置 |
-| `SCAI_BACKPORT` | Set internally | Vite 代理后端端口；脚本根据启动上下文设置 |
-
+| 变量                                    | 默认值                      | 效果                                                                                                       |
+| --------------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `SCAI_DATA_DIR`                       | 解析后的同级`data` 目录   | 后端数据根目录；Docker 入口程序强制设为`/data`。覆盖后，直接运行的 `start.sh` 仍会创建/打印同级 data。 |
+| `SCAI_JWT_SECRET`                     | 生成并存储为`.jwt_secret` | HS256 JWT 签名                                                                                             |
+| `SCAI_CONFIG_SECRET`                  | 生成的本地加密材料          | 加密存储的用户/模型 secrets                                                                                |
+| `SCAI_ENABLE_REPRODUCIBILITY`         | Disabled                    | 真值`1`、`true` 或 `yes` 启用可重现性 bundles                                                        |
+| `SCAI_ENABLE_SNAPSHOT_V2`             | Disabled                    | 真值`1`、`true` 或 `yes` 为该实例启用 Snapshot V2                                                    |
+| `SCAI_SNAPSHOT_SESSION_QUOTA_GB`      | `500`                     | 每个会话的快照存储上限，单位 GiB。**不建议设置为小于 100 GiB** —— 参见[快照容量](#快照容量)         |
+| `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB` | `50`                      | 一次捕获完成后数据卷上必须保留的剩余空间，单位 GiB                                                         |
+| `SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO`   | `0.8`                     | 一次捕获可规划使用的内核内存余量比例 —— 参见[快照的内存影响](#快照的内存影响)。超出 `(0, 1]` 的取值会被忽略并告警 |
+| `SCAI_MODE`                           | `prod`                    | Docker 入口程序模式（`prod` 或 `dev`）                                                                 |
+| `PIP_INDEX_URL`                       | pip environment/default     | Docker Python 软件包 index                                                                                 |
+| `SCAI_AUTO_FETCH_MARKERS`             | `0`                       | 直接启动；`1` 尝试下载标记数据库                                                                         |
+| `SCAI_HOST`                           | Set internally              | Vite 代理主机；脚本根据启动上下文设置                                                                      |
+| `SCAI_BACKPORT`                       | Set internally              | Vite 代理后端端口；脚本根据启动上下文设置                                                                  |
 
 ### 快照容量
 
@@ -566,40 +670,40 @@ Snapshot V2 有两道上限，均在捕获写入之前检查一次、写入落�
 
 ### Shell 选项
 
-| 程序 | 选项 | 默认值/效果 |
-|---|---|---|
-| `start.sh` | `--dev` | 开发模式 |
-| `start.sh` | `--prod` | 生产模式；默认值 |
-| `start.sh` | `--host HOST` | `127.0.0.1` |
-| `start.sh` | `--port PORT` | 前端 `3000` |
-| `start.sh` | `--backport PORT` | 后端 `8000` |
-| `start.sh` | `-h`, `--help` | 帮助 |
-| `stop.sh` | none | 宽泛匹配主机进程，并无条件清理默认端口 3000/8000 的占用者 |
-| `build.sh` | `--version TAG` | 最新 Git 标签，否则为 `latest` |
-| `build.sh` | `--push` | 推送所选标签和 `latest`；默认禁用 |
-| `build.sh` | `-h`, `--help` | 帮助 |
-| `session_manager.py` | `--url URL` | `http://localhost:8000` |
-| `session_manager.py` | `--api-key KEY` | 必需 |
-| `session_manager.py list` | none | 列出拥有的会话 |
-| `session_manager.py import` | `archive` | 必需的归档路径 |
-| `session_manager.py export` | `session_id`, optional `output` | 必需 ID 和可选目标 |
+| 程序                          | 选项                                | 默认值/效果                                               |
+| ----------------------------- | ----------------------------------- | --------------------------------------------------------- |
+| `start.sh`                  | `--dev`                           | 开发模式                                                  |
+| `start.sh`                  | `--prod`                          | 生产模式；默认值                                          |
+| `start.sh`                  | `--host HOST`                     | `127.0.0.1`                                             |
+| `start.sh`                  | `--port PORT`                     | 前端`3000`                                              |
+| `start.sh`                  | `--backport PORT`                 | 后端`8000`                                              |
+| `start.sh`                  | `-h`, `--help`                  | 帮助                                                      |
+| `stop.sh`                   | none                                | 宽泛匹配主机进程，并无条件清理默认端口 3000/8000 的占用者 |
+| `build.sh`                  | `--version TAG`                   | 最新 Git 标签，否则为`latest`                           |
+| `build.sh`                  | `--push`                          | 推送所选标签和`latest`；默认禁用                        |
+| `build.sh`                  | `-h`, `--help`                  | 帮助                                                      |
+| `session_manager.py`        | `--url URL`                       | `http://localhost:8000`                                 |
+| `session_manager.py`        | `--api-key KEY`                   | 必需                                                      |
+| `session_manager.py list`   | none                                | 列出拥有的会话                                            |
+| `session_manager.py import` | `archive`                         | 必需的归档路径                                            |
+| `session_manager.py export` | `session_id`, optional `output` | 必需 ID 和可选目标                                        |
 
 ### Python 常规公共 API
 
-| 类型 | 签名 |
-|---|---|
-| `Client` | `Client(base_url, *, api_key=None, jwt=None, timeout=3600)` |
-| `Client` | `close()` |
-| `Client` | `submit(config_path)` |
-| `Client` | `get_job(job_id)` |
-| `Client` | `list_sessions()` |
+| 类型       | 签名                                                                                              |
+| ---------- | ------------------------------------------------------------------------------------------------- |
+| `Client` | `Client(base_url, *, api_key=None, jwt=None, timeout=3600)`                                     |
+| `Client` | `close()`                                                                                       |
+| `Client` | `submit(config_path)`                                                                           |
+| `Client` | `get_job(job_id)`                                                                               |
+| `Client` | `list_sessions()`                                                                               |
 | `Client` | `import_session(archive_path, *, wait=True, poll_interval=2.0, timeout=None, on_progress=None)` |
-| `Client` | `export_session(session_id, output_path=None, *, timeout=None, chunk_size=1048576)` |
-| `Client` | `cancel_import(import_id)` |
-| `Job` | `Job(client, job_id)` |
-| `Job` | `status()` |
-| `Job` | `wait(interval=60, timeout=None)` |
-| `Job` | `artifacts()` |
-| `Job` | `download_artifact(name, dest)` |
-| `Job` | `download_export(dest)` |
-| `Job` | `delete()` |
+| `Client` | `export_session(session_id, output_path=None, *, timeout=None, chunk_size=1048576)`             |
+| `Client` | `cancel_import(import_id)`                                                                      |
+| `Job`    | `Job(client, job_id)`                                                                           |
+| `Job`    | `status()`                                                                                      |
+| `Job`    | `wait(interval=60, timeout=None)`                                                               |
+| `Job`    | `artifacts()`                                                                                   |
+| `Job`    | `download_artifact(name, dest)`                                                                 |
+| `Job`    | `download_export(dest)`                                                                         |
+| `Job`    | `delete()`                                                                                      |

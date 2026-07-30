@@ -44,9 +44,6 @@ MAX_WORKSPACE_H5AD_FILES = 2
 # Implementations live in ./bioinformatics/; re-exported here so existing
 # importers and tests keep resolving them from this module.
 from ..bioinformatics.kernel_templates import (  # noqa: F401
-    _HIGH_MEMORY_ANALYSIS_RE,
-    _high_memory_referenced_names,
-    _build_resource_guard_preamble,
     _TPL_SAFE_CLOSE_ALL,
     _TPL_PLT_RESTORE_BASELINE,
     _build_exec_autosave_wrapper,

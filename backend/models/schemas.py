@@ -292,6 +292,13 @@ class AnalysisState(BaseModel):
     # without capturing at that boundary. See failure_gate.consume_snapshot_skip.
     skip_required_snapshot_phase: Optional[str] = None
 
+    # One-shot "capture anyway" marker. Set when the user chooses Proceed on a
+    # memory-preflight gate, accepting the OOM risk; consumed by the next runtime
+    # capture, which then skips the preflight. Cleared on consumption so a later
+    # capture is judged on its own measurements.
+    # See runtime_parts.capture._consume_memory_preflight_override.
+    force_snapshot_memory_override: bool = False
+
     # Recovery failure marker: set when journal recovery fails, blocks mutations
     recovery_blocked: bool = False
 

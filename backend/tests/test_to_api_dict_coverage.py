@@ -41,6 +41,9 @@ _EXCLUDED_FIELDS = {
     # One-shot marker armed and consumed server-side by the snapshot failure
     # gate (services/snapshot_v2/failure_gate.py); the client never reads it.
     "skip_required_snapshot_phase",
+    # Likewise one-shot: armed by the Proceed action on a memory-preflight gate
+    # and consumed by the next runtime capture. Server-side only.
+    "force_snapshot_memory_override",
     "code_history",
     "analysis_log",
     "literature_reports",

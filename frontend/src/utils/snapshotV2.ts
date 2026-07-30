@@ -94,6 +94,9 @@ function validSnapshotFailureActions(raw: unknown): SnapshotFailureAction[] {
   return raw.filter(
     (action): action is SnapshotFailureAction =>
       action === 'retry' ||
+      // Memory-preflight gates send 'proceed' in place of 'retry'; omitting it
+      // here would silently drop the only way past that gate.
+      action === 'proceed' ||
       action === 'skip' ||
       action === 'manage' ||
       action === 'terminate',

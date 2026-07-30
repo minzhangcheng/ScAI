@@ -22,7 +22,9 @@ from backend.constants import WaitInputReason
 from backend.models.schemas import TaskStatus
 from backend.services.snapshot_v2.errors import (
     SNAPSHOT_FAILURE_ACTIONS,
+    SNAPSHOT_FAILURE_ACTIONS_MEMORY,
     SNAPSHOT_FAILURE_ACTIONS_SKIPPABLE,
+    SNAPSHOT_MEMORY_INSUFFICIENT_CODE,
     RequiredSnapshotBlocked,
 )
 from backend.services.snapshot_v2.models import RetryOutcome, SnapshotRetryContext
@@ -36,6 +38,30 @@ SNAPSHOT_FAILURE_GATE_ACTIONS: SnapshotFailureActions = SNAPSHOT_FAILURE_ACTIONS
 SNAPSHOT_SKIPPABLE_GATE_ACTIONS: SnapshotFailureActions = (
     SNAPSHOT_FAILURE_ACTIONS_SKIPPABLE
 )
+
+
+def _actions_for_code(
+    code: str | None, base: SnapshotFailureActions,
+) -> list[str]:
+    """Gate actions for a failure *code*, defaulting to the producer's *base* set.
+
+    A memory-preflight refusal replaces the base set. Retry is dropped because
+    the preflight is deterministic — re-running it measures the same objects
+    against the same headroom and refuses again, so the gate could never clear.
+    Manage is dropped because it reclaims disk, which does not free kernel
+    memory. Proceed takes retry's place as the "capture it anyway" escape hatch.
+
+    Skip only survives when *base* already allowed it: pre_restore forbids
+    skipping (its snapshot is the sole safety point before a restore overwrites
+    live state), and a memory refusal must not smuggle that option back in.
+    """
+    if code != SNAPSHOT_MEMORY_INSUFFICIENT_CODE:
+        return list(base)
+    actions = list(SNAPSHOT_FAILURE_ACTIONS_MEMORY)
+    if "skip" not in base:
+        actions = [action for action in actions if action != "skip"]
+    return actions
+
 
 RetryProducerFn = Callable[
     [str, Any, SnapshotRetryContext],
@@ -221,7 +247,7 @@ def ensure_post_report_retry_context(
             {
                 "code": code,
                 "message": message,
-                "allowed_actions": list(SNAPSHOT_SKIPPABLE_GATE_ACTIONS),
+                "allowed_actions": _actions_for_code(code, SNAPSHOT_SKIPPABLE_GATE_ACTIONS),
                 "snapshot_id": snapshot_id,
             },
             retry_context=typed,
@@ -245,7 +271,9 @@ def ensure_post_report_retry_context(
 
     # post_report is skippable: reports are already generated, so continuing
     # without the post-report snapshot only forfeits that restore point.
-    payload["allowed_actions"] = list(SNAPSHOT_SKIPPABLE_GATE_ACTIONS)
+    payload["allowed_actions"] = _actions_for_code(
+        payload.get("code"), SNAPSHOT_SKIPPABLE_GATE_ACTIONS
+    )
     if _post_report_context_incomplete(payload.get("retry_context")):
         payload["retry_context"] = typed
     state.snapshot_failure = payload
@@ -327,7 +355,9 @@ def ensure_workflow_boundary_retry_context(
         if existing:
             payload = dict(existing)
             if "allowed_actions" not in payload:
-                payload["allowed_actions"] = list(SNAPSHOT_FAILURE_GATE_ACTIONS)
+                payload["allowed_actions"] = _actions_for_code(
+                    payload.get("code"), SNAPSHOT_FAILURE_GATE_ACTIONS
+                )
             state.snapshot_failure = payload
             state.status = TaskStatus.WAITING_INPUT
             state.wait_input_reason = WaitInputReason.SNAPSHOT_FAILURE.value
@@ -347,7 +377,7 @@ def ensure_workflow_boundary_retry_context(
             {
                 "code": code,
                 "message": message,
-                "allowed_actions": list(SNAPSHOT_SKIPPABLE_GATE_ACTIONS),
+                "allowed_actions": _actions_for_code(code, SNAPSHOT_SKIPPABLE_GATE_ACTIONS),
                 "snapshot_id": snapshot_id,
             },
             retry_context=typed,
@@ -357,7 +387,9 @@ def ensure_workflow_boundary_retry_context(
     payload = dict(existing)
     # Workflow-boundary captures are skippable: the analysis proceeds past the
     # boundary without that restore point.
-    payload["allowed_actions"] = list(SNAPSHOT_SKIPPABLE_GATE_ACTIONS)
+    payload["allowed_actions"] = _actions_for_code(
+        payload.get("code"), SNAPSHOT_SKIPPABLE_GATE_ACTIONS
+    )
     if _workflow_boundary_context_incomplete(payload.get("retry_context")):
         payload["retry_context"] = typed
     state.snapshot_failure = payload
@@ -387,7 +419,9 @@ def enter_snapshot_failure_gate(
     state.wait_input_reason = WaitInputReason.SNAPSHOT_FAILURE.value
     payload = dict(failure)
     if "allowed_actions" not in payload:
-        payload["allowed_actions"] = list(SNAPSHOT_FAILURE_GATE_ACTIONS)
+        payload["allowed_actions"] = _actions_for_code(
+            payload.get("code"), SNAPSHOT_FAILURE_GATE_ACTIONS
+        )
     if retry_context is not None:
         payload["retry_context"] = dict(retry_context)
     state.snapshot_failure = payload
@@ -417,7 +451,7 @@ def enter_chat_snapshot_failure_gate(
         {
             "code": code,
             "message": message,
-            "allowed_actions": list(SNAPSHOT_SKIPPABLE_GATE_ACTIONS),
+            "allowed_actions": _actions_for_code(code, SNAPSHOT_SKIPPABLE_GATE_ACTIONS),
             "snapshot_id": snapshot_id,
         },
         retry_context={
@@ -591,6 +625,17 @@ def consume_snapshot_skip(state: Any, phase: str) -> bool:
     return False
 
 
+def arm_memory_preflight_override(state: Any) -> None:
+    """Accept the OOM risk so the next capture bypasses the memory preflight.
+
+    Armed by the Proceed action on a memory gate; consumed by the next runtime
+    capture (``runtime_parts.capture._consume_memory_preflight_override``). The
+    caller is expected to follow this with the ordinary retry dispatch — this
+    only lowers the preflight, it does not itself re-run the capture.
+    """
+    state.force_snapshot_memory_override = True
+
+
 def skip_workflow_boundary(state: Any, phase: str | None) -> None:
     """Skip a workflow-boundary required snapshot and resume RUNNING.
 
@@ -715,11 +760,20 @@ _SKIPPABLE_PRODUCERS: frozenset[str] = frozenset({
 })
 
 
-def _actions_for_producer(producer: str | None) -> list[str]:
-    """Base actions plus Skip for producers where skipping is safe."""
-    if producer in _SKIPPABLE_PRODUCERS:
-        return list(SNAPSHOT_SKIPPABLE_GATE_ACTIONS)
-    return list(SNAPSHOT_FAILURE_GATE_ACTIONS)
+def _actions_for_producer(
+    producer: str | None, code: str | None = None,
+) -> list[str]:
+    """Base actions plus Skip for producers where skipping is safe.
+
+    *code* lets a memory-preflight refusal override the producer-derived set;
+    see :func:`_actions_for_code`.
+    """
+    base = (
+        SNAPSHOT_SKIPPABLE_GATE_ACTIONS
+        if producer in _SKIPPABLE_PRODUCERS
+        else SNAPSHOT_FAILURE_GATE_ACTIONS
+    )
+    return _actions_for_code(code, base)
 
 
 def _reenter_gate_on_failure(
@@ -735,7 +789,7 @@ def _reenter_gate_on_failure(
         {
             "code": code,
             "message": message,
-            "allowed_actions": _actions_for_producer(context.producer),
+            "allowed_actions": _actions_for_producer(context.producer, code),
             "snapshot_id": snapshot_id,
         },
         retry_context=context.model_dump(mode="json"),

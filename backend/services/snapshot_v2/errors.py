@@ -18,6 +18,21 @@ SNAPSHOT_FAILURE_ACTIONS_SKIPPABLE: tuple[str, ...] = (
     "retry", "skip", "manage", "terminate",
 )
 
+# Actions offered when the memory preflight refused the capture.
+#
+# ``retry`` is deliberately absent. The preflight is deterministic: re-running it
+# against the same kernel measures the same objects and the same headroom, so a
+# retry can only refuse again and the gate would never clear. ``proceed`` is the
+# escape hatch — it re-runs the capture with the preflight bypassed, accepting
+# the OOM risk. ``manage`` is absent too: it opens snapshot storage management,
+# which reclaims disk and cannot free kernel memory.
+SNAPSHOT_FAILURE_ACTIONS_MEMORY: tuple[str, ...] = (
+    "proceed", "skip", "terminate",
+)
+
+#: Capture-refusal code raised by the runtime memory preflight.
+SNAPSHOT_MEMORY_INSUFFICIENT_CODE = "snapshot_memory_insufficient"
+
 
 def is_snapshot_failure_blocked(state: Any) -> bool:
     """True when forward resume/start must refuse until dedicated HITL action.

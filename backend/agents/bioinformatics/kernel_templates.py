@@ -1,14 +1,12 @@
-# Builders for the Python source that is executed inside the Jupyter kernel: resource guards, autosave wrappers, and figure wrappers.
+# Builders for the Python source that is executed inside the Jupyter kernel: autosave wrappers and figure wrappers.
 # Moved verbatim out of backend/agents/bioinformatics_agent.py.
 """
 Bioinformatics Agent - Handles snRNA-seq analysis with iterative code execution
 Supports autonomous technical steps and PI consultation for biological decisions
 With step-level checkpointing for recovery from interruptions
 """
-from typing import List
 import logging
 import re
-import ast
 import textwrap
 
 
@@ -17,213 +15,6 @@ from ...utils.sandbox import _TPL_NOOP_INSTALL
 # Configure logger
 logger = logging.getLogger(__name__)
 
-
-_HIGH_MEMORY_ANALYSIS_RE = re.compile(
-    r"\b(?:scv|scvelo)\s*\.\s*(?:pp\s*\.\s*moments|tl\s*\.\s*(?:velocity|velocity_graph))\s*\(|"
-    r"\bcellrank\b|\bsc\s*\.\s*pp\s*\.\s*scale\s*\(|\.X\s*\.\s*toarray\s*\(",
-    re.IGNORECASE,
-)
-
-def _high_memory_referenced_names(code: str) -> List[str]:
-    """Return AnnData arguments for graph-building or dense-memory operations."""
-    if not _HIGH_MEMORY_ANALYSIS_RE.search(code):
-        return []
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        return []
-
-    cellrank_aliases = {"cellrank"}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "cellrank":
-                    cellrank_aliases.add(alias.asname or alias.name)
-        elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("cellrank"):
-            for alias in node.names:
-                cellrank_aliases.add(alias.asname or alias.name)
-
-    def _dotted_name(node: ast.AST) -> str:
-        parts = []
-        while isinstance(node, ast.Attribute):
-            parts.append(node.attr)
-            node = node.value
-        if isinstance(node, ast.Name):
-            parts.append(node.id)
-        return ".".join(reversed(parts))
-
-    names = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func_name = _dotted_name(node.func)
-        is_scvelo = bool(re.fullmatch(
-            r"(?:scv|scvelo)\.(?:pp\.moments|tl\.(?:velocity|velocity_graph))",
-            func_name,
-            re.IGNORECASE,
-        ))
-        root = func_name.split(".", 1)[0]
-        is_cellrank = root in cellrank_aliases
-        is_scale = bool(re.fullmatch(r"sc\.pp\.scale", func_name, re.IGNORECASE))
-        if is_scale and any(
-            kw.arg == "zero_center"
-            and isinstance(kw.value, ast.Constant)
-            and kw.value.value is False
-            for kw in node.keywords
-        ):
-            is_scale = False
-        is_toarray = (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr == "toarray"
-            and isinstance(node.func.value, ast.Attribute)
-            and node.func.value.attr == "X"
-            and isinstance(node.func.value.value, ast.Name)
-        )
-        if not (is_scvelo or is_cellrank or is_scale or is_toarray):
-            continue
-        if is_toarray:
-            target = node.func.value.value
-        else:
-            target = node.args[0] if node.args else next(
-                (kw.value for kw in node.keywords if kw.arg in {"adata", "data"}),
-                None,
-            )
-        if isinstance(target, ast.Name):
-            names.add(target.id)
-    return sorted(names)
-
-def _build_resource_guard_preamble(code: str) -> str:
-    """Build a kernel-side memory preflight for high-memory operations.
-
-    The guard measures referenced AnnData matrices and actual host/cgroup
-    headroom immediately before user code runs. It fails early with actionable
-    guidance instead of letting the kernel be OOM-killed and losing the cell.
-    """
-    names = _high_memory_referenced_names(code)
-    if not names:
-        return ""
-    names_repr = repr(names)
-    dense_transform = bool(re.search(r"(?:\bsc\s*\.\s*pp\s*\.\s*scale\s*\(|\.X\s*\.\s*toarray\s*\()", code, re.I))
-    operation_factor = 2 if dense_transform else (
-        8 if re.search(r"\bcellrank\b", code, re.I) else (
-            6 if re.search(r"velocity_graph", code, re.I) else 4
-        )
-    )
-    return f"""
-# ScAI resource preflight for high-memory analysis.
-def _scai_matrix_bytes(_value, _seen):
-    if _value is None or id(_value) in _seen:
-        return 0
-    _seen.add(id(_value))
-    _total = 0
-    _has_sparse_parts = False
-    for _part_name in ('data', 'indices', 'indptr'):
-        _part = getattr(_value, _part_name, None)
-        if _part is not None and id(_part) not in _seen:
-            _has_sparse_parts = True
-            _seen.add(id(_part))
-            _total += int(getattr(_part, 'nbytes', 0) or 0)
-    if not _has_sparse_parts:
-        _total = int(getattr(_value, 'nbytes', 0) or 0)
-    return _total
-
-def _scai_adata_bytes(_adata):
-    _seen = set()
-    _total = _scai_matrix_bytes(getattr(_adata, 'X', None), _seen)
-    for _mapping_name in ('layers', 'obsp', 'varp', 'obsm', 'varm'):
-        _mapping = getattr(_adata, _mapping_name, None)
-        if _mapping is not None:
-            try:
-                for _value in _mapping.values():
-                    _total += _scai_matrix_bytes(_value, _seen)
-            except Exception:
-                pass
-    return _total
-
-def _scai_memory_headroom():
-    _limits = []
-    try:
-        with open('/proc/meminfo', 'r', encoding='utf-8') as _meminfo:
-            for _line in _meminfo:
-                if _line.startswith('MemAvailable:'):
-                    _limits.append(int(_line.split()[1]) * 1024)
-                    break
-    except Exception:
-        pass
-    for _max_path, _cur_path in (
-        ('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.current'),
-        ('/sys/fs/cgroup/memory/memory.limit_in_bytes',
-         '/sys/fs/cgroup/memory/memory.usage_in_bytes'),
-    ):
-        try:
-            with open(_max_path, 'r', encoding='utf-8') as _f:
-                _maximum = _f.read().strip()
-            with open(_cur_path, 'r', encoding='utf-8') as _f:
-                _current = int(_f.read().strip())
-            if _maximum != 'max':
-                _maximum_int = int(_maximum)
-                if 0 < _maximum_int < (1 << 60):
-                    _limits.append(max(0, _maximum_int - _current))
-        except Exception:
-            pass
-    return min(_limits) if _limits else None
-
-_scai_guard_names = {names_repr}
-_scai_guard_candidates = []
-for _scai_guard_name in _scai_guard_names:
-    _scai_guard_obj = globals().get(_scai_guard_name)
-    if (_scai_guard_obj is not None
-            and hasattr(_scai_guard_obj, 'n_obs')
-            and hasattr(_scai_guard_obj, 'n_vars')
-            and hasattr(_scai_guard_obj, 'X')):
-        _scai_guard_candidates.append((_scai_guard_name, _scai_guard_obj))
-
-if _scai_guard_candidates:
-    # Measure each candidate once and reuse the winner's byte count; the
-    # earlier form re-traversed X/layers/obsp/varp/obsm/varm for the chosen
-    # AnnData a second time just to recompute the same number.
-    _scai_guard_name, _scai_guard_adata, _scai_guard_bytes = max(
-        ((_n, _o, _scai_adata_bytes(_o)) for _n, _o in _scai_guard_candidates),
-        key=lambda _item: _item[2],
-    )
-    _scai_guard_bytes = max(1, _scai_guard_bytes)
-    _scai_guard_n_obs = int(getattr(_scai_guard_adata, 'n_obs', 0) or 0)
-    _scai_guard_n_vars = int(getattr(_scai_guard_adata, 'n_vars', 0) or 0)
-    _scai_guard_dense_bytes = _scai_guard_n_obs * _scai_guard_n_vars * 8 if {dense_transform!r} else 0
-    _scai_guard_graph_bytes = (
-        0 if {dense_transform!r}
-        else _scai_guard_n_obs * min(_scai_guard_n_obs, 5000) * 8
-    )
-    _scai_guard_required = max(
-        512 * 1024**2,
-        _scai_guard_bytes * {operation_factor} + _scai_guard_graph_bytes + _scai_guard_dense_bytes,
-    )
-    _scai_guard_headroom = _scai_memory_headroom()
-    if _scai_guard_dense_bytes > int(1.5 * 1024**3):
-        raise MemoryError(
-            'ScAI resource preflight blocked a full-matrix dense transformation: '
-            f'{{_scai_guard_name}} would require at least '
-            f'{{_scai_guard_dense_bytes / 1024**3:.1f}} GiB for one dense matrix, '
-            'which would make runtime snapshots unsafe. Subset to relevant features/HVGs, '
-            'use zero_center=False for sparse scaling, or keep the matrix sparse.'
-        )
-    if (_scai_guard_headroom is not None
-            and _scai_guard_required > int(_scai_guard_headroom * 0.70)):
-        raise MemoryError(
-            'ScAI resource preflight blocked a high-memory operation: '
-            f'{{_scai_guard_name}} has {{_scai_guard_n_obs:,}} cells and the operation '
-            f'is estimated to need {{_scai_guard_required / 1024**3:.1f}} GiB, but only '
-            f'{{_scai_guard_headroom / 1024**3:.1f}} GiB headroom is available. '
-            'Subset/downsample the relevant lineage, remove unused AnnData copies, '
-            'or use DPT/PAGA before retrying.'
-        )
-    print(
-        f'[ScAI resource preflight] {{_scai_guard_name}}: '
-        f'{{_scai_guard_n_obs:,}} cells; estimated additional budget '
-        f'{{_scai_guard_required / 1024**3:.1f}} GiB; '
-        f'headroom {{(_scai_guard_headroom or 0) / 1024**3:.1f}} GiB'
-    )
-"""
 
 # Reusable sandbox template snippet: safely close all matplotlib figures
 _TPL_SAFE_CLOSE_ALL = """\
@@ -268,7 +59,6 @@ def _build_exec_autosave_wrapper(code: str, figures_dir: str, timestamp: str) ->
     """
     figures_dir_repr = repr(str(figures_dir))
     user_source_repr = repr(code)
-    resource_guard = textwrap.indent(_build_resource_guard_preamble(code), '    ')
     restore_baseline = textwrap.indent(_TPL_PLT_RESTORE_BASELINE, '    ')
     return f'''
 import matplotlib.pyplot as plt
@@ -333,7 +123,6 @@ _pre_fignums = set(plt.get_fignums())
 # Execute user code (auto-save runs in finally so PDFs are always supplemented,
 # even when the user code raises midway through)
 try:
-{resource_guard}
     _scai_user_source = {user_source_repr}
     exec(compile(_scai_user_source, '<scai-user-code>', 'exec'), globals(), globals())
 finally:
@@ -443,7 +232,6 @@ def _build_publication_figure_wrapper(
     pdf_path_repr = repr(str(pdf_path))
     user_source_repr = repr(code)
     restore_baseline = textwrap.indent(_TPL_PLT_RESTORE_BASELINE, '    ')
-    resource_guard = textwrap.indent(_build_resource_guard_preamble(code), '    ')
     return f'''
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -476,7 +264,6 @@ Path(_figures_dir).mkdir(exist_ok=True)
 # Execute the plotting code (save runs in finally so JPG+PDF are always written,
 # even if user code raises midway through)
 try:
-{resource_guard}
     _scai_user_source = {user_source_repr}
     exec(compile(_scai_user_source, '<scai-user-code>', 'exec'), globals(), globals())
 finally:

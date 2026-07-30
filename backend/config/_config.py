@@ -118,6 +118,39 @@ warn_if_quota_below_advisory(SNAPSHOT_SESSION_QUOTA_BYTES)
 #: and the ceiling that will actually refuse the capture can never disagree.
 SNAPSHOT_QUOTA_WARNING_RATIO = 0.9
 
+#: Fraction of measured kernel headroom the runtime capture is allowed to plan
+#: against. Capturing an AnnData copies it, so the capture needs roughly the
+#: size of the largest captured object on top of what the kernel already holds;
+#: this ratio is the margin left for allocator overhead and for whatever else on
+#: the host claims memory between the measurement and the copy. Operators on
+#: dedicated hosts can raise it; those sharing a host should lower it.
+SNAPSHOT_MEMORY_SAFETY_RATIO_DEFAULT = 0.8
+
+
+def _resolve_memory_safety_ratio() -> float:
+    """Read the capture memory margin, ignoring values outside (0, 1]."""
+    raw = os.environ.get("SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO", "").strip()
+    if not raw:
+        return SNAPSHOT_MEMORY_SAFETY_RATIO_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO=%r is not a number; using %.2f",
+            raw, SNAPSHOT_MEMORY_SAFETY_RATIO_DEFAULT,
+        )
+        return SNAPSHOT_MEMORY_SAFETY_RATIO_DEFAULT
+    if not 0 < value <= 1:
+        logging.getLogger(__name__).warning(
+            "SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO=%s is outside (0, 1]; using %.2f",
+            raw, SNAPSHOT_MEMORY_SAFETY_RATIO_DEFAULT,
+        )
+        return SNAPSHOT_MEMORY_SAFETY_RATIO_DEFAULT
+    return value
+
+
+SNAPSHOT_MEMORY_SAFETY_RATIO = _resolve_memory_safety_ratio()
+
 
 def is_snapshot_v2_enabled() -> bool:
     """Return the process-scoped Snapshot V2 operator feature gate."""

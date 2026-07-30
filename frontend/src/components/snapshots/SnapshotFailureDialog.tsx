@@ -9,6 +9,7 @@ interface SnapshotFailureDialogProps {
   failure: SnapshotFailureInfo
   isZh?: boolean
   onRetry: (options: SnapshotFailureRetryOptions) => void
+  onProceed: () => void
   onSkip: () => void
   onManage: () => void
   onTerminate: () => void
@@ -40,6 +41,7 @@ export function SnapshotFailureDialog({
   failure,
   isZh = false,
   onRetry,
+  onProceed,
   onSkip,
   onManage,
   onTerminate,
@@ -52,6 +54,9 @@ export function SnapshotFailureDialog({
   const isPreRestore = phase === 'pre_restore' || /pre_restore/i.test(record.code || '')
   const isPostReport =
     phase === 'post_report' || /post_report/i.test(record.code || '')
+  // The memory preflight refused before allocating anything. There is no Retry
+  // on this gate: the check is deterministic, so it would refuse again.
+  const isMemoryRefusal = record.code === 'snapshot_memory_insufficient'
 
   // The backend message can be a short sentence or a multi-thousand-character
   // kernel traceback. Split off the first line as a human summary and keep the
@@ -137,11 +142,18 @@ export function SnapshotFailureDialog({
             </p>
           )}
 
-          {!isPostReport && (
+          {!isPostReport && !isMemoryRefusal && (
             <p className="text-xs text-slate-500">
               {isZh
                 ? '重试仅重新进入捕获流程。'
                 : 'Retry re-enters capture only.'}
+            </p>
+          )}
+          {isMemoryRefusal && (
+            <p className="text-xs text-slate-500">
+              {isZh
+                ? '快照会先复制内存中的数据集再写盘，当前可用内存不足以完成这次复制。分析本身未被中断，只有快照被拦下。重试没有意义 —— 同样的检查会得到同样的结果。'
+                : 'A snapshot copies the in-memory dataset before writing it, and the available memory is not enough for that copy. The analysis itself was not interrupted — only the snapshot was refused. Retrying would not help: the same check would reach the same result.'}
             </p>
           )}
         </div>
@@ -154,6 +166,20 @@ export function SnapshotFailureDialog({
               className="w-full px-3 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
             >
               {isZh ? '重试' : 'Retry'}
+            </button>
+          )}
+          {actions.has('proceed') && (
+            <button
+              type="button"
+              onClick={onProceed}
+              className="w-full px-3 py-2 text-sm bg-orange-50 hover:bg-orange-100 text-orange-800 border border-orange-300 rounded-lg font-medium"
+              title={
+                isZh
+                  ? '忽略内存预检，仍然创建快照。内存不足时内核可能被终止，正在进行的分析状态将丢失。'
+                  : 'Ignore the memory preflight and capture anyway. If memory runs out the kernel may be killed and the live analysis state lost.'
+              }
+            >
+              {isZh ? '仍然创建快照（有风险）' : 'Capture anyway (risky)'}
             </button>
           )}
           {actions.has('skip') && !isPreRestore && (

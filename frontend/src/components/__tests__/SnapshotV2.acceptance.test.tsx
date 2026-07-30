@@ -617,6 +617,7 @@ describe('snapshot-failure Skip is producer-gated', () => {
           allowed_actions: ['retry', 'manage', 'terminate'],
         }}
         onRetry={vi.fn()}
+        onProceed={vi.fn()}
         onSkip={vi.fn()}
         onManage={vi.fn()}
         onTerminate={vi.fn()}
@@ -643,6 +644,7 @@ describe('snapshot-failure Skip is producer-gated', () => {
           allowed_actions: ['retry', 'skip', 'manage', 'terminate'],
         }}
         onRetry={vi.fn()}
+        onProceed={vi.fn()}
         onSkip={onSkip}
         onManage={vi.fn()}
         onTerminate={vi.fn()}

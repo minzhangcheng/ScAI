@@ -319,6 +319,12 @@
     ]
   ],
   [
+    "/api/session/{session_id}/snapshot-failure/proceed",
+    [
+      "POST"
+    ]
+  ],
+  [
     "/api/session/{session_id}/snapshot-failure/skip",
     [
       "POST"

@@ -895,6 +895,54 @@ async def _snapshot_failure_retry_locked(session_id: str, user_id: str):
 
 
 @router.post(
+    "/{session_id}/snapshot-failure/proceed",
+    dependencies=[Depends(require_snapshot_v2_enabled)],
+)
+async def snapshot_failure_proceed(session_id: str, request: Request):
+    """Capture anyway after the memory preflight refused, accepting the OOM risk.
+
+    Only valid on a gate that offered ``proceed`` — i.e. one raised by the
+    runtime memory preflight. Arms a one-shot override and then runs the
+    ordinary retry dispatch, so the capture re-runs through the same producer
+    with the preflight lowered for that attempt only.
+    """
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    # Same gate and same cached AnalysisState as Retry/Skip/Terminate; this
+    # handler additionally mutates the override flag, so it must not interleave.
+    async with get_snapshot_action_lock(session_id):
+        return await _snapshot_failure_proceed_locked(session_id, user_id)
+
+
+async def _snapshot_failure_proceed_locked(session_id: str, user_id: str):
+    from backend.services.snapshot_v2.failure_gate import arm_memory_preflight_override
+
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    if not is_snapshot_failure_blocked(state):
+        raise HTTPException(
+            status_code=409,
+            detail="Session is not blocked on a snapshot failure",
+        )
+
+    failure = getattr(state, "snapshot_failure", None) or {}
+    if "proceed" not in (failure.get("allowed_actions") or []):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This snapshot failure cannot be overridden. Proceed is offered "
+                "only when the memory preflight refused the capture."
+            ),
+        )
+
+    arm_memory_preflight_override(state)
+    # Reuse retry verbatim: the producer dispatch, context validation and gate
+    # bookkeeping are identical — the override flag is the only difference, and
+    # the capture consumes it on its own.
+    return await _snapshot_failure_retry_locked(session_id, user_id)
+
+
+@router.post(
     "/{session_id}/snapshot-failure/skip",
     dependencies=[Depends(require_snapshot_v2_enabled)],
 )

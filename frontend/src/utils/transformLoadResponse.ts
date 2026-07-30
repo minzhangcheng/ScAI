@@ -15,7 +15,7 @@ import type {
   FigureReviewStatus,
   LlmFailureInfo,
 } from '../stores/appStore'
-import type { SnapshotTransactionRecord } from '../types/snapshotV2'
+import type { SnapshotFailureAction, SnapshotTransactionRecord } from '../types/snapshotV2'
 
 // Must cover the whole TaskStatus union: anything missing is silently coerced
 // to 'pending' on reload. 'stopped' was absent even though it is the durable
@@ -158,7 +158,7 @@ export type StoreUpdates = {
       message: string
       details?: Record<string, unknown>
     }
-    allowed_actions: Array<'retry' | 'skip' | 'manage' | 'terminate'>
+    allowed_actions: SnapshotFailureAction[]
   } | null
   snapshotTransaction?: SnapshotTransactionRecord | null
 } & LiteratureConfigStoreUpdates
