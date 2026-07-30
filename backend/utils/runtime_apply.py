@@ -373,6 +373,36 @@ def write_runtime_h5ad_manifest(session_id: str, entries: dict[str, str]) -> Pat
     return path
 
 
+def _staged_copy_replace(src: Path, dst: Path) -> None:
+    """Copy *src* onto *dst* through a ``<dst>.<pid>.staged`` temp, then fsync.
+
+    The temp name is one no sweeper in the system can match: both states-dir
+    sweeps glob ``*.h5ad``, GC walks ``objects/`` only, and the snapshot staging
+    sweeps operate on ``<session>/staging``. Quota accounting sums ``objects/``
+    too, so a dataset-sized partial left here by a failed copy — ENOSPC is the
+    realistic case, since restore holds the object-store copy, the staged copy
+    and the live copy at once — is invisible, unreclaimable, and packed verbatim
+    into every v1 export archive. Unlink it while we still know its name.
+    """
+    tmp = dst.with_suffix(dst.suffix + f".{os.getpid()}.staged")
+    try:
+        shutil.copy2(src, tmp)
+        tmp_fd = os.open(tmp, os.O_RDONLY)
+        try:
+            os.fsync(tmp_fd)
+        finally:
+            os.close(tmp_fd)
+        os.replace(str(tmp), str(dst))
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    dir_fd = os.open(str(dst.parent), os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 def atomic_replace_pkl(session_id: str, src_pkl_path: str) -> str:
     """Atomically replace the live session.pkl with a staged copy.
 
@@ -393,25 +423,7 @@ def atomic_replace_pkl(session_id: str, src_pkl_path: str) -> str:
     idir.mkdir(parents=True, exist_ok=True)
     live.parent.mkdir(parents=True, exist_ok=True)
 
-    # Atomic copy to live pkl. See atomic_replace_h5ad for why the temp has to
-    # be unlinked by hand when the copy fails.
-    tmp = live.with_suffix(live.suffix + f".{os.getpid()}.staged")
-    try:
-        shutil.copy2(src, tmp)
-        tmp_fd = os.open(tmp, os.O_RDONLY)
-        try:
-            os.fsync(tmp_fd)
-        finally:
-            os.close(tmp_fd)
-        os.replace(str(tmp), str(live))
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-    dir_fd = os.open(str(live.parent), os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+    _staged_copy_replace(src, live)
 
     # Re-sign HMAC
     from backend.utils.files import atomic_write_bytes
@@ -423,8 +435,8 @@ def atomic_replace_pkl(session_id: str, src_pkl_path: str) -> str:
             f"[{session_id}] replaced pkl failed integrity check"
         )
 
-    import hashlib
-    return hashlib.sha256(live.read_bytes()).hexdigest()
+    from backend.services.snapshot_v2.object_store import _hash_file
+    return _hash_file(live)
 
 
 def atomic_replace_h5ad(session_id: str, src_h5ad_path: str, var_name: str = "adata") -> str:
@@ -450,34 +462,10 @@ def atomic_replace_h5ad(session_id: str, src_h5ad_path: str, var_name: str = "ad
     states.mkdir(parents=True, exist_ok=True)
     dst = runtime_h5ad_path(states, safe_var_name)
 
-    # Atomic copy. The temp is named ``<dst>.<pid>.staged``, which no sweeper in
-    # the system can match: both states-dir sweeps glob ``*.h5ad``, GC walks
-    # ``objects/`` only, and the snapshot staging sweeps operate on
-    # ``<session>/staging``. Quota accounting sums ``objects/`` too, so a
-    # dataset-sized partial left here by a failed copy — ENOSPC is the realistic
-    # case, since restore holds the object-store copy, the staged copy and the
-    # live copy at once — is invisible, unreclaimable, and packed verbatim into
-    # every v1 export archive. Unlink it while we still know its name.
-    tmp = dst.with_suffix(dst.suffix + f".{os.getpid()}.staged")
-    try:
-        shutil.copy2(src, tmp)
-        tmp_fd = os.open(tmp, os.O_RDONLY)
-        try:
-            os.fsync(tmp_fd)
-        finally:
-            os.close(tmp_fd)
-        os.replace(str(tmp), str(dst))
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-    dir_fd = os.open(str(states), os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+    _staged_copy_replace(src, dst)
 
-    import hashlib
-    return hashlib.sha256(dst.read_bytes()).hexdigest()
+    from backend.services.snapshot_v2.object_store import _hash_file
+    return _hash_file(dst)
 
 
 def _reclaim_orphan_staged_temps(states: Path, states_resolved: Path) -> None:

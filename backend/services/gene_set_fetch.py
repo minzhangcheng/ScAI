@@ -13,15 +13,20 @@ analysis mid-round.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Optional
 
 import httpx
 
+from backend.utils.files import atomic_write_text
+
 from .gene_set_resolver import (
     DEFAULT_HOMOLOGY_TYPES,
+    DEFAULT_PROJECTION_SOURCE,
     PARTITION_PARTS,
+    PARTITION_SEPARATOR,
     ENSEMBL_SOURCE_SPECIES,
     GeneSetResult,
     MSIGDB_ORGANISMS,
@@ -138,9 +143,8 @@ def load_collection(version: str, collection: str, organism: str,
     sets = parse_gmt(text)
     if not sets:
         raise ValueError(f"{url} parsed to zero gene sets")
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)  # atomic: never leave a half-written GMT for the next read
+    # atomic: never leave a half-written GMT for the next read
+    atomic_write_text(path, text)
     return sets
 
 
@@ -245,8 +249,12 @@ def resolve_gene_set(set_id: str, organism: str, *, version: str,
                      collection: str, resource: str = "msigdb",
                      cache_dir: Optional[Path] = None,
                      homology_types: Iterable[str] = DEFAULT_HOMOLOGY_TYPES,
+                     source_organism: str = DEFAULT_PROJECTION_SOURCE,
                      ) -> tuple[Optional[GeneSetResult], Optional[str]]:
     """Resolve one named gene set for one organism.
+
+    ``source_organism`` names the published organism a non-native set is
+    projected FROM; it is ignored when ``organism`` is itself published.
 
     Returns ``(result, None)`` or ``(None, error)`` where ``error`` is written
     for the agent to act on.
@@ -258,10 +266,10 @@ def resolve_gene_set(set_id: str, organism: str, *, version: str,
     organism = normalize_organism(organism)
     native = organism in MSIGDB_ORGANISMS
 
-    # For a non-native organism, pull the set from whichever published organism
-    # we are projecting from. Mouse is the closer source for most non-human
-    # work, but the caller may already have told us otherwise via `organism`.
-    source_organism = organism if native else "mouse"
+    # A native organism is its own source; otherwise the set is pulled from
+    # whichever published organism the caller asked to project from.
+    if native:
+        source_organism = organism
 
     try:
         sets = load_collection(version, collection, source_organism, cache_dir)
@@ -343,7 +351,8 @@ def resolve_gene_set(set_id: str, organism: str, *, version: str,
 
 def resolve_partitioned_gene_set(set_id: str, organism: str, *, version: str,
                                  collection: str, resource: str = "msigdb",
-                                 cache_dir=None):
+                                 cache_dir=None,
+                                 source_organism: str = DEFAULT_PROJECTION_SOURCE):
     """Fetch a set and split it into direction-coherent parts.
 
     Returns ``(parts, error)`` where ``parts`` is a list of GeneSetResult, one
@@ -353,7 +362,7 @@ def resolve_partitioned_gene_set(set_id: str, organism: str, *, version: str,
     """
     base, error = resolve_gene_set(
         set_id, organism, version=version, collection=collection,
-        resource=resource, cache_dir=cache_dir)
+        resource=resource, cache_dir=cache_dir, source_organism=source_organism)
     if error:
         return None, error
 
@@ -368,7 +377,8 @@ def resolve_partitioned_gene_set(set_id: str, organism: str, *, version: str,
     for part, sibling_id in siblings.items():
         result, err = resolve_gene_set(
             sibling_id, organism, version=version, collection=collection,
-            resource=resource, cache_dir=cache_dir)
+            resource=resource, cache_dir=cache_dir,
+            source_organism=source_organism)
         if err:
             missing.append(part)
         else:
@@ -388,15 +398,10 @@ def resolve_partitioned_gene_set(set_id: str, organism: str, *, version: str,
         genes = parts.get(name) or []
         if not genes:
             continue
-        out.append(GeneSetResult(
-            set_id=f"{base.set_id}#{name}",
+        out.append(replace(
+            base,
+            set_id=f"{base.set_id}{PARTITION_SEPARATOR}{name}",
             genes=genes,
-            resource=base.resource,
-            version=base.version,
-            collection=base.collection,
-            organism=base.organism,
-            source_organism=base.source_organism,
-            projected=base.projected,
             projection=dict(base.projection),
             provenance=partition_provenance(base.provenance, name),
         ))

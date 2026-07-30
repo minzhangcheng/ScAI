@@ -193,8 +193,10 @@ def test_fetched_genes_are_injected_not_retyped():
     start = src.index('elif tool_name == "fetch_gene_set":')
     end = src.index('elif tool_name == "register_analysis_plan":', start)
     block = src[start:end]
-    assert "self.sandbox.execute" in block
-    assert "skip_safety_check=True" in block
+    assert "self._bind_gene_set(" in block
+    bind = inspect.getsource(bio_mod.BioinformaticsAgent._bind_gene_set)
+    assert "self.sandbox.execute" in bind
+    assert "skip_safety_check=True" in bind
 
 
 def test_resolver_ships_no_curated_biology():

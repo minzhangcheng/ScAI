@@ -18,7 +18,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import tarfile
 import uuid
 from datetime import datetime, timezone
@@ -45,6 +44,8 @@ from backend.services.snapshot_v2.object_store import (
     ObjectStore,
     SnapshotImportLimits,
     canonical_json,
+    free_bytes_at,
+    physical_object_store_bytes,
 )
 from backend.services.snapshot_v2.paths import SnapshotV2Paths
 
@@ -643,21 +644,6 @@ class SnapshotImporter:
 
     # ── Limit checks ──────────────────────────────────────────────────
 
-    def _physical_object_store_bytes(self) -> int:
-        """Bytes currently occupied by this session's object store."""
-        objects_dir = Path(str(self.paths.objects))
-        if not objects_dir.is_dir():
-            return 0
-        total = 0
-        for path in objects_dir.iterdir():
-            if not path.is_file():
-                continue
-            try:
-                total += path.stat().st_size
-            except OSError:
-                continue
-        return total
-
     def _check_admission(self, plan, archive_inventory: dict) -> None:
         """Reject before pass 2 when the projected write breaches quota/reserve.
 
@@ -674,7 +660,7 @@ class SnapshotImporter:
             if meta is not None:
                 projected += meta.size
 
-        current = self._physical_object_store_bytes()
+        current = physical_object_store_bytes(objects_dir)
         if current + projected > self.limits.session_quota_bytes:
             raise SnapshotStorageError(
                 "snapshot_quota_exceeded",
@@ -683,26 +669,20 @@ class SnapshotImporter:
                 f"{self.limits.session_quota_bytes}",
             )
 
-        # The v2 root is not created until a capture runs, so probe the nearest
-        # existing ancestor — free space is identical across the filesystem.
-        # Mirrors the walk-up in `_check_quota`.
-        probe = Path(str(self.paths.root))
-        while not probe.exists() and probe != probe.parent:
-            probe = probe.parent
         try:
-            usage = shutil.disk_usage(probe)
+            free = free_bytes_at(self.paths.root)
         except OSError as exc:
             raise SnapshotStorageError(
                 "DISK_USAGE_CHECK_FAILED",
                 f"Failed to check disk usage: {exc}",
             ) from exc
         # Unlike the capture check this runs *before* the write, so the
-        # projection has to be subtracted: usage.free still includes the bytes
+        # projection has to be subtracted: the free bytes still include what
         # pass 2 is about to consume.
-        if usage.free - projected < self.limits.free_space_reserve_bytes:
+        if free - projected < self.limits.free_space_reserve_bytes:
             raise SnapshotStorageError(
                 "snapshot_quota_exceeded",
-                f"Insufficient disk space: {usage.free} free, importing "
+                f"Insufficient disk space: {free} free, importing "
                 f"{projected} would leave less than the "
                 f"{self.limits.free_space_reserve_bytes} reserve",
             )

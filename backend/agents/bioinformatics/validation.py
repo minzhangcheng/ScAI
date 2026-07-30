@@ -143,6 +143,7 @@ from .shared import (  # noqa: F401
     _FAILED_EVIDENCE_OUTPUT_RE,
     build_approved_plan_context,
     inject_revised_plan_context,
+    code_is_statically_unsafe,
     execution_supports_evidence,
     successful_evidence_executions,
     _STAGE1_GUIDANCE,
@@ -160,14 +161,7 @@ class ValidationMixin:
 
     def _validation_code_is_safe(self, code: str, main_var: str) -> Optional[str]:
         """Return a reason string if code is statically unsafe, else None."""
-        low = code.lower()
-        for pat in self._VALIDATION_DENYLIST:
-            if pat in low:
-                return f"disallowed operation '{pat}'"
-        # crude assignment-to-main-var guard: '<main_var> =' but not '<main_var>_val ='
-        if re.search(rf"(^|\n)\s*{re.escape(main_var)}\s*=(?!=)", code):
-            return f"assignment to main object '{main_var}'"
-        return None
+        return code_is_statically_unsafe(code, main_var, self._VALIDATION_DENYLIST)
 
     async def validate_annotations_with_plan(
         self,

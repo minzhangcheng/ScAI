@@ -40,8 +40,8 @@ Anything else is rejected with a corrective message aimed at the model.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import asdict, dataclass, field, fields
+from typing import Mapping, Optional
 
 KIND_DATABASE = "database"
 KIND_DERIVED = "derived"
@@ -97,15 +97,19 @@ class GeneSetProvenance:
         return f"hand-assembled: {self.justification}"
 
     def to_dict(self) -> dict:
-        return {
-            "kind": self.kind,
-            "raw": self.raw,
-            "resource": self.resource,
-            "version": self.version,
-            "set_id": self.set_id,
-            "detail": self.detail,
-            "justification": self.justification,
-        }
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Mapping) -> Optional["GeneSetProvenance"]:
+        """Rebuild from a ``to_dict()`` form, or None when nothing was parsed.
+
+        Records written before provenance enforcement carry no parsed form, and
+        an unrecognised kind is not one this vocabulary can render; both cases
+        are the caller's cue to fall back to the raw string.
+        """
+        if not data or data.get("kind") not in VALID_KINDS:
+            return None
+        return cls(**{f.name: str(data.get(f.name, "") or "") for f in fields(cls)})
 
 
 def _reject(msg: str) -> tuple[None, str]:

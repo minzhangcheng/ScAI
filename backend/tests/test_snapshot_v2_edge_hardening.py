@@ -474,9 +474,12 @@ def test_human_input_refuses_while_the_snapshot_gate_is_armed():
     from backend.routes import interaction
 
     source = inspect.getsource(interaction.send_human_input)
-    assert "is_snapshot_failure_blocked" in source, (
+    assert "_refuse_if_snapshot_blocked" in source, (
         "/human-input signals the same _continue_event the round gate waits "
         "on, so without this guard it releases the snapshot gate too"
+    )
+    assert "is_snapshot_failure_blocked" in inspect.getsource(
+        interaction._refuse_if_snapshot_blocked
     )
 
 
@@ -501,10 +504,12 @@ def test_restore_template_prefers_the_pkl_over_a_stale_sidecar():
 def test_apply_removes_stale_checkpoint_wal_companions():
     import inspect
 
+    from backend.services.snapshot_v2.checkpoint_paths import SQLITE_COMPANION_SUFFIXES
     from backend.services.snapshot_v2.restore_parts import coordinator
 
+    assert SQLITE_COMPANION_SUFFIXES == ("-wal", "-shm")
     source = inspect.getsource(coordinator.RestoreCoordinator.apply)
-    assert '"-wal"' in source and '"-shm"' in source, (
+    assert "SQLITE_COMPANION_SUFFIXES" in source, (
         "orphan -wal/-shm left by an unclean shutdown are replayed over the "
         "restored checkpoint when no workflow object exists to close them"
     )
@@ -811,7 +816,7 @@ def test_pre_write_estimate_counts_the_projected_runtime(v2_paths):
     sandbox.km = object()
 
     projected = svc._estimate_runtime_addition(
-        request, MagicMock(), set(), sandbox=sandbox,
+        request, MagicMock(), sandbox=sandbox,
     )
     assert projected == 8 * 1024 ** 3, (
         "the pre-write ceiling counted only state/notebook/checkpoint/workspace "
@@ -819,19 +824,20 @@ def test_pre_write_estimate_counts_the_projected_runtime(v2_paths):
         "could never fire before the kernel had been driven and the bytes written"
     )
 
-    # A hash the caller already knows about does NOT zero the projection.
+    # A hash already held in objects/ does NOT zero the projection.
     # The head's refs model the bytes this capture is about to write; they are
     # not those bytes. GC marks every object of a committed lineage head
     # reachable, so the head's own runtime objects are in objects/ by
     # construction — deduping against that set returned 0 for exactly the
     # steady state the pre-I/O ceiling exists for. Genuine reuse is
     # short-circuited upstream instead, by `request.runtime is not None`.
+    (v2_paths.objects / rt_h).write_bytes(b"big-adata")
     assert svc._estimate_runtime_addition(
-        request, MagicMock(), {rt_h}, sandbox=sandbox,
+        request, MagicMock(), sandbox=sandbox,
     ) == 8 * 1024 ** 3
     # No kernel → nothing to capture.
     assert svc._estimate_runtime_addition(
-        request, MagicMock(), set(), sandbox=None,
+        request, MagicMock(), sandbox=None,
     ) == 0
 
 

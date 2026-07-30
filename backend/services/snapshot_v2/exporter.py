@@ -20,11 +20,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend.config import SNAPSHOT_EXPORT_PREFIX
 from backend.services.snapshot_v2.errors import SnapshotV2Error
 from backend.services.snapshot_v2.object_store import (
     ManifestStore,
     ObjectStore,
-    canonical_json,
+    canonical_manifest_document_bytes,
+    compute_manifest_root_hash,
 )
 from backend.services.snapshot_v2.models import (
     RuntimeManifest,
@@ -243,9 +245,11 @@ def _without_omitted_runtime(
     omitted = {h for h in manifest.objects if h not in included_hashes}
     if not omitted:
         return manifest
-    emitted = manifest.model_copy(deep=True)
-    for h in omitted:
-        emitted.objects.pop(h, None)
+    emitted = manifest.model_copy(update={
+        "objects": {
+            h: ref for h, ref in manifest.objects.items() if h not in omitted
+        },
+    })
     rt = emitted.runtime
     emitted.runtime = RuntimeManifest(
         status="missing",
@@ -256,8 +260,8 @@ def _without_omitted_runtime(
     )
     # The importer re-derives root_hash from the manifest body and refuses a
     # mismatch (MANIFEST_ROOT_HASH_MISMATCH), so a rewritten body needs a
-    # rewritten hash. canonical_json excludes root_hash itself.
-    emitted.root_hash = hashlib.sha256(canonical_json(emitted)).hexdigest()
+    # rewritten hash.
+    emitted.root_hash = compute_manifest_root_hash(emitted)
     return emitted
 
 
@@ -361,7 +365,7 @@ class SnapshotExporter:
                 staging_dir.mkdir(parents=True, exist_ok=True)
             fd, tmp_path = tempfile.mkstemp(
                 suffix=".tar.gz",
-                prefix=f"v2-export-{export_id}-",
+                prefix=f"{SNAPSHOT_EXPORT_PREFIX}{export_id}-",
                 dir=str(staging_dir) if staging_dir is not None else None,
             )
             os.close(fd)
@@ -400,11 +404,7 @@ class SnapshotExporter:
                     # by the importer after rebinding, so it is not a checksum
                     # over these bytes.)
                     emitted = _without_omitted_runtime(manifest, included_hashes)
-                    m_bytes = json.dumps(
-                        emitted.model_dump(mode="json"),
-                        sort_keys=True, separators=(",", ":"),
-                        ensure_ascii=False,
-                    ).encode()
+                    m_bytes = canonical_manifest_document_bytes(emitted)
                     m_info = tarfile.TarInfo(name=f"manifests/{emitted.snapshot_id}.json")
                     m_info.size = len(m_bytes)
                     tf.addfile(m_info, io.BytesIO(m_bytes))

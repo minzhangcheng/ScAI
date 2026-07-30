@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass
@@ -24,6 +25,56 @@ _EVIDENCE_CACHE_MAX = 4096
 #: transfer is never mistaken for debris. Public because recovery's
 #: orphan-staging sweep applies the same rule and the two must not drift.
 STAGING_TEMP_TTL_SECONDS = 24 * 3600
+
+
+def reclaim_stale_staging_temp(entry: Path) -> bool:
+    """Unlink *entry* if it is a ``put_*`` temp older than the TTL.
+
+    Returns whether it was removed. Shared by ``ManifestStore.reconcile`` and
+    recovery's orphan-staging sweep so the two cannot drift.
+    """
+    try:
+        if (entry.is_file()
+                and time.time() - entry.stat().st_mtime
+                > STAGING_TEMP_TTL_SECONDS):
+            entry.unlink()
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def physical_object_store_bytes(objects_dir: Path) -> int:
+    """Bytes currently occupied by the object store at *objects_dir*.
+
+    The one measurement both capacity gates — capture quota and import
+    admission — read, so the two can never answer differently.
+    """
+    objects_dir = Path(str(objects_dir))
+    if not objects_dir.is_dir():
+        return 0
+    total = 0
+    for path in objects_dir.iterdir():
+        if not path.is_file():
+            continue
+        try:
+            total += path.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def free_bytes_at(root: Path) -> int:
+    """Free bytes of the filesystem holding *root*'s nearest existing ancestor.
+
+    The v2 root is not created until a capture runs, so the probe walks up —
+    free space is identical across the same filesystem. ``OSError`` propagates:
+    each capacity gate maps it to its own error code.
+    """
+    probe = Path(str(root))
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    return shutil.disk_usage(probe).free
 
 
 @dataclass(frozen=True)
@@ -125,10 +176,14 @@ class SnapshotImportLimits(BaseModel):
                 config, "snapshot_v2_import_snapshot_count", 10000,
             ),
             session_quota_bytes=getattr(
-                config, "snapshot_v2_session_quota_bytes", 500 * 1024 ** 3,
+                config,
+                "snapshot_v2_session_quota_bytes",
+                cls.model_fields["session_quota_bytes"].default,
             ),
             free_space_reserve_bytes=getattr(
-                config, "snapshot_v2_free_space_reserve_bytes", 50 * 1024 ** 3,
+                config,
+                "snapshot_v2_free_space_reserve_bytes",
+                cls.model_fields["free_space_reserve_bytes"].default,
             ),
         )
 
@@ -161,6 +216,15 @@ def canonical_manifest_body_bytes(manifest: SnapshotManifestV2) -> bytes:
 def canonical_manifest_document_bytes(manifest: SnapshotManifestV2) -> bytes:
     """Canonical full document bytes including root_hash."""
     return _canonical_json_bytes(manifest.model_dump(mode="json"))
+
+
+def compute_manifest_root_hash(manifest: SnapshotManifestV2) -> str:
+    """The root_hash a manifest body derives to.
+
+    The importer refuses a manifest whose root_hash does not re-derive
+    (MANIFEST_ROOT_HASH_MISMATCH), so every producer must use this one rule.
+    """
+    return hashlib.sha256(canonical_manifest_body_bytes(manifest)).hexdigest()
 
 
 def _hash_bytes(data: bytes) -> str:
@@ -655,9 +719,7 @@ class ManifestStore:
         return verify_hmac_sha256(data, sig)
 
     def write_staging(self, manifest: SnapshotManifestV2, prefix: str = "") -> Path:
-        raw = canonical_manifest_body_bytes(manifest)
-        root_hash = hashlib.sha256(raw).hexdigest()
-        manifest.root_hash = root_hash
+        manifest.root_hash = compute_manifest_root_hash(manifest)
         document = canonical_manifest_document_bytes(manifest)
         staging_path = self._paths.staging / f"{prefix}{manifest.snapshot_id}.json"
         staging_path.parent.mkdir(parents=True, exist_ok=True)
@@ -862,13 +924,7 @@ class ManifestStore:
                     # to quota accounting and counts against the free-space
                     # reserve forever. Its stem is a content hash, not a snapshot
                     # id, so it must not enter removed_staging_ids.
-                    try:
-                        if (entry.is_file()
-                                and time.time() - entry.stat().st_mtime
-                                > STAGING_TEMP_TTL_SECONDS):
-                            entry.unlink()
-                    except OSError:
-                        pass
+                    reclaim_stale_staging_temp(entry)
                     continue
                 if entry.is_file() or entry.is_symlink():
                     removed_staging_ids.append(entry.stem)

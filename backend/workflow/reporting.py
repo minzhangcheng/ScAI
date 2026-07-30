@@ -198,16 +198,9 @@ class ReportingMixin(
         # closed so a leaked hold stays a visible gate rather than an unbounded
         # wait here.
         if service.safe_point.has_pending_request(self.session_id):
-            import inspect
+            from .helpers import ack_restore_safe_point
 
-            # getattr/isawaitable is this file family's idiom for boundary hooks
-            # and is required: tests bind this capture onto bare harnesses that
-            # do not implement the hook.
-            await_restore = getattr(self, "await_restore_safe_point", None)
-            if callable(await_restore):
-                result = await_restore()
-                if inspect.isawaitable(result):
-                    await result
+            await ack_restore_safe_point(self)
 
         # Read the kernel only after the handover: the restore may have torn the
         # sandbox down while this capture was frozen.

@@ -4,7 +4,7 @@ import { useSession, useConfig, useUserConfig, generateId, apiFetch, getSnapshot
 import { useTranslation } from '../i18n/translations'
 import type { RoundSummary } from '../types'
 import { RoundSummaries } from './analysis/RoundSummaries'
-import type { SnapshotTransactionRecord } from '../types/snapshotV2'
+import type { SnapshotFailureAction, SnapshotTransactionRecord } from '../types/snapshotV2'
 import { roundKey } from '../utils/roundKey'
 import type { AnnotationData } from '../utils/annotationGate'
 import ReactMarkdown from 'react-markdown'
@@ -912,9 +912,7 @@ export function AnalysisPanel() {
           status?: TaskStatus
           still_blocked?: boolean
           snapshot_failure?: Record<string, unknown> | null
-          snapshot_failure_allowed_actions?: Array<
-            'retry' | 'proceed' | 'skip' | 'manage' | 'terminate'
-          >
+          snapshot_failure_allowed_actions?: SnapshotFailureAction[]
           transaction_id?: string
           snapshot_transaction?: SnapshotTransactionRecord
         }

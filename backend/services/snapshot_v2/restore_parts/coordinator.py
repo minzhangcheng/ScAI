@@ -19,7 +19,10 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from backend.services.snapshot_v2.checkpoint_paths import checkpoint_sqlite_path
+from backend.services.snapshot_v2.checkpoint_paths import (
+    SQLITE_COMPANION_SUFFIXES,
+    checkpoint_sqlite_path,
+)
 from backend.services.snapshot_v2.errors import SnapshotIntegrityError
 from backend.services.snapshot_v2.object_store import ManifestStore, ObjectStore
 from backend.services.snapshot_v2.runtime import validate_runtime_dependency_proof
@@ -382,7 +385,7 @@ class RestoreCoordinator:
             # staging tree, so commit()/cleanup()/recovery reclaim it with
             # everything else and only rollback ever reads it back.
             staged_root = Path(str(paths.staging)) / tx_id
-            for companion in ("-wal", "-shm"):
+            for companion in SQLITE_COMPANION_SUFFIXES:
                 live_companion = ckpt_dst.with_name(ckpt_dst.name + companion)
                 if not live_companion.exists():
                     continue

@@ -136,3 +136,19 @@ snapshot_jobs: Dict[str, Any] = {}
 # Snapshot V2 restore jobs: transaction_id -> RestoreJobHandle
 # Shared process-wide so cancel/status work across independent HTTP requests.
 snapshot_restore_jobs: Dict[str, Any] = {}
+
+
+def has_live_session_task(session_id: str) -> bool:
+    """Whether any registry holds an unfinished task for this session.
+
+    These three are the complete set of places a session's work can be
+    executing, so a caller asking "is anything running here?" must consult all
+    of them — answering from one registry answers for one entry point only.
+    """
+    from backend.services.workflow_runner import _report_tasks  # local: cycle
+
+    for registry in (_run_tasks, _report_tasks, chat_tasks):
+        task = registry.get(session_id)
+        if task is not None and not task.done():
+            return True
+    return False

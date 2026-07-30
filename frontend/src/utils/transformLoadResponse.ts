@@ -1,4 +1,4 @@
-import { parseSnapshotFailure } from './snapshotV2'
+import { parseSnapshotFailure, type ParsedSnapshotFailure } from './snapshotV2'
 import { buildAnnotationDataFromState, type AnnotationData } from './annotationGate'
 import type {
   SessionLoadResponse,
@@ -9,25 +9,14 @@ import type {
   RawPublicationFigure,
   RawPublicationTable,
 } from '../types'
+import { TASK_STATUSES } from '../stores/appStore'
 import type {
   Session,
   RoundResult,
   FigureReviewStatus,
   LlmFailureInfo,
 } from '../stores/appStore'
-import type { SnapshotFailureAction, SnapshotTransactionRecord } from '../types/snapshotV2'
-
-// Must cover the whole TaskStatus union: anything missing is silently coerced
-// to 'pending' on reload. 'stopped' was absent even though it is the durable
-// terminal state written by the snapshot-failure Terminate action and by
-// restoring a terminal capsule — so a session the user had deliberately
-// stopped came back rendering the 'pending' branch, i.e. an enabled
-// "Start Analysis" button with no sign it was ever terminated.
-const VALID_STATUSES: readonly Session['status'][] = [
-  'pending', 'running', 'paused', 'stopped', 'waiting_input', 'waiting_annotation',
-  'waiting_plan_review', 'waiting_species_input', 'completed', 'failed',
-  'generating_report',
-]
+import type { SnapshotTransactionRecord } from '../types/snapshotV2'
 
 function opt<K extends string, V>(key: K, value: V | null | undefined): Partial<Record<K, V>> {
   return value != null ? { [key]: value } as Partial<Record<K, V>> : {}
@@ -149,17 +138,7 @@ export type StoreUpdates = {
   llmFailureInfo?: LlmFailureInfo | null
   runtimeRestoreStatus?: 'complete' | 'unavailable' | 'intentionally_kept'
   runtimeRestoreWarning?: string | null
-  snapshotFailure?: {
-    failure: {
-      snapshot_id: string
-      session_id: string
-      failed_at: string
-      code: string
-      message: string
-      details?: Record<string, unknown>
-    }
-    allowed_actions: SnapshotFailureAction[]
-  } | null
+  snapshotFailure?: ParsedSnapshotFailure | null
   snapshotTransaction?: SnapshotTransactionRecord | null
 } & LiteratureConfigStoreUpdates
 
@@ -169,7 +148,7 @@ export interface TransformedLoadResponse {
 }
 
 export function transformLoadResponse(data: SessionLoadResponse): TransformedLoadResponse {
-  const status: Session['status'] = VALID_STATUSES.includes(data.status as Session['status'])
+  const status: Session['status'] = TASK_STATUSES.includes(data.status as Session['status'])
     ? data.status as Session['status']
     : 'pending'
 

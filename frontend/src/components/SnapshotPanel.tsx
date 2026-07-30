@@ -26,6 +26,11 @@ import type {
 
 const POLL_INTERVAL_MS = 2000
 
+// The transaction journal spells the code upper-case, the HTTP error payload
+// lower-case; both mean the same refusal.
+const isPreRestoreUnavailable = (code?: string | null): boolean =>
+  (code || '').toUpperCase() === 'PRE_RESTORE_UNAVAILABLE'
+
 interface SnapshotPanelProps {
   sessionId: string
   language: Language
@@ -35,10 +40,10 @@ interface SnapshotPanelProps {
   activeTransactionId?: string | null
 }
 
-function asApiError(err: unknown): { status: number; code: string; runtimeStatus: string | null; message: string } | null {
+function asApiError(err: unknown): { status: number; code: string; runtimeStatus: string | null; message: string; details: Record<string, unknown> | null } | null {
   if (err && typeof err === 'object' && 'code' in err) {
-    const e = err as { code: string; status?: number; runtimeStatus?: string | null; message?: string }
-    return { status: e.status ?? 500, code: e.code, runtimeStatus: e.runtimeStatus ?? null, message: e.message ?? '' }
+    const e = err as { code: string; status?: number; runtimeStatus?: string | null; message?: string; details?: Record<string, unknown> | null }
+    return { status: e.status ?? 500, code: e.code, runtimeStatus: e.runtimeStatus ?? null, message: e.message ?? '', details: e.details ?? null }
   }
   return null
 }
@@ -116,6 +121,11 @@ export function SnapshotPanel({
     }
   }, [snapshots, selectedId])
 
+  const offerDiscardRestore = useCallback((snapshotId: string) => {
+    setPendingRestoreId(snapshotId)
+    setShowDiscard(true)
+  }, [])
+
   const applyTxnUpdate = useCallback(
     (txn: SnapshotTransactionRecord) => {
       const key = `${txn.transaction_id}:${txn.status}`
@@ -135,14 +145,13 @@ export function SnapshotPanel({
       // failing capture.
       if (
         txn.status === 'failed'
-        && txn.failure?.code === 'PRE_RESTORE_UNAVAILABLE'
+        && isPreRestoreUnavailable(txn.failure?.code as string | undefined)
         && txn.snapshot_id
       ) {
-        setPendingRestoreId(txn.snapshot_id)
-        setShowDiscard(true)
+        offerDiscardRestore(txn.snapshot_id)
       }
     },
-    [setSnapshotTransaction, onRestore, fetchSnapshots],
+    [setSnapshotTransaction, onRestore, fetchSnapshots, offerDiscardRestore],
   )
 
   // Sync WS store updates into local progress (dedupe by status)
@@ -209,9 +218,8 @@ export function SnapshotPanel({
       const apiErr = asApiError(e)
       if (apiErr) {
         const upper = apiErr.code.toUpperCase()
-        if (upper === 'PRE_RESTORE_UNAVAILABLE' || apiErr.code === 'pre_restore_unavailable') {
-          setPendingRestoreId(snapshotId)
-          setShowDiscard(true)
+        if (isPreRestoreUnavailable(apiErr.code)) {
+          offerDiscardRestore(snapshotId)
         } else if (
           upper === 'RUNTIME_CHOICE_REQUIRED' ||
           upper === 'RUNTIME_UNAVAILABLE' ||
@@ -273,10 +281,15 @@ export function SnapshotPanel({
     try {
       await deleteSnapshotV2(sessionId, snapshotId, branch)
     } catch (e) {
-      const err = e as { message?: string; details?: { reason?: string } | null }
-      const reason = err?.details?.reason
+      const err = asApiError(e)
+      const reason = err?.details?.reason as string | undefined
       setDeleteError(
-        [err?.message || (isZh ? '删除失败' : 'Delete failed'), reason ? `(${reason})` : '']
+        [
+          err?.message
+            || (e instanceof Error ? e.message : '')
+            || (isZh ? '删除失败' : 'Delete failed'),
+          reason ? `(${reason})` : '',
+        ]
           .filter(Boolean)
           .join(' '),
       )

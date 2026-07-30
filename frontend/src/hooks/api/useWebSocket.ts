@@ -15,6 +15,33 @@ import { API_BASE, WS_CONNECT_TIMEOUT_MS, apiFetch, applyStoreUpdates, authHeade
 
 const SNAPSHOT_CLEANUP_THRESHOLD = 20
 const SNAPSHOT_REMINDER_INTERVAL = 5
+
+/**
+ * Refetch `/session/{id}/load` and apply it to the store.
+ *
+ * `staleGuardSessionId`, when given, drops the response if the active session
+ * changed while the request was in flight.
+ */
+function reloadSessionState(
+  sessionId: string,
+  errorLabel: string,
+  staleGuardSessionId?: string,
+): Promise<void> {
+  return fetch(`${API_BASE}/session/${sessionId}/load`, { headers: authHeaders() })
+    .then(resp => resp.ok ? resp.json() : null)
+    .then(reloadData => {
+      if (!reloadData) return
+      if (
+        staleGuardSessionId
+        && useAppStore.getState().currentSession?.id !== staleGuardSessionId
+      ) return
+      const { sessionUpdates, storeUpdates } = transformLoadResponse(reloadData)
+      useAppStore.getState().updateSession(sessionUpdates)
+      applyStoreUpdates(storeUpdates)
+    })
+    .catch(reloadErr => console.error(errorLabel, reloadErr))
+}
+
 export function useWebSocket() {
   const { currentSession, addMessage, updateSession, setWsConnected, setMessages, addAgentError, setStateVersion } = useAppStore()
   const wsRef = useRef<WebSocket | null>(null)
@@ -188,16 +215,7 @@ export function useWebSocket() {
             console.warn('WebSocket: Received outdated state sync, current:', currentVersion, 'received:', syncContent.version, '. Reloading session state.')
             const sessionId = useAppStore.getState().currentSession?.id
             if (sessionId) {
-              fetch(`${API_BASE}/session/${sessionId}/load`, { headers: authHeaders() })
-                .then(resp => resp.ok ? resp.json() : null)
-                .then(reloadData => {
-                  if (reloadData) {
-                    const { sessionUpdates, storeUpdates } = transformLoadResponse(reloadData)
-                    useAppStore.getState().updateSession(sessionUpdates)
-                    applyStoreUpdates(storeUpdates)
-                  }
-                })
-                .catch(reloadErr => console.error('WebSocket: Failed to reload session state:', reloadErr))
+              void reloadSessionState(sessionId, 'WebSocket: Failed to reload session state:')
             }
           } else {
             // Update state version and session status. Producers that omit
@@ -289,18 +307,11 @@ export function useWebSocket() {
                   && restoreCommitRefreshedRef.current !== info.transaction_id
                 ) {
                   restoreCommitRefreshedRef.current = info.transaction_id
-                  fetch(`${API_BASE}/session/${activeSessionId}/load`, { headers: authHeaders() })
-                    .then(resp => resp.ok ? resp.json() : null)
-                    .then(reloadData => {
-                      if (!reloadData) return
-                      if (useAppStore.getState().currentSession?.id !== activeSessionId) return
-                      const { sessionUpdates, storeUpdates } = transformLoadResponse(reloadData)
-                      useAppStore.getState().updateSession(sessionUpdates)
-                      applyStoreUpdates(storeUpdates)
-                    })
-                    .catch(reloadErr => console.error(
-                      'WebSocket: Failed to reload session state after restore commit:', reloadErr,
-                    ))
+                  void reloadSessionState(
+                    activeSessionId,
+                    'WebSocket: Failed to reload session state after restore commit:',
+                    activeSessionId,
+                  )
                 }
               }
             } else if (syncContent.change_type === 'snapshot_failure') {
@@ -332,7 +343,7 @@ export function useWebSocket() {
             // during a restore used to blank `status` and `currentRound`,
             // leaving the Analysis Control header with no matching branch and
             // therefore no buttons at all until a manual page reload.
-            const sessionUpdate: Record<string, unknown> = {}
+            const sessionUpdate: Partial<Session> = {}
             if (syncContent.status !== undefined) sessionUpdate.status = syncContent.status
             if (syncContent.current_round !== undefined) sessionUpdate.currentRound = syncContent.current_round
             if (syncContent.analysis_phase) sessionUpdate.analysisPhase = syncContent.analysis_phase

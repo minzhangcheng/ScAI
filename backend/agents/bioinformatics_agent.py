@@ -940,14 +940,24 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             logger.warning(f"[{self.session_id}] DB priors computation skipped: {e}")
             return {}
 
+    async def _bind_gene_set(self, set_id: str, genes: List[str], label: str) -> Optional[str]:
+        """Bind a fetched panel into the kernel; returns its variable name or None.
 
-
-
-
-
-
-
-
+        Handing the genes over as data rather than asking the model to retype
+        them is where a fetched panel stops silently becoming a remembered one
+        again. `None` means the kernel would not take them, and the caller must
+        inline the genes into its reply instead.
+        """
+        var_name = f"gene_set_{re.sub(r'[^0-9A-Za-z_]', '_', set_id)[:60]}"
+        try:
+            await self.sandbox.execute(
+                f"{var_name} = {genes!r}",
+                save_to_history=False, skip_safety_check=True,
+            )
+            return var_name
+        except Exception as exc:
+            logger.warning(f"[{self.session_id}] {label} injection failed: {exc}")
+            return None
 
     async def run_autonomous_analysis(
         self,
@@ -2789,22 +2799,13 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             ]
                             for part in parts:
                                 name = part.set_id.split("#")[-1]
-                                var = (
-                                    "gene_set_"
-                                    + re.sub(r"[^0-9A-Za-z_]", "_", part.set_id)[:60]
+                                var = await self._bind_gene_set(
+                                    part.set_id, part.genes, "partition"
                                 )
-                                try:
-                                    await self.sandbox.execute(
-                                        f"{var} = {part.genes!r}",
-                                        save_to_history=False, skip_safety_check=True,
-                                    )
-                                    bound = f" bound as {var}"
-                                except Exception as exc:
-                                    logger.warning(
-                                        f"[{self.session_id}] partition injection "
-                                        f"failed: {exc}"
-                                    )
-                                    bound = f" genes: {', '.join(part.genes)}"
+                                bound = (
+                                    f" bound as {var}" if var
+                                    else f" genes: {', '.join(part.genes)}"
+                                )
                                 lines.append(
                                     f"[{name}] {part.n_genes} genes, "
                                     f"provenance {part.provenance}{bound}."
@@ -2854,21 +2855,10 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             ))
                             continue
 
-                        # Hand the genes to the kernel as data rather than asking the
-                        # model to retype them: retyping is where a fetched panel
-                        # silently becomes a remembered one again.
-                        var_name = f"gene_set_{re.sub(r'[^0-9A-Za-z_]', '_', set_id)[:60]}"
-                        try:
-                            await self.sandbox.execute(
-                                f"{var_name} = {result.genes!r}",
-                                save_to_history=False, skip_safety_check=True,
-                            )
-                            injected = True
-                        except Exception as exc:
-                            logger.warning(
-                                f"[{self.session_id}] gene set injection failed: {exc}"
-                            )
-                            injected = False
+                        var_name = await self._bind_gene_set(
+                            set_id, result.genes, "gene set"
+                        )
+                        injected = var_name is not None
 
                         lines = [
                             f"Fetched {result.set_id}: {result.n_genes} genes. "

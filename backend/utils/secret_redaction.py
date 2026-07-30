@@ -27,19 +27,21 @@ SECRET_FIELD_NAMES = frozenset({
 })
 
 
-def _transform_nested_secret_fields(value: Any, transform) -> Any:
+def _transform_nested_secret_fields(
+    value: Any, transform, fields: frozenset[str] = SECRET_FIELD_NAMES
+) -> Any:
     """Copy a small config tree while transforming recognized secret fields."""
     if isinstance(value, dict):
         return {
             key: (
                 transform(item)
-                if key in SECRET_FIELD_NAMES and item
-                else _transform_nested_secret_fields(item, transform)
+                if key in fields and item
+                else _transform_nested_secret_fields(item, transform, fields)
             )
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [_transform_nested_secret_fields(item, transform) for item in value]
+        return [_transform_nested_secret_fields(item, transform, fields) for item in value]
     return value
 
 
@@ -153,36 +155,22 @@ ENDPOINT_FIELD_NAMES = frozenset({
 })
 
 
-def _blank_nested_endpoint_fields(value: Any) -> Any:
-    """Copy a config tree, blanking recognized endpoint fields."""
-    if isinstance(value, dict):
-        return {
-            key: ("" if key in ENDPOINT_FIELD_NAMES and item else _blank_nested_endpoint_fields(item))
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_blank_nested_endpoint_fields(item) for item in value]
-    return value
+_ENDPOINT_BEARING_SECTIONS = (
+    "agent_server_configs",
+    "literature_config",
+    "config_snapshot",
+)
 
 
 def strip_analysis_state_secrets(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Return a portable payload with credentials and endpoints removed entirely."""
     result = _transform_secret_fields(payload, lambda _value: "")
 
-    servers = result.get("agent_server_configs")
-    if isinstance(servers, dict):
-        result["agent_server_configs"] = {
-            agent: (_blank_nested_endpoint_fields(config) if isinstance(config, dict) else config)
-            for agent, config in servers.items()
-        }
-
-    literature = result.get("literature_config")
-    if isinstance(literature, dict):
-        result["literature_config"] = _blank_nested_endpoint_fields(literature)
-
-    snapshot = result.get("config_snapshot")
-    if isinstance(snapshot, dict):
-        result["config_snapshot"] = _blank_nested_endpoint_fields(snapshot)
+    for key in _ENDPOINT_BEARING_SECTIONS:
+        if key in result:
+            result[key] = _transform_nested_secret_fields(
+                result[key], lambda _value: "", ENDPOINT_FIELD_NAMES
+            )
 
     return result
 

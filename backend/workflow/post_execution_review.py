@@ -216,17 +216,6 @@ class StepAudit:
     missing_families: List[str] = field(default_factory=list)
     verifiable: bool = True
 
-    def as_dict(self) -> Dict[str, Any]:
-        return {
-            "step_id": self.step_id,
-            "title": self.title,
-            "status": self.status,
-            "reason": self.reason,
-            "planned_families": list(self.planned_families),
-            "missing_families": list(self.missing_families),
-            "verifiable": self.verifiable,
-        }
-
 
 @dataclass
 class PlanAudit:
@@ -266,9 +255,6 @@ class PlanAudit:
             "executed_families": sorted(self.executed_families),
             "unavailable_families": sorted(self.unavailable_families),
         }
-
-    def as_dict(self) -> Dict[str, Any]:
-        return {"summary": self.summary(), "steps": [s.as_dict() for s in self.steps]}
 
 
 def audit_plan_execution(

@@ -5,6 +5,7 @@
  * parsing across the frontend into a single source of truth.
  */
 
+import { SNAPSHOT_FAILURE_ACTIONS } from '../types/snapshotV2'
 import type {
   SnapshotRecordV2,
   SnapshotManifestV2,
@@ -91,15 +92,8 @@ const SKIPPABLE_SNAPSHOT_PRODUCERS = new Set([
 
 function validSnapshotFailureActions(raw: unknown): SnapshotFailureAction[] {
   if (!Array.isArray(raw)) return []
-  return raw.filter(
-    (action): action is SnapshotFailureAction =>
-      action === 'retry' ||
-      // Memory-preflight gates send 'proceed' in place of 'retry'; omitting it
-      // here would silently drop the only way past that gate.
-      action === 'proceed' ||
-      action === 'skip' ||
-      action === 'manage' ||
-      action === 'terminate',
+  return raw.filter((action): action is SnapshotFailureAction =>
+    (SNAPSHOT_FAILURE_ACTIONS as readonly string[]).includes(action as string),
   )
 }
 

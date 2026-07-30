@@ -110,10 +110,10 @@ def _warn_about_unrecovered_journals() -> None:
     genuinely cannot run here — it needs the object store — but the operator
     should learn about it from a log line rather than from the results.
     """
-    import json as _json
-
     from backend.config._config import SESSION_DIR
-    from backend.services.snapshot_v2.paths import SnapshotV2Paths
+    from backend.services.snapshot_v2.feature_gate import (
+        has_unfinished_restore_journal,
+    )
 
     if not SESSION_DIR.exists():
         return
@@ -122,28 +122,11 @@ def _warn_about_unrecovered_journals() -> None:
     # tree. A COMMITTED or FAILED journal is just waiting for the next enabled
     # startup to reap it, and warning about those would point at every session
     # that has ever been restored.
-    unfinished = {"STAGED", "STAGING", "APPLYING"}
     stranded = []
     try:
         for sess_dir in sorted(SESSION_DIR.iterdir()):
-            if not sess_dir.is_dir():
-                continue
-            journals = SnapshotV2Paths.for_session(sess_dir.name).journals
-            if not journals.is_dir():
-                continue
-            for entry in journals.iterdir():
-                if not entry.is_file():
-                    continue
-                try:
-                    doc = _json.loads(entry.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    # Unreadable or truncated is itself a sign of an interrupted
-                    # write, so it counts.
-                    stranded.append(sess_dir.name)
-                    break
-                if str(doc.get("status", "")).upper() in unfinished:
-                    stranded.append(sess_dir.name)
-                    break
+            if sess_dir.is_dir() and has_unfinished_restore_journal(sess_dir.name):
+                stranded.append(sess_dir.name)
     except OSError as exc:
         logger.debug("Could not scan for stranded restore journals: %s", exc)
         return

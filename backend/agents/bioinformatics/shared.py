@@ -3,7 +3,7 @@ Bioinformatics Agent - Handles snRNA-seq analysis with iterative code execution
 Supports autonomous technical steps and PI consultation for biological decisions
 With step-level checkpointing for recovery from interruptions
 """
-from typing import Dict, Any, List, Optional, Callable, Awaitable, Tuple
+from typing import Dict, Any, List, Optional, Callable, Awaitable, Sequence, Tuple
 import asyncio
 import functools
 import json
@@ -222,6 +222,27 @@ def inject_revised_plan_context(
         ),
     })
     return True
+
+
+def code_is_statically_unsafe(
+    code: str,
+    main_var: str,
+    denylist: Sequence[str],
+) -> Optional[str]:
+    """Return a reason string if code is statically unsafe, else None.
+
+    The denied operations differ per caller — the annotation validator bans
+    analysis, the supplementary executor allows it — but the assignment guard
+    does not: '<main_var> =' but not '<main_var>_val ='. Rebinding the main
+    variable would strand every execution id already cited as evidence.
+    """
+    low = code.lower()
+    for pat in denylist:
+        if pat in low:
+            return f"disallowed operation '{pat}'"
+    if re.search(rf"(^|\n)\s*{re.escape(main_var)}\s*=(?!=)", code):
+        return f"assignment to main object '{main_var}'"
+    return None
 
 
 def execution_supports_evidence(execution: CodeExecution) -> bool:

@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import type { SnapshotRecordV2 } from '../../types/snapshotV2'
 
 function capsuleLabel(kind: string): string {
@@ -31,7 +32,14 @@ interface SnapshotTreeProps {
 }
 
 export function SnapshotTree({ snapshots, selectedId, onSelect, isZh = false }: SnapshotTreeProps) {
-  const sorted = [...snapshots].sort((a, b) => orderKey(a) - orderKey(b))
+  const sorted = useMemo(
+    () =>
+      snapshots
+        .map((record) => ({ record, key: orderKey(record) }))
+        .sort((a, b) => a.key - b.key)
+        .map((entry) => entry.record),
+    [snapshots],
+  )
 
   return (
     <div className="space-y-2">

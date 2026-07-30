@@ -46,7 +46,7 @@ from starlette.responses import FileResponse
 
 from urllib.parse import unquote
 
-from .core import ImportCancelled, MAX_INLINE_IMPORT_BYTES, _IMPORT_UPLOAD_PROGRESS_BYTES, check_inline_import_size, router
+from .core import ImportCancelled, MAX_INLINE_IMPORT_BYTES, _IMPORT_UPLOAD_PROGRESS_BYTES, check_inline_import_size, import_job_record, router
 
 from .import_impl import (
     _allocate_import_session_id,
@@ -251,18 +251,17 @@ async def import_state(
                     status_code=409,
                     detail="Import id is already in use by another import job",
                 )
-            _import_jobs[import_job_id] = {
-                "status": "uploading",
-                "phase": "uploading",
-                "user_id": user_id,
-                "created_at": time.time(),
-                "bytes_total": content_length,
-                "bytes_processed": 0,
-                "files_total": 0,
-                "files_processed": 0,
-                "current_file": "",
-                "cancel_requested": False,
-            }
+            _import_jobs[import_job_id] = import_job_record(
+                "uploading",
+                user_id=user_id,
+                created_at=time.time(),
+                bytes_total=content_length,
+                bytes_processed=0,
+                files_total=0,
+                files_processed=0,
+                current_file="",
+                cancel_requested=False,
+            )
 
         tmp_path = UPLOAD_TEMP_DIR / f"import_{uuid.uuid4().hex}.tar.gz"
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
@@ -287,14 +286,14 @@ async def import_state(
             logger.info(f"Import {import_job_id}: cancelled during upload")
             async with _import_jobs_lock:
                 created_at = _import_jobs.get(import_job_id, {}).get("created_at", time.time())
-                _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user", "user_id": user_id, "created_at": created_at}
+                _import_jobs[import_job_id] = import_job_record("cancelled", user_id=user_id, created_at=created_at, error="cancelled by user")
             tmp_path.unlink(missing_ok=True)
             return APIResponse(success=False, message="Import cancelled", data={"import_id": import_job_id, "status": "cancelled"})
         except Exception as e:
             logger.error("Import %s: upload failed after %.1fs: %s", import_job_id, time.time() - import_start_time, e, exc_info=True)
             async with _import_jobs_lock:
                 created_at = _import_jobs.get(import_job_id, {}).get("created_at", time.time())
-                _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": f"Upload failed: {str(e)}", "user_id": user_id, "created_at": created_at}
+                _import_jobs[import_job_id] = import_job_record("failed", user_id=user_id, created_at=created_at, error=f"Upload failed: {str(e)}")
             tmp_path.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail=f"Upload failed: {str(e)}")
 
@@ -303,22 +302,21 @@ async def import_state(
             cancel_flag = job.get("cancel_requested", False)
             created_at = job.get("created_at", time.time())
             archive_size = bytes_written
-            _import_jobs[import_job_id] = {
-                "status": "pending",
-                "phase": "pending",
-                "user_id": user_id,
-                "created_at": created_at,
-                "bytes_total": archive_size,
-                "bytes_processed": archive_size,
-                "files_total": 0,
-                "files_processed": 0,
-                "current_file": "",
-                "cancel_requested": cancel_flag,
-            }
+            _import_jobs[import_job_id] = import_job_record(
+                "pending",
+                user_id=user_id,
+                created_at=created_at,
+                bytes_total=archive_size,
+                bytes_processed=archive_size,
+                files_total=0,
+                files_processed=0,
+                current_file="",
+                cancel_requested=cancel_flag,
+            )
         if cancel_flag:
             tmp_path.unlink(missing_ok=True)
             async with _import_jobs_lock:
-                _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user", "user_id": user_id, "created_at": created_at}
+                _import_jobs[import_job_id] = import_job_record("cancelled", user_id=user_id, created_at=created_at, error="cancelled by user")
             return APIResponse(success=False, message="Import cancelled", data={"import_id": import_job_id, "status": "cancelled"})
 
         background_tasks.add_task(_process_import_job, str(tmp_path), import_job_id, user_id, trust)

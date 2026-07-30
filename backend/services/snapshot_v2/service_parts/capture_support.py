@@ -54,6 +54,9 @@ from backend.services.snapshot_v2.object_store import (
     ObjectStore,
     ManifestStore,
     canonical_json,
+    compute_manifest_root_hash,
+    free_bytes_at,
+    physical_object_store_bytes,
 )
 from backend.services.snapshot_v2.paths import SnapshotV2Paths
 from backend.services.snapshot_v2.runtime import RuntimeCapture
@@ -279,8 +282,7 @@ class CaptureSupportMixin:
             )
 
     async def _compute_root_hash(self, manifest: SnapshotManifestV2) -> None:
-        raw = canonical_json(manifest)
-        manifest.root_hash = hashlib.sha256(raw).hexdigest()
+        manifest.root_hash = compute_manifest_root_hash(manifest)
 
     async def _check_quota(
         self,
@@ -322,32 +324,26 @@ class CaptureSupportMixin:
                 f"(session quota {self.session_quota_bytes})",
             )
         # Also enforce cumulative store size soft bound via logical objects.
-        # The v2 root dir is not created during a normal capture (objects/
-        # staging/committed are siblings), so probe the nearest existing
-        # ancestor — free space is identical across the same filesystem.
-        probe = self.paths.root
-        while not probe.exists() and probe != probe.parent:
-            probe = probe.parent
         try:
-            usage = shutil.disk_usage(probe)
-            # This runs at capture step 8 — *after* every object has already been
-            # written into objects/ — so `usage.free` already excludes `added`.
-            # Subtracting it again demanded roughly twice the headroom the
-            # capture actually needed, and failed deterministically on exactly
-            # the workloads this system exists for (multi-GB AnnData captures):
-            # the bytes were safely on disk, the capture was rejected anyway, the
-            # objects were cleaned up, and Retry reproduced the same arithmetic
-            # forever. The reserve is the only meaningful post-write guard.
-            if usage.free < self.free_space_reserve_bytes:
-                raise SnapshotStorageError(
-                    "snapshot_quota_exceeded",
-                    f"Insufficient disk space: {usage.free} free after writing "
-                    f"{added}, below {self.free_space_reserve_bytes} reserve",
-                )
+            free = free_bytes_at(self.paths.root)
         except OSError as exc:
             raise SnapshotStorageError(
                 "DISK_USAGE_CHECK_FAILED",
                 f"Failed to check disk usage: {exc}",
+            )
+        # This runs at capture step 8 — *after* every object has already been
+        # written into objects/ — so the free bytes already exclude `added`.
+        # Subtracting it again demanded roughly twice the headroom the capture
+        # actually needed, and failed deterministically on exactly the workloads
+        # this system exists for (multi-GB AnnData captures): the bytes were
+        # safely on disk, the capture was rejected anyway, the objects were
+        # cleaned up, and Retry reproduced the same arithmetic forever. The
+        # reserve is the only meaningful post-write guard.
+        if free < self.free_space_reserve_bytes:
+            raise SnapshotStorageError(
+                "snapshot_quota_exceeded",
+                f"Insufficient disk space: {free} free after writing "
+                f"{added}, below {self.free_space_reserve_bytes} reserve",
             )
 
     def _cleanup_unpublished_capture_objects(
@@ -389,18 +385,7 @@ class CaptureSupportMixin:
                 )
 
     def _physical_object_store_bytes(self) -> int:
-        objects_dir = Path(str(self.paths.objects))
-        total = 0
-        if not objects_dir.is_dir():
-            return total
-        for path in objects_dir.iterdir():
-            if not path.is_file():
-                continue
-            try:
-                total += path.stat().st_size
-            except FileNotFoundError:
-                continue
-        return total
+        return physical_object_store_bytes(self.paths.objects)
 
     async def _estimate_capture_addition(
         self,
@@ -498,7 +483,7 @@ class CaptureSupportMixin:
                 add_file(path)
 
         estimate += self._estimate_runtime_addition(
-            request, analysis_state, known_hashes, sandbox=sandbox,
+            request, analysis_state, sandbox=sandbox,
         )
         return estimate
 
@@ -506,7 +491,6 @@ class CaptureSupportMixin:
         self,
         request: SnapshotCaptureRequest,
         analysis_state: Any,
-        known_hashes: set[str],
         *,
         sandbox: Any = None,
     ) -> int:
@@ -531,8 +515,8 @@ class CaptureSupportMixin:
             return 0
         projected = 0
         # Deduped only against itself (an adata and the residual can carry the
-        # same hash), never against the caller's store-derived *known_hashes*.
-        # The head's refs model the bytes this capture is about to write; they
+        # same hash), never against the caller's store-derived hashes. The
+        # head's refs model the bytes this capture is about to write; they
         # are not those bytes. GC marks every object of a committed lineage head
         # reachable, so the head's own runtime objects are present in objects/
         # by construction — testing membership there zeroed the projection in
@@ -551,8 +535,6 @@ class CaptureSupportMixin:
                 continue
             projected += ref.size
             seen.add(ref.sha256)
-            # Still recorded so the caller cannot count the same hash twice.
-            known_hashes.add(ref.sha256)
         return projected
 
     def _mark_runtime_committed(

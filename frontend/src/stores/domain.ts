@@ -4,7 +4,8 @@
 
 
 export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature' | 'painter' | 'supervisor' | 'technique'
-export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused' | 'stopped' | 'waiting_input' | 'waiting_annotation' | 'waiting_plan_review' | 'waiting_species_input' | 'generating_report'
+export const TASK_STATUSES = ['pending', 'running', 'completed', 'failed', 'paused', 'stopped', 'waiting_input', 'waiting_annotation', 'waiting_plan_review', 'waiting_species_input', 'generating_report'] as const
+export type TaskStatus = (typeof TASK_STATUSES)[number]
 export type FigureReviewStatus = 'pending' | 'approved' | 'accepted_with_reservations' | 'revision_requested'
 
 

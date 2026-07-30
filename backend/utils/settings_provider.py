@@ -26,6 +26,11 @@ MASKED_SECRET_VALUE = "********"
 _SECRET_FIELD_NAMES = {"api_key", "deep_research_api_key", "google_api_key"}
 
 
+def agent_endpoint_lacks_credential(agent_url: str, agent_key: str, global_url: str) -> bool:
+    """Report a per-agent endpoint that carries no credential of its own."""
+    return bool(agent_url) and agent_url != global_url and not agent_key
+
+
 class AgentSettingsProvider:
     """Per-session settings reader for agents with LLM client caching.
 
@@ -106,7 +111,7 @@ class AgentSettingsProvider:
            (not agent_key or agent_key == self._config.api.api_key):
             return self._global_client
 
-        if agent_url and agent_url != self._config.api.llm_base_url and not agent_key:
+        if agent_endpoint_lacks_credential(agent_url, agent_key, self._config.api.llm_base_url):
             # A custom endpoint whose credential is gone — the state of every
             # session that arrives through export/import, because export blanks
             # credentials and keeps everything else. Falling through would build

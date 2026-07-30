@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Iterable, Optional, Sequence
 
 from .gene_set_provenance import MIN_PANEL_SIZE_FOR_NEGATIVE_CLAIM
 from .method_rules import rule_text
@@ -311,45 +310,16 @@ _MEASURED_QUANTITY = re.compile(
     r'signatures?|programs?|modules?|footprints?|pseudotime|trajector\w+|'
     r'transcripts?|genes?|degs?|markers?|targets?|pathways?|ontolog\w+|nes|'
     r'reads?|umis?|counts\s+per|mitochondrial|ribosomal|doublet\w*)\b', re.I)
-_LABEL_STOPWORDS = frozenset({
-    "cell", "cells", "like", "likely", "positive", "negative", "high", "low",
-    "state", "states", "type", "types", "subtype", "subtypes", "cluster",
-    "clusters", "population", "populations", "unknown", "ambiguous", "mixed",
-    "doublet", "other", "and", "or", "the", "with", "associated", "enriched",
-    "specific", "related", "putative", "possible", "candidate", "intermediate",
-    "activated", "resting", "quiescent", "mature", "immature", "naive",
-    "resident", "recruited"})
-
-
-def population_vocabulary(cluster_labels):
-    """Content tokens of the labels this run actually assigned.
-
-    The biology enters at runtime, from the annotation record, never from this
-    source file -- which is what keeps the module domain neutral.
-    """
-    vocab = set()
-    for lab in cluster_labels or []:
-        for tok in _WORD_RE.findall(str(lab).lower()):
-            if len(tok) >= 4 and tok not in _LABEL_STOPWORDS:
-                vocab.add(tok.rstrip("s"))
-    return frozenset(vocab)
-
-
-def _names_population(text, vocab):
-    if _POPULATION.search(text):
-        return True
-    return any(t.rstrip("s") in vocab for t in _tokens(text))
 
 
 # ============================================================ COMPOSITION
-def check_composition_claims(findings, *, cluster_labels=(), score_definitions=()):
+def check_composition_claims(findings, *, score_definitions=()):
     """A composition claim must not rest on a per-population test of proportions."""
     if any(score_kind(s) == "differential_abundance" for s in score_definitions or ()):
         return []
-    vocab = population_vocabulary(cluster_labels)
     for text in _texts(findings):
         for sent in _sentences(text):
-            in_scope = _names_population(sent, vocab)
+            in_scope = bool(_POPULATION.search(sent))
             for clause in _clauses(sent):
                 if not (in_scope or _PERCENT.search(clause)
                         or _COMPOSITION_NOUN.search(clause)):
@@ -400,6 +370,18 @@ _CONDITION_CONTRAST = re.compile(
     r'|\beffects?\s+of\s+condition\b|\bcondition\b[^.;:]{0,24}\bfixed\s+effect\b)', re.I)
 
 
+def _carries_cell_level_inference(clause):
+    """``_has_inference`` plus a feature count, minus bare abundance wording.
+
+    "Significant" next to a proportion is a composition claim, which the
+    simplex gate owns; this one is about the unit of analysis.
+    """
+    return (_has_p(clause) or bool(_NAMED_TEST.search(clause))
+            or bool(_ALT_INFERENCE.search(clause))
+            or (_has_sig_word(clause) and not _ABUNDANCE.search(clause))
+            or bool(_FEATURE_COUNT_CLAIM.search(clause)))
+
+
 def _group_label_pattern(samples_per_group):
     labels = [re.escape(str(g)) for g in (samples_per_group or ()) if str(g).strip()]
     if not labels:
@@ -438,14 +420,7 @@ def check_cell_level_inference(findings, samples_per_group=None):
             sample_level_sentence = bool(_SAMPLE_LEVEL.search(sent))
             sentence_disclaimed = bool(_DISCLAIMED.search(sent))
             for clause in _clauses(sent):
-                if (_has_p(clause) or _NAMED_TEST.search(clause)
-                        or _ALT_INFERENCE.search(clause)):
-                    pass
-                elif _has_sig_word(clause) and not _ABUNDANCE.search(clause):
-                    pass
-                elif _FEATURE_COUNT_CLAIM.search(clause):
-                    pass
-                else:
+                if not _carries_cell_level_inference(clause):
                     continue
                 if sentence_disclaimed or _DISCLAIMED.search(clause):
                     continue
@@ -780,11 +755,11 @@ def run_gates(
 ):
     """Run every statistical gate over a report_findings payload.
 
-    cluster_labels is accepted but deliberately NOT forwarded to the composition
-    check. Measured: supplying annotation vocabulary takes that check from
-    21 TP / 0 FP to 21 TP / 7 FP, because bulk findings that merely name a cell
-    type start matching. Recall is already 1.000 without it, so the parameter
-    exists only so callers need not know that.
+    cluster_labels is accepted and deliberately ignored. Measured: feeding
+    annotation vocabulary to the composition check takes it from 21 TP / 0 FP
+    to 21 TP / 7 FP, because bulk findings that merely name a cell type start
+    matching. Recall is already 1.000 without it, so the parameter exists only
+    so callers need not know that.
     """
     report = GateReport()
     report.findings.extend(

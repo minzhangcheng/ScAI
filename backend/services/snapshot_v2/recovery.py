@@ -19,17 +19,20 @@ typed recovery failures that leave the journal in place and set
 import logging
 import os
 import shutil
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
-from backend.services.snapshot_v2.checkpoint_paths import checkpoint_sqlite_path
+from backend.services.snapshot_v2.checkpoint_paths import (
+    SQLITE_COMPANION_SUFFIXES,
+    checkpoint_sqlite_path,
+    sqlite_companion_paths,
+)
 from backend.services.snapshot_v2.errors import SnapshotIntegrityError
 from backend.services.snapshot_v2.object_store import (
     ManifestStore,
     ObjectStore,
-    STAGING_TEMP_TTL_SECONDS,
+    reclaim_stale_staging_temp,
 )
 from backend.services.snapshot_v2.runtime_names import runtime_h5ad_path
 from backend.services.snapshot_v2.workspace import WorkspaceScope
@@ -105,11 +108,7 @@ def _discard_sqlite_db(db_path: Path) -> None:
     is being *replaced*, where the surviving WAL still belongs to it.
     """
     db_path = Path(str(db_path))
-    for path in (
-        db_path,
-        db_path.with_name(db_path.name + "-wal"),
-        db_path.with_name(db_path.name + "-shm"),
-    ):
+    for path in (db_path, *sqlite_companion_paths(db_path)):
         path.unlink(missing_ok=True)
 
 
@@ -218,7 +217,7 @@ class _RecoveryRestorer:
         if not tx_id:
             return
         staged_root = Path(str(self.paths.staging)) / tx_id
-        companions = ("-wal", "-shm")
+        companions = SQLITE_COMPANION_SUFFIXES
         stashed = {
             companion: prev_checkpoint_companion_path(staged_root, companion)
             for companion in companions
@@ -1296,17 +1295,12 @@ async def recover_snapshot_transactions(
                     # in-process path, so one still here after a full day was
                     # stranded by a hard kill. Nothing else walks staging/, and
                     # the bytes count against the free-space reserve, so this is
-                    # the only place they are ever reclaimed.
-                    try:
-                        if (time.time() - entry.stat().st_mtime
-                                > STAGING_TEMP_TTL_SECONDS):
-                            entry.unlink()
-                            logger.info(
-                                "Recovery [%s]: removed stranded object temp %s",
-                                session_id, entry.name,
-                            )
-                    except OSError:
-                        pass
+                    # one of the two places they are ever reclaimed.
+                    if reclaim_stale_staging_temp(entry):
+                        logger.info(
+                            "Recovery [%s]: removed stranded object temp %s",
+                            session_id, entry.name,
+                        )
                     continue
                 entry.unlink()
                 logger.info(

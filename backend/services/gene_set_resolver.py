@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -72,6 +72,11 @@ ENSEMBL_SOURCE_SPECIES = {
     "human": "homo_sapiens",
     "mouse": "mus_musculus",
 }
+
+#: Which published organism a non-native set is projected FROM by default.
+#: Configuration, not a biological claim: it is one of the two the upstream
+#: resource publishes, and callers that want the other pass it explicitly.
+DEFAULT_PROJECTION_SOURCE = "mouse"
 
 #: Below this fraction of the source set surviving projection, the result is
 #: flagged. Not a hard refusal: for some organism pairs a low rate is expected
@@ -120,19 +125,7 @@ class GeneSetResult:
         return len(self.genes)
 
     def to_dict(self) -> dict:
-        return {
-            "set_id": self.set_id,
-            "genes": self.genes,
-            "n_genes": self.n_genes,
-            "resource": self.resource,
-            "version": self.version,
-            "collection": self.collection,
-            "organism": self.organism,
-            "source_organism": self.source_organism,
-            "projected": self.projected,
-            "projection": self.projection,
-            "provenance": self.provenance,
-        }
+        return {**asdict(self), "n_genes": self.n_genes}
 
     def warnings(self) -> list[str]:
         """Caveats a caller must surface rather than swallow."""
@@ -327,6 +320,10 @@ def parse_gmt(text: str) -> dict[str, list[str]]:
     Blank fields appear in real files and are dropped.
     """
     out: dict[str, list[str]] = {}
+    # A collection names only ~20k distinct symbols across more than a million
+    # memberships. Interning through the pool keeps one str per symbol instead
+    # of one per occurrence, which is the difference between a few MB and tens.
+    pool: dict[str, str] = {}
     for line in text.splitlines():
         if not line.strip():
             continue
@@ -334,7 +331,7 @@ def parse_gmt(text: str) -> dict[str, list[str]]:
         if len(parts) < 3:
             continue
         name = parts[0].strip()
-        genes = [g.strip() for g in parts[2:] if g.strip()]
+        genes = [pool.setdefault(g, g) for g in (p.strip() for p in parts[2:]) if g]
         if name and genes:
             out[name] = genes
     return out

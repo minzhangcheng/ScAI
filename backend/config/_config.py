@@ -190,7 +190,19 @@ MAX_CACHED_SESSIONS = 50  # Maximum sessions to keep in memory
 MAX_REALTIME_MESSAGES = 1000  # Maximum realtime messages per session
 SESSION_CACHE_TTL = 3600  # Seconds before inactive session eviction (1 hour)
 IMPORT_JOB_TTL = 3600  # Cleanup completed/failed import jobs after (seconds)
+# Prepared-but-never-downloaded archives are full-size copies of a session. Nothing
+# reclaimed them: the only unlink hung off a successful download, so a user who
+# closed the "packaging complete" dialog left the bytes on disk forever.
 PREPARED_EXPORT_TTL = 6 * 3600  # Delete prepared-but-undownloaded export archives after (seconds)
+# The only filename shapes the export endpoints write into UPLOAD_TEMP_DIR.
+# The orphan sweep in tasks/session_cleanup.py reclaims exactly these, so a new
+# export producer belongs here rather than naming its own temp file — every
+# other name in that directory is an upload chunk or an import archive with its
+# own lifecycle, and the sweep must not widen past these prefixes.
+PREPARED_EXPORT_PREFIX = "prepared_export_"
+EXPORT_STREAM_PREFIX = "export_stream_"
+SNAPSHOT_EXPORT_PREFIX = "v2-export-"
+EXPORT_TEMP_PREFIXES = (PREPARED_EXPORT_PREFIX, EXPORT_STREAM_PREFIX, SNAPSHOT_EXPORT_PREFIX)
 CLEANUP_INTERVAL = 300  # Background cleanup task interval (seconds)
 WS_RECEIVE_TIMEOUT = 60.0  # WebSocket receive timeout (seconds) — increased from 30s
 CHAT_DELEGATION_TIMEOUT = 600  # Chat delegation global timeout (seconds)

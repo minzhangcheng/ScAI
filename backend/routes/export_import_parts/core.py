@@ -18,7 +18,7 @@ import aiofiles
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from backend.config import (
     DATA_BASE_DIR, REPORTS_DIR, SESSION_DIR, STATE_DIR, UPLOAD_DIR, WORKSPACE_DIR,
-    UPLOAD_CHUNK_SIZE, UPLOAD_TEMP_DIR,
+    PREPARED_EXPORT_TTL, UPLOAD_CHUNK_SIZE, UPLOAD_TEMP_DIR,
     get_session_dir, get_session_metadata_path, get_session_reports,
     get_session_states, get_session_uploads, get_session_workspace, resolve_session_metadata_path,
 )
@@ -41,6 +41,7 @@ from backend.state import (
 from backend.utils.auth import require_session_ownership
 from backend.utils.blob_store import inline_blobs
 from backend.utils.files import slugify_session_name, validate_path_within, validate_session_id, temp_file_on_error
+from backend.utils.runtime_apply import RUNTIME_H5AD_MANIFEST_FILENAME
 from backend.utils.secret_redaction import strip_analysis_state_secrets
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
@@ -123,6 +124,31 @@ def count_v2_snapshot_records(state_payload) -> int:
             continue
     return total
 
+def import_job_record(
+    status: str,
+    *,
+    user_id: str,
+    created_at: float,
+    error: Optional[str] = None,
+    **extra: Any,
+) -> Dict[str, Any]:
+    """Build one entry of the import-job registry.
+
+    ``phase`` always mirrors ``status``; the status endpoint spreads the record
+    verbatim, so a field the completed record grows has to be reachable from the
+    cancel and failure records too. Written in one place for that reason.
+    """
+    record: Dict[str, Any] = {
+        "status": status,
+        "phase": status,
+        "user_id": user_id,
+        "created_at": created_at,
+    }
+    if error is not None:
+        record["error"] = error
+    record.update(extra)
+    return record
+
 def check_inline_import_size(content_length: Optional[int], max_bytes: int = MAX_INLINE_IMPORT_BYTES) -> None:
     """Fast-reject oversized inline imports based on the Content-Length header."""
     if content_length is not None and content_length > max_bytes:
@@ -137,6 +163,22 @@ def is_sandbox_pickle(name: str) -> bool:
     """
     base = name.rsplit("/", 1)[-1]
     return bool(re.match(r".*_session\.pkl(\.zst)?$", base) or base == "session.pkl")
+
+def is_runtime_h5ad_name(name: str) -> bool:
+    """True if a filename belongs to the live-runtime h5ad sidecar set.
+
+    ``runtime_h5ad_manifest.json`` plus the ``*.h5ad`` files it names are runtime,
+    not data: a Snapshot V2 restore writes them so a kernel can come back up
+    holding ``adata`` when the dill residual alone cannot carry it. Export and
+    import share this so the two halves are always dropped together -- a manifest
+    whose sidecars are missing makes every later kernel start raise
+    "h5ad sidecar missing", which is a brick rather than a degrade.
+
+    Case-folded for the same reason as the checkpoint filter: the readers spell
+    these names in lower case.
+    """
+    base = name.rsplit("/", 1)[-1]
+    return base == RUNTIME_H5AD_MANIFEST_FILENAME or base.casefold().endswith(".h5ad")
 
 _SNAPSHOT_V2_SESSION_ROOTS = frozenset({
     "v2",
@@ -184,11 +226,6 @@ MAX_EXPORT_NAME = 200
 # export endpoints share it; they used to disagree (1.0 vs 2.0) for byte-identical
 # archives, which made the field useless for diagnosing a bad import.
 ARCHIVE_FORMAT_VERSION = "2.0"
-
-# Prepared-but-never-downloaded archives are full-size copies of a session. Nothing
-# reclaimed them: the only unlink hung off a successful download, so a user who
-# closed the "packaging complete" dialog left the bytes on disk forever.
-PREPARED_EXPORT_TTL = 6 * 3600
 
 
 def new_export_token() -> str:

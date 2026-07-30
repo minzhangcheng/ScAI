@@ -164,11 +164,13 @@ async def _headless_workflow_runner(session_id: str):
             workflows[session_id] = workflow
             _initializing_sessions.discard(session_id)
 
-        if state.current_round > 0 or state.status in (
-            TaskStatus.PAUSED,
-            TaskStatus.WAITING_INPUT,
-            TaskStatus.WAITING_ANNOTATION,
-        ):
+        # One rule for resume-vs-fresh-start, shared with the WebSocket path so
+        # the two cannot commit an imported session to different paths. Imported
+        # locally: the helper lives in the routes layer, which must not be pulled
+        # in while this service module is still being imported.
+        from backend.routes.websockets import should_resume_workflow
+
+        if should_resume_workflow(state):
             await workflow.resume(session_id, state)
         else:
             await workflow.run(state, session_id)

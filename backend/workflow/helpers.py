@@ -58,6 +58,22 @@ async def safe_pi_brief(make_awaitable, session_id: str, label: str) -> Optional
         return None
 
 
+async def ack_restore_safe_point(owner) -> None:
+    """Acknowledge a pending restore safe point on *owner*'s behalf.
+
+    The single implementation of the boundary-hook idiom every acknowledgement
+    site shares. Both tolerances are required, not defensive habit: the hook may
+    be absent entirely (bare mocks and lightweight harnesses are bound to these
+    code paths), and it may return a non-awaitable (tests bind plain callables
+    for it).
+    """
+    await_restore = getattr(owner, "await_restore_safe_point", None)
+    if callable(await_restore):
+        result = await_restore()
+        if inspect.isawaitable(result):
+            await result
+
+
 HITL_SAFE_POINT_POLL_SECONDS = 1.0
 
 
@@ -103,20 +119,6 @@ async def wait_with_skip_time(
         logger.info(f"[{session_id}] {gate_name}: skip time = 0, auto-skipping")
         return False
 
-    if not callable(safe_point_hook):
-        if wait_seconds == -1:
-            logger.info(f"[{session_id}] {gate_name}: manual mode, waiting indefinitely")
-            await event.wait()
-            return True
-        timeout = wait_seconds + 60
-        logger.info(f"[{session_id}] {gate_name}: waiting up to {timeout}s (skip time {wait_seconds}s + 60s buffer)")
-        try:
-            await asyncio.wait_for(event.wait(), timeout=timeout)
-            return True
-        except asyncio.TimeoutError:
-            logger.warning(f"[{session_id}] {gate_name}: timed out after {timeout}s, auto-skipping")
-            return False
-
     loop = asyncio.get_running_loop()
     if wait_seconds == -1:
         logger.info(f"[{session_id}] {gate_name}: manual mode, waiting indefinitely")
@@ -127,21 +129,26 @@ async def wait_with_skip_time(
         logger.info(f"[{session_id}] {gate_name}: waiting up to {timeout}s (skip time {wait_seconds}s + 60s buffer)")
         deadline = loop.time() + timeout
 
+    hooked = callable(safe_point_hook)
     while True:
         if event.is_set():
             return True
-        slice_seconds = HITL_SAFE_POINT_POLL_SECONDS
+        # Nothing to wake up for without a hook, so the gate waits out whatever
+        # budget is left in a single slice, exactly as it did before polling.
+        slice_seconds = HITL_SAFE_POINT_POLL_SECONDS if hooked else None
         if deadline is not None:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 logger.warning(f"[{session_id}] {gate_name}: timed out after {timeout}s, auto-skipping")
                 return False
-            slice_seconds = min(slice_seconds, remaining)
+            slice_seconds = remaining if slice_seconds is None else min(slice_seconds, remaining)
         try:
             await asyncio.wait_for(event.wait(), timeout=slice_seconds)
             return True
         except asyncio.TimeoutError:
             pass
+        if not hooked:
+            continue
         frozen_from = loop.time()
         result = safe_point_hook()
         if inspect.isawaitable(result):

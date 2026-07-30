@@ -27,7 +27,7 @@ from .direction_coverage import (
     normalize_direction_key,
     normalize_legacy_round_result,
 )
-from .helpers import wait_with_skip_time
+from .helpers import ack_restore_safe_point, wait_with_skip_time
 from .provenance import consume_restore_provenance, restore_provenance_id
 
 if TYPE_CHECKING:
@@ -483,13 +483,7 @@ class SynthesisMixin:
 
     async def _pi_synthesis(self, state: WorkflowState) -> WorkflowState:
         """PI synthesizes all results and prepares round summary for user"""
-        import inspect
-
-        await_restore = getattr(self, "await_restore_safe_point", None)
-        if callable(await_restore):
-            result = await_restore()
-            if inspect.isawaitable(result):
-                await result
+        await ack_restore_safe_point(self)
         analysis_state = state["analysis_state"]
 
         provider = getattr(self, "_settings_provider", None)
@@ -872,13 +866,7 @@ class SynthesisMixin:
         Auto-skip semantics for the post-exploration direction-selection gate:
         equivalent to "let PI decide" (sets user_chosen_direction = [PI_DECIDE]).
         """
-        import inspect
-
-        await_restore = getattr(self, "await_restore_safe_point", None)
-        if callable(await_restore):
-            result = await_restore()
-            if inspect.isawaitable(result):
-                await result
+        await ack_restore_safe_point(self)
         analysis_state = state["analysis_state"]
 
         # Integration gate: auto-skip / timeout now triggers PI_DECIDE_SIGNAL

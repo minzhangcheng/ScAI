@@ -720,18 +720,13 @@ class SnapshotService(
         loop) or a report/chat task built on one.
         """
         try:
-            from backend.services.workflow_runner import _report_tasks
-            from backend.state import _run_tasks, chat_tasks
+            from backend.state import has_live_session_task
 
-            for registry in (_run_tasks, _report_tasks, chat_tasks):
-                task = registry.get(self.session_id)
-                if task is not None and not task.done():
-                    return True
+            return has_live_session_task(self.session_id)
         except Exception:  # pragma: no cover - defensive, bookkeeping only
             # Unknown means "assume observable": marking a flag nobody reads is
             # recoverable, failing to mark a live run is not.
             return True
-        return False
 
     async def _retire_superseded_workflow(self, workflow: Any) -> None:
         """Retire the pre-restore run so apply() can replace the checkpoint DB.

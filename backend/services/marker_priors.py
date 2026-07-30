@@ -6,12 +6,12 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
+from .gene_set_resolver import normalize_organism
+
 logger = logging.getLogger(__name__)
 
 REQUIRED_COLS = ["source", "species", "cell_type", "gene_symbol", "tissue", "evidence", "ref"]
 _TSV_NAMES = ("panglaodb.tsv", "cellmarker.tsv")  # PanglaoDB 优先
-_SPECIES_NORM = {"mouse": "mouse", "mus musculus": "mouse", "mmusculus": "mouse", "mm": "mouse",
-                 "human": "human", "homo sapiens": "human", "hsapiens": "human", "hs": "human"}
 
 #: Projection revision the loader accepts. ``fetch_markers.py`` stamps it into
 #: the header of every table it writes; a table carrying any other value is
@@ -30,7 +30,8 @@ MARKER_SCHEMA_REVISION = 3
 
 
 def normalize_species(organism: str) -> str:
-    return _SPECIES_NORM.get(str(organism).strip().lower(), str(organism).strip().lower())
+    """One alias table governs the whole platform; see gene_set_resolver."""
+    return normalize_organism(organism)
 
 
 def runtime_markers_dir() -> Path:
@@ -53,7 +54,10 @@ def parse_table_header(path: Path) -> Dict[str, str]:
     treat "no metadata" and "wrong metadata" alike.
     """
     try:
-        first = path.read_text().splitlines()[0]
+        # readline, not read_text: these tables are multi-MB and the header is
+        # one line, so slurping the file to reach it costs the whole table.
+        with path.open(encoding="utf-8") as handle:
+            first = handle.readline()
     except Exception:
         return {}
     if not first.startswith("#"):
@@ -66,8 +70,12 @@ def parse_table_header(path: Path) -> Dict[str, str]:
     return out
 
 
+def _header_is_current(header: Dict[str, str]) -> bool:
+    return header.get("SCHEMA_REVISION") == str(MARKER_SCHEMA_REVISION)
+
+
 def _is_current_revision(path: Path) -> bool:
-    return parse_table_header(path).get("SCHEMA_REVISION") == str(MARKER_SCHEMA_REVISION)
+    return _header_is_current(parse_table_header(path))
 
 
 #: Separator for the multi-valued tissue field. ``ora_kernel`` splits on it.
@@ -119,15 +127,16 @@ class MarkerDB:
             path = self.markers_dir / name
             if not path.exists():
                 continue
-            if not _is_current_revision(path):
+            header = parse_table_header(path)
+            if not _header_is_current(header):
                 logger.warning(
                     "ignoring stale %s (SCHEMA_REVISION=%s, expected %s); "
                     "re-fetch required before DB priors are available",
-                    path, parse_table_header(path).get("SCHEMA_REVISION", "absent"),
+                    path, header.get("SCHEMA_REVISION", "absent"),
                     MARKER_SCHEMA_REVISION)
                 continue
-            self._versions[name.replace(".tsv", "")] = (
-                parse_table_header(path).get("SOURCE_VERSION", "unknown"))
+            self._versions[name.replace(".tsv", "")] = header.get(
+                "SOURCE_VERSION", "unknown")
             df = pd.read_csv(path, sep="\t", comment="#", dtype=str).fillna("")
             missing = [c for c in REQUIRED_COLS if c not in df.columns]
             if missing:

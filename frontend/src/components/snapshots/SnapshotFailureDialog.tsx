@@ -142,7 +142,7 @@ export function SnapshotFailureDialog({
             </p>
           )}
 
-          {!isPostReport && !isMemoryRefusal && (
+          {!isPostReport && actions.has('retry') && (
             <p className="text-xs text-slate-500">
               {isZh
                 ? '重试仅重新进入捕获流程。'

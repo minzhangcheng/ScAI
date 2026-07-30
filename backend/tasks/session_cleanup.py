@@ -7,8 +7,8 @@ from typing import Any, Dict
 from pathlib import Path
 
 from backend.config import (
-    CLEANUP_INTERVAL, IMPORT_JOB_TTL, MAX_CACHED_SESSIONS, PREPARED_EXPORT_TTL,
-    SESSION_CACHE_TTL, UPLOAD_TEMP_DIR,
+    CLEANUP_INTERVAL, EXPORT_TEMP_PREFIXES, IMPORT_JOB_TTL, MAX_CACHED_SESSIONS,
+    PREPARED_EXPORT_TTL, SESSION_CACHE_TTL, UPLOAD_TEMP_DIR,
 )
 from backend.services.session_store import async_save_session
 from backend.state import (
@@ -141,12 +141,6 @@ async def _cleanup_stale_prepared_exports(
         logger.info(f"Cleaned up {len(stale)} stale prepared exports")
 
 
-# The only filename shapes the export endpoints write into UPLOAD_TEMP_DIR.
-# Every other name there is an upload chunk or an import archive with its own
-# lifecycle, so this sweep must not widen past these prefixes.
-_EXPORT_TEMP_PREFIXES = ("prepared_export_", "export_stream_", "v2-export-")
-
-
 def _unlink_orphaned_export_archives(max_age_s: float | None) -> int:
     """Delete export archives on disk that no live token can reach any more.
 
@@ -162,7 +156,7 @@ def _unlink_orphaned_export_archives(max_age_s: float | None) -> int:
         return 0
     now = time.time()
     for path in entries:
-        if not path.name.startswith(_EXPORT_TEMP_PREFIXES):
+        if not path.name.startswith(EXPORT_TEMP_PREFIXES):
             continue
         try:
             if not path.is_file():

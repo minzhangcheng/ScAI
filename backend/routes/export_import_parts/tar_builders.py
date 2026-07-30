@@ -41,11 +41,10 @@ from backend.utils.auth import require_session_ownership
 from backend.utils.blob_store import inline_blobs
 from backend.utils.files import slugify_session_name, validate_path_within, validate_session_id, temp_file_on_error
 from backend.utils.secret_redaction import ENDPOINT_FIELD_NAMES, strip_analysis_state_secrets
-from backend.utils.runtime_apply import RUNTIME_H5AD_MANIFEST_FILENAME
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
 
-from .core import is_sandbox_pickle
+from .core import is_runtime_h5ad_name, is_sandbox_pickle
 
 logger = logging.getLogger(__name__)
 
@@ -117,8 +116,15 @@ def _safe_add_file(tf, path: Path, arcname: str) -> bool:
         fh.close()
 
 
-def _add_tree_to_tar(tf, root: Path, arc_prefix: str) -> None:
-    """Add every regular file under *root* as ``<arc_prefix>/<relative path>``."""
+def _contained_files(root: Path):
+    """Yield every regular file under *root* that does not escape it.
+
+    ``_safe_add_file`` builds the member from an open descriptor, so a symlink is
+    packed with its *target's* bytes rather than as a link. A link that escapes
+    the tree would put out-of-session content in an archive whose scope is a
+    single session, so it is dropped here -- the same fail-closed rule
+    services/snapshot_v2/workspace.py applies.
+    """
     if not root.exists():
         return
     try:
@@ -135,11 +141,6 @@ def _add_tree_to_tar(tf, root: Path, arc_prefix: str) -> None:
         try:
             if not file_path.is_file():
                 continue
-            # ``_safe_add_file`` builds the member from an open descriptor, so a
-            # symlink is packed with its *target's* bytes rather than as a link.
-            # A link that escapes the tree would put out-of-session content in an
-            # archive whose scope is a single session, so it is dropped here --
-            # the same fail-closed rule services/snapshot_v2/workspace.py applies.
             if (file_path.is_symlink()
                     and not file_path.resolve().is_relative_to(root_resolved)):
                 logger.warning(
@@ -148,6 +149,12 @@ def _add_tree_to_tar(tf, root: Path, arc_prefix: str) -> None:
                 continue
         except OSError:
             continue
+        yield file_path
+
+
+def _add_tree_to_tar(tf, root: Path, arc_prefix: str) -> None:
+    """Add every regular file under *root* as ``<arc_prefix>/<relative path>``."""
+    for file_path in _contained_files(root):
         rel = file_path.relative_to(root)
         _safe_add_file(tf, file_path, f"{arc_prefix}/{rel.as_posix()}")
 
@@ -229,13 +236,9 @@ def _add_states_to_tar(tf, session_id: str, include_runtime: bool = False):
         # portable export that also declares the runtime absent — shipping a
         # multi-GB AnnData the importer then reports as gone.
         #
-        # The two halves must be dropped together or not at all: a manifest whose
-        # sidecars are missing makes every later kernel start raise
-        # "h5ad sidecar missing", which is a brick rather than a degrade.
-        if not include_runtime and (
-            state_file.name == RUNTIME_H5AD_MANIFEST_FILENAME
-            or state_file.name.casefold().endswith(".h5ad")
-        ):
+        # The two halves must be dropped together or not at all, so the rule is
+        # shared with the import side rather than restated here.
+        if not include_runtime and is_runtime_h5ad_name(state_file.name):
             return
         _safe_add_file(tf, state_file, f"{session_id}/states/{state_file.name}")
 
@@ -280,29 +283,9 @@ def _add_session_logs_to_tar(tf, session_id: str):
     source could reach, next to an api_key the archive deliberately dropped.
     """
     logs_dir = get_session_logs(session_id)
-    if not logs_dir.exists():
-        return
-    try:
-        entries = sorted(logs_dir.rglob("*"))
-        logs_resolved = logs_dir.resolve()
-    except OSError as exc:
-        logger.warning("Export: cannot walk %s (%s)", logs_dir, exc)
-        return
-    for log_file in entries:
-        try:
-            if not log_file.is_file():
-                continue
-            # Same containment rule _add_tree_to_tar applies: a link out of the
-            # tree would be packed with its target's bytes, and for a .jsonl it
-            # would additionally be parsed and re-emitted as this session's log.
-            if (log_file.is_symlink()
-                    and not log_file.resolve().is_relative_to(logs_resolved)):
-                logger.warning(
-                    "Export: skipping %s (symlink escapes %s)", log_file, logs_dir
-                )
-                continue
-        except OSError:
-            continue
+    # ``_contained_files`` drops links out of the tree; for a .jsonl such a link
+    # would additionally be parsed and re-emitted as this session's log.
+    for log_file in _contained_files(logs_dir):
         arcname = f"{session_id}/logs/{log_file.relative_to(logs_dir).as_posix()}"
         if log_file.suffix.casefold() != ".jsonl":
             _safe_add_file(tf, log_file, arcname)
@@ -330,12 +313,12 @@ def _add_session_logs_to_tar(tf, session_id: str):
         except OSError as exc:
             logger.warning("Export: skipping log %s (%s)", log_file, exc)
             continue
-        data = buf.getvalue()
         info = tarfile.TarInfo(name=arcname)
-        info.size = len(data)
+        info.size = buf.tell()
         info.mode = 0o600
         info.mtime = int(mtime)
-        tf.addfile(info, io.BytesIO(data))
+        buf.seek(0)
+        tf.addfile(info, buf)
 
 def _add_reproducibility_to_tar(tf, session_id: str):
     """Add reproducibility bundle files to tar archive."""

@@ -22,7 +22,10 @@ from .direction_coverage import (
     normalize_direction_key,
     uncovered_direction_requirements,
 )
-from .helpers import _diff_plan_steps, _get_task_text, _normalize_tasks, _DIFF_LABELS, wait_with_skip_time
+from .helpers import (
+    _diff_plan_steps, _get_task_text, _normalize_tasks, _DIFF_LABELS,
+    ack_restore_safe_point, wait_with_skip_time,
+)
 from .provenance import restore_provenance_id
 from .retry import MAX_NODE_RETRIES, _retry_backoff_delay, with_retry
 
@@ -661,13 +664,7 @@ class PlanningMixin:
 
     async def _planning_dialogue(self, state: WorkflowState) -> WorkflowState:
         """PI ↔ Bioinformatics dialogue to design an analysis plan (max 5 rounds)."""
-        import inspect
-
-        await_restore = getattr(self, "await_restore_safe_point", None)
-        if callable(await_restore):
-            result = await_restore()
-            if inspect.isawaitable(result):
-                await result
+        await ack_restore_safe_point(self)
         analysis_state = state["analysis_state"]
 
         # Planning calls use explicit, stateless prompts. Clear legacy BaseAgent
@@ -1102,13 +1099,7 @@ class PlanningMixin:
         Blocks until the user responds (approve/skip/modify).
         For modification requests, loops back to planning_dialogue.
         """
-        import inspect
-
-        await_restore = getattr(self, "await_restore_safe_point", None)
-        if callable(await_restore):
-            result = await_restore()
-            if inspect.isawaitable(result):
-                await result
+        await ack_restore_safe_point(self)
         analysis_state = state["analysis_state"]
         plan = analysis_state.current_plan
 

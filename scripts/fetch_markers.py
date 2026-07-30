@@ -201,8 +201,11 @@ def _acquire_lock(lock: Path):
 def is_current_revision(path: Path) -> bool:
     """True when ``path`` carries this module's SCHEMA_REVISION in its header."""
     try:
-        first = path.read_text().splitlines()[0]
-    except (OSError, IndexError):
+        # readline, not read_text: the table is multi-MB and the header is one
+        # line, so slurping the file to reach it costs the whole table.
+        with path.open(encoding="utf-8") as handle:
+            first = handle.readline()
+    except OSError:
         return False
     if not first.startswith("#"):
         return False

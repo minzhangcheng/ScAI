@@ -11,10 +11,15 @@ from typing import Any, Dict, List, Optional, Set
 import asyncio
 import json
 import logging
-import re
 import time
 
-from .shared import AnalysisStep, CodeExecution, execution_supports_evidence, truncate_for_llm
+from .shared import (
+    AnalysisStep,
+    CodeExecution,
+    code_is_statically_unsafe,
+    execution_supports_evidence,
+    truncate_for_llm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,16 +65,7 @@ class SupplementaryMixin:
 
     def _supplementary_code_is_safe(self, code: str, main_var: str) -> Optional[str]:
         """Return a reason string if a supplementary cell is statically unsafe, else None."""
-        low = code.lower()
-        for pat in self._SUPPLEMENTARY_DENYLIST:
-            if pat in low:
-                return f"disallowed operation '{pat}'"
-        # Same assignment guard as _validation_code_is_safe: '<main_var> =' but not
-        # '<main_var>_score ='. Rebinding the main variable would strand every
-        # execution id the round has already cited as evidence.
-        if re.search(rf"(^|\n)\s*{re.escape(main_var)}\s*=(?!=)", code):
-            return f"assignment to main object '{main_var}'"
-        return None
+        return code_is_statically_unsafe(code, main_var, self._SUPPLEMENTARY_DENYLIST)
 
     def _supplementary_fatal_signature_changes(self, changed: List[str]) -> List[str]:
         """Destructive subset of a signature diff from `signatures_match`.

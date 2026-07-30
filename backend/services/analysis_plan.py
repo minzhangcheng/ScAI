@@ -79,6 +79,10 @@ HIGH_RISK_OPERATIONS = tuple(
     name for name, spec in EDIT_OPERATIONS.items() if spec["risk"] == "high"
 )
 
+#: Floor on the rationale a rationale-requiring edit must carry. Long enough
+#: that a reason has to be given rather than a word typed.
+MIN_RATIONALE_CHARS = 20
+
 
 def canonical_panel(genes: Optional[Iterable[str]]) -> list[str]:
     """Order- and duplicate-insensitive form of a gene panel.
@@ -162,12 +166,12 @@ def validate_edit_operations(operations) -> tuple[list[dict], Optional[str]]:
             )
         spec = EDIT_OPERATIONS[op]
         rationale = str(raw.get("rationale", "")).strip()
-        if spec["rationale_required"] and len(rationale) < 20:
+        if spec["rationale_required"] and len(rationale) < MIN_RATIONALE_CHARS:
             return [], (
                 f"edit_operations[{i}] is a {spec['risk']}-risk '{op}' and needs a "
-                f"rationale of at least 20 characters saying why. Removing genes "
-                f"from, or adding genes to, a versioned set moves the result "
-                f"toward whatever the edit was chosen to show."
+                f"rationale of at least {MIN_RATIONALE_CHARS} characters saying why. "
+                f"Removing genes from, or adding genes to, a versioned set moves "
+                f"the result toward whatever the edit was chosen to show."
             )
         genes = [str(g).strip() for g in (raw.get("genes") or []) if str(g).strip()]
         normalised.append({

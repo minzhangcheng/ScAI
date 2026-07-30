@@ -20,6 +20,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from backend.config import (
     DATA_BASE_DIR, REPORTS_DIR, SESSION_DIR, STATE_DIR, UPLOAD_DIR, WORKSPACE_DIR,
     UPLOAD_CHUNK_SIZE, UPLOAD_TEMP_DIR,
+    EXPORT_STREAM_PREFIX, PREPARED_EXPORT_PREFIX, SNAPSHOT_EXPORT_PREFIX,
     get_session_dir, get_session_metadata_path, get_session_reports,
     get_session_states, get_session_uploads, get_session_workspace, resolve_session_metadata_path,
 )
@@ -148,6 +149,50 @@ def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = F
         _add_session_logs_to_tar(tf, session_id)
 
 
+async def _pack_session_archive(
+    session_id: str,
+    state,
+    include_runtime: bool,
+    *,
+    prefix: str,
+) -> tuple[str, str]:
+    """Pack *session_id* into a temp archive and return (tar_path, filename).
+
+    Both export endpoints share the preconditions so they cannot drift apart:
+    the disk-headroom check, the forced save the packer depends on, and the
+    prefixed temp file that a failed build has to clean up.
+
+    Save latest state to disk first. Forced: the packer reads session.json off
+    the disk, and RUNNING is not one of the statuses that bypass the 5s save
+    throttle — so a session exported while it is analysing would ship a
+    session.json up to five seconds stale. A `current_round` that lands back at
+    0 that way also makes the importer skip its runtime-availability marking
+    entirely, producing an archive that claims a kernel it lacks.
+
+    The temp-file prefix is what makes a leak from an aborted download
+    sweepable — without it the name is indistinguishable from an import
+    upload's temp file.
+    """
+    check_export_disk_space()
+
+    await async_save_session(session_id, state, force=True)
+
+    export_dir = UPLOAD_TEMP_DIR
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(
+        prefix=prefix, suffix=".tar.gz", delete=False, dir=str(export_dir)
+    )
+    tar_path = tmp.name
+    tmp.close()
+
+    async with temp_file_on_error(tar_path):
+        await asyncio.to_thread(_build_session_tar, tar_path, session_id, include_runtime)
+
+    return tar_path, _build_export_filename(session_id, state.name)
+
+
 @router.api_route("/api/session/{session_id}/export", methods=["GET", "HEAD"])
 async def export_state(session_id: str, request: Request, include_runtime: bool = False):
     """Export complete session as tar.gz including all uploads, workspace, reports, and state files.
@@ -188,31 +233,10 @@ async def export_state(session_id: str, request: Request, include_runtime: bool 
             },
         )
 
-    check_export_disk_space()
-
-    # Save latest state to disk first. Forced: the packer reads session.json
-    # off the disk, and RUNNING is not one of the statuses that bypass the 5s
-    # save throttle — so a session exported while it is analysing would ship a
-    # session.json up to five seconds stale. A `current_round` that lands back
-    # at 0 that way also makes the importer skip its runtime-availability
-    # marking entirely, producing an archive that claims a kernel it lacks.
-    await async_save_session(session_id, state, force=True)
-
-    # Write tar.gz to a temp file on disk (not in memory). The prefix is what
-    # makes a leak from an aborted download sweepable — without it the name is
-    # indistinguishable from an import upload's temp file.
-    import tempfile
-    tmp = tempfile.NamedTemporaryFile(
-        prefix='export_stream_', suffix='.tar.gz', delete=False, dir=str(UPLOAD_TEMP_DIR)
+    # Write tar.gz to a temp file on disk (not in memory).
+    tmp_path, filename = await _pack_session_archive(
+        session_id, state, include_runtime, prefix=EXPORT_STREAM_PREFIX
     )
-    tmp_path = tmp.name
-    tmp.close()
-
-    async with temp_file_on_error(tmp_path):
-        await asyncio.to_thread(_build_session_tar, tmp_path, session_id, include_runtime)
-
-    # Build safe filename (consistent format with export_prepare)
-    filename = _build_export_filename(session_id, state.name)
 
     # FileResponse streams from disk; BackgroundTask deletes the temp file after response is sent
     return FileResponse(
@@ -243,32 +267,11 @@ async def export_prepare(session_id: str, request: Request, include_runtime: boo
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    check_export_disk_space()
-
-    # Save latest state to disk first. Forced: the packer reads session.json
-    # off the disk, and RUNNING is not one of the statuses that bypass the 5s
-    # save throttle — so a session exported while it is analysing would ship a
-    # session.json up to five seconds stale. A `current_round` that lands back
-    # at 0 that way also makes the importer skip its runtime-availability
-    # marking entirely, producing an archive that claims a kernel it lacks.
-    await async_save_session(session_id, state, force=True)
-
-    export_dir = UPLOAD_TEMP_DIR
-    export_dir.mkdir(parents=True, exist_ok=True)
-
-    filename = _build_export_filename(session_id, state.name)
-
-    import tempfile
-    tmp = tempfile.NamedTemporaryFile(
-        prefix="prepared_export_", suffix=".tar.gz", delete=False, dir=str(export_dir)
+    tar_path, filename = await _pack_session_archive(
+        session_id, state, include_runtime, prefix=PREPARED_EXPORT_PREFIX
     )
-    tar_path = Path(tmp.name)
-    tmp.close()
 
-    async with temp_file_on_error(str(tar_path)):
-        await asyncio.to_thread(_build_session_tar, str(tar_path), session_id, include_runtime)
-
-    size_bytes = tar_path.stat().st_size
+    size_bytes = Path(tar_path).stat().st_size
 
     export_token = new_export_token()
     async with _prepared_exports_lock:
@@ -400,7 +403,7 @@ async def export_v2(
     export_dir = UPLOAD_TEMP_DIR
     export_dir.mkdir(parents=True, exist_ok=True)
     export_token = new_export_token()
-    filename = f"v2-export-{session_id[:8]}-{uuid.uuid4().hex[:8]}.tar.gz"
+    filename = f"{SNAPSHOT_EXPORT_PREFIX}{session_id[:8]}-{uuid.uuid4().hex[:8]}.tar.gz"
     final_path = export_dir / filename
     # Off the event loop regardless: a deployment that overrides the staging
     # directory, or a same-name-different-device layout, would otherwise block

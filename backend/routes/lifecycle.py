@@ -24,6 +24,7 @@ from backend.services.session_store import (
 )
 from backend.utils.auth import require_session_ownership
 from backend.utils.runtime_apply import is_forward_resume_blocked
+from backend.services.snapshot_v2.checkpoint_paths import checkpoint_sqlite_path
 from backend.services.snapshot_v2.errors import (
     SNAPSHOT_FAILURE_ACTIONS,
     SnapshotTransactionError,
@@ -96,6 +97,30 @@ async def _pause_and_restart_ws(session_id: str, state):
     await _pause_and_restart_ws_impl(session_id, state, websockets)
 
 
+async def _close_hitl_socket_for_redrive(session_id: str, reason: str) -> None:
+    """Close a parked HITL socket so the frontend reconnects and re-drives.
+
+    A workflow-boundary gate unwound the graph, so nothing is running and the
+    re-drive only starts when a WebSocket reconnect rebuilds the workflow. The
+    client holding the HITL connection never reconnects on its own, so close it
+    with the same 4000 code the confirm/choose endpoints use to trigger the
+    frontend's auto-reconnect. Skipped when a workflow is live: the capture then
+    already ran in-process and that run owns the socket.
+    """
+    async with _state_lock:
+        ws = None if session_id in workflows else websockets.get(session_id)
+    if ws is not None:
+        try:
+            await ws.close(4000, reason)
+        except Exception:
+            logger.debug(
+                "[%s] Failed to close HITL WebSocket after %s",
+                session_id,
+                reason,
+                exc_info=True,
+            )
+
+
 router = APIRouter(prefix="/api/session", tags=["lifecycle"])
 
 
@@ -156,7 +181,7 @@ async def run_analysis(session_id: str, request: Request):
     # which withheld the explicit_start intent and sent Re-run into an exact
     # continuation on an empty kernel instead of a fresh round.
     has_resumable_checkpoint = (
-        (get_session_states(session_id) / "checkpoints.sqlite").exists()
+        checkpoint_sqlite_path(get_session_states(session_id)).exists()
         and _live_pkl(session_id).exists()
     )
     if getattr(state, "restore_resume_kind", None) is None and (
@@ -845,24 +870,8 @@ async def _snapshot_failure_retry_locked(session_id: str, user_id: str):
     # write it supersedes was force-saved moments earlier.
     await async_save_session(session_id, state, force=True)
 
-    # A workflow-boundary gate unwound the graph, so nothing is running and the
-    # re-drive only starts when a WebSocket reconnect rebuilds the workflow. The
-    # client holding the HITL connection never reconnects on its own, so close
-    # it with the same 4000 code the confirm/choose endpoints use to trigger the
-    # frontend's auto-reconnect. Skipped when a workflow is live: the capture
-    # then already ran in-process and that run owns the socket.
     if outcome.success and context.producer == "workflow_boundary":
-        async with _state_lock:
-            ws = None if session_id in workflows else websockets.get(session_id)
-        if ws is not None:
-            try:
-                await ws.close(4000, "snapshot_retry_resume")
-            except Exception:
-                logger.debug(
-                    "[%s] Failed to close HITL WebSocket after snapshot retry",
-                    session_id,
-                    exc_info=True,
-                )
+        await _close_hitl_socket_for_redrive(session_id, "snapshot_retry_resume")
 
     data = {
         "status": outcome.status
@@ -1009,26 +1018,10 @@ async def _snapshot_failure_skip_locked(session_id: str, user_id: str):
     await _update_session_cache(session_id, state)
     await async_save_session(session_id, state, force=True)
 
-    # Nothing re-drives the graph in-process: the boundary gate already unwound
-    # it, so the run only restarts when a WebSocket reconnect rebuilds the
-    # workflow. The client holding the HITL connection never reconnects on its
-    # own (it is parked in the HITL-hold loop with a live socket), and the
-    # frontend only reconnects when it sees the socket down — so without this
-    # close the session sat at status=RUNNING with no workflow, no run task and
-    # no dialog, making zero progress until a full page reload. Same 4000 code
-    # and same live-workflow exemption as the Retry branch above.
+    # Without this close the session sat at status=RUNNING with no workflow, no
+    # run task and no dialog, making zero progress until a full page reload.
     if context.producer == "workflow_boundary":
-        async with _state_lock:
-            ws = None if session_id in workflows else websockets.get(session_id)
-        if ws is not None:
-            try:
-                await ws.close(4000, "snapshot_skip_resume")
-            except Exception:
-                logger.debug(
-                    "[%s] Failed to close HITL WebSocket after snapshot skip",
-                    session_id,
-                    exc_info=True,
-                )
+        await _close_hitl_socket_for_redrive(session_id, "snapshot_skip_resume")
 
     return APIResponse(
         success=True,

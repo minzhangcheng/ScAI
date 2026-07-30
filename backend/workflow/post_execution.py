@@ -18,7 +18,7 @@ produces exactly one RoundResult for one direction — `max_rounds`, the directi
 queue and the integration bookkeeping stay untouched.
 """
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..models.schemas import AgentType
 from .post_execution_review import (
@@ -36,6 +36,8 @@ from .post_execution_review import (
 logger = logging.getLogger(__name__)
 
 _MAX_STORED_REVIEWS = 40
+_MAX_AGENT_SUGGESTIONS = 20
+_MAX_AGENT_SUGGESTION_LEN = 600
 
 
 class PostExecutionReviewMixin:
@@ -57,6 +59,11 @@ class PostExecutionReviewMixin:
     # execution budget. Generous: a code-generation call on a saturated round
     # context is the slowest kind this workflow makes.
     _REVIEW_LLM_ALLOWANCE_SECONDS = 120
+
+    # Fallbacks for a config that cannot be read at all: `sandbox_timeout`'s own
+    # default, put through the same derivation the configured path applies.
+    _DEFAULT_SANDBOX_TIMEOUT = 5400
+    _DEFAULT_STEP_TIMEOUT = _DEFAULT_SANDBOX_TIMEOUT + _REVIEW_LLM_ALLOWANCE_SECONDS
 
     def _post_execution_review_limits(self) -> Tuple[int, int, int, int]:
         """(max_iterations, step_timeout, total_timeout, max_tasks) from config.
@@ -83,7 +90,10 @@ class PostExecutionReviewMixin:
             if step <= 0:
                 sandbox_timeout = int(getattr(cfg, "sandbox_timeout", 0) or 0)
                 if sandbox_timeout <= 0:
-                    sandbox_timeout = int(getattr(default_config, "sandbox_timeout", 5400) or 5400)
+                    sandbox_timeout = int(
+                        getattr(default_config, "sandbox_timeout", self._DEFAULT_SANDBOX_TIMEOUT)
+                        or self._DEFAULT_SANDBOX_TIMEOUT
+                    )
                 step = sandbox_timeout + self._REVIEW_LLM_ALLOWANCE_SECONDS
             step = max(1, step)
 
@@ -92,7 +102,7 @@ class PostExecutionReviewMixin:
                 total = step * iterations
             return (iterations, step, max(step, total), tasks)
         except Exception:
-            return (5, 5520, 27600, 5)
+            return (5, self._DEFAULT_STEP_TIMEOUT, self._DEFAULT_STEP_TIMEOUT * 5, 5)
 
     # ------------------------------------------------------------------
     # Last-direction detection
@@ -307,6 +317,13 @@ class PostExecutionReviewMixin:
             result_status,
         )
 
+        def _decline(status: str, reason: str, **extra) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+            meta = empty_review_meta(status, reason, attempt_id)
+            meta["plan_audit"] = audit_summary
+            meta.update(extra)
+            self._store_review(analysis_state, meta)
+            return meta, empty_merge
+
         # 2) Idempotency. Node retry (@with_retry, 3 attempts), websocket reconnect
         #    and Snapshot V2 restore all re-enter this node; a supplementary pass
         #    must not be paid for twice for the same execution.
@@ -325,21 +342,14 @@ class PostExecutionReviewMixin:
             audit, admissions, result_status, is_terminal, has_runtime=has_runtime
         )
         if not run:
-            meta = empty_review_meta("skipped", reason, attempt_id)
-            meta["plan_audit"] = audit_summary
-            self._store_review(analysis_state, meta)
             logger.info(f"[{self.session_id}] Post-execution review skipped: {reason}")
-            return meta, empty_merge
+            return _decline("skipped", reason)
 
         logger.info(f"[{self.session_id}] Post-execution review triggered: {reason}")
         max_iterations, step_timeout, total_timeout, max_tasks = \
             self._post_execution_review_limits()
         if max_tasks == 0:
-            meta = empty_review_meta(
-                "skipped", "Supplementary task budget is zero by configuration.", attempt_id)
-            meta["plan_audit"] = audit_summary
-            self._store_review(analysis_state, meta)
-            return meta, empty_merge
+            return _decline("skipped", "Supplementary task budget is zero by configuration.")
 
         # 3) PI reviews the completed result set and triages what is worth doing.
         await self._send_message("status", "PI is reviewing execution completeness...", AgentType.PI)
@@ -360,24 +370,16 @@ class PostExecutionReviewMixin:
             )
         except Exception as e:
             logger.warning(f"[{self.session_id}] post-execution review planning failed: {e}")
-            meta = empty_review_meta(
-                "failed", f"Review planning failed: {e}", attempt_id)
-            meta["plan_audit"] = audit_summary
-            self._store_review(analysis_state, meta)
-            return meta, empty_merge
+            return _decline("failed", f"Review planning failed: {e}")
 
         review_plan = sanitize_review_plan(raw_plan, max_tasks)
         if review_plan["verdict"] == "no_action" or not review_plan["supplementary_tasks"]:
-            meta = empty_review_meta(
+            logger.info(f"[{self.session_id}] PI declined supplementary analysis")
+            return _decline(
                 "no_action",
                 review_plan.get("rationale") or "PI found no supplementary analysis warranted.",
-                attempt_id,
+                review_plan=review_plan,
             )
-            meta["plan_audit"] = audit_summary
-            meta["review_plan"] = review_plan
-            self._store_review(analysis_state, meta)
-            logger.info(f"[{self.session_id}] PI declined supplementary analysis")
-            return meta, empty_merge
 
         # 4) Restricted execution. Its own bounded loop, its own timeout; it cannot
         #    call report_findings, consult_pi or the figure pipeline, so it can
@@ -547,6 +549,7 @@ class PostExecutionReviewMixin:
         ran the analysis thought was left undone. Read it back off the analysis log.
         """
         suggestions: List[str] = []
+        seen: Set[str] = set()
         for step in result.get("analysis_log") or []:
             if isinstance(step, dict):
                 if step.get("step_type") != "report_findings":
@@ -558,9 +561,14 @@ class PostExecutionReviewMixin:
                 items = getattr(step, "findings_suggestions", None) or []
             for item in items:
                 text = str(item or "").strip()
-                if text and text not in suggestions:
-                    suggestions.append(text[:600])
-        return suggestions[:20]
+                if not text or text in seen:
+                    continue
+                text = text[:_MAX_AGENT_SUGGESTION_LEN]
+                seen.add(text)
+                suggestions.append(text)
+                if len(suggestions) >= _MAX_AGENT_SUGGESTIONS:
+                    return suggestions
+        return suggestions
 
     @staticmethod
     def _build_supplementary_context(result: Dict[str, Any], review_plan: Dict[str, Any]) -> str:

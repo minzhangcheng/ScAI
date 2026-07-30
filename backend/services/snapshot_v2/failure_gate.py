@@ -503,6 +503,18 @@ def upgrade_legacy_snapshot_failure_gate(state: Any) -> bool:
         )
         return True
 
+    error = RequiredSnapshotBlocked(
+        str(failure.get("code") or "REQUIRED_SNAPSHOT_BLOCKED"),
+        str(failure.get("message") or "Required snapshot capture failed"),
+        details=details,
+        snapshot_id=(
+            str(failure.get("snapshot_id"))
+            if failure.get("snapshot_id")
+            else None
+        ),
+        phase=phase or None,
+    )
+
     if phase == "post_chat":
         # A post-chat gate reaches disk in two writes: the service-level bare
         # failure is persisted by `_create_chat_snapshot` before it re-raises,
@@ -517,17 +529,7 @@ def upgrade_legacy_snapshot_failure_gate(state: Any) -> bool:
         # skippable" rationale does not apply to it.
         enter_chat_snapshot_failure_gate(
             state,
-            RequiredSnapshotBlocked(
-                str(failure.get("code") or "REQUIRED_SNAPSHOT_BLOCKED"),
-                str(failure.get("message") or "Required snapshot capture failed"),
-                details=details,
-                snapshot_id=(
-                    str(failure.get("snapshot_id"))
-                    if failure.get("snapshot_id")
-                    else None
-                ),
-                phase=phase,
-            ),
+            error,
             # The pre-gate status is not recoverable from a bare gate, and the
             # live status is the gate's own WAITING_INPUT — restoring that would
             # leave the session parked. PAUSED is the neutral answer: the UI
@@ -540,17 +542,6 @@ def upgrade_legacy_snapshot_failure_gate(state: Any) -> bool:
         # Unknown/manual captures are not automatically made skippable.
         return False
 
-    error = RequiredSnapshotBlocked(
-        str(failure.get("code") or "REQUIRED_SNAPSHOT_BLOCKED"),
-        str(failure.get("message") or "Required snapshot capture failed"),
-        details=details,
-        snapshot_id=(
-            str(failure.get("snapshot_id"))
-            if failure.get("snapshot_id")
-            else None
-        ),
-        phase=phase or None,
-    )
     ensure_workflow_boundary_retry_context(
         state,
         error,

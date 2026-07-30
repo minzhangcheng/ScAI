@@ -387,11 +387,9 @@ class RestoreJobManager:
         Sessions with a live workflow or run task keep the normal cooperative
         boundary handshake.
         """
-        from backend.services.workflow_runner import _report_tasks
         from backend.state import (
-            _run_tasks,
             chat_sandboxes,
-            chat_tasks,
+            has_live_session_task,
             initializing_sessions,
             sessions,
             state_lock,
@@ -400,17 +398,12 @@ class RestoreJobManager:
 
         async with state_lock:
             workflow = workflows.get(session_id)
-            run_task = _run_tasks.get(session_id)
-            report_task = _report_tasks.get(session_id)
-            chat_task = chat_tasks.get(session_id)
             state = sessions.get(session_id)
             if (
                 state is None
                 or session_id in initializing_sessions
                 or session_id in chat_sandboxes
-                or (run_task is not None and not run_task.done())
-                or (report_task is not None and not report_task.done())
-                or (chat_task is not None and not chat_task.done())
+                or has_live_session_task(session_id)
             ):
                 return False
 

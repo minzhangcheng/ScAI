@@ -8,6 +8,7 @@ import html as html_module
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from backend.services.gene_set_provenance import GeneSetProvenance
 from backend.utils.report_html import render_table_html
 
 # Map known computation methods (code function names) to a biologist-friendly
@@ -62,17 +63,9 @@ def provenance_label(sd: Dict[str, Any]) -> str:
     Scores registered before provenance enforcement have no parsed form; their
     raw ``gene_list_source`` is shown as-is rather than being dropped.
     """
-    prov = sd.get("provenance") or {}
-    kind = prov.get("kind", "")
-    if kind == "database":
-        return f"{prov.get('resource', '')} {prov.get('version', '')}: {prov.get('set_id', '')}".strip()
-    if kind == "derived":
-        detail = prov.get("detail") or prov.get("resource") or ""
-        return f"derived from this dataset ({detail})" if detail else "derived from this dataset"
-    if kind == "literature":
-        return f"{str(prov.get('resource', '')).upper()}:{prov.get('set_id', '')}"
-    if kind == "bespoke":
-        return f"hand-assembled: {prov.get('justification', '')}"
+    prov = GeneSetProvenance.from_dict(sd.get("provenance") or {})
+    if prov is not None:
+        return prov.citation()
     return sd.get("gene_list_source", "") or ""
 
 

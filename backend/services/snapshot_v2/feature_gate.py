@@ -18,11 +18,11 @@ def require_snapshot_v2_enabled() -> None:
         )
 
 
-def _has_unfinished_restore_journal(session_id: str) -> bool:
+def has_unfinished_restore_journal(session_id: str) -> bool:
     """True while a STAGED/STAGING/APPLYING journal describes a half-swapped tree.
 
-    Mirrors the startup scan in ``backend/main.py``. Only a restore that never
-    reached a terminal state leaves the session's files mixing pre- and
+    Also drives the startup scan in ``backend/main.py``. Only a restore that
+    never reached a terminal state leaves the session's files mixing pre- and
     post-restore content; COMMITTED and FAILED journals are merely waiting to be
     reaped. Anything unreadable counts as unfinished, because a truncated write
     is itself evidence of an interrupted one.
@@ -109,7 +109,7 @@ def normalize_disabled_snapshot_state(
         return False
 
     recovery_cleared = False
-    if recovery_gate and not _has_unfinished_restore_journal(
+    if recovery_gate and not has_unfinished_restore_journal(
         str(getattr(state, "id", "") or "")
     ):
         from backend.services.session_store import clear_recovery_blocked

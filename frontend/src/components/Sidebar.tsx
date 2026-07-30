@@ -190,28 +190,10 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
       let cancelled = false
       try {
         const { sessionId, skipped } = await pollImportUntilDone(pendingId, () => cancelled)
-        if (sessionId) {
-          clearMessages()
-          const session = await loadSession(sessionId)
-          // An imported mid-analysis session lands paused or waiting, whose
-          // controls live on the analysis tab; without this the user is left on
-          // the default tab with the only way forward hidden.
-          if (session) syncTabToSessionStatus(session)
-        }
-        try { localStorage.removeItem('scai.pendingImport') } catch {}
-        setProgressInfo({
-          action: t('importSuccess'),
-          detail: importSuccessDetail(skipped),
-          closable: true,
-          success: true,
-        })
+        await loadImportedSession(sessionId)
+        showImportSuccess(skipped)
       } catch (err: any) {
-        try { localStorage.removeItem('scai.pendingImport') } catch {}
-        setProgressInfo({
-          action: t('importFailed'),
-          detail: err?.message || '',
-          closable: true,
-        })
+        showImportFailed(err?.message || '')
       } finally {
         setImporting(false)
         // Expose cancel hook to the resumed flow (declared but unused outside; satisfies linter)
@@ -498,6 +480,37 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
     return `${base}${language === 'zh' ? '。' : '. '}${summary}`
   }
 
+  // The tail every finished import shares — the fresh-upload flow and the
+  // resumed-poll flow both end here.
+  const loadImportedSession = async (sessionId: string | undefined) => {
+    if (!sessionId) return
+    clearMessages()
+    const session = await loadSession(sessionId)
+    // An imported mid-analysis session lands paused or waiting, whose controls
+    // live on the analysis tab; without this the user is left on the default
+    // tab with the only way forward hidden.
+    if (session) syncTabToSessionStatus(session)
+  }
+
+  const showImportSuccess = (skipped: Record<string, number>) => {
+    try { localStorage.removeItem('scai.pendingImport') } catch {}
+    setProgressInfo({
+      action: t('importSuccess'),
+      detail: importSuccessDetail(skipped),
+      closable: true,
+      success: true,
+    })
+  }
+
+  const showImportFailed = (detail: string) => {
+    try { localStorage.removeItem('scai.pendingImport') } catch {}
+    setProgressInfo({
+      action: t('importFailed'),
+      detail,
+      closable: true,
+    })
+  }
+
   const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file || importing) return
@@ -650,33 +663,18 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
       // Phase 3: Load session
       if (sessionId) {
         setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? '正在加载会话...' : 'Loading session...' })
-        clearMessages()
-        const session = await loadSession(sessionId)
-        // Same reason as the resumed-poll path: a paused/waiting import has its
-        // only usable controls on the analysis tab.
-        if (session) syncTabToSessionStatus(session)
       }
+      await loadImportedSession(sessionId)
 
       // Phase 4: Show success
       setImporting(false)
-      try { localStorage.removeItem('scai.pendingImport') } catch {}
       if (fileInputRef.current) fileInputRef.current.value = ''
-      setProgressInfo({
-        action: t('importSuccess'),
-        detail: importSuccessDetail(skipped),
-        closable: true,
-        success: true
-      })
+      showImportSuccess(skipped)
     } catch (e: any) {
       console.error('Import failed:', e)
       setImporting(false)
-      try { localStorage.removeItem('scai.pendingImport') } catch {}
       if (fileInputRef.current) fileInputRef.current.value = ''
-      setProgressInfo({
-        action: t('importFailed'),
-        detail: e.message || '',
-        closable: true
-      })
+      showImportFailed(e.message || '')
     }
   }
 

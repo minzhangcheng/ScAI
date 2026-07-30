@@ -1,6 +1,5 @@
 """Retry decorator for workflow nodes."""
 import asyncio
-import inspect
 import logging
 import traceback
 from functools import wraps
@@ -11,6 +10,7 @@ from ..utils.llm_client import UpstreamExhaustedError
 from ..services.snapshot_v2.errors import RequiredSnapshotBlocked
 from .helpers import (
     _retry_backoff_delay,
+    ack_restore_safe_point,
     WorkflowSupersededError,
     WorkflowTerminatedError,
 )
@@ -49,12 +49,7 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
 
             # Restore safe-point: acknowledge pending request and freeze until
             # the restore job releases (shared process-wide coordinator).
-            # Skip MagicMock/non-coroutine callables used by lightweight stubs.
-            await_restore = getattr(self, "await_restore_safe_point", None)
-            if callable(await_restore):
-                result = await_restore()
-                if inspect.isawaitable(result):
-                    await result
+            await ack_restore_safe_point(self)
 
             # Check skip_nodes
             if node_name in state.get("skip_nodes", []):

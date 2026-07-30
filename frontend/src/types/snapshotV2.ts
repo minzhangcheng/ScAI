@@ -45,12 +45,6 @@ export type ContinuationCapsule =
   | TerminalCapsule
   | IdleCapsule
 
-export interface RuntimeDependencyEntry {
-  name: string
-  version: string
-  type: string
-}
-
 /** Mirrors backend `RuntimeDependency`. */
 export interface RuntimeDependency {
   name: string
@@ -189,14 +183,22 @@ export interface SnapshotTransactionResponse {
   cancel_url: string
 }
 
-export type SnapshotFailureAction =
-  | 'retry'
+/**
+ * The whole snapshot-failure action vocabulary, as data so the runtime filter
+ * in utils/snapshotV2 and the type stay one source: an action added to a union
+ * but forgotten in a hand-written filter type-checks and is silently dropped.
+ */
+export const SNAPSHOT_FAILURE_ACTIONS = [
+  'retry',
   // Offered only by the memory-preflight gate, in place of retry: capture
   // anyway, accepting the risk that the copy exhausts memory.
-  | 'proceed'
-  | 'skip'
-  | 'manage'
-  | 'terminate'
+  'proceed',
+  'skip',
+  'manage',
+  'terminate',
+] as const
+
+export type SnapshotFailureAction = (typeof SNAPSHOT_FAILURE_ACTIONS)[number]
 
 export interface SnapshotFailureInfo {
   failure: SnapshotFailureRecord

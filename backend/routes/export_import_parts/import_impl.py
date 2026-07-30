@@ -23,6 +23,10 @@ from backend.config import (
 )
 from backend.models.schemas import AnalysisState, APIResponse
 from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
+from backend.services.snapshot_v2.checkpoint_paths import (
+    CHECKPOINT_SQLITE_FILENAME,
+    checkpoint_sqlite_path,
+)
 from backend.services.snapshot_v2.feature_gate import (
     is_snapshot_v2_enabled,
     normalize_disabled_snapshot_state,
@@ -46,11 +50,14 @@ from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
 
 from .core import (
+    ARCHIVE_FORMAT_VERSION,
     ImportCancelled,
     MIN_FREE_DISK_BYTES,
     _IMPORT_PROGRESS_UPDATE_INTERVAL_S,
     _is_disabled_snapshot_v2_member,
     free_disk_bytes,
+    import_job_record,
+    is_runtime_h5ad_name,
     is_sandbox_pickle,
 )
 
@@ -60,7 +67,7 @@ logger = logging.getLogger(__name__)
 # Archive layouts this build knows how to read. Unknown values are imported on a
 # best-effort basis with a warning rather than rejected, so an archive from a
 # newer build is not simply unopenable.
-_SUPPORTED_ARCHIVE_VERSIONS = frozenset({"1.0", "2.0"})
+_SUPPORTED_ARCHIVE_VERSIONS = frozenset({"1.0", ARCHIVE_FORMAT_VERSION})
 
 
 def _mark_runtime_availability_after_import(
@@ -193,7 +200,7 @@ def _arm_restore_intent_after_import(state: AnalysisState) -> None:
 
     from backend.utils.runtime_apply import _live_pkl
 
-    checkpoint = get_session_states(state.id) / "checkpoints.sqlite"
+    checkpoint = checkpoint_sqlite_path(get_session_states(state.id))
     if checkpoint.exists() and _live_pkl(state.id).exists():
         # Checkpoint plus the kernel it was written against: resume() can
         # continue exactly, and must not be diverted into a fresh round.
@@ -338,18 +345,17 @@ async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: st
     async with _import_jobs_lock:
         prev = _import_jobs.get(import_job_id, {})
         created_at = prev.get("created_at", time.time())
-        _import_jobs[import_job_id] = {
-            "status": "extracting",
-            "phase": "extracting",
-            "user_id": user_id,
-            "created_at": created_at,
-            "bytes_total": archive_size,
-            "bytes_processed": 0,
-            "files_total": 0,
-            "files_processed": 0,
-            "current_file": "",
-            "cancel_requested": prev.get("cancel_requested", False),
-        }
+        _import_jobs[import_job_id] = import_job_record(
+            "extracting",
+            user_id=user_id,
+            created_at=created_at,
+            bytes_total=archive_size,
+            bytes_processed=0,
+            files_total=0,
+            files_processed=0,
+            current_file="",
+            cancel_requested=prev.get("cancel_requested", False),
+        )
     # Populated by the extraction worker the moment the destination id is known,
     # so a cancel or a mid-archive failure can still remove what it created.
     # The worker only ever writes into a session directory it allocated itself
@@ -367,36 +373,35 @@ async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: st
         await async_save_session(state.id, state, force=True)
         await _update_session_cache(state.id, state)
         async with _import_jobs_lock:
-            _import_jobs[import_job_id] = {
-                "status": "completed",
-                "phase": "completed",
-                "user_id": user_id,
-                "created_at": created_at,
-                "session_id": state.id,
-                "name": state.name,
+            _import_jobs[import_job_id] = import_job_record(
+                "completed",
+                user_id=user_id,
+                created_at=created_at,
+                session_id=state.id,
+                name=state.name,
                 # Zeros are filtered so the common case stays an empty dict; the
                 # endpoint spreads this record verbatim.
-                "skipped": {
+                skipped={
                     k: v for k, v in (outcome.get("skipped") or {}).items() if v
                 },
-                "skipped_examples": outcome.get("skipped_examples") or [],
-            }
+                skipped_examples=outcome.get("skipped_examples") or [],
+            )
         logger.info(f"Import {import_job_id}: completed, session_id={state.id}")
     except ImportCancelled as e:
         logger.info(f"Import {import_job_id}: cancelled by user ({e})")
         await asyncio.to_thread(_cleanup_partial_session, outcome.get("session_id"))
         async with _import_jobs_lock:
-            _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user", "user_id": user_id, "created_at": created_at}
+            _import_jobs[import_job_id] = import_job_record("cancelled", user_id=user_id, created_at=created_at, error="cancelled by user")
     except HTTPException as e:
         logger.error(f"Import {import_job_id}: failed (HTTPException): {e.detail}")
         await asyncio.to_thread(_cleanup_partial_session, outcome.get("session_id"))
         async with _import_jobs_lock:
-            _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": e.detail, "user_id": user_id, "created_at": created_at}
+            _import_jobs[import_job_id] = import_job_record("failed", user_id=user_id, created_at=created_at, error=e.detail)
     except Exception as e:
         logger.exception(f"Import {import_job_id}: failed with exception")
         await asyncio.to_thread(_cleanup_partial_session, outcome.get("session_id"))
         async with _import_jobs_lock:
-            _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": str(e), "user_id": user_id, "created_at": created_at}
+            _import_jobs[import_job_id] = import_job_record("failed", user_id=user_id, created_at=created_at, error=str(e))
     finally:
         Path(tmp_path_str).unlink(missing_ok=True)
 
@@ -471,7 +476,7 @@ def _is_checkpoint_member(relative_to_base: str) -> bool:
     if not relative_to_base.startswith("states/"):
         return False
     rest = relative_to_base[len("states/"):]
-    return "/" not in rest and rest.casefold().startswith("checkpoints.sqlite")
+    return "/" not in rest and rest.casefold().startswith(CHECKPOINT_SQLITE_FILENAME)
 
 
 def _is_runtime_h5ad_member(relative_to_base: str) -> bool:
@@ -484,20 +489,15 @@ def _is_runtime_h5ad_member(relative_to_base: str) -> bool:
     until now they crossed installations in an ordinary ``include_runtime=false``
     export and were written without the caller ever asserting trust.
 
-    Case-folded for the same reason as ``_is_checkpoint_member``: the readers
-    spell these names in lower case.
+    The name test itself is ``is_runtime_h5ad_name``, shared with the export
+    side so the two cannot classify the set differently.
     """
-    from backend.utils.runtime_apply import RUNTIME_H5AD_MANIFEST_FILENAME
-
     if not relative_to_base.startswith("states/"):
         return False
     rest = relative_to_base[len("states/"):]
     if "/" in rest:
         return False
-    return (
-        rest == RUNTIME_H5AD_MANIFEST_FILENAME
-        or rest.casefold().endswith(".h5ad")
-    )
+    return is_runtime_h5ad_name(rest)
 
 
 def _drop_kernelless_checkpoints(session_id: str, notify=None) -> None:
@@ -537,7 +537,7 @@ def _drop_kernelless_checkpoints(session_id: str, notify=None) -> None:
             continue
         name = path.name.casefold()
         if not (
-            name.startswith("checkpoints.sqlite")
+            name.startswith(CHECKPOINT_SQLITE_FILENAME)
             or name.endswith("_bioinfo_checkpoint.json")
         ):
             continue
@@ -1007,16 +1007,7 @@ def _import_tar_gz(
             )
         raise HTTPException(status_code=400, detail="Session state JSON not found in archive")
 
-    # Path remapping: replace the source installation's data root with ours.
-    state_json_str = _remap_paths_in_text(
-        state_json_data.decode('utf-8'),
-        old_base_dir,
-        data_base_str,
-        archive_session_id,
-        session_id,
-    )
-
-    state_data = json.loads(state_json_str)
+    state_data = json.loads(state_json_data.decode('utf-8'))
     state_data = _rebind_session_id_values(state_data, archive_session_id, session_id)
     state_data["id"] = session_id
     state_data["user_id"] = user_id
@@ -1027,10 +1018,12 @@ def _import_tar_gz(
     # combination produces a sidebar entry which can be neither opened nor
     # deleted (both paths go through require_session_ownership and 404).
     #
-    # Blob references are inlined for the in-memory state, and the inlined text
-    # is remapped again: strings >= 1 KB (long code history, report segments)
-    # live in blobs/*.b64 sidecars that are copied byte-for-byte, so they never
-    # saw the first remap and would keep the source machine's absolute paths.
+    # Blob references are inlined for the in-memory state, and only then is the
+    # document remapped -- the source installation's data root replaced with
+    # ours. Remapping before inlining reaches nothing that lives in a sidecar:
+    # strings >= 1 KB (long code history, report segments) are copied
+    # byte-for-byte into blobs/*.b64 and would keep the source machine's
+    # absolute paths.
     inlined = inline_blobs(state_data, get_session_dir(session_id) / "blobs")
     inlined = json.loads(
         _remap_paths_in_text(
@@ -1132,7 +1125,11 @@ def _import_zip(content: bytes, user_id: str, trust: bool = False) -> AnalysisSt
                             detail=f"Archive entry escapes target directory: {name}",
                         )
                     dest_path.parent.mkdir(parents=True, exist_ok=True)
-                    dest_path.write_bytes(zf.read(name))
+                    # Streamed rather than read whole: these trees carry the
+                    # uploaded matrices, which decompress to multiples of the
+                    # 100 MB the zip itself is capped at.
+                    with zf.open(name) as src, open(dest_path, "wb") as out_f:
+                        shutil.copyfileobj(src, out_f, UPLOAD_CHUNK_SIZE)
 
             # Extract notebook if exists
             states_dir = get_session_states(session_id)
