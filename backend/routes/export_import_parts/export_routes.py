@@ -330,6 +330,9 @@ async def export_v2(
         export_path = await service.export_snapshots(
             include_runtime=include_runtime,
             snapshot_ids=parsed_ids,
+            # Build the archive where it will live, so publishing it below is a
+            # rename on the same filesystem instead of a multi-GB copy.
+            staging_dir=UPLOAD_TEMP_DIR,
         )
     except SnapshotV2Error as exc:
         err = snapshot_error_detail(exc)
@@ -346,7 +349,10 @@ async def export_v2(
     export_token = new_export_token()
     filename = f"v2-export-{session_id[:8]}-{uuid.uuid4().hex[:8]}.tar.gz"
     final_path = export_dir / filename
-    shutil.move(str(export_path), str(final_path))
+    # Off the event loop regardless: a deployment that overrides the staging
+    # directory, or a same-name-different-device layout, would otherwise block
+    # every other request and WebSocket ping for the length of the copy.
+    await asyncio.to_thread(shutil.move, str(export_path), str(final_path))
 
     size_bytes = final_path.stat().st_size
 

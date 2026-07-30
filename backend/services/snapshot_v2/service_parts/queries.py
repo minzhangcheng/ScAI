@@ -124,6 +124,14 @@ from .shared import (  # noqa: F401
 )
 
 
+def _listing_sort_key(snap) -> datetime:
+    """Order key that tolerates a listing mixing naive V1 and aware V2 records."""
+    ts = snap.timestamp
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
 class QueriesMixin:
     """Read-only snapshot listing, preview, store status, and manifest rebuild."""
 
@@ -374,12 +382,35 @@ class QueriesMixin:
 
         return compute_store_status(self.paths, self.manifest_store)
 
-    def rebuild_snapshots_from_manifests(self) -> list:
-        """Rebuild AnalysisState.snapshots listing from verified committed manifests."""
+    def rebuild_snapshots_from_manifests(self, existing: list | None = None) -> list:
+        """Rebuild AnalysisState.snapshots listing from verified committed manifests.
+
+        Authoritative for V2 projections only. Legacy V1 records (``format_version``
+        null/1) predate the store and have no committed manifest by construction,
+        so a listing rebuilt from manifests alone silently deletes them — and with
+        them the only handle ``legacy.build_legacy_inventory`` and the V1 delete
+        routes have on sidecars under ``sessions/<id>/snapshots/`` that V2 GC never
+        sweeps. They are carried over from *existing*; V2 entries never are, so a
+        projection whose manifest is gone still disappears.
+
+        *existing* defaults to the cached session listing because the capture and
+        delete call sites rebuild in place on the cached state and pass nothing —
+        without the fallback each of them would re-drop what the load path kept.
+        """
         from backend.models.schemas import Snapshot
         from datetime import datetime as _dt
 
-        rebuilt = []
+        from backend.services.snapshot_v2.legacy import _is_v1_snapshot
+
+        if existing is None:
+            from backend.state import sessions
+
+            cached = sessions.get(self.session_id)
+            existing = getattr(cached, "snapshots", None)
+            if not isinstance(existing, list):
+                existing = None
+
+        rebuilt = [snap for snap in (existing or []) if _is_v1_snapshot(snap)]
         for manifest in self.manifest_store.verify_all_committed():
             try:
                 ts = _dt.fromisoformat(
@@ -418,8 +449,11 @@ class QueriesMixin:
                     ),
                 )
             )
-        # Sort by created_at ascending for stable lineage listing
-        rebuilt.sort(key=lambda s: s.timestamp)
+        # Sort by created_at ascending for stable lineage listing. V2 projections
+        # carry tz-aware timestamps (manifest ISO strings end in Z) while V1
+        # records were persisted naive; Python refuses to order the two, so a
+        # mixed list would raise here and take the whole reconcile down.
+        rebuilt.sort(key=_listing_sort_key)
         return rebuilt
 
     def _resolve_previous_manifest(

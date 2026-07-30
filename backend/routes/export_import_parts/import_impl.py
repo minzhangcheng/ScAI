@@ -831,93 +831,108 @@ def _import_zip(content: bytes, user_id: str, trust: bool = False) -> AnalysisSt
 
     See :func:`import_state` for the ``trust`` semantics.
     """
-    zip_buffer = io.BytesIO(content)
+    # The allocator below takes ownership of the destination id by
+    # creating sessions/<id>/ with mkdir(exist_ok=False). The tar.gz path
+    # releases that claim on every failure (_process_import_job calls
+    # _cleanup_partial_session on cancel, HTTPException and generic
+    # errors); this one did not, so a truncated or malformed archive left
+    # an ownerless directory with no session.json — invisible in the UI,
+    # never reclaimed, and holding the archive's own id forever, so a
+    # later valid import of the same archive was silently redirected to a
+    # fresh uuid.
+    session_id: Optional[str] = None
+    try:
+        zip_buffer = io.BytesIO(content)
 
-    with zipfile.ZipFile(zip_buffer, 'r') as zf:
-        namelist = zf.namelist()
-        if not namelist:
-            raise HTTPException(status_code=400, detail="Empty zip file")
+        with zipfile.ZipFile(zip_buffer, 'r') as zf:
+            namelist = zf.namelist()
+            if not namelist:
+                raise HTTPException(status_code=400, detail="Empty zip file")
 
-        archive_session_id = namelist[0].split('/')[0]
-        validate_session_id(archive_session_id)
-        session_id = _allocate_import_session_id(archive_session_id)
+            archive_session_id = namelist[0].split('/')[0]
+            validate_session_id(archive_session_id)
+            session_id = _allocate_import_session_id(archive_session_id)
 
-        # Extract state.json
-        state_json_path = f"{archive_session_id}/state.json"
-        if state_json_path not in namelist:
-            raise HTTPException(status_code=400, detail="state.json not found in archive")
+            # Extract state.json
+            state_json_path = f"{archive_session_id}/state.json"
+            if state_json_path not in namelist:
+                raise HTTPException(status_code=400, detail="state.json not found in archive")
 
-        state_json_str = _remap_paths_in_text(
-            zf.read(state_json_path).decode('utf-8'),
-            "",
-            str(DATA_BASE_DIR),
-            archive_session_id,
-            session_id,
-        )
+            state_json_str = _remap_paths_in_text(
+                zf.read(state_json_path).decode('utf-8'),
+                "",
+                str(DATA_BASE_DIR),
+                archive_session_id,
+                session_id,
+            )
 
-        state_data = json.loads(state_json_str)
-        state_data = _rebind_session_id_values(state_data, archive_session_id, session_id)
-        state_data["id"] = session_id
-        state_data["user_id"] = user_id
+            state_data = json.loads(state_json_str)
+            state_data = _rebind_session_id_values(state_data, archive_session_id, session_id)
+            state_data["id"] = session_id
+            state_data["user_id"] = user_id
 
-        session_dir = get_session_dir(session_id)
+            session_dir = get_session_dir(session_id)
 
-        def _extract_tree(prefix: str, dest_root: Path) -> None:
-            """Copy every member under *prefix* into *dest_root*, traversal-checked."""
-            dest_root_resolved = dest_root.resolve()
-            for name in namelist:
-                if not name.startswith(prefix) or name.endswith('/'):
-                    continue
-                relative_path = name[len(prefix):]
-                if is_sandbox_pickle(relative_path) and not trust:
-                    logger.warning(f"Skipping sandbox pickle from imported zip (untrusted): {name}")
-                    continue
-                dest_path = (dest_root / relative_path).resolve()
-                # Robust traversal check via Path.is_relative_to (3.9+). Reject
-                # rather than silently skip — a malicious archive should fail loudly.
-                if not dest_path.is_relative_to(dest_root_resolved):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Archive entry escapes target directory: {name}",
-                    )
-                dest_path.parent.mkdir(parents=True, exist_ok=True)
-                dest_path.write_bytes(zf.read(name))
+            def _extract_tree(prefix: str, dest_root: Path) -> None:
+                """Copy every member under *prefix* into *dest_root*, traversal-checked."""
+                dest_root_resolved = dest_root.resolve()
+                for name in namelist:
+                    if not name.startswith(prefix) or name.endswith('/'):
+                        continue
+                    relative_path = name[len(prefix):]
+                    if is_sandbox_pickle(relative_path) and not trust:
+                        logger.warning(f"Skipping sandbox pickle from imported zip (untrusted): {name}")
+                        continue
+                    dest_path = (dest_root / relative_path).resolve()
+                    # Robust traversal check via Path.is_relative_to (3.9+). Reject
+                    # rather than silently skip — a malicious archive should fail loudly.
+                    if not dest_path.is_relative_to(dest_root_resolved):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Archive entry escapes target directory: {name}",
+                        )
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    dest_path.write_bytes(zf.read(name))
 
-        # Extract notebook if exists
-        states_dir = get_session_states(session_id)
-        states_dir.mkdir(parents=True, exist_ok=True)
-        notebook_path = f"{archive_session_id}/notebook.ipynb"
-        if notebook_path in namelist:
-            (states_dir / f"{session_id}.ipynb").write_bytes(zf.read(notebook_path))
+            # Extract notebook if exists
+            states_dir = get_session_states(session_id)
+            states_dir.mkdir(parents=True, exist_ok=True)
+            notebook_path = f"{archive_session_id}/notebook.ipynb"
+            if notebook_path in namelist:
+                (states_dir / f"{session_id}.ipynb").write_bytes(zf.read(notebook_path))
 
-        # SECURITY (S4): sandbox pickles can execute arbitrary code via dill.load.
-        # Drop them unless the caller passed trust=true to take responsibility.
-        wrote_sandbox_pkl = False
-        pkl_path = f"{archive_session_id}/session.pkl"
-        if pkl_path in namelist:
-            if trust:
-                logger.warning(f"Restoring sandbox pickle from zip (trust=true): {pkl_path}")
-                (states_dir / f"{session_id}_session.pkl").write_bytes(zf.read(pkl_path))
-                _resign_imported_live_pkl(session_id)
-                wrote_sandbox_pkl = True
-            else:
-                logger.warning(f"Skipping sandbox pickle from imported zip (untrusted): {pkl_path}")
+            # SECURITY (S4): sandbox pickles can execute arbitrary code via dill.load.
+            # Drop them unless the caller passed trust=true to take responsibility.
+            wrote_sandbox_pkl = False
+            pkl_path = f"{archive_session_id}/session.pkl"
+            if pkl_path in namelist:
+                if trust:
+                    logger.warning(f"Restoring sandbox pickle from zip (trust=true): {pkl_path}")
+                    (states_dir / f"{session_id}_session.pkl").write_bytes(zf.read(pkl_path))
+                    _resign_imported_live_pkl(session_id)
+                    wrote_sandbox_pkl = True
+                else:
+                    logger.warning(f"Skipping sandbox pickle from imported zip (untrusted): {pkl_path}")
 
-        # Extract metadata if exists
-        metadata_path = f"{archive_session_id}/metadata.json"
-        if metadata_path in namelist:
-            (states_dir / f"{session_id}_state.json").write_bytes(zf.read(metadata_path))
+            # Extract metadata if exists
+            metadata_path = f"{archive_session_id}/metadata.json"
+            if metadata_path in namelist:
+                (states_dir / f"{session_id}_state.json").write_bytes(zf.read(metadata_path))
 
-        # Workspace, uploads, reports and the blob sidecars. Without the last
-        # three the restored session points at files that never arrived and
-        # renders raw "@scai-blob:<hash>" tokens in its history.
-        _extract_tree(f"{archive_session_id}/workspace/", get_session_workspace(session_id))
-        _extract_tree(f"{archive_session_id}/uploads/", get_session_uploads(session_id))
-        _extract_tree(f"{archive_session_id}/reports/", get_session_reports(session_id))
-        _extract_tree(f"{archive_session_id}/blobs/", session_dir / "blobs")
+            # Workspace, uploads, reports and the blob sidecars. Without the last
+            # three the restored session points at files that never arrived and
+            # renders raw "@scai-blob:<hash>" tokens in its history.
+            _extract_tree(f"{archive_session_id}/workspace/", get_session_workspace(session_id))
+            _extract_tree(f"{archive_session_id}/uploads/", get_session_uploads(session_id))
+            _extract_tree(f"{archive_session_id}/reports/", get_session_reports(session_id))
+            _extract_tree(f"{archive_session_id}/blobs/", session_dir / "blobs")
 
-    state = AnalysisState(**inline_blobs(state_data, get_session_dir(session_id) / "blobs"))
-    _mark_runtime_availability_after_import(state, imported_pkl=wrote_sandbox_pkl)
-    _normalize_imported_status(state)
-    _arm_restore_intent_after_import(state)
-    return state
+        state = AnalysisState(**inline_blobs(state_data, get_session_dir(session_id) / "blobs"))
+        _mark_runtime_availability_after_import(state, imported_pkl=wrote_sandbox_pkl)
+        _normalize_imported_status(state)
+        _arm_restore_intent_after_import(state)
+        return state
+
+    except BaseException:
+        _cleanup_partial_session(session_id)
+        raise

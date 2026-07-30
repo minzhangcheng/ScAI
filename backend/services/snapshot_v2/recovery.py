@@ -58,6 +58,13 @@ class RecoveryResult:
     errors: list = field(default_factory=list)
     mutations_blocked: bool = False
     gc_result: Optional["GCResult"] = None
+    #: True when recovery rewrote the live ``session.json`` (rollback or
+    #: forward-complete). The in-memory ``sessions`` cache is *not* touched by
+    #: recovery, so on this path it still holds the state the interrupted
+    #: restore installed — the caller must evict it, or the very next
+    #: ``ensure_session_loaded`` writes that stale object straight back over the
+    #: file recovery just restored and silently half-undoes the rollback.
+    session_state_rewritten: bool = False
 
 
 # -- Journal helpers ----------------------------------------------------------
@@ -122,6 +129,12 @@ class _RecoveryRestorer:
         self.workspace_root = Path(str(workspace_root))
         self.states_root = Path(str(states_root))
         self._scope = WorkspaceScope()
+        #: True once the current rollback/forward pass has streamed a new live
+        #: ``session.json``. Both writes land several failable steps before the
+        #: pass returns, so completion is the wrong moment to report the rewrite
+        #: — the caller's cache eviction has to key off the durable write, not
+        #: off success. Reset per transaction by rollback/forward_complete.
+        self.session_json_rewritten = False
 
     def _apply_scoped_workspace_from_manifest(self, manifest) -> None:
         """Restore workspace files from *manifest* using WorkspaceScope only.
@@ -177,6 +190,42 @@ class _RecoveryRestorer:
                 allowed.add(rel)
         self._scope.remove_added_files(self.workspace_root, allowed)
 
+    def _restore_stashed_checkpoint_companions(
+        self, journal: dict, ckpt_dst: Path,
+    ) -> None:
+        """Put back the WAL companions ``apply()`` parked in the staging tree.
+
+        Absent for a transaction whose live DB had no companions when apply ran
+        (and for journals written before apply started stashing them), which is
+        indistinguishable here and equally fine: nothing to replay, and whatever
+        is live keeps the pre-existing treatment of belonging to the main file
+        being put back.
+
+        When a stash does exist, apply took the originals away, so any companion
+        live *now* was created after the target image was installed and would be
+        replayed onto the pre_restore database — drop it before reinstating.
+        """
+        from backend.services.snapshot_v2.restore_parts.coordinator import (
+            prev_checkpoint_companion_path,
+        )
+
+        tx_id = journal.get("transaction_id") or ""
+        if not tx_id:
+            return
+        staged_root = Path(str(self.paths.staging)) / tx_id
+        companions = ("-wal", "-shm")
+        stashed = {
+            companion: prev_checkpoint_companion_path(staged_root, companion)
+            for companion in companions
+        }
+        if not any(path.exists() for path in stashed.values()):
+            return
+        for companion in companions:
+            live = ckpt_dst.with_name(ckpt_dst.name + companion)
+            live.unlink(missing_ok=True)
+            if stashed[companion].exists():
+                _stream_copy(stashed[companion], live)
+
     def rollback(self, journal: dict) -> bool:
         """Revert a partial apply by materializing the pre_restore snapshot.
 
@@ -184,6 +233,7 @@ class _RecoveryRestorer:
         (absent ref, missing/corrupt manifest, missing objects, apply error)
         raises RecoveryFailure — never returns True for partial success.
         """
+        self.session_json_rewritten = False
         pre_ref = (journal.get("pre_restore_ref") or "").strip()
         if not pre_ref:
             raise RecoveryFailure(
@@ -259,6 +309,32 @@ class _RecoveryRestorer:
                         f"failed to restore residual pkl: {exc}",
                     ) from exc
 
+        # Mirror of the forward path's else-branch (RestoreCoordinator.apply
+        # quarantines the live runtime when a complete target has no staged
+        # residual). Without it a rollback to a pre_restore snapshot that had no
+        # residual — the normal shape for a session with no live kernel, which is
+        # exactly what users restore from — left the TARGET's pkl installed by
+        # apply() in place, with a valid signature. The next kernel start then
+        # rehydrated the target's globals into a session whose files, notebook
+        # and checkpoint had all been reverted, and the session ended up with a
+        # residual it never owned before the restore.
+        if rsc is None or rsc.residual_ref is None:
+            try:
+                from backend.utils.runtime_apply import quarantine_live_runtime_pkl
+
+                pkl_session_id = (
+                    journal.get("session_id")
+                    or getattr(pre_manifest, "session_id", "")
+                    or ""
+                )
+                if pkl_session_id:
+                    quarantine_live_runtime_pkl(pkl_session_id)
+            except Exception as exc:
+                raise RecoveryFailure(
+                    "PRE_RESTORE_APPLY_FAILED",
+                    f"failed to quarantine the target residual pkl: {exc}",
+                ) from exc
+
         # Rewrite the live h5ad sidecar manifest to match what we just put back.
         # The forward path does this via install_live_runtime_h5ad_set(), but
         # rollback copied the sidecars with a bare _stream_copy and left the
@@ -300,6 +376,10 @@ class _RecoveryRestorer:
                 src = Path(str(self.paths.objects)) / ref.sha256
                 dst = self.session_dir / "session.json"
                 _stream_copy(src, dst)
+                # Durable from here on, with the notebook and checkpoint steps
+                # still to come — record it now so a failure below still tells
+                # the caller its cached state is stale.
+                self.session_json_rewritten = True
             except Exception as exc:
                 raise RecoveryFailure(
                     "PRE_RESTORE_APPLY_FAILED",
@@ -342,15 +422,19 @@ class _RecoveryRestorer:
                         f"checkpoint object missing: {ckpt_ref.sha256}",
                         details={"sha256": ckpt_ref.sha256},
                     )
-                # The -wal/-shm companions are deliberately left in place.
                 # LangGraph runs this DB in WAL mode and capture stored the MAIN
                 # FILE only, so commits still sitting in the WAL were never in
-                # the snapshot. apply() replaced only the main file, so that WAL
-                # still belongs to the very file being put back and replaying it
-                # restores the graph progress the snapshot could not capture.
-                # Measured: keeping it yields [PRE_A, PRE_IN_WAL] with
-                # integrity_check ok; deleting it silently drops PRE_IN_WAL.
+                # the snapshot; the WAL belongs to the very main file being put
+                # back, and replaying it restores the graph progress the
+                # snapshot could not capture. Measured: keeping it yields
+                # [PRE_A, PRE_IN_WAL] with integrity_check ok; losing it
+                # silently drops PRE_IN_WAL.
+                #
+                # apply() no longer leaves those companions live — SQLite would
+                # replay them over the TARGET image — so it stashes them in the
+                # transaction's staging tree, and this is where they come back.
                 _stream_copy(src, ckpt_dst)
+                self._restore_stashed_checkpoint_companions(journal, ckpt_dst)
             except RecoveryFailure:
                 raise
             except Exception as exc:
@@ -389,6 +473,7 @@ class _RecoveryRestorer:
             quarantine_live_runtime,
         )
 
+        self.session_json_rewritten = False
         tx_id = journal["transaction_id"]
         staged_root = Path(str(self.paths.staging)) / tx_id
         workspace_dir = staged_root / "workspace"
@@ -448,6 +533,7 @@ class _RecoveryRestorer:
             if state_src.exists():
                 dst = self.session_dir / "session.json"
                 _stream_copy(state_src, dst)
+                self.session_json_rewritten = True
                 ledger.append({"step": "state", "completed": True})
                 completed.add("state")
 
@@ -550,8 +636,12 @@ def _recover_restore_envelope(
     session_id: str,
     restorer: "_RecoveryRestorer",
     recovered_txns: list,
-) -> None:
-    """Recover a restore_apply envelope (Task 1 state machine preserved)."""
+) -> bool:
+    """Recover a restore_apply envelope (Task 1 state machine preserved).
+
+    Returns True when the live ``session.json`` was rewritten (rollback or
+    forward-complete), so the caller can evict the now-stale in-memory cache.
+    """
     from backend.services.snapshot_v2.journal_store import (
         JournalStore,
         envelope_to_restore_dict,
@@ -597,7 +687,7 @@ def _recover_restore_envelope(
             "Recovery [%s]: cleanup for committed restore_apply %s",
             session_id, tx_id,
         )
-        return
+        return False
 
     if status in ("APPLYING", "STAGED"):
         if recovery_mode == "forward_only":
@@ -630,7 +720,7 @@ def _recover_restore_envelope(
                 "Recovery [%s]: rolled back restore_apply %s",
                 session_id, tx_id,
             )
-        return
+        return True
 
     if status == "STAGING":
         restorer.remove_staging(journal)
@@ -640,12 +730,13 @@ def _recover_restore_envelope(
             "Recovery [%s]: removed partial staging for restore_apply %s",
             session_id, tx_id,
         )
-        return
+        return False
 
     logger.warning(
         "Recovery [%s]: restore_apply %s unknown status %r — left in place",
         session_id, tx_id, status,
     )
+    return False
 
 
 def _recover_restore_job_envelope(
@@ -655,8 +746,20 @@ def _recover_restore_job_envelope(
     session_id: str,
     recovered_txns: list,
 ) -> None:
-    """Non-mutating job status recovery: drop terminal job journals only."""
-    from backend.services.snapshot_v2.journal_store import JournalStore
+    """Non-mutating job status recovery: retire terminal and abandoned jobs.
+
+    A non-terminal envelope is only meaningful while the job that owns it is
+    alive in this process. ``_run_job`` is its sole writer, so once the handle
+    is gone from ``snapshot_restore_jobs`` — always the case after a restart —
+    nothing will ever drive the record to a terminal status again. Leaving it
+    was permanent: ``compute_protected_snapshot_ids`` treats any non-terminal
+    ``restore_job`` envelope as a live ``restore_target`` protection, so the
+    snapshot being restored became undeletable and un-reclaimable forever;
+    status polls reported ``waiting_safe_point`` indefinitely; and
+    ``cancel_restore_job`` answered 404, so no API could clear it either.
+    """
+    from backend.services.snapshot_v2.journal_store import JournalStore, make_envelope
+    from backend.services.snapshot_v2.jobs import get_restore_job
 
     st = str(envelope.status or "").lower()
     terminal = {"committed", "failed", "cancelled", "timed_out"}
@@ -667,12 +770,45 @@ def _recover_restore_job_envelope(
             "Recovery [%s]: cleaned terminal restore_job %s (%s)",
             session_id, envelope.transaction_id, st,
         )
-    else:
-        # Active job journal — leave for status polls / operator
+        return
+
+    if get_restore_job(envelope.transaction_id) is not None:
+        # Live job in this process — its own runner owns the record.
         logger.info(
-            "Recovery [%s]: restore_job %s status=%s left in place",
+            "Recovery [%s]: restore_job %s status=%s is live, left in place",
             session_id, envelope.transaction_id, st,
         )
+        return
+
+    payload = dict(envelope.payload or {})
+    payload["failure"] = {
+        "code": "RESTORE_JOB_ABANDONED",
+        "message": (
+            "The process running this restore job did not survive; the job "
+            "status is reported as failed. The session itself is repaired by "
+            "restore_apply recovery."
+        ),
+    }
+    record = payload.get("record")
+    if isinstance(record, dict):
+        record = dict(record)
+        record["status"] = "failed"
+        record["failure"] = payload["failure"]
+        payload["record"] = record
+    JournalStore(paths).write(
+        make_envelope(
+            kind="restore_job",
+            transaction_id=envelope.transaction_id,
+            session_id=envelope.session_id,
+            status="failed",
+            payload=payload,
+        )
+    )
+    recovered_txns.append(envelope.transaction_id)
+    logger.warning(
+        "Recovery [%s]: restore_job %s was abandoned at status=%s; marked failed",
+        session_id, envelope.transaction_id, st,
+    )
 
 
 def _recover_delete_envelope(
@@ -880,16 +1016,46 @@ def _recover_export_protection_envelope(
     session_id: str,
     recovered_txns: list,
 ) -> None:
-    """Export protection is non-mutating; remove only if no active owner.
+    """Export protection is non-mutating; reap it once its writer is gone.
 
-    Crash recovery cannot confirm an active export handle, so leave ACTIVE
-    journals in place (fail closed for protection). Orphaned protections
-    older than a process restart are still safe to leave — they only block
-    deletes until an operator removes them.
+    The finally in export() is the journal's only remover, and it runs
+    in the process that wrote it — so a crash during the archive build (minutes
+    of work over tens of GB, which is where a crash is most likely) leaves an
+    ACTIVE journal behind with nothing left to retire it.  Leaving it was
+    permanent, not merely untidy: compute_protected_snapshot_ids folds every
+    export_protection envelope into the protected map, so each snapshot the
+    payload names answered 409 PROTECTED to DELETE and its bytes stayed
+    unreclaimable by GC for the life of the session, with no API able to clear
+    the journal.  "They only block deletes until an operator removes them" had
+    no operator-facing removal path.
+
+    Neither status nor age can tell crash debris from a live export — the
+    journal reads ACTIVE for both, and because the archive is built in a worker
+    thread while recovery runs on the event loop, recovery can legitimately
+    land in the middle of one.  The owner stamp can: a journal carrying another
+    process's id, or none at all (only writers predating the stamp produce
+    that), provably has no live export handle behind it.  This is the same
+    argument applied to abandoned restore_job envelopes above.
     """
+    from backend.services.snapshot_v2.journal_store import (
+        JOURNAL_OWNER_ID,
+        JournalStore,
+    )
+
+    owner = str((envelope.payload or {}).get("owner") or "")
+    if owner == JOURNAL_OWNER_ID:
+        logger.info(
+            "Recovery [%s]: export_protection %s is owned by this process, "
+            "left in place",
+            session_id, envelope.transaction_id,
+        )
+        return
+
+    JournalStore(paths).remove(envelope.transaction_id)
+    recovered_txns.append(envelope.transaction_id)
     logger.info(
-        "Recovery [%s]: export_protection %s left in place (non-mutating)",
-        session_id, envelope.transaction_id,
+        "Recovery [%s]: reaped orphaned export_protection %s (owner=%s)",
+        session_id, envelope.transaction_id, owner or "<unstamped>",
     )
 
 
@@ -913,6 +1079,22 @@ def _gc_blocked_by_active_safe_point(session_id: str) -> bool:
         session_id,
     )
     return True
+
+
+def _report_partial_session_state_rewrite(restorer, result) -> None:
+    """Carry a durable session.json rewrite out of a *failed* recovery pass.
+
+    ``_recover_restore_envelope`` reports the rewrite through its return value,
+    which only exists when the whole pass completed — but ``rollback()`` streams
+    the pre_restore session.json over the live file with the notebook and
+    checkpoint steps still ahead of it. A failure in between left the flag off,
+    so the caller kept the cached AnalysisState the interrupted restore had
+    installed and wrote that target state straight back over the file the
+    rollback had just restored, half-undoing it. The write is what the cache has
+    to be invalidated against, not the success of the steps after it.
+    """
+    if getattr(restorer, "session_json_rewritten", False):
+        result.session_state_rewritten = True
 
 
 # -- Public recovery entry point ----------------------------------------------
@@ -1016,13 +1198,14 @@ async def recover_snapshot_transactions(
 
         try:
             if envelope.kind == "restore_apply":
-                _recover_restore_envelope(
+                if _recover_restore_envelope(
                     envelope,
                     paths=paths,
                     session_id=session_id,
                     restorer=restorer,
                     recovered_txns=recovered_txns,
-                )
+                ):
+                    result.session_state_rewritten = True
             elif envelope.kind == "restore_job":
                 _recover_restore_job_envelope(
                     envelope,
@@ -1063,6 +1246,7 @@ async def recover_snapshot_transactions(
             )
             failed_txns.append(tx_id)
             errors.append(str(exc))
+            _report_partial_session_state_rewrite(restorer, result)
 
         except Exception as exc:
             logger.exception(
@@ -1071,6 +1255,7 @@ async def recover_snapshot_transactions(
             )
             failed_txns.append(tx_id)
             errors.append(str(exc))
+            _report_partial_session_state_rewrite(restorer, result)
 
     if recovered_txns:
         result.recovered = True
@@ -1187,6 +1372,8 @@ async def recover_for_all_sessions(paths_factory=None) -> RecoveryResult:
             )
             if result.recovered:
                 combined.recovered = True
+            if result.session_state_rewritten:
+                combined.session_state_rewritten = True
             # Always merge failure/error state even when recovered=False
             # (e.g. HMAC failures, blocked rollbacks with no successful recovery).
             combined.recovered_transactions.extend(result.recovered_transactions)

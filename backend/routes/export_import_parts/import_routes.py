@@ -51,6 +51,7 @@ from .core import ImportCancelled, MAX_INLINE_IMPORT_BYTES, _IMPORT_UPLOAD_PROGR
 from .import_impl import (
     _allocate_import_session_id,
     _arm_restore_intent_after_import,
+    _cleanup_partial_session,
     _import_zip,
     _mark_runtime_availability_after_import,
     _normalize_imported_status,
@@ -102,6 +103,17 @@ async def import_v2(
     tmp_path = tmp.name
     tmp.close()
 
+    # The operator's compressed-archive ceiling, read once before the copy.
+    # `SnapshotImporter` applies the same limit, but only from
+    # `archive_path.stat().st_size` — i.e. after the entire body is already
+    # materialised in UPLOAD_TEMP_DIR, on the same volume as every session's
+    # metadata. A limit evaluated after the allocation it names cannot bound it,
+    # so the rejection has to happen while the body is still arriving.
+    from backend.config._config import default_config
+    from backend.services.snapshot_v2.object_store import SnapshotImportLimits
+
+    max_body_bytes = SnapshotImportLimits.from_config(default_config).max_compressed_bytes
+
     try:
         buffer_size = 0
         with open(tmp_path, "wb") as f:
@@ -110,6 +122,15 @@ async def import_v2(
                     continue
                 f.write(chunk)
                 buffer_size += len(chunk)
+                if buffer_size > max_body_bytes:
+                    # Stop reading; the `finally` below unlinks the partial file.
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            f"Archive exceeds the {max_body_bytes} byte import "
+                            "limit"
+                        ),
+                    )
 
         if buffer_size == 0:
             raise HTTPException(status_code=400, detail="Empty upload")
@@ -351,28 +372,37 @@ async def import_state(
         # user_id onto it, so posting {"id": "<someone else's session>"} handed
         # that session over.
         session_id = _allocate_import_session_id(archive_session_id)
-        state_data = inline_blobs(
-            state_data, get_session_dir(archive_session_id) / "blobs"
-        )
-        if session_id != archive_session_id:
-            state_data = json.loads(
-                _remap_paths_in_text(
-                    json.dumps(state_data, ensure_ascii=False),
-                    "",
-                    str(DATA_BASE_DIR),
-                    archive_session_id,
-                    session_id,
+        # The allocator claims the id by creating sessions/<id>/. Everything
+        # below can still fail (a ValidationError from AnalysisState is the
+        # ordinary case), and without releasing the claim the directory is left
+        # ownerless and unlisted — permanently holding the archive's own id, so
+        # re-uploading a corrected document lands under a fresh uuid instead.
+        try:
+            state_data = inline_blobs(
+                state_data, get_session_dir(archive_session_id) / "blobs"
+            )
+            if session_id != archive_session_id:
+                state_data = json.loads(
+                    _remap_paths_in_text(
+                        json.dumps(state_data, ensure_ascii=False),
+                        "",
+                        str(DATA_BASE_DIR),
+                        archive_session_id,
+                        session_id,
+                    )
                 )
-            )
-            state_data = _rebind_session_id_values(
-                state_data, archive_session_id, session_id
-            )
-        state_data["id"] = session_id
-        state_data["user_id"] = user_id
-        state = AnalysisState(**state_data)
-        _mark_runtime_availability_after_import(state)
-        _normalize_imported_status(state)
-        _arm_restore_intent_after_import(state)
+                state_data = _rebind_session_id_values(
+                    state_data, archive_session_id, session_id
+                )
+            state_data["id"] = session_id
+            state_data["user_id"] = user_id
+            state = AnalysisState(**state_data)
+            _mark_runtime_availability_after_import(state)
+            _normalize_imported_status(state)
+            _arm_restore_intent_after_import(state)
+        except BaseException:
+            _cleanup_partial_session(session_id)
+            raise
     else:
         raise HTTPException(
             status_code=400,

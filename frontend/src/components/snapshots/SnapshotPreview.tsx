@@ -10,10 +10,43 @@ function capsuleDetail(capsule: ContinuationCapsule): string {
 
 interface SnapshotPreviewProps {
   record: SnapshotRecordV2
+  isZh?: boolean
 }
 
-export function SnapshotPreview({ record }: SnapshotPreviewProps) {
+export function SnapshotPreview({ record, isZh = false }: SnapshotPreviewProps) {
   const m = record.manifest
+
+  // For a corrupt entry the manifest is a placeholder the normalizer invented
+  // so this component cannot crash on a missing field — rendering it would
+  // report a captured time, branch, generation and root hash that were never
+  // read off disk. The verifier's diagnostics are the only real information
+  // available, so show those and nothing else.
+  if (record.failure) {
+    return (
+      <div className="space-y-3">
+        <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+          Snapshot {record.snapshot_id}
+        </div>
+        <div className="bg-red-50 border border-red-200 rounded-xl p-3 space-y-2">
+          <div className="text-xs font-semibold text-red-700 uppercase tracking-wide">
+            {isZh ? '快照已损坏' : 'Corrupt Snapshot'}
+          </div>
+          <div className="text-xs text-red-700">
+            <span className="font-medium">{isZh ? '错误码：' : 'Code: '}</span>
+            <code className="text-[10px]">{record.failure.code}</code>
+          </div>
+          {record.failure.message && (
+            <div className="text-xs text-red-700 break-words">{record.failure.message}</div>
+          )}
+          <div className="text-xs text-red-600">
+            {isZh
+              ? '完整性校验未通过，该快照无法恢复；可将其删除后使用其他快照。'
+              : 'Integrity verification failed. This snapshot cannot be restored; delete it and use another one.'}
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-3">
@@ -91,18 +124,25 @@ export function SnapshotPreview({ record }: SnapshotPreviewProps) {
         </div>
       )}
 
-      {m.runtime_dependencies && (
+      {m.runtime && (
         <div className="bg-slate-50 rounded-xl p-3">
-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Runtime Dependencies</div>
+          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Runtime</div>
           <div className="space-y-1 text-xs text-slate-600">
             <div>
-              <span className="font-medium text-slate-800">{m.runtime_dependencies.python.name}: </span>
-              {m.runtime_dependencies.python.version}
+              <span className="font-medium text-slate-800">Status: </span>
+              {m.runtime.status}
             </div>
-            {Object.entries(m.runtime_dependencies.additional).map(([name, dep]) => (
+            {Object.entries(m.runtime.dependencies?.required ?? {}).map(([name, dep]) => (
               <div key={name}>
-                <span className="font-medium text-slate-800">{dep.name}: </span>
-                {dep.version}
+                <span className="font-medium text-slate-800">{name}: </span>
+                {dep.serializer}
+                {dep.type_name ? ` (${dep.type_name})` : ''}
+              </div>
+            ))}
+            {(m.runtime.dependencies?.incidental_skips ?? []).map((skip) => (
+              <div key={`skip-${skip.name}`} className="text-amber-700">
+                <span className="font-medium">{skip.name}: </span>
+                skipped{skip.reason ? ` — ${skip.reason}` : ''}
               </div>
             ))}
           </div>

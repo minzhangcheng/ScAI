@@ -409,31 +409,46 @@ class SnapshotService(
                 recovery_mode = "forward_only"
                 pre_restore_ref = ""
             else:
+                # Every way the pre-restore capture can fail reports the same
+                # stable code. The distinction that matters to the client is not
+                # which serializer gave up but that the *safety* snapshot could
+                # not be taken — and that nothing has been mutated yet, so
+                # re-posting the restore with current_state_choice=
+                # 'discard_current' is a legitimate way forward. The client has
+                # always branched on PRE_RESTORE_UNAVAILABLE to offer exactly
+                # that; no producer ever emitted it, so the discard path (and
+                # the whole audit-bundle branch behind it) was dead code and a
+                # user whose kernel could not be captured could only Retry into
+                # the same failure. The underlying code is preserved in details.
                 try:
                     pre_rec = await self.pre_restore_capture.capture_locked(context)
                 except RequiredSnapshotBlocked as exc:
+                    details = dict(exc.details or {})
+                    details["cause"] = exc.code
                     return _status(
                         "failed",
                         failure={
-                            "code": exc.code,
+                            "code": "PRE_RESTORE_UNAVAILABLE",
                             "message": str(exc),
-                            "details": dict(exc.details or {}),
+                            "details": details,
                         },
                     )
                 except Exception as exc:
                     return _status(
                         "failed",
                         failure={
-                            "code": "PRE_RESTORE_FAILED",
+                            "code": "PRE_RESTORE_UNAVAILABLE",
                             "message": str(exc),
+                            "details": {"cause": "PRE_RESTORE_FAILED"},
                         },
                     )
                 if pre_rec.failure is not None:
                     return _status(
                         "failed",
                         failure={
-                            "code": pre_rec.failure.code,
+                            "code": "PRE_RESTORE_UNAVAILABLE",
                             "message": pre_rec.failure.message,
+                            "details": {"cause": pre_rec.failure.code},
                         },
                     )
                 recovery_mode = "rollback"
@@ -697,6 +712,27 @@ class SnapshotService(
 
 
 
+    def _has_live_run(self) -> bool:
+        """True when a task that can observe the superseded flag is executing.
+
+        The flag is only ever read from inside a running graph invocation
+        (``await_restore_safe_point`` at node entry, the bioinformatics step
+        loop) or a report/chat task built on one.
+        """
+        try:
+            from backend.services.workflow_runner import _report_tasks
+            from backend.state import _run_tasks, chat_tasks
+
+            for registry in (_run_tasks, _report_tasks, chat_tasks):
+                task = registry.get(self.session_id)
+                if task is not None and not task.done():
+                    return True
+        except Exception:  # pragma: no cover - defensive, bookkeeping only
+            # Unknown means "assume observable": marking a flag nobody reads is
+            # recoverable, failing to mark a live run is not.
+            return True
+        return False
+
     async def _retire_superseded_workflow(self, workflow: Any) -> None:
         """Retire the pre-restore run so apply() can replace the checkpoint DB.
 
@@ -726,7 +762,22 @@ class SnapshotService(
         # Session-scoped: the eviction below makes the workflow object
         # unreachable, so every other site frozen on this safe point (the
         # bioinformatics step loop in particular) has to learn about it here.
-        self.safe_point.mark_superseded(self.session_id)
+        #
+        # Only when something can actually observe and clear it. The flag's
+        # whole lifecycle is "set here, cleared by the run that unwinds via
+        # WorkflowSupersededError" — every clear_superseded() call site sits in
+        # such a handler. But a workflow OBJECT outlives its run, and
+        # `_acknowledge_if_quiescent` deliberately admits restores on a session
+        # that has one with nothing executing. Marking there left the flag set
+        # for the life of the process, where a later, unrelated run reaching any
+        # node entry would find it and unwind mid-round — and `workflow.close()`
+        # would drop the kernel save.
+        if self._has_live_run():
+            self.safe_point.mark_superseded(self.session_id)
+        else:
+            # Nothing is frozen on the safe point, so nothing would ever clear
+            # the flag. Drop any stale one instead of adding to it.
+            self.safe_point.clear_superseded(self.session_id)
         try:
             workflow._restore_superseded = True
         except Exception:  # pragma: no cover - exotic workflow stand-ins
@@ -906,6 +957,35 @@ class SnapshotService(
                 "[%s] rebuild snapshots after capture failed: %s",
                 self.session_id, exc,
             )
+
+        # `_capture_impl` treats manifest publication as the commit point and
+        # deliberately does not raise when the post-publish session save fails —
+        # a retry with a new idempotency key could duplicate the snapshot. It
+        # signals the condition with `session_reconciliation_pending` instead,
+        # and until now nothing anywhere read that flag: the escape hatch the
+        # design relies on had no other end. The state written just before that
+        # failed save carries `saved_runtime_revision`/`runtime_revision`, so
+        # losing it makes the next pre_restore capture re-serialize a kernel
+        # that had not changed. Reconcile here, forced past the save throttle,
+        # and surface the condition on the transaction record if it still fails
+        # so a later load or resync can act on it.
+        if record.session_reconciliation_pending:
+            try:
+                from backend.services.session_store import (
+                    async_save_session,
+                    update_session_cache,
+                )
+
+                await update_session_cache(self.session_id, state)
+                await async_save_session(self.session_id, state, force=True)
+            except Exception as exc:
+                logger.warning(
+                    "[%s] post-capture session reconciliation failed: %s",
+                    self.session_id, exc,
+                )
+                transaction = dict(state.snapshot_transaction or {})
+                transaction["session_reconciliation_pending"] = True
+                state.snapshot_transaction = transaction
         return record
 
 
@@ -937,8 +1017,14 @@ class SnapshotService(
         *,
         include_runtime: bool = True,
         snapshot_ids: list[str] | None = None,
+        staging_dir: Any = None,
     ) -> Path:
-        """Export verified V2 snapshots under the session lock."""
+        """Export verified V2 snapshots under the session lock.
+
+        *staging_dir* should be the directory the caller will keep the archive
+        in, so the archive is built on that filesystem and publishing it is a
+        rename rather than a cross-device copy.
+        """
         from backend.services.snapshot_v2.exporter import SnapshotExporter
 
         lock = get_session_lock(self.session_id)
@@ -949,6 +1035,7 @@ class SnapshotService(
                 self.session_id,
                 include_runtime=include_runtime,
                 snapshot_ids=snapshot_ids,
+                staging_dir=Path(staging_dir) if staging_dir is not None else None,
             )
 
 
@@ -962,9 +1049,22 @@ class SnapshotService(
         self._guard_active_safe_point()
         from backend.services.snapshot_v2.importer import SnapshotImporter
 
+        from backend.services.snapshot_v2.object_store import SnapshotImportLimits
+
         lock = get_session_lock(self.session_id)
         async with lock:
-            importer = SnapshotImporter(self.session_id, self.paths)
+            # `SnapshotImportLimits.from_config` maps the whole
+            # `snapshot_v2_import_*` family plus the session quota and free-space
+            # reserve out of SystemConfig, but this — the only production
+            # construction of the importer — passed no limits at all, so it used
+            # the hard-coded defaults and an operator who lowered any of those
+            # settings on a shared installation had no effect on the one code
+            # path they exist for.
+            importer = SnapshotImporter(
+                self.session_id,
+                self.paths,
+                limits=SnapshotImportLimits.from_config(default_config),
+            )
             result = await asyncio.to_thread(
                 importer.import_bundle,
                 str(archive_path),
@@ -1033,7 +1133,7 @@ class SnapshotService(
             object_baseline_captured = True
 
             estimated_addition = await self._estimate_capture_addition(
-                request, workspace_root, analysis_state,
+                request, workspace_root, analysis_state, sandbox=sandbox,
             )
             current_physical = self._physical_object_store_bytes()
             phase = str(getattr(request.phase, "value", request.phase))

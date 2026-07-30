@@ -208,6 +208,7 @@ class PlanningMixin:
                             analysis_state.round_wait_seconds,
                             self.session_id,
                             "species_input",
+                            safe_point_hook=getattr(self, "await_restore_safe_point", None),
                         )
 
                         if not signaled:
@@ -1131,6 +1132,7 @@ class PlanningMixin:
                     wait_seconds,
                     self.session_id,
                     "plan_review",
+                    safe_point_hook=getattr(self, "await_restore_safe_point", None),
                 )
                 if not signaled:
                     # Auto-skip on timeout regardless of auto_approve_plans,

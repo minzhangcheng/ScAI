@@ -512,8 +512,19 @@ class TestSnapshotV2ImportRuntime:
     """Runtime omission and trust downgrade."""
 
     def test_import_runtime_omitted_from_archive(self, tmp_path, dest_paths):
-        """When runtime objects are omitted from archive, runtime is marked unavailable."""
+        """When runtime objects are omitted from archive, runtime is marked unavailable.
+
+        This is exactly the archive `POST /export-v2?include_runtime=false`
+        produces for any snapshot captured with a live kernel. The manifest
+        declares the runtime hashes it deliberately did not pack, so verifying
+        the *raw* manifests rejected it with MISSING_OBJECT before the import
+        plan could strip those refs — the documented "base objects always
+        export, runtime only with include_runtime=True" archive was unusable on
+        every installation, including the one that produced it. Verification now
+        runs over the plan, i.e. over what will actually be published.
+        """
         from backend.services.snapshot_v2.importer import SnapshotImporter
+        from backend.services.snapshot_v2.object_store import ManifestStore
 
         data, h = _make_obj_data(256)
         rt_data, rt_h = _make_obj_data(512)
@@ -543,7 +554,23 @@ class TestSnapshotV2ImportRuntime:
 
         importer = SnapshotImporter(SESSION_ID_DST, dest_paths)
         result = importer.import_bundle(archive)
-        assert not result.success  # Should fail because manifest references missing object
+
+        assert result.success, (
+            f"a runtime-omitted export must import: {result.errors}"
+        )
+        assert len(result.imported_snapshot_ids) == 1
+        imported_id = result.imported_snapshot_ids[0]
+        assert result.skipped_runtime_snapshot_ids == [imported_id]
+
+        published = ManifestStore(dest_paths).load(imported_id)
+        assert published.runtime.status == "missing"
+        assert published.runtime.adata_refs == {}
+        assert published.runtime.residual_ref is None
+        # The omitted runtime hash must not survive in `objects`, or GC and
+        # restore would both chase a ref the archive never carried.
+        assert rt_h not in published.objects
+        assert h in published.objects
+        assert not (dest_paths.objects / rt_h).exists()
 
     def test_import_trust_false_omits_runtime(self, tmp_path, dest_paths):
         """trust_runtime=False marks runtime as unavailable without writing dill."""

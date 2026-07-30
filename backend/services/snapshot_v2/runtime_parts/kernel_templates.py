@@ -254,10 +254,30 @@ if _adata is not None:
             _to_write.raw = _raw_ad
         except Exception:
             pass
-    _to_write.write({h5ad_path_repr!r})
-    import os as _runtime_os
-    _size = _runtime_os.path.getsize({h5ad_path_repr!r})
-    print('__H5AD_SAVED__:' + str(_size))
+    try:
+        _to_write.write({h5ad_path_repr!r})
+        import os as _runtime_os
+        _size = _runtime_os.path.getsize({h5ad_path_repr!r})
+        print('__H5AD_SAVED__:' + str(_size))
+    finally:
+        # This cell runs at the kernel's __main__ scope, so every name bound
+        # above is a kernel global that outlives the capture. _to_write is a
+        # full copy of the dataset and _X / _uns / _mapping / _frame are
+        # references into it, so leaving any of them bound keeps a second
+        # dataset resident for the life of the kernel: save_session skips
+        # _-prefixed names so it is never persisted, no probe measures kernel
+        # RSS, and only a kernel restart — a failure path — reclaims it. The
+        # next capture then evaluates _adata.copy() before rebinding, peaking
+        # at 3x the dataset where the algorithm needs 2x.
+        # It has to be a finally, not a trailing statement: a failed write is
+        # exactly when the host retries and builds another copy, and IPython
+        # keeps the failing frames alive on top of that.
+        for _cleanup_name in (
+            '_to_write', '_raw_ad', '_raw_varm', '_raw', '_adata',
+            '_X', '_uns', '_mapping', '_frame', '_slot',
+        ):
+            globals().pop(_cleanup_name, None)
+        globals().pop('_cleanup_name', None)
 else:
     print('__H5AD_NOT_FOUND__:' + {var_name_repr!r})
 """
@@ -270,41 +290,51 @@ import os as _runtime_os
 _saved_count = 0
 _skipped = []
 _saved = []
-with open({dill_path_repr!r}, 'wb') as _f:
-    for _n in _names:
-        _obj = globals().get(_n)
-        if _obj is None and _n not in globals():
-            _skipped.append(_n)
-            continue
-        _checkpoint = _f.tell()
-        try:
-            _runtime_dill.dump((_n, _obj), _f)
-            _saved_count += 1
-            _saved.append(_n)
-        except Exception as _e:
-            # dill writes incrementally. Remove the incomplete frame before
-            # appending another variable or its memo references can bind to
-            # objects leaked from the failed frame during restore.
-            _f.seek(_checkpoint)
-            _f.truncate()
-            _skipped.append(_n)
-_verified = []
-with open({dill_path_repr!r}, 'rb') as _verify_f:
-    while True:
-        try:
-            _verified_name, _verified_obj = _runtime_dill.load(_verify_f)
-            _verified.append(_verified_name)
-        except EOFError:
-            break
-if _verified != _saved:
-    raise RuntimeError(
-        'Residual dill readback mismatch: saved=' + repr(_saved)
-        + ' verified=' + repr(_verified)
-    )
-_size = _runtime_os.path.getsize({dill_path_repr!r})
-print('__DILL_SAVED__:' + str(_saved_count) + '/' + str(len(_names)) + ' size=' + str(_size))
-print('__DILL_SAVED_NAMES__:' + _runtime_json.dumps(_saved))
-print('__DILL_VERIFIED_NAMES__:' + _runtime_json.dumps(_verified))
-if _skipped:
-    print('__DILL_SKIPPED__:' + _runtime_json.dumps(_skipped))
+try:
+    with open({dill_path_repr!r}, 'wb') as _f:
+        for _n in _names:
+            _obj = globals().get(_n)
+            if _obj is None and _n not in globals():
+                _skipped.append(_n)
+                continue
+            _checkpoint = _f.tell()
+            try:
+                _runtime_dill.dump((_n, _obj), _f)
+                _saved_count += 1
+                _saved.append(_n)
+            except Exception as _e:
+                # dill writes incrementally. Remove the incomplete frame before
+                # appending another variable or its memo references can bind to
+                # objects leaked from the failed frame during restore.
+                _f.seek(_checkpoint)
+                _f.truncate()
+                _skipped.append(_n)
+    _verified = []
+    with open({dill_path_repr!r}, 'rb') as _verify_f:
+        while True:
+            try:
+                _verified_name, _verified_obj = _runtime_dill.load(_verify_f)
+                _verified.append(_verified_name)
+            except EOFError:
+                break
+    if _verified != _saved:
+        raise RuntimeError(
+            'Residual dill readback mismatch: saved=' + repr(_saved)
+            + ' verified=' + repr(_verified)
+        )
+    _size = _runtime_os.path.getsize({dill_path_repr!r})
+    print('__DILL_SAVED__:' + str(_saved_count) + '/' + str(len(_names)) + ' size=' + str(_size))
+    print('__DILL_SAVED_NAMES__:' + _runtime_json.dumps(_saved))
+    print('__DILL_VERIFIED_NAMES__:' + _runtime_json.dumps(_verified))
+    if _skipped:
+        print('__DILL_SKIPPED__:' + _runtime_json.dumps(_skipped))
+finally:
+    # Same kernel-scope rule as the h5ad template: these are __main__ globals,
+    # not locals. _obj only aliases the live residual value, but _verified_obj
+    # is a second, freshly deserialized copy of the last verified one, and the
+    # readback exists precisely because these values can be large. The readback
+    # mismatch above raises, so the cleanup has to be a finally to cover it.
+    for _cleanup_name in ('_obj', '_verified_obj', '_verified_name'):
+        globals().pop(_cleanup_name, None)
+    globals().pop('_cleanup_name', None)
 """

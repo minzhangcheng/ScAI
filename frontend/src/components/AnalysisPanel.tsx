@@ -165,6 +165,7 @@ export function AnalysisPanel() {
     attempts: number
     timer: ReturnType<typeof setTimeout> | null
   } | null>(null)
+  const snapshotAutoOpenedForRef = useRef<string | null>(null)
 
   // Snapshot cleanup reminder state
   const snapshotCount = useAppStore(state => state.snapshotCount)
@@ -221,6 +222,23 @@ export function AnalysisPanel() {
         return
       }
       if (pollState.attempts >= SNAPSHOT_RETRY_MAX_POLLS) {
+        // 150 × 2s is exactly the backend's 300s safe-point timeout, so a
+        // restore that waits near it and then spends time applying outlives
+        // this loop. Stopping silently froze the progress dialog on its last
+        // status with a live Cancel button, and when the restore did commit
+        // nothing ever noticed. Say so instead: the transaction is unchanged
+        // on the server, and reopening the Snapshot panel resumes tracking.
+        console.warn(
+          'Lost contact with restore transaction', pollState.transactionId,
+          '— stopped polling after', SNAPSHOT_RETRY_MAX_POLLS, 'attempts',
+        )
+        const stalled = useAppStore.getState().snapshotTransaction
+        if (stalled && stalled.transaction_id === pollState.transactionId) {
+          useAppStore.getState().setSnapshotTransaction({
+            ...stalled,
+            poll_timed_out: true,
+          } as SnapshotTransactionRecord)
+        }
         stopSnapshotRetryPolling()
         return
       }
@@ -259,36 +277,71 @@ export function AnalysisPanel() {
     void poll()
   }, [stopSnapshotRetryPolling])
 
-  useEffect(
-    () => stopSnapshotRetryPolling,
-    [stopSnapshotRetryPolling, currentSession?.id],
-  )
+  useEffect(() => {
+    snapshotAutoOpenedForRef.current = null
+    return stopSnapshotRetryPolling
+  }, [stopSnapshotRetryPolling, currentSession?.id])
+
+  // Both effects below are driven by a record they themselves cause to be
+  // rewritten: the poller calls `setSnapshotTransaction` on every tick and
+  // `setSnapshotTransaction` always allocates a new object, so a dependency on
+  // `snapshotTransaction` fires roughly twice a second for the whole restore.
+  // That turned each effect against its own purpose — the monitor tore down and
+  // re-seeded the loop it was supposed to own (attempts back to 0, so
+  // SNAPSHOT_RETRY_MAX_POLLS could never be reached and the give-up branch
+  // instead became a 300s restart cycle), and the auto-open re-asserted itself
+  // within a tick of every close, making the full-screen panel undismissable.
+  // Depend on the scalars that actually decide whether monitoring or opening is
+  // needed, and read the record itself from the store when it is.
+  const snapshotTxnId = snapshotTransaction?.transaction_id ?? null
+  const snapshotTxnSessionId = snapshotTransaction?.session_id ?? null
+  const snapshotTxnIsRetry = Boolean(snapshotTransaction?.retry_of_transaction_id)
+  const snapshotTxnTerminal = snapshotTransaction
+    ? SNAPSHOT_TERMINAL_STATUSES.has(snapshotTransaction.status)
+    : true
+  const currentSessionId = currentSession?.id ?? null
 
   useEffect(() => {
     if (!snapshotV2Enabled) return
-    if (!currentSession || !snapshotTransaction) return
-    if (snapshotTransaction.session_id !== currentSession.id) return
-    if (SNAPSHOT_TERMINAL_STATUSES.has(snapshotTransaction.status)) {
+    if (!currentSessionId || !snapshotTxnId) return
+    if (snapshotTxnSessionId !== currentSessionId) return
+    if (snapshotTxnTerminal) {
       stopSnapshotRetryPolling()
       return
     }
-    monitorSnapshotRetry(currentSession.id, snapshotTransaction)
+    const seed = useAppStore.getState().snapshotTransaction
+    if (!seed || seed.transaction_id !== snapshotTxnId) return
+    monitorSnapshotRetry(currentSessionId, seed)
   }, [
-    currentSession,
+    currentSessionId,
     snapshotV2Enabled,
-    snapshotTransaction,
+    snapshotTxnId,
+    snapshotTxnSessionId,
+    snapshotTxnTerminal,
     monitorSnapshotRetry,
     stopSnapshotRetryPolling,
   ])
 
   useEffect(() => {
     if (!snapshotV2Enabled) return
-    if (!currentSession || !snapshotTransaction) return
-    if (snapshotTransaction.session_id !== currentSession.id) return
-    if (!snapshotTransaction.retry_of_transaction_id) return
-    if (snapshotTransaction.status === 'committed') return
+    if (!currentSessionId || !snapshotTxnId) return
+    if (snapshotTxnSessionId !== currentSessionId) return
+    if (!snapshotTxnIsRetry) return
+    // Terminal covers more than 'committed': a failed/cancelled/timed_out retry
+    // must not pop the modal back up after the user has dismissed it either.
+    if (snapshotTxnTerminal) return
+    // Edge-triggered per transaction, so a close stays closed.
+    if (snapshotAutoOpenedForRef.current === snapshotTxnId) return
+    snapshotAutoOpenedForRef.current = snapshotTxnId
     setShowSnapshotPanel(true)
-  }, [currentSession, snapshotTransaction, snapshotV2Enabled])
+  }, [
+    currentSessionId,
+    snapshotTxnId,
+    snapshotTxnSessionId,
+    snapshotTxnIsRetry,
+    snapshotTxnTerminal,
+    snapshotV2Enabled,
+  ])
 
   useEffect(() => {
     void checkStatus()
@@ -870,6 +923,10 @@ export function AnalysisPanel() {
       }
       const transaction = resp?.data?.snapshot_transaction
       if (transaction) {
+        // Claim the auto-open edge here too: this explicit open and the effect
+        // above are the same one-shot, so without it a user who closes the panel
+        // gets it back the first time the effect observes the new transaction.
+        snapshotAutoOpenedForRef.current = transaction.transaction_id
         setShowSnapshotPanel(true)
         monitorSnapshotRetry(currentSession.id, transaction)
       }

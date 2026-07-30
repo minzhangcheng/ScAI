@@ -51,9 +51,34 @@ export interface RuntimeDependencyEntry {
   type: string
 }
 
+/** Mirrors backend `RuntimeDependency`. */
+export interface RuntimeDependency {
+  name: string
+  serializer: 'dill' | 'h5ad'
+  type_name?: string
+  version?: string
+}
+
+/** Mirrors backend `RuntimeSkip`. */
+export interface RuntimeSkip {
+  name: string
+  type_name?: string
+  reason?: string
+}
+
+/** Mirrors backend `RuntimeDependencyManifest`. */
 export interface RuntimeDependencyManifest {
-  python: RuntimeDependencyEntry
-  additional: Record<string, RuntimeDependencyEntry>
+  required: Record<string, RuntimeDependency>
+  incidental_skips: RuntimeSkip[]
+}
+
+/** Mirrors backend `RuntimeManifest` — the runtime proof the manifest carries. */
+export interface RuntimeManifest {
+  status: 'complete' | 'missing' | 'state_only' | 'corrupt'
+  dependencies: RuntimeDependencyManifest
+  residual_ref?: ObjectRef | null
+  captured_residual_names?: string[]
+  adata_refs?: Record<string, ObjectRef>
 }
 
 export interface RuntimeGenerationManifest {
@@ -79,7 +104,14 @@ export interface SnapshotManifestV2 {
   capsule: ContinuationCapsule
   workspace: WorkspaceEntry[]
   objects: Record<string, ObjectRef>
-  runtime_dependencies?: RuntimeDependencyManifest | null
+  /**
+   * The backend serializes the runtime proof under `runtime`. `runtime_dependencies`
+   * exists only on `SnapshotCaptureRequest` as a legacy bridge field and is never
+   * part of a serialized manifest, so every consumer that read it short-circuited
+   * permanently — and its declared shape (`{python, additional}`) did not match
+   * the backend's either, so populating it would have crashed the render.
+   */
+  runtime?: RuntimeManifest | null
   runtime_snapshot_capture?: RuntimeGenerationManifest | null
 }
 
@@ -116,6 +148,14 @@ export interface SnapshotTransactionRecord {
   retry_of_transaction_id?: string | null
   /** Backend may signal client reconnect after commit */
   reconnect?: boolean
+  /**
+   * Client-only: the retry monitor gave up polling before the transaction
+   * reached a terminal status. The server record is unaffected — reopening the
+   * Snapshot panel resumes tracking.
+   */
+  poll_timed_out?: boolean
+  /** Present on `failed`; `code` drives the client's recovery offer. */
+  failure_code?: string
 }
 
 export interface RestoreSnapshotV2Request {

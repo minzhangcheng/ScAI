@@ -452,7 +452,7 @@ class TestSnapshotV2ExportRoute:
         async def fake_owner(session_id, user_id=None):
             return state
 
-        async def fake_export(self, *, include_runtime=True, snapshot_ids=None):
+        async def fake_export(self, *, include_runtime=True, snapshot_ids=None, staging_dir=None):
             called["include_runtime"] = include_runtime
             called["snapshot_ids"] = snapshot_ids
             out = tmp_path / "fake-export.tar.gz"
@@ -516,7 +516,7 @@ class TestSnapshotV2ExportRoute:
         async def fake_owner(session_id, user_id=None):
             return state
 
-        async def fake_export(self, *, include_runtime=True, snapshot_ids=None):
+        async def fake_export(self, *, include_runtime=True, snapshot_ids=None, staging_dir=None):
             out = tmp_path / "fake-export-token.tar.gz"
             import tarfile, io, json
             with tarfile.open(out, "w:gz") as tf:
@@ -577,7 +577,7 @@ class TestSnapshotV2ExportRoute:
         async def fake_owner(session_id, user_id=None):
             return state
 
-        async def fake_export(self, *, include_runtime=True, snapshot_ids=None):
+        async def fake_export(self, *, include_runtime=True, snapshot_ids=None, staging_dir=None):
             raise ExportIntegrityError(
                 "UNKNOWN_SNAPSHOT_IDS",
                 "Snapshot IDs not found: snap-nonexistent",

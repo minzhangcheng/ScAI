@@ -336,13 +336,32 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             await self._send_state_sync(analysis_state, enter_change)
 
         try:
-            await event.wait()
+            # This is the seventh HITL gate, and like the six that got the hook
+            # in 0.36.12 it blocks *inside* a graph node: the run task stays in
+            # flight, so `_acknowledge_if_quiescent` declines, and the graph
+            # never reaches the node entry that would otherwise acknowledge. A
+            # restore requested while the user sits at the LLM-failure /
+            # disabled-agent / marker-DB dialog therefore had no acknowledger at
+            # all — and this gate has no timeout, so a user who walks away
+            # strands it indefinitely.
+            #
+            # `wait_seconds=-1` keeps the block-forever semantics exactly: with a
+            # hook the helper takes its polling loop, which returns True only
+            # when the event is set.
+            await wait_with_skip_time(
+                event, -1, self.session_id, node_name,
+                safe_point_hook=getattr(self, "await_restore_safe_point", None),
+            )
             action = self._llm_failure_actions.pop(node_name, None)
             analysis_state.wait_input_reason = None
             setattr(analysis_state, info_attr, None)
             self._set_status(analysis_state, TaskStatus.RUNNING)
             await self._send_state_sync(analysis_state, exit_change)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, WorkflowSupersededError):
+            # The hook re-raises WorkflowSupersededError once a restore commits.
+            # That unwinds through this gate the same way a cancellation does,
+            # so it needs the same cleanup — otherwise the gate's reason/info
+            # stay pinned on a state object nobody will resume.
             analysis_state.wait_input_reason = None
             setattr(analysis_state, info_attr, None)
             raise
@@ -1038,13 +1057,54 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         )
         workspace_root = str(get_session_workspace(self.session_id))
         # capture_required_snapshot applies success/failure and raises on failure
-        return await service.capture_required_snapshot(
-            state,
-            request,
-            sandbox=getattr(self, "sandbox", None),
-            workflow_state=workflow_state,
-            workspace_root=workspace_root,
-        )
+        #
+        # The pending-request yield above is a check-then-act: the only
+        # suspension point between it and the acquire inside `capture()` is the
+        # session lock, which a concurrent `_write_state_if_current` or mutating
+        # route holds across an `asyncio.to_thread` save. A restore reserving
+        # the safe point in that window makes `_acquire_unlocked` refuse (it
+        # treats pending and held alike), and SAFE_POINT_BUSY becomes a
+        # fail-closed gate that unwinds the whole graph invocation — so the
+        # workflow never reaches another acknowledgement site, and the restore
+        # that caused it waits out its full timeout and fails too. That is the
+        # exact double failure the pre-check exists to prevent.
+        #
+        # A *pending* request is a handover the workflow is entitled to
+        # complete, so do it once and re-attempt. An already-acquired foreign
+        # hold still fails closed: it never becomes pending, so the retry
+        # branch below cannot fire for it.
+        for attempt in (0, 1):
+            try:
+                return await service.capture_required_snapshot(
+                    state,
+                    request,
+                    sandbox=getattr(self, "sandbox", None),
+                    workflow_state=workflow_state,
+                    workspace_root=workspace_root,
+                )
+            except RequiredSnapshotBlocked as exc:
+                sp = get_snapshot_safe_point_manager()
+                if (
+                    attempt == 0
+                    and getattr(exc, "code", "") == "SAFE_POINT_BUSY"
+                    and sp.has_pending_request(self.session_id)
+                ):
+                    logger.info(
+                        f"[{self.session_id}] Boundary capture lost the safe "
+                        f"point to a restore reservation; handing over and "
+                        f"retrying once"
+                    )
+                    from ..services.snapshot_v2.failure_gate import (
+                        retry_workflow_boundary,
+                    )
+
+                    # The capture armed the fail-closed gate on its way out.
+                    # Clear it: nothing about the snapshot failed, the capture
+                    # lost a coordination race that this retry resolves.
+                    retry_workflow_boundary(state)
+                    await self.await_restore_safe_point()
+                    continue
+                raise
 
     def _merge_supplementary_findings(self, agent_key: str, new_findings: List[str]):
         """Merge supplementary findings into the current graph state for an agent."""
@@ -1438,6 +1498,8 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
                 if initial_state.current_round > len(initial_state.round_results):
                     logger.info(f"[{self.session_id}] Found incomplete round {initial_state.current_round}, running pi_synthesis before report")
                     workflow_state = await self._pi_synthesis(workflow_state)
+        except WorkflowSupersededError as e:
+            return self._superseded_report_result(initial_state, e)
         except Exception as e:
             logger.warning(f"[{self.session_id}] Could not load state from checkpointer: {e}")
 
@@ -1483,6 +1545,8 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             except Exception:
                 pass
             return initial_state
+        except WorkflowSupersededError as e:
+            return self._superseded_report_result(initial_state, e)
         except Exception as e:
             import traceback
             error_detail = traceback.format_exc()
@@ -1490,6 +1554,39 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             await self._send_message("error", f"Report generation failed: {str(e)}")
             self._set_status(initial_state, TaskStatus.FAILED)
             return initial_state
+
+    def _superseded_report_result(
+        self, initial_state: AnalysisState, exc: BaseException,
+    ) -> AnalysisState:
+        """Unwind a report run that a committed restore superseded.
+
+        `generate_report` reaches acknowledgement sites (``_pi_synthesis``'s
+        node-entry hook, the post-report capture's handover), so it can be
+        frozen on a restore safe point and woken with its state already
+        replaced. Both of its generic handlers used to absorb that: the
+        checkpointer-load one mislabelled it as "could not load state from
+        checkpointer" and kept generating — producing reports and a post-report
+        snapshot from the state the restore had just discarded — and the
+        trailing one wrote FAILED, which is exactly what WorkflowSupersededError
+        forbids (see helpers.py).
+
+        Deliberately does not touch session state: the restore already persisted
+        the authoritative object. Returning that object rather than
+        ``initial_state`` keeps a caller that saves the result from writing the
+        pre-restore state back. The session-scoped superseded flag is cleared
+        here because this run IS the superseded one and it has now unwound; no
+        report path did that, so the flag used to outlive the process.
+        """
+        from ..state import sessions as live_sessions
+        from ..services.snapshot_v2.safe_point import (
+            get_snapshot_safe_point_manager as _sp_clear,
+        )
+
+        logger.info(
+            f"[{self.session_id}] Report generation superseded by restore: {exc}"
+        )
+        _sp_clear().clear_superseded(self.session_id)
+        return live_sessions.get(self.session_id) or initial_state
 
     async def _invoke_restore_entry(
         self, analysis_state: AnalysisState, thread_id: str,

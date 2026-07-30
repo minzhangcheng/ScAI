@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from backend.constants import WORKFLOW_GRAPH_NODES
+from backend.constants import WORKFLOW_GRAPH_NODES, WaitInputReason
 from backend.models.schemas import SnapshotPhase
 from backend.services.snapshot_v2.errors import SnapshotCaptureError
 from backend.services.snapshot_v2.models import (
@@ -115,6 +115,27 @@ _STATUS_TO_GATE: dict[str, str] = {
     "waiting_input": "round_wait",
 }
 
+# ``waiting_input`` is the one entry above that is not self-describing. The
+# round gate, direction selection and integration selection all block in
+# ``_wait_for_user_input`` and so resume at the same physical checkpoint, which
+# is why mapping them all to round_wait is sound. An intervention gate driven by
+# ``_drive_hitl_gate`` also parks on WAITING_INPUT, but it blocks *inside* the
+# node it interrupted and names itself only on ``wait_input_reason``. Freezing
+# one of those as round_wait is not a harmless relabel: the restore dispatcher
+# falls back to the capsule's gate when the payload carries no wait reason, so
+# the reason is overwritten with "round_wait" while the intervention's own info
+# survives — the reconnect resend no longer recognizes it, and round_wait is a
+# semantic wait gate, so /resume answers "restored wait continuation" and drives
+# the graph forward from a gate the session was never at. Idle is the honest
+# capsule for a mid-node park: the true position needs the checkpointer's
+# ``next``, which is not available here.
+_NON_ROUND_WAIT_INPUT_REASONS: frozenset[str] = frozenset({
+    WaitInputReason.LLM_FAILURE.value,
+    WaitInputReason.AGENT_DISABLED.value,
+    WaitInputReason.MARKER_DB_MISSING.value,
+    WaitInputReason.SNAPSHOT_FAILURE.value,
+})
+
 
 def _gate_from_status(analysis_state: Any) -> str | None:
     """Return the semantic gate a parked session is sitting at, or None."""
@@ -124,7 +145,16 @@ def _gate_from_status(analysis_state: Any) -> str | None:
     status = getattr(status, "value", status)
     if status is None:
         return None
-    return _STATUS_TO_GATE.get(str(status).lower())
+    status = str(status).lower()
+    gate = _STATUS_TO_GATE.get(status)
+    if gate is None:
+        return None
+    if status == "waiting_input":
+        reason = getattr(analysis_state, "wait_input_reason", None)
+        reason = getattr(reason, "value", reason)
+        if reason is not None and str(reason) in _NON_ROUND_WAIT_INPUT_REASONS:
+            return None
+    return gate
 
 
 class ContinuationRegistry:
@@ -186,8 +216,21 @@ class ContinuationRegistry:
         kind = desc.get("continuation_kind") or desc.get("kind")
         if kind == "terminal" or desc.get("status") == "completed":
             return TerminalCapsule(graph_version=GRAPH_VERSION, status="completed")
-        if kind == "idle" or desc.get("inactive") is True:
+        if kind == "idle":
             return IdleCapsule(graph_version=GRAPH_VERSION)
+
+        # `inactive` means "nothing is executing / no kernel". That is orthogonal
+        # to "parked at a resumable HITL gate", and the two coincide constantly:
+        # the quiescent-coordinator descriptor (jobs.py) hard-codes
+        # ``inactive: True`` for every non-terminal status, including the
+        # ``waiting*`` statuses whose whole point is that the session IS parked
+        # somewhere resumable. Short-circuiting to Idle here made the
+        # status-derived gate below unreachable for exactly the producer it was
+        # written for — pre_restore, the snapshot a user reaches for to undo a
+        # restore — so the rollback point silently lost the gate. It still
+        # suppresses the mid-node `next_node` branch, where "nothing is
+        # executing" really does contradict a live graph position.
+        inactive = desc.get("inactive") is True
 
         gate = desc.get("semantic_gate") or desc.get("gate")
         if gate:
@@ -208,7 +251,9 @@ class ContinuationRegistry:
                 payload_ref=ref,
             )
 
-        next_node = desc.get("graph_node") or desc.get("next_node")
+        next_node = None if inactive else (
+            desc.get("graph_node") or desc.get("next_node")
+        )
         if next_node and next_node in _KNOWN_GRAPH_NODES:
             # Validate planning_stage before put_bytes so invalid stages fail
             # closed without writing objects (symmetric with restore-side check).

@@ -840,7 +840,10 @@ async def _snapshot_failure_retry_locked(session_id: str, user_id: str):
     )
 
     await _update_session_cache(session_id, state)
-    await async_save_session(session_id, state)
+    # force=True for the same reason as Skip below: the statuses this write
+    # installs (RUNNING / PAUSED) do not bypass the 5s throttle, and the gate
+    # write it supersedes was force-saved moments earlier.
+    await async_save_session(session_id, state, force=True)
 
     # A workflow-boundary gate unwound the graph, so nothing is running and the
     # re-drive only starts when a WebSocket reconnect rebuilds the workflow. The
@@ -950,8 +953,34 @@ async def _snapshot_failure_skip_locked(session_id: str, user_id: str):
     # checkpoint; the armed marker makes the next required capture at that phase a
     # no-op so the analysis proceeds past the boundary that previously failed.
     # (Mirrors the Retry flow, which likewise defers graph re-drive to reconnect.)
+    #
+    # force=True: RUNNING is not one of the statuses that bypass the 5s save
+    # throttle, and the gate write this request is undoing was force-saved
+    # moments earlier — so the throttle window is entered from a guaranteed
+    # preceding write and the cleared gate could be dropped silently.
     await _update_session_cache(session_id, state)
-    await async_save_session(session_id, state)
+    await async_save_session(session_id, state, force=True)
+
+    # Nothing re-drives the graph in-process: the boundary gate already unwound
+    # it, so the run only restarts when a WebSocket reconnect rebuilds the
+    # workflow. The client holding the HITL connection never reconnects on its
+    # own (it is parked in the HITL-hold loop with a live socket), and the
+    # frontend only reconnects when it sees the socket down — so without this
+    # close the session sat at status=RUNNING with no workflow, no run task and
+    # no dialog, making zero progress until a full page reload. Same 4000 code
+    # and same live-workflow exemption as the Retry branch above.
+    if context.producer == "workflow_boundary":
+        async with _state_lock:
+            ws = None if session_id in workflows else websockets.get(session_id)
+        if ws is not None:
+            try:
+                await ws.close(4000, "snapshot_skip_resume")
+            except Exception:
+                logger.debug(
+                    "[%s] Failed to close HITL WebSocket after snapshot skip",
+                    session_id,
+                    exc_info=True,
+                )
 
     return APIResponse(
         success=True,
@@ -1001,12 +1030,22 @@ async def _snapshot_failure_terminate_locked(session_id: str, user_id: str):
 
     terminate_snapshot_failure(state)
 
+    # Persist STOPPED *before* the irreversible teardown, and force the write.
+    #
+    # teardown_running_workflow closes the kernel and unlinks the graph
+    # checkpoint (plus its -wal/-shm). Running it first meant a crash anywhere
+    # inside it left session.json still saying WAITING_INPUT with the gate armed
+    # while the checkpoint was already gone — a session the user had terminated,
+    # shown to them as blocked, whose Retry would then resume against a
+    # checkpoint that no longer exists. STOPPED is also not in
+    # _FORCE_SAVE_STATUSES, so the unforced write could be dropped by the 5s
+    # throttle on top of that, entered from the force-saved gate write.
+    await _update_session_cache(session_id, state)
+    await async_save_session(session_id, state, force=True)
+
     # After STOPPED + termination_reason: tear down workflow/kernel resources.
     # Do NOT pause — pause would clobber STOPPED → PAUSED on the same state.
     await teardown_running_workflow(session_id)
-
-    await _update_session_cache(session_id, state)
-    await async_save_session(session_id, state)
 
     return APIResponse(
         success=True,

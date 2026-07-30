@@ -89,11 +89,16 @@ const twoSnapshots = {
           { path: 'data.csv', object_hash: 'h2', size: 10240, mode: 644, kind: 'file' },
         ],
         objects: { h1: { sha256: 'h1', size: 2048, media_type: 'text' } },
-        runtime_dependencies: {
-          python: { name: 'python', version: '3.11', type: 'interpreter' },
-          additional: {
-            numpy: { name: 'numpy', version: '1.26', type: 'library' },
+        runtime: {
+          status: 'complete',
+          dependencies: {
+            required: {
+              adata: { name: 'adata', serializer: 'h5ad', type_name: 'AnnData' },
+            },
+            incidental_skips: [],
           },
+          adata_refs: {},
+          residual_ref: null,
         },
       },
     }),
@@ -119,11 +124,16 @@ const twoSnapshots = {
           { path: 'main.ipynb', object_hash: 'h3', size: 4096, mode: 644, kind: 'file' },
         ],
         objects: { h3: { sha256: 'h3', size: 4096, media_type: 'text' } },
-        runtime_dependencies: {
-          python: { name: 'python', version: '3.11', type: 'interpreter' },
-          additional: {
-            numpy: { name: 'numpy', version: '1.26', type: 'library' },
+        runtime: {
+          status: 'complete',
+          dependencies: {
+            required: {
+              adata: { name: 'adata', serializer: 'h5ad', type_name: 'AnnData' },
+            },
+            incidental_skips: [],
           },
+          adata_refs: {},
+          residual_ref: null,
         },
       },
     }),
@@ -215,10 +225,14 @@ describe('SnapshotTree', () => {
     expect(await screen.findByText(/1 file/)).toBeInTheDocument()
   })
 
-  it('shows runtime python version in snapshot', async () => {
+  it('shows each snapshot runtime status', async () => {
+    // The row used to read `manifest.runtime_dependencies.python.version`, a
+    // key the backend manifest never contains, so the chip never rendered. The
+    // status is also the information that matters here: it decides whether
+    // restoring this snapshot bounces the user into the reset/keep dialog.
     render(<SnapshotPanel sessionId="sess" language="en" onClose={vi.fn()} onRestore={vi.fn()} />)
 
-    const matches = await screen.findAllByText(/3\.11/)
+    const matches = await screen.findAllByText(/runtime: complete/)
     expect(matches.length).toBeGreaterThanOrEqual(1)
   })
 
@@ -258,8 +272,10 @@ describe('SnapshotPreview', () => {
   it('shows runtime dependency info', async () => {
     render(<SnapshotPanel sessionId="sess" language="en" onClose={vi.fn()} onRestore={vi.fn()} />)
 
-    expect(await screen.findByText(/numpy/)).toBeInTheDocument()
-    expect(await screen.findByText('1.26')).toBeInTheDocument()
+    // Rendered from the authoritative `runtime` block: status plus the
+    // required set and how each member is serialized.
+    expect(await screen.findByText(/adata/)).toBeInTheDocument()
+    expect(await screen.findByText(/h5ad/)).toBeInTheDocument()
   })
 
   it('renders same-path replacement indicators', async () => {

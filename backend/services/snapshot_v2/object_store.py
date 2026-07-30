@@ -83,6 +83,12 @@ class SnapshotImportLimits(BaseModel):
     max_snapshot_count: int = 10000
     session_quota_bytes: int = 100 * 1024 ** 3
     free_space_reserve_bytes: int = 5 * 1024 ** 3
+    #: Caps for the two member kinds the importer reads *whole* into memory.
+    #: Without them both were bounded only by max_single_member_bytes (80 GB),
+    #: and since JSON compresses at ~1000:1 a few MB of upload could force a
+    #: multi-GB allocation on an endpoint any session owner can reach.
+    max_metadata_bytes: int = 8 * 1024 ** 2
+    max_manifest_bytes: int = 16 * 1024 ** 2
 
     @classmethod
     def from_config(cls, config: Any) -> "SnapshotImportLimits":
@@ -183,6 +189,26 @@ class ObjectStore:
         self._paths.staging.mkdir(parents=True, exist_ok=True)
         self._objects_dir.mkdir(parents=True, exist_ok=True)
 
+    def _fsync_objects_dir(self) -> None:
+        """Make an object's new directory entry durable after ``os.replace``.
+
+        Fsyncing the temp file only makes its *contents* durable; the rename
+        that publishes it into ``objects/`` is a directory-metadata operation
+        and needs its own fsync. Without it the store can come back from a
+        power loss with a committed, HMAC-verified manifest — ``publish_staging``
+        does fsync ``committed/`` — whose objects were never linked. Nothing
+        detects that: ``verify_all_committed`` checks signatures, not object
+        existence, so the snapshot lists as healthy and only fails at restore,
+        with no repair path.
+        """
+        try:
+            fsync_directory(self._objects_dir)
+        except OSError:
+            # A directory fsync can legitimately fail on exotic filesystems.
+            # The object is already installed; degrading durability is better
+            # than failing a capture that otherwise succeeded.
+            pass
+
     def _register_evidence(self, sha256: str, evidence: "VerifiedObjectEvidence") -> None:
         if len(self._evidence) >= self._evidence_max:
             # Evict oldest entries (simple FIFO-style)
@@ -246,6 +272,7 @@ class ObjectStore:
                 temp_file.flush()
                 os.fsync(temp_file.fileno())
             os.replace(str(temp_path), str(dest))
+            self._fsync_objects_dir()
         finally:
             if temp_path is not None:
                 temp_path.unlink(missing_ok=True)
@@ -298,17 +325,49 @@ class ObjectStore:
             )
 
         self._ensure_store_dirs()
-        with tempfile.NamedTemporaryFile(dir=str(self._paths.staging), prefix=f".{sha}.", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-            with open(resolved, "rb") as src:
-                while True:
-                    chunk = src.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    tmp.write(chunk)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-        os.replace(str(tmp_path), str(dest))
+        # ``delete=False`` means an error anywhere below leaves the partial temp
+        # behind. Nothing else reclaims it: recovery's orphan-staging sweep skips
+        # dot-prefixed names and quota accounting only sums ``objects/``, so an
+        # ENOSPC here (the likeliest failure, on the largest objects in the
+        # system) would leak a near-complete copy on every HITL Retry.
+        tmp_path: Path | None = None
+        copied = 0
+        copied_hash = hashlib.sha256()
+        try:
+            with tempfile.NamedTemporaryFile(dir=str(self._paths.staging), prefix=f".{sha}.", delete=False) as tmp:
+                tmp_path = Path(tmp.name)
+                with open(resolved, "rb") as src:
+                    while True:
+                        chunk = src.read(CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        copied += len(chunk)
+                        copied_hash.update(chunk)
+                        tmp.write(chunk)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            # ``sha`` came from a *separate* pass over the source. A writer the
+            # capture does not exclude can land between the two passes — the
+            # chat-delegation sandbox holds its own exec lock and writes into
+            # the same workspace the capture walks — and installing the second
+            # pass's bytes under the first pass's name yields an object that
+            # does not hash to its own name. The manifest naming it then commits
+            # and HMAC-signs clean, verify_all_committed never reads object
+            # content, and only the restore rehash notices, by which point the
+            # snapshot is permanently unrestorable. Prove the copy instead, as
+            # put_bytes and put_stream already do. Hashing the chunks we are
+            # already reading costs no extra I/O — a second read of a multi-GB
+            # h5ad would.
+            if copied != size or copied_hash.hexdigest() != sha:
+                raise SnapshotIntegrityError(
+                    "OBJECT_HASH_MISMATCH",
+                    f"Source file changed while being stored: {path}",
+                )
+            os.replace(str(tmp_path), str(dest))
+            self._fsync_objects_dir()
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
         ev = VerifiedObjectEvidence.from_path(dest, sha)
         self._register_evidence(sha, ev)
         return ObjectPutResult(
@@ -386,13 +445,23 @@ class ObjectStore:
         hasher = hashlib.sha256()
         total = 0
         self._ensure_store_dirs()
-        with tempfile.NamedTemporaryFile(
-            dir=str(self._paths.staging),
-            prefix=f".{expected_sha256}.",
-            delete=False,
-        ) as tmp:
-            tmp_path = Path(tmp.name)
-            try:
+        # The three ad-hoc unlinks this replaces covered the write loop and the
+        # two integrity branches but left ``os.replace`` outside all of them —
+        # the last of the three put_* writers whose install could leak. An
+        # ENOSPC or EIO there stranded a fully written, up-to-single-member-limit
+        # temp in staging/ that nothing reclaims: recovery's orphan-staging sweep
+        # and ManifestStore.reconcile() both skip dot-prefixed names by contract,
+        # import recovery matches only ``{txn}``-prefixed entries, and quota sums
+        # only ``objects/``. One finally spans the whole thing instead; after a
+        # successful rename the unlink is a no-op via ``missing_ok``.
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=str(self._paths.staging),
+                prefix=f".{expected_sha256}.",
+                delete=False,
+            ) as tmp:
+                tmp_path = Path(tmp.name)
                 while True:
                     chunk = reader.read(CHUNK_SIZE)
                     if not chunk:
@@ -402,34 +471,24 @@ class ObjectStore:
                     tmp.write(chunk)
                 tmp.flush()
                 os.fsync(tmp.fileno())
-            except Exception:
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise
 
-        actual_hash = hasher.hexdigest()
-        if total != expected_size:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise SnapshotIntegrityError(
-                "OBJECT_SIZE_MISMATCH",
-                f"Object {expected_sha256} size {total} != expected {expected_size}",
-            )
-        if actual_hash != expected_sha256:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise SnapshotIntegrityError(
-                "OBJECT_HASH_MISMATCH",
-                f"Object {expected_sha256} hash mismatch (actual: {actual_hash})",
-            )
+            actual_hash = hasher.hexdigest()
+            if total != expected_size:
+                raise SnapshotIntegrityError(
+                    "OBJECT_SIZE_MISMATCH",
+                    f"Object {expected_sha256} size {total} != expected {expected_size}",
+                )
+            if actual_hash != expected_sha256:
+                raise SnapshotIntegrityError(
+                    "OBJECT_HASH_MISMATCH",
+                    f"Object {expected_sha256} hash mismatch (actual: {actual_hash})",
+                )
 
-        os.replace(str(tmp_path), str(dest))
+            os.replace(str(tmp_path), str(dest))
+            self._fsync_objects_dir()
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
         ev = VerifiedObjectEvidence.from_path(dest, expected_sha256)
         self._register_evidence(expected_sha256, ev)
         return ObjectPutResult(
@@ -772,6 +831,19 @@ class ManifestStore:
         staging_dir = self._paths.staging
         if staging_dir.exists():
             for entry in list(staging_dir.iterdir()):
+                # ``staging/`` is shared: ManifestStore writes
+                # ``{tx}_{snapshot_id}.json`` here, but every ObjectStore.put_*
+                # also writes its in-flight temp here as ``.{sha}.…``. Today no
+                # caller can interleave the two — every reconcile() caller runs
+                # under the per-session lock that capture also holds — so this
+                # exemption is a contract, not a bug fix: it makes reconcile
+                # safe on its own terms rather than on its callers', and matches
+                # the filter recovery's orphan-staging sweep already applies
+                # (``not entry.name.startswith(".")``). write_staging only ever
+                # produces ``{prefix}{snapshot_id}.json``, so nothing reconcile
+                # is meant to reclaim starts with a dot.
+                if entry.name.startswith("."):
+                    continue
                 if entry.is_file() or entry.is_symlink():
                     removed_staging_ids.append(entry.stem)
                     entry.unlink()

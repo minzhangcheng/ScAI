@@ -7,6 +7,7 @@ tested and reused by both the restore route and sandbox startup recovery.
 import json
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Literal, Optional
@@ -21,6 +22,10 @@ from backend.services.snapshot_v2.runtime_names import (
 logger = logging.getLogger(__name__)
 
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+
+# Staging temp of atomic_replace_pkl / atomic_replace_h5ad: the pid is what
+# tells an abandoned partial apart from a copy that is still in flight.
+_STAGED_TEMP_SUFFIX = re.compile(r"\.(\d+)\.staged$")
 
 RuntimeStatus = Literal["complete", "missing", "state_only", "corrupt"]
 RuntimeRestoreStatus = Literal["complete", "unavailable", "intentionally_kept"]
@@ -192,6 +197,17 @@ def _quarantine_path(path: Path) -> Path | None:
         index += 1
     path.replace(candidate)
     return candidate
+
+
+def quarantine_live_runtime_pkl(session_id: str) -> None:
+    """Move the live dill pkl and its signature aside, leaving h5ads alone.
+
+    The pkl-only half of :func:`quarantine_live_runtime`, for callers that own
+    the h5ad sidecar set separately (rollback drives it through
+    :func:`finalize_live_runtime_h5ad_set`).
+    """
+    for p in (_live_pkl(session_id), _live_sig(session_id)):
+        _quarantine_path(p)
 
 
 def quarantine_live_runtime(session_id: str) -> None:
@@ -377,15 +393,20 @@ def atomic_replace_pkl(session_id: str, src_pkl_path: str) -> str:
     idir.mkdir(parents=True, exist_ok=True)
     live.parent.mkdir(parents=True, exist_ok=True)
 
-    # Atomic copy to live pkl
+    # Atomic copy to live pkl. See atomic_replace_h5ad for why the temp has to
+    # be unlinked by hand when the copy fails.
     tmp = live.with_suffix(live.suffix + f".{os.getpid()}.staged")
-    shutil.copy2(src, tmp)
-    tmp_fd = os.open(tmp, os.O_RDONLY)
     try:
-        os.fsync(tmp_fd)
-    finally:
-        os.close(tmp_fd)
-    os.replace(str(tmp), str(live))
+        shutil.copy2(src, tmp)
+        tmp_fd = os.open(tmp, os.O_RDONLY)
+        try:
+            os.fsync(tmp_fd)
+        finally:
+            os.close(tmp_fd)
+        os.replace(str(tmp), str(live))
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     dir_fd = os.open(str(live.parent), os.O_RDONLY)
     try:
         os.fsync(dir_fd)
@@ -429,15 +450,26 @@ def atomic_replace_h5ad(session_id: str, src_h5ad_path: str, var_name: str = "ad
     states.mkdir(parents=True, exist_ok=True)
     dst = runtime_h5ad_path(states, safe_var_name)
 
-    # Atomic copy
+    # Atomic copy. The temp is named ``<dst>.<pid>.staged``, which no sweeper in
+    # the system can match: both states-dir sweeps glob ``*.h5ad``, GC walks
+    # ``objects/`` only, and the snapshot staging sweeps operate on
+    # ``<session>/staging``. Quota accounting sums ``objects/`` too, so a
+    # dataset-sized partial left here by a failed copy — ENOSPC is the realistic
+    # case, since restore holds the object-store copy, the staged copy and the
+    # live copy at once — is invisible, unreclaimable, and packed verbatim into
+    # every v1 export archive. Unlink it while we still know its name.
     tmp = dst.with_suffix(dst.suffix + f".{os.getpid()}.staged")
-    shutil.copy2(src, tmp)
-    tmp_fd = os.open(tmp, os.O_RDONLY)
     try:
-        os.fsync(tmp_fd)
-    finally:
-        os.close(tmp_fd)
-    os.replace(str(tmp), str(dst))
+        shutil.copy2(src, tmp)
+        tmp_fd = os.open(tmp, os.O_RDONLY)
+        try:
+            os.fsync(tmp_fd)
+        finally:
+            os.close(tmp_fd)
+        os.replace(str(tmp), str(dst))
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     dir_fd = os.open(str(states), os.O_RDONLY)
     try:
         os.fsync(dir_fd)
@@ -446,6 +478,41 @@ def atomic_replace_h5ad(session_id: str, src_h5ad_path: str, var_name: str = "ad
 
     import hashlib
     return hashlib.sha256(dst.read_bytes()).hexdigest()
+
+
+def _reclaim_orphan_staged_temps(states: Path, states_resolved: Path) -> None:
+    """Unlink ``*.<pid>.staged`` partials whose writing process is gone.
+
+    ``atomic_replace_pkl``/``atomic_replace_h5ad`` unlink their own temp when the
+    copy fails, but a process killed mid-copy cannot, and nothing else ever
+    will — the `*.h5ad` sweeps here and in ``quarantine_live_runtime`` cannot
+    match the suffix. A live pid means an in-flight copy, ours or a concurrent
+    process's, and unlinking that would sabotage a running restore, so liveness
+    is what decides rather than the name alone.
+    """
+    for p in states.glob("*.staged"):
+        if not p.is_file():
+            continue
+        match = _STAGED_TEMP_SUFFIX.search(p.name)
+        if match is None:
+            continue
+        try:
+            if p.resolve().parent != states_resolved:
+                continue
+        except OSError:
+            continue
+        try:
+            os.kill(int(match.group(1)), 0)
+        except ProcessLookupError:
+            pass  # writer is gone: the partial can never be completed
+        except OSError:
+            continue  # alive but not signalable by us
+        else:
+            continue  # still running
+        try:
+            p.unlink()
+        except OSError:
+            logger.warning("Could not reclaim orphan staged temp: %s", p)
 
 
 def _quarantine_unreferenced_live_h5ads(
@@ -459,6 +526,8 @@ def _quarantine_unreferenced_live_h5ads(
         states_resolved = states.resolve()
     except OSError:
         states_resolved = states
+
+    _reclaim_orphan_staged_temps(states, states_resolved)
 
     keep_filenames = set()
     for name in keep_names:

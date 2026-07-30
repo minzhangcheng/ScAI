@@ -98,6 +98,19 @@ class SnapshotGarbageCollector:
             manifest = self.manifest_store.load_pending_verified(sid)
             marked.update(manifest.objects.keys())
 
+        # 1c. Collect from audit-bundle manifests.
+        #
+        # `_iter_committed_json_stems` skips `audit-*` so audit bundles are never
+        # offered as restorable snapshots — a *presentation* rule. Reachability is
+        # a different question: `AuditBundle.capture_locked` runs a full capture
+        # (state, notebook, checkpoint, workspace, runtime blobs) and publishes a
+        # real committed manifest. On the `discard_current` restore path no
+        # pre_restore snapshot is taken, so that manifest is the only record of
+        # the state the user discarded. Leaving its objects unmarked let the very
+        # next sweep unlink every one of them, turning the bundle the restore had
+        # just verified into a manifest of dangling refs.
+        marked.update(self._mark_audit_bundles())
+
         # 2. Collect from active transaction journals (verified envelopes)
         journals_dir = Path(str(self.paths.journals))
         store = JournalStore(self.paths)
@@ -129,6 +142,37 @@ class SnapshotGarbageCollector:
                     if _HASH_RE.match(str(h)):
                         marked.add(str(h))
 
+        return marked
+
+    def _mark_audit_bundles(self) -> set[str]:
+        """Return object hashes referenced by committed ``audit-*`` manifests.
+
+        A corrupt or unloadable audit manifest is logged and skipped rather than
+        raising: audit bundles are archival, never restorable, and aborting the
+        whole sweep over one would leave GC — the only reclaimer — permanently
+        stuck, exactly the failure mode the orphan pending-import marker had.
+        """
+        marked: set[str] = set()
+        committed_dir = Path(str(self.paths.committed))
+        if not committed_dir.exists():
+            return marked
+        for entry in sorted(committed_dir.iterdir()):
+            if entry.suffix != ".json" or not entry.is_file():
+                continue
+            if not entry.stem.startswith("audit-"):
+                continue
+            try:
+                manifest = self.manifest_store.load_verified_including_pending(
+                    entry.stem,
+                )
+            except Exception:
+                logger.warning(
+                    "[%s] Unverifiable audit bundle manifest %s; its objects "
+                    "are not protected from sweep",
+                    self.session_id, entry.stem,
+                )
+                continue
+            marked.update(manifest.objects.keys())
         return marked
 
     def _verify_surviving_manifests(self) -> None:

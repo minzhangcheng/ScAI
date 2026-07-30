@@ -125,9 +125,16 @@ def _snapshot_error_status(exc: SnapshotV2Error) -> int:
     The order of checks matters: more specific (subclass) checks must come
     before the generic ``SnapshotV2Error`` fallback.
     """
+    # Not-found is decided by the code, not the producer class. The delete path
+    # signals a missing snapshot with SnapshotStorageError("SNAPSHOT_NOT_FOUND")
+    # (deletion.py), which used to reach the storage branch below and answer 507
+    # Insufficient Storage — telling a client whose only mistake was retrying an
+    # already-successful DELETE that the store is out of space, and paging
+    # operators to investigate a disk-full condition that does not exist. The
+    # docstring above has always promised 404 for this code.
+    if exc.code in ("MANIFEST_NOT_FOUND", "SNAPSHOT_NOT_FOUND"):
+        return 404
     if isinstance(exc, SnapshotIntegrityError):
-        if exc.code in ("MANIFEST_NOT_FOUND", "SNAPSHOT_NOT_FOUND"):
-            return 404
         return 422
     if isinstance(exc, SnapshotCompatibilityError):
         return 422

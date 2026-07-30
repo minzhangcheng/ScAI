@@ -62,9 +62,16 @@ function makeSnapshot(
         { path: 'main.ipynb', object_hash: 'h1', size: 2048, mode: 644, kind: 'file' },
       ],
       objects: { h1: { sha256: 'h1', size: 2048, media_type: 'text' } },
-      runtime_dependencies: {
-        python: { name: 'python', version: '3.11', type: 'interpreter' },
-        additional: { numpy: { name: 'numpy', version: '1.26', type: 'library' } },
+      runtime: {
+        status: 'complete',
+        dependencies: {
+          required: {
+            adata: { name: 'adata', serializer: 'h5ad', type_name: 'AnnData' },
+          },
+          incidental_skips: [],
+        },
+        adata_refs: {},
+        residual_ref: null,
       },
       ...(manifestOverrides || {}),
     },
@@ -101,10 +108,17 @@ const lineage = {
           h1: { sha256: 'h1', size: 2048, media_type: 'text' },
           h2: { sha256: 'h2', size: 4096, media_type: 'text' },
         },
-        runtime_dependencies: {
-          python: { name: 'python', version: '3.11', type: 'interpreter' },
-          additional: { numpy: { name: 'numpy', version: '1.26', type: 'library' } },
+        runtime: {
+        status: 'complete',
+        dependencies: {
+          required: {
+            adata: { name: 'adata', serializer: 'h5ad', type_name: 'AnnData' },
+          },
+          incidental_skips: [],
         },
+        adata_refs: {},
+        residual_ref: null,
+      },
       },
     }),
     makeSnapshot('snap-child', {
@@ -128,10 +142,17 @@ const lineage = {
           { path: 'main.ipynb', object_hash: 'h3', size: 4096, mode: 644, kind: 'file' },
         ],
         objects: { h3: { sha256: 'h3', size: 4096, media_type: 'text' } },
-        runtime_dependencies: {
-          python: { name: 'python', version: '3.11', type: 'interpreter' },
-          additional: { numpy: { name: 'numpy', version: '1.26', type: 'library' } },
+        runtime: {
+        status: 'complete',
+        dependencies: {
+          required: {
+            adata: { name: 'adata', serializer: 'h5ad', type_name: 'AnnData' },
+          },
+          incidental_skips: [],
         },
+        adata_refs: {},
+        residual_ref: null,
+      },
       },
     }),
   ],

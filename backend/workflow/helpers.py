@@ -1,6 +1,7 @@
 """Pure helper functions for the workflow — no side effects, no class dependencies."""
 import ast
 import asyncio
+import inspect
 import logging
 import random
 from typing import Dict, List, Optional, Union
@@ -57,11 +58,16 @@ async def safe_pi_brief(make_awaitable, session_id: str, label: str) -> Optional
         return None
 
 
+HITL_SAFE_POINT_POLL_SECONDS = 1.0
+
+
 async def wait_with_skip_time(
     event: asyncio.Event,
     wait_seconds: int,
     session_id: str,
     gate_name: str,
+    *,
+    safe_point_hook=None,
 ) -> bool:
     """Unified HITL wait gate honoring user-configured `round_wait_seconds`.
 
@@ -71,6 +77,24 @@ async def wait_with_skip_time(
       >0  countdown → wait `wait_seconds + 60` seconds (60s buffer for client lag),
                      then return as timed out
 
+    *safe_point_hook* is an optional zero-argument callable (normally the
+    workflow's ``await_restore_safe_point``) invoked periodically while the gate
+    is blocked. Every HITL gate in this system blocks *inside* a graph node, so
+    the run task stays in flight and the graph never reaches another node entry
+    — which is the only place the cooperative snapshot safe point is otherwise
+    acknowledged. Without this hook a Snapshot V2 restore requested while the
+    user is sitting at a gate had no acknowledger at all: the quiescent
+    coordinator declines because the run task is live, and the graph is parked
+    in ``event.wait()``. The restore waited out its full timeout and failed,
+    while its pending request made every other snapshot operation on the session
+    answer SAFE_POINT_BUSY — and the gate the user was sitting at is exactly the
+    moment they reach for a restore.
+
+    The hook returns immediately when nothing is pending, so the poll is cheap.
+    Time spent frozen inside it does not consume the countdown: the deadline is
+    pushed out by the frozen duration so a restore hold cannot silently trip the
+    auto-skip the moment the user regains control.
+
     Returns:
         True  if the event was signaled (user responded)
         False if timed out / no-wait → caller should apply its default auto-skip action
@@ -78,18 +102,53 @@ async def wait_with_skip_time(
     if wait_seconds == 0:
         logger.info(f"[{session_id}] {gate_name}: skip time = 0, auto-skipping")
         return False
+
+    if not callable(safe_point_hook):
+        if wait_seconds == -1:
+            logger.info(f"[{session_id}] {gate_name}: manual mode, waiting indefinitely")
+            await event.wait()
+            return True
+        timeout = wait_seconds + 60
+        logger.info(f"[{session_id}] {gate_name}: waiting up to {timeout}s (skip time {wait_seconds}s + 60s buffer)")
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(f"[{session_id}] {gate_name}: timed out after {timeout}s, auto-skipping")
+            return False
+
+    loop = asyncio.get_running_loop()
     if wait_seconds == -1:
         logger.info(f"[{session_id}] {gate_name}: manual mode, waiting indefinitely")
-        await event.wait()
-        return True
-    timeout = wait_seconds + 60
-    logger.info(f"[{session_id}] {gate_name}: waiting up to {timeout}s (skip time {wait_seconds}s + 60s buffer)")
-    try:
-        await asyncio.wait_for(event.wait(), timeout=timeout)
-        return True
-    except asyncio.TimeoutError:
-        logger.warning(f"[{session_id}] {gate_name}: timed out after {timeout}s, auto-skipping")
-        return False
+        deadline = None
+        timeout = None
+    else:
+        timeout = wait_seconds + 60
+        logger.info(f"[{session_id}] {gate_name}: waiting up to {timeout}s (skip time {wait_seconds}s + 60s buffer)")
+        deadline = loop.time() + timeout
+
+    while True:
+        if event.is_set():
+            return True
+        slice_seconds = HITL_SAFE_POINT_POLL_SECONDS
+        if deadline is not None:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                logger.warning(f"[{session_id}] {gate_name}: timed out after {timeout}s, auto-skipping")
+                return False
+            slice_seconds = min(slice_seconds, remaining)
+        try:
+            await asyncio.wait_for(event.wait(), timeout=slice_seconds)
+            return True
+        except asyncio.TimeoutError:
+            pass
+        frozen_from = loop.time()
+        result = safe_point_hook()
+        if inspect.isawaitable(result):
+            await result
+        frozen_for = loop.time() - frozen_from
+        if deadline is not None and frozen_for > HITL_SAFE_POINT_POLL_SECONDS:
+            deadline += frozen_for
 
 
 def _retry_backoff_delay(attempt: int) -> float:

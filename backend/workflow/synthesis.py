@@ -867,6 +867,7 @@ class SynthesisMixin:
             else:
                 signaled = await wait_with_skip_time(
                     self._continue_event, wait_seconds, self.session_id, "integration_gate",
+                    safe_point_hook=getattr(self, "await_restore_safe_point", None),
                 )
                 if not signaled:
                     analysis_state.user_chosen_direction = PI_DECIDE_SIGNAL
@@ -936,6 +937,7 @@ class SynthesisMixin:
                     wait_seconds,
                     self.session_id,
                     GATE_DIRECTION_SELECTION if is_direction_gate else GATE_ROUND_WAIT,
+                    safe_point_hook=getattr(self, "await_restore_safe_point", None),
                 )
                 if not signaled:
                     # Auto-skip on timeout

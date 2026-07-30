@@ -142,6 +142,7 @@ class KernelMixin:
         # A freshly started+initialized kernel is alive regardless of any prior
         # dead state; reset before the best-effort restore below.
         self._kernel_dead = False
+        self.kernel_epoch = getattr(self, "kernel_epoch", 0) + 1
 
         # Try to restore previous session
         await self._restore_session()
@@ -667,8 +668,13 @@ print(f"I/O sandbox active: writes restricted to session directory")
                 self._kernel_dead = True
                 return
 
-            # Kernel is healthy again.
+            # Kernel is healthy again — and it is a NEW namespace. Anything
+            # mid-flight across several cells (a snapshot runtime capture)
+            # must not keep going as if nothing happened: the restart
+            # rehydrates from the last saved pkl, i.e. an older generation
+            # than the one it already partially serialized.
             self._kernel_dead = False
+            self.kernel_epoch = getattr(self, "kernel_epoch", 0) + 1
 
             # Restore is best-effort: a corrupt dump must not brick a live kernel.
             try:

@@ -39,6 +39,7 @@ from backend.services.snapshot_v2.models import (
     SnapshotManifestV2,
     SnapshotRecordV2,
     SnapshotRestoreRequest,
+    empty_complete_runtime,
 )
 from backend.services.snapshot_v2.object_store import ManifestStore, ObjectStore
 from backend.services.snapshot_v2.paths import SnapshotV2Paths
@@ -158,15 +159,25 @@ class PreRestoreCapture:
         sandbox = context.sandbox
         if self._can_reuse_runtime(context):
             prev = context.prev_manifest
+            # Reuse is scoped to exactly what the revision gate proves: the
+            # kernel. It says nothing about the analysis state, notebook,
+            # checkpoint or round, and a session advances a round without ever
+            # dirtying the kernel (the plan-review gate of round N+1, whose
+            # lineage head is still round N's capture). Aliasing those four
+            # fields to the lineage head made the pre_restore snapshot
+            # re-declare the head instead of freezing the live session: a
+            # rollback silently discarded every change since that head, and
+            # once the rounds diverged the manifest contradicted the capsule
+            # this method froze from the live state — apply() installs the
+            # head's session.json, activate() writes the capsule's live round
+            # back over it, live_verify reports "current_round mismatch" and the
+            # transaction is refused as LIVE_VERIFY_FAILED with the session
+            # recovery-blocked. This is the one snapshot a user reaches for to
+            # undo a restore, so it must serialize the state it claims to
+            # freeze. Re-serializing is close to free: the object store is
+            # content-addressed, so an unchanged object dedups to the same hash
+            # and adds no physical bytes.
             req.runtime = prev.runtime
-            req.analysis_state_ref = prev.analysis_state_ref
-            req.notebook_ref = prev.notebook_ref
-            req.checkpoint_ref = prev.checkpoint_ref
-            # The reused analysis_state_ref is prev serialized state, so the
-            # round must follow that state and not the live one: the revision
-            # check only proves the kernel is unchanged, and a session can
-            # advance a round without ever dirtying it.
-            req.round_number = prev.round_number
             sandbox = None  # skip kernel introspection
             logger.info(
                 "[%s] Reusing runtime for pre_restore capture",
@@ -289,6 +300,37 @@ class AuditBundle:
     def __init__(self, service: SnapshotService) -> None:
         self._service = service
 
+    async def _capture(
+        self,
+        req: SnapshotCaptureRequest,
+        context: RestoreCaptureContext,
+        *,
+        sandbox: Any,
+        snapshot_id_override: str,
+    ) -> SnapshotRecordV2:
+        """Lock-held capture only — never reacquires the session lock."""
+        capture = getattr(self._service, "_capture_locked_for_restore", None)
+        if capture is not None:
+            return await capture(
+                req,
+                sandbox=sandbox,
+                workspace_root=context.workspace_root,
+                workflow_state=context.workflow_state or {},
+                analysis_state=context.analysis_state,
+                snapshot_id_override=snapshot_id_override,
+            )
+        # Fallback: lock-held capture without session persistence (restore owns save).
+        return await self._service._capture_locked(
+            req,
+            sandbox=sandbox,
+            workspace_root=context.workspace_root,
+            workflow_state=context.workflow_state or {},
+            analysis_state=context.analysis_state,
+            snapshot_id_override=snapshot_id_override,
+            skip_safe_point_lifecycle=True,
+            persist_session=False,
+        )
+
     async def capture_locked(
         self,
         context: RestoreCaptureContext,
@@ -312,26 +354,39 @@ class AuditBundle:
             capsule=capsule,
         )
 
-        capture = getattr(self._service, "_capture_locked_for_restore", None)
-        if capture is not None:
-            record = await capture(
-                req,
-                sandbox=context.sandbox,
-                workspace_root=context.workspace_root,
-                workflow_state=context.workflow_state or {},
-                analysis_state=context.analysis_state,
-                snapshot_id_override=audit_id,
-            )
-        else:
-            record = await self._service._capture_locked(
-                req,
-                sandbox=context.sandbox,
-                workspace_root=context.workspace_root,
-                workflow_state=context.workflow_state or {},
-                analysis_state=context.analysis_state,
-                snapshot_id_override=audit_id,
-                skip_safe_point_lifecycle=True,
-                persist_session=False,
+        record = await self._capture(
+            req, context, sandbox=context.sandbox, snapshot_id_override=audit_id,
+        )
+
+        runtime_failure: SnapshotFailureRecord | None = None
+        if record.failure is not None:
+            # This bundle is the exit from a failed pre_restore, and the
+            # dominant reason a pre_restore fails is that the live kernel cannot
+            # be serialized. Handing the same sandbox to the same capture entry
+            # point re-runs the identical introspection against the identical
+            # kernel and fails identically, so discard_current — the one way
+            # forward PRE_RESTORE_UNAVAILABLE steers the client into — returned
+            # AUDIT_FAILED, a code the panel offers no action for. Retry and
+            # discard both looped back into the same failure and no API path
+            # could complete the restore.
+            #
+            # The kernel is captured opportunistically, never as a precondition:
+            # discard_current is by definition a request to throw it away
+            # (runtime_choice="keep" is rejected alongside it), and the bundle's
+            # contract is the state, workspace and notebook plus structured
+            # failure information. So keep the live attempt — while it succeeds
+            # it is the only record of the discarded kernel — and fall back to a
+            # runtime-free archival capture when it does not. sandbox=None alone
+            # would not do it: with no runtime on the request the capture falls
+            # to the empty-runtime eligibility gate, which refuses
+            # reason="audit_bundle", trading AUDIT_CAPTURE_FAILED for
+            # LIVE_SANDBOX_REQUIRED. Failures that do not originate in the
+            # kernel (quota, workspace, analysis state) recur on the retry and
+            # still raise — the bundle is never published on a guess.
+            runtime_failure = record.failure
+            req.runtime = empty_complete_runtime()
+            record = await self._capture(
+                req, context, sandbox=None, snapshot_id_override=audit_id,
             )
 
         if record.failure is not None:
@@ -340,6 +395,21 @@ class AuditBundle:
                 f"Audit bundle capture failed: {record.failure.message}",
                 details={"capture_failure": record.failure.model_dump(mode="json")},
             )
+
+        if runtime_failure is not None:
+            # A bundle that is the only record of the discarded state must say
+            # what it does not contain, and why.
+            failures = [
+                *failures,
+                {
+                    "code": "AUDIT_RUNTIME_NOT_CAPTURED",
+                    "message": (
+                        "Runtime was not captured into the audit bundle: "
+                        f"{runtime_failure.message}"
+                    ),
+                    "cause": runtime_failure.code,
+                },
+            ]
 
         failure_record = SnapshotFailureRecord(
             snapshot_id=audit_id,

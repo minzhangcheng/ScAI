@@ -21,6 +21,7 @@ export function useWebSocket() {
   const connectingRef = useRef<boolean>(false)  // Prevent multiple simultaneous connect attempts
   const reconnectCountRef = useRef<number>(0)  // Track reconnection attempts for history recovery
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const restoreCommitRefreshedRef = useRef<string | null>(null)  // Transaction whose commit already triggered a /load refetch
   const [connected, setConnected] = useState(false)
 
   const connect = useCallback(() => {
@@ -199,8 +200,13 @@ export function useWebSocket() {
                 .catch(reloadErr => console.error('WebSocket: Failed to reload session state:', reloadErr))
             }
           } else {
-            // Update state version and session status
-            useAppStore.getState().setStateVersion(syncContent.version)
+            // Update state version and session status. Producers that omit
+            // `version` (the restore-job transaction sync) must not reset the
+            // tracked version to undefined — that would disable the
+            // conflict-reload branch above for every later message.
+            if (typeof syncContent.version === 'number') {
+              useAppStore.getState().setStateVersion(syncContent.version)
+            }
 
             // Handle LLM failure state (single source of truth — state_sync only)
             if (syncContent.change_type === 'llm_failure' && syncContent.llm_failure_info) {
@@ -260,10 +266,41 @@ export function useWebSocket() {
                 const store = useAppStore.getState()
                 store.setSnapshotTransaction(info)
 
-                // Terminal committed events may trigger reconnect if backend directs
-                if (info.status === 'committed' && info.reconnect === true) {
-                  const { wsConnect: connectWs } = useAppStore.getState()
-                  if (connectWs) setTimeout(() => connectWs(), 100)
+                // A committed restore has already rewritten session.json, the
+                // notebook, the workspace and the graph checkpoint on the
+                // server, and this sync deliberately carries no `status` /
+                // `current_round` / `version`, so the partial-update block below
+                // writes nothing. The refresh used to be gated on
+                // `info.reconnect`, a field no producer emits —
+                // SnapshotTransactionRecord has no such key — so whenever the
+                // Snapshot panel was unmounted at commit time (page reloaded
+                // mid-restore: the panel only auto-reopens for a *retry*
+                // transaction) the client kept rendering pre-restore state and
+                // dispatched the user's next action against a server that had
+                // moved. Refetch rather than reconnect: it is idempotent and
+                // does not tear down a live socket. Guarded per transaction id
+                // because `_resend_wait_input_state_sync` replays the stored
+                // transaction on every reconnect.
+                const activeSessionId = store.currentSession?.id
+                if (
+                  info.status === 'committed'
+                  && activeSessionId
+                  && info.session_id === activeSessionId
+                  && restoreCommitRefreshedRef.current !== info.transaction_id
+                ) {
+                  restoreCommitRefreshedRef.current = info.transaction_id
+                  fetch(`${API_BASE}/session/${activeSessionId}/load`, { headers: authHeaders() })
+                    .then(resp => resp.ok ? resp.json() : null)
+                    .then(reloadData => {
+                      if (!reloadData) return
+                      if (useAppStore.getState().currentSession?.id !== activeSessionId) return
+                      const { sessionUpdates, storeUpdates } = transformLoadResponse(reloadData)
+                      useAppStore.getState().updateSession(sessionUpdates)
+                      applyStoreUpdates(storeUpdates)
+                    })
+                    .catch(reloadErr => console.error(
+                      'WebSocket: Failed to reload session state after restore commit:', reloadErr,
+                    ))
                 }
               }
             } else if (syncContent.change_type === 'snapshot_failure') {
@@ -286,11 +323,22 @@ export function useWebSocket() {
               useAppStore.getState().clearSpeciesInputState()
             }
 
-            useAppStore.getState().updateSession({
-              status: syncContent.status,
-              currentRound: syncContent.current_round,
-              ...(syncContent.analysis_phase ? { analysisPhase: syncContent.analysis_phase } : {}),
-            })
+            // Only write fields the message actually carries. `updateSession`
+            // spreads this object over the session, so a key present with value
+            // `undefined` erases the real value rather than being ignored — and
+            // not every state_sync producer sends the full shape. The restore
+            // job's `snapshot_transaction` sync in particular sends only
+            // `change_type` + `snapshot_transaction`, so every progress event
+            // during a restore used to blank `status` and `currentRound`,
+            // leaving the Analysis Control header with no matching branch and
+            // therefore no buttons at all until a manual page reload.
+            const sessionUpdate: Record<string, unknown> = {}
+            if (syncContent.status !== undefined) sessionUpdate.status = syncContent.status
+            if (syncContent.current_round !== undefined) sessionUpdate.currentRound = syncContent.current_round
+            if (syncContent.analysis_phase) sessionUpdate.analysisPhase = syncContent.analysis_phase
+            if (Object.keys(sessionUpdate).length > 0) {
+              useAppStore.getState().updateSession(sessionUpdate)
+            }
           }
           return  // Don't add state_sync to message stream
         }

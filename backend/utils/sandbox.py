@@ -132,6 +132,11 @@ class LocalJupyterSandbox(
         self._session_restore_failed = False  # Track if session restore failed
         self._kernel_dead = False  # Set when kernel restart fails
         self._restarting = False  # reentrancy guard for _restart_kernel
+        # Monotonic generation of the live kernel namespace. Bumped by every
+        # start and restart, so a multi-cell operation (snapshot runtime
+        # capture in particular) can assert that all of its cells ran against
+        # one namespace instead of silently mixing generations.
+        self.kernel_epoch = 0
         self._pending_save_tasks: set = set()
         # Snapshot V2 runtime dependency tracking (created/loaded user globals).
         self._known_user_globals: set[str] = set()
@@ -272,6 +277,20 @@ try:
                 raise RuntimeError(
                     f"h5ad sidecar path must be exactly {{_expected_filename!r}}, got {{_raw_path!r}}"
                 )
+            # The live pkl wins whenever it provides the name. The sidecar set
+            # is written only by snapshot restore / recovery and is never
+            # retired: save_session() dumps every live AnnData into the pkl but
+            # leaves runtime_h5ad_manifest.json frozen at the restored
+            # snapshot's content, hashes and all. Overwriting unconditionally
+            # therefore rolled the namespace back to the restored snapshot on
+            # every later rehydrate (kernel OOM, session reopen), silently
+            # discarding every cell run since the restore -- and the sidecar
+            # hash still matched, so nothing flagged it. A restore's own pkl
+            # never carries the h5ad names (RuntimeCapture routes AnnData to
+            # h5ad and everything else to the dill residual), so the sidecar is
+            # still authoritative for the rehydrate that immediately follows it.
+            if _name in _restored_names:
+                continue
             # Never join raw manifest path; only the validated basename.
             _path = (_states_root / _expected_filename).resolve()
             if _path.parent != _states_root:
@@ -283,8 +302,7 @@ try:
             if _actual != _expected:
                 raise RuntimeError(f"h5ad sidecar hash mismatch for {{_name}}")
             globals()[_name] = _runtime_read_h5ad(_path)
-            if _name not in _restored_names:
-                _restored_names.append(_name)
+            _restored_names.append(_name)
 
     print(f"Session restored: {{len(_restored_names)}} variables")
     print(f"Restored: {{_restored_names}}")

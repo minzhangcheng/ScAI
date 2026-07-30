@@ -29,6 +29,7 @@ from backend.services.snapshot_v2.runtime_names import (
     validate_runtime_global_name,
 )
 from backend.services.snapshot_v2.runtime_registry import (
+    CANONICAL_RUNTIME_ARTIFACTS,
     build_required_runtime_manifest,
     is_known_unpersistable_residual,
 )
@@ -66,7 +67,46 @@ class RuntimeCapture:
         *,
         exec_lock_held: bool = False,
     ):
-        """Execute trusted capture code; use unlocked path when lock already held."""
+        """Execute trusted capture code; use unlocked path when lock already held.
+
+        Asserts that the kernel namespace did not change generation underneath
+        the capture. `_execute_unlocked`'s pre-execute liveness guard restarts a
+        dead kernel and then runs the caller's code on the *new* one, which
+        `_restart_kernel` has rehydrated from the last saved pkl — an older
+        generation than the one this capture already partially serialized. With
+        no re-check, a kernel reaped between two capture cells produced a
+        manifest whose variables never coexisted, and every object hash in it is
+        internally consistent so nothing downstream could detect it.
+        """
+        epoch_before = getattr(sandbox, "kernel_epoch", None)
+        result = await self._run_kernel_unchecked(
+            sandbox, code, exec_lock_held=exec_lock_held,
+        )
+        epoch_after = getattr(sandbox, "kernel_epoch", None)
+        if (
+            epoch_before is not None
+            and epoch_after is not None
+            and epoch_after != epoch_before
+        ):
+            raise SnapshotCaptureError(
+                "required_runtime_unpersistable",
+                "The kernel restarted during runtime capture; the namespace is "
+                "a different generation from the one already serialized",
+                details={
+                    "kernel_epoch_before": epoch_before,
+                    "kernel_epoch_after": epoch_after,
+                },
+            )
+        return result
+
+    async def _run_kernel_unchecked(
+        self,
+        sandbox,
+        code: str,
+        *,
+        exec_lock_held: bool = False,
+    ):
+        """Raw execution without the kernel-generation assertion."""
         if exec_lock_held:
             unlocked = getattr(sandbox, "_execute_unlocked", None)
             if unlocked is not None and callable(unlocked):
@@ -415,6 +455,18 @@ class RuntimeCapture:
                         )
                     )
                     pruned_required.pop(var_name, None)
+                    # The value IS live in kernel globals — this drop discards
+                    # real state, which is exactly what `dropped_present` marks
+                    # (see its comment above). Recording it only here, and not
+                    # for the absent-name soft skip, keeps the deliberate
+                    # "dropping an absent name loses nothing" behaviour while
+                    # letting the post-pruning guard below see that a live value
+                    # was dropped. Without it, a session whose only tracked
+                    # globals were unpersistable handles published a live-kernel
+                    # runtime marked "complete" with zero content — the state
+                    # the invariant at the top of this method declares valid
+                    # only when kernel_present is False.
+                    dropped_present.add(var_name)
                     continue
                 present_dill_names.append(var_name)
 
@@ -450,11 +502,25 @@ class RuntimeCapture:
                     not_accounted = set(residual_names) - set(saved) - set(dill_skipped)
                     required_skipped |= not_accounted
 
+                # A canonical artifact that is LIVE in kernel globals and that
+                # dill unexpectedly failed on is not the case soft-skip exists
+                # for. Soft-skip's rationale — "the user already deleted it, so
+                # dropping it loses nothing" — applies to absent names, and the
+                # pre-skip above already covers types that are inherently
+                # unpersistable. What is left here is real state that was there
+                # and did not survive: dropping it silently published a runtime
+                # marked "complete" that the restored kernel then hits as a
+                # NameError. `checkpoint_dependencies` was meant to carry this
+                # tier, but nothing in production writes it.
+                strict_names = mandatory_names | {
+                    n for n in required_skipped
+                    if n in globals_meta and n in CANONICAL_RUNTIME_ARTIFACTS
+                }
                 advisory_skipped = {
-                    n for n in required_skipped if n not in mandatory_names
+                    n for n in required_skipped if n not in strict_names
                 }
                 mandatory_skipped = {
-                    n for n in required_skipped if n in mandatory_names
+                    n for n in required_skipped if n in strict_names
                 }
                 for n in sorted(advisory_skipped):
                     type_str = type_by_name.get(n, "unknown")

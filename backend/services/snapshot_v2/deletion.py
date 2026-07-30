@@ -456,24 +456,21 @@ class DeletionService:
         """Delete manifests that were imported but never made visible.
 
         These manifests exist in ``committed/`` with ``.pending-import-*``
-        markers but were never confirmed by a batch record.  Reads the
-        committed JSON directly (bypassing :meth:`ManifestStore.load` which
-        would work for valid manifests, but we need to handle the case
-        where signatures are missing or the batch was never published).
+        markers but were never confirmed by a batch record.  Removal is
+        authorized by the marker alone, so a missing or unreadable manifest
+        never blocks the rollback.
 
-        Only removes objects that are **not** referenced by any surviving
-        visible manifest.
+        Object reclamation is delegated to the shared GC (as ``_delete_impl``
+        already does) rather than derived here: see the sweep below.
         """
-        # Snapshot the visible manifest set once. verify_all_committed()
-        # excludes pending-import manifests, and this method only removes
-        # pending-import manifests (never visible ones), so the visible set is
-        # invariant across the deletion — reuse it for both surviving-objects
-        # and surviving-ids instead of re-verifying every manifest twice.
-        surviving_manifests = self.manifest_store.verify_all_committed()
-        surviving_objects: set[str] = set()
-        for manifest in surviving_manifests:
-            surviving_objects.update(manifest.objects.keys())
-
+        # Nothing is verified up front. This method used to open with
+        # `verify_all_committed()`, which walks every *visible* manifest and
+        # raises on the first corrupt one — and the dominant way to reach this
+        # rollback is `IMPORT_RECONCILE_CORRUPT`, raised by `reconcile()` over
+        # exactly that same set. So on its main caller the rollback was
+        # guaranteed to abort before touching a single file, over a manifest
+        # that has nothing to do with the import being rolled back. The delete
+        # set is authorized by markers, not by the health of the visible store.
         freed_bytes = 0
         deleted_ids: list[str] = []
 
@@ -490,29 +487,8 @@ class DeletionService:
             if not marker_path.exists():
                 continue
 
-            committed_path = Path(str(self.paths.committed)) / f"{sid}.json"
-            manifest = None
-            if committed_path.exists():
-                try:
-                    manifest = SnapshotManifestV2.model_validate_json(
-                        committed_path.read_bytes(),
-                    )
-                except Exception:
-                    # Unreadable pending manifest: drop it and let the sweep
-                    # reclaim its objects. Leaving it in place would keep the
-                    # marker alive and block GC (see below).
-                    manifest = None
-
-            if manifest is not None:
-                # Remove only objects unique to this pending manifest
-                for sha256 in manifest.objects.keys():
-                    if sha256 not in surviving_objects:
-                        obj_path = Path(str(self.paths.objects)) / sha256
-                        if obj_path.exists():
-                            freed_bytes += obj_path.stat().st_size
-                            obj_path.unlink()
-
             # Remove committed JSON
+            committed_path = Path(str(self.paths.committed)) / f"{sid}.json"
             committed_path.unlink(missing_ok=True)
 
             # Remove signature
@@ -529,7 +505,35 @@ class DeletionService:
 
             deleted_ids.append(sid)
 
-        surviving_ids = [m.snapshot_id for m in surviving_manifests]
+        # Reclaim through the one authority on reachability. The hand-rolled
+        # predicate this replaces protected only what `verify_all_committed()`
+        # returns, which by construction excludes `audit-*` bundles, the other
+        # pending-import manifests, and journal-declared object hashes — all
+        # three of which `SnapshotGarbageCollector.mark()` treats as roots. Since
+        # objects are content addressed, a pending manifest routinely declares a
+        # hash the destination already held (`_assert_manifest_write_proofs`
+        # tolerates exactly that), so the sweep unlinked live objects out from
+        # under the audit bundle a discard_current restore had just written and
+        # out from under in-flight transactions. Running the same GC
+        # `_delete_impl` runs makes the two delete paths agree by construction.
+        #
+        # It is deliberately best-effort: the manifests and markers are already
+        # gone, so a GC that aborts (a corrupt visible manifest, an unreadable
+        # journal) must not turn a completed rollback into a raised one — the
+        # caller is an exception handler and the next GC reclaims anyway.
+        if deleted_ids:
+            try:
+                freed_bytes = self.gc.run().removed_bytes
+            except Exception:
+                logger.exception(
+                    "[%s] pending-import rollback removed %s but could not "
+                    "reclaim their objects; leaving them for the next GC",
+                    self.session_id, deleted_ids,
+                )
+
+        # Visible stems, not verified manifests: reporting what survives must
+        # not depend on every one of them verifying (see the note above).
+        surviving_ids = self.manifest_store._iter_committed_json_stems()
 
         return DeleteResult(
             deleted_ids=deleted_ids,

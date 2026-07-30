@@ -294,6 +294,24 @@ async def _recover_snapshot_v2_on_load(
                 "Session %s: recovery failure — mutations blocked (%d failed transactions)",
                 session_id, len(result.failed_transactions),
             )
+        if result.session_state_rewritten:
+            # Recovery rewrote session.json from the pre_restore snapshot (or
+            # forward-completed the target), but it never touches the in-memory
+            # cache — which still holds the AnalysisState the interrupted
+            # restore installed via `_persist_restored_state`. Left in place,
+            # `ensure_session_loaded` returns that object, clears its recovery
+            # block and persists it, writing the *target* state back over the
+            # file the rollback just restored: the rollback is silently
+            # half-undone and the session is unblocked while its state, files,
+            # notebook and checkpoint no longer agree. Evict so the next read
+            # comes from the disk copy recovery just wrote.
+            async with state_lock:
+                sessions.pop(session_id, None)
+                session_access_times.pop(session_id, None)
+            logger.info(
+                "Session %s: evicted cached state after recovery rewrote "
+                "session.json", session_id,
+            )
         gc_result = result.gc_result
         if result.recovered:
             logger.info(
@@ -436,7 +454,17 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
     elif recovery_blocked:
         mark_recovery_blocked(session_id, state, recovery_failure)
         await _persist_recovery_marker(session_id, state)
-    elif clear_recovery_blocked(session_id, state):
+    elif recovery_evaluated and clear_recovery_blocked(session_id, state):
+        # Same guard as the cached and not-found branches above. Omitting it
+        # here read as "recovery reported nothing wrong", but a deferred pass
+        # reports nothing at all: the lock-first endpoints (/resume, /pause,
+        # /stop, prompts) hold the session lock before they load, so
+        # _snapshot_transaction_in_flight always defers for them — and once the
+        # session has been evicted, this is the branch they land on. Clearing
+        # here discarded the process-wide marker and the persisted flag, and
+        # assert_recovery_clear then waved through a session whose restore_apply
+        # journal is still APPLYING. A block left standing costs one lock-free
+        # load (any status poll) to clear once recovery really has run.
         await _persist_recovery_marker(session_id, state)
 
     # Reconcile AnalysisState.snapshots from verified V2 manifests
@@ -446,7 +474,11 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
             from backend.services.snapshot_v2.paths import SnapshotV2Paths
             from backend.services.snapshot_v2.service import SnapshotService
             svc = SnapshotService(session_id, SnapshotV2Paths.for_session(session_id))
-            state.snapshots = svc.rebuild_snapshots_from_manifests()
+            # Pass the loaded listing as the baseline: the reconcile is
+            # authoritative for V2 projections only, and the state is not in the
+            # cache yet, so it is the sole place the pre-cutover V1 records
+            # (which have no manifest by construction) can be read from.
+            state.snapshots = svc.rebuild_snapshots_from_manifests(state.snapshots)
         except Exception:
             logger.debug(
                 "Session %s: snapshot listing reconcile skipped",

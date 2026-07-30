@@ -261,6 +261,17 @@ class InitializeMixin:
 
         # Carry forward the graph-node resume target from the initial workflow
         # state so the routing decision survives the initialize_round node.
+        #
+        # Note: `_restore_resume_node` is not a declared `WorkflowState` channel,
+        # so LangGraph drops it from both the invoke input and every node write.
+        # It reaches a router only through the node→branch passthrough within the
+        # same step, which is why the graph-node jump is actually performed by
+        # `_route_from_restore_entry` reading `_restore_entry_plan` off
+        # `restore_entry`'s own return. This re-emit and the branch it feeds in
+        # `_should_continue_after_init` are therefore inert; they are kept
+        # because making them live would require declaring the channel, and a
+        # declared one-shot target must then also be consumed here or every
+        # later round would re-route to it.
         restore_node = state.get("_restore_resume_node")
         if restore_node is not None:
             result["_restore_resume_node"] = restore_node

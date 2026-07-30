@@ -21,8 +21,13 @@ from pathlib import Path
 from typing import Any
 
 from backend.services.snapshot_v2.errors import SnapshotV2Error
-from backend.services.snapshot_v2.object_store import ManifestStore, ObjectStore
+from backend.services.snapshot_v2.object_store import (
+    ManifestStore,
+    ObjectStore,
+    canonical_json,
+)
 from backend.services.snapshot_v2.models import (
+    RuntimeManifest,
     SnapshotManifestV2,
 )
 
@@ -52,7 +57,11 @@ def _write_export_protection(
     session_id: str,
     protected_ids: list[str],
 ) -> None:
-    from backend.services.snapshot_v2.journal_store import JournalStore, make_envelope
+    from backend.services.snapshot_v2.journal_store import (
+        JOURNAL_OWNER_ID,
+        JournalStore,
+        make_envelope,
+    )
 
     tx_id = f"export-{export_id}"
     env = make_envelope(
@@ -64,6 +73,17 @@ def _write_export_protection(
             "export_id": export_id,
             "protected_snapshot_ids": list(protected_ids),
             "created_at": _now_iso(),
+            # Stamp the writing process, as the import journal does. The only
+            # remover of this journal is the `finally` in `export()`, in this
+            # same process: a crash during the archive build (minutes, tens of
+            # GB) leaves an ACTIVE journal that recovery deliberately keeps,
+            # and every snapshot it names is then undeletable — and its bytes
+            # unreclaimable — for the life of the session. An export runs in a
+            # worker thread while recovery runs on the event loop, so "is this
+            # crash debris?" cannot be answered by status or age; only the
+            # owner can answer it, and a journal from a dead process provably
+            # has no live export handle.
+            "owner": JOURNAL_OWNER_ID,
         },
     )
     JournalStore(paths).write(env)
@@ -208,6 +228,39 @@ def _classify_manifest_and_collect(
     return base_hashes, runtime_only
 
 
+def _without_omitted_runtime(
+    manifest: SnapshotManifestV2, included_hashes: set[str],
+) -> SnapshotManifestV2:
+    """Return *manifest* describing only the objects actually being packed.
+
+    A no-op when every hash it names is included (the include_runtime=True
+    case). Otherwise the runtime block is downgraded to ``status="missing"``
+    with no refs, and the omitted hashes are dropped from ``objects`` — the
+    same shape the importer's own runtime downgrade produces, so an
+    export→import→export round trip is stable. Hashes shared with a base
+    artifact (dedup) are kept, because those files *are* in the archive.
+    """
+    omitted = {h for h in manifest.objects if h not in included_hashes}
+    if not omitted:
+        return manifest
+    emitted = manifest.model_copy(deep=True)
+    for h in omitted:
+        emitted.objects.pop(h, None)
+    rt = emitted.runtime
+    emitted.runtime = RuntimeManifest(
+        status="missing",
+        dependencies=rt.dependencies,
+        residual_ref=None,
+        captured_residual_names=[],
+        adata_refs={},
+    )
+    # The importer re-derives root_hash from the manifest body and refuses a
+    # mismatch (MANIFEST_ROOT_HASH_MISMATCH), so a rewritten body needs a
+    # rewritten hash. canonical_json excludes root_hash itself.
+    emitted.root_hash = hashlib.sha256(canonical_json(emitted)).hexdigest()
+    return emitted
+
+
 # ── SnapshotExporter ────────────────────────────────────────────────────
 
 
@@ -235,6 +288,7 @@ class SnapshotExporter:
         *,
         include_runtime: bool = True,
         snapshot_ids: list[str] | None = None,
+        staging_dir: Path | None = None,
     ) -> Path:
         """Build a tar.gz archive of verified snapshot objects (streaming).
 
@@ -297,7 +351,19 @@ class SnapshotExporter:
                         ) from exc
 
             # Build tar.gz archive with streaming emission
-            fd, tmp_path = tempfile.mkstemp(suffix=".tar.gz", prefix=f"v2-export-{export_id}-")
+            # Allocate on *staging_dir* when the caller names one. Without it
+            # mkstemp lands in the system temp dir, which in every deployment
+            # with a mounted data volume is a different filesystem from where
+            # the route then moves the archive — turning shutil.move into a
+            # full multi-GB copy, and ENOSPC-ing a small /tmp even when the data
+            # volume has terabytes free.
+            if staging_dir is not None:
+                staging_dir.mkdir(parents=True, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(
+                suffix=".tar.gz",
+                prefix=f"v2-export-{export_id}-",
+                dir=str(staging_dir) if staging_dir is not None else None,
+            )
             os.close(fd)
 
             total_object_size = 0
@@ -322,12 +388,24 @@ class SnapshotExporter:
 
                 # 6b. Add manifest files
                 for manifest in manifests:
+                    # With include_runtime=False the runtime object *files* are
+                    # left out, but the manifest used to be written verbatim —
+                    # still declaring every runtime hash in `objects`. The
+                    # importer verifies that every hash a manifest names is
+                    # present in the archive, and does so before it gets a
+                    # chance to strip runtime refs, so such an archive was
+                    # rejected 100% of the time for any snapshot captured with a
+                    # live kernel. Emit a manifest that describes what is
+                    # actually in the archive instead. (`root_hash` is recomputed
+                    # by the importer after rebinding, so it is not a checksum
+                    # over these bytes.)
+                    emitted = _without_omitted_runtime(manifest, included_hashes)
                     m_bytes = json.dumps(
-                        manifest.model_dump(mode="json"),
+                        emitted.model_dump(mode="json"),
                         sort_keys=True, separators=(",", ":"),
                         ensure_ascii=False,
                     ).encode()
-                    m_info = tarfile.TarInfo(name=f"manifests/{manifest.snapshot_id}.json")
+                    m_info = tarfile.TarInfo(name=f"manifests/{emitted.snapshot_id}.json")
                     m_info.size = len(m_bytes)
                     tf.addfile(m_info, io.BytesIO(m_bytes))
 

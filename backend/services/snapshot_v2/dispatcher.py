@@ -43,6 +43,27 @@ _KNOWN_GATES: frozenset[str] = frozenset({
 })
 
 
+# Gate → the TaskStatus its live counterpart announces. Each HITL endpoint
+# validates the one status it owns, so a restored session parked on the wrong
+# one cannot be acted on at all.
+#
+#   annotation_confirmation → workflow/annotation.py announces
+#       WAITING_ANNOTATION; routes/interaction.py::confirm_annotations rejects
+#       anything else.
+#   plan_review            → workflow/planning.py announces
+#       WAITING_PLAN_REVIEW; routes/interaction.py::plan_review rejects
+#       anything else.
+#
+# round_wait / direction_selection / integration_selection are announced as
+# WAITING_INPUT by workflow/synthesis.py and workflow/integration.py, and
+# `plan_revision` is an internal routing decision with no dedicated status, so
+# all four keep the WAITING_INPUT default.
+_GATE_TO_STATUS_NAMES: dict[str, str] = {
+    GATE_ANNOTATION_CONFIRMATION: "WAITING_ANNOTATION",
+    "plan_review": "WAITING_PLAN_REVIEW",
+}
+
+
 
 # ── StagedCheckpoint model ────────────────────────────────────────────────────
 
@@ -191,19 +212,17 @@ class ContinuationDispatcher:
             )
             analysis_state.wait_input_reason = wait_reason
             from backend.models.schemas import TaskStatus
-            # The gate - not the capsule kind - decides the status. Each HITL
-            # endpoint validates the one status it owns, so a restored session
-            # parked on the wrong one cannot be acted on at all:
-            # /confirm-annotations rejects anything but WAITING_ANNOTATION
-            # (routes/interaction.py), which is also what the live gate
-            # announces (workflow/annotation.py). round_wait,
-            # direction_selection and integration_selection are announced as
-            # WAITING_INPUT by their live counterparts (workflow/synthesis.py,
-            # workflow/integration.py), so they keep it.
-            gate_status = (
-                TaskStatus.WAITING_ANNOTATION
-                if staged.gate == GATE_ANNOTATION_CONFIRMATION
-                else TaskStatus.WAITING_INPUT
+            # The gate - not the capsule kind - decides the status; see
+            # _GATE_TO_STATUS_NAMES above for the per-gate rationale. A gate that
+            # is restored onto the wrong status commits cleanly (live_verify only
+            # compares the gate itself) and is then unreachable: the restore has
+            # already evicted the workflow object, so the route's no-workflow
+            # branch — gated on exactly the status that was not written — is the
+            # only path left.
+            gate_status = getattr(
+                TaskStatus,
+                _GATE_TO_STATUS_NAMES.get(staged.gate or "", "WAITING_INPUT"),
+                TaskStatus.WAITING_INPUT,
             )
             try:
                 analysis_state.status = gate_status
@@ -287,8 +306,19 @@ class ContinuationDispatcher:
         from backend.workflow.provenance import seed_restore_provenance
         seed_restore_provenance(analysis_state)
 
-        # Invalidate report paths
-        self._invalidate_report_paths(analysis_state)
+        # Invalidate report paths so a restore triggers fresh generation — but
+        # only where something can actually regenerate them. A terminal restore
+        # sets COMPLETED and both run() and resume() short-circuit on
+        # restore_resume_kind == "terminal" before entering the graph, and the
+        # WebSocket handler's COMPLETED branch deliberately starts no workflow.
+        # Nulling the four paths there left the one snapshot that represents the
+        # finished analysis with every report view answering 404 and no path
+        # back except the destructive re-analysis route. Report HTML lives under
+        # `reports/`, which is outside the captured workspace scope
+        # (figures/tables/reproducibility), so those files are still on disk and
+        # the restored state's own paths are the right ones to keep.
+        if staged.kind != "terminal":
+            self._invalidate_report_paths(analysis_state)
 
     @staticmethod
     def _clear_gate_payload(analysis_state: Any) -> None:

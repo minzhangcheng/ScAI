@@ -58,6 +58,7 @@ export function SnapshotPanel({
   const [restoreError, setRestoreError] = useState<string | null>(null)
   const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const [deleteBranch, setDeleteBranch] = useState(false)
   const [showDiscard, setShowDiscard] = useState(false)
   const [pendingRestoreId, setPendingRestoreId] = useState<string | null>(null)
@@ -66,8 +67,19 @@ export function SnapshotPanel({
   const [pendingRuntimeRestoreId, setPendingRuntimeRestoreId] = useState<string | null>(null)
   const [localTxn, setLocalTxn] = useState<SnapshotTransactionRecord | null>(null)
   const [cancelling, setCancelling] = useState(false)
+  const [cancelError, setCancelError] = useState<string | null>(null)
   const lastStatusRef = useRef<string | null>(null)
-  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // The transaction the panel is polling. Held in state (not started
+  // imperatively) because the polling effect's cleanup runs whenever its
+  // dependencies change: with `startPolling` in the array — whose identity
+  // chains through `applyTxnUpdate` to the inline `onRestore` prop — the effect
+  // tore down and re-created on every parent render, so the interval
+  // `beginRestore` started was cleared within a tick and the panel's own poller
+  // never ran once. The dialog only kept updating because the parent's retry
+  // monitor polled the same transaction, and that loop hard-stops at 300s —
+  // exactly the safe-point timeout — so any slower restore froze the progress
+  // dialog forever and never fired `onRestore`.
+  const [pollingTxnId, setPollingTxnId] = useState<string | null>(activeTransactionId)
 
   const storeTxn = useAppStore((s) => s.snapshotTransaction)
   const setSnapshotTransaction = useAppStore((s) => s.setSnapshotTransaction)
@@ -114,6 +126,20 @@ export function SnapshotPanel({
         onRestore()
         fetchSnapshots()
       }
+      // The pre-restore safety capture fails *inside the background job*, so
+      // this — not the initial 202 — is where the client learns the live state
+      // could not be captured. Nothing has been mutated at that point, which is
+      // exactly when "discard my current state and restore anyway" is a valid
+      // answer; without this the only offer was a Retry that re-ran the same
+      // failing capture.
+      if (
+        txn.status === 'failed'
+        && txn.failure?.code === 'PRE_RESTORE_UNAVAILABLE'
+        && txn.snapshot_id
+      ) {
+        setPendingRestoreId(txn.snapshot_id)
+        setShowDiscard(true)
+      }
     },
     [setSnapshotTransaction, onRestore, fetchSnapshots],
   )
@@ -124,39 +150,36 @@ export function SnapshotPanel({
     applyTxnUpdate(storeTxn as SnapshotTransactionRecord)
   }, [storeTxn, applyTxnUpdate])
 
-  const stopPolling = useCallback(() => {
-    if (pollTimerRef.current) {
-      clearInterval(pollTimerRef.current)
-      pollTimerRef.current = null
-    }
-  }, [])
-
-  const startPolling = useCallback(
-    (transactionId: string) => {
-      stopPolling()
-      const poll = async () => {
-        try {
-          const txn = await getSnapshotTransaction(sessionId, transactionId)
-          applyTxnUpdate(txn)
-          if (SNAPSHOT_TERMINAL_STATUSES.has(txn.status)) {
-            stopPolling()
-          }
-        } catch (e) {
-          console.error('Failed to poll snapshot transaction:', e)
-        }
-      }
-      void poll()
-      pollTimerRef.current = setInterval(poll, POLL_INTERVAL_MS)
-    },
-    [sessionId, applyTxnUpdate, stopPolling],
-  )
+  // Read the handler through a ref so its identity cannot restart the poller.
+  const applyTxnUpdateRef = useRef(applyTxnUpdate)
+  applyTxnUpdateRef.current = applyTxnUpdate
 
   useEffect(() => {
-    if (activeTransactionId) {
-      startPolling(activeTransactionId)
+    if (activeTransactionId) setPollingTxnId(activeTransactionId)
+  }, [activeTransactionId])
+
+  useEffect(() => {
+    if (!pollingTxnId) return
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const txn = await getSnapshotTransaction(sessionId, pollingTxnId)
+        if (cancelled) return
+        applyTxnUpdateRef.current(txn)
+        if (SNAPSHOT_TERMINAL_STATUSES.has(txn.status)) {
+          setPollingTxnId(null)
+        }
+      } catch (e) {
+        console.error('Failed to poll snapshot transaction:', e)
+      }
     }
-    return () => stopPolling()
-  }, [activeTransactionId, startPolling, stopPolling])
+    void poll()
+    const timer = setInterval(poll, POLL_INTERVAL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [sessionId, pollingTxnId])
 
   const selectedRecord = snapshots.find((s) => s.snapshot_id === selectedId) || null
 
@@ -178,7 +201,7 @@ export function SnapshotPanel({
         failure: null,
       }
       applyTxnUpdate(seed)
-      startPolling(resp.transaction_id)
+      setPollingTxnId(resp.transaction_id)
       setConfirmRestoreId(null)
       setPendingRestoreId(null)
     } catch (e) {
@@ -239,25 +262,55 @@ export function SnapshotPanel({
   }
 
   const handleDelete = async (snapshotId: string, branch: boolean) => {
-    await deleteSnapshotV2(sessionId, snapshotId, branch)
+    // The backend refuses a delete with 409 for any snapshot protected by an
+    // active journal (restore_target / pre_restore / import) or by live
+    // lineage, and the client-side `isProtected` hint has no relationship to
+    // that set. Without a catch the rejection surfaced only in the console: the
+    // confirm row stayed exactly as it was, nothing refreshed, and the user had
+    // no way to learn why the snapshot would not delete.
+    setDeleteError(null)
+    try {
+      await deleteSnapshotV2(sessionId, snapshotId, branch)
+    } catch (e) {
+      const err = e as { message?: string; details?: { reason?: string } | null }
+      const reason = err?.details?.reason
+      setDeleteError(
+        [err?.message || (isZh ? '删除失败' : 'Delete failed'), reason ? `(${reason})` : '']
+          .filter(Boolean)
+          .join(' '),
+      )
+      return
+    } finally {
+      await fetchSnapshots()
+    }
     setConfirmDeleteId(null)
     setDeleteBranch(false)
-    await fetchSnapshots()
   }
 
   const handleCancelTxn = async () => {
     const txnId = activeTxn?.transaction_id
     if (!txnId) return
     setCancelling(true)
+    setCancelError(null)
     try {
       await cancelSnapshotTransaction(sessionId, txnId)
       const reloaded = await getSnapshotTransaction(sessionId, txnId)
       applyTxnUpdate(reloaded)
       if (SNAPSHOT_TERMINAL_STATUSES.has(reloaded.status)) {
-        stopPolling()
+        setPollingTxnId(null)
       }
     } catch (e) {
-      console.error('Cancel restore failed:', e)
+      // The rejection is transient by nature — a connection error, a 5xx, or a
+      // 404 for a transaction whose journal recovery already retired it. The
+      // throw lands on the first await, so the status refresh below never runs
+      // either: without this the button simply re-enabled and the refusal
+      // existed only in the console, so the user's only reading was that Cancel
+      // does nothing. Mirrors the delete path's `deleteError`.
+      const err = asApiError(e)
+      setCancelError(
+        (err?.message || (e instanceof Error ? e.message : ''))
+        || (isZh ? '取消恢复失败' : 'Cancel restore failed'),
+      )
     } finally {
       setCancelling(false)
     }
@@ -266,6 +319,13 @@ export function SnapshotPanel({
   const isProtected = (record: SnapshotRecordV2) => {
     return record.manifest.capsule.kind === 'terminal'
   }
+
+  // Separate from `isProtected`, which is the terminal-capsule delete rule. A
+  // record carrying a failure has no verified manifest behind it, so the
+  // read-only restore preflight will refuse it with 422 no matter what: do not
+  // offer the action. Delete stays available — it is the only way to clear a
+  // corrupt entry out of the lineage.
+  const isRestorable = (record: SnapshotRecordV2) => record.failure === null
 
   const showProgress = Boolean(activeTxn)
 
@@ -307,12 +367,13 @@ export function SnapshotPanel({
                     snapshots={snapshots}
                     selectedId={selectedId}
                     onSelect={setSelectedId}
+                    isZh={isZh}
                   />
                 </div>
 
                 {selectedRecord && (
                   <div className="w-72 shrink-0">
-                    <SnapshotPreview record={selectedRecord} />
+                    <SnapshotPreview record={selectedRecord} isZh={isZh} />
                     <div className="flex items-center gap-2 mt-3 flex-wrap">
                       {confirmRestoreId === selectedRecord.snapshot_id ? (
                         <div className="flex flex-col gap-2 w-full">
@@ -351,6 +412,9 @@ export function SnapshotPanel({
                             />
                             {isZh ? '删除整支分支' : 'Delete entire branch'}
                           </label>
+                          {deleteError && (
+                            <div className="p-2 bg-red-50 rounded text-xs text-red-700">{deleteError}</div>
+                          )}
                           <div className="flex items-center gap-2">
                             <button
                               type="button"
@@ -364,6 +428,7 @@ export function SnapshotPanel({
                               onClick={() => {
                                 setConfirmDeleteId(null)
                                 setDeleteBranch(false)
+                                setDeleteError(null)
                               }}
                               className="px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 rounded-lg"
                             >
@@ -376,7 +441,8 @@ export function SnapshotPanel({
                           <button
                             type="button"
                             onClick={() => setConfirmRestoreId(selectedRecord.snapshot_id)}
-                            className="flex items-center gap-1 px-3 py-1.5 text-xs text-accent-600 hover:bg-accent-50 rounded-lg border border-accent-200"
+                            disabled={!isRestorable(selectedRecord)}
+                            className="flex items-center gap-1 px-3 py-1.5 text-xs text-accent-600 hover:bg-accent-50 rounded-lg border border-accent-200 disabled:opacity-40 disabled:cursor-not-allowed"
                             title={isZh ? '恢复' : 'Restore'}
                           >
                             <RotateCcw className="w-3.5 h-3.5" />
@@ -439,12 +505,24 @@ export function SnapshotPanel({
               ? () => {
                   setLocalTxn(null)
                   lastStatusRef.current = null
+                  setCancelError(null)
                   setSnapshotTransaction(null)
                 }
               : undefined
           }
           cancelling={cancelling}
         />
+      )}
+
+      {/* Sits above the progress dialog's own z-[60] overlay: the refusal has to
+          be readable next to the Cancel button that produced it. */}
+      {showProgress && cancelError && (
+        <div className="fixed inset-x-0 top-4 z-[70] flex justify-center px-4 pointer-events-none">
+          <div className="pointer-events-auto max-w-md w-full p-2 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
+            {isZh ? '取消恢复失败：' : 'Cancel restore failed: '}
+            {cancelError}
+          </div>
+        </div>
       )}
     </div>
   )

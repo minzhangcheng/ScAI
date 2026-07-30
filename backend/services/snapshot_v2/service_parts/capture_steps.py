@@ -239,7 +239,16 @@ class CaptureStepsMixin:
         analysis_state: Any = None,
     ) -> set[str]:
         deps: set[str] = set()
-        for source in (workflow_state or {}, sandbox_state):
+        # The safe-point descriptor is a first-class source here, exactly as it
+        # is for `_resolve_kernel_present`: it is the channel a producer at a
+        # graph boundary actually has, and omitting it was half of why the
+        # fail-closed tier had no production writer at all.
+        sources: list[Any] = []
+        desc = self.safe_point.get_descriptor(self.session_id)
+        if desc is not None:
+            sources.append(desc)
+        sources.extend((workflow_state or {}, sandbox_state))
+        for source in sources:
             if isinstance(source, dict):
                 deps |= _as_name_set(source.get("checkpoint_dependencies"))
         if analysis_state is not None:

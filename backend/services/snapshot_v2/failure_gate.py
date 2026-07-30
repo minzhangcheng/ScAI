@@ -469,6 +469,39 @@ def upgrade_legacy_snapshot_failure_gate(state: Any) -> bool:
         )
         return True
 
+    if phase == "post_chat":
+        # A post-chat gate reaches disk in two writes: the service-level bare
+        # failure is persisted by `_create_chat_snapshot` before it re-raises,
+        # and only the chat endpoint attaches the typed context and persists
+        # again. A crash (or a failed second write) between them leaves a bare
+        # gate whose phase is unambiguous. Without a branch here it fell through
+        # to the unknown-phase refusal below and stayed context-free forever, so
+        # both Retry and Skip answered 409 and Terminate — which stops the
+        # session and deletes the graph checkpoint — was the only way out of a
+        # failed *chat* snapshot. Chat is a first-class skippable producer
+        # everywhere else, so the "unknown captures are not automatically made
+        # skippable" rationale does not apply to it.
+        enter_chat_snapshot_failure_gate(
+            state,
+            RequiredSnapshotBlocked(
+                str(failure.get("code") or "REQUIRED_SNAPSHOT_BLOCKED"),
+                str(failure.get("message") or "Required snapshot capture failed"),
+                details=details,
+                snapshot_id=(
+                    str(failure.get("snapshot_id"))
+                    if failure.get("snapshot_id")
+                    else None
+                ),
+                phase=phase,
+            ),
+            # The pre-gate status is not recoverable from a bare gate, and the
+            # live status is the gate's own WAITING_INPUT — restoring that would
+            # leave the session parked. PAUSED is the neutral answer: the UI
+            # offers Resume and nothing claims progress that is not happening.
+            previous_status=TaskStatus.PAUSED,
+        )
+        return True
+
     if phase and phase not in _WORKFLOW_BOUNDARY_PHASES:
         # Unknown/manual captures are not automatically made skippable.
         return False

@@ -55,6 +55,24 @@ async def send_human_input(session_id: str, request: Request, body: HumanInputRe
     async with sess_lock:
         state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
+        # The snapshot-failure gate parks the session on WAITING_INPUT — the
+        # same status the round-completion gate uses — and `signal_continue()`
+        # below releases exactly the event `_wait_for_user_input` waits on. So
+        # without this check the one endpoint whose purpose is to release the
+        # round gate would also release a fail-closed snapshot gate and let the
+        # graph advance into the next round while `snapshot_failure` is still
+        # armed. Every other forward-motion endpoint (run, resume,
+        # stop-and-summarize, choose-direction) already refuses here; only the
+        # producer-aware retry/skip/terminate handlers may clear the gate.
+        if is_snapshot_failure_blocked(state):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Session is blocked on a required snapshot failure; "
+                    "resolve it before sending input."
+                ),
+            )
+
         state.pending_human_input = body.message
         state.pending_uploaded_files = [f.model_dump() for f in body.uploaded_files]
         state.human_input_requested = False
@@ -170,6 +188,26 @@ async def request_supplementary_analysis(
     sess_lock = get_session_lock(session_id)
     async with sess_lock:
         state = await require_session_ownership(session_id=session_id, user_id=user_id)
+
+        # `signal_supplementary_analysis` sets `_continue_event` for both the
+        # "direction" and "round" targets — the same event `/human-input`
+        # releases and the same one `_wait_for_user_input` blocks on. Releasing
+        # it here does not cross the round boundary (the wait loop re-parks),
+        # but it does run a full PI-planned supplementary analysis: agent turns,
+        # kernel steps, workspace and AnnData mutation, all past a point the
+        # design guarantees is snapshotted and while `snapshot_failure` is still
+        # armed. A later successful retry would then capture that work under the
+        # label of the boundary it was supposed to precede. Checked before the
+        # target/status branches below because "round" has no status guard at
+        # all and would otherwise reach the signal from any status.
+        if is_snapshot_failure_blocked(state):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Session is blocked on a required snapshot failure; "
+                    "resolve it before requesting supplementary analysis."
+                ),
+            )
 
         if body.target == "annotation" and state.status != TaskStatus.WAITING_ANNOTATION:
             raise HTTPException(status_code=400, detail="Session is not at annotation confirmation point")
@@ -335,6 +373,23 @@ async def finalize_from_integration(session_id: str, request: Request):
             raise HTTPException(
                 status_code=400,
                 detail="finalize-from-integration is only valid at the integration gate.",
+            )
+        # A required-snapshot failure at the integration gate leaves both
+        # conditions above intact — the gate parks on WAITING_INPUT and never
+        # touches `analysis_phase` — so the guard above cannot see it. Without
+        # this check `signal_continue()` below releases the same
+        # `_continue_event` `/human-input` was blocked from touching, the
+        # integration gate consumes `final_report_requested`, and the graph runs
+        # to a COMPLETED final report with the gate still armed. Nothing between
+        # here and `generate_final_report` rechecks it, so this endpoint is the
+        # only place the fail-closed contract can still hold.
+        if is_snapshot_failure_blocked(state):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Session is blocked on a required snapshot failure; "
+                    "resolve it before finalizing."
+                ),
             )
         state.final_report_requested = True
         rec = resolve_integration_gate(state, event_type="finalize")

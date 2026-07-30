@@ -330,12 +330,19 @@ class CaptureSupportMixin:
             probe = probe.parent
         try:
             usage = shutil.disk_usage(probe)
-            free_after = usage.free - added
-            if free_after < self.free_space_reserve_bytes:
+            # This runs at capture step 8 — *after* every object has already been
+            # written into objects/ — so `usage.free` already excludes `added`.
+            # Subtracting it again demanded roughly twice the headroom the
+            # capture actually needed, and failed deterministically on exactly
+            # the workloads this system exists for (multi-GB AnnData captures):
+            # the bytes were safely on disk, the capture was rejected anyway, the
+            # objects were cleaned up, and Retry reproduced the same arithmetic
+            # forever. The reserve is the only meaningful post-write guard.
+            if usage.free < self.free_space_reserve_bytes:
                 raise SnapshotStorageError(
                     "snapshot_quota_exceeded",
-                    f"Insufficient disk space: {usage.free} free, "
-                    f"{added} needed, {self.free_space_reserve_bytes} reserve",
+                    f"Insufficient disk space: {usage.free} free after writing "
+                    f"{added}, below {self.free_space_reserve_bytes} reserve",
                 )
         except OSError as exc:
             raise SnapshotStorageError(
@@ -400,8 +407,27 @@ class CaptureSupportMixin:
         request: SnapshotCaptureRequest,
         workspace_root: str | None,
         analysis_state: Any = None,
+        *,
+        sandbox: Any = None,
     ) -> int:
-        """Estimate new physical bytes after content-addressed deduplication."""
+        """Estimate new physical bytes after content-addressed deduplication.
+
+        Includes a runtime component. Without one the estimate counted only the
+        state, notebook, checkpoint and workspace — a handful of MB against the
+        tens of GB a runtime capture writes — so it was not conservative but a
+        systematic under-count, and the pre-write ceiling it feeds could
+        essentially never fire for a runtime-bearing capture. Every over-quota
+        capture was therefore caught only *after* the kernel had been driven
+        through a full multi-minute serialization and the bytes were on disk,
+        and each Retry repeated the whole write-then-delete cycle with no
+        possibility of a different outcome.
+
+        The runtime figure is taken from the lineage head's manifest: it is the
+        best available projection of what this capture will write, and it costs
+        no kernel round trip. Unlike the state/notebook/workspace components it
+        is deliberately not deduped against the store — see
+        `_estimate_runtime_addition`.
+        """
         estimate = 0
         known_hashes: set[str] = set()
         objects_dir = Path(str(self.paths.objects))
@@ -470,7 +496,64 @@ class CaptureSupportMixin:
             for relative in WorkspaceScope().list_live_scoped_paths(root):
                 path = root / relative
                 add_file(path)
+
+        estimate += self._estimate_runtime_addition(
+            request, analysis_state, known_hashes, sandbox=sandbox,
+        )
         return estimate
+
+    def _estimate_runtime_addition(
+        self,
+        request: SnapshotCaptureRequest,
+        analysis_state: Any,
+        known_hashes: set[str],
+        *,
+        sandbox: Any = None,
+    ) -> int:
+        """Projected new bytes for the runtime half of *request*.
+
+        Zero when no kernel will be captured. Otherwise the lineage head's
+        runtime object sizes — the same data `_can_reuse_runtime` already
+        consults, so it needs no kernel round trip and cannot itself fail a
+        capture.
+        """
+        if request.runtime is not None:
+            return 0
+        if sandbox is None or getattr(sandbox, "km", None) is None:
+            return 0
+        try:
+            previous = self._resolve_previous_manifest(analysis_state)
+        except Exception:
+            # A missing or unverifiable lineage head is not a capture failure;
+            # it only means we have nothing to project from.
+            return 0
+        if previous is None or previous.runtime is None:
+            return 0
+        projected = 0
+        # Deduped only against itself (an adata and the residual can carry the
+        # same hash), never against the caller's store-derived *known_hashes*.
+        # The head's refs model the bytes this capture is about to write; they
+        # are not those bytes. GC marks every object of a committed lineage head
+        # reachable, so the head's own runtime objects are present in objects/
+        # by construction — testing membership there zeroed the projection in
+        # exactly the steady state the pre-I/O ceiling exists for, leaving the
+        # over-quota capture to be caught only after the kernel had been driven
+        # through a full serialization. The genuine-reuse case is short-circuited
+        # upstream instead: `_can_reuse_runtime` copies the previous runtime
+        # block onto the request, and `request.runtime is not None` returns 0 at
+        # the top of this function.
+        seen: set[str] = set()
+        refs = list((previous.runtime.adata_refs or {}).values())
+        if previous.runtime.residual_ref is not None:
+            refs.append(previous.runtime.residual_ref)
+        for ref in refs:
+            if ref.sha256 in seen:
+                continue
+            projected += ref.size
+            seen.add(ref.sha256)
+            # Still recorded so the caller cannot count the same hash twice.
+            known_hashes.add(ref.sha256)
+        return projected
 
     def _mark_runtime_committed(
         self, sandbox: Any, runtime_revision: int | None = None,

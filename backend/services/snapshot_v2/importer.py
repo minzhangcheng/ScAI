@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import tarfile
 import uuid
 from datetime import datetime, timezone
@@ -317,6 +318,9 @@ class SnapshotImporter:
         result = ImportResult(dest_session_id=self.dest_session_id)
 
         txn_id = f"import-{uuid.uuid4().hex[:12]}"
+        # Ids this transaction has marked pending and not yet cleared. The
+        # failure handlers roll these back; see _rollback_pending_publish.
+        marked_pending_ids: list[str] = []
 
         try:
             _write_import_journal(
@@ -337,7 +341,21 @@ class SnapshotImporter:
                 )
 
             with tarfile.open(str(archive_path), "r:gz") as tf:
-                members = tf.getmembers()
+                # Iterate lazily rather than calling getmembers(): that
+                # materialises a TarInfo for every member in the archive before
+                # any limit can run, so max_member_count could not protect the
+                # allocation it exists to bound — a ~50 MB tar of a hundred
+                # million empty members was enough to exhaust memory. Bounding
+                # here caps the list at the operator's configured size.
+                members = []
+                for member in tf:
+                    members.append(member)
+                    if len(members) > self.limits.max_member_count:
+                        raise SnapshotStorageError(
+                            "TOO_MANY_MEMBERS",
+                            f"Archive member count exceeds limit "
+                            f"{self.limits.max_member_count}",
+                        )
 
                 self._verify_archive_safety(members)
                 self._check_member_limits(members)
@@ -351,10 +369,6 @@ class SnapshotImporter:
                 # Read and validate manifests (small, full content in memory)
                 manifests = self._read_manifests(tf, members)
 
-                # Verify all manifest-referenced objects exist in archive
-                for manifest in manifests:
-                    self._verify_manifest_objects_meta(manifest, archive_inventory)
-
             # Build sanitized plan from metadata inventory
             plan = build_import_plan(
                 manifests,
@@ -363,6 +377,20 @@ class SnapshotImporter:
                 trust_runtime=trust_runtime,
                 dest_session_id=self.dest_session_id,
             )
+
+            # Verify against the plan, not the raw manifests.
+            #
+            # An `include_runtime=false` export omits the runtime object files
+            # but (before 0.36.12) still declared their hashes in every
+            # manifest's `objects`. Checking the raw manifests therefore
+            # rejected the archive with MISSING_OBJECT before the plan could
+            # strip those refs — every such archive was unimportable, on every
+            # installation including the one that produced it. The plan is also
+            # the correct subject: `plan.manifests` is exactly what will be
+            # published, so this asserts the objects that will actually be
+            # referenced, and nothing else.
+            for manifest in plan.manifests:
+                self._verify_manifest_objects_meta(manifest, archive_inventory)
 
             # Destination identity is immutable. Re-importing the exact same
             # target root is idempotent; the same ID with different content
@@ -387,6 +415,25 @@ class SnapshotImporter:
                         "with different content",
                     )
                 idempotent_ids.add(manifest.snapshot_id)
+
+            # Admission control, before pass 2 allocates anything.
+            #
+            # `SnapshotImportLimits` carries the session quota and the
+            # free-space reserve and `from_config` populates both, but no
+            # consumer read them: the only ceilings the import enforced were
+            # per-archive, so N successive imports could take a session's
+            # objects/ past the operator's quota without bound, and could drive
+            # the data volume — shared with every other session's metadata
+            # writes — to zero free space. Capture enforces both (see
+            # `_check_quota`); the import writes the same object store from an
+            # endpoint any session owner can reach.
+            #
+            # This has to run after `build_import_plan`, not in
+            # `_check_member_limits`: only the plan says which hashes will
+            # actually be written, and hashes the store already holds are
+            # deduplicated by `put_stream`, so counting raw members would reject
+            # an idempotent re-import that adds nothing.
+            self._check_admission(plan, archive_inventory)
 
             # ── Pass 2: stream approved objects through ObjectStore ─
             write_proofs: dict[str, ObjectRef] = {}
@@ -437,6 +484,7 @@ class SnapshotImporter:
                 if m.snapshot_id not in idempotent_ids
             ]
             ManifestStore.mark_pending_imports(self.paths.committed, planned_ids)
+            marked_pending_ids = list(planned_ids)
 
             # Stage and publish each rebound manifest (write proofs only)
             manifest_roots: dict[str, str] = {}
@@ -485,6 +533,7 @@ class SnapshotImporter:
                 self.paths.committed,
                 list(manifest_roots.keys()),
             )
+            marked_pending_ids = []
 
             # Run safe GC
             self._run_safe_gc()
@@ -511,6 +560,7 @@ class SnapshotImporter:
         except SnapshotV2Error as exc:
             result.merge_error(exc.code, str(exc))
             logger.error("Import [%s] failed: %s — %s", txn_id, exc.code, exc)
+            self._rollback_pending_publish(txn_id, marked_pending_ids)
             try:
                 _write_import_journal(
                     self.paths,
@@ -525,6 +575,7 @@ class SnapshotImporter:
             msg = f"Unexpected import error: {exc}"
             result.merge_error("UNEXPECTED", msg)
             logger.exception("Import [%s] failed unexpectedly", txn_id)
+            self._rollback_pending_publish(txn_id, marked_pending_ids)
             try:
                 _write_import_journal(
                     self.paths,
@@ -538,7 +589,123 @@ class SnapshotImporter:
 
         return result
 
+    def _rollback_pending_publish(
+        self, txn_id: str, planned_ids: list[str],
+    ) -> None:
+        """Undo a publish phase that never reached its batch record.
+
+        A failure between ``mark_pending_imports`` and ``clear_pending_imports``
+        used to leave both the markers and any manifests already published on
+        disk. ``_iter_committed_json_stems`` skips anything with a pending
+        marker, so those manifests became invisible to listing, load, verify,
+        export and deletion — permanently, because ``_recover_import_envelope``
+        declines to act on FAILED journals and the reconcile that fails is
+        reached *before* the markers are cleared, so every retry re-fails at the
+        same point. GC meanwhile kept pinning their objects as roots, so the
+        storage was never reclaimed either.
+
+        ``delete_pending_import_manifests`` is marker-authorized, so it can only
+        remove ids this transaction actually marked.
+        """
+        if not planned_ids:
+            return
+        removed_ids: list[str] = []
+        try:
+            from backend.services.snapshot_v2.deletion import DeletionService
+
+            removed_ids = list(DeletionService(
+                self.dest_session_id, self.paths,
+            ).delete_pending_import_manifests(list(planned_ids)).deleted_ids)
+        except Exception:
+            logger.exception(
+                "Import [%s]: failed to remove pending-import manifests %s",
+                txn_id, planned_ids,
+            )
+        # Clear markers only for ids whose manifest is provably gone. Clearing
+        # the whole planned set unconditionally made the marker outlive nothing:
+        # a delete that raised left the freshly published manifests on disk, and
+        # dropping their markers is exactly what makes a manifest visible. An
+        # import the API answered with 422 therefore published its snapshots —
+        # listable, loadable, restorable, with no batch record behind them — the
+        # precise inversion of the batch atomicity the markers implement. A
+        # marker left behind instead keeps the manifest invisible and retryable,
+        # which is the only safe direction to fail here.
+        try:
+            ManifestStore.clear_pending_imports(
+                self.paths.committed, removed_ids,
+            )
+        except Exception:
+            logger.exception(
+                "Import [%s]: failed to clear pending-import markers %s; those "
+                "snapshot ids stay invisible until the markers are removed",
+                txn_id, removed_ids,
+            )
+
     # ── Limit checks ──────────────────────────────────────────────────
+
+    def _physical_object_store_bytes(self) -> int:
+        """Bytes currently occupied by this session's object store."""
+        objects_dir = Path(str(self.paths.objects))
+        if not objects_dir.is_dir():
+            return 0
+        total = 0
+        for path in objects_dir.iterdir():
+            if not path.is_file():
+                continue
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+        return total
+
+    def _check_admission(self, plan, archive_inventory: dict) -> None:
+        """Reject before pass 2 when the projected write breaches quota/reserve.
+
+        *projected* counts only hashes the store does not already hold, which is
+        exactly what ``put_stream`` will write — its ``dest.exists()`` fast path
+        adds nothing for the rest.
+        """
+        objects_dir = Path(str(self.paths.objects))
+        projected = 0
+        for obj_hash in plan.object_hashes:
+            if (objects_dir / obj_hash).exists():
+                continue
+            meta = archive_inventory.get(obj_hash)
+            if meta is not None:
+                projected += meta.size
+
+        current = self._physical_object_store_bytes()
+        if current + projected > self.limits.session_quota_bytes:
+            raise SnapshotStorageError(
+                "snapshot_quota_exceeded",
+                f"Import would take the object store to {current + projected} "
+                f"bytes, exceeding session quota "
+                f"{self.limits.session_quota_bytes}",
+            )
+
+        # The v2 root is not created until a capture runs, so probe the nearest
+        # existing ancestor — free space is identical across the filesystem.
+        # Mirrors the walk-up in `_check_quota`.
+        probe = Path(str(self.paths.root))
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        try:
+            usage = shutil.disk_usage(probe)
+        except OSError as exc:
+            raise SnapshotStorageError(
+                "DISK_USAGE_CHECK_FAILED",
+                f"Failed to check disk usage: {exc}",
+            ) from exc
+        # Unlike the capture check this runs *before* the write, so the
+        # projection has to be subtracted: usage.free still includes the bytes
+        # pass 2 is about to consume.
+        if usage.free - projected < self.limits.free_space_reserve_bytes:
+            raise SnapshotStorageError(
+                "snapshot_quota_exceeded",
+                f"Insufficient disk space: {usage.free} free, importing "
+                f"{projected} would leave less than the "
+                f"{self.limits.free_space_reserve_bytes} reserve",
+            )
 
     def _check_member_limits(self, members: list) -> None:
         """Enforce member count and size limits from import bounds."""
@@ -556,9 +723,26 @@ class SnapshotImporter:
                     f"Tar member {m.name} size {m.size} exceeds "
                     f"single-member limit {self.limits.max_single_member_bytes}",
                 )
+            # Every regular member counts: bounding only objects/ left the
+            # metadata and manifest members — the two the importer reads whole
+            # into memory — outside the budget entirely.
+            total_uncompressed += m.size
+            if m.name == "snapshot-v2-export.json":
+                if m.size > self.limits.max_metadata_bytes:
+                    raise SnapshotStorageError(
+                        "MEMBER_TOO_LARGE",
+                        f"Export metadata size {m.size} exceeds limit "
+                        f"{self.limits.max_metadata_bytes}",
+                    )
+            if m.name.startswith("manifests/") and m.name.endswith(".json"):
+                if m.size > self.limits.max_manifest_bytes:
+                    raise SnapshotStorageError(
+                        "MEMBER_TOO_LARGE",
+                        f"Manifest {m.name} size {m.size} exceeds limit "
+                        f"{self.limits.max_manifest_bytes}",
+                    )
             if m.name.startswith("objects/") and m.name.count("/") == 1:
                 obj_count += 1
-                total_uncompressed += m.size
                 if obj_count > self.limits.max_member_count:
                     raise SnapshotStorageError(
                         "TOO_MANY_OBJECTS",
@@ -580,7 +764,7 @@ class SnapshotImporter:
         if total_uncompressed > self.limits.max_uncompressed_bytes:
             raise SnapshotStorageError(
                 "TOTAL_UNCOMPRESSED_TOO_LARGE",
-                f"Total uncompressed object data {total_uncompressed} exceeds "
+                f"Total uncompressed archive data {total_uncompressed} exceeds "
                 f"limit {self.limits.max_uncompressed_bytes}",
             )
         if len(snapshot_ids) > self.limits.max_snapshot_count:
@@ -614,7 +798,17 @@ class SnapshotImporter:
                 if f is None:
                     break
                 try:
-                    return json.loads(f.read().decode())
+                    # Bounded read: the header size was already checked, but a
+                    # member whose declared size understates its payload must
+                    # not be able to allocate past the cap either.
+                    limit = self.limits.max_metadata_bytes
+                    raw = f.read(limit + 1)
+                    if len(raw) > limit:
+                        raise SnapshotStorageError(
+                            "MEMBER_TOO_LARGE",
+                            f"Export metadata exceeds limit {limit}",
+                        )
+                    return json.loads(raw.decode())
                 except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                     raise SnapshotIntegrityError(
                         "METADATA_PARSE_ERROR",
@@ -646,7 +840,13 @@ class SnapshotImporter:
             if f is None:
                 continue
 
-            manifest_bytes = f.read()
+            limit = self.limits.max_manifest_bytes
+            manifest_bytes = f.read(limit + 1)
+            if len(manifest_bytes) > limit:
+                raise SnapshotStorageError(
+                    "MEMBER_TOO_LARGE",
+                    f"Manifest {m.name} exceeds limit {limit}",
+                )
             try:
                 manifest = SnapshotManifestV2.model_validate_json(manifest_bytes)
             except Exception as exc:

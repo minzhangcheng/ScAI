@@ -97,6 +97,7 @@ class ReportingMixin(
     ):
         """Run the required post-report capture unless Snapshot V2 is disabled."""
         from ..config import is_snapshot_v2_enabled
+        from .helpers import WorkflowSupersededError
 
         if not is_snapshot_v2_enabled():
             analysis_state.pending_required_snapshot = None
@@ -117,6 +118,9 @@ class ReportingMixin(
                     pending.get("report_generation_id", report_generation_id),
                 )
                 analysis_state.pending_required_snapshot = None
+            except WorkflowSupersededError:
+                analysis_state.pending_required_snapshot = None
+                raise
             except Exception:
                 pending["attempts"] = pending.get("attempts", 0) + 1
                 analysis_state.pending_required_snapshot = pending
@@ -133,6 +137,14 @@ class ReportingMixin(
                     analysis_state, report_generation_id,
                 )
                 analysis_state.pending_required_snapshot = None
+            except WorkflowSupersededError:
+                # The capture handed the safe point to a restore, and that
+                # restore committed. This run is over and `analysis_state` is
+                # the pre-restore object the restore just replaced: leaving the
+                # pending marker on it would arm a post-report retry gate for a
+                # capture that never failed, on a state nobody should resume.
+                analysis_state.pending_required_snapshot = None
+                raise
             except Exception:
                 # Keep pending so retry re-enters capture only
                 raise
@@ -166,6 +178,39 @@ class ReportingMixin(
             service = SnapshotService(self.session_id, paths)
             self.snapshot_service = service
 
+        # A restore job reserves the safe point and then waits for a live
+        # participant to hand it over at a boundary. The report nodes contain no
+        # other acknowledgement site — grep `await_restore_safe_point` over the
+        # report path — so this capture is the last one the reservation can
+        # reach, and it used to be the one producer that refuses instead of
+        # yielding. Both refusal routes end the same way: with no kernel the
+        # guard below raises LIVE_SANDBOX_REQUIRED outright, and with a live
+        # kernel the guard is skipped entirely and the acquire inside
+        # `capture_required_snapshot` refuses with SAFE_POINT_BUSY (a *pending*
+        # request and an acquired hold are indistinguishable to
+        # `_acquire_unlocked`). Either becomes RequiredSnapshotBlocked, which
+        # arms the fail-closed snapshot-failure gate on a run that had no
+        # snapshot problem — and the restore that caused it, having lost its
+        # only acknowledger, waits out its full timeout and fails too.
+        #
+        # Yield only for a *pending* request, exactly as the workflow-boundary
+        # capture does. An already-acquired foreign hold must keep failing
+        # closed so a leaked hold stays a visible gate rather than an unbounded
+        # wait here.
+        if service.safe_point.has_pending_request(self.session_id):
+            import inspect
+
+            # getattr/isawaitable is this file family's idiom for boundary hooks
+            # and is required: tests bind this capture onto bare harnesses that
+            # do not implement the hook.
+            await_restore = getattr(self, "await_restore_safe_point", None)
+            if callable(await_restore):
+                result = await_restore()
+                if inspect.isawaitable(result):
+                    await result
+
+        # Read the kernel only after the handover: the restore may have torn the
+        # sandbox down while this capture was frozen.
         sandbox = getattr(self, "sandbox", None)
         kernel_present = (
             sandbox is not None

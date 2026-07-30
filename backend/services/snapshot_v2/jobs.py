@@ -42,6 +42,11 @@ logger = logging.getLogger(__name__)
 
 SAFE_POINT_RESERVATION_TIMEOUT_SECONDS = 5.0
 
+# How often a waiting restore job re-proves that the session went quiescent.
+# Quiescence is a property of the session over time, not of the instant the
+# restore was filed — see the poll in ``_run_job``.
+QUIESCENCE_RECHECK_SECONDS = 2.0
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -595,11 +600,42 @@ class RestoreJobManager:
                     "Restore job started without an owned safe-point request",
                     details={"transaction_id": tx_id},
                 )
+            # `enqueue` proves quiescence once, before this task even starts.
+            # That proof expires the moment the activity it observed ends: every
+            # other acknowledger in the system — the graph boundaries, the HITL
+            # gate hooks, the sandbox step loop — needs a LIVE run task to reach
+            # it. So when the chat delegation / report generation / initializing
+            # workflow that made the session non-quiescent finishes without ever
+            # passing an acknowledgement site (the chat and report paths contain
+            # none at all), nothing is left to hand the reservation over. The
+            # single `wait_for` below then waited on an event that no longer had
+            # a setter: the restore burned its full timeout and reported
+            # `timed_out` on a session that had been idle for minutes, while its
+            # pending request made every other snapshot operation answer
+            # SAFE_POINT_BUSY for the whole window.
+            #
+            # Re-prove quiescence in slices instead. `_acknowledge_if_quiescent`
+            # does the entire probe under `state_lock` and the acknowledgement is
+            # generation-checked, so a run that registered in the meantime makes
+            # the probe decline, and a workflow that acknowledged first leaves no
+            # pending request for the ack to match.
+            deadline = time.monotonic() + timeout_seconds
             try:
-                await asyncio.wait_for(
-                    self._race(reservation.event, stop_event),
-                    timeout=timeout_seconds,
-                )
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                    try:
+                        await asyncio.wait_for(
+                            self._race(reservation.event, stop_event),
+                            timeout=min(remaining, QUIESCENCE_RECHECK_SECONDS),
+                        )
+                        break
+                    except asyncio.TimeoutError:
+                        if await self._acknowledge_if_quiescent(
+                            session_id, reservation,
+                        ):
+                            break
             except asyncio.TimeoutError:
                 elapsed = time.monotonic() - t0
                 record = self._update(handle, "timed_out")

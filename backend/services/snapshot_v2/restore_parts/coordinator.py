@@ -36,6 +36,17 @@ from .journal import AppliedRestore, StagedRestore, _journal_path, _new_transact
 from .staging import _atomic_copy, _atomic_replace, _iter_manifest_object_refs, _require_declared_object, _runtime_status_from_manifest, _stage_object_ref, _stream_copy, _validate_checkpoint_capsule_compatibility, _validate_staged_analysis_state, _validate_staged_checkpoint, _validate_staged_notebook
 
 
+#: Stem under ``staging/<transaction_id>/`` where ``apply()`` parks the live
+#: checkpoint's WAL companions. Recovery's rollback reads them back from here;
+#: keep the two sides in step.
+PREV_CHECKPOINT_COMPANION_STEM = "prev-checkpoints.sqlite"
+
+
+def prev_checkpoint_companion_path(staged_root, companion: str) -> Path:
+    """Stash location for the pre-restore checkpoint ``-wal``/``-shm`` companion."""
+    return Path(str(staged_root)) / f"{PREV_CHECKPOINT_COMPANION_STEM}{companion}"
+
+
 class RestoreCoordinator:
     """Four-phase restore lifecycle with journaled crash recovery."""
 
@@ -350,6 +361,50 @@ class RestoreCoordinator:
 
         if "checkpoint" not in completed_steps and staged.staged_checkpoint:
             ckpt_dst = checkpoint_sqlite_path(states_root_p)
+            # The LangGraph checkpoint DB runs in WAL mode: it is three files,
+            # and replacing only the main one leaves `-wal`/`-shm` that SQLite
+            # replays over the restored image on the next open, silently undoing
+            # the restore. Closing the in-process checkpointer connection makes
+            # SQLite retire the companions, but that only happens in
+            # `_retire_superseded_workflow`, which returns immediately when the
+            # session has no workflow object — the normal state right after a
+            # process restart, and one `_acknowledge_if_quiescent` explicitly
+            # supports. Orphans left by an unclean shutdown therefore survived.
+            # Clear them here so the replacement covers the whole triple; the
+            # connection close stays as the in-process guard.
+            #
+            # Moved aside rather than deleted: capture stores the MAIN FILE only,
+            # so commits still sitting in that WAL were never in any snapshot,
+            # and a rollback puts back the very main file they belong to —
+            # recovery's rollback reinstates them from this stash to recover the
+            # graph progress the snapshot could not hold. Deleting them here
+            # would drop it silently. The stash lives in this transaction's
+            # staging tree, so commit()/cleanup()/recovery reclaim it with
+            # everything else and only rollback ever reads it back.
+            staged_root = Path(str(paths.staging)) / tx_id
+            for companion in ("-wal", "-shm"):
+                live_companion = ckpt_dst.with_name(ckpt_dst.name + companion)
+                if not live_companion.exists():
+                    continue
+                try:
+                    staged_root.mkdir(parents=True, exist_ok=True)
+                    shutil.move(
+                        str(live_companion),
+                        str(prev_checkpoint_companion_path(staged_root, companion)),
+                    )
+                except OSError:
+                    logger.warning(
+                        "Could not stash stale checkpoint companion %s%s; "
+                        "removing it so it cannot be replayed over the restore",
+                        ckpt_dst.name, companion, exc_info=True,
+                    )
+                    try:
+                        live_companion.unlink(missing_ok=True)
+                    except OSError:
+                        logger.warning(
+                            "Could not remove stale checkpoint companion %s%s",
+                            ckpt_dst.name, companion, exc_info=True,
+                        )
             _atomic_replace(staged.staged_checkpoint, ckpt_dst)
             ledger.append({"step": "checkpoint", "completed": True})
             self._persist_ledger(paths, tx_id, ledger)

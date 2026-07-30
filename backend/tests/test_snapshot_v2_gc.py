@@ -218,9 +218,21 @@ class TestMark:
         assert "verify_all_committed" in calls
         assert "list_committed_with_diagnostics" not in calls
 
-    def test_mark_audit_manifests_excluded(self, v2_paths):
-        """mark() excludes audit-* manifests from object tracking."""
+    def test_mark_protects_audit_manifest_objects(self, v2_paths):
+        """mark() protects audit-* objects even though listings hide them.
+
+        The ``audit-`` prefix is a *presentation* rule — audit bundles must not
+        be offered as restorable snapshots — and `_iter_committed_json_stems`
+        enforces it for every listing path. Reachability is a different
+        question: `AuditBundle.capture_locked` runs a full capture and the
+        `discard_current` restore path takes no pre_restore snapshot, so the
+        audit manifest is the only record of the state the user discarded (and
+        `restore_snapshot` verifies its objects immediately after writing it).
+        Excluding it from mark() let the next sweep unlink every one of those
+        objects, leaving a manifest of dangling refs that no API can delete.
+        """
         from backend.services.snapshot_v2.gc import SnapshotGarbageCollector
+        from backend.services.snapshot_v2.object_store import ManifestStore
 
         hex_a = hashlib.sha256(b"a").hexdigest()
         hex_b = hashlib.sha256(b"b").hexdigest()
@@ -239,7 +251,21 @@ class TestMark:
 
         marked = SnapshotGarbageCollector("s1", v2_paths).mark()
         assert hex_a in marked
-        assert hex_b not in marked
+        assert hex_b in marked, (
+            "audit bundle objects were left unmarked; the next sweep would "
+            "unlink the only copy of the discarded state"
+        )
+
+        # The listing rule is unchanged: audit bundles stay invisible.
+        listed = {
+            m.snapshot_id for m in ManifestStore(v2_paths).verify_all_committed()
+        }
+        assert listed == {"snap-normal"}
+
+        # And they survive an actual sweep.
+        gc = SnapshotGarbageCollector("s1", v2_paths)
+        gc.sweep(gc.mark())
+        assert (v2_paths.objects / hex_b).exists()
 
 
 # ═════════════════════════════════════════════════════════════════════════

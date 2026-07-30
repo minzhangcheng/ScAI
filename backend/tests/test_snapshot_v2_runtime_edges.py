@@ -468,6 +468,47 @@ def test_closing_the_connection_first_makes_the_restore_visible(tmp_path):
     assert seen == ["RESTORED"]
 
 
+class _FakeTask:
+    """Minimal asyncio.Task stand-in: only ``done()`` is consulted."""
+
+    def __init__(self, fut):
+        self._fut = fut
+
+    def done(self):
+        return self._fut.done()
+
+
+@pytest.mark.asyncio
+async def test_retire_does_not_leak_superseded_without_a_run_to_unwind(monkeypatch):
+    """The flag is only ever cleared by a run unwinding via
+    WorkflowSupersededError. A workflow OBJECT outlives its run, and restores on
+    a session parked at a gate are admitted with no run task at all — marking
+    there left the flag set for the life of the process, where a later,
+    unrelated run would find it at a node entry and unwind mid-round."""
+    from backend.services.snapshot_v2.service import SnapshotService
+    from backend import state as state_mod
+    from backend.services import workflow_runner
+
+    service = SnapshotService.__new__(SnapshotService)
+    service.session_id = "retire-idle-probe"
+    service.safe_point = get_snapshot_safe_point_manager()
+
+    workflow = MagicMock(_db_conn=None)
+    monkeypatch.setitem(state_mod.workflows, "retire-idle-probe", workflow)
+    monkeypatch.setattr(state_mod, "_run_tasks", {}, raising=False)
+    monkeypatch.setattr(workflow_runner, "_report_tasks", {}, raising=False)
+    monkeypatch.setattr(state_mod, "chat_tasks", {}, raising=False)
+
+    await service._retire_superseded_workflow(workflow)
+
+    try:
+        assert not get_snapshot_safe_point_manager().is_superseded(
+            "retire-idle-probe"
+        ), "superseded flag set with no run that could ever clear it"
+    finally:
+        get_snapshot_safe_point_manager().clear_superseded("retire-idle-probe")
+
+
 @pytest.mark.asyncio
 async def test_retire_closes_the_checkpoint_connection_and_evicts(monkeypatch):
     from backend.services.snapshot_v2.service import SnapshotService
@@ -491,6 +532,10 @@ async def test_retire_closes_the_checkpoint_connection_and_evicts(monkeypatch):
 
     workflow = _Workflow()
     monkeypatch.setitem(state_mod.workflows, "retire-probe", workflow)
+    # A live run is what observes and later clears the flag; without one there
+    # is nothing to signal (see the companion test below).
+    run_task = asyncio.get_running_loop().create_future()
+    monkeypatch.setitem(state_mod._run_tasks, "retire-probe", _FakeTask(run_task))
 
     await service._retire_superseded_workflow(workflow)
 
