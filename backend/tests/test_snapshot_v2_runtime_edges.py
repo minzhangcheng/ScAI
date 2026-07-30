@@ -30,6 +30,11 @@ from backend.services.snapshot_v2.safe_point import (
 # `raw = adata.raw` left in the namespace failed every capture closed.
 
 
+# Certifies Snapshot V2-enabled behaviour. The operator gate ships off, so pin it
+# on here instead of inheriting it from the environment: these assertions describe
+# the enabled lifecycle and are meaningless (and were failing) with it off.
+pytestmark = pytest.mark.requires_snapshot_v2
+
 @pytest.mark.parametrize("type_str", [
     "AnnData((2, 13704))",          # what introspection emits for a real AnnData
     "AnnData((50, 10))",

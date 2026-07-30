@@ -31,6 +31,15 @@ export const en = {
     exportDownloadStartedDetail: 'File download has started, please check your browser download manager',
     importSuccess: 'Import successful',
     importFailed: 'Import failed',
+    // Members the import worker dropped instead of restoring; kinds come from
+    // `_note_skip` in backend/routes/export_import_parts/import_impl.py.
+    importSkippedSummary: '{count} item(s) were not restored: {items}',
+    importSkippedSnapshotV2: 'Snapshot V2 data',
+    importSkippedUnsafePath: 'unsafe paths',
+    importSkippedOffLayout: 'files outside the session layout',
+    importSkippedUntrustedPickle: 'kernel runtime state (not trusted)',
+    importSkippedUntrustedRuntimeH5ad: 'runtime data objects (not trusted)',
+    importSkippedCheckpointDropped: 'workflow checkpoints',
     exportFailed: 'Export failed',
     confirm: 'Confirm',
     apiSettings: 'API Settings',

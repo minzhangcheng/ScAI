@@ -418,13 +418,20 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
             clear_recovery_blocked(session_id, None)
         return None
 
-    # Clean up stale LLM failure state from a previous process
+    # Clean up a stale workflow-bound gate from a previous process. Every reason
+    # listed here is resolved only by POST /{id}/llm-failure-action, which needs
+    # the live workflow object that set it; after a restart there is none, so the
+    # dialog the WebSocket re-opens would 404 on every button. `agent_disabled`
+    # belongs with the other two — it was omitted, and it is the one gate that
+    # therefore never self-healed.
     if state.wait_input_reason in (
         WaitInputReason.LLM_FAILURE.value,
+        WaitInputReason.AGENT_DISABLED.value,
         WaitInputReason.MARKER_DB_MISSING.value,
     ):
         logger.warning(
-            f"Session {session_id}: clearing stale LLM failure state from previous process"
+            f"Session {session_id}: clearing stale "
+            f"{state.wait_input_reason} gate from previous process"
         )
         info = state.llm_failure_info
         if info:
@@ -435,9 +442,13 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
             )
         state.wait_input_reason = None
         state.llm_failure_info = None
+        # Left behind, this still rides out on every state_sync as an open
+        # agent-disabled dialog, which is the gate we just declared unresolvable.
+        state.agent_disabled_info = None
         state.status = TaskStatus.PAUSED
         logger.info(
-            f"Session {session_id}: Analysis paused due to unresolved LLM failure before restart."
+            f"Session {session_id}: Analysis paused due to an unresolved "
+            f"workflow-bound gate before restart."
         )
         # Save the cleaned-up state so PAUSED status persists
         dumped = state.model_dump(mode="json")

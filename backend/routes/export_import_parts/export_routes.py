@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import logging
+from urllib.parse import quote
 import os
 import re
 import secrets
@@ -43,10 +44,18 @@ from backend.utils.blob_store import inline_blobs
 from backend.utils.files import slugify_session_name, validate_path_within, validate_session_id, temp_file_on_error
 from backend.utils.secret_redaction import strip_analysis_state_secrets
 from starlette.background import BackgroundTask
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, Response
 
-from .core import ARCHIVE_FORMAT_VERSION, _build_export_filename, new_export_token, router
+from .core import (
+    ARCHIVE_FORMAT_VERSION,
+    _build_export_filename,
+    check_export_disk_space,
+    count_v2_snapshot_records,
+    new_export_token,
+    router,
+)
 from .tar_builders import (
+    _add_json_bytes,
     _add_portable_state_json,
     _add_reproducibility_to_tar,
     _add_session_blobs_to_tar,
@@ -77,20 +86,32 @@ def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = F
             info.size = len(data)
             tf.addfile(info, io.BytesIO(data))
 
+        # 1. session.json is read first -- though still written after the
+        # manifest -- because the manifest states how many Snapshot V2 records
+        # travel without their object storage, which only this payload knows.
+        session_file = resolve_session_metadata_path(session_id)
+        state_payload = None
+        if session_file and session_file.exists():
+            state_payload = json.loads(session_file.read_text(encoding="utf-8"))
+
         # Manifest first: the importer latches the session id from the first
         # member it sees and reconciles it against this file.
         manifest = json.dumps({
             "session_id": session_id,
             "version": ARCHIVE_FORMAT_VERSION,
             "data_base_dir": str(DATA_BASE_DIR),
+            # An ordinary archive packs no V2 object storage at all, so a
+            # destination could not otherwise tell "the source had no snapshots"
+            # from "the export dropped them". This is that difference, stated.
+            "snapshot_v2_records_without_payload": count_v2_snapshot_records(state_payload),
         }, indent=2).encode("utf-8")
         _add_bytes(f"{session_id}/manifest.json", manifest)
 
-        # 1. session.json
-        session_file = resolve_session_metadata_path(session_id)
-        if session_file and session_file.exists():
-            _add_portable_state_json(
-                tf, session_file, f"{session_id}/sessions/{session_id}.json"
+        if state_payload is not None:
+            _add_json_bytes(
+                tf,
+                f"{session_id}/sessions/{session_id}.json",
+                strip_analysis_state_secrets(state_payload),
             )
 
         # 2. states (checkpoints, notebook, pkl)
@@ -148,6 +169,27 @@ async def export_state(session_id: str, request: Request, include_runtime: bool 
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
+    if request.method == "HEAD":
+        # Answer the metadata question without paying for the answer: this route
+        # is registered for HEAD as well as GET, and with no branch here a HEAD
+        # forced a session save and a full multi-GB pack whose body starlette then
+        # discarded. Placed after validate_session_id/require_session_ownership so
+        # HEAD keeps GET's exact 400/401/404 surface and cannot become an
+        # existence oracle, and before the save/pack, which is the point.
+        # Content-Disposition is percent-encoded because export names keep CJK
+        # characters and a header must be latin-1.
+        head_filename = _build_export_filename(session_id, state.name)
+        return Response(
+            status_code=200,
+            media_type="application/gzip",
+            headers={
+                "Content-Disposition":
+                    f"attachment; filename*=utf-8''{quote(head_filename)}"
+            },
+        )
+
+    check_export_disk_space()
+
     # Save latest state to disk first. Forced: the packer reads session.json
     # off the disk, and RUNNING is not one of the statuses that bypass the 5s
     # save throttle — so a session exported while it is analysing would ship a
@@ -156,9 +198,13 @@ async def export_state(session_id: str, request: Request, include_runtime: bool 
     # marking entirely, producing an archive that claims a kernel it lacks.
     await async_save_session(session_id, state, force=True)
 
-    # Write tar.gz to a temp file on disk (not in memory)
+    # Write tar.gz to a temp file on disk (not in memory). The prefix is what
+    # makes a leak from an aborted download sweepable — without it the name is
+    # indistinguishable from an import upload's temp file.
     import tempfile
-    tmp = tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False, dir=str(UPLOAD_TEMP_DIR))
+    tmp = tempfile.NamedTemporaryFile(
+        prefix='export_stream_', suffix='.tar.gz', delete=False, dir=str(UPLOAD_TEMP_DIR)
+    )
     tmp_path = tmp.name
     tmp.close()
 
@@ -196,6 +242,8 @@ async def export_prepare(session_id: str, request: Request, include_runtime: boo
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    check_export_disk_space()
 
     # Save latest state to disk first. Forced: the packer reads session.json
     # off the disk, and RUNNING is not one of the statuses that bypass the 5s

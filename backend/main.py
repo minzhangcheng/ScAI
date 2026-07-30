@@ -228,6 +228,14 @@ async def lifespan(app: FastAPI):
     # Recover incomplete restore transactions only when Snapshot V2 is enabled.
     await _recover_snapshots_on_startup()
 
+    # Reclaim export archives stranded by a previous process. Unconditional is
+    # safe *here only*: startup runs before any request is served, so
+    # `prepared_exports` is empty by construction and every matching file on disk
+    # is already unreachable. Both shipped launchers run a single uvicorn worker;
+    # with `--workers N` this would need the age guard the periodic sweep uses.
+    from backend.tasks.session_cleanup import sweep_orphaned_export_archives
+    await sweep_orphaned_export_archives()
+
     from backend.tasks.session_cleanup import cleanup_stale_sessions
     cleanup_task = asyncio.create_task(
         cleanup_stale_sessions(

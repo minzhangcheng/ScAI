@@ -4,7 +4,7 @@ import { useSession, apiFetch, generateId, authHeaders } from '../hooks/useApi'
 import { useAppStore } from '../stores/appStore'
 import { getTargetTab, selectPrioritySession, selectCompletedSession, selectPendingSession } from '../utils/sessionPriority'
 import type { SessionListItem } from '../types'
-import { useTranslation } from '../i18n/translations'
+import { useTranslation, type TranslationKey } from '../i18n/translations'
 import { ROUND_WAIT_OPTIONS } from '../constants/roundWait'
 import { ProgressModal } from './sidebar/ProgressModal'
 import { SessionBrowserModal } from './sidebar/SessionBrowserModal'
@@ -33,6 +33,19 @@ const PRIORITY_TIERS: { select: (s: SessionListItem[]) => SessionListItem | null
 
 function syncTabToSessionStatus(session: { status: string }) {
   useAppStore.getState().setActiveTab(getTargetTab(session.status))
+}
+
+// Human labels for the import worker's skipped-member counters. The kinds are
+// the ones `_note_skip` reports (backend/routes/export_import_parts/import_impl.py);
+// an unknown kind falls back to its raw key so a newly added counter still
+// surfaces instead of being swallowed.
+const IMPORT_SKIP_LABELS: Record<string, TranslationKey> = {
+  snapshot_v2: 'importSkippedSnapshotV2',
+  unsafe_path: 'importSkippedUnsafePath',
+  off_layout: 'importSkippedOffLayout',
+  untrusted_pickle: 'importSkippedUntrustedPickle',
+  untrusted_runtime_h5ad: 'importSkippedUntrustedRuntimeH5ad',
+  checkpoint_dropped: 'importSkippedCheckpointDropped',
 }
 
 interface SidebarProps {
@@ -176,15 +189,19 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
       setImporting(true)
       let cancelled = false
       try {
-        const sessionId = await pollImportUntilDone(pendingId, () => cancelled)
+        const { sessionId, skipped } = await pollImportUntilDone(pendingId, () => cancelled)
         if (sessionId) {
           clearMessages()
-          await loadSession(sessionId)
+          const session = await loadSession(sessionId)
+          // An imported mid-analysis session lands paused or waiting, whose
+          // controls live on the analysis tab; without this the user is left on
+          // the default tab with the only way forward hidden.
+          if (session) syncTabToSessionStatus(session)
         }
         try { localStorage.removeItem('scai.pendingImport') } catch {}
         setProgressInfo({
           action: t('importSuccess'),
-          detail: language === 'zh' ? '会话已成功导入' : 'Session imported successfully',
+          detail: importSuccessDetail(skipped),
           closable: true,
           success: true,
         })
@@ -365,8 +382,12 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
   // Poll the backend import-status endpoint until the job finishes. No hard
   // timeout — large archives can legitimately take >1h to extract. The
   // shouldCancel() hook lets the caller bail out (set by the modal cancel button).
-  // Returns the new session_id on success, or throws on failure/cancel.
-  const pollImportUntilDone = async (pollId: string, shouldCancel: () => boolean): Promise<string> => {
+  // Returns the new session_id plus the worker's skipped-member counters on
+  // success, or throws on failure/cancel.
+  const pollImportUntilDone = async (
+    pollId: string,
+    shouldCancel: () => boolean,
+  ): Promise<{ sessionId: string; skipped: Record<string, number> }> => {
     const POLL_INTERVAL = 3000
     const MAX_CONSECUTIVE_ERRORS = 10
     let consecutiveErrors = 0
@@ -401,7 +422,13 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
       if (!status) continue
 
       if (status.status === 'completed') {
-        return status.session_id
+        // The worker knows which members it dropped and now reports them
+        // (import_impl.py: `_note_skip`); zero-valued kinds are filtered out
+        // server-side, so an empty object is the common case.
+        return {
+          sessionId: status.session_id,
+          skipped: status.skipped && typeof status.skipped === 'object' ? status.skipped : {},
+        }
       }
       if (status.status === 'failed') {
         throw new Error(status.error || (language === 'zh' ? '解压失败' : 'Extraction failed'))
@@ -451,6 +478,24 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
         cancelLabel: language === 'zh' ? '取消导入' : 'Cancel Import',
       })
     }
+  }
+
+  // Success detail for a finished import, including one human line for what the
+  // worker dropped. A skipped member is not a failed import, so this is purely
+  // additive: with the common empty counter map nothing extra is rendered.
+  const importSuccessDetail = (skipped: Record<string, number>): string => {
+    const base = language === 'zh' ? '会话已成功导入' : 'Session imported successfully'
+    const entries = Object.entries(skipped || {}).filter(([, n]) => Number(n) > 0)
+    if (entries.length === 0) return base
+    const total = entries.reduce((sum, [, n]) => sum + Number(n), 0)
+    const items = entries
+      .map(([kind, n]) => {
+        const key = IMPORT_SKIP_LABELS[kind]
+        return `${key ? t(key) : kind} (${n})`
+      })
+      .join(language === 'zh' ? '、' : ', ')
+    const summary = t('importSkippedSummary', { count: total, items })
+    return `${base}${language === 'zh' ? '。' : '. '}${summary}`
   }
 
   const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -567,24 +612,49 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
       }
 
       let sessionId: string | undefined = data?.session_id
+      let skipped: Record<string, number> = {}
 
       // Phase 2: Poll extraction status (tar.gz async path)
       // Use import_id from response if available, otherwise the pre-generated one
-      const pollId: string = data?.data?.import_id || preImportId
+      const asyncImportId: string | undefined = data?.data?.import_id
+      const pollId: string = asyncImportId || preImportId
       activePollId = pollId
-      const isTarGz = file.name.endsWith('.tar.gz') || file.name.endsWith('.tgz')
+      // Match the backend's dispatch, which lowercases the name before testing
+      // the extension (import_routes.py: `lowered = filename.lower()`), so an
+      // archive named EXPORT.TAR.GZ is extracted in the background there. A
+      // case-sensitive test here skipped polling, and the tar.gz response
+      // carries no session_id, so the flow reported success without ever
+      // loading the imported session.
+      const lowerName = file.name.toLowerCase()
+      const isTarGz = lowerName.endsWith('.tar.gz') || lowerName.endsWith('.tgz')
 
-      if (isTarGz || !data) {
+      if (asyncImportId || isTarGz) {
         // Unlimited polling — large archives can take >1h. Cancellation is via
         // the modal cancel button; transient network errors are tolerated.
-        sessionId = await pollImportUntilDone(pollId, () => cancelRequested)
+        const polled = await pollImportUntilDone(pollId, () => cancelRequested)
+        sessionId = polled.sessionId
+        skipped = polled.skipped
+      } else if (!sessionId) {
+        // Inline .zip/.json imports register no job — import_routes.py creates
+        // an _import_jobs entry only on the tar.gz branch — so there is nothing
+        // to poll when the response is lost. Polling preImportId just 404s for
+        // ~30s (10 × 3s) and reports a failure for an import that may well have
+        // succeeded; say what is actually known instead.
+        throw new Error(
+          language === 'zh'
+            ? '上传已完成，但服务端响应丢失，无法确认导入结果。请在「打开已有会话」中确认会话是否已导入。'
+            : 'Upload finished but the server response was lost, so the outcome is unknown. Check "Open Saved Session" to see whether the session arrived.'
+        )
       }
 
       // Phase 3: Load session
       if (sessionId) {
         setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? '正在加载会话...' : 'Loading session...' })
         clearMessages()
-        await loadSession(sessionId)
+        const session = await loadSession(sessionId)
+        // Same reason as the resumed-poll path: a paused/waiting import has its
+        // only usable controls on the analysis tab.
+        if (session) syncTabToSessionStatus(session)
       }
 
       // Phase 4: Show success
@@ -593,7 +663,7 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
       if (fileInputRef.current) fileInputRef.current.value = ''
       setProgressInfo({
         action: t('importSuccess'),
-        detail: language === 'zh' ? '会话已成功导入' : 'Session imported successfully',
+        detail: importSuccessDetail(skipped),
         closable: true,
         success: true
       })

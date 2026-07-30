@@ -184,7 +184,13 @@ def test_export_import_continue(
 
     states = get_session_states(new_id)
     assert (states / f"{new_id}.ipynb").exists(), "analysis notebook lost"
-    assert (states / f"{new_id}_bioinfo_checkpoint.json").exists(), "bioinfo checkpoint lost"
+    # The bioinformatics checkpoint is kernel-bound: it tells the node to resume
+    # its autonomous loop, which is only meaningful if the values that loop
+    # produced arrived with it. Without the kernel it must be gone, or the node
+    # resumes the old conversation and never sees the kernel-is-empty notice.
+    assert (states / f"{new_id}_bioinfo_checkpoint.json").exists() == (
+        include_runtime and trust
+    ), "the bioinfo checkpoint must travel with its kernel and only with it"
     assert (get_session_dir(new_id) / "workspace" / "umap.png").exists() or \
            any(get_session_dir(new_id).rglob("umap.png")), "figure lost"
     assert any(get_session_dir(new_id).rglob("matrix.h5ad")), "uploaded data lost"

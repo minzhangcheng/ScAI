@@ -344,6 +344,322 @@ class TestAnImportedSessionAlwaysHasAWayForward:
 
         assert getattr(state, "restore_start_intent", None) is None
 
+    @pytest.mark.parametrize(
+        "reason", ["llm_failure", "agent_disabled", "marker_db_missing"]
+    )
+    def test_a_gate_only_a_live_workflow_can_release_is_cleared(self, tmp_path, reason):
+        """Otherwise the imported session offers a dialog whose buttons 404.
+
+        ``POST /{id}/llm-failure-action`` is the only exit for these three
+        reasons and it resolves them through ``workflows[session_id]``, which no
+        import creates. The WebSocket then parks the session in its HITL-hold
+        branch and returns *before* registering a workflow — after re-opening the
+        dialog — so Retry/Skip/Modify raise ``404 Workflow not found`` forever.
+        ``ensure_session_loaded`` clears such a gate on a disk load, but an import
+        primes the cache, so nothing else reaches this session.
+        """
+        from backend.config import DATA_BASE_DIR
+        from backend.models.schemas import TaskStatus
+        from backend.routes.export_import import _import_tar_gz
+
+        session_id = str(uuid.uuid4())
+        archive = _build_archive(
+            tmp_path / f"gate-{reason}.tar.gz",
+            session_id,
+            {},
+            data_base_dir=str(DATA_BASE_DIR),
+            state_payload=_session_json(
+                session_id,
+                current_round=2,
+                status=TaskStatus.WAITING_INPUT,
+                wait_input_reason=reason,
+                llm_failure_info={"node_name": "bioinformatics", "generation": 3},
+                agent_disabled_info={"agent": "pathology", "generation": 3},
+            ),
+        )
+
+        state = _import_tar_gz(str(archive), user_id="importer")
+
+        assert state.wait_input_reason is None
+        assert state.llm_failure_info is None
+        assert state.agent_disabled_info is None
+        assert state.status == TaskStatus.PAUSED
+
+    def test_a_species_gate_is_left_standing(self, tmp_path):
+        """Only the workflow-bound gates are cleared; this one has its own route."""
+        from backend.config import DATA_BASE_DIR
+        from backend.models.schemas import TaskStatus
+        from backend.routes.export_import import _import_tar_gz
+
+        session_id = str(uuid.uuid4())
+        archive = _build_archive(
+            tmp_path / "species.tar.gz",
+            session_id,
+            {},
+            data_base_dir=str(DATA_BASE_DIR),
+            state_payload=_session_json(
+                session_id,
+                current_round=2,
+                status=TaskStatus.WAITING_INPUT,
+                wait_input_reason="species_input",
+            ),
+        )
+
+        state = _import_tar_gz(str(archive), user_id="importer")
+
+        assert state.wait_input_reason == "species_input"
+        assert state.status == TaskStatus.WAITING_INPUT
+
+
+class TestTheRuntimeTravelsOnlyWhenItIsTrusted:
+    """``X-Trust`` covers the whole live runtime, not just the dill residual.
+
+    The h5ad sidecar set is the other half: a Snapshot V2 restore writes
+    ``runtime_h5ad_manifest.json`` plus the ``<name>.h5ad`` files it lists, and the
+    sandbox rehydrates from the manifest alone with no pkl at all. It carries no
+    code, but it does bind identifier-named globals into the kernel, and the
+    ``X-Trust`` contract already says "restore runtime objects (dill/h5ad)".
+    """
+
+    def _archive(self, tmp_path, session_id, extra=None):
+        from backend.config import DATA_BASE_DIR
+
+        members = {
+            f"{session_id}/states/runtime_h5ad_manifest.json":
+                b'{"version": 1, "entries": {}}',
+            f"{session_id}/states/adata.h5ad": b"H5AD",
+        }
+        members.update(extra or {})
+        return _build_archive(
+            tmp_path / f"{session_id[:8]}-runtime.tar.gz",
+            session_id,
+            members,
+            data_base_dir=str(DATA_BASE_DIR),
+            state_payload=_session_json(session_id, current_round=3),
+        )
+
+    def test_an_untrusted_import_drops_the_h5ad_sidecars(self, tmp_path):
+        from backend.config import get_session_states
+        from backend.routes.export_import import _import_tar_gz
+
+        session_id = str(uuid.uuid4())
+        state = _import_tar_gz(str(self._archive(tmp_path, session_id)), user_id="importer")
+
+        states = get_session_states(state.id)
+        assert not (states / "runtime_h5ad_manifest.json").exists()
+        assert not (states / "adata.h5ad").exists()
+        # No runtime arrived, so the session must say so.
+        assert state.runtime_restore_status == "unavailable"
+
+    def test_a_trusted_h5ad_only_runtime_counts_as_a_runtime(self, tmp_path):
+        """A "complete" restore target with no dill residual leaves no pkl at all.
+
+        The manifest is then the only carrier of ``adata``, so marking the session
+        runtime-less would send a genuine migration through a re-run it does not
+        need -- and would drop the checkpoints that still match it.
+        """
+        from backend.config import get_session_states
+        from backend.routes.export_import import _import_tar_gz
+
+        session_id = str(uuid.uuid4())
+        archive = self._archive(
+            tmp_path, session_id,
+            {f"{session_id}/states/checkpoints.sqlite": b"SQLITE"},
+        )
+
+        state = _import_tar_gz(str(archive), user_id="importer", trust=True)
+
+        states = get_session_states(state.id)
+        assert (states / "runtime_h5ad_manifest.json").exists()
+        assert (states / "adata.h5ad").exists()
+        assert state.runtime_restore_status == "complete"
+        assert (states / "checkpoints.sqlite").exists()
+
+
+class TestImportDoesNotCarryBlockersItCannotAnswer:
+    """V2-only gates travelled in session.json and nothing on the import path cleared them.
+
+    With the subsystem off the first authenticated read repaired them, but only
+    there; with it ON no load path clears them at all, leaving ``/run`` at 409 and
+    ``/resume`` refused -- pointing the user at snapshot actions whose objects an
+    ordinary archive never carried.
+    """
+
+    def _blocked_payload(self, session_id):
+        from backend.models.schemas import TaskStatus
+
+        return _session_json(
+            session_id,
+            current_round=2,
+            status=TaskStatus.RUNNING,
+            wait_input_reason="snapshot_failure",
+            snapshot_failure={
+                "code": "SNAPSHOT_CAPTURE_FAILED",
+                "retry_context": {"producer": "pre_restore", "previous_status": "running"},
+            },
+            pending_required_snapshot={"phase": "pre_restore"},
+            skip_required_snapshot_phase="*",
+            recovery_blocked=True,
+        )
+
+    def test_the_blockers_are_gone_before_the_session_is_listable(self, tmp_path, monkeypatch):
+        from backend.config import DATA_BASE_DIR, _config, get_session_metadata_path
+        from backend.models.schemas import TaskStatus
+        from backend.routes.export_import import _import_tar_gz
+
+        monkeypatch.setattr(_config, "SNAPSHOT_V2_ENABLED", False)
+        session_id = str(uuid.uuid4())
+        archive = _build_archive(
+            tmp_path / "blocked.tar.gz",
+            session_id,
+            {},
+            data_base_dir=str(DATA_BASE_DIR),
+            state_payload=self._blocked_payload(session_id),
+        )
+
+        state = _import_tar_gz(str(archive), user_id="importer")
+
+        assert state.snapshot_failure is None
+        assert state.pending_required_snapshot is None
+        assert state.wait_input_reason is None
+        assert state.skip_required_snapshot_phase is None
+        assert state.recovery_blocked is False
+        assert state.status != TaskStatus.RUNNING
+        # The crash-safety write must carry the normalized state, not the archive's:
+        # a process that dies before its own save would otherwise leave the gate.
+        on_disk = json.loads(
+            get_session_metadata_path(state.id).read_text(encoding="utf-8")
+        )
+        assert on_disk["snapshot_failure"] is None
+        assert on_disk["status"] != "running"
+
+    def test_an_enabled_installation_keeps_them(self, tmp_path, monkeypatch):
+        """Only the disabled path may clear a gate: with V2 on, the records mean something."""
+        from backend.config import DATA_BASE_DIR, _config
+        from backend.routes.export_import import _import_tar_gz
+
+        monkeypatch.setattr(_config, "SNAPSHOT_V2_ENABLED", True)
+        session_id = str(uuid.uuid4())
+        archive = _build_archive(
+            tmp_path / "blocked-on.tar.gz",
+            session_id,
+            {},
+            data_base_dir=str(DATA_BASE_DIR),
+            state_payload=self._blocked_payload(session_id),
+        )
+
+        state = _import_tar_gz(str(archive), user_id="importer")
+
+        assert state.snapshot_failure is not None
+
+
+class TestImportReportsWhatItDropped:
+    """Every drop used to reach only the log, under a modal saying "Import successful"."""
+
+    def _occupy(self, session_id):
+        from backend.config import get_session_dir
+
+        get_session_dir(session_id).mkdir(parents=True, exist_ok=True)
+
+    def test_the_summary_reaches_the_caller(self, tmp_path, monkeypatch):
+        from backend.config import DATA_BASE_DIR, _config
+        from backend.routes.export_import import _import_tar_gz
+
+        monkeypatch.setattr(_config, "SNAPSHOT_V2_ENABLED", False)
+        session_id = str(uuid.uuid4())
+        self._occupy(session_id)  # force a new id, so the thread-id drop fires too
+        archive = _build_archive(
+            tmp_path / "dropped.tar.gz",
+            session_id,
+            {
+                f"{session_id}/v2/manifests/abc.json": b"{}",
+                f"{session_id}/states/checkpoints.sqlite": b"SQLITE",
+                f"{session_id}/states/{session_id}_session.pkl": b"KERNEL",
+                f"{session_id}/app.db": b"PWNED",
+            },
+            data_base_dir=str(DATA_BASE_DIR),
+            state_payload=_session_json(session_id, current_round=3),
+        )
+        outcome: dict = {}
+
+        _import_tar_gz(str(archive), user_id="importer", outcome=outcome)
+
+        skipped = outcome["skipped"]
+        assert skipped["snapshot_v2"] == 1
+        assert skipped["untrusted_pickle"] == 1
+        assert skipped["off_layout"] == 1
+        assert skipped["checkpoint_dropped"] >= 1
+        assert outcome["skipped_examples"], "examples must name at least one member"
+        assert len(outcome["skipped_examples"]) <= 20
+
+    def test_a_clean_archive_reports_nothing(self, tmp_path):
+        from backend.config import DATA_BASE_DIR
+        from backend.routes.export_import import _import_tar_gz
+
+        session_id = str(uuid.uuid4())
+        archive = _build_archive(
+            tmp_path / "clean.tar.gz",
+            session_id,
+            {f"{session_id}/uploads/{session_id}/matrix.h5ad": b"DATA"},
+            data_base_dir=str(DATA_BASE_DIR),
+            state_payload=_session_json(session_id, current_round=1),
+        )
+        outcome: dict = {}
+
+        _import_tar_gz(str(archive), user_id="importer", outcome=outcome)
+
+        assert not any(outcome["skipped"].values())
+
+
+class TestARefusalNamesTheRealConstraint:
+    def test_a_v2_only_archive_does_not_blame_the_file(self, tmp_path, monkeypatch):
+        """Every member of a V2 export is filtered when the subsystem is off.
+
+        The archive is intact; the installation is the constraint. "Session state
+        JSON not found" read as corruption.
+        """
+        from backend.config import DATA_BASE_DIR, _config
+        from backend.routes.export_import import _import_tar_gz
+
+        monkeypatch.setattr(_config, "SNAPSHOT_V2_ENABLED", False)
+        session_id = str(uuid.uuid4())
+        # A V2 export archive: flat object storage, no session state member.
+        archive = _build_archive(
+            tmp_path / "v2only.tar.gz",
+            session_id,
+            {f"{session_id}/objects/{'a' * 64}": b"OBJ"},
+            data_base_dir=str(DATA_BASE_DIR),
+            state_payload=None,
+        )
+        # _build_archive always writes a state member; drop it so the archive is
+        # genuinely V2-only.
+        _strip_member(archive, f"{session_id}/sessions/{session_id}.json")
+
+        with pytest.raises(Exception) as excinfo:
+            _import_tar_gz(str(archive), user_id="importer")
+
+        detail = str(getattr(excinfo.value, "detail", excinfo.value))
+        assert "Snapshot V2 is not enabled" in detail
+        assert "SCAI_ENABLE_SNAPSHOT_V2" not in detail, (
+            "an end-user message must not carry operator env-var wording"
+        )
+
+
+def _strip_member(path: Path, drop: str) -> None:
+    """Rewrite *path* without the member named *drop*."""
+    kept = []
+    with tarfile.open(path, mode="r:gz") as tf:
+        for member in tf.getmembers():
+            if member.name == drop:
+                continue
+            extracted = tf.extractfile(member)
+            kept.append((member.name, extracted.read() if extracted else b""))
+    with tarfile.open(path, mode="w:gz") as tf:
+        for name, payload in kept:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(payload)
+            tf.addfile(info, io.BytesIO(payload))
+
 
 class TestJsonImportCreatesASession:
     """The .json path was the only one without id allocation.
@@ -516,7 +832,12 @@ class TestStatesMembersFollowTheDestinationId:
         )
 
     def test_notebook_and_bioinfo_checkpoint_are_renamed(self, tmp_path):
-        """The default export carries both, and both used to be lost silently."""
+        """The default export carries both, and both used to be lost silently.
+
+        The bioinformatics checkpoint is only *kept* when the kernel it describes
+        arrives with it (see the kernel-less case below), so this pins the rename
+        on the trusted-runtime import where both survive.
+        """
         from backend.config import get_session_states
         from backend.routes.export_import import _import_tar_gz
 
@@ -525,15 +846,47 @@ class TestStatesMembersFollowTheDestinationId:
         archive = self._archive(tmp_path, session_id, {
             f"{session_id}/states/{session_id}.ipynb": b'{"cells":[]}',
             f"{session_id}/states/{session_id}_bioinfo_checkpoint.json": b"{}",
+            f"{session_id}/states/{session_id}_session.pkl": b"KERNEL",
         })
 
-        state = _import_tar_gz(str(archive), user_id="importer")
+        state = _import_tar_gz(str(archive), user_id="importer", trust=True)
 
         assert state.id != session_id
         states = get_session_states(state.id)
         assert (states / f"{state.id}.ipynb").read_bytes() == b'{"cells":[]}'
         assert (states / f"{state.id}_bioinfo_checkpoint.json").exists()
         assert not (states / f"{session_id}.ipynb").exists()
+
+    def test_a_bioinfo_checkpoint_without_its_kernel_is_dropped(self, tmp_path):
+        """It would make the agent resume a loop whose values no longer exist.
+
+        The file matches neither ``is_sandbox_pickle`` nor ``_is_checkpoint_member``,
+        so an ordinary export carries it with no runtime at all. Kept,
+        ``has_resumable_checkpoint`` sees a non-completed checkpoint for the round
+        the import preserved, and the bioinformatics node restores the old
+        conversation and discards the freshly built instruction — including the
+        kernel-is-empty notice ``runtime_recompute_pending`` exists to deliver.
+
+        The report checkpoint is a different family and stays: report generation
+        resumes from the round results in the state, not from the kernel.
+        """
+        from backend.config import get_session_states
+        from backend.routes.export_import import _import_tar_gz
+
+        session_id = str(uuid.uuid4())
+        archive = self._archive(tmp_path, session_id, {
+            f"{session_id}/states/{session_id}.ipynb": b'{"cells":[]}',
+            f"{session_id}/states/{session_id}_bioinfo_checkpoint.json": b"{}",
+            f"{session_id}/states/{session_id}_report_checkpoint.json": b"{}",
+        })
+
+        state = _import_tar_gz(str(archive), user_id="importer")
+
+        states = get_session_states(state.id)
+        assert not (states / f"{state.id}_bioinfo_checkpoint.json").exists()
+        assert (states / f"{state.id}_report_checkpoint.json").exists()
+        # The notebook is documentation, not runtime state, and must survive.
+        assert (states / f"{state.id}.ipynb").exists()
 
     def test_names_are_left_alone_when_the_id_is_kept(self, tmp_path):
         from backend.config import get_session_states
@@ -629,19 +982,57 @@ class TestStatesMembersFollowTheDestinationId:
         assert not (states / "checkpoints.sqlite").exists()
         assert not (states / "checkpoints.sqlite-wal").exists()
 
-    def test_checkpoint_survives_when_the_id_is_kept(self, tmp_path):
+    def test_checkpoint_survives_when_the_id_is_kept_and_the_kernel_arrives(self, tmp_path):
+        """Both halves are required: the thread id must match AND the pkl must land.
+
+        This is the one combination that yields exact continuation, and the one
+        the admin manual promises for a cross-instance runtime migration.
+        """
         from backend.config import get_session_states
         from backend.routes.export_import import _import_tar_gz
 
         session_id = str(uuid.uuid4())
         archive = self._archive(tmp_path, session_id, {
             f"{session_id}/states/checkpoints.sqlite": b"SQLITE",
+            f"{session_id}/states/{session_id}_session.pkl": b"KERNEL",
         })
 
-        state = _import_tar_gz(str(archive), user_id="importer")
+        state = _import_tar_gz(str(archive), user_id="importer", trust=True)
 
         assert state.id == session_id
         assert (get_session_states(session_id) / "checkpoints.sqlite").read_bytes() == b"SQLITE"
+        # With both halves present the import must not divert Resume into a
+        # fresh round.
+        assert state.restore_start_intent is None
+
+    def test_checkpoint_is_dropped_when_the_kernel_does_not_arrive(self, tmp_path):
+        """A checkpoint names a graph node; the kernel holds what that node made.
+
+        ``include_runtime=true`` carries the checkpoint while the pkl additionally
+        needs ``trust``, so this is what a runtime export imported without trust
+        looks like — and on a free id the thread-id drop above does not fire.
+        ``resume()`` calls ``aget_state()`` before it ever consults
+        ``restore_start_intent``, so a surviving checkpoint replays the source
+        machine's graph node against an empty kernel.
+        """
+        from backend.config import get_session_states
+        from backend.routes.export_import import _import_tar_gz
+
+        session_id = str(uuid.uuid4())
+        archive = self._archive(tmp_path, session_id, {
+            f"{session_id}/states/checkpoints.sqlite": b"SQLITE",
+            f"{session_id}/states/checkpoints.sqlite-wal": b"WAL",
+            f"{session_id}/states/{session_id}_session.pkl": b"KERNEL",
+        })
+
+        state = _import_tar_gz(str(archive), user_id="importer", trust=False)
+
+        assert state.id == session_id
+        states = get_session_states(session_id)
+        assert not (states / "checkpoints.sqlite").exists()
+        assert not (states / "checkpoints.sqlite-wal").exists()
+        # ...and the session is routed through the fresh-round re-entry instead.
+        assert state.restore_start_intent == "explicit_start"
 
 
 # --- Members the old filters dropped, and members they should have ---------

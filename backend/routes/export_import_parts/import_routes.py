@@ -52,6 +52,7 @@ from .import_impl import (
     _allocate_import_session_id,
     _arm_restore_intent_after_import,
     _cleanup_partial_session,
+    _finalize_imported_state,
     _import_zip,
     _mark_runtime_availability_after_import,
     _normalize_imported_status,
@@ -378,8 +379,11 @@ async def import_state(
         # ownerless and unlisted — permanently holding the archive's own id, so
         # re-uploading a corrected document lands under a fresh uuid instead.
         try:
+            # Destination, not archive: a .json import ships no blob sidecars,
+            # and on an id collision the archive's directory belongs to a
+            # different, live session whose blob store this must never read.
             state_data = inline_blobs(
-                state_data, get_session_dir(archive_session_id) / "blobs"
+                state_data, get_session_dir(session_id) / "blobs"
             )
             if session_id != archive_session_id:
                 state_data = json.loads(
@@ -397,9 +401,7 @@ async def import_state(
             state_data["id"] = session_id
             state_data["user_id"] = user_id
             state = AnalysisState(**state_data)
-            _mark_runtime_availability_after_import(state)
-            _normalize_imported_status(state)
-            _arm_restore_intent_after_import(state)
+            _finalize_imported_state(state)
         except BaseException:
             _cleanup_partial_session(session_id)
             raise
@@ -413,7 +415,10 @@ async def import_state(
         )
 
     validate_session_id(state.id)
-    await async_save_session(state.id, state)
+    # Forced: for the inline .json/.zip paths this is the ONLY session.json
+    # write, so losing it to the save throttle would leave a session that exists
+    # as files and in the cache but has no metadata document at all.
+    await async_save_session(state.id, state, force=True)
     await _update_session_cache(state.id, state)
 
     return APIResponse(

@@ -29,6 +29,42 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["websockets"])
 
 
+def _needs_report_only(state, effective_max_rounds: int, in_integration_loop: bool) -> bool:
+    """Whether this attach should generate the report instead of running the graph.
+
+    Scoped to a session that completed its analysis and was interrupted during
+    report generation — not to a user-initiated run. An armed
+    ``restore_start_intent`` is exactly that ask: ``POST /run`` sets it as the
+    "re-run from your data" the blocked-resume message promises, and import arms it
+    for a checkpoint-less session. Answering it with a report fabricated a final
+    report out of the imported rounds, cleared the runtime warning on the way in,
+    and left ``runtime_recompute_pending`` unconsumed — only the bioinformatics
+    node clears it — so the finished session's one remaining trace of an empty
+    kernel was that flag.
+
+    Suppressing report-only is sufficient on its own: ``_should_continue`` tests
+    ``current_round >= max_rounds`` only *after* a round body runs, so the
+    preserved round re-executes and then routes to the report exactly once.
+    Bumping ``max_rounds`` instead would run an extra round, because
+    ``preserve_round_on_initialize`` keeps ``current_round`` where it is.
+
+    ``final_report_requested`` keeps precedence: that is the explicit
+    "write the report" intent, and it is already exempt from the integration-loop
+    guard.
+    """
+    if getattr(state, "final_report_requested", False):
+        return True
+    if getattr(state, "restore_start_intent", None) == "explicit_start":
+        return False
+    return (
+        state.status in (TaskStatus.RUNNING, TaskStatus.WAITING_INPUT,
+                         TaskStatus.FAILED, TaskStatus.GENERATING_REPORT)
+        and state.current_round >= effective_max_rounds
+        and len(state.round_results) >= effective_max_rounds
+        and not in_integration_loop
+    )
+
+
 def _in_integration_loop(state) -> bool:
     # User explicitly chose to write the final report — not in the loop.
     if getattr(state, "final_report_requested", False):
@@ -647,13 +683,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     # Detect sessions that completed analysis but were interrupted during report generation
     effective_max_rounds = state.max_rounds if state.max_rounds > 0 else config.max_rounds
     in_integration_loop = _in_integration_loop(state)
-    finalize_requested = getattr(state, "final_report_requested", False)
-    needs_report_only = finalize_requested or (
-        state.status in (TaskStatus.RUNNING, TaskStatus.WAITING_INPUT,
-                         TaskStatus.FAILED, TaskStatus.GENERATING_REPORT)
-        and state.current_round >= effective_max_rounds
-        and len(state.round_results) >= effective_max_rounds
-        and not in_integration_loop
+    needs_report_only = _needs_report_only(
+        state, effective_max_rounds, in_integration_loop
     )
 
     try:

@@ -41,6 +41,7 @@ from backend.utils.auth import require_session_ownership
 from backend.utils.blob_store import inline_blobs
 from backend.utils.files import slugify_session_name, validate_path_within, validate_session_id, temp_file_on_error
 from backend.utils.secret_redaction import strip_analysis_state_secrets
+from backend.utils.runtime_apply import RUNTIME_H5AD_MANIFEST_FILENAME
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
 
@@ -204,6 +205,21 @@ def _add_states_to_tar(tf, session_id: str, include_runtime: bool = False):
         if not include_runtime and is_sandbox_pickle(state_file.name):
             return
         if not include_runtime and state_file.name.startswith("checkpoints.sqlite"):
+            return
+        # The h5ad sidecar set is runtime too: a Snapshot V2 restore writes
+        # `runtime_h5ad_manifest.json` plus the `<name>.h5ad` files it lists so a
+        # kernel can come back holding `adata` when the dill residual cannot
+        # carry it. Matching neither filter above, the pair used to travel in the
+        # portable export that also declares the runtime absent — shipping a
+        # multi-GB AnnData the importer then reports as gone.
+        #
+        # The two halves must be dropped together or not at all: a manifest whose
+        # sidecars are missing makes every later kernel start raise
+        # "h5ad sidecar missing", which is a brick rather than a degrade.
+        if not include_runtime and (
+            state_file.name == RUNTIME_H5AD_MANIFEST_FILENAME
+            or state_file.name.casefold().endswith(".h5ad")
+        ):
             return
         _safe_add_file(tf, state_file, f"{session_id}/states/{state_file.name}")
 

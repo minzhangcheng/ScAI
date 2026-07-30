@@ -22,6 +22,11 @@ from backend.services.snapshot_v2.models import (
 # ── Fixtures (mirrors test_snapshot_v2_deletion.py) ─────────────────────
 
 
+# Certifies Snapshot V2-enabled behaviour. The operator gate ships off, so pin it
+# on here instead of inheriting it from the environment: these assertions describe
+# the enabled lifecycle and are meaningless (and were failing) with it off.
+pytestmark = pytest.mark.requires_snapshot_v2
+
 @pytest.fixture
 def v2_paths(tmp_path):
     class FakePaths:

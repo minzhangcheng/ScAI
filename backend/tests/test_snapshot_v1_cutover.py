@@ -21,8 +21,17 @@ def test_snapshot_v1_restore_cutover_defaults_on():
     """No config combination should leave V1 restore enabled after cutover."""
     cfg = SystemConfig()
     assert cfg.snapshot_v1_restore_cutover is True
-    # Dual-path flag removed or forced authoritative for V2 lifecycle.
-    assert not hasattr(cfg, "snapshot_v2_enabled") or cfg.snapshot_v2_enabled is True
+    # The dual-path flag is not a V1 escape hatch, and not an independent switch
+    # either: it mirrors the operator gate, whose default is *off*. Asserting it
+    # True only ever held because the repo conftest forces SCAI_ENABLE_SNAPSHOT_V2
+    # on, which made the shipped configuration the one this test could not run in.
+    # "V1 restore stays rejected whatever this flag says" is the invariant that
+    # matters, and test_should_reject_v1_restore_always below is what pins it.
+    from backend.config import _config
+
+    assert not hasattr(cfg, "snapshot_v2_enabled") or (
+        cfg.snapshot_v2_enabled is _config._ENABLE_SNAPSHOT_V2
+    )
 
 
 def test_should_reject_v1_restore_always():

@@ -79,6 +79,50 @@ def free_disk_bytes(path) -> int:
     except OSError:
         return 0
 
+def check_export_disk_space() -> None:
+    """Refuse to build an export archive on a volume that is already near full.
+
+    An export is a second full-size copy of the session, written to the same data
+    volume it came from, and nothing sized it before this. Import has refused to
+    start under this floor from the beginning; without the mirror check on the way
+    out, one export is what fills the disk and starts failing every other upload
+    and analysis on the installation.
+    """
+    free = free_disk_bytes(UPLOAD_TEMP_DIR)
+    if free and free < MIN_FREE_DISK_BYTES:
+        raise HTTPException(
+            status_code=507,
+            detail=(
+                "Not enough free disk space to build the export "
+                f"({free // (1024 * 1024)} MB left). Free space and try again."
+            ),
+        )
+
+def count_v2_snapshot_records(state_payload) -> int:
+    """Number of format_version >= 2 snapshot records in a session.json payload.
+
+    An ordinary archive ships these records but none of the Snapshot V2 object
+    storage that backs them (_build_session_tar packs no v2/, objects/,
+    staging/, journals/, committed/ or integrity/ root), so the
+    manifest states the count rather than leaving the destination to discover
+    records it can neither restore nor delete.
+    """
+    if not isinstance(state_payload, dict):
+        return 0
+    records = state_payload.get("snapshots")
+    if not isinstance(records, list):
+        return 0
+    total = 0
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        try:
+            if int(record.get("format_version") or 0) >= 2:
+                total += 1
+        except (TypeError, ValueError):
+            continue
+    return total
+
 def check_inline_import_size(content_length: Optional[int], max_bytes: int = MAX_INLINE_IMPORT_BYTES) -> None:
     """Fast-reject oversized inline imports based on the Content-Length header."""
     if content_length is not None and content_length > max_bytes:
@@ -116,7 +160,12 @@ def _is_disabled_snapshot_v2_member(name: str) -> bool:
     if is_snapshot_v2_enabled():
         return False
 
-    normalized = name.strip("/")
+    # Empty and "." segments are dropped before anything is compared: a member
+    # named "./<sid>/v2/..." or "<sid>//objects/..." names the same path as the
+    # plain form, and matching on the raw string let both bypass the session-root
+    # rule below.
+    parts = [p for p in name.split("/") if p not in ("", ".")]
+    normalized = "/".join(parts)
     if normalized == "snapshot-v2-export.json":
         return True
     if _SNAPSHOT_V2_OBJECT_MEMBER.fullmatch(normalized):
@@ -124,7 +173,6 @@ def _is_disabled_snapshot_v2_member(name: str) -> bool:
     if normalized.startswith("manifests/"):
         return True
 
-    parts = normalized.split("/")
     return len(parts) >= 2 and parts[1] in _SNAPSHOT_V2_SESSION_ROOTS
 
 # P3-7: cap export filename's slug portion to keep total filename below

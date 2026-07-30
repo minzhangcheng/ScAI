@@ -145,8 +145,8 @@ docker build -t ghcr.io/minzhangcheng/scai:latest .
 ```
 
 ```bash
-./build.sh --version 0.36.13
-./build.sh --version 0.36.13 --push
+./build.sh --version 0.36.14
+./build.sh --version 0.36.14 --push
 ```
 
 如果未指定 `--version`，辅助脚本使用 `git describe --tags --abbrev=0` 返回的最新 Git 标签；如果不存在标签，则使用 `latest`。`--push` 会将两个标签推送到 `ghcr.io/minzhangcheng/scai`；使用前请先向该注册表进行 Docker 身份验证。该辅助脚本不接受注册表、镜像名称、平台或构建参数 flags。
@@ -288,7 +288,7 @@ docker start scai
 
 恢复过程：停止服务，将损坏的数据根目录移到一旁，将完整备份恢复到原路径，恢复所需所有权，提供相同密钥，启动匹配的应用版本，并在重新允许用户访问前完成验证。
 
-可移植会话导出/导入用于在实例之间迁移单个会话。以 `include_runtime=true` 导出时会一并携带在线内核状态和工作流 checkpoint，导入后可继续分析；默认导出只携带内容，无法继续。两种方式都不能替代完整服务备份——权衡详见第 13 节。
+可移植会话导出/导入用于在实例之间迁移单个会话。以 `include_runtime=true` 导出、并在导入时传 `X-Trust: true` 时会一并携带在线内核状态和工作流 checkpoint，导入后可继续分析；默认导出只携带内容，无法继续。两种方式都不能替代完整服务备份——权衡详见第 13 节。
 
 ## 10. 监控与日志
 
@@ -409,9 +409,9 @@ with Client("http://localhost:8000", api_key="<API_KEY>", timeout=86400) as clie
 
 常规签名：`import_session(archive_path: str | Path, *, wait: bool = True, poll_interval: float = 2.0, timeout: int | None = None, on_progress: Callable[[dict], None] | None = None) -> str`。服务器接受 `.tar.gz`、`.tgz`、`.zip` 和 `.json` 格式。Tar 归档可以异步处理：设置 `wait=False` 时，返回字符串为导入作业 ID。进度回调异常会被忽略。提取进度将未压缩成员字节数与压缩归档字节数比较，因此该比率是启发式值，可能超过 100%。
 
-**警告：**常规导入会保留归档中记录的会话 ID，并可能覆盖具有相同 ID 的现有会话文件。导入前，请列出现有会话、执行完整备份；如果无法确定冲突后果，请使用隔离实例。Tar 导入没有配置压缩大小、展开后大小或成员数量限制。请通过带外方式检查归档清单，并预留足够的数据/临时磁盘和 inode，以承受极端膨胀或归档炸弹。内联 ZIP 和 JSON 导入的请求体限制为 100 MiB，但该限制并不能保证归档内容安全。错误包括 `FileNotFoundError`、`AuthError`、`ScaiError`、`ImportFailed`、`TimeoutError` 以及 HTTP/网络错误。
+**警告：**常规导入只在归档记录的会话 ID 于目标实例上未被占用时沿用该 ID。若已有会话占用它，归档会在新分配的 ID 下落地，并将其中所有嵌入路径重新绑定到新 ID，绝不覆盖既有会话的文件——导入始终是「创建会话」，而非「覆盖会话」。因此 ID 冲突的代价是换一个新 ID 以及失去精确续跑（见下文运行时段落），而不是数据丢失，无需为防冲突做完整备份或使用隔离实例。Tar 导入没有配置压缩大小、展开后大小或成员数量限制。请通过带外方式检查归档清单，并预留足够的数据/临时磁盘和 inode，以承受极端膨胀或归档炸弹。内联 ZIP 和 JSON 导入的请求体限制为 100 MiB，但该限制并不能保证归档内容安全。错误包括 `FileNotFoundError`、`AuthError`、`ScaiError`、`ImportFailed`、`TimeoutError` 以及 HTTP/网络错误。
 
-`cancel_import(import_id: str) -> dict` 会在上传处理推进时以及归档成员之间请求协作式取消；取消并非即时事务回滚。当前状态/取消查询并不按创建者限定导入作业 ID，因此应将其视为敏感 capability：不要记录、发布或披露。该方法返回服务器响应，并会因身份验证失败、未知 ID 或其他 API 故障引发 `AuthError` 或 `ScaiError`。
+`cancel_import(import_id: str) -> dict` 会在上传处理推进时以及归档成员之间请求协作式取消；取消并非即时事务回滚。状态查询与取消查询都按发起该作业的用户限定；未知 ID 与他人的 ID 一律返回 HTTP 404，因此该端点无法用于探测正在进行的导入，仅凭 ID 也无法操作他人的作业。该方法返回服务器响应，并会因身份验证失败、未知 ID 或其他 API 故障引发 `AuthError` 或 `ScaiError`。
 
 常规导出用法：
 
@@ -429,14 +429,14 @@ with Client("http://localhost:8000", api_key="<API_KEY>") as client:
 
 服务器会先完整构建临时压缩 tar 文件，然后才发送第一个响应字节。请确保 `upload_temp/` 有空间存放这一额外归档，并为大型会话预留足够的首字节等待时间；`timeout=None` 会为该请求禁用读/写/pool 超时，但保留客户端连接超时。
 
-可移植导出包括选定的会话元数据、上传文件、工作区文件（包括图形/产物）、报告、可移植 notebook/状态 sidecar、外置内容和可选的可重现性 bundle。任何情况下都不包括会话日志和凭据。
+可移植导出包括选定的会话元数据、上传文件、工作区文件（包括图形/产物）、报告、可移植 notebook/状态 sidecar、外置内容、会话级 LLM 调用日志（`sessions/<SESSION_ID>/logs/`）和可选的可重现性 bundle。日志在任何情况下都会随归档传输：它是模型调用用量的唯一逐次记录，缺少它重新生成的报告会声称所有 agent 的调用次数均为零。每个导出的状态 JSON 都会剥离明文凭据与 endpoint；但设置 `include_runtime=true` 时，LangGraph checkpoint 中仍可能残留由源实例密钥封装的凭据——目标实例无法解密，导入时会将其丢弃。
 
-导入后能否**继续分析**，取决于导出时的一个选择：
+导入后能否**继续分析**，取决于导出时的一个选择——若选择携带运行时，还取决于导入方是否信任该归档：
 
-- **默认（`include_runtime=false`）**——不含内核 pkl 和工作流 checkpoint。数据、代码、图表、报告和对话历史都会保留且可查看，但会话无法继续：导入时其运行时会被标记为 `unavailable`，继续操作会提示需要从导入的数据重跑。适合把会话交给他人，或只关心结果的场景。
-- **携带运行时（`include_runtime=true`）**——额外包含在线内核 pkl（`adata` 等内存变量）和 LangGraph checkpoint，分析可以从中断处接着跑。导入时必须传 `X-Trust: true` 才会接受，因为加载 pkl 会执行归档中的代码。归档体积可能大数 GB。
+- **默认（`include_runtime=false`）**——不含内核 pkl、LangGraph checkpoint 和 h5ad 运行时 sidecar。数据、代码、图表、报告和对话历史都会保留且可查看，但会话无法继续：导入时其运行时会被标记为 `unavailable`，常规导出仍会携带的逐轮生信 checkpoint 会在导入时被删除，继续操作会提示需要从导入的数据重跑——会话随后正是这样做的：重新开始当前轮次，而不是恢复一段内核已经不存在的对话。适合把会话交给他人，或只关心结果的场景。
+- **携带运行时（`include_runtime=true`）**——额外包含在线内核 pkl（`adata` 等内存变量）、LangGraph checkpoint，以及 Snapshot V2 恢复时可能代替 pkl 写出的 h5ad 运行时 sidecar，分析可以从中断处接着跑。导入时必须传 `X-Trust: true` 才会接受 pkl 与 h5ad sidecar，因为加载 pkl 会执行归档中的代码。不带该 header 时归档仍可导入，但不会落地任何在线内核，两类 checkpoint——LangGraph checkpoint 与逐轮生信 checkpoint——都会被丢弃，结果与上面的默认情形完全相同。归档体积可能大数 GB。
 
-携带运行时的归档在**其他实例**上同样可以恢复。两处与安装绑定的机制在导入时会被处理：pkl 的 HMAC sidecar 由目标实例用本地密钥重新生成（它从不随归档传输），源实例密钥封装的凭据会被丢弃而不是当作损坏——导入后重新配置 API key 即可。以上均不需要启用 Snapshot V2。
+要获得精确续跑，需要三个条件同时成立：导出时 `include_runtime=true`、导入时 `X-Trust: true`，以及归档记录的会话 ID 在目标实例上仍未被占用。携带运行时的归档在**其他实例**上同样可以恢复，但最后一个条件才是悄悄决定「恢复得有多精确」的那一项。导入永不覆盖既有会话：该 ID 若已被占用，导入会另行分配一个新 ID，而以归档会话 ID 为 thread_id、无法改名落位的 LangGraph checkpoint 会随之被丢弃。此时内核 pkl 仍会恢复，会话保留内存变量，但「继续」只能从新一轮的起点重新进入工作流，而不是回到原先暂停的节点。因此把携带运行时的归档重新导入到导出它的那台实例上，只有先删除原会话才能获得精确续跑。两处与安装绑定的机制在导入时会被处理：pkl 的 HMAC sidecar 由目标实例用本地密钥重新生成（它从不随归档传输），源实例密钥封装的凭据会被丢弃而不是当作损坏——导入后重新配置 API key 即可。以上均不需要启用 Snapshot V2。
 
 要能继续，会话必须是在暂停或等待输入时导出的。已完成的会话导出后，其 checkpoint 停在流程图末端，没有可继续的内容；此时应发起重新分析，开启新一轮。
 
@@ -465,7 +465,7 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
   export '<SESSION_ID>' '<OUTPUT_PATH>'
 ```
 
-`list` 显示 ID、名称、状态、当前轮次和创建时间。`import` 显示启发式提取进度（可能超过 100%），并在没有轮询期限的情况下等待；HTTP 客户端超时为 24 小时。它保留归档的会话 ID，因此使用前请列出并备份现有会话。`export` 写入压缩归档；省略输出时使用客户端默认名称；服务器需要临时磁盘在下载开始前完成构建。请引用 secrets 和路径，并避免将密钥或异步导入作业 ID 存入 shell 历史记录或日志。
+`list` 显示 ID、名称、状态、当前轮次和创建时间。`import` 显示启发式提取进度（可能超过 100%），并在没有轮询期限的情况下等待；HTTP 客户端超时为 24 小时。它只在归档的会话 ID 未被占用时沿用该 ID，冲突时会另行分配新 ID，不会覆盖既有会话。`export` 写入压缩归档；省略输出时使用客户端默认名称；服务器需要临时磁盘在下载开始前完成构建。请引用 secrets 和路径，并避免将密钥或异步导入作业 ID 存入 shell 历史记录或日志。
 
 ## 15. 安全实践
 

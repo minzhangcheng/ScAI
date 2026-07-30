@@ -228,6 +228,64 @@ def test_portable_export_omits_installation_bound_checkpoint(tmp_path, monkeypat
     assert "portable-session/states/checkpoints.sqlite-wal" not in names
 
 
+def _states_export_names(tmp_path, monkeypatch, include_runtime):
+    """Pack a states/ dir through the real builder and return the member names."""
+    from backend.routes import export_import
+
+    states = tmp_path / "states"
+    states.mkdir()
+    (states / "analysis.ipynb").write_text("{}", encoding="utf-8")
+    (states / "runtime_h5ad_manifest.json").write_text(
+        '{"version": 1, "entries": {"adata": {"path": "adata.h5ad", "sha256": "%s"}}}'
+        % ("0" * 64),
+        encoding="utf-8",
+    )
+    (states / "adata.h5ad").write_bytes(b"H5AD")
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    setattr_facade(
+        monkeypatch, "backend.routes.export_import", "get_session_states",
+        lambda _session_id: states,
+    )
+    setattr_facade(monkeypatch, "backend.routes.export_import", "STATE_DIR", legacy)
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        export_import._add_states_to_tar(
+            archive, "sidecar-session", include_runtime=include_runtime
+        )
+    buffer.seek(0)
+    with tarfile.open(fileobj=buffer, mode="r") as archive:
+        return set(archive.getnames())
+
+
+def test_portable_export_omits_the_h5ad_runtime_sidecars(tmp_path, monkeypatch):
+    """They are runtime, and this is the export that declares the runtime absent.
+
+    Matching neither ``is_sandbox_pickle`` nor the checkpoint filter, the pair used
+    to travel in every ordinary archive -- shipping a multi-GB AnnData that the
+    importer then marks ``runtime_restore_status=unavailable``.
+    """
+    names = _states_export_names(tmp_path, monkeypatch, include_runtime=False)
+
+    assert "sidecar-session/states/analysis.ipynb" in names
+    assert "sidecar-session/states/runtime_h5ad_manifest.json" not in names
+    assert "sidecar-session/states/adata.h5ad" not in names
+
+
+def test_a_runtime_export_keeps_the_h5ad_sidecars_as_a_pair(tmp_path, monkeypatch):
+    """Atomicity is the property that matters, in both directions.
+
+    A manifest whose sidecars were dropped makes every later kernel start raise
+    "h5ad sidecar missing" -- a brick rather than a degrade -- and sidecars with no
+    manifest are inert, since nothing reads ``states/*.h5ad`` except through it.
+    """
+    names = _states_export_names(tmp_path, monkeypatch, include_runtime=True)
+
+    assert "sidecar-session/states/runtime_h5ad_manifest.json" in names
+    assert "sidecar-session/states/adata.h5ad" in names
+
+
 def test_session_json_is_encrypted_and_owner_only(tmp_path, monkeypatch):
     session_path = tmp_path / "secret-test" / "session.json"
     monkeypatch.setattr(

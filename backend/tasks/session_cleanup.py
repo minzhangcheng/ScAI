@@ -8,7 +8,7 @@ from pathlib import Path
 
 from backend.config import (
     CLEANUP_INTERVAL, IMPORT_JOB_TTL, MAX_CACHED_SESSIONS, PREPARED_EXPORT_TTL,
-    SESSION_CACHE_TTL,
+    SESSION_CACHE_TTL, UPLOAD_TEMP_DIR,
 )
 from backend.services.session_store import async_save_session
 from backend.state import (
@@ -141,6 +141,50 @@ async def _cleanup_stale_prepared_exports(
         logger.info(f"Cleaned up {len(stale)} stale prepared exports")
 
 
+# The only filename shapes the export endpoints write into UPLOAD_TEMP_DIR.
+# Every other name there is an upload chunk or an import archive with its own
+# lifecycle, so this sweep must not widen past these prefixes.
+_EXPORT_TEMP_PREFIXES = ("prepared_export_", "export_stream_", "v2-export-")
+
+
+def _unlink_orphaned_export_archives(max_age_s: float | None) -> int:
+    """Delete export archives on disk that no live token can reach any more.
+
+    ``_cleanup_stale_prepared_exports`` walks the in-memory ``prepared_exports``
+    dict, so it can only reclaim what this process still remembers. A restart
+    forgets every token and strands the files — full-size copies of a session —
+    with nothing left that can ever name them. This is the disk-side half.
+    """
+    removed = 0
+    try:
+        entries = list(UPLOAD_TEMP_DIR.iterdir())
+    except OSError:
+        return 0
+    now = time.time()
+    for path in entries:
+        if not path.name.startswith(_EXPORT_TEMP_PREFIXES):
+            continue
+        try:
+            if not path.is_file():
+                continue
+            if max_age_s is not None and now - path.stat().st_mtime <= max_age_s:
+                continue
+            # Unlinking a file FileResponse is still streaming is safe on POSIX:
+            # the open descriptor keeps serving it, so an age-guarded sweep cannot
+            # truncate a slow download.
+            path.unlink(missing_ok=True)
+            removed += 1
+        except OSError as exc:
+            logger.warning("Failed to delete orphaned export archive %s: %s", path, exc)
+    if removed:
+        logger.info("Cleaned up %d orphaned export archives", removed)
+    return removed
+
+
+async def sweep_orphaned_export_archives(max_age_s: float | None = None) -> int:
+    return await asyncio.to_thread(_unlink_orphaned_export_archives, max_age_s)
+
+
 async def cleanup_stale_sessions(
     chat_task_lock: asyncio.Lock,
     chat_sandboxes: Dict[str, Any],
@@ -167,6 +211,8 @@ async def cleanup_stale_sessions(
                 await _cleanup_stale_prepared_exports(
                     current_time, prepared_exports, prepared_exports_lock
                 )
+            # In-memory sweep first, so the dict never outlives the file it names.
+            await sweep_orphaned_export_archives(PREPARED_EXPORT_TTL)
 
         except Exception:
             logger.exception("Error in session cleanup task")

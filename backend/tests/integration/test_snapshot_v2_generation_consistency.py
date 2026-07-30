@@ -28,6 +28,11 @@ from backend.utils.sandbox import LocalJupyterSandbox, _integrity_dir, _verify_p
 _KERNEL_NAME = "python3"
 _KERNEL_START_TIMEOUT_S = 30
 
+# Every test here drives `_create_auto_snapshot`, which is a no-op with the
+# operator gate off — and the gate ships off, so without this the file's
+# assertions were unrunnable in the default configuration.
+pytestmark = pytest.mark.requires_snapshot_v2
+
 
 def _sync_sandbox_state(state, sandbox) -> None:
     """Mirror production tracking of runtime generation on AnalysisState."""
@@ -219,10 +224,16 @@ async def test_auto_snapshot_waits_for_pending_save(generation_env, monkeypatch)
             "pre_round_wait",
         )
     )
-    await asyncio.wait_for(entered.wait(), timeout=10)
-    assert not capture.done()
-
-    release.set()
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        assert not capture.done()
+    finally:
+        # Opened unconditionally: a gate that never opens strands the
+        # monkeypatched `await_pending_saves`, and the fixture's own teardown
+        # awaits it (`sandbox.stop()`), so any early exit here would deadlock the
+        # whole pytest process instead of failing this one test. `--timeout` does
+        # not rescue it — the hang is inside fixture finalization.
+        release.set()
     record = await asyncio.wait_for(capture, timeout=60)
     assert record is not None and record.failure is None
     _sync_sandbox_state(env.state, sandbox)

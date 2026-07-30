@@ -58,6 +58,40 @@ async def test_ensure_session_loaded_caches():
     assert second is first
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason", ["llm_failure", "agent_disabled", "marker_db_missing"]
+)
+async def test_load_clears_a_gate_only_a_live_workflow_could_release(reason):
+    """A restart leaves no workflow, so these gates can never be answered.
+
+    All three are resolved solely by ``POST /{id}/llm-failure-action``, which
+    raises ``404 Workflow not found`` when ``workflows[session_id]`` is absent —
+    and the WebSocket re-opens the dialog on attach, so the session presents
+    buttons that cannot work. ``agent_disabled`` was missing from this cleanup and
+    was therefore the one gate that never self-healed.
+    """
+    from backend.models.schemas import TaskStatus
+
+    sid = f"sess-gate-{reason}"
+    ensure_session_dirs(sid)
+    state = _make_state(sid)
+    state.status = TaskStatus.WAITING_INPUT
+    state.wait_input_reason = reason
+    state.llm_failure_info = {"node_name": "bioinformatics", "generation": 2}
+    state.agent_disabled_info = {"agent": "pathology", "generation": 2}
+    save_session_to_disk(sid, state)
+    sessions.pop(sid, None)
+
+    loaded = await ensure_session_loaded(sid)
+
+    assert loaded is not None
+    assert loaded.wait_input_reason is None
+    assert loaded.llm_failure_info is None
+    assert loaded.agent_disabled_info is None
+    assert loaded.status == TaskStatus.PAUSED
+
+
 def test_list_saved_sessions_sees_new_structure():
     sid = "sess-listed"
     ensure_session_dirs(sid)

@@ -329,8 +329,9 @@ except Exception as e:
             )
             raise RuntimeError(
                 f"Sandbox restore failed for session {self.session_id}: {detail}. "
-                f"Previous kernel variable state is unavailable. Start a fresh kernel "
-                f"or restore from an earlier snapshot."
+                f"Previous kernel variable state is unavailable. Re-run the analysis "
+                f"from your data to rebuild kernel state; snapshot restore is only "
+                f"available where Snapshot V2 is enabled."
             )
     
     async def save_session(self):
@@ -355,7 +356,23 @@ except Exception as e:
         Modules, functions, classes and methods are excluded — kernel init and
         notebook replay re-establish them, and by-reference frames are what most
         often break a restore in a different environment.
+
+        A kernel whose restore failed is never persisted. ``_restore_session``
+        populates ``globals()`` frame by frame, so a mid-stream failure leaves a
+        partial namespace; dumping that over the live pkl and re-signing it
+        destroys the only good copy and makes the *next* start succeed with a
+        silently truncated runtime, still reporting ``runtime_restore_status`` as
+        complete. The pkl on disk is better evidence than anything this kernel
+        now holds.
         """
+        if getattr(self, "_session_restore_failed", False):
+            logger.error(
+                "[%s] refusing to persist a kernel whose restore failed; "
+                "keeping the previous pkl",
+                self.session_id,
+            )
+            return
+
         async with self._exec_lock:
             session_path = str(self.notebook_state.session_path.absolute())
             escaped_path = repr(session_path)

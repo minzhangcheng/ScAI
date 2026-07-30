@@ -1,6 +1,8 @@
 """P1-11: Sandbox dill restore/save failures must surface (not silently skip)."""
 import re
 
+import pytest
+
 import backend.utils.sandbox as sb_mod
 
 
@@ -32,6 +34,51 @@ def test_restore_failure_raises_not_silent():
     )
     assert "ZstdDecompressor" in body
     assert "_raw.seek(0)" in body, "legacy uncompressed runtime must remain readable"
+
+
+@pytest.mark.asyncio
+async def test_save_session_refuses_to_overwrite_after_a_failed_restore(tmp_path):
+    """The pkl on disk is better evidence than a half-restored namespace.
+
+    ``_restore_session`` assigns into ``globals()`` frame by frame, so an aborted
+    restore leaves a partial namespace. Dumping that over the live pkl and
+    re-signing it destroyed the only good copy and made the *next* start succeed
+    with a silently truncated runtime, still reporting the runtime as complete.
+    """
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from backend.utils.sandbox import LocalJupyterSandbox
+
+    sandbox = LocalJupyterSandbox.__new__(LocalJupyterSandbox)
+    sandbox.session_id = "restore-failed"
+    sandbox._session_restore_failed = True
+    sandbox._exec_lock = asyncio.Lock()
+    pkl = tmp_path / "restore-failed_session.pkl"
+    pkl.write_bytes(b"ORIGINAL")
+    sandbox.notebook_state = MagicMock(session_path=pkl)
+    # Reaching the kernel at all would be a bug; make it explode if we do.
+    sandbox.execute = MagicMock(side_effect=AssertionError("must not reach the kernel"))
+
+    await sandbox.save_session()
+
+    assert pkl.read_bytes() == b"ORIGINAL"
+
+
+def test_start_tears_down_a_kernel_whose_restore_failed():
+    """A half-restored kernel must not stay reachable.
+
+    Nothing downstream re-checks the flag: ``execute()`` guards only on
+    ``kc is None`` and the bioinformatics agent only on ``km is None``.
+    """
+    from backend.tests.split_facade import source_for_path
+
+    source = source_for_path("backend/utils/sandbox_parts/kernel.py")
+    start = source.split("async def start(", 1)[1]
+    assert "await self._restore_session()" in start
+    assert "await self.stop(save=False)" in start, (
+        "a failed restore must tear the kernel down, without saving"
+    )
 
 
 def test_save_session_collects_and_reports_skipped_vars():

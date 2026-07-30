@@ -144,8 +144,17 @@ class KernelMixin:
         self._kernel_dead = False
         self.kernel_epoch = getattr(self, "kernel_epoch", 0) + 1
 
-        # Try to restore previous session
-        await self._restore_session()
+        # Try to restore previous session. On failure the kernel is torn down
+        # rather than handed back: `_restore_session` assigns into globals() frame
+        # by frame, so an aborted restore leaves a partial namespace, and nothing
+        # downstream re-checks (execute() guards only on `kc is None`, the agent
+        # only on `km is None`). save=False is mandatory — this namespace must
+        # never reach the pkl. With km/kc cleared, the next start rebuilds clean.
+        try:
+            await self._restore_session()
+        except Exception:
+            await self.stop(save=False)
+            raise
 
         return {
             "started": True,

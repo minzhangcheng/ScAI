@@ -25,6 +25,7 @@ from backend.models.schemas import AnalysisState, APIResponse
 from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
 from backend.services.snapshot_v2.feature_gate import (
     is_snapshot_v2_enabled,
+    normalize_disabled_snapshot_state,
     require_snapshot_v2_enabled,
 )
 from backend.services.session_store import (
@@ -38,7 +39,7 @@ from backend.state import (
     prepared_exports_lock as _prepared_exports_lock,
 )
 from backend.utils.auth import require_session_ownership
-from backend.utils.blob_store import inline_blobs
+from backend.utils.blob_store import externalize_blobs, inline_blobs
 from backend.utils.files import slugify_session_name, validate_path_within, validate_session_id, temp_file_on_error
 from backend.utils.secret_redaction import strip_analysis_state_secrets
 from starlette.background import BackgroundTask
@@ -115,7 +116,18 @@ def _normalize_imported_status(state: AnalysisState) -> None:
     start one — including the "re-run from your data" button that a runtime-less
     import depends on — so the session looks permanently busy and the user has
     to stop it before anything else is reachable.
+
+    A wait gate whose only exits run through that missing workflow object is the
+    same problem wearing a different status, and a worse one because the dialog
+    comes back: ``POST /{id}/llm-failure-action`` resolves ``llm_failure``,
+    ``agent_disabled`` and ``marker_db_missing`` through ``workflows[session_id]``
+    and raises ``404 Workflow not found`` when it is absent, while the WebSocket
+    parks such a session in its HITL-hold branch and returns *before* registering
+    a workflow — after re-opening the dialog. ``ensure_session_loaded`` clears
+    two of the three on a disk load, but an import primes the cache, so nothing
+    clears them here.
     """
+    from backend.constants import WaitInputReason
     from backend.models.schemas import TaskStatus
 
     # GENERATING_REPORT is the same claim with a different label, and the
@@ -131,6 +143,29 @@ def _normalize_imported_status(state: AnalysisState) -> None:
             "lands paused.",
             state.id,
             previous.value,
+        )
+
+    # Checked on the reason rather than the status so a stale pairing cannot
+    # smuggle the gate through: an unresolvable gate is cleared either way, and
+    # only a session still parked on it needs its status moved.
+    workflow_bound_reasons = {
+        WaitInputReason.LLM_FAILURE.value,
+        WaitInputReason.AGENT_DISABLED.value,
+        WaitInputReason.MARKER_DB_MISSING.value,
+    }
+    if state.wait_input_reason in workflow_bound_reasons:
+        previous_reason = state.wait_input_reason
+        state.wait_input_reason = None
+        state.llm_failure_info = None
+        state.agent_disabled_info = None
+        if state.status == TaskStatus.WAITING_INPUT:
+            state.status = TaskStatus.PAUSED
+        logger.info(
+            "[%s] Imported while waiting on the %s gate, whose actions need a "
+            "live workflow this installation has none of; cleared the gate and "
+            "landed paused.",
+            state.id,
+            previous_reason,
         )
 
 
@@ -171,6 +206,37 @@ def _arm_restore_intent_after_import(state: AnalysisState) -> None:
         state.id,
         state.current_round,
     )
+
+
+def _finalize_imported_state(
+    state: AnalysisState,
+    *,
+    imported_runtime: Optional[bool] = None,
+) -> None:
+    """Apply every import-time fixup to *state*, in the one order that is correct.
+
+    ``normalize_disabled_snapshot_state`` has to run BEFORE
+    ``_normalize_imported_status``: it picks the next status from the failure's
+    ``retry_context``, and it passes ``generating_report`` straight through — the
+    one status the frontend renders no controls for, and precisely what
+    ``_normalize_imported_status`` exists to rewrite. So the status normalizer
+    must have the last word.
+
+    Without this, a session imported from an installation that had Snapshot V2
+    enabled kept every V2-only blocker (``snapshot_failure``,
+    ``pending_required_snapshot``, ``wait_input_reason``, ``recovery_blocked``,
+    ``snapshot_transaction.recovery_error``) even though nothing here can ever
+    answer them: a gate-off destination repaired them on the first authenticated
+    read, but only there, and a destination with the gate ON has no load path that
+    clears them at all — leaving ``/run`` at 409 and ``/resume`` refused, pointing
+    the user at snapshot actions whose objects this archive never carried.
+    """
+    _mark_runtime_availability_after_import(state, imported_pkl=imported_runtime)
+    if not is_snapshot_v2_enabled():
+        # Nothing can own a session that is being created right now.
+        normalize_disabled_snapshot_state(state, workflow_active=False)
+    _normalize_imported_status(state)
+    _arm_restore_intent_after_import(state)
 
 
 def _resign_imported_live_pkl(session_id: str) -> bool:
@@ -296,7 +362,9 @@ async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: st
 
         validate_session_id(state.id)
 
-        await async_save_session(state.id, state)
+        # Forced: this is the write that turns the extracted tree into a listable
+        # session, and PAUSED does not bypass the save throttle on its own.
+        await async_save_session(state.id, state, force=True)
         await _update_session_cache(state.id, state)
         async with _import_jobs_lock:
             _import_jobs[import_job_id] = {
@@ -306,6 +374,12 @@ async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: st
                 "created_at": created_at,
                 "session_id": state.id,
                 "name": state.name,
+                # Zeros are filtered so the common case stays an empty dict; the
+                # endpoint spreads this record verbatim.
+                "skipped": {
+                    k: v for k, v in (outcome.get("skipped") or {}).items() if v
+                },
+                "skipped_examples": outcome.get("skipped_examples") or [],
             }
         logger.info(f"Import {import_job_id}: completed, session_id={state.id}")
     except ImportCancelled as e:
@@ -398,6 +472,90 @@ def _is_checkpoint_member(relative_to_base: str) -> bool:
         return False
     rest = relative_to_base[len("states/"):]
     return "/" not in rest and rest.casefold().startswith("checkpoints.sqlite")
+
+
+def _is_runtime_h5ad_member(relative_to_base: str) -> bool:
+    """Whether a member is part of the live-runtime h5ad sidecar set.
+
+    ``states/runtime_h5ad_manifest.json`` plus the ``states/*.h5ad`` files it
+    names are runtime, not data: a Snapshot V2 restore writes them so a kernel
+    can come back up holding ``adata`` when the dill residual alone cannot carry
+    it. They match neither ``is_sandbox_pickle`` nor ``_is_checkpoint_member``, so
+    until now they crossed installations in an ordinary ``include_runtime=false``
+    export and were written without the caller ever asserting trust.
+
+    Case-folded for the same reason as ``_is_checkpoint_member``: the readers
+    spell these names in lower case.
+    """
+    from backend.utils.runtime_apply import RUNTIME_H5AD_MANIFEST_FILENAME
+
+    if not relative_to_base.startswith("states/"):
+        return False
+    rest = relative_to_base[len("states/"):]
+    if "/" in rest:
+        return False
+    return (
+        rest == RUNTIME_H5AD_MANIFEST_FILENAME
+        or rest.casefold().endswith(".h5ad")
+    )
+
+
+def _drop_kernelless_checkpoints(session_id: str, notify=None) -> None:
+    """Delete checkpoints that describe a kernel this import did not bring.
+
+    Both checkpoint families name a point mid-run and assume the values that
+    point produced are still in memory. Kept without the live pkl they are worse
+    than absent, because each one outranks the ``explicit_start`` intent that
+    ``_arm_restore_intent_after_import`` arms for exactly this situation:
+
+    * ``states/checkpoints.sqlite`` — ``workflow.resume()`` calls
+      ``aget_state()`` first and continues the graph the moment a row for this
+      thread exists; it consults ``restore_start_intent`` only in its "no
+      checkpoint found" tail. It travels under ``include_runtime`` while the pkl
+      needs ``trust`` as well, so a runtime export imported without trust — onto
+      a *free* id, where the in-loop drop above does not fire — resumes the
+      source machine's graph node against an empty kernel.
+    * ``states/<id>_bioinfo_checkpoint.json`` — matched by neither
+      ``is_sandbox_pickle`` nor ``_is_checkpoint_member``, so it travels in an
+      ordinary export too. ``has_resumable_checkpoint`` then makes the
+      bioinformatics node restore the old conversation and discard the freshly
+      built instruction, including the kernel-is-empty notice
+      ``runtime_recompute_pending`` exists to deliver.
+
+    Dropping them is what makes "re-run from your data" mean that. A trusted
+    runtime import keeps both, and keeps exact continuation with them.
+
+    The ``report`` checkpoint family is deliberately NOT touched: report
+    generation resumes from the round results in the state, not from anything in
+    the kernel, so it is still resumable on a session that arrived without one.
+    """
+    states_dir = get_session_states(session_id)
+    if not states_dir.exists():
+        return
+    for path in sorted(states_dir.iterdir()):
+        if not path.is_file():
+            continue
+        name = path.name.casefold()
+        if not (
+            name.startswith("checkpoints.sqlite")
+            or name.endswith("_bioinfo_checkpoint.json")
+        ):
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            logger.warning(
+                "Could not drop kernel-less checkpoint %s: %s", path, exc
+            )
+            continue
+        logger.warning(
+            "Imported without a live sandbox pkl; dropped %s so the session "
+            "starts from its restored round instead of resuming against an "
+            "empty kernel.",
+            path.name,
+        )
+        if notify is not None:
+            notify("checkpoint_dropped", path.name)
 
 
 def _resolve_import_dest(
@@ -545,7 +703,7 @@ def _import_tar_gz(
     *outcome* receives ``session_id`` as soon as a destination is allocated so the
     caller can clean up a half-written session on cancel or failure.
     """
-    from backend.utils.runtime_apply import _live_pkl
+    from backend.utils.runtime_apply import _live_pkl, runtime_h5ad_manifest_path
 
     data_base_str = str(DATA_BASE_DIR)
 
@@ -556,6 +714,34 @@ def _import_tar_gz(
     # Only a pkl written by *this* import gets re-signed; a pre-existing live pkl
     # left over from another session must keep whatever signature it already had.
     wrote_sandbox_pkl = False
+    # Same rule for the h5ad sidecar set: a manifest merely lying in the
+    # destination belongs to some other run and says nothing about this archive.
+    wrote_runtime_h5ad_manifest = False
+
+    # What the walk threw away. Every one of these decisions used to reach only
+    # the log, so a user whose archive lost its checkpoint, its V2 payload or a
+    # member outside the layout was told "Import successful" and nothing else.
+    # Bound into `outcome` up front and mutated in place, so a cancel or a
+    # mid-archive failure can still read the partial summary.
+    skipped: Dict[str, int] = {
+        "snapshot_v2": 0,
+        "unsafe_path": 0,
+        "off_layout": 0,
+        "untrusted_pickle": 0,
+        "untrusted_runtime_h5ad": 0,
+        "checkpoint_dropped": 0,
+    }
+    skipped_examples: list[str] = []
+    if outcome is not None:
+        outcome["skipped"] = skipped
+        outcome["skipped_examples"] = skipped_examples
+
+    def _note_skip(kind: str, name: str) -> None:
+        skipped[kind] += 1
+        # An off-layout or hostile archive can hold tens of thousands of members
+        # and this list is echoed on every status poll.
+        if len(skipped_examples) < 20:
+            skipped_examples.append(f"{kind}: {name}")
 
     archive_size = 0
     try:
@@ -646,10 +832,12 @@ def _import_tar_gz(
                     "the subsystem is disabled: %s",
                     member.name,
                 )
+                _note_skip("snapshot_v2", member.name)
                 continue
 
             if _is_unsafe_member_name(member.name):
                 logger.warning(f"Skipping archive entry with suspicious path: {member.name}")
+                _note_skip("unsafe_path", member.name)
                 continue
 
             parts = member.name.split('/', 1)
@@ -708,6 +896,7 @@ def _import_tar_gz(
                     "its restored round instead of a thread it cannot resume.",
                     member.name,
                 )
+                _note_skip("checkpoint_dropped", member.name)
                 continue
 
             dest_path = _resolve_import_dest(relative_to_base, session_id, archive_session_id)
@@ -716,6 +905,7 @@ def _import_tar_gz(
                     "Skipping archive entry outside the session layout: %s",
                     member.name,
                 )
+                _note_skip("off_layout", member.name)
                 continue
             validate_path_within(dest_path, get_session_dir(session_id))
             # SECURITY (S4): sandbox pickles can execute arbitrary code via dill.load.
@@ -724,8 +914,23 @@ def _import_tar_gz(
             if is_pkl_member:
                 if not trust:
                     logger.warning(f"Skipping sandbox pickle from imported archive (untrusted): {member.name}")
+                    _note_skip("untrusted_pickle", member.name)
                     continue
                 logger.warning(f"Restoring sandbox pickle (trust=true): {member.name}")
+            # The h5ad sidecar set is the other half of the live runtime, and the
+            # X-Trust contract already says so ("restore runtime objects
+            # (dill/h5ad)"). It carries no code, but it does bind identifier-named
+            # globals into the kernel, and an ordinary export has no business
+            # shipping a multi-GB AnnData it also declares absent.
+            is_runtime_h5ad_member = _is_runtime_h5ad_member(relative_to_base)
+            if is_runtime_h5ad_member and not trust:
+                logger.warning(
+                    "Skipping runtime h5ad sidecar from imported archive "
+                    "(untrusted): %s",
+                    member.name,
+                )
+                _note_skip("untrusted_runtime_h5ad", member.name)
+                continue
             dest_path.parent.mkdir(parents=True, exist_ok=True)
 
             f = tf.extractfile(member)
@@ -747,6 +952,11 @@ def _import_tar_gz(
                 # let a session with no live kernel at all claim it had one.
                 if is_pkl_member and dest_path == _live_pkl(session_id):
                     wrote_sandbox_pkl = True
+                # A restore-written h5ad set is a live runtime in its own right:
+                # a "complete" target with no dill residual leaves no pkl at all,
+                # and the manifest is then the only carrier of `adata`.
+                if is_runtime_h5ad_member and dest_path == runtime_h5ad_manifest_path(session_id):
+                    wrote_runtime_h5ad_manifest = True
 
             # Progress accounting: count uncompressed member size (matches what
             # the user sees on disk). bytes_total is compressed archive size, so
@@ -767,10 +977,34 @@ def _import_tar_gz(
             job["files_total"] = files_processed
             job["current_file"] = ""
 
-    if wrote_sandbox_pkl and session_id:
-        _resign_imported_live_pkl(session_id)
+    # Only decidable here: which members arrived is known after the walk, and
+    # the checkpoints must be gone before `_arm_restore_intent_after_import`
+    # tests for them below.
+    imported_live_runtime = wrote_sandbox_pkl or wrote_runtime_h5ad_manifest
+    if session_id:
+        if wrote_sandbox_pkl:
+            _resign_imported_live_pkl(session_id)
+        if not imported_live_runtime:
+            _drop_kernelless_checkpoints(session_id, notify=_note_skip)
 
     if state_json_data is None:
+        if skipped["snapshot_v2"]:
+            # Every member a Snapshot V2 export emits is filtered above when the
+            # subsystem is off, so the archive is intact and this installation is
+            # the constraint. "State JSON not found" blamed the file for an
+            # operator setting. The env var deliberately stays out of the detail:
+            # this text reaches end users, and the operator-facing wording already
+            # lives in config/_config.py and main.py.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This archive carries only Snapshot V2 snapshot data "
+                    f"({skipped['snapshot_v2']} member(s)) and no session state. "
+                    "Snapshot V2 is not enabled on this server, so the archive "
+                    "cannot be imported here; import it on a server with "
+                    "Snapshot V2 enabled."
+                ),
+            )
         raise HTTPException(status_code=400, detail="Session state JSON not found in archive")
 
     # Path remapping: replace the source installation's data root with ours.
@@ -808,9 +1042,7 @@ def _import_tar_gz(
         )
     )
     state = AnalysisState(**inlined)
-    _mark_runtime_availability_after_import(state, imported_pkl=wrote_sandbox_pkl)
-    _normalize_imported_status(state)
-    _arm_restore_intent_after_import(state)
+    _finalize_imported_state(state, imported_runtime=imported_live_runtime)
 
     # Write the externalized JSON (with @scai-blob tokens intact) to disk.
     # This keeps session.json consistent with the extracted blob sidecars.
@@ -820,7 +1052,15 @@ def _import_tar_gz(
     session_file = get_session_metadata_path(session_id)
     session_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     session_file.parent.chmod(0o700)
-    session_file.write_text(json.dumps(state_data, ensure_ascii=False), encoding="utf-8")
+    session_file.write_text(
+        json.dumps(
+            externalize_blobs(
+                state.model_dump(mode="json"), get_session_dir(session_id) / "blobs"
+            ),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     session_file.chmod(0o600)
 
     return state
@@ -928,9 +1168,7 @@ def _import_zip(content: bytes, user_id: str, trust: bool = False) -> AnalysisSt
             _extract_tree(f"{archive_session_id}/blobs/", session_dir / "blobs")
 
         state = AnalysisState(**inline_blobs(state_data, get_session_dir(session_id) / "blobs"))
-        _mark_runtime_availability_after_import(state, imported_pkl=wrote_sandbox_pkl)
-        _normalize_imported_status(state)
-        _arm_restore_intent_after_import(state)
+        _finalize_imported_state(state, imported_runtime=wrote_sandbox_pkl)
         return state
 
     except BaseException:

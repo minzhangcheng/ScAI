@@ -80,7 +80,13 @@ class Job:
         return dest
 
     def download_export(self, dest: str | Path) -> Path:
-        """Download the full session export as a zip."""
+        """Download the V1 job output ZIP.
+
+        The server returns the first ``*.zip`` at the top of the session
+        workspace when one exists, and otherwise builds a ZIP of the session
+        directory. Neither is the portable-session contract — use
+        ``Client.export_session`` for session transfer.
+        """
         dest = Path(dest)
         with self._client.stream(
             "GET", f"/api/v1/analyses/{self.job_id}/export", follow_redirects=True

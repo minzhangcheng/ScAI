@@ -31,6 +31,15 @@ export const zh = {
     exportDownloadStartedDetail: '文件下载已开始，请检查浏览器下载管理器',
     importSuccess: '导入成功',
     importFailed: '导入失败',
+    // Members the import worker dropped instead of restoring; kinds come from
+    // `_note_skip` in backend/routes/export_import_parts/import_impl.py.
+    importSkippedSummary: '有 {count} 项未恢复：{items}',
+    importSkippedSnapshotV2: '快照 V2 数据',
+    importSkippedUnsafePath: '不安全路径',
+    importSkippedOffLayout: '不符合会话目录结构的文件',
+    importSkippedUntrustedPickle: '内核运行时状态（未信任）',
+    importSkippedUntrustedRuntimeH5ad: '运行时数据对象（未信任）',
+    importSkippedCheckpointDropped: '工作流检查点',
     exportFailed: '导出失败',
     confirm: '确定',
     apiSettings: 'API 设置',
