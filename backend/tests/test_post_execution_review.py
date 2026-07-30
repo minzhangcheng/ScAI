@@ -285,8 +285,11 @@ def test_review_fires_on_hard_structural_signals():
     run, reason = should_run_post_execution_review(_unmet_audit(), [], "completed", False)
     assert run is True and "cell_communication" in reason
 
+    # Signal 4 is "last direction of the batch", not "terminal round": whether an
+    # analysis round follows depends on the integration cycle and the PI's next
+    # direction choice, neither of which has happened when this is decided.
     run, reason = should_run_post_execution_review(_clean_audit(), [], "completed", True)
-    assert run is True and "terminal" in reason.lower()
+    assert run is True and "last direction" in reason.lower()
 
 
 def test_review_declines_when_clean_and_a_later_round_remains():
@@ -373,6 +376,58 @@ def test_sanitize_review_result_bounds_lists_and_survives_non_dict():
     assert bad["status"] == "failed"
     assert bad["warnings"] == ["non-dict result"]
     assert bad["findings"] == [] and bad["figures"] == []
+
+
+def test_evidence_gap_labels_describe_vocabulary_not_feasibility():
+    """The labels say what the text mentions. Measured on all 542 real items, a
+    feasibility reading is wrong most of the time, so the two things a caller may
+    rely on are: measurement vocabulary wins over computational vocabulary, and a
+    "replicate-aware" request counts as new measurement even when it also names a
+    computation."""
+    from backend.workflow.post_execution_review import (
+        GAP_MENTIONS_COMPUTATION,
+        GAP_MENTIONS_NEW_MEASUREMENT,
+        GAP_UNLABELLED,
+        label_evidence_gap,
+    )
+
+    assert label_evidence_gap("Bulk concordance for canonical marker genes") == GAP_MENTIONS_COMPUTATION
+    assert label_evidence_gap("Western blot validation of the protein") == GAP_MENTIONS_NEW_MEASUREMENT
+    # Measurement wins even when a computation is named in the same sentence.
+    assert label_evidence_gap(
+        "Orthogonal protein validation of the correlation") == GAP_MENTIONS_NEW_MEASUREMENT
+    # The dominant real-world false positive: separated words, plus a computation.
+    assert label_evidence_gap(
+        "Replicated snRNA libraries per condition for formal composition testing"
+    ) == GAP_MENTIONS_NEW_MEASUREMENT
+    assert label_evidence_gap("Something entirely unrelated") == GAP_UNLABELLED
+    assert label_evidence_gap("") == GAP_UNLABELLED
+
+
+def test_collect_gaps_accepts_dicts_and_objects_and_bounds_itself():
+    from types import SimpleNamespace
+
+    from backend.workflow.post_execution_review import collect_structured_evidence_gaps
+
+    programs = [
+        {"label": "dict-form", "evidence_execution_ids": ["e1"],
+         "missing_evidence": ["Bulk concordance check", "  ", "qPCR validation"]},
+        SimpleNamespace(label="object-form", evidence_execution_ids=[],
+                        missing_evidence=["Ambient RNA sensitivity analysis"]),
+    ]
+    out = collect_structured_evidence_gaps(programs)
+
+    assert out["programs_total"] == 2
+    assert out["programs_with_gaps"] == 2
+    assert out["programs_without_evidence_ids"] == ["object-form"]
+    assert len(out["items"]) == 3, "blank gap text is dropped"
+    assert sum(out["counts"].values()) == 3
+
+    many = [{"label": f"p{i}", "evidence_execution_ids": ["e"],
+             "missing_evidence": [f"gap {j}" for j in range(20)]} for i in range(10)]
+    assert len(collect_structured_evidence_gaps(many)["items"]) <= 60
+
+    assert collect_structured_evidence_gaps([])["programs_total"] == 0
 
 
 def test_empty_review_meta_shape():

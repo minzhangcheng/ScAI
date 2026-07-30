@@ -418,6 +418,16 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             "steps_executed": result.get("steps_executed", 0),
             "status": result.get("status", "completed"),
             "mechanism_programs": result.get("mechanism_programs", []),
+            # Evidence binding must survive this dict. It is read by three
+            # consumers that all fail silently without it: the completeness gate in
+            # derive_round_completion_status (which withholds direction-coverage
+            # eligibility from a round whose findings are not bound to successful
+            # executions), the evidence note handed to the PI at synthesis, and the
+            # report's hedging. Dropping the keys made every round look verified,
+            # because each of those consumers tests `is False` and an absent key
+            # reads as None.
+            "evidence_verified": result.get("evidence_verified"),
+            "evidence_execution_ids": list(result.get("evidence_execution_ids") or []),
             # The executing agent's own view of what is left undone. It is present
             # in every real report_findings call and used to be dropped here, so
             # the PI synthesizing the round never saw it.

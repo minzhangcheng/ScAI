@@ -104,6 +104,49 @@ def test_audit_never_raises_on_a_broken_plan():
     assert harness._audit_round_plan_execution(state, {}) == {}
 
 
+def test_evidence_gaps_are_recorded_but_never_shown_to_the_pi():
+    """Step 1 is measurement: recording gaps must not change what the round
+    concludes, so the observation must not enter the PI's synthesis context."""
+    import re
+    import backend.workflow.synthesis as syn_mod
+
+    plan = _plan([PlanStep(id=1, title="Communication", method="Run liana rank_aggregate")])
+    state = _state(plan, code_history=[_execution("li.mt.rank_aggregate(adata)")])
+    result = {
+        "findings": [],
+        "mechanism_programs": [
+            {"label": "P1", "evidence_execution_ids": ["e1"],
+             "missing_evidence": ["Bulk concordance for the reported signature",
+                                  "Western blot validation of the protein"]},
+            {"label": "P2", "evidence_execution_ids": [], "missing_evidence": []},
+        ],
+    }
+
+    summary = _Harness()._audit_round_plan_execution(state, result)
+    gaps = summary["evidence_gaps"]
+
+    assert gaps["programs_total"] == 2
+    assert gaps["programs_with_gaps"] == 1
+    assert gaps["programs_without_evidence_ids"] == ["P2"]
+    assert gaps["counts"]["mentions_computation"] == 1
+    assert gaps["counts"]["mentions_new_measurement"] == 1
+    # Verbatim text is kept: the labels are not a feasibility verdict, so the item
+    # itself is the part a later calibration needs.
+    assert any(i["gap"].startswith("Bulk concordance") for i in gaps["items"])
+
+    # The PI's bioinformatics context enumerates its keys explicitly; evidence_gaps
+    # must not be among them.
+    source = open(syn_mod.__file__).read()
+    fn = re.search(r"async def _pi_synthesis\b.*?(?=\n    (?:async )?def )", source, re.DOTALL)
+    assert "evidence_gaps" not in fn.group(0), "observation leaked into the PI prompt"
+
+
+def test_no_mechanism_programs_records_nothing():
+    state = _state(_plan([PlanStep(id=1, title="t", method="Run liana rank_aggregate")]))
+    summary = _Harness()._audit_round_plan_execution(state, {"mechanism_programs": []})
+    assert "evidence_gaps" not in summary
+
+
 def test_registered_score_vouches_for_gene_scoring():
     plan = _plan([PlanStep(id=1, title="Module scores", method="Use score_genes for the panel")])
     state = _state(plan, score_definitions=[SimpleNamespace(round_number=2)])
@@ -112,6 +155,76 @@ def test_registered_score_vouches_for_gene_scoring():
 
     assert summary["n_completed"] == 1
     assert plan.steps[0].status == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Evidence binding must survive the node's result dict
+# ---------------------------------------------------------------------------
+
+def test_final_result_carries_evidence_binding_keys():
+    """The fixed-key result dict is the only writer of workflow-state
+    `bioinformatics_result`. Three consumers test `evidence_verified is False`, so
+    dropping the key made every round read as verified."""
+    import re
+    import backend.workflow.agents as agents_mod
+
+    source = open(agents_mod.__file__).read()
+    block = re.search(r"final_result = \{.*?\n        \}", source, re.DOTALL)
+    assert block, "could not locate the final_result literal"
+    body = block.group(0)
+    assert '"evidence_verified"' in body
+    assert '"evidence_execution_ids"' in body
+
+
+def _healthy_round(evidence_verified):
+    """A round where every other completion condition is satisfied, so the only
+    variable is whether the findings were bound to successful executions."""
+    from backend.models.schemas import RoundResult
+
+    state = {
+        "bioinformatics_result": {"findings": ["a finding"], "status": "completed",
+                                  "evidence_verified": evidence_verified},
+        "literature_result": {"findings": ["a citation"], "status": "completed"},
+    }
+    result = RoundResult(round_number=2, bioinformatics_findings=["a finding"],
+                         literature_findings=["a citation"])
+    return state, result
+
+
+def test_evidence_gate_fires_when_binding_failed():
+    """The completeness gate withholds direction-coverage eligibility from a round
+    whose findings are not bound to successful executions. It could not fire at all
+    while the key was being dropped from the node's result dict."""
+    from backend.workflow.synthesis import derive_round_completion_status
+
+    result = derive_round_completion_status(*_healthy_round(False))
+
+    assert result.round_status == "partial"
+    assert result.direction_coverage_eligible is False
+
+
+def test_evidence_gate_does_not_fire_when_binding_succeeded():
+    from backend.workflow.synthesis import derive_round_completion_status
+
+    result = derive_round_completion_status(*_healthy_round(True))
+
+    assert result.round_status == "completed"
+    assert result.direction_coverage_eligible is True
+
+
+def test_unknown_evidence_binding_is_not_reported_as_verified():
+    """`None` means the binding was never recorded. The note handed to the PI must
+    not claim the findings are linked to successful executions."""
+    import re
+    import backend.workflow.synthesis as syn_mod
+
+    source = open(syn_mod.__file__).read()
+    fn = re.search(r"async def _pi_synthesis\b.*?(?=\n    (?:async )?def )", source, re.DOTALL)
+    assert fn, "could not locate _pi_synthesis"
+    body = fn.group(0)
+    # A two-branch form on `is False` is exactly the bug: it maps None to verified.
+    assert "elif evidence_verified is False:" in body, "the note must handle all three states"
+    assert "unknown" in body.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -193,22 +306,50 @@ def test_timeout_interrupts_the_kernel_and_never_raises():
 
 
 # ---------------------------------------------------------------------------
-# Terminal-round detection
+# Last-direction detection
 # ---------------------------------------------------------------------------
 
-def test_terminal_round_requires_spent_budget_empty_queue_and_closed_integration():
+def _batch_state(queue, current_direction, **kwargs):
+    return _state(directions_queue=queue, current_round_direction=current_direction, **kwargs)
+
+
+def test_last_direction_ignores_the_entry_this_round_is_running():
+    """`directions_queue` is popped one round LATE — planning peeks, the next
+    round's _initialize_round pops — so the running direction is still queued
+    while it runs. A bare non-empty-queue test never fired on a last direction,
+    which is the stale-entry trap 0.30.4 already fixed once for the terminal gate."""
     harness = _Harness()
-    assert harness._is_terminal_analysis_round(_state(current_round=2, max_rounds=3)) is False
-    assert harness._is_terminal_analysis_round(_state(current_round=3, max_rounds=3)) is True
-    assert harness._is_terminal_analysis_round(
-        _state(current_round=3, max_rounds=3, directions_queue=[{"direction": "d"}])) is False
-    assert harness._is_terminal_analysis_round(
-        _state(current_round=3, max_rounds=3, pending_integration=True,
-               integration_cycle=0, max_integration_cycles=1)) is False
-    # Integration cycle cap reached: nothing can reopen the analysis.
-    assert harness._is_terminal_analysis_round(
-        _state(current_round=3, max_rounds=3, pending_integration=True,
-               integration_cycle=1, max_integration_cycles=1)) is True
+
+    # Two-direction batch: not last while D2 is still ahead, last once running D2.
+    assert harness._is_last_direction_round_of_batch(
+        _batch_state([{"direction": "D2"}], "D1")) is False
+    assert harness._is_last_direction_round_of_batch(
+        _batch_state([{"direction": "D2"}], "D2")) is True
+
+    # The two queue writers disagree on whether the running entry is present:
+    # _pi_planning stores selected_dirs[1:], the user-selection route stores all.
+    assert harness._is_last_direction_round_of_batch(
+        _batch_state([{"direction": "U1"}], "U1")) is True
+    assert harness._is_last_direction_round_of_batch(
+        _batch_state([{"direction": "U1"}, {"direction": "U2"}], "U1")) is False
+
+
+def test_last_direction_does_not_use_the_round_budget():
+    """The integration branch budgets one round MORE than the batch it plans
+    (the spare slot is the integration round itself), so `current_round >=
+    max_rounds` is false on every round of every integration batch — with an
+    empty queue included. The predicate must not consult it."""
+    harness = _Harness()
+    assert harness._is_last_direction_round_of_batch(
+        _batch_state([], "D5", current_round=5, max_rounds=6)) is True
+    assert harness._is_last_direction_round_of_batch(
+        _batch_state([], "D1", current_round=1, max_rounds=8)) is True
+
+
+def test_last_direction_ignores_blank_queue_entries():
+    harness = _Harness()
+    assert harness._is_last_direction_round_of_batch(
+        _batch_state([{"direction": "  "}, {}], "D1")) is True
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +441,10 @@ async def test_disabled_by_config_skips_without_touching_agents():
 @pytest.mark.asyncio
 async def test_fully_evidenced_round_does_not_run_the_pass():
     plan = _plan([PlanStep(id=1, title="Communication", method="Run liana rank_aggregate")])
-    state = _state(plan, code_history=[_execution("li.mt.rank_aggregate(adata)")])
+    # Another direction is still queued, so this is not the batch's last one either.
+    state = _state(plan, code_history=[_execution("li.mt.rank_aggregate(adata)")],
+                   current_round_direction="D1",
+                   directions_queue=[{"direction": "D2"}])
     pi, bio = _PI(), _Bio()
     harness = _Harness(pi=pi, bio=bio)
 
@@ -456,10 +600,14 @@ async def test_no_runtime_means_no_pass():
 
 
 @pytest.mark.asyncio
-async def test_terminal_round_triggers_on_an_otherwise_clean_round():
-    """The one case with no other signal: after this round nothing can run."""
+async def test_last_direction_triggers_on_an_otherwise_clean_round():
+    """The one signal with nothing else behind it: analysis may stop after the
+    batch's last direction, so its follow-up work would be discarded. This is the
+    real shape it has to fire on — the running direction still queued."""
     plan = _plan([PlanStep(id=1, title="Communication", method="Run liana rank_aggregate")])
     state = _state(plan, current_round=3, max_rounds=3,
+                   current_round_direction="D2",
+                   directions_queue=[{"direction": "D2"}],
                    code_history=[_execution("li.mt.rank_aggregate(adata)", round_number=3)])
     pi, bio = _PI(), _Bio()
     harness = _Harness(pi=pi, bio=bio)
@@ -469,5 +617,5 @@ async def test_terminal_round_triggers_on_an_otherwise_clean_round():
     meta, _ = await harness._run_post_execution_review(
         state, _unmet_result(), audit_summary, "full")
 
-    assert "Terminal round" in meta["review_reason"]
+    assert "Last direction" in meta["review_reason"]
     assert pi.review_calls == 1

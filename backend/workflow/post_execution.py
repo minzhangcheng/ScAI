@@ -25,6 +25,7 @@ from .post_execution_review import (
     apply_audit_to_plan,
     audit_plan_execution,
     collect_failure_admissions,
+    collect_structured_evidence_gaps,
     compute_review_attempt_id,
     empty_review_meta,
     sanitize_review_plan,
@@ -94,34 +95,48 @@ class PostExecutionReviewMixin:
             return (5, 5520, 27600, 5)
 
     # ------------------------------------------------------------------
-    # Terminal-round detection
+    # Last-direction detection
     # ------------------------------------------------------------------
 
-    def _is_terminal_analysis_round(self, analysis_state) -> bool:
-        """True when no later round can carry follow-up work.
+    def _is_last_direction_round_of_batch(self, analysis_state) -> bool:
+        """True when this round is the last DIRECTION of the active batch.
 
-        Deliberately conservative: it must be certain, not likely, because the
-        terminal round is the one case where the gate fires on nothing else. A
-        round is terminal only when the round budget is spent, no direction is
-        queued, and the integration loop cannot reopen the analysis — either
-        nothing is pending or the cycle cap is already reached. An integration
-        round itself runs no core agent, so a pending integration cycle that can
-        still select a new direction is treated as "not terminal".
+        This replaces an earlier "is this the terminal round" test, which was both
+        unreachable and unanswerable:
+
+        * unreachable, twice over. `directions_queue` is popped one round LATE —
+          `_pi_planning` peeks `directions_queue[0]` and explicitly does not pop,
+          `_initialize_round` pops it at the START of the next round — so the entry
+          for the direction this round is running is still queued while it runs.
+          A bare "queue is non-empty" test therefore never fired on a last
+          direction. That is the same stale-entry trap 0.30.4 already fixed for the
+          multi-direction terminal gate, and reintroducing it was a regression.
+          Separately, the integration branch budgets one round MORE than the batch
+          it plans (`max_rounds = current_round + len(selected_dirs)`, the spare
+          slot being the integration round itself), so `current_round >= max_rounds`
+          was false on every round of every integration batch even with an empty
+          queue. Neither test is used here any more.
+        * unanswerable. Whether any analysis round follows depends on a decision
+          that has not been made yet: `integration_synthesis` increments
+          `integration_cycle` and the PI then chooses how many new directions to
+          open, both AFTER this node runs. So "no later round can carry follow-up
+          work" cannot be established here, and pretending otherwise is what made
+          the old predicate look conservative while being simply dead.
+
+        What IS decidable is whether the active batch has another direction after
+        this one. That is the honest approximation: it fires once per batch rather
+        than once per session, and each firing is a round after which analysis may
+        well stop. The in-flight entry is filtered out because the two queue
+        writers disagree on whether it is present — `_pi_planning` stores
+        `selected_dirs[1:]` while the user-selection route stores every chosen
+        direction including the running one.
         """
         try:
-            from ..config import default_config
-            cfg = getattr(self, "config", None) or default_config
-            configured = int(getattr(cfg, "max_rounds", 3))
-            state_max = int(getattr(analysis_state, "max_rounds", 0) or 0)
-            max_rounds = max(1, state_max if state_max > 0 else configured)
-            if int(getattr(analysis_state, "current_round", 0) or 0) < max_rounds:
-                return False
-            if getattr(analysis_state, "directions_queue", None):
-                return False
-            cycle = int(getattr(analysis_state, "integration_cycle", 0) or 0)
-            cycle_cap = int(getattr(analysis_state, "max_integration_cycles", 1) or 1)
-            if getattr(analysis_state, "pending_integration", False) and cycle < cycle_cap:
-                return False
+            current = str(getattr(analysis_state, "current_round_direction", "") or "").strip()
+            for entry in (getattr(analysis_state, "directions_queue", None) or []):
+                direction = str((entry or {}).get("direction", "") or "").strip()
+                if direction and direction != current:
+                    return False
             return True
         except Exception:
             return False
@@ -149,6 +164,42 @@ class PostExecutionReviewMixin:
             logger.debug(f"[{self.session_id}] structured family scan failed: {e}")
         return families
 
+    def _collect_round_evidence_gaps(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Record this round's stated evidence gaps, with vocabulary labels.
+
+        Observation only — nothing in the trigger path reads it, and it is kept out
+        of the PI's synthesis context so that recording it cannot change what the
+        round concludes. It exists so the distribution can be measured on real runs
+        of the current code before an expansion trigger is designed around it. The
+        labels are not a feasibility verdict; the verbatim items are the useful part.
+        """
+        try:
+            gaps = collect_structured_evidence_gaps(result.get("mechanism_programs") or [])
+        except Exception as e:
+            logger.debug(f"[{self.session_id}] evidence-gap scan failed: {e}")
+            return {}
+        if not gaps.get("programs_total"):
+            # No registered claim, so nothing states a gap. Returning an empty dict
+            # keeps the audit summary free of a record that says nothing.
+            return {}
+        counts = gaps.get("counts") or {}
+        logger.info(
+            f"[{self.session_id}] Evidence gaps (observation only): "
+            f"{gaps['programs_with_gaps']}/{gaps['programs_total']} programs state a gap; "
+            f"mentions-computation={counts.get('mentions_computation', 0)}, "
+            f"mentions-new-measurement={counts.get('mentions_new_measurement', 0)}, "
+            f"unlabelled={counts.get('unlabelled', 0)}"
+        )
+        # A registered claim with no citable execution is the sharper signal of the
+        # two: the tool schema requires evidence ids, so an empty list means the
+        # claim cannot be traced to anything this round ran.
+        if gaps.get("programs_without_evidence_ids"):
+            logger.warning(
+                f"[{self.session_id}] Mechanism programs with no citable execution: "
+                f"{'; '.join(gaps['programs_without_evidence_ids'][:5])}"
+            )
+        return gaps
+
     def _audit_round_plan_execution(self, analysis_state, result: Dict[str, Any]) -> Dict[str, Any]:
         """Audit the approved plan against this round's evidence and record it.
 
@@ -156,9 +207,10 @@ class PostExecutionReviewMixin:
         Never raises: an audit failure must not fail the round it describes.
         Returns the audit summary (empty dict when there was no plan to audit).
         """
+        evidence_gaps = self._collect_round_evidence_gaps(result)
         plan = getattr(analysis_state, "current_plan", None)
         if plan is None or not getattr(plan, "steps", None):
-            return {}
+            return {"evidence_gaps": evidence_gaps} if evidence_gaps else {}
         try:
             round_number = int(getattr(analysis_state, "current_round", 0) or 0)
             audit = audit_plan_execution(
@@ -180,11 +232,13 @@ class PostExecutionReviewMixin:
                     f"{'; '.join(summary['unmet_titles'][:5])}"
                 )
             self._last_plan_audit = audit
+            if evidence_gaps:
+                summary["evidence_gaps"] = evidence_gaps
             return summary
         except Exception as e:
             logger.warning(f"[{self.session_id}] plan audit failed (non-critical): {e}")
             self._last_plan_audit = None
-            return {}
+            return {"evidence_gaps": evidence_gaps} if evidence_gaps else {}
 
     # ------------------------------------------------------------------
     # Feature B — gated supplementary pass
@@ -234,7 +288,7 @@ class PostExecutionReviewMixin:
         findings = list(result.get("findings") or [])
         admissions = collect_failure_admissions(findings, result.get("analysis_log") or [])
         result_status = str(result.get("status", "completed") or "completed")
-        is_terminal = self._is_terminal_analysis_round(analysis_state)
+        is_terminal = self._is_last_direction_round_of_batch(analysis_state)
         has_runtime = bool(getattr(self, "bioinformatics_agent", None))
 
         plan = getattr(analysis_state, "current_plan", None)
@@ -449,6 +503,23 @@ class PostExecutionReviewMixin:
         result["figures"] = merged_figures
         if added_executions:
             result["code_history"] = list(result.get("code_history") or []) + added_executions
+            # Successful supplementary executions ARE citable evidence, so they join
+            # the round's evidence ids — the report and the audit both need them.
+            #
+            # `evidence_verified` and `status` are deliberately left alone. It is
+            # tempting to flip them, since a round whose main loop ended as
+            # `max_steps_reached` or whose evidence gate degraded stays ineligible
+            # for direction coverage even after a successful repair. But
+            # `evidence_verified is False` records that THIS ROUND'S REPORTED
+            # FINDINGS were not bound to successful executions, and running five
+            # more cells does not make those findings bound. Overwriting it would
+            # buy coverage eligibility by erasing the fact that earned the
+            # ineligibility — exactly the hedging the gate exists to force.
+            fresh_ids = [e.id for e in added_executions if not getattr(e, "error", None)]
+            if fresh_ids:
+                result["evidence_execution_ids"] = list(
+                    result.get("evidence_execution_ids") or []
+                ) + fresh_ids
 
         logger.info(
             f"[{self.session_id}] Merged supplementary pass: +{len(tagged)} finding(s), "

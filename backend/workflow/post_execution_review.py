@@ -433,6 +433,172 @@ def collect_failure_admissions(
 
 
 # ---------------------------------------------------------------------------
+# Structured evidence gaps  (observation only — see should_run_post_execution_review)
+#
+# A mechanism program is the closest thing this platform has to a stated claim:
+# `evidence_execution_ids` is required by the tool schema, and `missing_evidence`
+# (not required, but populated in every program of every run measured so far) is
+# the program's own account of what it lacks. That makes it a candidate trigger
+# for an EXPANSION pass — supplementary analysis on a topic whose plan completed
+# cleanly — which the repair-oriented gate deliberately does not cover.
+#
+# It is deliberately NOT wired into the gate. `missing_evidence` was populated for
+# 146 of 146 programs across the 9 sessions on disk, so a gate keyed on "a gap
+# exists" would fire every round, and this project has twice had to rebuild a
+# threshold designed from first principles (0.36.8-rc1, 0.36.8-rc5).
+#
+# These helpers LABEL TEXT. They do not decide whether a gap is closable, and the
+# labels must not be read that way — measured on all 542 real items, a
+# feasibility reading of them is wrong most of the time. 60.5% match no method
+# vocabulary at all, and of the 65 that matched computational vocabulary only
+# roughly 8-12 were actually runnable on data in hand: the rest are dominated by
+# "replicate-aware"/"replicated pseudobulk" requests, which need per-sample or
+# per-animal metadata the run may simply not have. Whether such an item is
+# closable depends on the dataset, not on its wording, so no phrase list can
+# decide it. Closing that gap properly means having the PRODUCER say so — e.g. a
+# structured `missing_evidence` entry in the register_mechanism_programs schema
+# that marks whether the item is closable with data already loaded — rather than
+# inferring it afterwards.
+# ---------------------------------------------------------------------------
+
+# Method vocabulary, never biology: naming an assay class is domain-neutral in the
+# sense the platform requires (no tissue, disease, organism or pathway). It marks
+# what the text MENTIONS, nothing more.
+_NEEDS_NEW_DATA_MARKERS: Tuple[str, ...] = (
+    # direct measurement
+    "assay", "western", "qpcr", "rt-pcr", "elisa", "immunohisto", "immunostain",
+    "immunofluor", "ihc", "rnascope", "in situ", "flow cytometry", "facs",
+    "mass spec", "proteomic", "metabolomic", "lipidomic", "icp-ms",
+    "elemental analysis", "respirometry", "seahorse", "oxygen consumption",
+    "enzyme activity", "electron microscop", "histolog", "histopatholog",
+    "staining", "stain ", "biochemical measurement", "protein level",
+    # new material
+    "additional sample", "new sample", "independent cohort", "validation cohort",
+    "replicate librar", "replicated librar", "biological replicate",
+    "additional animal", "more animal", "new sequencing", "additional sequencing",
+    "additional section", "orthogonal validation", "orthogonal protein",
+    # intervention
+    "knockout", "knockdown", "overexpress", "rescue experiment", "inhibitor",
+    "lineage tracing", "transgenic", "supplementation",
+    # another modality or an external corpus
+    "spatial transcriptom", "atac", "chip-seq", "cut&run", "methylation",
+    "public dataset", "external dataset", "published dataset", "reference atlas",
+)
+
+# Positive signals that the gap is answerable by more analysis of data in hand.
+_IN_SILICO_MARKERS: Tuple[str, ...] = (
+    "concordance", "correlat", "pseudobulk", "subcluster", "module score",
+    "enrichment", "deconvolut", "trajector", "composition", "adjust for",
+    "control for", "stratif", "re-analy", "reanaly", "sensitivity analysis",
+    "ambient", "doublet", "batch", "normali", "cross-validat", "bulk validation",
+    "same-sign", "effect size", "confidence interval", "multiple testing",
+    "permutation", "null model", "regress",
+)
+
+# Co-occurrence rules, for requests a contiguous phrase cannot catch. "Replicated
+# snRNA libraries per condition for formal composition testing" asks for new
+# sequencing, but the words are separated and the sentence also names a
+# computation, so a phrase list scores it in-silico. Each tuple must ALL appear.
+_NEEDS_NEW_DATA_PAIRS: Tuple[Tuple[str, ...], ...] = (
+    ("replicat", "librar"),
+    ("replicat", "sample"),
+    ("replicat", "cohort"),
+    ("replicat", "animal"),
+    ("additional", "librar"),
+    ("independent", "librar"),
+    ("independent", "measurement"),
+    ("matched", "tissue"),
+    ("paired", "tissue"),
+)
+
+# Labels describe the VOCABULARY the item uses, not what it would take to close it.
+# Named so that no caller can mistake one for a feasibility verdict.
+GAP_MENTIONS_NEW_MEASUREMENT = "mentions_new_measurement"
+GAP_MENTIONS_COMPUTATION = "mentions_computation"
+GAP_UNLABELLED = "unlabelled"
+
+_MAX_GAP_ITEMS = 60
+
+
+def label_evidence_gap(text: str) -> str:
+    """Label one `missing_evidence` item by the method vocabulary it uses.
+
+    NOT a feasibility judgement — see the section comment. Measurement vocabulary
+    wins over computational vocabulary, because "orthogonal protein validation of
+    the correlation" is a bench request that merely mentions a computation. An item
+    labelled `mentions_computation` is a candidate to look at by hand, not a task
+    that can be dispatched.
+    """
+    lowered = str(text or "").lower()
+    if not lowered.strip():
+        return GAP_UNLABELLED
+    if any(marker in lowered for marker in _NEEDS_NEW_DATA_MARKERS):
+        return GAP_MENTIONS_NEW_MEASUREMENT
+    if any(all(part in lowered for part in pair) for pair in _NEEDS_NEW_DATA_PAIRS):
+        return GAP_MENTIONS_NEW_MEASUREMENT
+    if any(marker in lowered for marker in _IN_SILICO_MARKERS):
+        return GAP_MENTIONS_COMPUTATION
+    return GAP_UNLABELLED
+
+
+def _program_field(program: Any, name: str) -> Any:
+    if isinstance(program, dict):
+        return program.get(name)
+    return getattr(program, name, None)
+
+
+def collect_structured_evidence_gaps(programs: Sequence[Any]) -> Dict[str, Any]:
+    """Record this round's stated evidence gaps with their vocabulary labels.
+
+    Reads the mechanism programs the round registered and keeps the items verbatim
+    — the raw text is the part worth having, since the labels are not a feasibility
+    verdict. Bounded for storage. Purely descriptive: nothing in the trigger path
+    reads this.
+    """
+    items: List[Dict[str, str]] = []
+    programs_with_gaps = 0
+    programs_total = 0
+    unbound_programs: List[str] = []
+
+    for program in programs or []:
+        programs_total += 1
+        label = str(_program_field(program, "label") or "")[:200]
+        # `evidence_execution_ids` is required by the tool schema; a program without
+        # one is a claim with no citable execution, which is worth seeing separately.
+        if not (_program_field(program, "evidence_execution_ids") or []):
+            unbound_programs.append(label)
+        gaps = _program_field(program, "missing_evidence") or []
+        if gaps:
+            programs_with_gaps += 1
+        for gap in gaps:
+            text = str(gap or "").strip()
+            if not text:
+                continue
+            items.append({
+                "program": label,
+                "gap": text[:400],
+                "label": label_evidence_gap(text),
+            })
+            if len(items) >= _MAX_GAP_ITEMS:
+                break
+        if len(items) >= _MAX_GAP_ITEMS:
+            break
+
+    counts = {
+        GAP_MENTIONS_COMPUTATION: sum(1 for i in items if i["label"] == GAP_MENTIONS_COMPUTATION),
+        GAP_MENTIONS_NEW_MEASUREMENT: sum(1 for i in items if i["label"] == GAP_MENTIONS_NEW_MEASUREMENT),
+        GAP_UNLABELLED: sum(1 for i in items if i["label"] == GAP_UNLABELLED),
+    }
+    return {
+        "programs_total": programs_total,
+        "programs_with_gaps": programs_with_gaps,
+        "programs_without_evidence_ids": unbound_programs[:20],
+        "counts": counts,
+        "items": items,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Trigger gate
 # ---------------------------------------------------------------------------
 
@@ -440,7 +606,7 @@ def should_run_post_execution_review(
     audit: PlanAudit,
     admissions: Sequence[str],
     result_status: str,
-    is_terminal_round: bool,
+    is_last_direction_of_batch: bool,
     has_runtime: bool = True,
 ) -> Tuple[bool, str]:
     """Decide whether the bounded supplementary pass is warranted.
@@ -454,9 +620,15 @@ def should_run_post_execution_review(
       1. the executor errored or stopped short of its own completion path;
       2. the agent admitted in writing that something did not run;
       3. the plan audit found a non-conditional step with no execution evidence;
-      4. this is the round after which no further analysis can ever happen —
-         the terminal round, whose follow-up proposals are otherwise discarded
-         with certainty rather than probability.
+      4. this is the last direction of the active batch, so analysis may stop
+         after it — the round whose follow-up proposals are otherwise the most
+         likely to be discarded.
+
+    Signal 4 used to claim the round was TERMINAL. It cannot: whether another
+    analysis round follows depends on `integration_synthesis` incrementing
+    `integration_cycle` and the PI then choosing new directions, both of which
+    happen after this decision. "Last direction of the batch" is the strongest
+    decidable form, and it fires once per batch rather than once per session.
     """
     if not has_runtime:
         return (False, "No live analysis runtime available for a supplementary pass.")
@@ -475,10 +647,12 @@ def should_run_post_execution_review(
                 f"{len(unmet)} approved step(s) show no execution evidence "
                 f"({', '.join(families[:6])}).")
 
-    if is_terminal_round:
-        return (True, "Terminal round: no later round can carry follow-up work.")
+    if is_last_direction_of_batch:
+        return (True,
+                "Last direction of the active batch: analysis may stop after this "
+                "round, so its follow-up work would be discarded.")
 
-    return (False, "Plan fully evidenced, no failure admissions, and a later round remains.")
+    return (False, "Plan fully evidenced, no failure admissions, and another direction remains.")
 
 
 # ---------------------------------------------------------------------------
