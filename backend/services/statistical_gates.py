@@ -284,7 +284,7 @@ _DISCLAIMED = re.compile(
     r'were\s+blocked|proportions?\s+are\s+descriptive|technical\s+arte?fact|not\s+a\s+biological)', re.I)
 _COMPOSITIONAL_METHOD = re.compile(
     r'\b(?:sccoda|sccomp|dirichlet[-\s]?multinomial|dirichlet|'
-    r'beta[-\s]?binomial|milo(?:py|r)?|propeller|'
+    r'beta[-\s]?binomial|milo(?:py|r)?|propeller|scanpro|'
     r'cent[er]{2}ed?\s+log[-\s]?ratio|clr|arcsin\w*|'
     r'isometric\s+log[-\s]?ratio|additive\s+log[-\s]?ratio|aitchison)\b', re.I)
 _SAMPLE_LEVEL = re.compile(
@@ -358,9 +358,19 @@ _MEASURED_QUANTITY = re.compile(
 
 # ============================================================ COMPOSITION
 def check_composition_claims(findings, *, score_definitions=()):
-    """A composition claim must not rest on a per-population test of proportions."""
-    if any(score_kind(s) == "differential_abundance" for s in score_definitions or ()):
-        return []
+    """A composition claim must not rest on a per-population test of proportions.
+
+    A registered joint model downgrades the refusal to a note; it does not
+    delete it. `method` is free text the model writes itself -- register_score
+    declares it as a bare string with no enum -- so honouring it as a stand-down
+    would hand the model an off-switch for a blocking gate, and the exemption is
+    payload-wide, so one scCODA score would also cover a claim about a
+    population that model never touched. Downgrading keeps both halves honest:
+    an analysis that did the work is not made to argue with the gate, and the
+    simplex caveat still rides along to the report either way.
+    """
+    modelled = any(score_kind(s) == "differential_abundance"
+                   for s in score_definitions or ())
     for text in _texts(findings):
         for sent in _sentences(text):
             in_scope = bool(_POPULATION.search(sent))
@@ -383,17 +393,26 @@ def check_composition_claims(findings, *, score_definitions=()):
                 count_test = bool(_COUNT_TEST.search(clause)) and not measured
                 if not (abundance_claim or count_test):
                     continue
+                shape = (
+                    "this finding attaches an inferential statistic to a "
+                    "between-condition population-abundance claim. Proportions sum "
+                    "to one, so an increase anywhere mechanically depresses every "
+                    "other population whether or not its absolute count changed, "
+                    "and a per-population test over cells uses cells as the sample "
+                    "size.")
+                remedy = (
+                    " A joint compositional model is registered for this round, "
+                    "so this is a note rather than a refusal: say that the claim "
+                    "is that model's output, not a per-population test computed "
+                    "beside it."
+                    if modelled else
+                    " Model the joint composition (scCODA / sccomp / propeller "
+                    "/ Milo), or state the shift as descriptive.")
                 return [GateFinding(
                     gate="simplex-ignored",
                     rule_id="composition-lives-on-a-simplex",
-                    detail=(
-                        "this finding attaches an inferential statistic to a "
-                        "between-condition population-abundance claim. Proportions sum "
-                        "to one, so an increase anywhere mechanically depresses every "
-                        "other population whether or not its absolute count changed, "
-                        "and a per-population test over cells uses cells as the sample "
-                        "size. Model the joint composition (scCODA / sccomp / propeller "
-                        "/ Milo), or state the shift as descriptive."))]
+                    severity="advise" if modelled else "block",
+                    detail=shape + remedy)]
     return []
 
 
@@ -566,9 +585,6 @@ def _threshold_test_registered(score_definitions):
 
 
 # ============================================================ METHOD KIND
-METHOD_KINDS = ("ranked_enrichment", "over_representation", "single_sample_enrichment",
-                "module_score", "regulatory_activity", "differential_expression",
-                "differential_abundance", "descriptive", "other")
 FAMILY_REQUIRED_KINDS = ("ranked_enrichment", "over_representation")
 _RANKED = frozenset({"prerank", "preranked", "gsea", "gseapreranked", "fgsea",
                      "camera", "roast", "fry"})
@@ -581,12 +597,29 @@ _ACTIVITY = frozenset({"ulm", "mlm", "viper", "dorothea", "scenic", "pyscenic",
                        "decoupler", "progeny"})
 _DE = frozenset({"deseq2", "pydeseq2", "deseqstats", "edger", "limma", "voom",
                  "rank_genes_groups", "mannwhitneyu", "wilcoxon", "ttest"})
-_DA = frozenset({"sccoda", "sccomp", "propeller", "milo", "milopy", "dirichlet",
-                 "betabinomial"})
+#: Matching is whole-token, so a package's code spelling and its prose spelling
+#: are separate entries and neither implies the other: "miloR::testNhoods" does
+#: not contain the token "milo". Deliberately absent: quasibinomial and glmmTMB,
+#: which fit one population at a time and so are the design this gate refuses
+#: rather than an escape from it; pertpy, whose composition entry points already
+#: match through sccoda and milo while the bare name would also capture its
+#: perturbation and enrichment tools; and scipy.stats.betabinom, a univariate
+#: distribution that carries no joint model however it is spelled.
+_DA = frozenset({"sccoda", "sccomp", "propeller", "scanpro", "milo", "milopy",
+                 "milor", "dirichlet", "betabinomial"})
 
 
 def infer_method_kind(method):
-    """Migration shim for records written before method_kind existed."""
+    """Classify a declared method string into one analysis family.
+
+    Whole-token match over the declared `method`, first hit wins, "other" when
+    nothing matches. `method` is free text the model writes -- register_score
+    takes no enum -- so this classifies a self-report rather than verifying one.
+    That is why the tables stay narrow: at check_declared_testing_family and
+    check_ora_background a name this misses costs a missed check, but at
+    check_composition_claims the kind is an exemption, so a name it matches too
+    eagerly costs a refusal that should have stood.
+    """
     raw = str(method or "").lower()
     tok = _tokens(raw)
 
@@ -610,9 +643,7 @@ def infer_method_kind(method):
 
 
 def score_kind(score):
-    declared = str(getattr(score, "method_kind", "") or "").strip().lower()
-    return declared if declared in METHOD_KINDS else infer_method_kind(
-        getattr(score, "method", ""))
+    return infer_method_kind(getattr(score, "method", ""))
 
 
 def check_declared_testing_family(score_definitions, scoring_plans):
@@ -993,7 +1024,10 @@ def run_gates(
     annotation vocabulary to the composition check takes it from 21 TP / 0 FP
     to 21 TP / 7 FP, because bulk findings that merely name a cell type start
     matching. Recall is already 1.000 without it, so the parameter exists only
-    so callers need not know that.
+    so callers need not know that. Those counts were measured while the
+    composition check was still being called without score_definitions, so they
+    describe its inputs rather than the operating point that ships now: a
+    registered joint model downgrades that check to an advisory.
     """
     report = GateReport()
     report.findings.extend(
@@ -1009,7 +1043,8 @@ def run_gates(
     report.findings.extend(check_analysis_unit(findings, samples_per_group))
     report.findings.extend(check_cell_level_inference(findings, samples_per_group))
     report.findings.extend(check_ora_background(score_definitions))
-    report.findings.extend(check_composition_claims(findings))
+    report.findings.extend(
+        check_composition_claims(findings, score_definitions=score_definitions))
     report.findings.extend(
         check_magnitude_claims(findings, score_definitions=score_definitions))
     return report

@@ -24,6 +24,7 @@ from backend.services.statistical_gates import (
     check_permutation_at_small_n,
     check_underpowered_negative_claims,
     run_gates,
+    score_kind,
 )
 
 
@@ -173,6 +174,52 @@ def test_descriptive_wording_passes_at_n1():
 def test_adequate_replication_passes():
     findings = ["the effect of condition is significant"]
     assert check_analysis_unit(findings, {"A": 3, "B": 3}) == []
+
+
+# ----------------------------------------------------------- composition
+
+#: A per-cluster test of proportions, which is what the simplex gate refuses.
+_SIMPLEX_CLAIM = "The proportion of cluster 3 rose from 12% to 31% (chi-square p = 0.001)."
+
+
+def test_composition_claim_without_a_joint_model_is_refused():
+    report = run_gates([_SIMPLEX_CLAIM], score_definitions=[], scoring_plans=[],
+                       samples_per_group={"A": 3, "B": 3})
+    assert [f.gate for f in report.blocking] == ["simplex-ignored"]
+
+
+def test_a_registered_joint_model_downgrades_the_refusal_to_a_note():
+    """run_gates held score_definitions and did not forward them, so the
+    exemption this check declares was unreachable."""
+    scores = [_score("composition", method="pertpy.tools.Sccoda")]
+    report = run_gates([_SIMPLEX_CLAIM], score_definitions=scores,
+                       scoring_plans=[], samples_per_group={"A": 3, "B": 3})
+    assert report.passed, "a registered joint model must not be refused"
+    assert [f.gate for f in report.advisories] == ["simplex-ignored"], (
+        "the caveat must still travel: method is free text the model writes, so "
+        "the exemption may not delete the finding"
+    )
+
+
+def test_an_unrelated_score_does_not_open_the_composition_exemption():
+    scores = [_score("panel_x", method="gseapy.prerank")]
+    report = run_gates([_SIMPLEX_CLAIM], score_definitions=scores,
+                       scoring_plans=[_plan("", family=["ranked_enrichment"])],
+                       samples_per_group={"A": 3, "B": 3})
+    assert "simplex-ignored" in [f.gate for f in report.blocking]
+
+
+def test_the_composition_family_covers_the_spellings_a_score_records():
+    """Whole-token matching, so a code spelling is not implied by a prose one."""
+    for method in ("scanpro.scanpro", "miloR::testNhoods", "pertpy.tools.Sccoda"):
+        assert score_kind(SimpleNamespace(method=method)) == "differential_abundance", (
+            f"{method} should classify as a joint compositional model"
+        )
+    for method in ("scipy.stats.betabinom", "statsmodels.glm(family=quasibinomial)"):
+        assert score_kind(SimpleNamespace(method=method)) != "differential_abundance", (
+            f"{method} fits one population at a time -- it is the design the gate "
+            f"refuses, not an escape from it"
+        )
 
 
 # ------------------------------------------------------------- integration

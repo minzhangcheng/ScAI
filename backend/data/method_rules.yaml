@@ -413,9 +413,10 @@ rules:
     genes the experiment could never have selected because they were never measured. Terms
     dominated by tissue-restricted or lowly-expressed genes then appear significant purely
     because the denominator was inflated. Change the background and every p-value in the table
-    changes. The check reads the declared method_kind and the declared background rather than
-    pattern-matching the method string: the earlier version fired on any method naming a web-API
-    client, including the correct call that passes a background.'
+    changes. The check classifies the method by whole-token match on the declared method
+    string and passes any score that declares a background: the earlier version matched
+    substrings, so it fired on any method whose name merely contained a web-API client''s,
+    including the correct call that passes a background.'
   python: 'Pass the measured genes explicitly -- gseapy.enrichr accepts a background and,
     in 1.3.0, forwards it to the Speedrichr endpoints rather than silently discarding it as
     older versions did. Do not rely on the default: with no background the universe becomes
