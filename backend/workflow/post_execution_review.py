@@ -68,6 +68,24 @@ def compute_review_attempt_id(
 # only when a plan step that names it cannot be satisfied by anything else — that
 # non-substitutability is what makes its absence a finding rather than a style
 # difference.
+#
+# Matched as SUBSTRINGS, because the code and error text this is read against
+# carry identifiers inside larger expressions -- "dc.run_", "li.mt.", "milo.",
+# "sc.external.pp.harmony" are not words and tokenising the table would drop
+# them. The cost is that a bare token which is also English over-matches the one
+# prose input, plan-step text; the answer is to qualify that token, not to change
+# the matcher for all three inputs.
+#
+# NOT the same taxonomy as the frozensets behind
+# services.statistical_gates.infer_method_kind, and not a drifted copy of them:
+# this asks whether a planned STEP ran, that asks what kind of statistical claim
+# a registered score licenses. Ten of the families here have no counterpart
+# there, and the distinction this collapses into one "enrichment" bucket is
+# exactly the one that side must keep -- gseapy.prerank, gseapy.enrichr and
+# gseapy.ssgsea are three inference kinds from one package. The tables are also
+# right to disagree about members: betabinom and quasibinomial belong in
+# composition_model here, because the step ran, and must stay out of _DA there,
+# because they fit one population at a time. Do not unify them.
 # ---------------------------------------------------------------------------
 
 METHOD_SIGNATURES: Dict[str, Tuple[str, ...]] = {
@@ -96,9 +114,16 @@ METHOD_SIGNATURES: Dict[str, Tuple[str, ...]] = {
                       "spotlight", "scaden", "music"),
     "gene_scoring": ("score_genes", "addmodulescore", "sc.tl.score_genes"),
     "integration": ("harmonypy", "sc.external.pp.harmony", "scanorama", "bbknn",
-                    "scvi", "combat", "ingest"),
-    "reference_mapping": ("ingest", "scarches", "symphony", "label_transfer",
-                          "transfer_anchors"),
+                    "scvi", "combat"),
+    # Qualified for the same reason "regulon" was removed above: bare "ingest" is
+    # the ordinary verb for loading data, which is step one of nearly every plan,
+    # so "Ingest the filtered matrix" read as a commitment nothing ran -- and an
+    # unmet step is what sends the supplementary pass. It was also the only token
+    # here claimed by two families, so it charged both at once. Dropped from
+    # integration outright rather than qualified twice: sc.tl.ingest projects
+    # labels from a reference, which is this family, not batch correction.
+    "reference_mapping": ("tl.ingest", ".ingest(", "scarches", "symphony",
+                          "label_transfer", "transfer_anchors"),
     "doublet_detection": ("scrublet", "doubletdetection", "solo"),
     "copy_number": ("infercnv", "copykat", "numbat"),
     "survival": ("lifelines", "coxph", "kaplan"),

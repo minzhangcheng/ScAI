@@ -585,6 +585,12 @@ def _threshold_test_registered(score_definitions):
 
 
 # ============================================================ METHOD KIND
+# Distinct from workflow.post_execution_review.METHOD_SIGNATURES on purpose, and
+# not a drifted copy of it: that table asks whether a planned step ran and reads
+# substrings of code, this one asks what a registered score licenses and reads
+# whole tokens of one declared field. Agreement between them is not a goal --
+# betabinom and quasibinomial belong in its composition family and must stay out
+# of _DA below. Do not unify them.
 FAMILY_REQUIRED_KINDS = ("ranked_enrichment", "over_representation")
 _RANKED = frozenset({"prerank", "preranked", "gsea", "gseapreranked", "fgsea",
                      "camera", "roast", "fry"})

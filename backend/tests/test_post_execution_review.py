@@ -115,6 +115,47 @@ def test_planned_methods_and_conditional_wording():
                                         expected_output="proportions, if available")) is True
 
 
+def test_ordinary_plan_prose_commits_the_plan_to_nothing():
+    """Only an identifier commits a step to a family; English never does.
+
+    Bare "ingest" was both scanpy's label-transfer call and the verb every plan
+    uses for loading data, and it was the only token two families claimed. So the
+    first step of nearly every analysis silently owed both batch integration and
+    reference mapping, audited unmet, and sent a supplementary pass after work
+    nobody planned -- with `unmet_families` telling the PI to prioritise it.
+    """
+    for text in ("Ingest the filtered matrix and normalise",
+                 "Data ingestion and quality control",
+                 "Compare each cluster in isolation"):
+        step = PlanStep(id=1, title=text, method="sc.pp.filter_cells(adata, min_genes=200)")
+        assert extract_planned_methods(step) == set(), text
+
+
+def test_reference_mapping_is_still_matched_when_named_as_a_call():
+    step = PlanStep(id=1, title="Label transfer",
+                    method="Run sc.tl.ingest against the reference atlas")
+    assert extract_planned_methods(step) == {"reference_mapping"}
+    assert executed_method_families(
+        [CodeExecution(code="sc.tl.ingest(adata, adata_ref, obs='cell_type')",
+                       round_number=1)], 1) == {"reference_mapping"}
+
+
+def test_dotted_identifiers_survive_in_both_prose_and_code():
+    """These carry punctuation and no underscore, so they are reachable only by
+    substring. Tokenising the table -- the obvious repair when a bare word
+    over-matches -- drops all six silently, and nothing else covers them."""
+    for text, family in (("sc.tl.paga(adata)", "trajectory"),
+                         ("sc.tl.dpt(adata)", "trajectory"),
+                         ("milo.count_nhoods(adata)", "composition_model"),
+                         ("sc.external.pp.harmony_integrate(adata)", "integration"),
+                         ("dc.run_ulm(mat=mat, net=net)", "pathway_activity"),
+                         ("li.mt.rank_aggregate(adata)", "cell_communication")):
+        assert family in extract_planned_methods(
+            PlanStep(id=1, title="t", method=text)), text
+        assert family in executed_method_families(
+            [CodeExecution(code=text, round_number=1)], 1), text
+
+
 def test_executed_families_require_success_in_this_round():
     history = [
         CodeExecution(code="sc.tl.rank_genes_groups(adata, 'leiden')", round_number=2),
