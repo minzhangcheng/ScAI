@@ -102,6 +102,14 @@ class PublicationFigure(BaseModel):
     pi_feedback: Optional[str] = None
     revision_history: List[Dict[str, Any]] = Field(default_factory=list)  # Accumulated feedback from all revision rounds
     revision_count: int = 0
+    # Renderer-measured layout defects still present in the saved image
+    # (see agents/bioinformatics/layout_lint.py). Blocking kinds mean some text
+    # is covered by another artist and cannot be read at all.
+    layout_violations: List[Dict[str, Any]] = Field(default_factory=list)
+    # Reviewer must_fix items that were never addressed before the revision
+    # loop gave up. Recorded so the report can say so instead of presenting the
+    # figure as reviewed and fine.
+    unresolved_must_fix: List[str] = Field(default_factory=list)
     round_number: int = 0
     analysis_generation: int = 0
     expression_provenance: Dict[str, Any] = Field(default_factory=dict)

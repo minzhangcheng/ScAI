@@ -11,6 +11,7 @@ import textwrap
 
 
 from ...utils.sandbox import _TPL_NOOP_INSTALL
+from ...services.figure_layout import LAYOUT_LINT_SRC
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -226,6 +227,11 @@ def _build_publication_figure_wrapper(
     now go through the same machinery as the initial render. Includes the
     velocity/fate memory preflight so the resource guard is not skipped on
     figure code (it is a no-op unless the code runs scv.tl.velocity / cellrank).
+
+    The wrapper also runs the renderer-level layout linter (``layout_lint``)
+    on the finished figure before saving, and surfaces matplotlib's own layout
+    warnings, which the kernel's global ``warnings.filterwarnings('ignore')``
+    would otherwise swallow. Neither can prevent the figure from being written.
     """
     figures_dir_repr = repr(str(figures_dir))
     jpg_path_repr = repr(str(jpg_path))
@@ -261,20 +267,67 @@ Path(_figures_dir).mkdir(exist_ok=True)
 
 {_TPL_NOOP_INSTALL}
 
+# Renderer-level layout linter: defines _scai_lint_figure_layout and
+# _scai_emit_layout_lint in the kernel namespace.
+{LAYOUT_LINT_SRC}
+
 # Execute the plotting code (save runs in finally so JPG+PDF are always written,
-# even if user code raises midway through)
+# even if user code raises midway through). Warnings are recorded rather than
+# discarded: the kernel installs a global warnings.filterwarnings('ignore') at
+# init, which hides matplotlib's own layout complaints — exactly the diagnostic
+# that would explain a figure whose panels do not fit.
+import warnings as _scai_warnings_mod
+_scai_layout_warnings = []
 try:
-    _scai_user_source = {user_source_repr}
-    exec(compile(_scai_user_source, '<scai-user-code>', 'exec'), globals(), globals())
+    with _scai_warnings_mod.catch_warnings(record=True) as _scai_layout_warnings:
+        _scai_warnings_mod.simplefilter("always")
+        _scai_user_source = {user_source_repr}
+        exec(compile(_scai_user_source, '<scai-user-code>', 'exec'), globals(), globals())
 finally:
 {restore_baseline}
 
+    # Report matplotlib's layout warnings (deduplicated, capped)
+    try:
+        _scai_layout_kw = (
+            'layout', 'constrained', 'not compatible', 'glyph',
+            'font family', 'clip', 'overlap',
+        )
+        _scai_seen_warn = set()
+        for _scai_w in list(_scai_layout_warnings or [])[:200]:
+            _scai_wmsg = str(getattr(_scai_w, 'message', '') or '')
+            if not any(_k in _scai_wmsg.lower() for _k in _scai_layout_kw):
+                continue
+            if _scai_wmsg in _scai_seen_warn:
+                continue
+            _scai_seen_warn.add(_scai_wmsg)
+            print("[Layout] %s: %s" % (
+                getattr(getattr(_scai_w, 'category', None), '__name__', 'Warning'),
+                _scai_wmsg,
+            ))
+            if len(_scai_seen_warn) >= 5:
+                break
+    except Exception:
+        pass
+
     # Get current figure and save (both JPG and PDF)
-    if _scai_cleanup_plt.get_fignums():
+    _scai_fignums = _scai_cleanup_plt.get_fignums()
+    if len(_scai_fignums) > 1:
+        print(
+            "[Layout] Warning: %d figures are open but only the current one is "
+            "saved. Draw every panel into a single figure." % len(_scai_fignums)
+        )
+    if _scai_fignums:
         try:
             fig = _scai_cleanup_plt.gcf()
             _jpg_path = {jpg_path_repr}
             _pdf_path = {pdf_path_repr}
+
+            # Measure where the text actually landed, before saving. Advisory
+            # to the kernel: it only prints, it never blocks the save.
+            try:
+                _scai_emit_layout_lint(fig)
+            except Exception as _scai_lint_err:
+                print("__SCAI_LAYOUT_LINT_ERROR__ %s" % _scai_lint_err)
 
             try:
                 fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',

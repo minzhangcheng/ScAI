@@ -825,12 +825,19 @@ class ReportHtmlMixin:
                     seen_stems.add(resolved.stem)
                     figure_map[fname] = resolved
 
-        # Also include publication figures (PI-reviewed, may not be in supervision records)
+        # Also include publication figures (PI-reviewed, may not be in supervision records).
+        # The excluded_stems check applies here too: a figure can pass
+        # is_report_eligible while its stem sits in invalidated_artifact_stems,
+        # because those are two separate staleness mechanisms. The supervision-record
+        # loop above and the workspace scan below both filter on it; skipping it here
+        # is what let invalidated stems reach report.html through this one path.
         if eligible_figures:
             for pf in eligible_figures:
                 if not pf.png_path:
                     continue
                 fname = os.path.basename(pf.png_path)
+                if Path(fname).stem in excluded_stems:
+                    continue
                 if fname in figure_map:
                     continue
                 fig_path = Path(pf.png_path)
@@ -913,8 +920,16 @@ class ReportHtmlMixin:
         return tables
 
     @staticmethod
-    def _compress_base64_figure(b64_png: str, max_width: int = 512) -> str:
-        """Compress a base64 PNG to a smaller JPEG base64 for vision model review."""
+    def _compress_base64_figure(b64_png: str, max_width: int = 1024) -> str:
+        """Compress a base64 PNG to a smaller JPEG base64 for vision model review.
+
+        A publication figure is typically 2000-2500 px wide, so the previous
+        512 px ceiling was a 4-5x linear reduction before the reviewer ever saw
+        it — tick labels and legend entries on a multi-panel figure land at a
+        few pixels of glyph height. 1024 px roughly quadruples the image tokens
+        per figure while keeping small text resolvable, which is the whole point
+        of showing the model the image.
+        """
         try:
             from PIL import Image
             img = Image.open(io.BytesIO(base64.b64decode(b64_png)))

@@ -430,10 +430,18 @@ You are conducting {modality} analysis. You have access to tools:
    - ALWAYS manually add ax.set_xlabel('UMAP1') and ax.set_ylabel('UMAP2') to ALL embedding plots
    - If UMAP legends overlap data, use legend_loc='right margin' — NEVER manually set legend coordinates
    - All text elements must have fontsize >= 12pt (title >= 14pt)
-   - Legend must NOT overlap data — place outside plot or use bbox_to_anchor
    - Use consistent naming across ALL panels (e.g., pick one canonical label per cell type and reuse it everywhere — never abbreviate it in some panels and spell it out in others)
    - No grid lines unless explicitly needed for the figure type
    - Always call ax.set_xticks() BEFORE ax.set_xticklabels() to ensure label count matches tick count
+
+   **FIGURE LAYOUT (the rendering engine measures these and a violation blocks the figure):**
+   - Create the figure with a layout engine: `plt.figure(figsize=(...), layout='constrained')`. Do NOT also call `tight_layout()` or `subplots_adjust()` — combining them produces the layout neither of them intended.
+   - A legend outside its axes needs space RESERVED for it: give it its own GridSpec column/row, or use `fig.legend(...)`. `bbox_to_anchor` only moves the legend; it does not make room, so the legend lands on whatever is drawn next to it — typically the neighbouring panel's tick labels.
+   - Any `ax.text` / `ax.annotate` outside the axes must set `clip_on=True` or use `transform=fig.transFigure`. Placing an annotation at a y computed from raw data, when the axes limits came from trimmed data, throws it out of the panel entirely.
+   - Panel letters go above the axes with `va='bottom'`: `ax.text(-0.12, 1.02, 'A', transform=ax.transAxes, va='bottom', ha='right')`. With `va='top'` the glyph hangs down into the first tick labels of a short panel.
+   - Budget about 0.18 inch of height per labelled heatmap row. If the rows do not fit, show fewer, shorten the labels, or split the panel — never shrink text below 6 pt.
+   - Tick labels are read by humans: no raw variable names, no words broken across lines.
+   - When one axes carries several artist families (stripplot + pointplot, bar + errorbar), build the legend by matching labels, not by slicing `get_legend_handles_labels()` positionally — a positional slice silently gives two entries the same colour.
 
    **PLOT RULES & MULTI-MODAL FALLBACK (CRITICAL):**
    - Figures must have precise titles, readable (rotated when needed) labels, and colorblind-friendly palettes (e.g. 'viridis').

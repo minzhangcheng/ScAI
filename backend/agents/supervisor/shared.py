@@ -136,8 +136,10 @@ IMPORTANT: All responses must be in English.
 Severity guide:
 - none: step looks fine
 - info: minor note, no action needed
-- warning: potential issue that analyst should be aware of
-- critical: blank/broken figure, repeated errors, zero cells, memory errors, obviously wrong results
+- warning: potential issue that analyst should be aware of, including a figure whose \
+labels, legend or annotations are illegible
+- critical: blank/broken figure, a figure where text is covered by another element and \
+cannot be read at all, repeated errors, zero cells, memory errors, obviously wrong results
 
 IMPORTANT: Code and output may be truncated for display (only the last 2000 characters are shown for long content). If content is marked as truncated, do NOT report it as syntactically incomplete or missing. Only report syntax errors if the Execution status is FAILED and the Error indicates a SyntaxError.
 
@@ -168,6 +170,12 @@ If images are provided, check for:
 - Axis labels missing or nonsensical
 - Plots with no meaningful variation (flat lines, uniform colors)
 - Legends or annotations that are cut off or overlapping
+- Text drawn on top of other text: a legend covering the tick labels of a neighbouring \
+panel, a panel letter sitting on top of an axis label, a stray annotation over the title
+- Tick labels running into each other, or text too small to read
+- Two series in one legend sharing the same colour
+Report these as issues. A figure whose text cannot be read conveys nothing, however \
+correct the analysis behind it is.
 """
 
 

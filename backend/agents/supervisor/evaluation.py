@@ -170,6 +170,18 @@ class EvaluationMixin:
                 logger.warning(f"[{self.session_id}] Supervisor LLM evaluation failed: {e}")
 
         if llm_result:
+            if llm_result.get("parse_failed"):
+                # The no-op verdict below is a parsing artefact, not a finding.
+                # Logged loudly, but deliberately NOT appended to
+                # record.technical_issues: that list feeds
+                # steps_with_technical_issues, which the detailed report prints
+                # to the reader as "found N technical issues" — a supervisor
+                # that could not be parsed is not a defect in the analysis, and
+                # counting it as one misinforms the reader about their results.
+                logger.warning(
+                    f"[{self.session_id}] Step {step.step_number} was not evaluated: "
+                    f"supervisor response was not parseable JSON"
+                )
             record.llm_severity = llm_result.get("severity", "none")
             llm_issues = llm_result.get("issues", [])
             if llm_issues:
@@ -351,10 +363,18 @@ class EvaluationMixin:
                     compressed.append(self._compress_base64_figure(fig_b64))
 
                 n_figs = len(compressed)
+                # This note sits immediately before the images and is what the
+                # model actually acts on, so it restates the full image
+                # checklist rather than a shortened one — an abbreviated
+                # reminder in the highest-recency position quietly narrows the
+                # system prompt's criteria.
                 text_with_fig_note = (
                     f"{text_context}\n\n"
                     f"[{n_figs} figure(s) attached for visual inspection. "
-                    f"Check for blank/empty plots, missing labels, or obviously wrong visualizations.]"
+                    f"Check for blank/empty plots, missing or nonsensical labels, "
+                    f"text or legends drawn on top of other text, labels that run "
+                    f"into each other, fonts too small to read, and obviously wrong "
+                    f"visualizations.]"
                 )
 
                 self._set_llm_context()
@@ -471,31 +491,53 @@ class EvaluationMixin:
 
     @staticmethod
     def _parse_supervisor_response(text: str) -> Dict:
-        """Parse JSON from LLM response with multi-level fallback."""
+        """Parse JSON from LLM response with multi-level fallback.
+
+        The fallback is a no-op verdict, which is indistinguishable from "the
+        supervisor looked and found nothing wrong". They are not the same thing,
+        so an exhausted fallback is logged at WARNING and the returned verdict
+        carries ``parse_failed`` — a silent unparseable response reads in every
+        downstream view as a clean bill of health.
+        """
         # Try direct parse
         try:
-            return json.loads(text)
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+            logger.debug(
+                "Supervisor response: parsed as %s, not an object", type(parsed).__name__
+            )
         except (json.JSONDecodeError, TypeError):
             logger.debug("Supervisor response: direct JSON parse failed")
         # Try extracting from markdown code block
         match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
         if match:
             try:
-                return json.loads(match.group(1))
+                parsed = json.loads(match.group(1))
+                if isinstance(parsed, dict):
+                    return parsed
             except (json.JSONDecodeError, TypeError):
                 logger.debug("Supervisor response: markdown code block JSON parse failed")
         # Try finding any JSON object in the text
         match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
         if match:
             try:
-                return json.loads(match.group(0))
+                parsed = json.loads(match.group(0))
+                if isinstance(parsed, dict):
+                    return parsed
             except (json.JSONDecodeError, TypeError):
                 logger.debug("Supervisor response: regex-extracted JSON parse failed")
-        # Default: no intervention
+        # Default: no intervention, but say so out loud
+        snippet = (text or "").strip().replace("\n", " ")[:200]
+        logger.warning(
+            "Supervisor response could not be parsed as JSON; treating the step as "
+            "un-evaluated rather than clean. Response began: %r",
+            snippet or "<empty>",
+        )
         return {
             "severity": "none", "issues": [], "action": "none", "message": "",
             "is_biological_checkpoint": False, "pi_question": "",
-            "issue_type": "ambiguous",
+            "issue_type": "ambiguous", "parse_failed": True,
         }
 
     @staticmethod

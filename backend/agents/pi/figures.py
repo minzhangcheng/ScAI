@@ -7,6 +7,7 @@ import asyncio
 import logging
 
 from ...utils.formatting import safe_parse_json_array
+from ...services.figure_layout import format_violations_for_prompt
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -66,6 +67,24 @@ class FiguresMixin:
         """
         logger.info(f"[{self.session_id}][PI] Reviewing figure: {figure.name}")
 
+        # Renderer-measured collisions in the image being reviewed, so the
+        # reviewer is not left to infer from a downscaled JPEG what the renderer
+        # already knows exactly.
+        layout_block = ""
+        measured = format_violations_for_prompt(
+            getattr(figure, "layout_violations", None)
+        )
+        if measured:
+            layout_block = f"""
+**Measured layout defects in this image (from the rendering engine — pixel
+overlaps between artists, not matters of taste):**
+{measured}
+
+Anything listed as BLOCKING above means text is covered by another element and
+cannot be read. List those in `must_fix` and do NOT approve the figure while
+they are present, regardless of revision count.
+"""
+
         prompt = f"""## Figure Review for Publication Quality
 
 You are reviewing a figure for publication in a high-impact scientific journal.
@@ -86,7 +105,7 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
 - Description: {figure.description}
 - Revision count: {figure.revision_count}
 {self._build_revision_history_text(figure)}
-
+{layout_block}
 **Review Criteria:**
 1. **Scientific Accuracy**: Does the figure accurately represent the data?
 2. **Clarity**: Is the figure easy to understand? Are labels clear and readable?
@@ -129,7 +148,7 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
             prompt += """
 **FINAL REVISION - MUST APPROVE unless critical issues exist:**
 - This is the final revision attempt. APPROVE if quality_score >= 5.
-- Only reject for: fabricated data, completely missing labels, or scientific errors.
+- Only reject for: fabricated data, completely missing labels, scientific errors, or text that is covered by another element and cannot be read.
 - Aesthetic issues at this stage should be noted in feedback but should NOT prevent approval.
 """
         elif figure.revision_count >= 2:
@@ -137,8 +156,9 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
 **IMPORTANT - REVISION LENIENCY POLICY (revision count >= 2):**
 - This figure has been revised multiple times. Focus ONLY on critical issues.
 - Approve if quality_score >= 6 AND there are no data accuracy/fabrication issues.
-- Minor aesthetic preferences (color choices, exact font sizes, spacing) should NOT block approval.
-- Only reject if there are scientific accuracy issues, missing essential labels, or data fidelity problems.
+- Minor aesthetic preferences (colour choices, exact font sizes, generous or tight spacing) should NOT block approval.
+- Leniency does not extend to legibility. Text drawn on top of other text, a legend covering a neighbouring panel's labels, tick labels running into each other, or a label so small it cannot be read are not preferences — the reader cannot recover that information from the figure. Keep rejecting those.
+- Otherwise reject only for scientific accuracy issues, missing essential labels, or data fidelity problems.
 """
 
         # Use vision capability to analyze the figure
