@@ -69,6 +69,35 @@ def _marker(name: str, caption: str = "") -> str:
     return f"\n\n[FIGURE: {name}]\n"
 
 
+def _inline_marker(name: str, caption: str = "") -> str:
+    """A marker rebuilt where it already stands, without opening a new block."""
+    if caption:
+        return f"[FIGURE: {name}]\n[FIGURE_CAPTION: {caption}]"
+    return f"[FIGURE: {name}]"
+
+
+def _alt_ext(name: str) -> str:
+    """The same filename under the other image extension (.png ↔ .jpg)."""
+    stem, _, ext = name.rpartition(".")
+    if not stem:
+        return name
+    return f"{stem}.png" if ext.lower() in ("jpg", "jpeg") else f"{stem}.jpg"
+
+
+def _resolve(fig: str, known: set) -> Optional[str]:
+    """The known filename a marker refers to, or None if it refers to nothing.
+
+    Publication figures are written as JPG while the report model routinely
+    writes ``.png``; the HTML renderer has carried a .png↔.jpg fallback for
+    exactly that. Placement runs first, so resolving only on an exact match here
+    deletes the marker -- and its caption -- before the renderer ever sees it.
+    """
+    if fig in known:
+        return fig
+    alt = _alt_ext(fig)
+    return alt if alt in known else None
+
+
 def enforce_figure_placement(
     sections: List[Dict[str, Any]],
     outline: Sequence[Any],
@@ -95,12 +124,35 @@ def enforce_figure_placement(
         report.unplaced = sorted(known)
         return report
 
-    by_id = {sec.get("id"): sec for sec in sections}
-    # round number → section id that owns it
-    owner_of_round: Dict[int, str] = {}
+    # First-wins: ``align_sections_to_outline`` keeps the first copy of a
+    # duplicated section in its outline position and appends the second to the
+    # extras at the end of the list. Last-wins would aim every relocated and
+    # appended figure at that trailing duplicate, printing them in a stray
+    # repeated chapter after the conclusions while the real one stays empty.
+    by_id: Dict[Any, Dict[str, Any]] = {}
+    for sec in sections:
+        by_id.setdefault(sec.get("id"), sec)
+
+    # round number → section id that owns it, recorded only where exactly one
+    # section claims the round. An outline may deliberately give several
+    # sections the same rounds: the legacy (single-pass) outline organises by
+    # analysis type, so quality control, clustering, differential expression and
+    # key findings each declare every round. There the round number says nothing
+    # about which section a figure belongs in, and picking the first claimant
+    # would sweep every figure in the report into it.
+    claimants: Dict[int, set] = {}
     for osec in outline:
         for rn in getattr(osec, "rounds", ()) or ():
-            owner_of_round.setdefault(int(rn), osec.id)
+            claimants.setdefault(int(rn), set()).add(osec.id)
+    owner_of_round: Dict[int, str] = {
+        rn: next(iter(ids)) for rn, ids in claimants.items() if len(ids) == 1
+    }
+    if len(owner_of_round) < len(claimants):
+        logger.info(
+            "Outline does not partition rounds by section; leaving the model's "
+            "placement alone for round(s) %s",
+            ", ".join(str(rn) for rn in sorted(set(claimants) - set(owner_of_round))),
+        )
 
     # Sections that may hold figures at all, in outline order. Used as the
     # landing place for figures whose round has no section of its own.
@@ -125,10 +177,11 @@ def enforce_figure_placement(
         content = sec.get("content", "") or ""
 
         def _replace(match: "re.Match") -> str:
-            fig = match.group(1).strip()
+            written = match.group(1).strip()
             caption = (match.group(2) or "").strip()
-            if fig not in known:
-                report.unknown_removed.append((fig, sid))
+            fig = _resolve(written, known)
+            if fig is None:
+                report.unknown_removed.append((written, sid))
                 return ""
             if fig in placed:
                 report.duplicates_removed.append((fig, sid))
@@ -138,7 +191,10 @@ def enforce_figure_placement(
                 # Correctly placed, or unattributable — leave it where the model
                 # put it. An unattributable figure has no better home to move to.
                 placed.add(fig)
-                return match.group(0)
+                # Rewrite only if the name had to be resolved, so a marker the
+                # model wrote correctly keeps its exact original text.
+                return (match.group(0) if fig == written
+                        else _inline_marker(fig, caption))
             placed.add(fig)
             pending.setdefault(target, []).append((fig, caption))
             report.relocated.append((fig, sid, target))

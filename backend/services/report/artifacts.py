@@ -37,6 +37,58 @@ def is_diagnostic(artifact: Any) -> bool:
     return bool(getattr(artifact, "diagnostic", False))
 
 
+#: Kind the renderer records when its in-kernel layout lint could not run. An
+#: unmeasured layout must not be stored as an empty violation list, because that
+#: is exactly what a measured-clean figure carries.
+LAYOUT_UNVERIFIED_KIND = "lint_skipped"
+
+
+def layout_was_measured(artifact: Any) -> bool:
+    """Whether the renderer's layout lint actually ran on this artifact.
+
+    ``has_blocking_layout_defects`` answers "was anything found"; a False from it
+    means either "measured, nothing wrong" or "never measured", and only one of
+    those is evidence.
+    """
+    violations = getattr(artifact, "layout_violations", None) or []
+    return not any(
+        str((violation or {}).get("kind", "")) == LAYOUT_UNVERIFIED_KIND
+        for violation in violations
+        if isinstance(violation, dict)
+    )
+
+
+#: The blank-render floor the producer applies to every figure it accepts (see
+#: ``agents/bioinformatics/figures.py``): a JPEG smaller than this is white space
+#: with axes at most.
+MIN_RENDERED_FIGURE_BYTES = 2000
+
+
+def render_is_intact(artifact: Any) -> bool:
+    """Whether the file this record would hand over is still a real render.
+
+    The publication wrapper saves in a ``finally``, so a revision that rendered
+    nothing has already overwritten the good file before the loop can object,
+    and the in-memory rollback is a no-op when no snapshot was ever taken --
+    none is while a blocking layout defect is outstanding. The record then keeps
+    the earlier render's base64 while the bytes beside it are blank, so the
+    preview and the download are different images.
+
+    Judged on the bytes and not on the review status, so nothing is withheld for
+    merely having been revised. A path that cannot be stat'd is not judged at
+    all: the record still carries its own preview, and withholding figures whose
+    workspace moved is the over-filtering the browsing surface was widened to
+    undo.
+    """
+    path = getattr(artifact, "png_path", None)
+    if not path:
+        return True
+    try:
+        return os.path.getsize(str(path)) >= MIN_RENDERED_FIGURE_BYTES
+    except OSError:
+        return True
+
+
 def is_report_eligible(artifact: Any) -> bool:
     """Return whether a reviewed artifact is current enough for final reports."""
     if not getattr(artifact, "is_current", True):
@@ -54,8 +106,13 @@ def is_report_eligible(artifact: Any) -> bool:
     # The layout gate above is deliberately still applied: whether text is covered
     # is measured by the renderer, not attested by a reviewer, so it is exactly the
     # question an unreviewed figure can still be asked.
+    #
+    # That is also the whole of the waiver's justification, so it cannot survive
+    # the measurement failing. A diagnostic is rendered with no review callback,
+    # so if its lint did not run nothing looked at the figure at all -- and the
+    # figure most likely to crash the lint is the one most likely to need it.
     if is_diagnostic(artifact):
-        return True
+        return layout_was_measured(artifact)
     return _status_value(artifact) in REPORTABLE_REVIEW_STATUSES
 
 
@@ -77,6 +134,11 @@ def is_gallery_eligible(artifact: Any) -> bool:
     instead, so nothing is hidden and nothing is misrepresented. Only artifacts
     superseded by newer data are withheld, because those describe a matrix that
     no longer exists.
+
+    Deliberately answerable from the record alone. ``render_is_intact`` asks the
+    separate question of whether the bytes on disk still match the record, and
+    surfaces that serve a download call it alongside this one -- folding it in
+    here would make every caller of this predicate stat the filesystem.
     """
     return bool(
         getattr(artifact, "is_current", True)

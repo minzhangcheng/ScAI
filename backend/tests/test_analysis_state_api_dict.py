@@ -22,6 +22,8 @@ from backend.models.schemas import (
     MessageRole,
     RoundResult,
     WebSocketMessage,
+    PublicationFigure,
+    FigureReviewStatus,
 )
 
 
@@ -163,6 +165,41 @@ class TestAnalysisStateApiDictRoundTrip:
 
         api = state.to_api_dict(strip_message_base64=stripper)
         assert api["messages"][0]["content"] == "stripped this"
+
+    def test_publication_figures_carry_gallery_badge_fields(self):
+        """The Results gallery badges must survive a reload.
+
+        round / layout_blocking / diagnostic reach the first render on the
+        integrated_report WebSocket message; a reload rebuilds the gallery from
+        this payload alone, so the record's own values have to travel with it.
+        """
+        state = AnalysisState(user_id="test")
+        state.publication_figures = [
+            PublicationFigure(
+                id="f-blocked", name="umap_clusters", description="d",
+                figure_type="umap", png_path="/x/umap.png", pdf_path="/x/umap.pdf",
+                review_status=FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS,
+                round_number=3,
+                layout_violations=[{"kind": "text_over_text", "severity": "block"}],
+            ),
+            PublicationFigure(
+                id="f-diagnostic", name="qc_panel", description="d",
+                figure_type="qc", png_path="/x/qc.png", pdf_path="/x/qc.pdf",
+                diagnostic=True,
+                # Advisory only: a warning is not a blocking defect.
+                layout_violations=[{"kind": "text_over_text", "severity": "warn"}],
+            ),
+        ]
+        api = state.to_api_dict()
+        json.dumps(api)
+        blocked, diagnostic = api["publication_figures"]
+        assert blocked["round"] == 3
+        assert blocked["layout_blocking"] is True
+        assert blocked["diagnostic"] is False
+        # An unattributed figure reports no round rather than "round 0".
+        assert diagnostic["round"] is None
+        assert diagnostic["layout_blocking"] is False
+        assert diagnostic["diagnostic"] is True
 
     def test_runtime_warning_is_serialized(self):
         """to_api_dict() must include runtime_restore_warning when set, default to None."""

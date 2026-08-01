@@ -47,6 +47,69 @@ def _method_rule_text(rule_id: str) -> str:
     except Exception:  # pragma: no cover - corpus is optional by design
         return ""
 
+
+def _gate_score_definitions(state) -> List[Any]:
+    """Registered scores the statistical gates judge this round's findings against.
+
+    Scores accumulate for the whole session and there is no de-register tool. A
+    record that is defective in itself -- an undeclared testing family, an
+    unnamed ORA universe -- is refused against the record rather than against
+    the finding, and re-registering only replaces a score of the same name, so
+    a later round working on something else can never clear it and the block
+    would repeat forever. That, and only that, is what this filter is for.
+
+    Everything else an earlier round registered is evidence the current findings
+    have to be judged against: the resample count behind a quoted p-value, the
+    joint compositional model that turns the simplex refusal into a note.
+    Dropping it makes the gates blind rather than lenient, and it takes the
+    exemption away together with the check. So an earlier round's score is
+    carried forward unless the gates already refuse the record itself, asked
+    with no findings to judge -- posing the question to the gates rather than
+    restating their taxonomy here, so a record-level check added later is
+    honoured without a second copy of the rules.
+    """
+    carried: List[Any] = []
+    for score in (state.score_definitions or []):
+        # round_number is stamped at registration; 0 means pre-tracking or
+        # restored state, so it is kept.
+        if getattr(score, "round_number", 0) in (0, state.current_round):
+            carried.append(score)
+            continue
+        if run_statistical_gates(
+            None,
+            score_definitions=[score],
+            scoring_plans=state.scoring_plans,
+        ).passed:
+            carried.append(score)
+    return carried
+
+
+def _gate_samples_per_group(state) -> Dict[str, int]:
+    """Samples per condition as the record has them, for the design gates.
+
+    sample_count defaults to 1 in the schema, so a declaration left alone can
+    undercount a group whose upload plainly holds more. Per-sample-numbered
+    files are the harder evidence and raise the count when the upload resolves
+    more samples than were declared.
+
+    They do not decide membership. A group the record shows as a single
+    specimen is exactly the input check_analysis_unit and
+    check_permutation_at_small_n exist to refuse, and leaving it out empties the
+    mapping -- both gates return early on an empty one, so the design they were
+    written for is the one design they would stop seeing.
+    """
+    numbered: Dict[Any, set] = {}
+    for data_file in (state.data_files or []):
+        if getattr(data_file, "sample_number", None) is None:
+            continue
+        numbered.setdefault(data_file.group_id, set()).add(data_file.sample_number)
+    return {
+        g.name: max(g.sample_count, len(numbered.get(g.id, ())))
+        for g in (state.treatment_groups or [])
+        if getattr(g, "sample_count", None) is not None
+    }
+
+
 # Configure logger
 logger = logging.getLogger(__name__)
 
@@ -960,10 +1023,22 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         """
         var_name = f"gene_set_{re.sub(r'[^0-9A-Za-z_]', '_', set_id)[:60]}"
         try:
-            await self.sandbox.execute(
+            result = await self.sandbox.execute(
                 f"{var_name} = {genes!r}",
                 save_to_history=False, skip_safety_check=True,
             )
+            # A kernel that will not take the assignment says so in the result
+            # -- dead kernel, restart, timeout, MemoryError on a large panel --
+            # far more often than it raises. Reporting the variable anyway is
+            # the worst outcome available: the caller then suppresses the inline
+            # gene list, and the next cell dies on NameError or the model
+            # retypes the panel from memory, which is what this helper exists to
+            # prevent.
+            if result.error:
+                logger.warning(
+                    f"[{self.session_id}] {label} injection failed: {result.error}"
+                )
+                return None
             return var_name
         except Exception as exc:
             logger.warning(f"[{self.session_id}] {label} injection failed: {exc}")
@@ -2163,6 +2238,15 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 raise WorkflowTerminatedError("Analysis terminated by user at marker DB gate")
                             if action == _LFA.RETRY:
                                 _get_marker_db().reload()  # clear stale empty cache after fetch
+                        else:
+                            # Usable, but a source whose download failed leaves
+                            # the DB narrower than the revision intends and
+                            # fires no gate, so nothing would ask for it again.
+                            # Quiet, once per process, never blocking.
+                            from backend.services import marker_priors as _mp
+                            if await asyncio.to_thread(
+                                    _mp.top_up_missing_tables, _get_marker_db()):
+                                _get_marker_db().reload()
                         workspace_dir = getattr(self.sandbox, "working_dir", None)
                         database_priors = {}
                         if workspace_dir is not None:
@@ -2367,35 +2451,18 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         # loop, and an escape is recorded in the report.
                         _stats_report = run_statistical_gates(
                             args.get("findings"),
-                            # Scores accumulate for the whole session. A stale
-                            # record from an earlier round must not re-refuse a
-                            # later round's unrelated findings -- there is no
-                            # de-register tool, so the block would never clear.
-                            # round_number is stamped at registration; 0 means
-                            # pre-tracking or restored state, so it is kept.
-                            score_definitions=[
-                                s for s in (state.score_definitions or [])
-                                if getattr(s, "round_number", 0)
-                                in (0, state.current_round)
-                            ],
+                            # A stale record that refuses itself is dropped; the
+                            # rest of the session's scores are evidence these
+                            # findings are judged against. See
+                            # _gate_score_definitions.
+                            score_definitions=_gate_score_definitions(state),
                             # scoring_plans stays unfiltered: the gate uses it as
                             # a plan_id lookup table, and a current-round score
                             # may legitimately cite a plan frozen earlier.
                             scoring_plans=state.scoring_plans,
-                            # sample_count defaults to 1 in the schema, so a 1 is
-                            # indistinguishable from "never edited". Believe it
-                            # only when the upload actually resolves per-sample
-                            # files for that group; absent information must not
-                            # read as a violation.
-                            samples_per_group={
-                                g.name: g.sample_count
-                                for g in (state.treatment_groups or [])
-                                if getattr(g, "sample_count", None) is not None
-                                and (g.sample_count > 1
-                                     or any(f.group_id == g.id
-                                            and f.sample_number is not None
-                                            for f in (state.data_files or [])))
-                            },
+                            # Declared counts, raised by per-sample files when the
+                            # upload resolves more. See _gate_samples_per_group.
+                            samples_per_group=_gate_samples_per_group(state),
                             # cluster_labels deliberately not supplied: measured,
                             # feeding annotation vocabulary to the composition
                             # check costs 7 false positives and gains nothing,

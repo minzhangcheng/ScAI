@@ -22,30 +22,86 @@ _sizes = {}
 def _runtime_matrix_bytes(_value, _seen):
     # Sparse matrices carry their payload in data/indices/indptr, each with its
     # own nbytes; the container's own nbytes is meaningless. Dense arrays have
-    # none of those parts, so nbytes on the value itself is the answer. ``_seen``
-    # keeps a matrix shared between slots (e.g. a layer aliasing X) from being
-    # counted twice.
+    # none of those parts, so nbytes on the value itself is the answer.
+    #
+    # ``_seen`` maps id -> object rather than holding bare ids. It keeps a
+    # matrix shared between slots (e.g. a layer aliasing X) from being counted
+    # twice, and holding the object is what makes that id trustworthy: a .X or
+    # .raw.X that materialises a fresh temporary on every access (a view, a
+    # backed store, a dask- or CuPy-wrapped matrix) is freed the moment this
+    # call returns, CPython hands the same address to the next array, and that
+    # array then matched an id already recorded and was measured as 0 bytes.
     if _value is None or id(_value) in _seen:
         return 0
-    _seen.add(id(_value))
+    _seen[id(_value)] = _value
     _total = 0
     _has_sparse_parts = False
     for _part_name in ('data', 'indices', 'indptr'):
         _part = getattr(_value, _part_name, None)
         if _part is not None and id(_part) not in _seen:
             _has_sparse_parts = True
-            _seen.add(id(_part))
+            _seen[id(_part)] = _part
             _total += int(getattr(_part, 'nbytes', 0) or 0)
     if not _has_sparse_parts:
         _total = int(getattr(_value, 'nbytes', 0) or 0)
     return _total
 
 
+def _runtime_frame_bytes(_frame, _seen):
+    # obs / var are DataFrames and copy() duplicates both. A DataFrame copy
+    # duplicates its blocks; an object column copies the array of pointers, not
+    # the strings behind them, which is exactly what memory_usage(deep=False)
+    # reports — so deep=True would overstate the copy and walk every cell.
+    if _frame is None or id(_frame) in _seen:
+        return 0
+    _seen[id(_frame)] = _frame
+    try:
+        return int(_frame.memory_usage(index=True, deep=False).sum())
+    except Exception:
+        return 0
+
+
+def _runtime_container_bytes(_value, _seen, _budget, _depth=0):
+    # uns is deep-copied by copy(), so a stored neighbours graph or a
+    # rank_genes_groups table is allocated a second time by the capture just as
+    # X is. Walked by reference only — nothing here materialises anything. The
+    # depth limit and node budget keep an arbitrary user structure from turning
+    # the probe into the expensive part of the capture.
+    if _value is None or _depth > 8 or _budget[0] <= 0:
+        return 0
+    _budget[0] -= 1
+    if isinstance(_value, (str, bytes, bytearray, bool, int, float, complex)):
+        return 0
+    if isinstance(_value, dict):
+        if id(_value) in _seen:
+            return 0
+        _seen[id(_value)] = _value
+        _total = 0
+        for _item in _value.values():
+            _total += _runtime_container_bytes(_item, _seen, _budget, _depth + 1)
+        return _total
+    if isinstance(_value, (list, tuple, set, frozenset)):
+        if id(_value) in _seen:
+            return 0
+        _seen[id(_value)] = _value
+        _total = 0
+        for _item in _value:
+            _total += _runtime_container_bytes(_item, _seen, _budget, _depth + 1)
+        return _total
+    if hasattr(_value, 'columns') and hasattr(_value, 'memory_usage'):
+        return _runtime_frame_bytes(_value, _seen)
+    return _runtime_matrix_bytes(_value, _seen)
+
+
 def _runtime_adata_bytes(_adata):
     # Must mirror what AnnData.copy() duplicates, because that copy is exactly
     # what the h5ad capture template allocates. .raw is included: it is a full
-    # second matrix and copy() carries it along.
-    _seen = set()
+    # second matrix and copy() carries it along. So are obs, var and uns —
+    # copy() copies the two frames and deepcopies uns, and a session whose bulk
+    # lives in a stored graph or a results table under uns was previously
+    # measured as if only its matrices existed.
+    _seen = {}
+    _budget = [20000]
     _total = _runtime_matrix_bytes(getattr(_adata, 'X', None), _seen)
     try:
         _raw = getattr(_adata, 'raw', None)
@@ -53,14 +109,26 @@ def _runtime_adata_bytes(_adata):
         _raw = None
     if _raw is not None:
         _total += _runtime_matrix_bytes(getattr(_raw, 'X', None), _seen)
+        _total += _runtime_frame_bytes(getattr(_raw, 'var', None), _seen)
     for _mapping_name in ('layers', 'obsp', 'varp', 'obsm', 'varm'):
         _mapping = getattr(_adata, _mapping_name, None)
         if _mapping is not None:
             try:
                 for _value in _mapping.values():
-                    _total += _runtime_matrix_bytes(_value, _seen)
+                    # Through the container walker, not straight to the matrix
+                    # one: obsm/varm slots are allowed to hold DataFrames.
+                    _total += _runtime_container_bytes(_value, _seen, _budget)
             except Exception:
                 pass
+    for _frame_name in ('obs', 'var'):
+        try:
+            _total += _runtime_frame_bytes(getattr(_adata, _frame_name, None), _seen)
+        except Exception:
+            pass
+    try:
+        _total += _runtime_container_bytes(getattr(_adata, 'uns', None), _seen, _budget)
+    except Exception:
+        pass
     return _total
 
 
@@ -131,7 +199,8 @@ print(_runtime_json.dumps({
 print('__RUNTIME_MEMORY_END__')
 for _cleanup_name in (
     '_globals', '_sizes', '_name', '_obj', '_shape',
-    '_runtime_matrix_bytes', '_runtime_adata_bytes',
+    '_runtime_matrix_bytes', '_runtime_frame_bytes',
+    '_runtime_container_bytes', '_runtime_adata_bytes',
     '_runtime_memory_headroom', '_runtime_self_rss',
 ):
     globals().pop(_cleanup_name, None)

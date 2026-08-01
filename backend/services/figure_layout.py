@@ -379,14 +379,35 @@ def _scai_lint_figure_layout(fig):
     except Exception:
         pass
 
+    def _worst_first(found):
+        """Blocking hits first, then advisory, each in the order found.
+
+        Every section below caps its report with a head slice, and a section
+        that can emit both severities collects them in artist order — so an
+        axes full of advisory crowding would push every blocking collision out
+        of the report and, with it, off the gate that reads the report.
+        """
+        return sorted(
+            found, key=lambda h: 0 if h["severity"] == "block" else 1
+        )
+
     # ---- V1: text spilling onto a foreign axes' data area -----------------
     # "Foreign" means a genuinely separate panel: not the same axes, not a twin
     # or a nested child of it, and not a container that paints nothing.
     panels = [a for a in axes_list if a["axis_on"]]
     hits = []
     for e in entries:
-        if e["owner"] == -1 and e["what"] == "figure title":
-            continue
+        # Figure-level text — a suptitle, a fig.text, a fig.legend entry —
+        # belongs to the whole figure and not to any panel, so sitting over a
+        # panel's rectangle is where it was placed, not a spill out of
+        # somewhere else. Handing a legend that has outgrown its axes to the
+        # figure is the remedy the plotting instructions recommend, and
+        # fig.legend's default location is inside the figure rectangle, i.e.
+        # on top of a panel: blocking that makes the recommended fix
+        # unpublishable. Report the overlap, but leave the verdict to V2 —
+        # what makes text unreadable is other text covering it, and every
+        # figure-level artist is compared against all of it below.
+        figure_level = e["owner"] == -1
         for entry in panels:
             if entry["group"] == e["owner"]:
                 continue
@@ -394,7 +415,7 @@ def _scai_lint_figure_layout(fig):
             if ov > 0:
                 hits.append({
                     "kind": "text_over_foreign_axes",
-                    "severity": "block",
+                    "severity": "advise" if figure_level else "block",
                     "text": e["text"],
                     "what": e["what"],
                     "overlap_px2": round(ov, 1),
@@ -402,7 +423,7 @@ def _scai_lint_figure_layout(fig):
                     "foreign_axes_bbox": [round(v, 1) for v in entry["bbox"]],
                 })
                 break
-    violations.extend(hits[:_MAX_PER_KIND])
+    violations.extend(_worst_first(hits)[:_MAX_PER_KIND])
 
     # legend frames get their own report: the frame, not just its text, is what
     # covers the neighbour
@@ -473,7 +494,7 @@ def _scai_lint_figure_layout(fig):
                         "overlap_px2": round(ov, 1),
                         "bbox": [round(v, 1) for v in a["bbox"]],
                     })
-        violations.extend(tt_hits[:_MAX_PER_KIND])
+        violations.extend(_worst_first(tt_hits)[:_MAX_PER_KIND])
     else:
         violations.append({
             "kind": "lint_skipped",
@@ -671,9 +692,16 @@ def format_violations_for_prompt(
         kind = str(v.get("kind", ""))
         text = str(v.get("text", "") or "")
         what = str(v.get("what", "") or "element")
+        # Label from the severity the linter assigned, never from the kind:
+        # the same kind is blocking or advisory depending on what collided,
+        # and the reviewer is told not to approve anything marked BLOCKING
+        # "regardless of revision count". Calling advisory crowding blocking
+        # spends the whole revision budget on a defect no redraw can clear and
+        # then drops the figure from every report.
+        tag = "BLOCKING" if str(v.get("severity", "")) == "block" else "advisory"
         if kind == "text_over_foreign_axes":
             lines.append(
-                f"- BLOCKING: the {what} \"{text}\" is drawn on top of a "
+                f"- {tag}: the {what} \"{text}\" is drawn on top of a "
                 f"different panel's plotting area "
                 f"(overlap {v.get('overlap_px2')} px^2; its box "
                 f"{v.get('bbox')}, the other panel's box "
@@ -682,7 +710,7 @@ def format_violations_for_prompt(
             )
         elif kind == "text_over_text":
             lines.append(
-                f"- BLOCKING: the {what} \"{text}\" overlaps the "
+                f"- {tag}: the {what} \"{text}\" overlaps the "
                 f"{v.get('collides_with_what', 'text')} "
                 f"\"{v.get('collides_with', '')}\" "
                 f"(overlap {v.get('overlap_px2')} px^2 at {v.get('bbox')}). "
@@ -690,7 +718,7 @@ def format_violations_for_prompt(
             )
         elif kind == "tick_label_collision":
             lines.append(
-                f"- BLOCKING: {what}s run into each other — "
+                f"- {tag}: {what}s run into each other — "
                 f"\"{text}\" overlaps \"{v.get('collides_with', '')}\" by "
                 f"{v.get('overlap_px')} px, and {v.get('n_collisions')} of "
                 f"{v.get('n_labels')} labels on that axis collide. Show fewer "

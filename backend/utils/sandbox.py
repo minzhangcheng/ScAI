@@ -324,10 +324,17 @@ except Exception as e:
             # from earlier snapshot).
             self._session_restore_failed = True
             # Mark of how much work the kernel had done when persistence was
-            # latched off. `runtime_revision` advances only on a successful
-            # user cell, so anything above this mark is a namespace the agent
-            # rebuilt rather than restore residue -- see save_session.
+            # latched off. Cheap short-circuit only: a kernel that has run
+            # nothing since cannot have rebuilt anything -- see save_session.
             self._restore_failed_at_revision = getattr(self, "runtime_revision", 0)
+            # What the aborted restore left the namespace holding. This, not the
+            # cell counter, is what save_session compares against: a counter
+            # cannot tell "the agent reloaded the data and recomputed the
+            # analysis" from "one `import scanpy as sc` ran", and both advance it
+            # by exactly one. Taken here because the kernel is still alive at
+            # this point; None means it could not be read, and save_session then
+            # keeps refusing rather than guessing.
+            self._restore_failed_globals = await self._snapshot_persistable_globals()
             detail = result.error or result.output or "unknown error"
             logger.error(
                 f"[{self.session_id}] dill session restore failed: {detail}"
@@ -374,34 +381,60 @@ except Exception as e:
         deliberately keeps a kernel alive whose restore failed, so the analysis
         carries on and recomputes its state from the uploaded data; refusing
         forever meant none of that work was ever written, and the next resume
-        silently rehydrated the pre-crash pkl instead. ``runtime_revision``
-        advances only on a successful user cell, so a revision above the mark
-        taken when the latch was set is a namespace this kernel built, not
-        restore residue, and it is the better evidence.
+        silently rehydrated the pre-crash pkl instead.
+
+        The evidence that it has rebuilt is what the namespace now *holds*, not
+        how many cells have run. ``runtime_revision`` advances on any successful
+        cell, so requiring it to pass the mark once meant a single
+        ``import scanpy as sc`` disarmed the guard: modules are never written to
+        the pkl, so that save dumped a namespace with no analysis state in it
+        over the last good copy, and the next resume rehydrated it and reported
+        ``runtime_restore_status`` complete. The comparison is instead against
+        the persistable globals the aborted restore left behind
+        (``_restore_failed_globals``); only values this kernel added on top of
+        that residue count as a rebuild.
         """
-        if getattr(self, "_session_restore_failed", False):
-            mark = getattr(self, "_restore_failed_at_revision", None)
-            revision = getattr(self, "runtime_revision", 0)
-            if mark is None or revision <= mark:
-                logger.error(
-                    "[%s] refusing to persist a kernel whose restore failed and "
-                    "which has executed nothing since; keeping the previous pkl",
-                    self.session_id,
-                )
-                return
-            logger.warning(
-                "[%s] restore failed earlier, but %d cell(s) have run since; "
-                "persisting the rebuilt namespace over the previous pkl",
+        restore_failed = bool(getattr(self, "_session_restore_failed", False))
+        mark = getattr(self, "_restore_failed_at_revision", None)
+        revision = getattr(self, "runtime_revision", 0)
+        if restore_failed and (mark is None or revision <= mark):
+            # Cheap short-circuit: nothing has run, so nothing can have been
+            # rebuilt, and the kernel need not be touched to establish that.
+            logger.error(
+                "[%s] refusing to persist a kernel whose restore failed and "
+                "which has executed nothing since; keeping the previous pkl",
                 self.session_id,
-                revision - mark,
             )
-            # The latch is cleared only once the write has actually landed --
-            # see the end of this method. Clearing it here would drop the
-            # protection permanently the first time a save raised.
+            return
 
         async with self._exec_lock:
             session_path = str(self.notebook_state.session_path.absolute())
             escaped_path = repr(session_path)
+
+            if restore_failed:
+                rebuilt = await self._rebuilt_since_restore_failure()
+                if not rebuilt:
+                    logger.error(
+                        "[%s] refusing to persist a kernel whose restore failed: "
+                        "%d cell(s) have run since, but the namespace still holds "
+                        "nothing this kernel built, so the previous pkl stays the "
+                        "better evidence and is kept",
+                        self.session_id,
+                        revision - mark,
+                    )
+                    return
+                logger.warning(
+                    "[%s] restore failed earlier; the kernel has since rebuilt "
+                    "%d value(s) (%s), persisting the rebuilt namespace over the "
+                    "previous pkl",
+                    self.session_id,
+                    len(rebuilt),
+                    ", ".join(sorted(rebuilt)[:8]),
+                )
+                # The latch is cleared only once the write has actually landed --
+                # see the end of this method. Clearing it here would drop the
+                # protection permanently the first time a save raised.
+
             logger.info(f"Saving session to {session_path}")
 
             # Compatibility cleanup for dependency trackers written by older
@@ -652,8 +685,60 @@ print(f"Session saved: {_saved_count} variables")
             if getattr(self, "_session_restore_failed", False):
                 self._session_restore_failed = False
                 self._restore_failed_at_revision = None
+                self._restore_failed_globals = None
 
             return True
+
+    async def _snapshot_persistable_globals(self) -> set[str] | None:
+        """User globals ``save_session`` would actually dump, or None if unknown.
+
+        The same exclusion the save code applies via ``_scai_skip_kinds``:
+        modules, functions, classes and methods are re-established by kernel init
+        and notebook replay and never reach the pkl, so a namespace holding only
+        those holds no analysis state at all. ``None`` is deliberately distinct
+        from the empty set -- "the kernel could not tell us" and "the kernel has
+        nothing" lead to the same refusal, but only one of them is a fact about
+        the namespace.
+        """
+        code = (
+            "import json as _pg_json, types as _pg_types\n"
+            "_pg_kinds = (_pg_types.ModuleType, _pg_types.FunctionType,\n"
+            "             _pg_types.BuiltinFunctionType, _pg_types.MethodType, type)\n"
+            "print('__PERSISTABLE_GLOBALS__:' + _pg_json.dumps(sorted(\n"
+            "    _n for _n, _v in list(globals().items())\n"
+            "    if not _n.startswith('_') and not isinstance(_v, _pg_kinds)\n"
+            ")))\n"
+        )
+        result = await self._execute_unlocked(
+            code, save_to_history=False, skip_safety_check=True
+        )
+        if not result.success:
+            return None
+        for line in (result.output or "").splitlines():
+            if line.startswith("__PERSISTABLE_GLOBALS__:"):
+                raw = line[len("__PERSISTABLE_GLOBALS__:"):].strip()
+                try:
+                    parsed = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    return None
+                if isinstance(parsed, list):
+                    return {str(x) for x in parsed}
+        return None
+
+    async def _rebuilt_since_restore_failure(self) -> set[str]:
+        """Values this kernel produced since its restore failed.
+
+        Empty means "no evidence of a rebuild", which includes the case where
+        the baseline was never measured or the kernel cannot answer now: with
+        nothing to compare against, the pkl on disk stays the better evidence.
+        """
+        baseline = getattr(self, "_restore_failed_globals", None)
+        if baseline is None:
+            return set()
+        live = await self._snapshot_persistable_globals()
+        if live is None:
+            return set()
+        return live - set(baseline)
 
 
 

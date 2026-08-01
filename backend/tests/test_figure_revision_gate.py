@@ -15,7 +15,7 @@ import pytest
 
 from backend.agents.bioinformatics.figures import FiguresMixin
 from backend.models.schemas import AnalysisState, FigureReviewStatus
-from backend.services.figure_layout import LAYOUT_LINT_SENTINEL
+from backend.services.figure_layout import LAYOUT_LINT_SENTINEL, blocking_violations
 
 BLOCKING = [{
     "kind": "text_over_text", "severity": "block", "text": "Con FXR/bile",
@@ -203,6 +203,43 @@ async def test_a_held_back_figure_records_why_on_itself(tmp_path):
     assert is_report_eligible(figure) is False
     assert "[Layout gate]" in (figure.pi_feedback or "")
     assert "held back" in figure.pi_feedback
+
+
+@pytest.mark.asyncio
+async def test_an_unmeasured_first_render_is_not_recorded_as_clean(tmp_path):
+    """The first render has no earlier measurement to keep, so it must record
+    the absence of one.
+
+    A platform diagnostic is produced with no review callback and never enters
+    the loop, and ``is_report_eligible`` waives the review-status check for it --
+    the layout gate is the only question it is asked. Storing ``[]``, which is
+    exactly what a measured-clean figure stores, makes the gap invisible to every
+    consumer that reads the record.
+    """
+    agent = _Agent(_FakeSandbox(tmp_path, [{"violations": None}]))
+    state = AnalysisState(user_id="u")
+    await agent._handle_generate_publication_figure(
+        code="plot()", figure_name="f", description="d", figure_type="qc",
+        state=state, review_callback=None, diagnostic=True,
+    )
+    figure = state.publication_figures[0]
+    assert figure.layout_violations, "unverified must not be stored as measured-clean"
+    assert [v["kind"] for v in figure.layout_violations] == ["lint_skipped"]
+    # Advisory, not blocking: nothing was measured to be wrong, and a redraw
+    # cannot fix a linter that did not run. A blocking record here would spend
+    # the revision budget on an unfixable objection and drop from every report
+    # the one figure the QC chapter has.
+    assert blocking_violations(figure.layout_violations) == []
+
+    # ... and a render the linter did measure still records nothing, so the two
+    # remain distinguishable.
+    clean_agent = _Agent(_FakeSandbox(tmp_path, [CLEAN]))
+    clean_state = AnalysisState(user_id="u")
+    await clean_agent._handle_generate_publication_figure(
+        code="plot()", figure_name="f", description="d", figure_type="qc",
+        state=clean_state, review_callback=None, diagnostic=True,
+    )
+    assert clean_state.publication_figures[0].layout_violations == []
 
 
 @pytest.mark.asyncio

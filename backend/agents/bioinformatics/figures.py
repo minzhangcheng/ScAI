@@ -69,6 +69,33 @@ def _render_landed(output: str | None) -> bool:
     return _NO_FIGURE_MARKER not in text and _SAVE_FAILED_MARKER not in text
 
 
+def _layout_unverified_marker() -> Dict[str, Any]:
+    """The record for a render the linter returned no verdict for.
+
+    ``parse_layout_violations`` returns ``[]`` both for "measured, nothing wrong"
+    and for "no verdict at all", and only the second is a gap — yet stored on the
+    figure the two are the same value, so every consumer reads an unmeasured
+    figure as a measured-clean one. Record the gap instead, reusing the
+    ``lint_skipped`` kind the kernel already emits when it drops one of its own
+    checks rather than inventing a second representation.
+
+    Advisory by construction: a linter that did not run has measured no defect,
+    and a redraw cannot fix one that was never found. Blocking here would spend
+    the revision budget on an unfixable objection and drop the figure from every
+    report — the false-positive cost this gate is built to avoid.
+    """
+    return {
+        "kind": "lint_skipped",
+        "severity": "advise",
+        "text": "",
+        "what": "layout",
+        "detail": (
+            "the renderer returned no verdict for this render, so its layout "
+            "is unverified rather than known to be clean"
+        ),
+    }
+
+
 def _layout_feedback_block(violations) -> str:
     """Render measured layout violations as a feedback section, or ''."""
     body = format_violations_for_prompt(violations)
@@ -329,6 +356,13 @@ class FiguresMixin:
                 f"{summarize_violations(layout_violations)}"
             )
         else:
+            # "Unverified" has to be written down, not just logged. The revision
+            # path keeps the previous measurement for exactly this reason; the
+            # first render has none to keep, so it records the absence itself —
+            # otherwise the figure carries [], which is what a clean measurement
+            # carries, and the layout gate is the only check a diagnostic figure
+            # is subject to at all.
+            layout_violations = [_layout_unverified_marker()]
             logger.warning(
                 f"[Bioinformatics] Figure {safe_name}: layout lint did not "
                 f"report — treating layout as unverified, not as clean"

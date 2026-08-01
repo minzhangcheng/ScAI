@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_COLS = ["source", "species", "cell_type", "gene_symbol", "tissue", "evidence", "ref"]
 
+#: Every table this script is expected to leave behind, primary source first.
+#: The "already current, skip the network" short-circuit below is keyed on all of
+#: them. Keying it on panglaodb.tsv alone meant that the first fetch which
+#: succeeded for the primary and failed for the supplementary (whose failure is
+#: only a warning) stamped panglaodb.tsv at the current revision and thereby
+#: made cellmarker.tsv unfetchable forever — every later call returned True
+#: without a request, so a deployment ran on PanglaoDB-only priors permanently.
+EXPECTED_TABLES = ("panglaodb.tsv", "cellmarker.tsv")
+
 #: Stamped into every table written here and validated by
 #: ``marker_priors.MARKER_SCHEMA_REVISION`` — the two must be bumped together.
 #: 2 = dual-species rows expanded + PanglaoDB's ``organ`` carried as ``tissue``.
@@ -213,18 +222,31 @@ def is_current_revision(path: Path) -> bool:
 
 
 def fetch_and_write(dest_dir: Path | None = None, force: bool = False) -> bool:
-    """下载并原子写两表到 dest_dir（默认 default_dest_dir()）。
+    """Download and atomically write both tables into dest_dir.
 
-    带文件锁防并发（陈旧锁自动夺取）。失败返回 False（不抛）。
+    Defaults to ``default_dest_dir()``. File-locked against concurrent runs, a
+    stale lock being taken over. Returns False on failure rather than raising.
 
-    ``force=False`` 时，若主源已是当前 SCHEMA_REVISION 则直接返回 True 而不联网 —
-    这让启动脚本可以无条件调用；revision 不符（含旧投影写下的表）仍会重下。
+    With ``force=False`` the network is skipped only when EVERY table in
+    ``EXPECTED_TABLES`` already carries the current SCHEMA_REVISION, so the
+    startup script can call this unconditionally. Keying the skip on the primary
+    table alone made a supplementary source that failed to download permanently
+    unrecoverable: the primary stayed current, so every later call returned
+    before reaching the network. Anything at the wrong revision -- a table
+    written by an older projection, or one absent because its last download
+    failed -- is fetched again, and only that table is.
 
-    CellMarker 是补充源：失败只 warning，PanglaoDB 仍写出（注释仍有主源先验）。
+    CellMarker is supplementary: its failure only warns, and PanglaoDB is still
+    written, so annotation keeps the primary source's priors.
     """
     dest = Path(dest_dir) if dest_dir else default_dest_dir()
     dest.mkdir(parents=True, exist_ok=True)
-    if not force and is_current_revision(dest / "panglaodb.tsv"):
+    # Per-table, not per-run: a primary that is already current must not be
+    # re-downloaded just because the supplementary source is missing, and a
+    # missing supplementary source must not be masked by a current primary.
+    stale = [name for name in EXPECTED_TABLES
+             if force or not is_current_revision(dest / name)]
+    if not stale:
         logger.info(f"marker DB already at schema revision {SCHEMA_REVISION}; skipping fetch")
         return True
     lock = dest / ".fetch.lock"
@@ -233,13 +255,17 @@ def fetch_and_write(dest_dir: Path | None = None, force: bool = False) -> bool:
         logger.warning("marker fetch already in progress (lock present); skipping")
         return False
     try:
-        atomic_write_tsv(_download_panglaodb(), dest / "panglaodb.tsv", "PanglaoDB_27_Mar_2020")
+        if "panglaodb.tsv" in stale:
+            atomic_write_tsv(_download_panglaodb(), dest / "panglaodb.tsv", "PanglaoDB_27_Mar_2020")
         # Attribution travels with the data, which lives outside the code tree.
+        # Rewritten on every fetch pass, supplementary-only ones included, so a
+        # directory that gains cellmarker.tsv later still carries both notices.
         (dest / "LICENSE").write_text(DATA_LICENSE_TEXT)
-        try:
-            atomic_write_tsv(_download_cellmarker(), dest / "cellmarker.tsv", "CellMarker3.0")
-        except Exception as e:
-            logger.warning(f"CellMarker fetch failed (PanglaoDB still written): {e}")
+        if "cellmarker.tsv" in stale:
+            try:
+                atomic_write_tsv(_download_cellmarker(), dest / "cellmarker.tsv", "CellMarker3.0")
+            except Exception as e:
+                logger.warning(f"CellMarker fetch failed (PanglaoDB still written): {e}")
         return True
     except Exception as e:
         logger.warning(f"marker fetch failed: {e}")

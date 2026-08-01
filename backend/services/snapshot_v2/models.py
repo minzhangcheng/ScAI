@@ -356,6 +356,41 @@ class SnapshotFailureRecord(BaseModel):
         default_factory=lambda: ["retry", "manage", "terminate"]
     )
 
+    @model_validator(mode="after")
+    def derive_allowed_actions_from_code(self):
+        """Fill ``allowed_actions`` from *code* when the caller did not choose.
+
+        The default above is the base set, so "caller said retry/manage/
+        terminate" and "the model filled the field in" are indistinguishable to
+        everyone downstream — and ``enter_snapshot_failure_gate`` only derives
+        from the code when the key is *absent* from its payload. A
+        memory-preflight refusal carries its own action set in ``details`` and
+        therefore reached the dialog as Retry / Manage / Terminate with no
+        "Capture anyway", while ``POST …/snapshot-failure/proceed`` refused
+        because ``proceed`` was not in ``allowed_actions``. Retry re-runs a
+        deterministic preflight and refuses identically every time, so on a
+        producer that cannot skip (``pre_restore``) the only remaining exit was
+        Terminate.
+
+        ``model_fields_set`` is what tells the two cases apart, so an explicit
+        producer-chosen set — and a round-tripped record, whose dump always
+        carries the key — is never rewritten.
+        """
+        if "allowed_actions" not in self.model_fields_set:
+            # Local import: failure_gate imports this module at load time.
+            from backend.services.snapshot_v2.failure_gate import (
+                SNAPSHOT_FAILURE_GATE_ACTIONS,
+                _actions_for_code,
+            )
+
+            # The record carries no producer, so the base set is the
+            # conservative one; producers where skipping is safe overwrite
+            # allowed_actions themselves via ensure_*_retry_context.
+            self.allowed_actions = _actions_for_code(
+                self.code, SNAPSHOT_FAILURE_GATE_ACTIONS
+            )
+        return self
+
 
 class DeleteResult(BaseModel):
     deleted_ids: list[str]

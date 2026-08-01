@@ -97,6 +97,37 @@ def test_prompt_text_carries_coordinates():
     assert "531.5" in text
 
 
+def test_prompt_labels_a_violation_from_its_severity_not_its_kind():
+    """The reviewer is told not to approve anything marked BLOCKING "regardless
+    of revision count", while blocking_violations() excludes advisory crowding —
+    so a label taken from the kind spends the whole revision budget on a defect
+    no redraw can clear, and the figure then exits revision_requested and is
+    dropped from every report."""
+    crowding = {
+        "kind": "text_over_text", "severity": "advise",
+        "text": "CD8+ Effector Memory T", "what": "annotation",
+        "collides_with": "CD4+ Naive T", "collides_with_what": "annotation",
+        "overlap_px2": 210.5, "bbox": [1.0, 2.0, 3.0, 4.0],
+    }
+    advisory_text = format_violations_for_prompt([crowding])
+    assert "BLOCKING" not in advisory_text
+    assert "advisory" in advisory_text
+
+    # the same kind, blocking, must still read as urgent...
+    covered = dict(crowding, severity="block")
+    assert "BLOCKING" in format_violations_for_prompt([covered])
+    # ...and the two must not come out labelled the same way
+    assert format_violations_for_prompt([covered]) != advisory_text
+
+    # a figure-level artist over a panel is measured but advisory
+    figure_level = {
+        "kind": "text_over_foreign_axes", "severity": "advise",
+        "text": "Con", "what": "figure legend entry", "overlap_px2": 300.0,
+        "bbox": [1.0, 2.0, 3.0, 4.0], "foreign_axes_bbox": [0.0, 0.0, 9.0, 9.0],
+    }
+    assert "BLOCKING" not in format_violations_for_prompt([figure_level])
+
+
 def test_summary_counts_by_kind():
     summary = summarize_violations([
         {"kind": "text_over_text"}, {"kind": "text_over_text"},
@@ -185,6 +216,56 @@ def test_legend_anchored_outside_its_axes_lands_on_the_neighbour(lint):
     kinds = {v["kind"] for v in lint(fig)}
     assert "text_over_foreign_axes" in kinds
     assert "text_over_text" in kinds
+
+
+def _two_panels_with_a_figure_legend(layout=None, **legend_kwargs):
+    fig, axes = plt.subplots(1, 2, figsize=(9, 4), dpi=100, layout=layout)
+    for a in axes:
+        a.plot([1, 2, 3], [1, 2, 3], label="Con")
+        a.plot([1, 2, 3], [3, 2, 1], label="DKO")
+        a.set_xlabel("Zonation bin")
+        a.set_ylabel("Module score")
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, **legend_kwargs)
+    return fig, axes
+
+
+def test_a_figure_level_legend_over_a_panel_is_not_a_spill(lint):
+    """Handing a legend that has outgrown its axes to the figure is the remedy
+    the plotting instructions recommend, and fig.legend's default location is
+    inside the figure rectangle — i.e. on top of a panel, since unlike
+    'outside ...' it reserves no space. Judged as a spill out of a foreign
+    panel it blocks the figure out of every report, and no redraw clears it,
+    so the recommended fix would be permanently unpublishable."""
+    fig, _ = _two_panels_with_a_figure_legend(layout="constrained")
+    hits = lint(fig)
+    assert [v for v in hits if v["kind"] == "text_over_foreign_axes"], (
+        "the overlap is still measured and reported"
+    )
+    assert not blocking_violations(hits)
+
+    # ...and the placement that does reserve space comes out clean
+    clean, _ = _two_panels_with_a_figure_legend(
+        layout="constrained", loc="outside right upper"
+    )
+    assert lint(clean) == []
+
+
+def test_a_figure_legend_covering_panel_text_still_blocks(lint):
+    """Exempting figure-level artists from the foreign-axes check must not
+    blind the gate. What makes text unreadable is other text drawn on top of
+    it, and that is judged by the text-over-text check, which does not care
+    which artist owns which."""
+    fig, axes = _two_panels_with_a_figure_legend(
+        loc="center", bbox_to_anchor=(0.29, 0.5), fontsize=11
+    )
+    for y, name in ((0.55, "Periportal program"), (0.42, "Pericentral program")):
+        axes[0].text(0.5, y, name, transform=axes[0].transAxes, ha="center",
+                     fontsize=11)
+
+    hits = lint(fig)
+    assert blocking_violations(hits)
+    assert {v["kind"] for v in blocking_violations(hits)} == {"text_over_text"}
 
 
 def test_panel_letter_hanging_from_the_top_hits_the_tick_labels(lint):
@@ -326,6 +407,38 @@ def test_annotations_crowding_inside_one_axes_only_advise(lint):
     assert hits, "the collision is still reported"
     assert all(v["severity"] == "advise" for v in hits)
     assert not blocking_violations(hits)
+
+
+def test_a_blocking_collision_survives_the_per_kind_cap(lint):
+    """Each check caps its report at _MAX_PER_KIND with a head slice, and
+    text_over_text collects both severities in artist-insertion order. One
+    crowded panel produces dozens of advisory hits before any other panel is
+    reached, so unsorted the cap fills with them and carries every genuinely
+    covered text off the report — and off the gate that reads it, which is how
+    an unreadable figure ships badged Approved."""
+    rng = np.random.default_rng(0)
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8), dpi=100)
+    axes = axes.ravel()
+    # panel 0, collected first: centroid labels on top of each other, advisory
+    axes[0].scatter(rng.random(60), rng.random(60), s=5)
+    for k in range(15):
+        axes[0].text(0.45 + 0.004 * k, 0.45 + 0.004 * k, f"Cluster {k:02d}",
+                     ha="center", va="center", fontsize=11)
+    # panels 1-3: the legend is drawn over an annotation — genuinely unreadable
+    for a in axes[1:]:
+        a.plot([1, 2, 3], [1, 2, 3], label="Series alpha")
+        a.legend(loc="upper left", fontsize=10)
+        a.text(0.16, 0.955, "annotated peak", transform=a.transAxes,
+               ha="left", va="top", fontsize=10)
+
+    hits = [v for v in lint(fig) if v["kind"] == "text_over_text"]
+    assert len(hits) == 8, "the cap must engage, or this proves nothing"
+    assert any(v["severity"] == "advise" for v in hits), (
+        "the advisory crowding must be competing for the same cap"
+    )
+    assert blocking_violations(hits), "the covered text must survive it"
+    severities = [v["severity"] for v in hits]
+    assert severities == sorted(severities, key=lambda s: s != "block")
 
 
 def test_measuring_does_not_move_what_savefig_writes(lint, tmp_path):

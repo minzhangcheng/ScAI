@@ -167,6 +167,24 @@ def test_agent_chosen_subdirectory_is_discovered(monkeypatch, tmp_path):
     assert found["r3_umap"]["diagnostic"] is False
 
 
+def test_the_deepest_tier_the_corpus_needed_is_admitted(monkeypatch, tmp_path):
+    """_MAX_SCAN_DEPTH counts directories, not path components.
+
+    ``relative_to(workspace).parts`` carries the filename too, so measuring the
+    bound against it admitted only two directory levels -- one shallower than the
+    depth the corpus behind the constant was measured at. An image the agent
+    filed under figures/<round>/<analysis>/ never reached the candidate list, the
+    gallery, or the per-round coverage floor.
+    """
+    ws = _make_workspace(monkeypatch, tmp_path)
+    _touch(ws / "figures" / "round3" / "de" / "volcano.png", mtime=100.0)
+
+    found = {f["name"]: f for f in discover_workspace_figures("sess-depth3")}
+    assert "volcano" in found
+    assert found["volcano"]["rel_path"] == "figures/round3/de/volcano.png"
+    assert found["volcano"]["source"] == "figures/round3/de"
+
+
 def test_named_roots_win_a_stem_the_recursive_tier_also_sees(monkeypatch, tmp_path):
     ws = _make_workspace(monkeypatch, tmp_path)
     _touch(ws / "figures" / "shared.png", mtime=100.0)
@@ -196,7 +214,9 @@ def test_annotation_validation_is_discovered_but_tagged_diagnostic(monkeypatch, 
         ".hidden/x.png",
         "__pycache__/x.png",
         "reports/figures/x.png",
-        "a/b/c/too_deep.png",
+        # one directory level past _MAX_SCAN_DEPTH; the bound counts directories,
+        # so a/b/c/ is inside it and a/b/c/d/ is not
+        "a/b/c/d/too_deep.png",
     ],
 )
 def test_recursive_tier_skips_non_output_paths(monkeypatch, tmp_path, rel):

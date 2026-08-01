@@ -190,3 +190,90 @@ def test_sections_that_own_no_figures_never_receive_any():
 def test_empty_section_list_reports_everything_unplaced():
     report = enforce_figure_placement([], _outline(), {"a.png": 1}, ["a.png"])
     assert report.unplaced == ["a.png"]
+
+
+# ------------------------------------ when the outline does not partition rounds
+
+def _legacy_outline():
+    """The single-pass outline: organised by analysis type, not by round."""
+    return build_report_outline(SimpleNamespace(
+        round_results=[_round(1, "exploration"), _round(2, "exploration")],
+        publication_figures=[],
+    ))
+
+
+def test_a_round_claimed_by_several_sections_relocates_nothing():
+    """Ownership is a partition or it is not ownership.
+
+    The legacy outline gives data_qc, clustering_annotation,
+    differential_expression and key_findings the same rounds tuple. Treating the
+    first claimant as the owner swept every figure in the report into quality
+    control and left three chapters describing panels that were no longer there.
+    """
+    outline = _legacy_outline()
+    sections = _sections(outline)
+    by_id = _by_id(sections)
+    placed = {
+        "data_qc": "qc.png",
+        "clustering_annotation": "umap.png",
+        "differential_expression": "volcano.png",
+        "key_findings": "dotplot.png",
+    }
+    for sid, fig in placed.items():
+        by_id[sid]["content"] += f"\n[FIGURE: {fig}]\n"
+    attribution = {"qc.png": 1, "umap.png": 1, "volcano.png": 2, "dotplot.png": 2}
+
+    report = enforce_figure_placement(
+        sections, outline, attribution, list(placed.values()))
+
+    assert report.relocated == []
+    for sid, fig in placed.items():
+        assert _figs_in(by_id[sid]) == [fig]
+
+
+def test_a_marker_written_with_the_other_extension_keeps_its_caption():
+    """Figures are saved as JPG; the report model writes .png.
+
+    The HTML renderer resolves that, but placement runs first -- and deleting
+    the marker takes the caption the model wrote with it, then re-appends the
+    figure uncaptioned at the end of the section, away from the prose about it.
+    """
+    outline = _outline()
+    sections = _sections(outline)
+    by_id = _by_id(sections)
+    by_id["direction_1"]["content"] = (
+        "The clusters separate. [FIGURE: umap.png]\n"
+        "[FIGURE_CAPTION: UMAP by cell type.] The panel above shows myeloid cells."
+    )
+
+    report = enforce_figure_placement(
+        sections, outline, {"umap.jpg": 2}, ["umap.jpg"])
+
+    body = by_id["direction_1"]["content"]
+    assert report.unknown_removed == []
+    assert _figs_in(by_id["direction_1"]) == ["umap.jpg"]
+    assert "[FIGURE_CAPTION: UMAP by cell type.]" in body
+    # Still where the model put it, not appended after the closing sentence.
+    assert body.index("[FIGURE:") < body.index("The panel above")
+
+
+def test_a_duplicated_section_id_does_not_capture_the_figures():
+    """A repeated heading is appended after the outline sections, not merged.
+
+    Resolving the id last-wins aimed every relocated and appended figure at that
+    trailing copy, so the report printed them in a stray chapter after the
+    conclusions while the real one stood empty.
+    """
+    outline = _outline()
+    owner = next(s.id for s in outline if 2 in (s.rounds or ()))
+    sections = _sections(outline)
+    real = _by_id(sections)[owner]
+    real["content"] = "The real chapter."
+    sections.append({"id": owner, "title": "Stray", "content": "Stray copy.",
+                     "analysis_type": "general", "figures": [], "tables": []})
+
+    report = enforce_figure_placement(sections, outline, {"qc.png": 2}, ["qc.png"])
+
+    assert report.appended == [("qc.png", owner)]
+    assert _figs_in(real) == ["qc.png"]
+    assert _figs_in(sections[-1]) == []

@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from ..models.schemas import AgentType, AnalysisPhase, AnalysisStep, MessageRole, TaskStatus
 from ..utils.llm_client import UpstreamExhaustedError
 from ..utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
+from ..utils.expression_contract import record_round_start
 from ..agents.bioinformatics_agent import count_saved_figures
 from ..agents.bioinformatics.exploration_diagnostics import (
     ensure_exploration_diagnostic_figure,
@@ -321,6 +322,17 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         # Set current state references for _pi_callback plan deviation detection
         self._current_analysis_state = analysis_state
         self._current_graph_state = state
+
+        # Open the round for artifact-staleness purposes. Everything that writes
+        # a figure or table into the workspace runs below this line, so this is
+        # the boundary `unchanged_artifact_stems` needs in order to blacklist
+        # only what this round produced. It cannot be derived from
+        # analysis_log: the agent accumulates its steps locally and they are
+        # merged and stamped with round_number further down this same method,
+        # i.e. never while the round is still running. Idempotent per round, so
+        # stage 2 keeps stage 1's stamp — a stage-2 normalization does
+        # invalidate a figure stage 1 drew.
+        record_round_start(analysis_state)
 
         max_steps = self.config.bioinfo_max_steps
         result = await self.bioinformatics_agent.run_autonomous_analysis(

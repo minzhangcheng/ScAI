@@ -145,16 +145,71 @@ def test_schema_revisions_are_bumped_together():
     )
 
 
-def test_fetch_skips_the_network_when_the_table_is_already_current(tmp_path, monkeypatch):
-    def _explode():
-        raise AssertionError("must not download when the table is current")
-
-    monkeypatch.setattr(fm, "_download_panglaodb", _explode)
+def _write_current(tmp_path, name):
     fm.atomic_write_tsv(
         __import__("pandas").DataFrame([{c: "" for c in fm.SCHEMA_COLS}]),
-        tmp_path / "panglaodb.tsv", source_version="vX")
+        tmp_path / name, source_version="vX")
+
+
+def test_fetch_skips_the_network_when_every_table_is_already_current(tmp_path, monkeypatch):
+    def _explode():
+        raise AssertionError("must not download when the tables are current")
+
+    monkeypatch.setattr(fm, "_download_panglaodb", _explode)
+    monkeypatch.setattr(fm, "_download_cellmarker", _explode)
+    for name in fm.EXPECTED_TABLES:
+        _write_current(tmp_path, name)
 
     assert fm.fetch_and_write(tmp_path) is True
+
+
+def test_fetch_retries_a_supplementary_source_that_failed_last_time(tmp_path, monkeypatch):
+    """A current primary must not make the supplementary source unfetchable.
+
+    The short-circuit used to be keyed on panglaodb.tsv alone, so the first run
+    that downloaded PanglaoDB and lost CellMarker stamped the primary current
+    and every later call returned True without a request. MarkerDB.usable() is
+    an any() over the two names, so nothing else ever noticed: the deployment
+    ran on PanglaoDB-only priors forever.
+    """
+    import pandas as pd
+
+    _write_current(tmp_path, "panglaodb.tsv")
+    assert not (tmp_path / "cellmarker.tsv").exists()
+
+    primary_calls, supplementary_calls = [], []
+    monkeypatch.setattr(fm, "_download_panglaodb",
+                        lambda: primary_calls.append(1) or pd.DataFrame(
+                            [{c: "" for c in fm.SCHEMA_COLS}]))
+    monkeypatch.setattr(fm, "_download_cellmarker",
+                        lambda: supplementary_calls.append(1) or pd.DataFrame(
+                            [{c: "" for c in fm.SCHEMA_COLS}]))
+
+    assert fm.fetch_and_write(tmp_path) is True
+    assert supplementary_calls, "the missing supplementary table must be re-fetched"
+    assert fm.is_current_revision(tmp_path / "cellmarker.tsv")
+    assert not primary_calls, (
+        "the primary is already current; re-fetching it is wasted bandwidth"
+    )
+    assert (tmp_path / "LICENSE").exists(), (
+        "a supplementary-only pass still has to leave the attribution in place"
+    )
+
+
+def test_fetch_keeps_returning_true_when_the_supplementary_source_stays_down(
+    tmp_path, monkeypatch,
+):
+    """Retrying is not the same as blocking: CellMarker remains best-effort."""
+    import pandas as pd
+
+    _write_current(tmp_path, "panglaodb.tsv")
+    monkeypatch.setattr(fm, "_download_panglaodb",
+                        lambda: pd.DataFrame([{c: "" for c in fm.SCHEMA_COLS}]))
+    monkeypatch.setattr(fm, "_download_cellmarker",
+                        lambda: (_ for _ in ()).throw(RuntimeError("unavailable")))
+
+    assert fm.fetch_and_write(tmp_path) is True
+    assert not (tmp_path / "cellmarker.tsv").exists()
 
 
 def test_fetch_redownloads_a_stale_revision(tmp_path, monkeypatch):
@@ -234,3 +289,58 @@ def test_panglaodb_download_sends_an_explicit_user_agent():
         "_download_panglaodb must fetch bytes itself, not hand the URL to pandas"
     )
     assert "ScAI" in fm.USER_AGENT
+
+
+# ------------------------------------------- recovering a half-fetched database
+
+def test_a_usable_but_incomplete_database_is_topped_up_once(tmp_path, monkeypatch):
+    """Nothing else ever asks for the missing source.
+
+    ``usable()`` is an any() over the tables, so a supplementary source whose
+    download failed leaves the gate satisfied: the HITL callback never fires,
+    trigger_fetch is never called, and the deployment annotates on the primary
+    source alone for the life of the data volume.
+    """
+    _write_current(tmp_path, "panglaodb.tsv")
+    db = marker_priors.MarkerDB(tmp_path)
+    assert db.usable() is True
+    assert db.missing_tables() == ["cellmarker.tsv"]
+
+    calls = []
+    monkeypatch.setattr(marker_priors, "trigger_fetch",
+                        lambda *a, **k: calls.append(1) or True)
+    monkeypatch.setattr(marker_priors, "_topped_up", False)
+
+    assert marker_priors.top_up_missing_tables(db) is True
+    assert len(calls) == 1
+    # Once per process: a source that stays unreachable must not be retried on
+    # every annotation, and must never escalate to a prompt.
+    assert marker_priors.top_up_missing_tables(db) is False
+    assert len(calls) == 1
+
+
+def test_a_complete_database_is_never_topped_up(tmp_path, monkeypatch):
+    for name in fm.EXPECTED_TABLES:
+        _write_current(tmp_path, name)
+    db = marker_priors.MarkerDB(tmp_path)
+    assert db.missing_tables() == []
+
+    def _explode(*a, **k):
+        raise AssertionError("must not fetch when every table is current")
+
+    monkeypatch.setattr(marker_priors, "trigger_fetch", _explode)
+    monkeypatch.setattr(marker_priors, "_topped_up", False)
+    assert marker_priors.top_up_missing_tables(db) is False
+
+
+def test_an_unusable_database_is_left_to_the_gate(tmp_path, monkeypatch):
+    """With nothing on disk the ordinary gate runs, and it may prompt."""
+    db = marker_priors.MarkerDB(tmp_path)
+    assert db.usable() is False
+
+    def _explode(*a, **k):
+        raise AssertionError("the top-up must not pre-empt the marker DB gate")
+
+    monkeypatch.setattr(marker_priors, "trigger_fetch", _explode)
+    monkeypatch.setattr(marker_priors, "_topped_up", False)
+    assert marker_priors.top_up_missing_tables(db) is False

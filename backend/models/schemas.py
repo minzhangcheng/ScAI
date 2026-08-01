@@ -792,12 +792,25 @@ class AnalysisState(BaseModel):
 
     @staticmethod
     def _serialize_publication_figures(figures):
+        from backend.services.figure_layout import blocking_violations
+
+        # round / layout_blocking / diagnostic are the gallery's badges. The
+        # integrated_report WebSocket message carries them for the figures it
+        # curated, but a reload rebuilds the gallery from this payload alone —
+        # so they have to travel with the record too, or the badges disappear
+        # on the first refresh. ``round`` comes from the record's own
+        # round_number (source 2 of services/report/figure_attribution.py),
+        # which is set for every promoted figure; 0 means unattributed and is
+        # reported as such rather than as round zero.
         return [
             {"id": f["id"], "name": f["name"], "description": f["description"],
              "figure_type": f["figure_type"], "png_path": f["png_path"],
              "pdf_path": f["pdf_path"], "png_base64": f["png_base64"],
              "review_status": f["review_status"],
              "pi_feedback": f["pi_feedback"], "revision_count": f["revision_count"],
+             "round": f.get("round_number") or None,
+             "layout_blocking": bool(blocking_violations(f.get("layout_violations"))),
+             "diagnostic": bool(f.get("diagnostic")),
              "created_at": f["created_at"]}
             for f in figures
         ]

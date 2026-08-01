@@ -401,10 +401,10 @@ def check_composition_claims(findings, *, score_definitions=()):
                     "and a per-population test over cells uses cells as the sample "
                     "size.")
                 remedy = (
-                    " A joint compositional model is registered for this round, "
-                    "so this is a note rather than a refusal: say that the claim "
-                    "is that model's output, not a per-population test computed "
-                    "beside it."
+                    " A joint compositional model is registered for this "
+                    "analysis, so this is a note rather than a refusal: say that "
+                    "the claim is that model's output, not a per-population test "
+                    "computed beside it."
                     if modelled else
                     " Model the joint composition (scCODA / sccomp / propeller "
                     "/ Milo), or state the shift as descriptive.")
@@ -823,6 +823,36 @@ def _quoted_p_values(text):
     return out
 
 
+def _names_score(text, score_name):
+    """Whether a text refers to a registered score by name.
+
+    Score names are identifiers ("hallmark_gsea") and prose is prose, so compare
+    on word tokens rather than the raw string: a finding writes "the hallmark
+    GSEA panel" for a score registered as "hallmark_gsea". Every token of the
+    name must appear, which makes a partial coincidence ("check" alone matching
+    "quick_check") insufficient.
+    """
+    words = set(_WORD_RE.findall(str(score_name).lower()))
+    return bool(words) and words <= _tokens(text)
+
+
+def _resamples_for(text, declared):
+    """The resample count a text is answerable to, or None.
+
+    A text that names registered scores is held to those; one that names none
+    cannot be attributed, and the *most permissive* count is used. The direction
+    is deliberate. Holding an unattributable finding to the coarsest score that
+    happens to be registered refuses a correct number -- a cheap 100-draw probe
+    beside a 10,000-draw run would bound the run's own p-values -- and the only
+    rewording that satisfies the gate overstates the uncertainty by the ratio of
+    the two counts. Observation (1) already covers the sloppy case advisorily.
+    """
+    named = [n for name, n in declared.items()
+             if name and n and _names_score(text, name)]
+    pool = named or [n for n in declared.values() if n]
+    return max(pool) if pool else None
+
+
 def check_resampling_resolution(findings, score_definitions):
     """A resampling p-value quoted below the resolution its draws can attain.
 
@@ -869,32 +899,55 @@ def check_resampling_resolution(findings, score_definitions):
         ))
 
     # (2) A floor value quoted as though it were an estimate.
+    #
+    # Scoped to the sentence rather than the whole finding, because the ordinary
+    # shape of a finding reports a resampling result and an analytic one side by
+    # side ("... pydeseq2 ... adjusted p = 1e-8. GSEA on the same contrast ...").
+    # A model-fit p-value has no resolution floor, and holding one to the
+    # enrichment's floor refuses a correct number.
     if counts:
-        floor = 1.0 / (min(counts) + 1)
+        hit = None
         for text in texts:
-            if not _RESAMPLED_RESULT.search(str(text)):
-                continue
-            for comparator, value in _quoted_p_values(text):
-                if comparator in _BOUNDED_COMPARATORS:
+            for sent in _sentences(text):
+                if not _RESAMPLED_RESULT.search(sent):
                     continue
-                if value <= 0 or value > floor * _FLOOR_ROUNDING_TOLERANCE:
+                resamples = _resamples_for(sent, declared)
+                if not resamples:
                     continue
-                out.append(GateFinding(
-                    gate="p-below-resampling-resolution",
-                    rule_id="resampling-p-has-a-resolution-floor",
-                    also_see=("gene-permutation-is-anticonservative",),
-                    detail=(
-                        f"this finding states a resampling p-value of {value:g} as an "
-                        f"estimate, but the smallest value {min(counts)} resamples can "
-                        f"produce is {floor:.2g}. Every result at that value is tied "
-                        f"with every other one there, so the number carries no ordering "
-                        f"and no precision. State it as an inequality (p < "
-                        f"{floor:.2g}), rank on the effect statistic instead, or "
-                        f"re-run with more resamples."),
-                ))
+                floor = 1.0 / (resamples + 1)
+                for comparator, value in _quoted_p_values(sent):
+                    if comparator in _BOUNDED_COMPARATORS:
+                        continue
+                    if value <= 0 or value > floor * _FLOOR_ROUNDING_TOLERANCE:
+                        continue
+                    if any(abs(value - c) < 1e-12 for c in _CONVENTIONAL_CUTOFFS):
+                        # A conventional cutoff restated is a threshold, not an
+                        # estimate -- the same carve-out observation (3) makes.
+                        # gseapy's default of 1000 draws puts the floor within
+                        # rounding distance of 0.001, so without this the gate
+                        # refuses the most standard sentence in the method.
+                        continue
+                    hit = (value, resamples, floor)
+                    break
+                if hit:
+                    break
+            if hit:
                 break
-            if out and out[-1].gate == "p-below-resampling-resolution":
-                break
+        if hit:
+            value, resamples, floor = hit
+            out.append(GateFinding(
+                gate="p-below-resampling-resolution",
+                rule_id="resampling-p-has-a-resolution-floor",
+                also_see=("gene-permutation-is-anticonservative",),
+                detail=(
+                    f"this finding states a resampling p-value of {value:g} as an "
+                    f"estimate, but the smallest value {resamples} resamples can "
+                    f"produce is {floor:.3g}. Every result at that value is tied "
+                    f"with every other one there, so the number carries no ordering "
+                    f"and no precision. State it as an inequality (p < "
+                    f"{floor:.3g}), rank on the effect statistic instead, or "
+                    f"re-run with more resamples."),
+            ))
 
     # (3) One value shared across several findings is the floor showing through.
     repeated = {}

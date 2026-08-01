@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { transformLoadResponse, transformRoundResults } from './transformLoadResponse'
+import { transformLoadResponse, transformRoundResults, type RawFigureBadges } from './transformLoadResponse'
 import { applyStoreUpdates } from '../hooks/useApi'
 import { useAppStore } from '../stores/appStore'
-import type { SessionLoadResponse } from '../types'
+import type { SessionLoadResponse, RawPublicationFigure } from '../types'
 
 const MINIMAL_RESPONSE: SessionLoadResponse = {
   session_id: 'test-123',
@@ -90,6 +90,36 @@ describe('transformLoadResponse', () => {
     expect(result.sessionUpdates.publicationFigures![0].reviewStatus).toBe('approved')
     expect(result.sessionUpdates.publicationTables).toHaveLength(1)
     expect(result.sessionUpdates.publicationTables![0].columns).toEqual(['col1', 'col2'])
+  })
+
+  it('carries the gallery badge fields on publication_figures', () => {
+    // The badges must survive a reload on their own: the integrated_report
+    // message that first supplied them ages out of the retained history, and
+    // every figure it did not curate never had them replayed at all.
+    const badged: (RawPublicationFigure & RawFigureBadges)[] = [{
+      id: 'f1', name: 'Fig 1', description: 'A figure',
+      figure_type: 'umap', png_path: '/fig.png', pdf_path: '/fig.pdf',
+      review_status: 'accepted_with_reservations',
+      revision_count: 1, created_at: '2026-01-01',
+      round: 3, layout_blocking: true, diagnostic: false,
+    }, {
+      id: 'f2', name: 'QC panel', description: 'A diagnostic',
+      figure_type: 'qc', png_path: '/qc.png', pdf_path: '/qc.pdf',
+      review_status: 'pending', revision_count: 0, created_at: '2026-01-01',
+      round: null, layout_blocking: false, diagnostic: true,
+    }]
+    const data: SessionLoadResponse = {
+      ...MINIMAL_RESPONSE,
+      publication_figures: badged,
+    }
+    const figures = transformLoadResponse(data).sessionUpdates.publicationFigures!
+    expect(figures[0].round).toBe(3)
+    expect(figures[0].layoutBlocking).toBe(true)
+    expect(figures[0].diagnostic).toBe(false)
+    // An unattributed round stays absent rather than becoming "Round 0".
+    expect(figures[1].round).toBeUndefined()
+    expect(figures[1].layoutBlocking).toBe(false)
+    expect(figures[1].diagnostic).toBe(true)
   })
 
   it('transforms graphic_abstract', () => {

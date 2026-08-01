@@ -32,9 +32,13 @@ _SKIP_DIRS = frozenset({"__pycache__", ".ipynb_checkpoints", "reports", "tables"
 # diagnostic rather than a result, so it sorts last and is tagged for the caller.
 _DIAGNOSTIC_DIRS = frozenset({"annotation_validation"})
 
-# How deep below the workspace a candidate may sit. Across 27 real sessions the
-# deepest image was at depth 3; the bound is here so an unforeseen tool that
-# writes a deep tree cannot turn discovery into a full-disk walk.
+# How many directory levels below the workspace a candidate may sit. Across 27
+# real sessions the deepest image was at depth 3, so the bound admits exactly
+# that tier; it exists so an unforeseen tool that writes a deep tree cannot turn
+# discovery into a full-disk walk. It is counted over the directories alone --
+# ``relative_to(workspace).parts`` also carries the filename, and measuring
+# against that admitted only two levels, excluding the very tier the corpus said
+# was needed.
 _MAX_SCAN_DEPTH = 3
 
 
@@ -129,7 +133,7 @@ def discover_workspace_figures(session_id: str) -> List[Dict[str, Any]]:
             except ValueError:
                 continue
             dirs = parts[:-1]
-            if len(parts) > _MAX_SCAN_DEPTH:
+            if len(dirs) > _MAX_SCAN_DEPTH:
                 continue
             if any(d.startswith(".") or d in _SKIP_DIRS for d in dirs):
                 continue

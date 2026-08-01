@@ -383,22 +383,85 @@ def workspace_artifact_versions(working_dir: str | Path) -> dict[str, int]:
     return versions
 
 
-def round_start_ns(state: Any) -> int:
-    """Wall-clock start of the round in progress, in ns, or now when unknown.
+#: Where ``record_round_start`` parks the stamp. Lives in ``sandbox_state``
+#: rather than on a dedicated field so the mechanism needs no schema change and
+#: travels with the rest of this module's provenance record.
+ROUND_START_KEY = "round_started_ns_v1"
 
-    Returning "now" is the safe default: nothing predates it, so a round that has
-    logged no step yet blacklists nothing rather than blacklisting everything.
+
+def record_round_start(state: Any) -> int:
+    """Stamp the wall-clock start of the round in progress and return it.
+
+    Idempotent per round: both stages of a round re-enter the node that calls
+    this, and a stage-2 representation change invalidates stage-1 artifacts too,
+    so the round keeps the stamp it was given when it opened.
+    """
+    sandbox_state = state.sandbox_state or {}
+    current = int(getattr(state, "current_round", 0) or 0)
+    stamp = sandbox_state.get(ROUND_START_KEY)
+    if isinstance(stamp, dict) and int(stamp.get("round", -1) or -1) == current:
+        started = int(stamp.get("started_ns", 0) or 0)
+        if started > 0:
+            return started
+    started = time.time_ns()
+    sandbox_state[ROUND_START_KEY] = {"round": current, "started_ns": started}
+    state.sandbox_state = sandbox_state
+    return started
+
+
+def round_start_ns(state: Any) -> int:
+    """Wall-clock start of the round in progress, in ns.
+
+    Read from the stamp ``record_round_start`` writes when the round opens. The
+    analysis log cannot answer this while the round is running and never could:
+    the bioinformatics agent keeps its steps in a local list and they are merged
+    into ``state.analysis_log`` -- and stamped with ``round_number`` -- only
+    after the round's execution has finished. So on every main pass the
+    current-round lookup found nothing and the function returned
+    ``time.time_ns()``, a bound nothing predates, which made
+    ``unchanged_artifact_stems`` return the empty set: no figure was ever
+    withheld, while ``describe_invalidated_artifacts`` still told the agent that
+    N of them had been.
+
+    The remaining fallbacks are ordered so an unknown start includes artifacts
+    rather than excluding them. Withholding too much is visible to the user and
+    the agent can regenerate; withholding nothing is silent and ships a figure
+    that no longer matches its data.
     """
     current = int(getattr(state, "current_round", 0) or 0)
+    sandbox_state = getattr(state, "sandbox_state", None) or {}
+    stamp = sandbox_state.get(ROUND_START_KEY) if isinstance(sandbox_state, dict) else None
+    if isinstance(stamp, dict) and int(stamp.get("round", -1) or -1) == current:
+        started = int(stamp.get("started_ns", 0) or 0)
+        if started > 0:
+            return started
+
+    steps = list(getattr(state, "analysis_log", None) or [])
     starts = [
         step.timestamp
-        for step in (getattr(state, "analysis_log", None) or [])
+        for step in steps
         if int(getattr(step, "round_number", 0) or 0) == current
         and getattr(step, "timestamp", None) is not None
     ]
-    if not starts:
-        return time.time_ns()
-    return int(min(starts).timestamp() * 1_000_000_000)
+    if starts:
+        return int(min(starts).timestamp() * 1_000_000_000)
+
+    # No stamp (a session that predates it, or a node that never opened the
+    # round) and nothing logged for this round yet. The last step of an earlier
+    # round is the boundary this one started after: it still excludes finished
+    # rounds' artifacts, which is what the round scoping exists for.
+    ends = [
+        step.timestamp
+        for step in steps
+        if 0 < int(getattr(step, "round_number", 0) or 0) < current
+        and getattr(step, "timestamp", None) is not None
+    ]
+    if ends:
+        return int(max(ends).timestamp() * 1_000_000_000)
+
+    # Nothing to bound with at all -- the first round of a session, where every
+    # artifact on disk does belong to the round in progress.
+    return 0
 
 
 def unchanged_artifact_stems(

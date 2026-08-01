@@ -7,6 +7,8 @@ unreliable, whereas the size of a copy this process is about to make is a
 measured fact.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from backend.services.snapshot_v2.errors import (
@@ -157,3 +159,406 @@ def test_actions_for_producer_honours_the_memory_code():
     assert _actions_for_producer(
         "pre_restore", SNAPSHOT_MEMORY_INSUFFICIENT_CODE
     ) == ["proceed", "terminate"]
+
+
+# --- A memory refusal must reach the dialog with its own action set ----------
+#
+# The memory action set lives inside ``details``. ``SnapshotFailureRecord``
+# defaults ``allowed_actions`` to the base set, so the gate's "not in payload"
+# guard saw the key present and left it: the dialog rendered Retry / Manage /
+# Terminate with no "Capture anyway" and POST …/snapshot-failure/proceed
+# answered 409. Retry re-runs a deterministic preflight and refuses identically
+# every time, and pre_restore is not skippable by design, so Terminate — which
+# stops the analysis — was the user's only exit.
+
+
+def _memory_failure_record(**kwargs):
+    from backend.services.snapshot_v2.models import SnapshotFailureRecord
+
+    return SnapshotFailureRecord(
+        snapshot_id="snap-1",
+        session_id="s1",
+        failed_at="2026-01-01T00:00:00",
+        code=SNAPSHOT_MEMORY_INSUFFICIENT_CODE,
+        message="not enough headroom",
+        details={"allowed_actions": list(SNAPSHOT_FAILURE_ACTIONS_MEMORY)},
+        **kwargs,
+    )
+
+
+def test_failure_record_derives_its_actions_from_the_code():
+    from backend.services.snapshot_v2.models import SnapshotFailureRecord
+
+    assert _memory_failure_record().allowed_actions == ["proceed", "terminate"]
+    # An ordinary refusal is unchanged: the base set is still the right answer.
+    ordinary = SnapshotFailureRecord(
+        snapshot_id="snap-1",
+        session_id="s1",
+        failed_at="2026-01-01T00:00:00",
+        code="required_runtime_unpersistable",
+        message="boom",
+    )
+    assert ordinary.allowed_actions == list(SNAPSHOT_FAILURE_GATE_ACTIONS)
+
+
+def test_an_explicit_action_set_and_a_round_trip_are_never_rewritten():
+    from backend.services.snapshot_v2.models import SnapshotFailureRecord
+
+    explicit = _memory_failure_record(allowed_actions=["retry", "terminate"])
+    assert explicit.allowed_actions == ["retry", "terminate"]
+
+    derived = _memory_failure_record()
+    again = SnapshotFailureRecord.model_validate(derived.model_dump(mode="json"))
+    assert again.allowed_actions == derived.allowed_actions
+
+
+def test_pre_restore_memory_gate_offers_capture_anyway():
+    from backend.services.snapshot_v2.failure_gate import enter_snapshot_failure_gate
+
+    state = SimpleNamespace()
+    # pre_restore.py hands the dumped record straight to the gate.
+    enter_snapshot_failure_gate(
+        state,
+        _memory_failure_record().model_dump(mode="json"),
+        retry_context={"producer": "pre_restore"},
+    )
+
+    actions = state.snapshot_failure["allowed_actions"]
+    assert "proceed" in actions, (
+        "the memory gate reached the dialog without its escape hatch; "
+        "Terminate would be the only way out of a deterministic refusal"
+    )
+    assert "skip" not in actions, (
+        "pre_restore's snapshot is the only safety point before a restore "
+        "overwrites live state"
+    )
+    assert "retry" not in actions and "manage" not in actions
+
+
+def test_a_stale_or_defaulted_action_set_is_repaired_by_the_gate():
+    """The gate is the last line: a payload can also arrive from disk."""
+    from backend.services.snapshot_v2.failure_gate import enter_snapshot_failure_gate
+
+    state = SimpleNamespace()
+    enter_snapshot_failure_gate(state, {
+        "code": SNAPSHOT_MEMORY_INSUFFICIENT_CODE,
+        "message": "not enough headroom",
+        "allowed_actions": list(SNAPSHOT_FAILURE_GATE_ACTIONS),
+    })
+    assert state.snapshot_failure["allowed_actions"] == ["proceed", "terminate"]
+
+    # A caller that does allow skipping keeps it.
+    skippable = SimpleNamespace()
+    enter_snapshot_failure_gate(skippable, {
+        "code": SNAPSHOT_MEMORY_INSUFFICIENT_CODE,
+        "message": "not enough headroom",
+        "allowed_actions": list(SNAPSHOT_SKIPPABLE_GATE_ACTIONS),
+    })
+    assert skippable.snapshot_failure["allowed_actions"] == [
+        "proceed", "skip", "terminate",
+    ]
+
+    # An empty list is "unspecified", not "no actions at all".
+    empty = SimpleNamespace()
+    enter_snapshot_failure_gate(empty, {
+        "code": "required_runtime_unpersistable",
+        "message": "boom",
+        "allowed_actions": [],
+    })
+    assert empty.snapshot_failure["allowed_actions"] == list(
+        SNAPSHOT_FAILURE_GATE_ACTIONS
+    )
+
+
+# --- "Capture anyway" is approval for ONE capture ---------------------------
+#
+# The flag is force-written to session.json the moment Proceed is pressed, and
+# the re-dispatched capture has several ways never to run (409 for a missing
+# retry context, SAFE_POINT_BUSY, the disk gate, a workflow_boundary hand-off
+# waiting on a WebSocket reconnect that never comes). It used to be cleared only
+# inside the h5ad branch of a capture, so an aborted attempt left the preflight
+# permanently disabled and a later capture on a different, larger AnnData
+# skipped it — accepting an OOM risk on the user's behalf.
+
+
+@pytest.fixture
+def override_session():
+    """A session registered in ``backend.state`` with a sandbox pointing at it."""
+    import backend.state as backend_state
+    from backend.services.snapshot_v2.failure_gate import (
+        clear_memory_preflight_override,
+    )
+
+    session_id = "override-session"
+    state = SimpleNamespace(
+        id=session_id,
+        force_snapshot_memory_override=False,
+        status=None,
+        wait_input_reason=None,
+        snapshot_failure=None,
+        pending_required_snapshot=None,
+        skip_required_snapshot_phase=None,
+        termination_reason=None,
+    )
+    backend_state.sessions[session_id] = state
+    try:
+        yield state, SimpleNamespace(session_id=session_id)
+    finally:
+        clear_memory_preflight_override(state)
+        backend_state.sessions.pop(session_id, None)
+
+
+def test_the_approved_capture_still_gets_its_override(override_session):
+    from backend.services.snapshot_v2.failure_gate import (
+        arm_memory_preflight_override,
+    )
+    from backend.services.snapshot_v2.runtime_parts.capture import (
+        _consume_memory_preflight_override,
+    )
+
+    state, sandbox = override_session
+    arm_memory_preflight_override(state)
+
+    assert _consume_memory_preflight_override(sandbox) is True
+    assert state.force_snapshot_memory_override is False
+
+
+def test_a_second_capture_never_inherits_the_override(override_session):
+    from backend.services.snapshot_v2.failure_gate import (
+        arm_memory_preflight_override,
+    )
+    from backend.services.snapshot_v2.runtime_parts.capture import (
+        _consume_memory_preflight_override,
+    )
+
+    state, sandbox = override_session
+    arm_memory_preflight_override(state)
+    _consume_memory_preflight_override(sandbox)
+
+    assert _consume_memory_preflight_override(sandbox) is False
+
+
+def test_an_override_left_on_disk_is_inert_and_scrubbed(override_session):
+    """No grant means the flag is debris from an abandoned attempt.
+
+    A capture that aborts before the preflight, and a process that restarted
+    since the approval, both leave exactly this: ``True`` in session.json with
+    nothing recording which capture it was for.
+    """
+    from backend.services.snapshot_v2.runtime_parts.capture import (
+        _consume_memory_preflight_override,
+    )
+
+    state, sandbox = override_session
+    state.force_snapshot_memory_override = True  # as read back from session.json
+
+    assert _consume_memory_preflight_override(sandbox) is False
+    assert state.force_snapshot_memory_override is False
+
+
+def test_re_entering_the_gate_spends_the_approval(override_session):
+    from backend.services.snapshot_v2.failure_gate import (
+        arm_memory_preflight_override,
+        enter_snapshot_failure_gate,
+    )
+    from backend.services.snapshot_v2.runtime_parts.capture import (
+        _consume_memory_preflight_override,
+    )
+
+    state, sandbox = override_session
+    arm_memory_preflight_override(state)
+    # The retried capture failed for some other reason and re-gated the session.
+    enter_snapshot_failure_gate(state, {
+        "code": "required_runtime_unpersistable", "message": "boom",
+    })
+
+    assert state.force_snapshot_memory_override is False
+    assert _consume_memory_preflight_override(sandbox) is False
+
+
+def test_terminate_abandons_the_approval(override_session):
+    from backend.services.snapshot_v2.failure_gate import (
+        arm_memory_preflight_override,
+        terminate_snapshot_failure,
+    )
+    from backend.services.snapshot_v2.runtime_parts.capture import (
+        _consume_memory_preflight_override,
+    )
+
+    state, sandbox = override_session
+    arm_memory_preflight_override(state)
+    terminate_snapshot_failure(state)
+
+    assert state.force_snapshot_memory_override is False
+    assert _consume_memory_preflight_override(sandbox) is False
+
+
+def test_another_session_cannot_spend_this_approval(override_session):
+    import backend.state as backend_state
+    from backend.services.snapshot_v2.failure_gate import (
+        arm_memory_preflight_override,
+    )
+    from backend.services.snapshot_v2.runtime_parts.capture import (
+        _consume_memory_preflight_override,
+    )
+
+    state, _sandbox = override_session
+    arm_memory_preflight_override(state)
+
+    other = SimpleNamespace(id="other-session", force_snapshot_memory_override=True)
+    backend_state.sessions["other-session"] = other
+    try:
+        assert _consume_memory_preflight_override(
+            SimpleNamespace(session_id="other-session")
+        ) is False
+    finally:
+        backend_state.sessions.pop("other-session", None)
+
+
+@pytest.mark.asyncio
+async def test_proceed_disarms_and_persists_when_the_retry_never_dispatches(
+    monkeypatch, override_session,
+):
+    """The 409 path is where the override used to become durable debris."""
+    from fastapi import HTTPException
+
+    from backend.routes import lifecycle
+    from backend.services.snapshot_v2.failure_gate import (
+        has_memory_preflight_grant,
+    )
+
+    state, _sandbox = override_session
+    state.wait_input_reason = "snapshot_failure"
+    state.snapshot_failure = {
+        "code": SNAPSHOT_MEMORY_INSUFFICIENT_CODE,
+        "message": "not enough headroom",
+        "allowed_actions": ["proceed", "terminate"],
+        # No retry_context: _snapshot_failure_retry_locked answers 409.
+    }
+    saved: list[bool] = []
+
+    async def _owner(session_id, user_id):
+        return state
+
+    async def _cache(*args, **kwargs):
+        return None
+
+    async def _save(session_id, st, force=False):
+        saved.append(bool(st.force_snapshot_memory_override))
+
+    monkeypatch.setattr(lifecycle, "require_session_ownership", _owner)
+    monkeypatch.setattr(lifecycle, "_update_session_cache", _cache)
+    monkeypatch.setattr(lifecycle, "async_save_session", _save)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await lifecycle._snapshot_failure_proceed_locked(state.id, "u1")
+
+    assert excinfo.value.status_code == 409
+    assert state.force_snapshot_memory_override is False
+    assert has_memory_preflight_grant(state.id) is False
+    assert saved == [False], (
+        "the disarmed override was not persisted; the next process load would "
+        "read it back as an approval"
+    )
+
+
+# --- The size probe must measure what AnnData.copy() really duplicates -------
+
+
+def _introspect_helpers():
+    """The shipped template's helper defs, executed exactly as the kernel does."""
+    namespace: dict = {}
+    source = _INTROSPECT_CODE.split("for _name, _obj in list(globals().items()):")[0]
+    exec(source, namespace)  # noqa: S102 - this is the shipped kernel template
+    return namespace
+
+
+def test_a_reused_address_does_not_zero_out_a_live_array():
+    """``_seen`` must hold the objects, not just their ids.
+
+    ``.X`` / ``.raw.X`` materialise a fresh temporary on every access for a
+    view, a backed store, or a dask/CuPy-wrapped matrix. The temporary is freed
+    when the call returns, CPython hands the same address to the next array, and
+    that array was then measured as 0 bytes — the total feeds the preflight,
+    which passes, and the deep copy OOM-kills the kernel.
+    """
+    import numpy as np
+
+    matrix_bytes = _introspect_helpers()["_runtime_matrix_bytes"]
+
+    seen = {}
+    freed = np.zeros(1000, dtype=np.float64)
+    freed_id = id(freed)
+    assert matrix_bytes(freed, seen) == freed.nbytes
+    del freed
+
+    # With the object held in _seen the address cannot come back at all; if it
+    # ever does, the second array must still be measured.
+    for _ in range(4000):
+        candidate = np.zeros(1000, dtype=np.float64)
+        if id(candidate) == freed_id:
+            assert matrix_bytes(candidate, seen) == candidate.nbytes
+            break
+        del candidate
+
+
+def test_uns_and_the_frames_are_measured_because_copy_duplicates_them():
+    anndata = pytest.importorskip("anndata")
+    import numpy as np
+    import pandas as pd
+
+    adata_bytes = _introspect_helpers()["_runtime_adata_bytes"]
+
+    adata = anndata.AnnData(X=np.zeros((200, 10), dtype=np.float64))
+    # AnnData.copy() does `deepcopy(self._uns)`, so this is allocated twice.
+    adata.uns["stored_graph"] = np.zeros(1_000_000, dtype=np.float64)
+    adata.obs["label"] = pd.Categorical(["a"] * 200)
+
+    measured = adata_bytes(adata)
+
+    assert measured >= adata.uns["stored_graph"].nbytes + adata.X.nbytes, (
+        "uns was not counted; any session whose bulk lives in a stored graph or "
+        "a results table is undercounted on every run"
+    )
+
+
+def test_the_estimate_does_not_exceed_what_the_copy_actually_allocates():
+    """Over-counting refuses captures that would have fitted."""
+    anndata = pytest.importorskip("anndata")
+    import tracemalloc
+
+    import numpy as np
+    import pandas as pd
+
+    adata_bytes = _introspect_helpers()["_runtime_adata_bytes"]
+
+    adata = anndata.AnnData(X=np.zeros((2000, 500), dtype=np.float64))
+    adata.uns["stored_graph"] = np.zeros(1_000_000, dtype=np.float64)
+    adata.obs["label"] = pd.Categorical(["a"] * 2000)
+    estimate = adata_bytes(adata)
+
+    tracemalloc.start()
+    before = tracemalloc.get_traced_memory()[0]
+    duplicate = adata.copy()
+    allocated = tracemalloc.get_traced_memory()[0] - before
+    tracemalloc.stop()
+    del duplicate
+
+    assert estimate <= allocated * 1.05, (
+        f"estimate {estimate} overstates the real copy {allocated}"
+    )
+
+
+def test_a_matrix_shared_between_slots_is_still_counted_once():
+    anndata = pytest.importorskip("anndata")
+    import numpy as np
+
+    adata_bytes = _introspect_helpers()["_runtime_adata_bytes"]
+
+    x = np.zeros((100, 100), dtype=np.float64)
+    adata = anndata.AnnData(X=x)
+    adata.layers["alias"] = adata.X
+
+    # Frames and the empty uns add a little; the aliased layer must not add a
+    # second full matrix.
+    assert adata_bytes(adata) < 2 * x.nbytes

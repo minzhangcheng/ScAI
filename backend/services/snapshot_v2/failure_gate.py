@@ -417,10 +417,31 @@ def enter_snapshot_failure_gate(
     """
     state.status = TaskStatus.WAITING_INPUT
     state.wait_input_reason = WaitInputReason.SNAPSHOT_FAILURE.value
+    # Arriving at a gate means the capture attempt that preceded it did not
+    # succeed, so any "capture anyway" approval still outstanding was for that
+    # attempt and is now spent. The user is about to be asked again, and
+    # answering Proceed re-arms it — nothing is lost, and an approval can no
+    # longer drift onto a capture it was never given for.
+    clear_memory_preflight_override(state)
     payload = dict(failure)
-    if "allowed_actions" not in payload:
+    declared = payload.get("allowed_actions")
+    if not declared:
         payload["allowed_actions"] = _actions_for_code(
             payload.get("code"), SNAPSHOT_FAILURE_GATE_ACTIONS
+        )
+    elif payload.get("code") == SNAPSHOT_MEMORY_INSUFFICIENT_CODE:
+        # A memory refusal's action set is decided by the code, never by the
+        # caller: retry re-runs a deterministic check against the same kernel
+        # and manage reclaims disk, neither of which can clear this gate. Only
+        # the caller's skip policy is preserved — pre_restore forbids skipping
+        # and a memory refusal must not smuggle it back in. This also repairs a
+        # payload that reached us carrying a stale or defaulted set, which is
+        # how the gate lost "Capture anyway" on the pre_restore path.
+        payload["allowed_actions"] = _actions_for_code(
+            SNAPSHOT_MEMORY_INSUFFICIENT_CODE,
+            SNAPSHOT_SKIPPABLE_GATE_ACTIONS
+            if "skip" in declared
+            else SNAPSHOT_FAILURE_GATE_ACTIONS,
         )
     if retry_context is not None:
         payload["retry_context"] = dict(retry_context)
@@ -616,15 +637,62 @@ def consume_snapshot_skip(state: Any, phase: str) -> bool:
     return False
 
 
+#: Session ids that currently hold a live "capture anyway" grant, i.e. a
+#: Proceed the user pressed in *this* process whose capture has not run yet.
+#:
+#: The persisted ``force_snapshot_memory_override`` flag on AnalysisState records
+#: only *that* the risk was accepted; this set records that the capture it was
+#: accepted for is still pending, and it is deliberately not persisted. The flag
+#: alone is force-written to session.json by the Proceed handler, and every path
+#: on which the re-dispatched capture never runs — a 409 for a missing retry
+#: context, SAFE_POINT_BUSY, the disk gate, or a workflow_boundary hand-off to a
+#: WebSocket reconnect the user never makes — used to leave it armed on disk
+#: forever. The next capture to come along, on a different and possibly much
+#: larger AnnData, then skipped the preflight on a risk nobody had accepted for
+#: it. An approval is for one capture in one running process; a flag found
+#: without a matching grant is stale and is cleared rather than honoured.
+_MEMORY_OVERRIDE_GRANTS: set[str] = set()
+
+
+def _override_session_id(state: Any) -> str:
+    return str(getattr(state, "id", "") or "")
+
+
 def arm_memory_preflight_override(state: Any) -> None:
     """Accept the OOM risk so the next capture bypasses the memory preflight.
 
     Armed by the Proceed action on a memory gate; consumed by the next runtime
     capture (``runtime_parts.capture._consume_memory_preflight_override``). The
     caller is expected to follow this with the ordinary retry dispatch — this
-    only lowers the preflight, it does not itself re-run the capture.
+    only lowers the preflight, it does not itself re-run the capture — and to
+    call :func:`clear_memory_preflight_override` on every path where that
+    dispatch does not reach a capture.
     """
     state.force_snapshot_memory_override = True
+    session_id = _override_session_id(state)
+    if session_id:
+        _MEMORY_OVERRIDE_GRANTS.add(session_id)
+
+
+def has_memory_preflight_grant(session_id: str) -> bool:
+    """True while *session_id* holds an unconsumed "capture anyway" grant."""
+    return bool(session_id) and session_id in _MEMORY_OVERRIDE_GRANTS
+
+
+def clear_memory_preflight_override(state: Any) -> bool:
+    """Disarm the "capture anyway" approval; True when something was armed.
+
+    Called when the approved capture is consumed, when it demonstrably will not
+    run, and when the user resolves the gate some other way. The caller persists
+    *state* — an override left on disk is exactly the failure this closes.
+    """
+    session_id = _override_session_id(state)
+    had_grant = session_id in _MEMORY_OVERRIDE_GRANTS
+    _MEMORY_OVERRIDE_GRANTS.discard(session_id)
+    was_armed = bool(getattr(state, "force_snapshot_memory_override", False))
+    if was_armed:
+        state.force_snapshot_memory_override = False
+    return had_grant or was_armed
 
 
 def skip_workflow_boundary(state: Any, phase: str | None) -> None:
@@ -737,6 +805,9 @@ def terminate_snapshot_failure(state: Any) -> None:
     # silently suppress the first required capture of some later run.
     if hasattr(state, "skip_required_snapshot_phase"):
         state.skip_required_snapshot_phase = None
+    # Same rule for a "capture anyway" approval: the capture it was granted for
+    # is being abandoned, so the approval goes with it.
+    clear_memory_preflight_override(state)
 
 
 def _status_value(state: Any) -> str | None:

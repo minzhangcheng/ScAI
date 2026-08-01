@@ -81,6 +81,16 @@ def _consume_memory_preflight_override(sandbox) -> bool:
     Mirrors ``consume_snapshot_skip``: the flag is armed by the proceed endpoint
     when the user accepts the OOM risk, and is cleared here so that a later
     capture is preflighted afresh instead of silently inheriting the override.
+
+    The persisted flag is not sufficient on its own. It is force-written to
+    session.json the moment Proceed is pressed, and the re-dispatched capture has
+    several ways to never run at all (409 on a missing retry context,
+    SAFE_POINT_BUSY, the disk gate, or a workflow_boundary hand-off waiting on a
+    WebSocket reconnect that never comes). An approval is for one capture in one
+    running process, so it is honoured only alongside the in-process grant that
+    ``arm_memory_preflight_override`` records; a flag found without one is debris
+    from an abandoned attempt or from a previous process and is cleared instead
+    of being spent on a capture nobody accepted the risk for.
     """
     session_id = getattr(sandbox, "session_id", None)
     if not session_id:
@@ -92,8 +102,17 @@ def _consume_memory_preflight_override(sandbox) -> bool:
     state = sessions.get(session_id)
     if state is None or not getattr(state, "force_snapshot_memory_override", False):
         return False
-    state.force_snapshot_memory_override = False
-    return True
+
+    from backend.services.snapshot_v2.failure_gate import (
+        clear_memory_preflight_override,
+        has_memory_preflight_grant,
+    )
+
+    granted = has_memory_preflight_grant(str(session_id))
+    # Consumed either way: an honoured approval is spent, and a stale flag is
+    # scrubbed so the next capture cannot inherit it.
+    clear_memory_preflight_override(state)
+    return granted
 
 
 def _preflight_capture_memory(
@@ -474,6 +493,13 @@ class RuntimeCapture:
                 )
             return empty_complete_runtime()
 
+        # Spend the user's "capture anyway" approval at the top of the attempt
+        # it belongs to, not at the preflight call further down: everything
+        # between the two can abort (introspection failure, an empty required
+        # set, the kernel-generation assertion), and an attempt that dies there
+        # must not hand the approval on to whatever capture comes next.
+        memory_override = _consume_memory_preflight_override(sandbox)
+
         globals_meta, memory_meta = await self._introspect_globals(
             sandbox, exec_lock_held=exec_lock_held
         )
@@ -545,7 +571,7 @@ class RuntimeCapture:
             # Refuse before allocating anything if the copy this capture is
             # about to make would not fit. Raised here rather than inside
             # _capture_adata so nothing has been written to the staging dir yet.
-            if not _consume_memory_preflight_override(sandbox):
+            if not memory_override:
                 _preflight_capture_memory(memory_meta, h5ad_names)
 
             for var_name in sorted(h5ad_names):

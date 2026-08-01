@@ -22,6 +22,7 @@ from backend.services.statistical_gates import (
     check_analysis_unit,
     check_declared_testing_family,
     check_permutation_at_small_n,
+    check_resampling_resolution,
     check_underpowered_negative_claims,
     run_gates,
     score_kind,
@@ -321,3 +322,251 @@ def test_gates_inspect_structure_not_biology():
         assert term not in src
     for word in ("liver", "mouse", "cancer", "copper"):
         assert not re.search(rf"\b{word}\b", src)
+
+
+# -------------------------------------------- what the agent hands the gates
+# A gate is only as good as the state it is given. These pin the two
+# projections the report_findings handler builds, because narrowing either of
+# them is indistinguishable from deleting the checks that read it.
+
+def _live_state(**kw):
+    from backend.models.schemas import AnalysisState
+
+    state = AnalysisState(session_id="t", user_id="u", research_purpose="t")
+    for key, value in kw.items():
+        setattr(state, key, value)
+    return state
+
+
+def _group(group_id, name, sample_count):
+    from backend.models.schemas import TreatmentGroup
+
+    return TreatmentGroup(id=group_id, name=name, sample_count=sample_count)
+
+
+def _uploaded(group_id, sample_number):
+    from backend.models.schemas import DataFile
+
+    return DataFile(filename="f", file_path="/f", section="sequencing",
+                    data_type="scRNA-seq", group_id=group_id,
+                    sample_number=sample_number)
+
+
+def _registered(name, method, round_number, *, plan_id="", parameters=None,
+                background_source=""):
+    from backend.models.schemas import ScoreDefinition
+
+    return ScoreDefinition(
+        score_name=name, method=method, description="",
+        parameters=parameters or {}, plan_id=plan_id,
+        background_source=background_source, round_number=round_number,
+    )
+
+
+def _frozen_plan(plan_id, name, method, *, family=()):
+    from backend.models.schemas import ScoringPlan
+
+    return ScoringPlan(id=plan_id, score_name=name, method=method,
+                       testing_family=list(family))
+
+
+def test_a_single_sample_group_still_reaches_the_design_gate():
+    """The n=1 group is the input check_analysis_unit exists to refuse.
+
+    A 1-vs-1 pilot uploaded with "No sample distinction" leaves every group at
+    sample_count 1 with no numbered file. Withholding those groups empties the
+    mapping, and both check_analysis_unit and check_permutation_at_small_n
+    return early on an empty one -- so the one design the gate was written for
+    would be the one design it never sees.
+    """
+    state = _live_state(
+        treatment_groups=[_group("ga", "Vehicle", 1), _group("gb", "Treated", 1)],
+        data_files=[_uploaded("ga", None), _uploaded("gb", None)],
+        current_round=2,
+    )
+    samples = bio_mod._gate_samples_per_group(state)
+    assert samples == {"Vehicle": 1, "Treated": 1}
+    report = run_gates(["Treatment significantly increases Il6 (p = 0.003)."],
+                       score_definitions=[], scoring_plans=[],
+                       samples_per_group=samples)
+    assert [f.gate for f in report.blocking] == ["unidentifiable-design"]
+
+
+def test_numbered_uploads_raise_a_count_left_at_the_schema_default():
+    """sample_count defaults to 1, so per-sample files are the harder evidence.
+
+    They raise a stale declaration rather than deciding whether the group is
+    looked at, which is what keeps the previous test's design visible without
+    refusing a study whose upload plainly holds replicates.
+    """
+    state = _live_state(
+        treatment_groups=[_group("gc", "Control", 1), _group("gd", "KO", 1)],
+        data_files=[_uploaded(g, n) for g in ("gc", "gd") for n in (1, 2, 3)],
+        current_round=2,
+    )
+    samples = bio_mod._gate_samples_per_group(state)
+    assert samples == {"Control": 3, "KO": 3}
+    report = run_gates(["the effect of condition is significant (p = 0.01)"],
+                       score_definitions=[], scoring_plans=[],
+                       samples_per_group=samples)
+    assert report.passed
+
+
+def test_an_earlier_rounds_resample_count_still_bounds_a_later_p_value():
+    """Evidence does not expire at a round boundary.
+
+    The count was declared when the score was registered; the value it makes
+    unattainable is quoted a round later, which is the normal shape of a
+    multi-round analysis.
+    """
+    state = _live_state(
+        score_definitions=[_registered("hallmark_gsea", "gseapy.prerank", 2,
+                                       plan_id="p1",
+                                       parameters={"permutation_num": 500})],
+        scoring_plans=[_frozen_plan("p1", "hallmark_gsea", "gseapy.prerank",
+                                   family=["hallmark"])],
+        current_round=3,
+    )
+    carried = bio_mod._gate_score_definitions(state)
+    assert [s.score_name for s in carried] == ["hallmark_gsea"]
+    report = run_gates(["GSEA gives NES = 2.1, p = 0.0002."],
+                       score_definitions=carried,
+                       scoring_plans=state.scoring_plans,
+                       samples_per_group={"A": 8, "B": 8})
+    assert [f.gate for f in report.blocking] == ["p-below-resampling-resolution"]
+
+
+def test_an_earlier_rounds_joint_model_still_downgrades_the_simplex_refusal():
+    """The exemption travels with the evidence, or the gate refuses good work.
+
+    check_composition_claims runs unconditionally and reads score_definitions
+    for the stand-down. Dropping an earlier round's scCODA registration turns a
+    correctly modelled composition claim back into a hard block, and there is
+    no way to re-register it from the round that is being refused.
+    """
+    state = _live_state(
+        score_definitions=[_registered("composition", "pertpy.tools.Sccoda", 2,
+                                       plan_id="p2")],
+        scoring_plans=[_frozen_plan("p2", "composition",
+                                   "pertpy.tools.Sccoda")],
+        current_round=3,
+    )
+    carried = bio_mod._gate_score_definitions(state)
+    assert [s.score_name for s in carried] == ["composition"]
+    report = run_gates([_SIMPLEX_CLAIM], score_definitions=carried,
+                       scoring_plans=state.scoring_plans,
+                       samples_per_group={"A": 8, "B": 8})
+    assert report.passed
+    assert [f.gate for f in report.advisories] == ["simplex-ignored"]
+
+
+def test_an_earlier_rounds_defective_record_does_not_refuse_forever():
+    """The one thing a stale score may not do is block a round it has nothing
+    to do with.
+
+    An undeclared testing family and an unnamed ORA universe are refused
+    against the record itself, and register_score only replaces a score of the
+    same name, so a round working on something else can never clear them. Those
+    records, and only those, are left out.
+    """
+    state = _live_state(
+        score_definitions=[
+            _registered("orphan_ora", "gseapy.enrich", 2),
+            _registered("stale_gsea", "gseapy.prerank", 2, plan_id="p3",
+                        parameters={"permutation_num": 1000}),
+        ],
+        scoring_plans=[_frozen_plan("p3", "stale_gsea", "gseapy.prerank")],
+        current_round=3,
+    )
+    assert bio_mod._gate_score_definitions(state) == []
+    report = run_gates(["a positive observation about cluster identity"],
+                       score_definitions=bio_mod._gate_score_definitions(state),
+                       scoring_plans=state.scoring_plans,
+                       samples_per_group={"A": 8, "B": 8})
+    assert report.passed
+
+
+def test_the_current_rounds_scores_are_never_withheld():
+    """A defective record registered this round must still be refused now."""
+    state = _live_state(
+        score_definitions=[_registered("fresh_ora", "gseapy.enrich", 3)],
+        scoring_plans=[],
+        current_round=3,
+    )
+    carried = bio_mod._gate_score_definitions(state)
+    assert [s.score_name for s in carried] == ["fresh_ora"]
+    report = run_gates(["a positive observation"], score_definitions=carried,
+                       scoring_plans=[], samples_per_group={"A": 8, "B": 8})
+    assert "ora-universe-undeclared" in [f.gate for f in report.blocking]
+
+
+# ------------------------------------------- which number the floor applies to
+# The resampling floor is a property of one method's draws. These pin what it
+# may be applied to, because a floor aimed at the wrong number refuses a correct
+# result and the only rewording that satisfies it overstates the uncertainty.
+
+def _floor_gates(findings, scores):
+    return [f.gate for f in check_resampling_resolution(findings, scores)
+            if f.gate == "p-below-resampling-resolution"]
+
+
+def test_an_analytic_p_value_is_not_held_to_the_enrichment_floor():
+    """A model-fit p-value has no resolution floor, whatever shares its paragraph.
+
+    Reporting a differential-expression result and an enrichment result in one
+    paragraph is the ordinary shape of a finding. Deciding the whole text is a
+    resampling result because one clause mentions GSEA, then applying the floor
+    to every number in it, refuses a Wald p-value that no number of draws
+    constrains.
+    """
+    scores = [_registered("hallmark_gsea", "gseapy.prerank", 1,
+                          parameters={"permutation_num": 1000})]
+    mixed = ("Differential expression with pydeseq2 identified GENE1 as "
+             "strongly upregulated (log2FC 3.4, adjusted p = 1.2e-08). GSEA "
+             "preranked on the same contrast showed enrichment of the "
+             "interferon module (NES 2.1).")
+    assert _floor_gates([mixed], scores) == []
+
+    # The floor still reaches a resampling value stated in its own sentence.
+    assert _floor_gates(["Preranked GSEA gives NES = 2.1, p = 0.0002."],
+                        scores) == ["p-below-resampling-resolution"]
+
+
+def test_a_coarse_probe_does_not_bound_a_finer_runs_p_value():
+    """The floor follows the score the finding names, not the worst registered.
+
+    A cheap 100-draw probe beside a 10,000-draw run is the normal shape of an
+    analysis. Taking the minimum count across every registered score applies the
+    probe's floor to the run's own p-values.
+    """
+    scores = [_registered("quick_check", "gseapy.prerank", 1,
+                          parameters={"permutation_num": 100}),
+              _registered("main_gsea", "gseapy.prerank", 1,
+                          parameters={"permutation_num": 10000})]
+    fine = ("GSEA preranked analysis of the main contrast: NES = 2.31, "
+            "FDR q = 0.0005 for the top pathway.")
+    assert _floor_gates([fine], scores) == []
+
+    # Named coarse score, so its own count binds and the value is unattainable.
+    coarse = "The quick check panel gives NES = 1.9, p = 0.0004."
+    assert _floor_gates([coarse], scores) == ["p-below-resampling-resolution"]
+
+
+def test_a_conventional_cutoff_is_not_a_resolution_floor_violation():
+    """0.001 quoted against gseapy's default 1000 draws is a threshold restated.
+
+    1/1001 rounds to the same three digits as the conventional cutoff, so
+    without the carve-out the most standard sentence the method produces is
+    refused -- and the refusal reads "states a p-value of 0.001 ... the smallest
+    value is 0.001", which the model cannot act on.
+    """
+    scores = [_registered("hallmark_gsea", "gseapy.prerank", 1,
+                          parameters={"permutation_num": 1000})]
+    for text in ("Preranked GSEA identified HALLMARK_INFLAMMATORY_RESPONSE "
+                 "(NES 2.4, FDR q = 0.001).",
+                 "Preranked GSEA showed the module significant at padj = 0.001."):
+        assert _floor_gates([text], scores) == []
+
+    # A value that is not a conventional cutoff and is under the floor still goes.
+    assert _floor_gates(["Preranked GSEA: NES = 2.4, q = 0.0004."],
+                        scores) == ["p-below-resampling-resolution"]

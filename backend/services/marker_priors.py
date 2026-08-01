@@ -119,6 +119,19 @@ class MarkerDB:
         return any(p.exists() and _is_current_revision(p)
                    for p in (self.markers_dir / n for n in _TSV_NAMES))
 
+    def missing_tables(self) -> List[str]:
+        """Expected tables absent or stale at the current projection revision.
+
+        ``usable`` asks whether the DB can annotate at all; this asks whether it
+        is running on the sources this revision was cut for. The two differ
+        exactly when one download succeeded and another failed, and nothing
+        downstream can tell: annotation simply proceeds on a narrower evidence
+        base than intended, with no signal anywhere.
+        """
+        return [n for n in _TSV_NAMES
+                if not ((self.markers_dir / n).exists()
+                        and _is_current_revision(self.markers_dir / n))]
+
     def _load(self) -> None:
         if self._loaded:
             return
@@ -213,6 +226,37 @@ def trigger_fetch(force: bool = False) -> bool:
     except Exception as e:
         logger.warning(f"trigger_fetch failed: {e}")
         return False
+
+
+_topped_up = False
+
+
+def top_up_missing_tables(db) -> bool:
+    """Best-effort, once per process: re-fetch tables absent at this revision.
+
+    A supplementary source whose download failed leaves the DB usable, so the
+    gate that would have re-fetched it never fires and nothing asks again --
+    the deployment annotates on the remaining source indefinitely, which is the
+    opposite of why the revision was cut.
+
+    Deliberately quiet: it never blocks a run and never escalates to the user,
+    so a source that stays unreachable costs one attempt per process rather
+    than a prompt per session. Call it off the event loop (asyncio.to_thread);
+    it performs network I/O.
+    """
+    global _topped_up
+    if _topped_up:
+        return False
+    _topped_up = True
+    if not db.usable():
+        return False  # the ordinary gate owns this case, and it can prompt.
+    missing = db.missing_tables()
+    if not missing:
+        return False
+    logger.warning(
+        "marker DB is usable but %s absent at SCHEMA_REVISION %s; attempting a "
+        "one-off top-up fetch", ", ".join(missing), MARKER_SCHEMA_REVISION)
+    return trigger_fetch()
 
 
 def summarize_database_priors(database_priors, total_clusters: int) -> Optional[str]:

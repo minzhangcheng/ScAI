@@ -63,8 +63,34 @@ def test_allocation_flags_unattributed_figures(tmp_path):
     text = _agent()._build_figure_allocation_text(
         _outline(), {"mystery.png": tmp_path / "mystery.png"}, {}
     )
-    assert "could not be determined" in text
+    # A figure the round cannot place is still offered to the model, told to
+    # place it by content -- never silently dropped from the allocation.
     assert "mystery.png" in text
+    assert "by content" in text
+
+
+def test_a_round_several_sections_claim_allocates_to_none_of_them(tmp_path):
+    """The legacy outline organises by analysis type, not by round.
+
+    Its four findings sections each declare every round, so the round number
+    carries no allocation. Handing the figures to the first claimant put the
+    whole report in quality control and told the model the other three chapters
+    produced nothing -- a statement it then wrote prose around.
+    """
+    outline = build_report_outline(SimpleNamespace(
+        round_results=[_round(1, "exploration"), _round(2, "exploration")],
+        publication_figures=[],
+    ))
+    shared = [sec.id for sec in outline if sec.rounds]
+    assert len(shared) > 1, "expected the legacy outline's shared-round sections"
+
+    text = _agent()._build_figure_allocation_text(
+        outline, {"umap.png": tmp_path / "umap.png"}, {"umap.png": 1}
+    )
+    assert "no figures were produced" not in text
+    assert "by content" in text
+    # Offered once, to no single section.
+    assert text.count("umap.png") == 1
 
 
 def test_parse_uses_outline_titles_and_types():

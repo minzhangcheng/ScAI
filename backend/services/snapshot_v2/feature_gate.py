@@ -18,14 +18,29 @@ def require_snapshot_v2_enabled() -> None:
         )
 
 
+# Journal kinds whose unfinished transaction really does leave the session's own
+# files — state, notebook, checkpoint, workspace — at different points in the
+# run. ``journals/`` is a single directory shared by every kind (``paths.py``),
+# so status alone cannot answer the question this predicate asks: a delete
+# (``deletion.py``) or an import touches only ``objects/`` and ``committed/``
+# and passes through STAGED/APPLYING inside a try whose except deliberately
+# leaves the journal behind, and an export protection journal is not a mutation
+# at all. Only a restore swaps the four session files against each other.
+# Legacy flat restore journals carry no ``kind``, and one whose kind cannot be
+# read is counted as a restore for the same fail-closed reason an unparseable
+# journal is.
+_HALF_SWAP_JOURNAL_KINDS = frozenset({"", "restore", "restore_apply", "restore_job"})
+
+
 def has_unfinished_restore_journal(session_id: str) -> bool:
-    """True while a STAGED/STAGING/APPLYING journal describes a half-swapped tree.
+    """True while a STAGED/STAGING/APPLYING *restore* journal is still on disk.
 
     Also drives the startup scan in ``backend/main.py``. Only a restore that
     never reached a terminal state leaves the session's files mixing pre- and
     post-restore content; COMMITTED and FAILED journals are merely waiting to be
-    reaped. Anything unreadable counts as unfinished, because a truncated write
-    is itself evidence of an interrupted one.
+    reaped, and a stranded journal of any other kind describes work that never
+    touched those files. Anything unreadable counts as unfinished, because a
+    truncated write is itself evidence of an interrupted one.
     """
     import json
 
@@ -45,7 +60,13 @@ def has_unfinished_restore_journal(session_id: str) -> bool:
                 doc = json.loads(entry.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 return True
-            if str(doc.get("status", "")).upper() in unfinished:
+            if not isinstance(doc, dict):
+                return True
+            if str(doc.get("status", "")).upper() not in unfinished:
+                continue
+            kind = doc.get("kind")
+            kind = "" if kind is None else str(kind).strip().lower()
+            if kind in _HALF_SWAP_JOURNAL_KINDS:
                 return True
     except OSError:
         # Unknown means fail closed: the flag exists to stop a half-applied
@@ -90,9 +111,11 @@ def normalize_disabled_snapshot_state(
     imported from an archive that carried the flag.
 
     That unblocking stops at evidence of an actual half-applied restore: when an
-    unfinished journal is still on disk the flag stays, because clearing it would
-    let the graph run against a session whose state, notebook, checkpoint and
-    workspace describe different points in the run. Such a session needs
+    unfinished *restore* journal is still on disk the flag stays, because
+    clearing it would let the graph run against a session whose state, notebook,
+    checkpoint and workspace describe different points in the run. A stranded
+    journal of another kind is not that evidence — see
+    ``_HALF_SWAP_JOURNAL_KINDS``. Such a session needs
     ``SCAI_ENABLE_SNAPSHOT_V2`` back on so recovery can finish or roll back —
     being unstartable is the correct outcome until then.
     """

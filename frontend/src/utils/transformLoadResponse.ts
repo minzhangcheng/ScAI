@@ -76,7 +76,21 @@ function transformBiochemistryIndicators(raw: RawBiochemistryIndicator[] | undef
   }))
 }
 
-function transformPublicationFigures(raw: RawPublicationFigure[] | undefined) {
+/**
+ * Gallery badge fields carried by the load payload
+ * (backend AnalysisState._serialize_publication_figures) and by the
+ * integrated_report message. Declared here rather than on RawPublicationFigure
+ * because they are optional on every other producer of a raw figure.
+ */
+export type RawFigureBadges = {
+  round?: number | null
+  round_number?: number | null
+  layout_blocking?: boolean | null
+  layoutBlocking?: boolean | null
+  diagnostic?: boolean | null
+}
+
+function transformPublicationFigures(raw: (RawPublicationFigure & RawFigureBadges)[] | undefined) {
   return (raw || []).map((f) => ({
     id: f.id,
     name: f.name,
@@ -89,6 +103,12 @@ function transformPublicationFigures(raw: RawPublicationFigure[] | undefined) {
     piFeedback: f.pi_feedback || f.piFeedback,
     revisionCount: f.revision_count ?? f.revisionCount ?? 0,
     createdAt: f.created_at || f.createdAt || '',
+    // Same mapping ResultsPanel applies to a live figure message: a reload must
+    // rebuild the round / layout-defect / diagnostic badges, not drop them and
+    // wait for an integrated_report replay that may have aged out of history.
+    round: f.round ?? f.round_number ?? undefined,
+    layoutBlocking: f.layout_blocking ?? f.layoutBlocking ?? false,
+    diagnostic: f.diagnostic ?? false,
   }))
 }
 

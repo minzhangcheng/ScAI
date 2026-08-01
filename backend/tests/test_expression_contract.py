@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from backend.utils.expression_contract import (
     mutates_expression_representation,
     prepares_expression_before_sensitive_call,
     record_representation_change,
+    record_round_start,
     round_start_ns,
     unchanged_artifact_stems,
     workspace_artifact_versions,
@@ -184,15 +186,82 @@ def test_unchanged_stems_are_bounded_to_the_current_round(tmp_path):
     ) == {"from_round_3"}
 
 
-def test_round_start_ns_without_a_logged_step_blacklists_nothing(tmp_path):
+def test_round_start_ns_comes_from_the_stamp_taken_when_the_round_opened(tmp_path):
+    """The running round is never in analysis_log, so a log lookup finds nothing.
+
+    The bioinformatics agent keeps its steps in a local list and they are merged
+    into state.analysis_log -- and stamped with round_number -- only after the
+    round's execution has finished. Deriving the start from the log therefore
+    always fell through to time.time_ns(), a bound nothing predates: the stem
+    blacklist came back empty on every main pass, so a figure drawn from raw
+    counts and invalidated by a log1p in the same round shipped as a current
+    result while the agent was told N artifacts had been withheld.
+    """
+    before_round = time.time_ns()
+    state = AnalysisState(initial_instruction="x", user_id="u")
+    state.current_round = 4  # no analysis_log entry for round 4 -- there never is
+
+    assert record_round_start(state) >= before_round
+    since = round_start_ns(state)
+    assert before_round <= since <= time.time_ns()
+
+    # A figure drawn after the round opened and not rewritten by the mutating
+    # cell is stale, and must be named as such. Stamped in ns: seconds-as-float
+    # loses sub-microsecond precision, which is the whole margin here.
+    drawn = tmp_path / "figures" / "drawn_this_round.png"
+    drawn.parent.mkdir(parents=True, exist_ok=True)
+    drawn.write_bytes(b"x")
+    os.utime(drawn, ns=(since + 1, since + 1))
+    before = workspace_artifact_versions(tmp_path)
+    assert unchanged_artifact_stems(tmp_path, before, since_ns=since) == {
+        "drawn_this_round"
+    }
+
+
+def test_round_start_stamp_survives_a_second_entry_into_the_same_round():
+    """Stage 1 and stage 2 re-enter the same node with the same round number.
+
+    A stage-2 normalization does invalidate what stage 1 drew, so re-stamping on
+    the second entry would hide exactly the case the mechanism exists for.
+    """
+    state = AnalysisState(initial_instruction="x", user_id="u")
+    state.current_round = 1
+    first = record_round_start(state)
+    time.sleep(0.001)
+    assert record_round_start(state) == first
+    state.current_round = 2
+    assert record_round_start(state) > first
+
+
+def test_round_start_ns_falls_back_to_the_previous_round_boundary():
+    """A session that predates the stamp still gets round scoping, not silence."""
+    state = AnalysisState(initial_instruction="x", user_id="u")
+    state.current_round = 3
+    last_of_round_2 = datetime(2026, 1, 1, 11, 0, 0)
+    state.analysis_log = [
+        AnalysisStep(step_number=1, step_type="execute_code", round_number=1,
+                     timestamp=datetime(2026, 1, 1, 9, 0, 0)),
+        AnalysisStep(step_number=2, step_type="execute_code", round_number=2,
+                     timestamp=last_of_round_2),
+    ]
+    assert round_start_ns(state) == int(last_of_round_2.timestamp() * 1_000_000_000)
+
+
+def test_round_start_ns_with_nothing_to_bound_on_includes_everything(tmp_path):
+    """Fail open, not silent: round 1 of a session owns every file on disk.
+
+    Returning "now" here was the silent-failure default -- nothing predates it,
+    so the caller withheld nothing while still reporting that it had.
+    """
     _stamp(tmp_path / "figures" / "existing.png", 1000.0)
     before = workspace_artifact_versions(tmp_path)
     state = AnalysisState(initial_instruction="x", user_id="u")
-    state.current_round = 4  # no analysis_log entry for round 4 yet
+    state.current_round = 1  # nothing logged, nothing stamped
 
-    since = round_start_ns(state)
-    assert since > int(1000.0 * 1_000_000_000)
-    assert unchanged_artifact_stems(tmp_path, before, since_ns=since) == set()
+    assert round_start_ns(state) == 0
+    assert unchanged_artifact_stems(
+        tmp_path, before, since_ns=round_start_ns(state)
+    ) == {"existing"}
 
 
 def test_round_start_ns_uses_the_earliest_step_of_the_current_round():
@@ -208,6 +277,32 @@ def test_round_start_ns_uses_the_earliest_step_of_the_current_round():
                      timestamp=datetime(2026, 1, 1, 11, 0, 0)),
     ]
     assert round_start_ns(state) == int(early.timestamp() * 1_000_000_000)
+
+
+def test_the_bioinformatics_node_opens_the_round_before_it_runs():
+    """Without this call the stamp never exists and the whole mechanism is dead.
+
+    Source-level because the alternative is standing up a whole workflow object:
+    what matters is only that the round is opened *before* the autonomous loop,
+    since everything that writes an artifact runs inside that loop.
+    """
+    import re
+
+    import backend.workflow.agents as agents_mod
+
+    source = open(agents_mod.__file__).read()
+    fn = re.search(
+        r"async def _bioinformatics_analysis\b.*?(?=\n    (?:async )?def |\Z)",
+        source, re.DOTALL,
+    )
+    assert fn, "could not locate _bioinformatics_analysis"
+    body = fn.group(0)
+    opened = body.find("record_round_start(analysis_state)")
+    runs = body.find("run_autonomous_analysis(")
+    assert opened != -1, "the bioinformatics node must open the round"
+    assert runs != -1 and opened < runs, (
+        "the round must be stamped before the loop that produces the artifacts"
+    )
 
 
 # --- The producer is told what it invalidated --------------------------------

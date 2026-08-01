@@ -46,3 +46,35 @@ def test_workspace_scan_cannot_reintroduce_ineligible_publication_figure(tmp_pat
                 png_path=str(figures / "revision.jpg")),
     ])
     assert {item["filename"] for item in found} == {"approved.jpg"}
+
+
+# ------------------------------- the diagnostic waiver rests on a measurement
+
+def _unverified():
+    """The marker the renderer stores when its in-kernel layout lint crashed."""
+    return {"kind": "lint_skipped", "severity": "advise",
+            "detail": "overlap checking was skipped"}
+
+
+def test_a_diagnostic_is_waived_past_review_only_once_its_layout_was_measured():
+    """The waiver's whole justification is that the lint still ran.
+
+    A platform-rendered diagnostic has no reviewer, so the layout gate is the
+    only thing that looks at it. Recording an unmeasured layout as an empty
+    violation list made "measured, nothing wrong" and "never measured" the same
+    record, and the figure most likely to crash the lint is the one most likely
+    to need it.
+    """
+    measured = _figure("qc_measured", FigureReviewStatus.PENDING, diagnostic=True)
+    unmeasured = _figure("qc_unmeasured", FigureReviewStatus.PENDING,
+                         diagnostic=True, layout_violations=[_unverified()])
+
+    assert is_report_eligible(measured) is True
+    assert is_report_eligible(unmeasured) is False
+
+
+def test_an_unmeasured_layout_does_not_withhold_a_reviewed_figure():
+    """A human looked at this one, so the missing measurement is not the only check."""
+    reviewed = _figure("umap", FigureReviewStatus.APPROVED,
+                       layout_violations=[_unverified()])
+    assert is_report_eligible(reviewed) is True

@@ -924,7 +924,10 @@ async def snapshot_failure_proceed(session_id: str, request: Request):
 
 
 async def _snapshot_failure_proceed_locked(session_id: str, user_id: str):
-    from backend.services.snapshot_v2.failure_gate import arm_memory_preflight_override
+    from backend.services.snapshot_v2.failure_gate import (
+        arm_memory_preflight_override,
+        clear_memory_preflight_override,
+    )
 
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
@@ -948,7 +951,22 @@ async def _snapshot_failure_proceed_locked(session_id: str, user_id: str):
     # Reuse retry verbatim: the producer dispatch, context validation and gate
     # bookkeeping are identical — the override flag is the only difference, and
     # the capture consumes it on its own.
-    return await _snapshot_failure_retry_locked(session_id, user_id)
+    #
+    # The approval covers exactly the capture this dispatch leads to. Retry can
+    # refuse before reaching one at all — 409 for a missing or invalid retry
+    # context, an unknown producer — and the override was already force-written
+    # to session.json by the time that happens, so without this the preflight
+    # stayed disabled for the session and some later capture on a different
+    # object skipped it. Disarm and persist on that path; a dispatch that does
+    # run re-persists through _snapshot_failure_retry_locked's own save, and a
+    # capture that fails clears the approval as it re-enters the gate.
+    try:
+        return await _snapshot_failure_retry_locked(session_id, user_id)
+    except Exception:
+        if clear_memory_preflight_override(state):
+            await _update_session_cache(session_id, state)
+            await async_save_session(session_id, state, force=True)
+        raise
 
 
 @router.post(

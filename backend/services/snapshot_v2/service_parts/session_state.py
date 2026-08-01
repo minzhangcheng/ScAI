@@ -245,7 +245,11 @@ class SessionStateMixin:
                 code=error.code,
                 message=str(error),
                 details=error.details,
-                allowed_actions=["retry", "manage", "terminate"],
+                # allowed_actions is deliberately not passed: the record derives
+                # it from the code (see SnapshotFailureRecord). Hardcoding the
+                # base set here made a memory-preflight refusal indistinguishable
+                # from an ordinary one, and pre_restore hands this record
+                # straight to the failure gate.
             ),
             committed=False,
             session_reconciliation_pending=False,

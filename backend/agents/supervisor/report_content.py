@@ -376,10 +376,18 @@ class ReportContentMixin:
         ``..._qc_overview`` came to open a report. The allocation below removes
         the guess; code re-checks it afterwards regardless.
         """
-        owner_of_round: Dict[int, str] = {}
+        # Only a round claimed by exactly one section allocates a figure. The
+        # legacy (single-pass) outline organises by analysis type instead of by
+        # round, so its four findings sections all declare every round; taking
+        # the first claimant would allocate the entire report to quality control
+        # and then tell the model the other three chapters produced nothing.
+        claimants: Dict[int, List[str]] = {}
         for sec in outline:
             for rn in sec.rounds:
-                owner_of_round.setdefault(int(rn), sec.id)
+                claimants.setdefault(int(rn), []).append(sec.id)
+        owner_of_round = {
+            rn: ids[0] for rn, ids in claimants.items() if len(ids) == 1
+        }
 
         per_section: Dict[str, List[str]] = {sec.id: [] for sec in outline}
         unattributed: List[str] = []
@@ -391,22 +399,29 @@ class ReportContentMixin:
             else:
                 per_section[sid].append(name)
 
+        shared = {rn for rn, ids in claimants.items() if len(ids) > 1}
         lines: List[str] = []
         for sec in outline:
             names = per_section.get(sec.id) or []
+            rounds_text = ", ".join(str(r) for r in sec.rounds)
             if not sec.rounds:
                 lines.append(f"[{sec.id}] — no figures (this section carries no result figures)")
             elif names:
-                lines.append(f"[{sec.id}] — round(s) {', '.join(str(r) for r in sec.rounds)}:")
+                lines.append(f"[{sec.id}] — round(s) {rounds_text}:")
                 lines.extend(f"    - {n}" for n in names)
+            elif shared.issuperset(int(r) for r in sec.rounds):
+                lines.append(
+                    f"[{sec.id}] — round(s) {rounds_text}, shared with other "
+                    f"sections: choose by content from the list below"
+                )
             else:
                 lines.append(
-                    f"[{sec.id}] — round(s) {', '.join(str(r) for r in sec.rounds)}: "
+                    f"[{sec.id}] — round(s) {rounds_text}: "
                     f"no figures were produced"
                 )
         if unattributed:
             lines.append(
-                "Figures whose round could not be determined (place by content, "
+                "Figures the round alone does not place (choose by content, "
                 "or omit):"
             )
             lines.extend(f"    - {n}" for n in unattributed)

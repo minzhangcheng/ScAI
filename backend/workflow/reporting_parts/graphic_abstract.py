@@ -26,6 +26,7 @@ from ...services.report.artifacts import (
     excluded_artifact_stems,
     gallery_artifacts,
     has_blocking_layout_defects,
+    render_is_intact,
 )
 from ...services.report.figure_attribution import attribute_figures_to_rounds  # noqa: F401
 from ..direction_coverage import current_lineage_id, direction_coverage_status
@@ -72,7 +73,6 @@ logger = logging.getLogger(__name__)
 # A candidate line is rendered into the PI's prompt once per figure against a
 # 200-candidate cap, so the description is an excerpt, not the whole field.
 _MAX_CANDIDATE_DESCRIPTION = 200
-
 
 def _attribute_rounds(
     analysis_state, publication_figures, workspace_figs,
@@ -153,7 +153,15 @@ class GraphicAbstractMixin:
         # cap — is still this run's own output and belongs here, badged with the
         # status it earned. Only artifacts superseded by newer data are withheld.
         # ``is_report_eligible`` remains the rule for every archival surface.
-        publication_figures = gallery_artifacts(analysis_state.publication_figures)
+        #
+        # The one thing that breadth must not carry with it is an entry whose
+        # file is no longer the figure it advertises: see ``render_is_intact``.
+        # Dropping it here also feeds ``excluded_artifact_stems`` below, so the
+        # same blank file is not re-offered by workspace discovery.
+        publication_figures = [
+            fig for fig in gallery_artifacts(analysis_state.publication_figures)
+            if render_is_intact(fig)
+        ]
         pub_figure_names = {fig.name for fig in publication_figures}
         excluded_stems = excluded_artifact_stems(
             analysis_state.publication_figures,

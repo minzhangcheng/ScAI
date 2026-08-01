@@ -505,3 +505,146 @@ def test_ordinary_import_does_not_materialize_v2_bundle_when_disabled(
 
     assert exc.value.status_code == 400
     assert not leaked_path.exists()
+
+
+# --- The recovery block is a claim about a *restore*, not about journals ------
+#
+# ``journals/`` is one directory for every kind (paths.py), so classifying by
+# status alone read a stranded delete or import transaction as a half-applied
+# restore. With Snapshot V2 off nothing can ever clear ``recovery_blocked``
+# again and no snapshot endpoint is reachable to try, so the session became
+# permanently unstartable — over work that never touched its state, notebook,
+# checkpoint or workspace, which is the whole justification for fail-closing.
+
+
+def _write_journal(session_id, *, kind, status, transaction_id="tx-1"):
+    from backend.services.snapshot_v2.journal_store import JournalStore, make_envelope
+    from backend.services.snapshot_v2.paths import SnapshotV2Paths
+
+    paths = SnapshotV2Paths.for_session(session_id)
+    paths.journals.mkdir(parents=True, exist_ok=True)
+    for stale in paths.journals.iterdir():
+        stale.unlink()
+    JournalStore(paths).write(
+        make_envelope(
+            kind=kind,
+            transaction_id=transaction_id,
+            session_id=session_id,
+            status=status,
+            payload={},
+        )
+    )
+    return paths
+
+
+def _write_raw_journal(session_id, name, text):
+    from backend.services.snapshot_v2.paths import SnapshotV2Paths
+
+    paths = SnapshotV2Paths.for_session(session_id)
+    paths.journals.mkdir(parents=True, exist_ok=True)
+    for stale in paths.journals.iterdir():
+        stale.unlink()
+    (paths.journals / name).write_text(text, encoding="utf-8")
+    return paths
+
+
+@pytest.mark.parametrize(
+    ("kind", "status"),
+    [
+        # deletion.py stages then applies inside a try whose except deliberately
+        # leaves the journal on disk for recovery.
+        ("delete", "STAGED"),
+        ("delete", "APPLYING"),
+        # An import writes objects/ and committed/ only.
+        ("import", "STAGING"),
+    ],
+)
+def test_a_stranded_non_restore_journal_does_not_block_a_disabled_session(
+    kind, status,
+):
+    from backend.models.schemas import AnalysisState
+    from backend.services.snapshot_v2.feature_gate import (
+        has_unfinished_restore_journal,
+        normalize_disabled_snapshot_state,
+    )
+
+    session_id = f"journal-{kind}-{status.lower()}"
+    _write_journal(session_id, kind=kind, status=status)
+
+    assert has_unfinished_restore_journal(session_id) is False, (
+        f"a {kind} journal was read as a half-applied restore"
+    )
+
+    state = AnalysisState(id=session_id, user_id="owner")
+    state.recovery_blocked = True
+
+    assert normalize_disabled_snapshot_state(state) is True
+    assert state.recovery_blocked is False, (
+        "the session stays unstartable with Snapshot V2 off, and the operator is "
+        "told to re-enable it so recovery can finish a restore that never ran"
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "status"),
+    [
+        ("restore_apply", "STAGED"),
+        ("restore_apply", "APPLYING"),
+        # jobs.py writes restore_job statuses in lower case.
+        ("restore_job", "applying"),
+    ],
+)
+def test_an_unfinished_restore_journal_still_fails_closed(kind, status):
+    from backend.models.schemas import AnalysisState
+    from backend.services.snapshot_v2.feature_gate import (
+        has_unfinished_restore_journal,
+        normalize_disabled_snapshot_state,
+    )
+
+    session_id = f"journal-{kind}-{status.lower()}"
+    _write_journal(session_id, kind=kind, status=status)
+
+    assert has_unfinished_restore_journal(session_id) is True
+
+    state = AnalysisState(id=session_id, user_id="owner")
+    state.recovery_blocked = True
+
+    assert normalize_disabled_snapshot_state(state) is False
+    assert state.recovery_blocked is True
+
+
+def test_a_terminal_restore_journal_is_only_waiting_to_be_reaped():
+    from backend.services.snapshot_v2.feature_gate import (
+        has_unfinished_restore_journal,
+    )
+
+    session_id = "journal-restore-committed"
+    _write_journal(session_id, kind="restore_apply", status="COMMITTED")
+
+    assert has_unfinished_restore_journal(session_id) is False
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        # A truncated write is itself evidence of an interrupted one.
+        ("truncated.json", "{not json"),
+        # Not an object: doc.get would raise, and unknown means fail closed.
+        ("notadict.json", '["a list"]'),
+        # Task-1 restore journals predate the kind envelope entirely.
+        (
+            "legacy.json",
+            '{"transaction_id": "t", "session_id": "s", "status": "APPLYING",'
+            ' "target_snapshot_id": "snap", "recovery_mode": "rollback"}',
+        ),
+    ],
+)
+def test_unreadable_or_kindless_journals_still_fail_closed(name, text):
+    from backend.services.snapshot_v2.feature_gate import (
+        has_unfinished_restore_journal,
+    )
+
+    session_id = f"journal-raw-{name.split('.')[0]}"
+    _write_raw_journal(session_id, name, text)
+
+    assert has_unfinished_restore_journal(session_id) is True
