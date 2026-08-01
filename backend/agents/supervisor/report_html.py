@@ -279,6 +279,12 @@ class ReportHtmlMixin:
             def _replace_figure_marker(m):
                 fname = m.group(1).strip()
                 caption = (m.group(2) or "").strip() if m.lastindex >= 2 else ""
+                # A figure embeds once. Repeat markers were previously honoured,
+                # so a filename cited three times was inlined three times — twice
+                # of it back to back in the same section.
+                if fname in placed_figures:
+                    logger.info(f"Figure already embedded, dropping repeat reference: {fname}")
+                    return ""
                 fig_html = _build_figure_html(fname, caption=caption)
                 if fig_html:
                     placed_figures.add(fname)
@@ -297,6 +303,9 @@ class ReportHtmlMixin:
             def _replace_table_marker(m):
                 fname = m.group(1).strip()
                 caption = (m.group(2) or "").strip() if m.lastindex >= 2 else ""
+                if fname in placed_tables:
+                    logger.info(f"Table already embedded, dropping repeat reference: {fname}")
+                    return ""
                 tbl_html = _build_table_html(fname, caption=caption)
                 if tbl_html:
                     placed_tables.add(fname)

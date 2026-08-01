@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.37.9 · **Last updated**: 2026-07-31
+**Version**: 0.38.1 · **Last updated**: 2026-08-01
 
 ## 1. Runtime Architecture
 
@@ -252,6 +252,13 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.38.x — (2026-08-01 onward)**
+
+- `0.38.1` — A finished report opened with a bulk RNA-seq heatmap under "Analysis Methodology Overview", and in another session with a round-3 stress/metal-axis panel under "Quality Control". Neither figure had anything to do with the chapter introducing it, and no component had chosen to put it there. The report mixed two ordering principles in one document — the opening chapters organised by *analysis type*, the later ones by *round* — so every figure had a home under both and nothing arbitrated between them. The report model resolved the conflict the only way left to it, by filename semantics, which is how a panel named `..._qc_overview` came to open a report it had no part in. Backend 4040 pass / 79 skip (4003 before, plus 48 new tests); the one failure, `pydeseq2` absent from the host interpreter, is pre-existing on `0.37.8`. +1611 / −57 across 11 files (2026-08-01):
+  - **The chapter list is derived from the rounds that ran (`services/report/report_outline.py`)**: the round is at once the unit of time and the unit of argument — one innovation round pursues one research direction — so a single organising axis yields an order that is chronological and argumentative together, and the conflict has nowhere to arise. Method description moves to a Methods chapter that owns no result figures; the four type-organised chapters that were competing for them (`analysis_overview`, `data_qc`, `clustering_annotation`, `differential_expression`) are gone from a multi-round report. A single-pass analysis keeps the older outline unchanged, because with one QC step and one DE step type headings are unambiguous.
+  - **Integration rounds are placed by what follows them, not by what they are**: one with further innovation work after it is a *gate* — it explains why the next direction was chosen — so it belongs inline between the directions it connects, capped at `GATE_SECTION_WORD_LIMIT` words with its conclusions labelled provisional, because later rounds may revise them. The final integration round closes the argument and becomes a full chapter. The predicate is computed from `round_results`, not judged by the model. Previously *no* integration round produced a section at all — only `phase == "innovation"` did — so a run with three integration cycles collapsed them into one generic chapter and the two mid-run syntheses were dropped despite being stored in full (three blobs, 21/13/19 KB, pairwise token overlap ~50%: accumulating, not redundant).
+  - **A figure belongs to the round that produced it, and the binding is enforced in code (`services/report/figure_attribution.py`, `figure_placement.py`)**: provenance comes from supervision records, then `PublicationFigure.round_number`, then file mtime against round boundaries. The first source is authoritative but sparse — the sandbox emits its `[Auto-saved]` marker only for figures still open when a cell ends, so analysis code that closes its own figures leaves no record. Measured: one session logged 0 of 25 figures across 190 records, another 35 of 59 all from a single round out of five. mtime therefore carries most figures in practice; on both sessions the three sources together resolve 100%. Enforcement is not left to prompt compliance — the prompt already said "each figure appears exactly once" while a shipped report embedded one figure three times, twice back to back. Cross-round references are relocated, repeats dropped, uncited figures appended to their round's section, and section order restored to plan regardless of the order the model emitted. The degraded `_fallback_report` body is exempt from both passes: it has its own fixed sections and was never written against an outline.
 
 **0.37.x — (2026-07-30 onward)**
 

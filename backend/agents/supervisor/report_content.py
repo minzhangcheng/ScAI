@@ -3,7 +3,7 @@
 Moved verbatim out of backend/agents/supervisor_agent.py; composed into SupervisorAgent.
 """
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, Sequence
 import asyncio
 import json
 import logging
@@ -21,6 +21,14 @@ from ...models.schemas import AnalysisState, AnalysisStep
 from ...utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
 from ...services.report.interaction_records import write_interaction_record_files
 from ...services.report.artifacts import eligible_artifacts
+from ...services.report.figure_attribution import attribute_figures_to_rounds
+from ...services.report.figure_placement import enforce_figure_placement
+from ...services.report.report_outline import (
+    GATE_SECTION_WORD_LIMIT,
+    OutlineSection,
+    align_sections_to_outline,
+    build_report_outline,
+)
 from ..prompt_blocks import build_integration_block
 
 
@@ -106,14 +114,26 @@ class ReportContentMixin:
             invalidated_stems=set(analysis_state.invalidated_artifact_stems or []),
         )
 
+        # Plan the report from the rounds that ran, and bind every figure to the
+        # round that produced it. Both are needed before the prompt is built and
+        # again after the model answers, to check its placement against them.
+        outline = build_report_outline(analysis_state)
+        attribution = attribute_figures_to_rounds(
+            figure_map.keys(),
+            state=analysis_state,
+            records=all_records,
+            figure_paths=figure_map,
+        )
+
         await _progress(15, "Generating report content...")
 
         # Generate report sections using strong model
         report_prompt = self._build_report_prompt(
             narrative, stats, analysis_state, figure_map, language,
-            table_list=table_list,
+            table_list=table_list, outline=outline, attribution=attribution,
         )
 
+        used_fallback = False
         try:
             # Use the provided LLM client (matching report_model's endpoint),
             # falling back to supervisor's own client if not provided.
@@ -147,11 +167,13 @@ class ReportContentMixin:
                         f"[{self.session_id}] Report generation failed after retry"
                     )
                     report_content = self._fallback_report(narrative, stats, language)
+                    used_fallback = True
                 except Exception:
                     logger.exception(
                         f"[{self.session_id}] Report generation LLM call failed"
                     )
                     report_content = self._fallback_report(narrative, stats, language)
+                    used_fallback = True
                     break
         finally:
             # Restore supervisor context in case of subsequent LLM calls
@@ -179,7 +201,44 @@ class ReportContentMixin:
             )
 
         # Parse the LLM output into sections
-        sections = self._parse_report_sections(report_content, language)
+        sections = self._parse_report_sections(report_content, language, outline=outline)
+
+        # The fallback body is a degraded step summary with its own fixed
+        # sections; forcing it through an outline it was never written against
+        # would only scramble it. Its figures fall through to the supplementary
+        # section, which is the honest presentation for a failed report.
+        if not used_fallback:
+            # Reading order follows the outline, not the order the model emitted.
+            # Sections owning figures are materialised even when skipped, so their
+            # figures have a home in the right place.
+            sections_with_figures = {
+                sid for sid in (
+                    next((s.id for s in outline if rn in s.rounds), None)
+                    for rn in set(attribution.values())
+                ) if sid
+            }
+            sections = align_sections_to_outline(
+                sections, outline, require_ids=sections_with_figures
+            )
+
+            # Placement is enforced in code, not left to the model's compliance:
+            # it relocates cross-round references, drops repeats, and appends
+            # figures the model never cited to the section owning their round.
+            figure_order = {}
+            for name, path in figure_map.items():
+                try:
+                    figure_order[name] = path.stat().st_mtime
+                except OSError:
+                    pass
+            placement = enforce_figure_placement(
+                sections, outline, attribution, figure_map.keys(),
+                figure_order=figure_order,
+            )
+            if placement.unplaced:
+                logger.info(
+                    f"[{self.session_id}] {len(placement.unplaced)} figures had no "
+                    f"owning section and fall through to Supplementary Figures"
+                )
 
         # Build chat sections if chat_messages provided
         if chat_messages:
@@ -290,6 +349,56 @@ class ReportContentMixin:
         await _progress(100, "Complete")
         return report
 
+    @staticmethod
+    def _build_figure_allocation_text(
+        outline: Sequence["OutlineSection"],
+        figure_map: Dict[str, Path],
+        attribution: Dict[str, int],
+    ) -> str:
+        """List, per section, the figures that section owns.
+
+        A figure belongs to the round that produced it. Handing the model a flat
+        list and asking it to pick "the most relevant section" made placement a
+        semantic guess over filenames — which is how a round-3 panel named
+        ``..._qc_overview`` came to open a report. The allocation below removes
+        the guess; code re-checks it afterwards regardless.
+        """
+        owner_of_round: Dict[int, str] = {}
+        for sec in outline:
+            for rn in sec.rounds:
+                owner_of_round.setdefault(int(rn), sec.id)
+
+        per_section: Dict[str, List[str]] = {sec.id: [] for sec in outline}
+        unattributed: List[str] = []
+        for name in figure_map:
+            rn = attribution.get(name)
+            sid = owner_of_round.get(rn) if rn is not None else None
+            if sid is None:
+                unattributed.append(name)
+            else:
+                per_section[sid].append(name)
+
+        lines: List[str] = []
+        for sec in outline:
+            names = per_section.get(sec.id) or []
+            if not sec.rounds:
+                lines.append(f"[{sec.id}] — no figures (this section carries no result figures)")
+            elif names:
+                lines.append(f"[{sec.id}] — round(s) {', '.join(str(r) for r in sec.rounds)}:")
+                lines.extend(f"    - {n}" for n in names)
+            else:
+                lines.append(
+                    f"[{sec.id}] — round(s) {', '.join(str(r) for r in sec.rounds)}: "
+                    f"no figures were produced"
+                )
+        if unattributed:
+            lines.append(
+                "Figures whose round could not be determined (place by content, "
+                "or omit):"
+            )
+            lines.extend(f"    - {n}" for n in unattributed)
+        return "\n".join(lines) or "None"
+
     def _build_report_prompt(
         self,
         narrative: str,
@@ -298,20 +407,23 @@ class ReportContentMixin:
         figure_map: Dict[str, Path],
         language: str,
         table_list: Optional[List[Dict]] = None,
+        outline: Optional[Sequence["OutlineSection"]] = None,
+        attribution: Optional[Dict[str, int]] = None,
     ) -> str:
         """Build the prompt for the report-writing LLM."""
+        attribution = attribution or {}
         figure_list = "\n".join(
-            f"- {name} ({self._categorize_figure(name)})" for name in figure_map.keys()
+            f"- {name} ({self._categorize_figure(name)})"
+            + (f" [round {attribution[name]}]" if name in attribution else "")
+            for name in figure_map.keys()
         ) or ("None")
 
-        # Collect per-round findings with phase labels
+        # Collect per-round findings with phase labels. The section list no
+        # longer derives from this loop — build_report_outline() reads the rounds
+        # directly — so it only builds narrative text now.
         findings_parts = []
-        has_innovation = False
-        innovation_directions = []
         for rr in state.round_results:
             phase_label = (rr.phase or "exploration").upper()
-            if rr.phase == "innovation":
-                has_innovation = True
             header = (
                 f"### Round {rr.round_number} ({phase_label}; "
                 f"status={rr.round_status}; evidence={rr.evidence_status})"
@@ -325,7 +437,6 @@ class ReportContentMixin:
                     direction = state.user_chosen_direction
                 if direction:
                     header += f" — Direction: {direction}"
-                    innovation_directions.append((rr.round_number, direction))
 
             findings_parts.append(header)
             if getattr(rr, "bioinformatics_evidence_verified", None) is False:
@@ -373,49 +484,42 @@ class ReportContentMixin:
         # Cross-direction integration analyses (spec §13)
         integration_text = build_integration_block(state, style="detailed") or "None"
 
-        # Build dynamic section template
-        base_sections = [
-            "[abstract] - Research summary (background, methods, key findings, conclusions)",
-            "[analysis_overview] - Analysis methodology overview (study design, data processing pipeline, computational methods, key parameters)",
-            "[data_qc] - Data overview and quality control",
-            "[clustering_annotation] - Clustering and cell type annotation (include PI checkpoint guidance if available)",
-            "[differential_expression] - Differential expression analysis (include PI checkpoint guidance if available)",
-            "[mechanism_candidates] - Data-driven candidate mechanisms (use hypothesis wording for "
-            "low/medium confidence; never present as confirmed; include missing evidence)",
-        ]
-
-        if has_innovation:
-            base_sections.append(
-                "[exploration_findings] - Phase 1 exploration findings summary and proposed research directions"
-            )
-            for i, (round_num, direction) in enumerate(innovation_directions):
-                short_dir = direction[:80] if direction else f"Direction {i+1}"
-                base_sections.append(
-                    f"[innovation_{i+1}] - Innovation Phase (Round {round_num}): {short_dir} "
-                    f"(hypothesis, targeted analyses such as GSEA/ORA/gene modules, key findings, "
-                    f"biological significance). This section MUST be comprehensive and include ALL "
-                    f"findings from this research direction."
-                )
-            base_sections.append(
-                "[integrated_findings] - Integrated findings across all phases (cross-phase connections, "
-                "how innovation findings validate or extend exploration discoveries)"
-            )
-        else:
-            base_sections.append("[key_findings] - Key biological findings")
-
-        base_sections.append(
-            "[conclusions] - Conclusions and future directions"
-        )
+        # Section template, derived from the rounds that actually ran. The
+        # outline orders the report by round, which is at once the chronological
+        # and the argumentative unit; see services/report/report_outline.py.
+        outline = outline or build_report_outline(state)
+        base_sections = [f"[{sec.id}] - {sec.guidance}" for sec in outline]
 
         sections_text = "\n".join(base_sections)
 
-        # Build per-section title guidance from base_sections
-        section_title_lines = []
-        for sec_line in base_sections:
-            sec_id = sec_line.split("]")[0].lstrip("[")
-            default_title = _SECTION_ID_TO_DEFAULT_TITLE.get(
-                sec_id, sec_id.replace("_", " ").title()
+        # Per-section figure allocation. Each section is told exactly which
+        # figures are its own, so the model never has to infer round provenance
+        # from a filename — the failure mode this replaces.
+        figure_allocation = self._build_figure_allocation_text(
+            outline, figure_map, attribution
+        )
+
+        # Integration gates are hinges, not chapters — the 300-500 word floor
+        # that makes findings sections substantial would pad them into rivals of
+        # the directions they merely connect, and their conclusions are the ones
+        # most likely to be superseded.
+        gate_ids = [sec.id for sec in outline if sec.is_brief]
+        if gate_ids:
+            gate_note = (
+                f"- EXCEPTION to the length floor: {', '.join(gate_ids)} are transition "
+                f"sections. Keep each under {GATE_SECTION_WORD_LIMIT} words, covering only "
+                f"what the completed directions jointly showed and which new direction that "
+                f"motivated. Label their conclusions provisional.\n"
             )
+            brevity_note = " (except the transition sections noted below)"
+        else:
+            gate_note = ""
+            brevity_note = ""
+
+        # Build per-section title guidance from the outline
+        section_title_lines = []
+        for sec, sec_line in zip(outline, base_sections):
+            default_title = sec.default_title
             section_title_lines.append(
                 f"  {sec_line}\n"
                 f"    → Use a descriptive scientific title (e.g., \"{default_title}\") "
@@ -450,6 +554,14 @@ class ReportContentMixin:
 ## Available Figures
 {figure_list}
 
+## Figure Allocation (BINDING)
+Every figure belongs to the round that produced it, and each section below owns
+the figures of its round. Place each figure ONLY in the section listed here.
+Do not move a figure to a section that "reads" like a better fit — a filename
+describes the kind of plot, not the stage of the analysis it came from.
+
+{figure_allocation}
+
 ## Available Tables (CSV)
 {table_list_text}
 
@@ -483,18 +595,18 @@ When referencing a data table, use this exact format (each marker on its own lin
 [TABLE: exact_filename.csv]
 [TABLE_CAPTION: A concise scientific caption (1-2 sentences) describing key data in this table and its significance]
 
-Each figure and table should appear exactly once in the most relevant section.
-Do NOT create separate figure/table appendix or listing sections.
+Each figure and table appears EXACTLY ONCE, in the section the Figure Allocation
+assigns it to. Do NOT create separate figure/table appendix or listing sections.
 
 IMPORTANT:
 - Write as a formal scientific research report, NOT a monitoring or system log.
-- Make the report thorough and comprehensive with detailed scientific content (300-500 words minimum per section).
+- Make the report thorough and comprehensive with detailed scientific content (300-500 words minimum per section){brevity_note}.
 - Innovation phase sections are CRITICAL — they contain the novel research findings and MUST be written in detail.
 - Reference specific figures, genes, pathways, cell types, statistical results, and quantitative findings.
-- Include ALL available figures — assign each figure to the most relevant section using [FIGURE: filename] markers.
+- Include ALL available figures, each in the section assigned to it by the Figure Allocation above, using [FIGURE: filename] markers.
 - Include ALL available tables — assign each table to the most relevant section using [TABLE: filename.csv] markers.
 - Every [FIGURE:] and [TABLE:] marker MUST be followed by its corresponding [FIGURE_CAPTION:] or [TABLE_CAPTION:] marker on the next line.
-"""
+{gate_note}"""
         return prompt
 
     def _get_report_system_prompt(self, language: str) -> str:
@@ -644,9 +756,19 @@ IMPORTANT:
 
         return "\n".join(parts)
 
-    def _parse_report_sections(self, content: str, language: str) -> List[Dict]:
+    def _parse_report_sections(
+        self,
+        content: str,
+        language: str,
+        outline: Optional[Sequence["OutlineSection"]] = None,
+    ) -> List[Dict]:
         """Parse LLM-generated report content into structured sections."""
         sections = []
+        # Titles and analysis types come from the outline the report was planned
+        # from; the static tables remain the fallback for sections the model
+        # invented and for callers that pass no outline.
+        outline_titles = {sec.id: sec.default_title for sec in (outline or ())}
+        outline_types = {sec.id: sec.analysis_type for sec in (outline or ())}
         # Split by ## [section_id] pattern
         pattern = re.compile(r'^##\s*\[(\w+)\]\s*(.+?)$', re.MULTILINE)
         matches = list(pattern.finditer(content))
@@ -656,7 +778,7 @@ IMPORTANT:
             title = match.group(2).strip()
             # Safety net: replace placeholder text with section-ID-derived fallback
             if not title or title.lower() in _PLACEHOLDER_SECTION_TITLES:
-                title = _SECTION_ID_TO_DEFAULT_TITLE.get(
+                title = outline_titles.get(section_id) or _SECTION_ID_TO_DEFAULT_TITLE.get(
                     section_id,
                     section_id.replace("_", " ").title(),
                 )
@@ -669,9 +791,11 @@ IMPORTANT:
             end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
             section_content = content[start:end].strip()
 
-            analysis_type = (
+            analysis_type = outline_types.get(section_id) or (
                 "specific"
-                if section_id in _SPECIFIC_SECTION_IDS or section_id.startswith("innovation_")
+                if section_id in _SPECIFIC_SECTION_IDS
+                or section_id.startswith("innovation_")
+                or section_id.startswith("direction_")
                 else "general"
             )
             sections.append({
