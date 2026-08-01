@@ -344,3 +344,254 @@ def test_an_unusable_database_is_left_to_the_gate(tmp_path, monkeypatch):
     monkeypatch.setattr(marker_priors, "trigger_fetch", _explode)
     monkeypatch.setattr(marker_priors, "_topped_up", False)
     assert marker_priors.top_up_missing_tables(db) is False
+
+
+# ------------------------------------ one source being down must not take the
+# ------------------------------------ other with it
+
+def _stub_sources(monkeypatch, *, primary_ok: bool, supplementary_ok: bool):
+    """Point both downloaders at canned outcomes, recording what got called."""
+    import pandas as pd
+
+    calls = []
+
+    def _make(name, ok):
+        def _download():
+            calls.append(name)
+            if not ok:
+                raise RuntimeError(f"{name} unreachable")
+            return pd.DataFrame([{c: "" for c in fm.SCHEMA_COLS}])
+        return _download
+
+    monkeypatch.setattr(fm, "_download_panglaodb", _make("panglaodb", primary_ok))
+    monkeypatch.setattr(fm, "_download_cellmarker", _make("cellmarker", supplementary_ok))
+    return calls
+
+
+def test_a_primary_that_is_down_does_not_take_the_supplementary_source_with_it(
+    tmp_path, monkeypatch,
+):
+    """The failure this test exists for, observed on 2026-08-01.
+
+    panglaodb.se hung its TLS handshake for ~60 s and then dropped it. The
+    primary download raised inside the pass-wide try, so ``fetch_and_write``
+    returned False having never issued a CellMarker request -- and CellMarker
+    was reachable the entire time. ``MarkerDB.usable()`` is an any() over the
+    two tables, so that one table would have been enough: instead the run
+    stopped on a HITL dialog whose retry button re-entered the same dead host.
+    """
+    calls = _stub_sources(monkeypatch, primary_ok=False, supplementary_ok=True)
+
+    assert fm.fetch_and_write(tmp_path) is True
+    assert calls == ["panglaodb", "cellmarker"], (
+        "a primary failure must not skip the supplementary download"
+    )
+    assert not (tmp_path / "panglaodb.tsv").exists()
+    assert fm.is_current_revision(tmp_path / "cellmarker.tsv")
+    assert marker_priors.MarkerDB(tmp_path).usable() is True
+    assert (tmp_path / "LICENSE").exists(), (
+        "attribution has to be written on a supplementary-only pass too"
+    )
+
+
+def test_fetch_reports_failure_only_when_no_table_survives(tmp_path, monkeypatch):
+    calls = _stub_sources(monkeypatch, primary_ok=False, supplementary_ok=False)
+
+    assert fm.fetch_and_write(tmp_path) is False
+    assert calls == ["panglaodb", "cellmarker"], "both sources must be attempted"
+    assert marker_priors.MarkerDB(tmp_path).usable() is False
+    assert not (tmp_path / "LICENSE").exists(), (
+        "attribution travels with the data; there is no data here"
+    )
+
+
+@pytest.mark.parametrize("primary_ok", [True, False])
+@pytest.mark.parametrize("supplementary_ok", [True, False])
+def test_return_value_states_whether_the_database_came_out_usable(
+    tmp_path, monkeypatch, primary_ok, supplementary_ok,
+):
+    """The contract, pinned against the only consumer that matters.
+
+    ``trigger_fetch`` returning True is what tells the HITL callback to stop
+    prompting, and the thing it is really being asked is "can annotation use
+    the database now" -- which is ``MarkerDB.usable()``, an any() over the
+    tables. Reporting per-download success instead is what made a reachable
+    CellMarker invisible behind an unreachable PanglaoDB.
+    """
+    _stub_sources(monkeypatch, primary_ok=primary_ok, supplementary_ok=supplementary_ok)
+
+    result = fm.fetch_and_write(tmp_path)
+    assert result is marker_priors.MarkerDB(tmp_path).usable()
+    assert result is (primary_ok or supplementary_ok)
+
+
+def test_a_failed_forced_refetch_leaves_the_existing_table_usable(tmp_path, monkeypatch):
+    """force=True is the HITL retry path; it must not be able to make things worse.
+
+    Every table counts as stale under force, so both downloads are attempted.
+    When they fail, what is already on disk is what the answer is about --
+    atomic_write_tsv never got as far as replacing it.
+    """
+    _write_current(tmp_path, "cellmarker.tsv")
+    _stub_sources(monkeypatch, primary_ok=False, supplementary_ok=False)
+
+    assert fm.fetch_and_write(tmp_path, force=True) is True
+    assert fm.is_current_revision(tmp_path / "cellmarker.tsv")
+    assert marker_priors.MarkerDB(tmp_path).usable() is True
+
+
+# -------------------------------------------------- transient faults get a retry
+
+class _FakeResponse:
+    def __init__(self, status_code=200, content=b"payload"):
+        self.status_code = status_code
+        self.content = content
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise fm.httpx.HTTPStatusError(
+                f"{self.status_code}", request=None, response=self)
+
+
+def _fake_client(outcomes, attempts):
+    """Client stub yielding one entry of ``outcomes`` per GET."""
+    class _Client:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, url):
+            attempts.append(url)
+            outcome = outcomes[len(attempts) - 1]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+    return _Client
+
+
+def test_a_transient_transport_fault_is_retried_rather_than_surfaced(monkeypatch):
+    """The observed fault arrives as an SSL EOF, not a status code.
+
+    Single-shot, one blip on a host that works seconds later cost a whole run.
+    """
+    attempts, slept = [], []
+    outcomes = [
+        fm.httpx.ConnectError("[SSL: UNEXPECTED_EOF_WHILE_READING] EOF ..."),
+        fm.httpx.ReadTimeout("timed out"),
+        _FakeResponse(),
+    ]
+    monkeypatch.setattr(fm.httpx, "Client", _fake_client(outcomes, attempts))
+    monkeypatch.setattr(fm.time, "sleep", lambda s: slept.append(s))
+
+    assert fm._http_get_bytes("https://panglaodb.se/x.tsv.gz") == b"payload"
+    assert len(attempts) == 3
+    assert slept == list(fm._HTTP_BACKOFF_SECONDS), "must back off between attempts"
+
+
+def test_the_last_failure_is_raised_once_the_attempts_run_out(monkeypatch):
+    attempts = []
+    boom = fm.httpx.ConnectError("still down")
+    outcomes = [fm.httpx.ConnectError("down"), fm.httpx.ConnectError("down"), boom]
+    monkeypatch.setattr(fm.httpx, "Client", _fake_client(outcomes, attempts))
+    monkeypatch.setattr(fm.time, "sleep", lambda s: None)
+
+    with pytest.raises(fm.httpx.ConnectError) as excinfo:
+        fm._http_get_bytes("https://panglaodb.se/x.tsv.gz")
+    assert excinfo.value is boom
+    assert len(attempts) == fm._HTTP_ATTEMPTS
+
+
+@pytest.mark.parametrize("status,retried", [(403, False), (404, False),
+                                            (429, True), (503, True)])
+def test_only_statuses_a_repeat_could_change_are_retried(monkeypatch, status, retried):
+    """Repeating a request the server declined outright just delays the dialog."""
+    attempts, slept = [], []
+    outcomes = [_FakeResponse(status_code=status)] * fm._HTTP_ATTEMPTS
+    monkeypatch.setattr(fm.httpx, "Client", _fake_client(outcomes, attempts))
+    monkeypatch.setattr(fm.time, "sleep", lambda s: slept.append(s))
+
+    with pytest.raises(fm.httpx.HTTPStatusError):
+        fm._http_get_bytes("https://panglaodb.se/x.tsv.gz")
+    assert len(attempts) == (fm._HTTP_ATTEMPTS if retried else 1)
+    assert bool(slept) is retried
+
+
+def test_connect_and_read_are_budgeted_separately():
+    """They shared one 120 s timeout, so a hung handshake burned the read budget.
+
+    The long read budget is for CellMarker's 12 MB body. Spending it on a
+    connection that is never going to open is how a single dead host held a run
+    for minutes before anything else was attempted.
+    """
+    timeout = fm._HTTP_TIMEOUT
+    assert timeout.connect < timeout.read
+    assert timeout.connect <= 30, "a handshake that hangs must fail fast"
+    assert timeout.read >= 60, "the body of a 12 MB table needs room to arrive"
+
+
+# ---------------------------- the reason a source failed is kept for the dialog
+
+def test_each_source_records_why_it_failed(tmp_path, monkeypatch):
+    """"Download failed" is not enough to choose between retry and skip.
+
+    The reason lived only in a container log, so the dialog could not tell the
+    user whether the host had dropped a handshake (retry) or answered 404
+    (skip). Recorded per source because the sources fail independently.
+    """
+    _stub_sources(monkeypatch, primary_ok=False, supplementary_ok=False)
+
+    assert fm.fetch_and_write(tmp_path) is False
+    assert set(fm.LAST_FETCH_ERRORS) == {"panglaodb.tsv", "cellmarker.tsv"}
+    assert "panglaodb unreachable" in fm.LAST_FETCH_ERRORS["panglaodb.tsv"]
+    assert "RuntimeError" in fm.LAST_FETCH_ERRORS["panglaodb.tsv"], (
+        "the exception type is part of what makes the reason actionable"
+    )
+
+
+def test_only_the_source_that_failed_is_recorded(tmp_path, monkeypatch):
+    _stub_sources(monkeypatch, primary_ok=False, supplementary_ok=True)
+
+    assert fm.fetch_and_write(tmp_path) is True
+    assert set(fm.LAST_FETCH_ERRORS) == {"panglaodb.tsv"}
+
+
+def test_a_clean_pass_leaves_no_reason_behind(tmp_path, monkeypatch):
+    """Otherwise a later dialog quotes a failure that has since been fixed."""
+    _stub_sources(monkeypatch, primary_ok=False, supplementary_ok=False)
+    fm.fetch_and_write(tmp_path)
+    assert fm.LAST_FETCH_ERRORS
+
+    _stub_sources(monkeypatch, primary_ok=True, supplementary_ok=True)
+    assert fm.fetch_and_write(tmp_path, force=True) is True
+    assert fm.LAST_FETCH_ERRORS == {}
+
+
+def test_a_lock_collision_is_a_reason_too(tmp_path, monkeypatch):
+    """Every False return has to come with something the dialog can show."""
+    _stub_sources(monkeypatch, primary_ok=True, supplementary_ok=True)
+    (tmp_path / ".fetch.lock").write_text("held")
+
+    assert fm.fetch_and_write(tmp_path) is False
+    assert "lock" in " ".join(fm.LAST_FETCH_ERRORS.values())
+
+
+def test_marker_priors_exposes_the_reasons_to_its_callers(tmp_path, monkeypatch):
+    monkeypatch.setattr(marker_priors, "_fetch_mod", fm)
+    _stub_sources(monkeypatch, primary_ok=False, supplementary_ok=False)
+    fm.fetch_and_write(tmp_path)
+
+    reasons = marker_priors.last_fetch_errors()
+    assert set(reasons) == {"panglaodb.tsv", "cellmarker.tsv"}
+    reasons["panglaodb.tsv"] = "mutated"
+    assert fm.LAST_FETCH_ERRORS["panglaodb.tsv"] != "mutated", "must hand back a copy"
+
+
+def test_reasons_are_empty_before_any_fetch_has_run(monkeypatch):
+    monkeypatch.setattr(marker_priors, "_fetch_mod", None)
+    assert marker_priors.last_fetch_errors() == {}

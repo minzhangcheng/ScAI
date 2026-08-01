@@ -224,8 +224,30 @@ def trigger_fetch(force: bool = False) -> bool:
     try:
         return bool(_fetch_mod.fetch_and_write(runtime_markers_dir(), force=force))
     except Exception as e:
+        # fetch_and_write swallows download faults itself, so reaching here
+        # means the call could not be made at all. Record it the same way so
+        # the dialog has something to show either way.
+        try:
+            _fetch_mod.LAST_FETCH_ERRORS["marker database"] = f"{type(e).__name__}: {e}"
+        except Exception:  # pragma: no cover - the module failed to load
+            pass
         logger.warning(f"trigger_fetch failed: {e}")
         return False
+
+
+def last_fetch_errors() -> Dict[str, str]:
+    """Per-source failure reasons from the most recent ``trigger_fetch``.
+
+    Empty before any fetch has run or after one that succeeded outright.
+    Exists so the HITL dialog can name the host that is down instead of
+    saying only that a download failed -- on 2026-08-01 the actual reason
+    (panglaodb.se dropping its TLS handshake) was visible nowhere but the
+    container log, so nothing the user could see distinguished "retry in a
+    minute" from "this will never work".
+    """
+    if _fetch_mod is None:
+        return {}
+    return dict(getattr(_fetch_mod, "LAST_FETCH_ERRORS", {}))
 
 
 _topped_up = False

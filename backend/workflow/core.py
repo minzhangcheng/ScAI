@@ -477,7 +477,18 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
     async def _wait_for_marker_db_intervention(
         self, node_name: str, analysis_state: AnalysisState,
     ) -> LlmFailureAction:
-        """缺 marker TSV 时复用 LlmTimeoutDialog 通道。retry 不清 LLM cache。"""
+        """缺 marker TSV 时复用 LlmTimeoutDialog 通道。retry 不清 LLM cache。
+
+        The per-source reason travels with the prompt. Asking someone to
+        choose between retrying and annotating without DB priors, while
+        showing them only "download failed", withholds the one fact the
+        choice turns on -- a host that dropped a TLS handshake is worth
+        retrying, a 404 is not.
+        """
+        from backend.services import marker_priors
+
+        reasons = marker_priors.last_fetch_errors()
+        detail = "; ".join(f"{name} — {why}" for name, why in reasons.items())
         return await self._drive_hitl_gate(
             node_name, analysis_state,
             reason=WaitInputReason.MARKER_DB_MISSING.value,
@@ -485,7 +496,9 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             info_payload={
                 "agent": "bioinformatics", "model": "", "llm_server": "",
                 "error": ("Automatic download of the marker database failed. "
-                          "Retry the download, skip (literature-only annotation), or terminate."),
+                          "Retry the download, skip (literature-only annotation), "
+                          "or terminate."
+                          + (f"\n\nLast attempt: {detail}" if detail else "")),
                 "reason": "marker_db_missing",
             },
             enter_change=StateSyncChangeType.LLM_FAILURE.value,

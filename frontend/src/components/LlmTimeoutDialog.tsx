@@ -125,8 +125,32 @@ export default function LlmTimeoutDialog({
         </div>
 
         {description && (
-          <div className="px-6 py-4">
+          <div className="px-6 py-4 space-y-3">
             <p className="text-sm text-gray-600">{description}</p>
+            {/* Which source failed and why. The marker-DB branch hides the info
+                section below, so without this the dialog says only that a
+                download failed and the reason -- the host, the transport error
+                -- stays in a server log the user cannot open. That reason is
+                what the choice turns on: a dropped TLS handshake is worth
+                retrying, a 404 is not. */}
+            <div>
+              <button
+                onClick={() => setShowErrorDetail(!showErrorDetail)}
+                className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors"
+                aria-expanded={showErrorDetail}
+              >
+                {showErrorDetail
+                  ? <ChevronUp className="w-3 h-3" aria-hidden="true" />
+                  : <ChevronDown className="w-3 h-3" aria-hidden="true" />
+                }
+                {t('llmErrorDetails')}
+              </button>
+              {showErrorDetail && (
+                <div className="mt-2 p-3 bg-gray-50 rounded-lg text-xs text-gray-600 font-mono break-words whitespace-pre-wrap max-h-32 overflow-y-auto" role="log">
+                  {llmFailureInfo.error}
+                </div>
+              )}
+            </div>
           </div>
         )}
 

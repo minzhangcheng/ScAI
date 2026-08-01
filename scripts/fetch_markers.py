@@ -15,10 +15,11 @@ CLI: python scripts/fetch_markers.py
   PanglaoDB      主源       CC BY-NC 4.0  https://panglaodb.se/
   CellMarker 3.0 补稀有/亚型  见官网       https://bio-bigdata.hrbmu.edu.cn/CellMarker/
 覆盖 human / mouse。仅离线非商业研究用途；商用需自行复核许可。
-补充源失败只 warning，不阻断主源写出。
+任一源下载失败只 warning，不影响另一源写出；两源都拿不到才算失败。
 """
 from __future__ import annotations
 import os
+import time
 import logging
 from io import BytesIO
 from pathlib import Path
@@ -165,12 +166,55 @@ def _download_panglaodb() -> pd.DataFrame:
                              tissue_col="organ")
 
 
+#: A single transient fault must not cost a run. panglaodb.se answers a TLS
+#: handshake it dislikes by holding the connection open and dropping it a
+#: minute later, which surfaces as an SSL EOF rather than a status code; the
+#: same request a few seconds later succeeds. Single-shot, that blip reached
+#: the user as a blocked run waiting on a HITL dialog.
+_HTTP_ATTEMPTS = 3
+#: Waits between attempts; length is _HTTP_ATTEMPTS - 1.
+_HTTP_BACKOFF_SECONDS = (2.0, 8.0)
+#: connect and read are budgeted separately. Sharing one 120 s timeout meant a
+#: handshake that hung cost two minutes before anything else was tried -- the
+#: read budget exists for CellMarker's 12 MB body, not for waiting on a
+#: connection that is never going to open.
+_HTTP_TIMEOUT = httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=10.0)
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Transient transport faults and server-side refusals are worth another go.
+
+    A 4xx other than 429 is the server declining this exact request; repeating
+    it unchanged only burns time, and here that time is spent in front of a
+    user whose analysis is parked on the result.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        return code == 429 or code >= 500
+    return isinstance(exc, httpx.HTTPError)
+
+
 def _http_get_bytes(url: str, verify: bool = True) -> bytes:
-    with httpx.Client(verify=verify, timeout=120, follow_redirects=True,
-                      headers={"User-Agent": USER_AGENT}) as c:
-        r = c.get(url)
-        r.raise_for_status()
-        return r.content
+    last_error: Exception | None = None
+    for attempt in range(_HTTP_ATTEMPTS):
+        if attempt:
+            delay = _HTTP_BACKOFF_SECONDS[attempt - 1]
+            logger.warning(
+                f"{url}: attempt {attempt}/{_HTTP_ATTEMPTS} failed "
+                f"({last_error}); retrying in {delay:.0f}s")
+            time.sleep(delay)
+        try:
+            with httpx.Client(verify=verify, timeout=_HTTP_TIMEOUT,
+                              follow_redirects=True,
+                              headers={"User-Agent": USER_AGENT}) as c:
+                r = c.get(url)
+                r.raise_for_status()
+                return r.content
+        except Exception as e:
+            if not _is_retryable(e):
+                raise
+            last_error = e
+    raise last_error
 
 
 def _download_cellmarker() -> pd.DataFrame:
@@ -185,12 +229,19 @@ def _download_cellmarker() -> pd.DataFrame:
                              tissue_col="tissue_type")
 
 
+#: ``{table_name: reason}`` for the sources that failed on the most recent
+#: pass, replaced wholesale each time. The HITL dialog reads it through
+#: ``marker_priors.last_fetch_errors`` so a user who is asked to choose
+#: between retrying and skipping can see which host is down and why. That
+#: reason used to exist only in a container log they have no way to open,
+#: which made "download failed" the whole of what the platform could say.
+LAST_FETCH_ERRORS: dict[str, str] = {}
+
 _STALE_LOCK_SECONDS = 1800  # 30 分钟后视锁为陈旧（进程崩溃残留）
 
 
 def _acquire_lock(lock: Path):
     """O_CREAT|O_EXCL 文件锁；陈旧（>30min）则夺锁。返回 fd 或 None。"""
-    import time
     try:
         return os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
@@ -236,11 +287,24 @@ def fetch_and_write(dest_dir: Path | None = None, force: bool = False) -> bool:
     written by an older projection, or one absent because its last download
     failed -- is fetched again, and only that table is.
 
-    CellMarker is supplementary: its failure only warns, and PanglaoDB is still
-    written, so annotation keeps the primary source's priors.
+    Each source is downloaded under its own guard and the return value reports
+    what is on disk afterwards, not whether every download succeeded: True iff
+    at least one table carries the current revision -- exactly the condition
+    ``MarkerDB.usable()`` tests, since that is an any() over the same names.
+
+    The guard used to sit on the supplementary source alone, so a PanglaoDB
+    failure returned False without ever attempting CellMarker. On 2026-08-01
+    panglaodb.se hung its TLS handshake for three minutes while CellMarker was
+    reachable the whole time; the run stopped on a HITL dialog whose retry
+    button re-entered the same unreachable host, and a usable supplementary
+    table was never requested. Whichever source is down, the other one still
+    gets fetched and still makes the database usable.
     """
     dest = Path(dest_dir) if dest_dir else default_dest_dir()
     dest.mkdir(parents=True, exist_ok=True)
+    # Reset per pass, so a False return always comes with a current reason
+    # and a success never leaves a stale one behind for the dialog to show.
+    LAST_FETCH_ERRORS.clear()
     # Per-table, not per-run: a primary that is already current must not be
     # re-downloaded just because the supplementary source is missing, and a
     # missing supplementary source must not be masked by a current primary.
@@ -252,22 +316,46 @@ def fetch_and_write(dest_dir: Path | None = None, force: bool = False) -> bool:
     lock = dest / ".fetch.lock"
     fd = _acquire_lock(lock)
     if fd is None:
+        LAST_FETCH_ERRORS["marker database"] = (
+            "another fetch is already running (lock held)")
         logger.warning("marker fetch already in progress (lock present); skipping")
         return False
     try:
-        if "panglaodb.tsv" in stale:
-            atomic_write_tsv(_download_panglaodb(), dest / "panglaodb.tsv", "PanglaoDB_27_Mar_2020")
+        # Looked up through the module globals on every call so a test (or a
+        # caller) that patches one downloader is actually the one that runs.
+        sources = (
+            ("panglaodb.tsv", _download_panglaodb, "PanglaoDB_27_Mar_2020"),
+            ("cellmarker.tsv", _download_cellmarker, "CellMarker3.0"),
+        )
+        for name, download, source_version in sources:
+            if name not in stale:
+                continue
+            try:
+                atomic_write_tsv(download(), dest / name, source_version)
+            except Exception as e:
+                # Per source, never for the pass: the other one may well be up,
+                # and one usable table is all the database needs to work.
+                LAST_FETCH_ERRORS[name] = f"{type(e).__name__}: {e}"
+                logger.warning(f"{name} fetch failed: {e}")
+        present = [name for name in EXPECTED_TABLES
+                   if is_current_revision(dest / name)]
+        if not present:
+            logger.warning("marker fetch failed: no source left a usable table")
+            return False
         # Attribution travels with the data, which lives outside the code tree.
         # Rewritten on every fetch pass, supplementary-only ones included, so a
         # directory that gains cellmarker.tsv later still carries both notices.
         (dest / "LICENSE").write_text(DATA_LICENSE_TEXT)
-        if "cellmarker.tsv" in stale:
-            try:
-                atomic_write_tsv(_download_cellmarker(), dest / "cellmarker.tsv", "CellMarker3.0")
-            except Exception as e:
-                logger.warning(f"CellMarker fetch failed (PanglaoDB still written): {e}")
+        absent = [name for name in EXPECTED_TABLES if name not in present]
+        if absent:
+            logger.warning(
+                f"marker DB usable on {', '.join(present)}; "
+                f"{', '.join(absent)} unavailable this pass")
         return True
     except Exception as e:
+        # Reached only for a fault outside any single download -- an unwritable
+        # destination, say. A download failure is handled per source above.
+        LAST_FETCH_ERRORS["marker database"] = f"{type(e).__name__}: {e}"
         logger.warning(f"marker fetch failed: {e}")
         return False
     finally:

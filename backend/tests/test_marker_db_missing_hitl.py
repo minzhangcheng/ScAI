@@ -107,3 +107,49 @@ async def test_marker_db_callback_terminate_after_failed_download(monkeypatch):
     wf._wait_for_marker_db_intervention = _wait
     action = await wf._marker_db_intervention_callback()
     assert action == LlmFailureAction.TERMINATE
+
+
+@pytest.mark.asyncio
+async def test_the_dialog_names_the_source_that_failed(monkeypatch):
+    """The dialog asks the user to choose; it has to show what they are choosing on.
+
+    On 2026-08-01 the prompt said only that the automatic download had failed.
+    The actual fault — panglaodb.se dropping the TLS handshake, while CellMarker
+    was reachable — appeared nowhere the user could see it, so "retry" and
+    "skip (literature-only annotation)" looked equally arbitrary.
+    """
+    wf = _bare_workflow()
+    captured = {}
+
+    async def _gate(node_name, state, **kwargs):
+        captured.update(kwargs)
+        return LlmFailureAction.SKIP
+
+    wf._drive_hitl_gate = _gate
+    monkeypatch.setattr(
+        "backend.services.marker_priors.last_fetch_errors",
+        lambda: {"panglaodb.tsv": "ConnectError: [SSL: UNEXPECTED_EOF_WHILE_READING]"})
+
+    await wf._wait_for_marker_db_intervention("bioinformatics_analysis", _State())
+
+    error = captured["info_payload"]["error"]
+    assert "panglaodb.tsv" in error
+    assert "UNEXPECTED_EOF_WHILE_READING" in error
+    assert "Retry the download" in error, "the offered choices must survive"
+
+
+@pytest.mark.asyncio
+async def test_the_dialog_says_nothing_extra_when_there_is_no_reason(monkeypatch):
+    """No dangling "Last attempt:" header with nothing after it."""
+    wf = _bare_workflow()
+    captured = {}
+
+    async def _gate(node_name, state, **kwargs):
+        captured.update(kwargs)
+        return LlmFailureAction.SKIP
+
+    wf._drive_hitl_gate = _gate
+    monkeypatch.setattr("backend.services.marker_priors.last_fetch_errors", dict)
+
+    await wf._wait_for_marker_db_intervention("bioinformatics_analysis", _State())
+    assert "Last attempt" not in captured["info_payload"]["error"]
