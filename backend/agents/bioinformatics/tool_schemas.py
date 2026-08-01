@@ -156,7 +156,7 @@ TOOLS = [
                     },
                     "figure_type": {
                         "type": "string",
-                        "enum": ["umap", "heatmap", "violin", "dotplot", "barplot", "trajectory", "volcano", "other"],
+                        "enum": ["umap", "heatmap", "violin", "dotplot", "barplot", "trajectory", "volcano", "qc", "other"],
                         "description": "Type of figure being generated"
                     }
                 },

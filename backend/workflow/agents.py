@@ -9,6 +9,9 @@ from ..models.schemas import AgentType, AnalysisPhase, AnalysisStep, MessageRole
 from ..utils.llm_client import UpstreamExhaustedError
 from ..utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ..agents.bioinformatics_agent import count_saved_figures
+from ..agents.bioinformatics.exploration_diagnostics import (
+    ensure_exploration_diagnostic_figure,
+)
 from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, prepend_species, safe_pi_brief, STAGE1_KEYWORDS
 from ..utils.blob_store import BLOB_REF_PREFIX
 from .retry import with_retry
@@ -384,6 +387,42 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
                 analysis_state.publication_figures[i]
                 for i in sorted(seen_fig_names.values())
             ]
+
+        # Step 2a: the exploration round's quality-control panel, rendered by the
+        # platform rather than requested from the model. Measured over seven real
+        # sessions the agent ran a full QC pass every time and plotted it zero
+        # times, and the audit below cannot see that gap: METHOD_SIGNATURES holds
+        # tool families and no plotting token, so a step promising a plot is
+        # unverifiable and by design never counted as unmet. The instruction now
+        # asks for the figure and this guarantees it, because a prompt-only figure
+        # rule has already failed once in this codebase. Unconditional for the
+        # exploration round: quality control is the evidence every later claim
+        # rests on, and "the agent drew something else" is not a reason to leave it
+        # unillustrated. Upserted by name, so a node retry replaces rather than
+        # duplicates. Cannot fail the round.
+        # Both stages of the exploration round, not just the first. Stage 1 and
+        # Stage 2 re-enter this node with the same round number, and every
+        # successful Stage-2 cell that mutates the expression representation calls
+        # invalidate_current_artifacts for round 1 — which would set is_current=False
+        # on a panel rendered at the end of Stage 1 and drop it from every surface
+        # before `diagnostic` is ever consulted (that check is downstream of
+        # is_current in is_report_eligible). Observed in session 86a9255a, where a
+        # Stage-2 normalization cell invalidated the round's only round-1 figure.
+        # Rendering again after Stage 2 also means the panel describes the
+        # representation the round actually ended on. Upserted by name, so the
+        # second render replaces the first rather than duplicating it.
+        if (
+            planning_stage in ("stage1", "stage2", "full")
+            and int(analysis_state.current_round or 0) <= 1
+        ):
+            try:
+                await ensure_exploration_diagnostic_figure(
+                    self.bioinformatics_agent, analysis_state
+                )
+            except Exception as diag_err:
+                logger.warning(
+                    f"[{self.session_id}] QC diagnostic panel skipped: {diag_err!r}"
+                )
 
         # Step 2b: audit the approved plan against what actually ran, then — only
         # on hard structural signals — let the PI commission a bounded repair pass.

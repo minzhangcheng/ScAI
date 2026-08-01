@@ -23,6 +23,7 @@ from ...services.report.figure_discovery import discover_workspace_figures
 from ...services.report.artifacts import (
     artifact_stems,
     eligible_artifacts,
+    excluded_artifact_stems,
     gallery_artifacts,
     has_blocking_layout_defects,
 )
@@ -54,6 +55,7 @@ from .shared import (  # noqa: F401
     discover_workspace_figures,
     artifact_stems,
     eligible_artifacts,
+    excluded_artifact_stems,
     gallery_artifacts,
     has_blocking_layout_defects,
     attribute_figures_to_rounds,
@@ -153,12 +155,12 @@ class GraphicAbstractMixin:
         # ``is_report_eligible`` remains the rule for every archival surface.
         publication_figures = gallery_artifacts(analysis_state.publication_figures)
         pub_figure_names = {fig.name for fig in publication_figures}
-        excluded_stems = (
-            artifact_stems(analysis_state.publication_figures)
-            - artifact_stems(publication_figures)
-        )
-        excluded_stems.update(
-            getattr(analysis_state, "invalidated_artifact_stems", None) or []
+        excluded_stems = excluded_artifact_stems(
+            analysis_state.publication_figures,
+            publication_figures,
+            invalidated_stems=getattr(
+                analysis_state, "invalidated_artifact_stems", None
+            ),
         )
 
         discovered = discover_workspace_figures(self.session_id)
@@ -181,6 +183,10 @@ class GraphicAbstractMixin:
         descriptions = {
             fig.name: (fig.description or "") for fig in publication_figures
         }
+        diagnostic_by_name = {
+            fig.name: bool(getattr(fig, "diagnostic", False))
+            for fig in publication_figures
+        }
         all_figs_for_ai = [
             {
                 "name": f["name"],
@@ -188,7 +194,11 @@ class GraphicAbstractMixin:
                 "is_publication": f["name"] in pub_figure_names,
                 "round": round_by_stem.get(f["name"]),
                 "description": descriptions.get(f["name"], "")[:_MAX_CANDIDATE_DESCRIPTION],
-                "diagnostic": bool(f.get("diagnostic")),
+                # Discovery only knows a figure is diagnostic from the directory it
+                # sits in; the record knows because the platform drew it. The
+                # platform's QC panel is written into the scanned workspace, so it
+                # arrives through this branch and would otherwise lose the flag.
+                "diagnostic": bool(f.get("diagnostic")) or diagnostic_by_name.get(f["name"], False),
             }
             for f in all_workspace_figs
         ]
@@ -200,7 +210,10 @@ class GraphicAbstractMixin:
                     "is_publication": True,
                     "round": round_by_stem.get(fig.name),
                     "description": (fig.description or "")[:_MAX_CANDIDATE_DESCRIPTION],
-                    "diagnostic": False,
+                    # Read from the record, not assumed: a platform-rendered panel
+                    # is diagnostic no matter which directory it landed in, and the
+                    # per-round coverage floor and the PI rubric both key on this.
+                    "diagnostic": bool(getattr(fig, "diagnostic", False)),
                 })
 
         selected_names = set(
@@ -233,7 +246,7 @@ class GraphicAbstractMixin:
                     # verdict on whether its text is legible travels with it —
                     # "Final" over an illegible figure would be a lie.
                     "layout_blocking": has_blocking_layout_defects(fig),
-                    "diagnostic": False,
+                    "diagnostic": bool(getattr(fig, "diagnostic", False)),
                 })
 
         for wf in all_workspace_figs:

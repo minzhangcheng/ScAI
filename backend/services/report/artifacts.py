@@ -32,14 +32,31 @@ def has_blocking_layout_defects(artifact: Any) -> bool:
     return bool(blocking_violations(getattr(artifact, "layout_violations", None)))
 
 
+def is_diagnostic(artifact: Any) -> bool:
+    """Whether the platform rendered this artifact, rather than the analysis agent."""
+    return bool(getattr(artifact, "diagnostic", False))
+
+
 def is_report_eligible(artifact: Any) -> bool:
     """Return whether a reviewed artifact is current enough for final reports."""
-    return bool(
-        getattr(artifact, "is_current", True)
-        and not getattr(artifact, "invalidated_at", None)
-        and _status_value(artifact) in REPORTABLE_REVIEW_STATUSES
-        and not has_blocking_layout_defects(artifact)
-    )
+    if not getattr(artifact, "is_current", True):
+        return False
+    if getattr(artifact, "invalidated_at", None):
+        return False
+    if has_blocking_layout_defects(artifact):
+        return False
+    # A platform-rendered diagnostic has no reviewer by construction, so a review
+    # status it could never earn must not be what withholds it. Quality control is
+    # the chapter every later claim rests on, and holding its only figure back for
+    # want of a sign-off nobody was asked to give is the same mistake as letting a
+    # stale stem overrule a record that says the figure is current.
+    #
+    # The layout gate above is deliberately still applied: whether text is covered
+    # is measured by the renderer, not attested by a reviewer, so it is exactly the
+    # question an unreviewed figure can still be asked.
+    if is_diagnostic(artifact):
+        return True
+    return _status_value(artifact) in REPORTABLE_REVIEW_STATUSES
 
 
 def eligible_artifacts(artifacts: Iterable[Any] | None) -> list[Any]:
@@ -82,6 +99,45 @@ def artifact_stems(artifacts: Iterable[Any] | None) -> set[str]:
             if value:
                 stems.add(os.path.splitext(os.path.basename(str(value)))[0])
     return stems
+
+
+def excluded_artifact_stems(
+    artifacts: Iterable[Any] | None,
+    kept: Iterable[Any] | None,
+    *,
+    invalidated_stems: Iterable[str] | None = None,
+) -> set[str]:
+    """Stems an output surface must not resolve, for one set of artifacts.
+
+    Two staleness mechanisms answer the same question and disagree.
+    ``invalidate_current_artifacts`` marks the *record*: per-artifact, round-scoped,
+    and carrying a reason. ``invalidated_artifact_stems`` marks the *file*: a flat,
+    monotonic union of bare names. The second exists to reach artifacts that have no
+    record at all -- a plain ``savefig`` left in the workspace -- so letting it
+    overrule the first inverts the relationship, withholding the reviewed figure
+    while the unreviewed file beside it is kept.
+
+    Hence the rule here: a stem does not withhold an artifact whose own record still
+    says it is current. Before 0.38.2 the stem set had no round bound, so a single
+    representation-mutating cell in round N blacklisted every artifact from rounds
+    1..N-1 for the rest of the session. That is fixed at the producer, but the sets
+    already written into ``session.json`` are not, and every report surface only ever
+    reads them -- so subtracting live records is also what repairs existing sessions.
+    Replayed against one real 8-round session it is the difference between 10 figures
+    and 5, and three of the five lost are the exploration round's own.
+
+    Stems with no artifact record stay excluded. Nothing available here can tell a
+    file that is genuinely stale from one the old producer bug named by mistake, and
+    guessing in the permissive direction would put a figure of the wrong generation
+    into a report.
+    """
+    artifacts = list(artifacts or [])
+    excluded = artifact_stems(artifacts) - artifact_stems(kept)
+    stale = {str(stem) for stem in (invalidated_stems or [])}
+    live = artifact_stems(
+        artifact for artifact in artifacts if is_gallery_eligible(artifact)
+    )
+    return excluded | (stale - live)
 
 
 def invalidate_current_artifacts(

@@ -50,12 +50,16 @@ class FigurePlacementReport:
     unknown_removed: List[Tuple[str, str]] = field(default_factory=list)  # (fig, section)
     appended: List[Tuple[str, str]] = field(default_factory=list)  # (fig, section)
     unplaced: List[str] = field(default_factory=list)
+    # Sections the outline says own figures, that ended up with none. Observation
+    # only -- it never withholds or fails a report.
+    figureless_sections: List[str] = field(default_factory=list)
 
     def summary(self) -> str:
         return (
             f"relocated={len(self.relocated)} duplicates={len(self.duplicates_removed)} "
             f"unknown={len(self.unknown_removed)} appended={len(self.appended)} "
-            f"unplaced={len(self.unplaced)}"
+            f"unplaced={len(self.unplaced)} "
+            f"figureless={len(self.figureless_sections)}"
         )
 
 
@@ -159,6 +163,24 @@ def enforce_figure_placement(
         sec = by_id[sid]
         sec["content"] = (sec.get("content", "") or "").rstrip() + "".join(
             _marker(fig, caption) for fig, caption in items
+        )
+
+    # A chapter that owns a round but shows nothing from it is the failure mode
+    # that hides best: the prose reads as complete, and the gap is visible only by
+    # counting. One shipped report carried a 3,700-character quality-control
+    # chapter, full of the exact numbers a panel would have plotted, with zero
+    # figures and zero tables, and nothing anywhere said so. Sections the outline
+    # gives no rounds (Methods) are excluded -- they own no figures by design.
+    for osec in outline:
+        sid = osec.id
+        if not getattr(osec, "rounds", ()) or sid not in by_id:
+            continue
+        if not _FIGURE_MARKER.search(by_id[sid].get("content", "") or ""):
+            report.figureless_sections.append(sid)
+    if report.figureless_sections:
+        logger.warning(
+            "Report sections own a round but show no figure: %s",
+            ", ".join(report.figureless_sections),
         )
 
     if report.relocated or report.duplicates_removed or report.appended:

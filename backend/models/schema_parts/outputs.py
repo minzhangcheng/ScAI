@@ -93,7 +93,7 @@ class PublicationFigure(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     description: str
-    figure_type: str  # umap, heatmap, violin, dotplot, barplot, trajectory, volcano, other
+    figure_type: str  # umap, heatmap, violin, dotplot, barplot, trajectory, volcano, qc, other
     png_path: str  # Path to PNG thumbnail
     pdf_path: str  # Path to high-res PDF
     png_base64: Optional[str] = None  # Base64 encoded PNG for preview (compressed)
@@ -110,6 +110,12 @@ class PublicationFigure(BaseModel):
     # loop gave up. Recorded so the report can say so instead of presenting the
     # figure as reviewed and fine.
     unresolved_must_fix: List[str] = Field(default_factory=list)
+    # Rendered by the platform rather than by the analysis agent, and therefore
+    # never offered to the figure-review loop. Read by ``is_report_eligible``,
+    # which must not withhold such a figure for lacking a sign-off that nobody was
+    # asked to give. Defaults False, so sessions written before this field
+    # deserialize unchanged.
+    diagnostic: bool = False
     round_number: int = 0
     analysis_generation: int = 0
     expression_provenance: Dict[str, Any] = Field(default_factory=dict)

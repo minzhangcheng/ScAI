@@ -45,6 +45,8 @@ def infer_figure_type(stem: str) -> str:
         return "umap"
     if "volcano" in s:
         return "volcano"
+    if "qc" in s or "quality_control" in s:
+        return "qc"
     if "violin" in s:
         return "violin"
     if "dotplot" in s or "dot_plot" in s:

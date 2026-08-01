@@ -279,6 +279,8 @@ This is STAGE 1 of exploration. Plan ONLY these steps:
 7. Clustering (leiden/louvain)
 8. Cell type annotation (via marker genes + annotate_clusters tool)
 
+Do NOT plan a quality-control figure step — the platform renders that panel itself at the end of this stage, from the metrics the run actually computed.
+
 Do NOT include downstream analysis (DEG, GO/KEGG, cell communication, RNA velocity, trajectory/pseudotime, etc.) — those will be planned in Stage 2 after seeing clustering results.
 
 Do NOT load, read, merge, or preprocess any data whose ONLY purpose is to feed a Stage 2 analysis. In particular:

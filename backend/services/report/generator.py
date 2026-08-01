@@ -39,6 +39,10 @@ from .llm_calls import LLMCallsMixin, REPORT_TOOLS
 from .pi_review import PIReviewMixin
 from .planning import PlanningMixin
 from .sections import SectionsMixin
+from backend.services.report.artifacts import (
+    eligible_artifacts,
+    excluded_artifact_stems,
+)
 from backend.services.report.lineage import build_lineage_report_state
 from backend.services.report.interaction_records import (
     build_direction_selection_history,
@@ -248,8 +252,12 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             ),
         )
         existing_tables = self._scan_existing_tables(
-            invalidated_stems=set(
-                getattr(report_state, "invalidated_artifact_stems", None) or []
+            invalidated_stems=excluded_artifact_stems(
+                getattr(report_state, "publication_tables", None),
+                eligible_artifacts(getattr(report_state, "publication_tables", None)),
+                invalidated_stems=getattr(
+                    report_state, "invalidated_artifact_stems", None
+                ),
             )
         )
         logger.info(f"Collected {len(existing_figures)} figures and {len(existing_tables)} tables for report")

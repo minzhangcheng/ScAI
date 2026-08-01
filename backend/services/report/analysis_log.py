@@ -410,7 +410,10 @@ class AnalysisLogMixin:
 
         # 3. Collect publication figure metadata
         pub_figures = []
-        from backend.services.report.artifacts import eligible_artifacts
+        from backend.services.report.artifacts import (
+            eligible_artifacts,
+            excluded_artifact_stems,
+        )
         for fig in eligible_artifacts(state.publication_figures):
             pub_figures.append({
                 "name": fig.name,
@@ -423,10 +426,15 @@ class AnalysisLogMixin:
         # 4. Scan workspace for CSV tables
         tables = []
         if self.workspace_dir and self.workspace_dir.exists():
+            excluded_table_stems = excluded_artifact_stems(
+                state.publication_tables,
+                eligible_artifacts(state.publication_tables),
+                invalidated_stems=state.invalidated_artifact_stems,
+            )
             tables_subdir = self.workspace_dir / "tables"
             csv_search_dir = tables_subdir if tables_subdir.exists() else self.workspace_dir
             for csv_file in sorted(csv_search_dir.glob("*.csv")):
-                if csv_file.stem in (state.invalidated_artifact_stems or []):
+                if csv_file.stem in excluded_table_stems:
                     continue
                 tables.append({
                     "filename": csv_file.name,

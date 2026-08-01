@@ -20,7 +20,7 @@ from openai import APIConnectionError
 from ...models.schemas import AnalysisState, AnalysisStep
 from ...utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
 from ...services.report.interaction_records import write_interaction_record_files
-from ...services.report.artifacts import eligible_artifacts
+from ...services.report.artifacts import eligible_artifacts, excluded_artifact_stems
 from ...services.report.figure_attribution import attribute_figures_to_rounds
 from ...services.report.figure_placement import enforce_figure_placement
 from ...services.report.report_outline import (
@@ -111,7 +111,11 @@ class ReportContentMixin:
         # Collect table paths from workspace
         table_list = self._collect_table_paths(
             workspace_path,
-            invalidated_stems=set(analysis_state.invalidated_artifact_stems or []),
+            invalidated_stems=excluded_artifact_stems(
+                analysis_state.publication_tables,
+                eligible_artifacts(analysis_state.publication_tables),
+                invalidated_stems=analysis_state.invalidated_artifact_stems,
+            ),
         )
 
         # Plan the report from the rounds that ran, and bind every figure to the
@@ -203,6 +207,11 @@ class ReportContentMixin:
         # Parse the LLM output into sections
         sections = self._parse_report_sections(report_content, language, outline=outline)
 
+        # Stays empty when the outline pass is skipped: the degraded fallback body
+        # has its own fixed sections and was never written against the outline, so
+        # it has no figure-owning sections to be missing figures from.
+        figureless_sections: List[str] = []
+
         # The fallback body is a degraded step summary with its own fixed
         # sections; forcing it through an outline it was never written against
         # would only scramble it. Its figures fall through to the supplementary
@@ -239,6 +248,7 @@ class ReportContentMixin:
                     f"[{self.session_id}] {len(placement.unplaced)} figures had no "
                     f"owning section and fall through to Supplementary Figures"
                 )
+            figureless_sections = list(placement.figureless_sections)
 
         # Build chat sections if chat_messages provided
         if chat_messages:
@@ -319,6 +329,9 @@ class ReportContentMixin:
             "progress": 100,
             "current_step": "Complete",
             "appendix": appendix_data,
+            # Recorded so an incomplete report is a reportable condition rather
+            # than something an operator has to notice by eye.
+            "figureless_sections": figureless_sections,
             "analysis_log": all_records,
             "score_definitions": [sd.model_dump(mode="json") for sd in analysis_state.score_definitions] if analysis_state.score_definitions else [],
         }

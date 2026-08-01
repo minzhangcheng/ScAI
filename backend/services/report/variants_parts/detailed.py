@@ -11,7 +11,11 @@ from typing import Dict, Any, Optional
 
 from backend.utils.report_html import markdown_to_html, _build_figure_description_map
 from backend.utils.image_utils import compress_image_to_base64, categorize_figures
-from backend.services.report.artifacts import artifact_stems, eligible_artifacts
+from backend.services.report.artifacts import (
+    artifact_stems,
+    eligible_artifacts,
+    excluded_artifact_stems,
+)
 from backend.models.schemas import AnalysisState
 
 logger = __import__('logging').getLogger(__name__)
@@ -109,11 +113,11 @@ def generate_detailed_report_segment_html(
             categories = categorize_figures(figures_subdir if figures_subdir.exists() else workspace_dir)
             fig_desc_map = _build_figure_description_map(segment_steps)
             eligible_figures = eligible_artifacts(state.publication_figures)
-            excluded_stems = (
-                artifact_stems(state.publication_figures)
-                - artifact_stems(eligible_figures)
+            excluded_stems = excluded_artifact_stems(
+                state.publication_figures,
+                eligible_figures,
+                invalidated_stems=state.invalidated_artifact_stems,
             )
-            excluded_stems.update(state.invalidated_artifact_stems or [])
             round_step_stems = {
                 Path(fname).stem
                 for step in segment_steps

@@ -4,6 +4,7 @@ Moved verbatim out of backend/agents/supervisor_agent.py; composed into Supervis
 """
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+import hashlib
 import logging
 import os
 import re
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 from ...models.schemas import AnalysisState
-from ...services.report.artifacts import artifact_stems, eligible_artifacts
+from ...services.report.artifacts import eligible_artifacts, excluded_artifact_stems
 
 
 # ---------------------------------------------------------------------------
@@ -816,12 +817,13 @@ class ReportHtmlMixin:
         eligible_figures = eligible_artifacts(
             state.publication_figures if state else []
         )
-        excluded_stems = (
-            artifact_stems(state.publication_figures if state else [])
-            - artifact_stems(eligible_figures)
+        excluded_stems = excluded_artifact_stems(
+            state.publication_figures if state else [],
+            eligible_figures,
+            invalidated_stems=(
+                getattr(state, "invalidated_artifact_stems", None) if state else None
+            ),
         )
-        if state:
-            excluded_stems.update(state.invalidated_artifact_stems or [])
 
         for rec in records:
             for fname in rec.get("saved_figure_filenames", []):
@@ -834,12 +836,11 @@ class ReportHtmlMixin:
                     seen_stems.add(resolved.stem)
                     figure_map[fname] = resolved
 
-        # Also include publication figures (PI-reviewed, may not be in supervision records).
-        # The excluded_stems check applies here too: a figure can pass
-        # is_report_eligible while its stem sits in invalidated_artifact_stems,
-        # because those are two separate staleness mechanisms. The supervision-record
-        # loop above and the workspace scan below both filter on it; skipping it here
-        # is what let invalidated stems reach report.html through this one path.
+        # Also include publication figures (PI-reviewed, may not be in supervision
+        # records). The excluded_stems check applies here too, and all three tiers
+        # read the same set -- ``excluded_artifact_stems`` is where the two staleness
+        # mechanisms are reconciled, so a stem can no longer overrule a record that
+        # says the figure is current.
         if eligible_figures:
             for pf in eligible_figures:
                 if not pf.png_path:
@@ -887,6 +888,50 @@ class ReportHtmlMixin:
                         del figure_map[fname]
                         logger.debug(f"Removed base figure {fname} in favor of versioned: {versions}")
                         break
+
+        # Two names can hold the same file. The analysis saves a figure with
+        # savefig and later re-registers it as a publication figure under a
+        # different name; the workspace-scan tier then picks up both. Every dedupe
+        # above compares filename strings, which cannot see that. Measured across
+        # the real sessions on this host, three such byte-identical pairs exist.
+        #
+        # Scope, stated because the neighbouring case looks identical and is not
+        # caught: this compares the raster the report embeds, so it collapses two
+        # names over one file, not one drawing re-encoded twice. A run that saved a
+        # panel as PNG and re-rendered it as JPG produces two different byte strings
+        # of the same picture, and that pair still reaches the report twice --
+        # session c31c0b42 shipped exactly that, its two PDFs differing only in the
+        # three bytes of their creation timestamp. Deciding *pictures* are equal
+        # needs a perceptual comparison, which is a different tool with a different
+        # false-positive profile; this one is exact and cannot be wrong.
+        registered_stems = {
+            Path(os.path.basename(str(pf.png_path))).stem
+            for pf in eligible_figures if getattr(pf, "png_path", None)
+        }
+        by_digest: Dict[str, str] = {}
+        for fname in list(figure_map):
+            try:
+                digest = hashlib.sha256(figure_map[fname].read_bytes()).hexdigest()
+            except Exception:
+                continue  # unreadable here is not fatal; embedding reports it
+            kept = by_digest.get(digest)
+            if kept is None:
+                by_digest[digest] = fname
+                continue
+            # Keep whichever copy carries a publication record: that is the one
+            # with a round number, a review status and a description, and losing
+            # it would strip the surviving image of its provenance.
+            loser = fname
+            if (
+                Path(fname).stem in registered_stems
+                and Path(kept).stem not in registered_stems
+            ):
+                loser, by_digest[digest] = kept, fname
+            figure_map.pop(loser, None)
+            logger.info(
+                f"Duplicate figure content: dropping {loser}, kept "
+                f"{by_digest[digest]}"
+            )
 
         logger.info(f"Collected {len(figure_map)} figures for report "
                      f"({len(records)} supervision records, workspace={workspace_path})")

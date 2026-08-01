@@ -21,6 +21,7 @@ from ...services.report.figure_discovery import discover_workspace_figures
 from ...services.report.artifacts import (
     artifact_stems,
     eligible_artifacts,
+    excluded_artifact_stems,
     gallery_artifacts,
     has_blocking_layout_defects,
 )

@@ -50,11 +50,21 @@ MANDATORY STEPS:
 9. Clustering (scanpy.tl.leiden with appropriate resolution)
 10. Cell type annotation: find marker genes per cluster (scanpy.tl.rank_genes_groups), then call annotate_clusters tool
 
+QUALITY-CONTROL FIGURE: the platform renders one for this stage itself, from what the
+kernel holds — the distribution of each per-observation quality metric this run computed,
+split by the batch/sample key where the data has one, and the variance profile of the
+dimensionality reduction. Do NOT reproduce it. Add a figure of your own only if a quality
+decision you made cannot be read off those distributions (an unusual filter, a batch
+effect you corrected, a doublet call you overrode) — and if you do, call
+generate_publication_figure with figure_type="qc".
+
 WHAT NOT TO DO (these will be done in Stage 2):
 - Do NOT run condition-level differential expression (DEG)
 - Do NOT run GO/KEGG pathway enrichment
 - Do NOT run cell-cell communication analysis (liana)
-- Do NOT generate publication figures (save that for Stage 2)
+- Do NOT generate publication figures of RESULTS (save those for Stage 2). Step 11 is the
+  single exception: the quality-control panel belongs to this stage, because Stage 2 is
+  forbidden from re-running the quality control it would have to describe
 - Do NOT run trajectory/velocity analysis
 
 IMPORTANT: After completing steps 1-10, call report_findings with a summary of:

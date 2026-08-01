@@ -11,8 +11,8 @@ from PIL import Image
 
 from backend.utils.files import resolve_figure_in_workspace
 from backend.services.report.artifacts import (
-    artifact_stems,
     eligible_artifacts,
+    excluded_artifact_stems,
 )
 
 logger = logging.getLogger(__name__)
@@ -145,11 +145,11 @@ class FiguresMixin:
         seen_filenames = set()
 
         eligible_publication_figures = eligible_artifacts(publication_figures)
-        excluded_publication_stems = (
-            artifact_stems(publication_figures)
-            - artifact_stems(eligible_publication_figures)
+        excluded_publication_stems = excluded_artifact_stems(
+            publication_figures,
+            eligible_publication_figures,
+            invalidated_stems=invalidated_stems,
         )
-        excluded_publication_stems.update(invalidated_stems or set())
 
         # Build filename-stem -> declared figure_type map from eligible metadata.
         declared_type_by_stem: Dict[str, str] = {}

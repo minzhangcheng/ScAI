@@ -14,7 +14,11 @@ from backend.utils.report_html import (
 )
 from backend.utils.image_utils import compress_image_to_base64
 from backend.services.report.score_section import build_score_definitions_section_html
-from backend.services.report.artifacts import artifact_stems, eligible_artifacts
+from backend.services.report.artifacts import (
+    artifact_stems,
+    eligible_artifacts,
+    excluded_artifact_stems,
+)
 from backend.models.schemas import AnalysisState
 
 logger = __import__('logging').getLogger(__name__)
@@ -68,10 +72,11 @@ def generate_annotation_context_report_html(
     # --- Build figure description map ---
     figure_desc_map = _build_figure_description_map(state.analysis_log)
     eligible_figures = eligible_artifacts(state.publication_figures)
-    excluded_figure_stems = (
-        artifact_stems(state.publication_figures) - artifact_stems(eligible_figures)
+    excluded_figure_stems = excluded_artifact_stems(
+        state.publication_figures,
+        eligible_figures,
+        invalidated_stems=state.invalidated_artifact_stems,
     )
-    excluded_figure_stems.update(state.invalidated_artifact_stems or [])
     workspace_dir = get_session_workspace(state.id) if state.id else None
 
     def _resolve_fig_path(fname: str) -> Optional[Path]:

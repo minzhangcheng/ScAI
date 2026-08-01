@@ -222,7 +222,8 @@ class FiguresMixin:
         description: str,
         figure_type: str,
         state: AnalysisState,
-        review_callback: Optional[Callable[[PublicationFigure], Awaitable[Dict[str, Any]]]] = None
+        review_callback: Optional[Callable[[PublicationFigure], Awaitable[Dict[str, Any]]]] = None,
+        diagnostic: bool = False,
     ) -> str:
         """
         Handle generate_publication_figure tool call.
@@ -235,6 +236,9 @@ class FiguresMixin:
             figure_type: Type of figure
             state: Analysis state to store the figure
             review_callback: Optional callback for PI review
+            diagnostic: Platform-rendered diagnostic rather than a result figure.
+                Recorded on the figure so report eligibility does not depend on a
+                review that, for this kind of figure, never happens.
 
         Returns:
             Tool result message
@@ -345,6 +349,7 @@ class FiguresMixin:
             png_base64=png_b64,
             layout_violations=layout_violations,
             review_status=FigureReviewStatus.PENDING,
+            diagnostic=diagnostic,
             round_number=int(state.current_round or 0),
             analysis_generation=int(sandbox_state.get("analysis_generation", 0) or 0),
             expression_provenance=dict(
