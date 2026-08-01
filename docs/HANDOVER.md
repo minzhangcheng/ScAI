@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.38.1 · **Last updated**: 2026-08-01
+**Version**: 0.38.6 · **Last updated**: 2026-08-01
 
 ## 1. Runtime Architecture
 
@@ -254,6 +254,11 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.38.x — (2026-08-01 onward)**
+
+- `0.38.6` — Added the ZnT1-Ctr1-DKO demonstration data preparation pipelines, documenting how the platform's example dataset is produced from raw sequencing output. The raw inputs themselves (loom, h5, pathology TIFs, biochemistry images) are distributed outside version control: two of them exceed GitHub's 100 MB per-file ceiling and together they would add ~900 MB to every clone, so the repository carries the scripts that generate the dataset rather than the dataset itself (2026-08-01):
+  - **Bulk RNA-seq data preparation pipeline (`demo/ZnT1-Ctr1-DKO/data-prepare/bulk-RNA-Seq/`)**: eight scripts covering the complete workflow from software installation through differential expression analysis. Includes `1.install.sh` for STAR, samtools, and R package dependencies; `2.prepare.sh` for reference genome and annotation preparation; `3.align.sh` for STAR alignment with quality metrics; `4.qc_extended.sh` for post-alignment quality control; `5.correlation.R` for sample correlation analysis; `6.edgr.R` for edgeR differential expression; `7.deseq2.R` for DESeq2 analysis; and `8.annot.R` for gene annotation and result formatting.
+  - **snRNA-seq data preparation pipeline (`demo/ZnT1-Ctr1-DKO/data-prepare/snRNA-seq/`)**: three scripts for single-nucleus RNA-seq processing. Includes `1.align.sh` for Cell Ranger alignment; `2.rmsk.sh` for repeat masking analysis; and `3.velocyto.sh` for RNA velocity analysis.
+  - **Demonstration inputs stay untracked (`.gitignore`)**: `demo/*/upload/` is ignored, so a local copy of the example data can sit at exactly the path the pipelines and the platform expect without ever being staged. The pathology, sequencing, and biochemistry inputs are obtained separately and dropped into that directory.
 
 - `0.38.1` — A finished report opened with a bulk RNA-seq heatmap under "Analysis Methodology Overview", and in another session with a round-3 stress/metal-axis panel under "Quality Control". Neither figure had anything to do with the chapter introducing it, and no component had chosen to put it there. The report mixed two ordering principles in one document — the opening chapters organised by *analysis type*, the later ones by *round* — so every figure had a home under both and nothing arbitrated between them. The report model resolved the conflict the only way left to it, by filename semantics, which is how a panel named `..._qc_overview` came to open a report it had no part in. Backend 4040 pass / 79 skip (4003 before, plus 48 new tests); the one failure, `pydeseq2` absent from the host interpreter, is pre-existing on `0.37.8`. +1611 / −57 across 11 files (2026-08-01):
   - **The chapter list is derived from the rounds that ran (`services/report/report_outline.py`)**: the round is at once the unit of time and the unit of argument — one innovation round pursues one research direction — so a single organising axis yields an order that is chronological and argumentative together, and the conflict has nowhere to arise. Method description moves to a Methods chapter that owns no result figures; the four type-organised chapters that were competing for them (`analysis_overview`, `data_qc`, `clustering_annotation`, `differential_expression`) are gone from a multi-round report. A single-pass analysis keeps the older outline unchanged, because with one QC step and one DE step type headings are unambiguous.

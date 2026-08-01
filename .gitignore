@@ -35,3 +35,9 @@ states/
 # Cached MSigDB GMTs live under $SCAI_DATA_DIR/gene_sets now; backstop only.
 backend/data/gene_sets/
 review.md
+
+# Demonstration inputs are large raw data — loom files, pathology TIFs, h5
+# matrices — distributed outside version control; two of them exceed GitHub's
+# 100 MB per-file ceiling. A local copy lives at the path the demo pipelines
+# expect without ever being staged.
+demo/*/upload/
