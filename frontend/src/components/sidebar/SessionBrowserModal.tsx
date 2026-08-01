@@ -81,6 +81,12 @@ export function SessionBrowserModal({
                       <h3 className="font-medium text-surface-800 truncate">
                         {session.name}
                       </h3>
+                      <p
+                        className="mt-0.5 font-mono text-[10px] leading-tight text-surface-400 truncate"
+                        title={session.id}
+                      >
+                        {session.id}
+                      </p>
                       <div className="flex items-center gap-3 mt-1 text-xs text-surface-500">
                         <span className="flex items-center gap-1">
                           <Clock className="w-3 h-3" />
