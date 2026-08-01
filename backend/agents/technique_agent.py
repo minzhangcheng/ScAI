@@ -236,6 +236,7 @@ except ImportError as e:
             return f"Could not find documentation for `{function_path}`. Package may not be installed."
 
         self.refresh_runtime_config_if_needed()
+        self._set_llm_context()
         # Step 2: Summarize with cheap LLM
         await self._notify("status", f"Summarizing documentation for `{function_path}`...")
         user_msg = f"Summarize this Python API documentation:\n\n{raw_doc[:4000]}"
@@ -274,6 +275,7 @@ except ImportError as e:
             Concise error explanation + correct API usage
         """
         self.refresh_runtime_config_if_needed()
+        self._set_llm_context()
         parsed = self._parse_error_for_lookup(error_text)
         if not parsed:
             return ""

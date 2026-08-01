@@ -613,7 +613,7 @@ Generate a comprehensive scientific narrative for this section. Your response mu
             if section_images:
                 response = await self._chat_with_vision_fallback(
                     text_prompt=prompt, images=section_images[:6],
-                    temperature=0.3, max_tokens=32768, request_timeout=120.0,
+                    temperature=0.3, max_tokens=32768, request_timeout=600.0,
                 )
             else:
                 response = await self._pi_chat(prompt, temperature=0.3)

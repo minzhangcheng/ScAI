@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 # Implementations live in ./llm_client_parts/; re-exported here so existing
 # importers and tests keep resolving them from this module.
 
+from .retry import DEFAULT_REQUEST_TIMEOUT
 from .shared import (  # noqa: F401
     base64,
     html,
@@ -164,7 +165,8 @@ class ClientStreamVisionMixin:
             base_params, model, temperature, max_tokens
         )
 
-        stream_retry_kwargs = self._build_retry_kwargs(model, request_timeout=120.0)
+        stream_retry_kwargs = self._build_retry_kwargs(
+            model, request_timeout=DEFAULT_REQUEST_TIMEOUT)
         stream_retry_kwargs["max_retries"] = MAX_RETRIES
 
         stream = await self._call_with_temp_fallback(
@@ -362,7 +364,7 @@ class ClientStreamVisionMixin:
             LLMResponse object
         """
         log_msgs = [{"role": "user", "content": f"[{len(images)} images] + {text_prompt[:500]}"}]
-        probe_timeout = request_timeout or 300.0
+        probe_timeout = request_timeout or DEFAULT_REQUEST_TIMEOUT
         return await self._dispatch_non_streaming(
             model=model,
             interaction_type="vision",

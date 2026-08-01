@@ -903,13 +903,27 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         pushes a status message through the WebSocket so the frontend knows the
         system is still alive (prevents disconnect due to apparent inactivity).
         """
-        async def _on_retry(attempt: int, max_retries: int, delay: float, error_type: str):
+        def _retry_agent(agent_name: str) -> Optional[AgentType]:
+            """Map an LLM client's agent_name onto the AgentType the UI labels with.
+
+            Clients carry the agent name as a plain string, set by set_context
+            from AgentType.value, so the enum lookup is exact. An unrecognised
+            name (a client whose context was never set) stays unlabelled rather
+            than being attributed to an agent that did not make the request.
+            """
+            try:
+                return AgentType(agent_name)
+            except ValueError:
+                return None
+
+        async def _on_retry(attempt: int, max_retries: int, delay: float, error_type: str,
+                            agent_name: str = ""):
             try:
                 await self._send_message(
                     "status",
                     f"LLM request retry {attempt + 1}/{max_retries + 1} "
                     f"({error_type}, waiting {delay:.0f}s)...",
-                    AgentType.BIOINFORMATICS,
+                    _retry_agent(agent_name),
                 )
             except Exception:
                 pass  # Best-effort; never break retry logic

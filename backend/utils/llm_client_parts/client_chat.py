@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 # Implementations live in ./llm_client_parts/; re-exported here so existing
 # importers and tests keep resolving them from this module.
 
+from .retry import DEFAULT_REQUEST_TIMEOUT
 from .shared import (  # noqa: F401
     base64,
     html,
@@ -344,7 +345,7 @@ class ClientChatMixin:
             raise ValueError("chat(stream=True) is not supported; use chat_stream() for streaming responses")
 
         enforced = _inject_english_enforcement(messages)
-        probe_timeout = timeout or 300.0
+        probe_timeout = timeout or DEFAULT_REQUEST_TIMEOUT
         return await self._dispatch_non_streaming(
             model=model,
             interaction_type="chat",

@@ -12,6 +12,7 @@ from ..constants import LlmFailureAction
 from ..models.schemas import (
     AgentType, AnalysisState, MessageRole, DataFile
 )
+from ..utils.formatting import safe_parse_json_array
 from ..utils.image_utils import (
     process_pathology_image, create_overview_image, load_image
 )
@@ -45,6 +46,26 @@ def _finding_key(value: str) -> str:
     return re.sub(r"\s+", " ", value.casefold()).strip().rstrip(".!")
 
 
+def _coerce_tile_batch(batch_data: Any, raw_response: str) -> Any:
+    """Recover a batch the model returned as a bare JSON array.
+
+    safe_parse_json scans for the first '{', so a top-level array comes back as
+    its own first element — a one-tile dict with no "tile_findings" key. That
+    reads downstream as a schema violation and discards the whole batch, even
+    though the model produced every finding asked for. Vision models differ on
+    whether they wrap the array in the documented object; both shapes are
+    unambiguous, so accept either.
+    """
+    if isinstance(batch_data, list):
+        return {"tile_findings": batch_data}
+    if isinstance(batch_data, dict) and "tile_findings" in batch_data:
+        return batch_data
+    entries = safe_parse_json_array(raw_response)
+    if entries:
+        return {"tile_findings": entries}
+    return batch_data
+
+
 def _validate_tile_batch(
     batch_data: Any,
     *,
@@ -59,6 +80,8 @@ def _validate_tile_batch(
     uses human-facing one-based tile labels while internal indices are zero-based.
     """
     errors: List[str] = []
+    if isinstance(batch_data, list):
+        batch_data = {"tile_findings": batch_data}
     if not isinstance(batch_data, dict):
         return [], ["response must be a JSON object"]
 
@@ -416,7 +439,7 @@ Please reply in JSON format:
                     text_prompt=overview_prompt,
                     images=[overview],
                     temperature=0.3,
-                    request_timeout=180.0  # 3 min for single overview image
+                    request_timeout=600.0  # 10 min for single overview image
                 ),
                 image_label=image_info.filename,
                 step_label="overview analysis",
@@ -467,8 +490,8 @@ tile-specific evidence. Identical explicit normal findings are allowed.
 If no abnormality is visible in a tile, use the explicit finding "No abnormality detected."
 """
 
-                # Dynamic timeout: 120s base + 30s per image
-                batch_timeout = 120.0 + 30.0 * len(batch_tiles)
+                # Dynamic timeout: 30s per image on top of the default floor
+                batch_timeout = max(600.0, 120.0 + 30.0 * len(batch_tiles))
                 normalized_batch: List[Dict[str, Any]] = []
                 last_validation_errors: List[str] = []
                 for validation_attempt in range(2):
@@ -492,10 +515,13 @@ If no abnormality is visible in a tile, use the explicit finding "No abnormality
                     )
 
                     batch_content = batch_result.content if batch_result else ""
-                    batch_data = self._safe_parse_json(
+                    batch_data = _coerce_tile_batch(
+                        self._safe_parse_json(
+                            batch_content,
+                            default={"raw_response": batch_content},
+                            agent_label="PathologyAgent",
+                        ),
                         batch_content,
-                        default={"raw_response": batch_content},
-                        agent_label="PathologyAgent",
                     )
                     normalized_batch, last_validation_errors = _validate_tile_batch(
                         batch_data,

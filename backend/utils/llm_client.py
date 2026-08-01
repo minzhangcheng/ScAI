@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Re-exported so `backend.utils.llm_client.<name>` keeps resolving
 # for existing importers and for tests that patch these by name.
+from .llm_client_parts.retry import DEFAULT_REQUEST_TIMEOUT  # noqa: F401
 from .llm_client_parts.shared import (  # noqa: F401
     base64,
     html,
@@ -180,8 +181,8 @@ class OpenAICompatibleClient(
         self.llm_logger = get_llm_logger()
         # Optional callback fired before each retry sleep, used to push
         # status updates to WebSocket so the frontend knows we're still alive.
-        # Signature: async (attempt, max_retries, delay, error_type) -> None
-        self.on_retry: Optional[Callable[[int, int, float, str], Awaitable[None]]] = None
+        # Signature: async (attempt, max_retries, delay, error_type, agent_name) -> None
+        self.on_retry: Optional[Callable[[int, int, float, str, str], Awaitable[None]]] = None
 
         # Session-level cache of models that rejected temperature parameter
         # Key is model name (extracted), value is True
@@ -208,7 +209,9 @@ class OpenAICompatibleClient(
         # Always create an explicit HTTP client with tuned timeouts and pool settings,
         # so both proxy and non-proxy scenarios get the same configuration.
         http_client_kwargs = {
-            "timeout": httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0),
+            "timeout": httpx.Timeout(
+                connect=10.0, read=DEFAULT_REQUEST_TIMEOUT, write=30.0, pool=10.0
+            ),
         }
         if proxy_url:
             http_client_kwargs["proxy"] = proxy_url
@@ -219,7 +222,7 @@ class OpenAICompatibleClient(
             api_key=api_key,
             base_url=_openai_sdk_base_url(self.base_url),
             http_client=self.http_client,
-            timeout=300.0,  # Safety net; deep research uses per-request timeout=1800 override
+            timeout=DEFAULT_REQUEST_TIMEOUT,  # Safety net; deep research uses per-request timeout=1800 override
             max_retries=0,  # Disable SDK internal retries; retry_with_backoff handles all retries
             default_headers={
                 "HTTP-Referer": "https://scai.local",

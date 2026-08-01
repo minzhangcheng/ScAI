@@ -7,7 +7,11 @@ from unittest.mock import MagicMock
 import pytest
 
 import backend.agents.pathology_agent as mod
-from backend.agents.pathology_agent import PathologyAgent, _validate_tile_batch
+from backend.agents.pathology_agent import (
+    PathologyAgent,
+    _coerce_tile_batch,
+    _validate_tile_batch,
+)
 from backend.models.schemas import AgentType, DataFile
 
 
@@ -218,3 +222,100 @@ async def test_twice_invalid_tile_batch_is_excluded_and_marks_image_error(monkey
     assert result["findings"] == []
     assert result["tile_validation"]["valid_tiles"] == 0
     assert len(result["tile_validation"]["invalid_batches"]) == 1
+
+
+def test_bare_array_batch_is_recovered_rather_than_discarded():
+    """A top-level array is unambiguous; safe_parse_json alone truncates it.
+
+    safe_parse_json scans for the first '{', which for a bare array is its own
+    first element — one tile, no "tile_findings" key. Left uncorrected the whole
+    batch is thrown away even though every requested finding is present.
+    """
+    entries = [
+        {"tile_index": i, "findings": "No abnormality detected."}
+        for i in range(5)
+    ]
+    raw = json.dumps(entries)
+    truncated = json.loads(raw[raw.index("{"):raw.index("}") + 1])
+    assert "tile_findings" not in truncated  # what safe_parse_json returns today
+
+    coerced = _coerce_tile_batch(truncated, raw)
+    normalized, errors = _validate_tile_batch(
+        coerced, start_idx=0, expected_count=5
+    )
+    assert errors == []
+    assert [entry["tile_index"] for entry in normalized] == [0, 1, 2, 3, 4]
+
+
+def test_bare_array_recovered_from_markdown_fence_and_prose():
+    entries = [
+        {"tile_index": 0, "findings": "Dense collagen surrounds a portal tract."},
+        {"tile_index": 1, "findings": "No abnormality detected."},
+    ]
+    raw = "Here are the findings:\n```json\n" + json.dumps(entries) + "\n```"
+    truncated = {"tile_index": 0, "findings": entries[0]["findings"]}
+
+    coerced = _coerce_tile_batch(truncated, raw)
+    normalized, errors = _validate_tile_batch(
+        coerced, start_idx=0, expected_count=2
+    )
+    assert errors == []
+    assert len(normalized) == 2
+
+
+def test_coerce_leaves_documented_object_untouched():
+    batch = {"tile_findings": [{"tile_index": 0, "findings": "Mild steatosis."}]}
+    assert _coerce_tile_batch(batch, json.dumps(batch)) is batch
+
+
+def test_coerce_keeps_original_when_no_array_is_present():
+    unparsable = {"raw_response": "the model refused"}
+    assert _coerce_tile_batch(unparsable, "the model refused") is unparsable
+
+
+def test_validate_accepts_a_list_directly():
+    entries = [{"tile_index": 0, "findings": "No abnormality detected."}]
+    normalized, errors = _validate_tile_batch(
+        entries, start_idx=3, expected_count=1
+    )
+    assert errors == []
+    assert normalized[0]["tile_index"] == 3
+
+
+@pytest.mark.asyncio
+async def test_bare_array_batch_validates_without_burning_a_retry(monkeypatch):
+    agent = _bare_agent()
+    image = _patch_image_setup(monkeypatch, agent)
+    prompts = []
+    responses = [
+        json.dumps({"overall_structure": "Preserved", "severity": "normal"}),
+        # Bare array — the shape Lingjian-1.5 emits in production.
+        json.dumps([
+            {"tile_index": 0, "findings": "No abnormality detected."},
+            {"tile_index": 1, "findings": "Mild stromal expansion is visible."},
+        ]),
+    ]
+
+    class FakeClient:
+        async def chat_with_vision(self, **kwargs):
+            prompts.append(kwargs["text_prompt"])
+            return SimpleNamespace(content=responses.pop(0))
+
+    agent._provider.get_llm_client.return_value = FakeClient()
+
+    async def synthesize(prompt, temperature=None):
+        return json.dumps({
+            "findings": ["Validated finding"],
+            "severity_score": 1,
+            "further_analysis": [],
+            "suggested_staining": [],
+        })
+
+    monkeypatch.setattr(agent, "chat_without_history", synthesize)
+    result = await agent._analyze_image(image, "Analyze")
+
+    assert len(prompts) == 2  # overview + one batch, no validation retry
+    assert all("previous response failed validation" not in p for p in prompts)
+    assert [entry["tile_index"] for entry in result["tile_findings"]] == [0, 1]
+    assert result["tile_validation"]["status"] == "completed"
+    assert result["tile_validation"]["invalid_batches"] == []

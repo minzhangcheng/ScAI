@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 # Implementations live in ./llm_client_parts/; re-exported here so existing
 # importers and tests keep resolving them from this module.
 
+from .retry import DEFAULT_REQUEST_TIMEOUT
 from .shared import (  # noqa: F401
     base64,
     html,
@@ -254,7 +255,7 @@ class ClientParamsMixin:
             kwargs["request_timeout"] = request_timeout
         if max_retries_override is not None:
             kwargs["max_retries"] = max_retries_override
-        elif request_timeout is not None and request_timeout > 300:
+        elif request_timeout is not None and request_timeout > DEFAULT_REQUEST_TIMEOUT:
             kwargs["max_retries"] = 0
         if self.on_retry is not None:
             kwargs["on_retry"] = self.on_retry

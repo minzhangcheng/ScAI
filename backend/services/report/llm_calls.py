@@ -110,7 +110,7 @@ class LLMCallsMixin:
         images: List[str],
         temperature: float = 0.3,
         max_tokens: int = 32768,
-        request_timeout: float = 120.0,
+        request_timeout: float = 600.0,
     ) -> str:
         """Vision call with agent fallback chain: PI -> bio -> supervisor -> text-only."""
         import logging

@@ -27,6 +27,13 @@ from .error_signals import _is_hard_quota_error, _is_protocol_adaptation_signal,
 from .errors import UpstreamExhaustedError
 
 
+# Hard per-attempt deadline for one LLM request (seconds). A reasoning model
+# routinely spends several minutes on a single non-streamed completion, and the
+# client giving up first does NOT cancel the upstream generation — the relay
+# still bills the full response. A deadline that is too tight therefore pays for
+# the same tokens on every retry and receives nothing.
+DEFAULT_REQUEST_TIMEOUT = 600.0
+
 # Retry configuration
 MAX_RETRIES = 4
 
@@ -92,8 +99,8 @@ async def retry_with_backoff(
     agent_name: str = "unknown",
     model_name: str = "",
     llm_server: str = "",
-    request_timeout: float = 300.0,
-    on_retry: Optional[Callable[[int, int, float, str], Awaitable[None]]] = None,
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+    on_retry: Optional[Callable[[int, int, float, str, str], Awaitable[None]]] = None,
     non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
 ):
     """
@@ -107,9 +114,11 @@ async def retry_with_backoff(
         request_timeout: Hard per-attempt timeout in seconds (asyncio-level deadline).
             Fires even if the HTTP client hangs during response body reading.
         on_retry: Optional async callback invoked before each retry sleep.
-            Signature: (attempt, max_retries, delay, error_type) -> None.
+            Signature: (attempt, max_retries, delay, error_type, agent_name) -> None.
             Useful for sending progress updates to WebSocket clients during
-            long retry waits.
+            long retry waits. agent_name is passed through because the retry
+            notice is the only trace of the stall the user sees, and a notice
+            attributed to the wrong agent sends them to the wrong logs.
 
     Returns:
         Result from the function
@@ -127,7 +136,7 @@ async def retry_with_backoff(
         """Fire the on_retry callback if provided, swallowing errors."""
         if on_retry is not None:
             try:
-                await on_retry(attempt, max_retries, delay, error_type)
+                await on_retry(attempt, max_retries, delay, error_type, agent_name)
             except Exception:
                 pass  # Never let notification failure break retry logic
 

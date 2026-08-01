@@ -68,6 +68,7 @@ from ..llm_client_parts.error_signals import (  # noqa: F401
     _is_hard_quota_error,
 )
 from ..llm_client_parts.retry import (  # noqa: F401
+    DEFAULT_REQUEST_TIMEOUT,
     MAX_RETRIES,
     MAX_RETRIES_UPSTREAM_5XX,
     RETRY_DELAY_BASE,

@@ -359,6 +359,20 @@ def setup_logging(log_level: int = logging.INFO) -> None:
     # checkpoint parameters contain the serialized AnalysisState and therefore
     # must never be copied into application logs.
     logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+    # The openai and anthropic SDKs share a generated base client that logs the
+    # complete request body at DEBUG ("Request options: ..."), so one vision call
+    # copies its base64 image data URIs to disk verbatim — measured at 8.0-8.5 MB
+    # for a single pathology tile batch. That collapses debug.log retention to
+    # minutes during an image-heavy round and makes SecretRedactionFilter regex
+    # the rendered megabytes on the request path. Both trees must be pinned:
+    # ScAI probes three protocols and routes to Anthropic Messages for some
+    # base_urls, and the leak is per-SDK.
+    # httpcore is deliberately NOT pinned — it logs connection lifecycle events
+    # only (connect_tcp, start_tls, proxy handshake), never the body, and those
+    # are the only records distinguishing a failed handshake from an application
+    # error when running behind proxy_url.
+    logging.getLogger("openai").setLevel(logging.INFO)
+    logging.getLogger("anthropic").setLevel(logging.INFO)
 
     # Log startup message
     logging.info(f"Logging initialized. Log directory: {LOG_DIR}")

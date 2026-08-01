@@ -356,7 +356,7 @@ Provide a detailed technical summary of this analysis phase covering:
         if phase_images:
             return await self._chat_with_vision_fallback(
                 text_prompt=prompt, images=phase_images,
-                temperature=0.3, max_tokens=32768, request_timeout=120.0,
+                temperature=0.3, max_tokens=32768, request_timeout=600.0,
             )
         else:
             return await self._pi_chat(prompt, temperature=0.3)
@@ -544,7 +544,7 @@ IMPORTANT:
             if all_images:
                 response = await self._chat_with_vision_fallback(
                     text_prompt=prompt, images=all_images[:20],
-                    temperature=0.3, max_tokens=8192, request_timeout=180.0,
+                    temperature=0.3, max_tokens=8192, request_timeout=600.0,
                 )
             else:
                 response = await self._pi_chat(prompt, temperature=0.3, max_tokens=8192)

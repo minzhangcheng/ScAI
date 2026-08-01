@@ -57,11 +57,11 @@ class GoogleDeepResearchClient:
         # httpx will also read from HTTP_PROXY/HTTPS_PROXY env vars if trust_env=True (default)
         if proxy_url:
             self.client = httpx.AsyncClient(
-                timeout=300.0,
+                timeout=600.0,
                 proxy=proxy_url
             )
         else:
-            self.client = httpx.AsyncClient(timeout=300.0)  # Long timeout for research
+            self.client = httpx.AsyncClient(timeout=600.0)  # Long timeout for research
         self._closed: bool = False
 
     def __del__(self):
