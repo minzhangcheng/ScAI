@@ -18,7 +18,13 @@ from ...constants import LlmFailureAction
 from ...config import get_session_reports, get_session_workspace
 from ...services.report import DetailedReportGenerator, compress_image_to_base64
 from ...services.report.figure_discovery import discover_workspace_figures
-from ...services.report.artifacts import artifact_stems, eligible_artifacts
+from ...services.report.artifacts import (
+    artifact_stems,
+    eligible_artifacts,
+    gallery_artifacts,
+    has_blocking_layout_defects,
+)
+from ...services.report.figure_attribution import attribute_figures_to_rounds
 from ..direction_coverage import current_lineage_id, direction_coverage_status
 from ...services.report.paths import resolve_report_output_dir
 from ...services.report.lineage import build_lineage_report_state

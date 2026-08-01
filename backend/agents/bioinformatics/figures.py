@@ -187,7 +187,9 @@ from .shared import (  # noqa: F401
     parse_expression_contracts,
     prepares_expression_before_sensitive_call,
     record_expression_contract,
+    describe_invalidated_artifacts,
     record_invalidated_file_stems,
+    round_start_ns,
     record_representation_change,
     unchanged_artifact_stems,
     workspace_artifact_versions,
@@ -287,13 +289,17 @@ class FiguresMixin:
             await self._notify("error", error_msg)
             return error_msg
 
-        record_representation_change(state, code)
+        invalidated_count = record_representation_change(state, code)
+        staleness_note = ""
         if representation_will_change:
-            record_invalidated_file_stems(
-                state,
-                unchanged_artifact_stems(
-                    self.sandbox.working_dir, preexisting_artifact_versions
-                ),
+            stale_stems = unchanged_artifact_stems(
+                self.sandbox.working_dir,
+                preexisting_artifact_versions,
+                since_ns=round_start_ns(state),
+            )
+            record_invalidated_file_stems(state, stale_stems)
+            staleness_note = describe_invalidated_artifacts(
+                stale_stems, invalidated_count
             )
 
         # Check if files were created
@@ -484,6 +490,7 @@ class FiguresMixin:
                         f"Figure {figure_name} has been approved by PI and saved.\n"
                         f"Quality score: {quality_score}/10\n"
                         f"Feedback: {review.get('feedback', 'Approved')}{layout_note}"
+                        + (f"\n{staleness_note}" if staleness_note else "")
                     )
 
                 # PI requested revision
@@ -520,6 +527,7 @@ class FiguresMixin:
                         f"PI feedback: {feedback}\n"
                         f"Please address this in the analysis pipeline and regenerate the figure later."
                         f"{layout_note}"
+                        + (f"\n{staleness_note}" if staleness_note else "")
                     )
 
                 # Record this round's feedback in cumulative history
@@ -586,6 +594,7 @@ class FiguresMixin:
                             f"after revision: {prev_score} -> {curr_score}).{rollback_note}\n"
                             f"Last feedback: {feedback}\n"
                             f"Please move on to the next analysis step."
+                            + (f"\n{staleness_note}" if staleness_note else "")
                         )
 
                 # Try to revise the figure
@@ -736,11 +745,16 @@ class FiguresMixin:
                 f"Figure {figure_name} saved after {revision_count} revision attempts. "
                 f"Status: needs further revision.\n"
                 f"Last feedback: {figure.pi_feedback}{layout_note}"
+                + (f"\n{staleness_note}" if staleness_note else "")
             )
 
         # No review callback, just save the figure
         self._upsert_publication_figure(state, figure)
-        return f"Figure {figure_name} has been generated and saved.\nJPG: {jpg_path}\nPDF: {pdf_path}"
+        return (
+            f"Figure {figure_name} has been generated and saved.\n"
+            f"JPG: {jpg_path}\nPDF: {pdf_path}"
+            + (f"\n{staleness_note}" if staleness_note else "")
+        )
 
     def _upsert_publication_figure(self, state, figure):
         """Replace existing figure with same name, or append if new."""

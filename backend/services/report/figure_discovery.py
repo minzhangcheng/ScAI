@@ -20,6 +20,22 @@ _IMAGE_GLOBS = ("*.png", "*.jpg", "*.jpeg")
 _PRIORITY_FIGURES = 0
 _PRIORITY_ROOT = 1
 _PRIORITY_NESTED = 2
+_PRIORITY_DEEP = 3
+_PRIORITY_DIAGNOSTIC = 4
+
+# Directory names the agent does not create as analysis output. ``reports`` holds
+# copies the report generators already wrote; re-discovering them would offer the
+# same image twice under a path that is not the analysis's own.
+_SKIP_DIRS = frozenset({"__pycache__", ".ipynb_checkpoints", "reports", "tables"})
+
+# Platform-written validation output. It is real and worth reaching, but it is a
+# diagnostic rather than a result, so it sorts last and is tagged for the caller.
+_DIAGNOSTIC_DIRS = frozenset({"annotation_validation"})
+
+# How deep below the workspace a candidate may sit. Across 27 real sessions the
+# deepest image was at depth 3; the bound is here so an unforeseen tool that
+# writes a deep tree cannot turn discovery into a full-disk walk.
+_MAX_SCAN_DEPTH = 3
 
 
 def infer_figure_type(stem: str) -> str:
@@ -44,8 +60,15 @@ def discover_workspace_figures(session_id: str) -> List[Dict[str, Any]]:
     """Return normalized, deduplicated, ordered figure candidates.
 
     Each candidate is a dict with ``name``, ``type``, ``path``, ``pdf_path``,
-    ``mtime``, and ``source``. Only files inside the session workspace are
-    returned. Callers are responsible for any candidate cap before prompting.
+    ``mtime``, ``source``, ``rel_path``, and ``diagnostic``. Only files inside the
+    session workspace are returned. Callers are responsible for any candidate cap
+    before prompting.
+
+    The three named scan roots below are a priority ordering, not the reach of the
+    search: nothing constrains where the agent saves a figure, and a run that put
+    its work in a directory of its own invention had every one of those figures
+    excluded from the Results gallery while the detailed report — which resolves
+    recursively — showed them. The recursive tier closes that gap.
     """
     validate_session_id(session_id)
     workspace = get_session_workspace(session_id)
@@ -64,30 +87,58 @@ def discover_workspace_figures(session_id: str) -> List[Dict[str, Any]]:
             scan_dirs.append((out_fig, rel, _PRIORITY_NESTED))
 
     raw: List[Dict[str, Any]] = []
+
+    def _add(img: Path, source: str, priority: int) -> None:
+        try:
+            resolved = validate_path_within(img, workspace)
+            stat = img.stat()
+        except Exception:
+            return
+        pdf = img.with_suffix(".pdf")
+        pdf_path = None
+        if pdf.exists():
+            try:
+                pdf_path = str(validate_path_within(pdf, workspace))
+            except Exception:
+                pdf_path = None
+        raw.append({
+            "name": img.stem,
+            "type": infer_figure_type(img.stem),
+            "path": str(resolved),
+            "pdf_path": pdf_path,
+            "mtime": stat.st_mtime,
+            "source": source,
+            "rel_path": img.relative_to(workspace).as_posix(),
+            "diagnostic": priority == _PRIORITY_DIAGNOSTIC,
+            "_priority": priority,
+        })
+
     for scan_dir, source, priority in scan_dirs:
         for pattern in _IMAGE_GLOBS:
             for img in scan_dir.glob(pattern):
-                try:
-                    resolved = validate_path_within(img, workspace)
-                    stat = img.stat()
-                except Exception:
-                    continue
-                pdf = img.with_suffix(".pdf")
-                pdf_path = None
-                if pdf.exists():
-                    try:
-                        pdf_path = str(validate_path_within(pdf, workspace))
-                    except Exception:
-                        pdf_path = None
-                raw.append({
-                    "name": img.stem,
-                    "type": infer_figure_type(img.stem),
-                    "path": str(resolved),
-                    "pdf_path": pdf_path,
-                    "mtime": stat.st_mtime,
-                    "source": source,
-                    "_priority": priority,
-                })
+                _add(img, source, priority)
+
+    # Recursive tier: anywhere else the agent chose to write. Deduplication below
+    # keeps the named roots winning any stem they also hold.
+    for pattern in _IMAGE_GLOBS:
+        for img in workspace.rglob(pattern):
+            try:
+                parts = img.relative_to(workspace).parts
+            except ValueError:
+                continue
+            dirs = parts[:-1]
+            if len(parts) > _MAX_SCAN_DEPTH:
+                continue
+            if any(d.startswith(".") or d in _SKIP_DIRS for d in dirs):
+                continue
+            if not dirs:
+                continue  # already covered by the workspace-root tier
+            priority = (
+                _PRIORITY_DIAGNOSTIC
+                if any(d in _DIAGNOSTIC_DIRS for d in dirs)
+                else _PRIORITY_DEEP
+            )
+            _add(img, "/".join(dirs), priority)
 
     # Deduplicate by stem: keep best (lowest priority, then newest mtime).
     best: Dict[str, Dict[str, Any]] = {}
@@ -98,10 +149,12 @@ def discover_workspace_figures(session_id: str) -> List[Dict[str, Any]]:
         ):
             best[cand["name"]] = cand
 
-    # Order: source priority, then mtime ascending, then name.
+    # Order: source priority, then mtime DESCENDING, then name. Callers cap the
+    # list by head-slicing it, so ascending order made the cap discard the newest
+    # figures — the ones a late round just produced — and keep the oldest.
     ordered = sorted(
         best.values(),
-        key=lambda c: (c["_priority"], c["mtime"], c["name"]),
+        key=lambda c: (c["_priority"], -c["mtime"], c["name"]),
     )
     for cand in ordered:
         cand.pop("_priority", None)

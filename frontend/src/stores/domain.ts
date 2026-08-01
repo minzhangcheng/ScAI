@@ -53,6 +53,12 @@ export interface PublicationFigure {
   piFeedback?: string
   revisionCount: number
   createdAt: string
+  /** Round that produced the figure, when it could be attributed. */
+  round?: number
+  /** The renderer measured text drawn underneath another artist. */
+  layoutBlocking?: boolean
+  /** Platform-written validation output rather than a result. */
+  diagnostic?: boolean
 }
 
 export interface PublicationTable {

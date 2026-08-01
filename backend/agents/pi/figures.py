@@ -725,10 +725,28 @@ an earlier version may win.
 
         return len(candidates) - 1
 
+    @staticmethod
+    def _describe_candidate(figure: Dict[str, Any]) -> str:
+        """One prompt line per candidate, using whatever the caller supplied.
+
+        Every field beyond name and type is optional: this is also called with
+        bare ``{name, type, is_publication}`` dicts, so nothing may be required.
+        """
+        parts = [f"- {figure['name']} (type: {figure['type']}"]
+        if figure.get("round"):
+            parts.append(f", round: {figure['round']}")
+        if figure.get("diagnostic"):
+            parts.append(", diagnostic")
+        parts.append(")")
+        description = (figure.get("description") or "").strip()
+        if description:
+            parts.append(f" — {description}")
+        return "".join(parts)
+
     async def select_brief_figures(
         self,
         state: AnalysisState,
-        all_figures: List[Dict[str, str]]
+        all_figures: List[Dict[str, Any]]
     ) -> List[str]:
         """
         Select figure names to display in the Brief Report (Result page).
@@ -744,9 +762,19 @@ an earlier version may win.
         if not all_figures:
             return []
 
+        # Render every field the caller supplies, defensively: callers that pass a
+        # bare name/type dict must keep working, so nothing here is subscripted.
         figures_list = "\n".join(
-            f"- {f['name']} (type: {f['type']})"
-            for f in all_figures
+            self._describe_candidate(f) for f in all_figures
+        )
+        rounds_present = sorted({
+            int(f["round"]) for f in all_figures
+            if f.get("round") and not f.get("diagnostic")
+        })
+        coverage_line = (
+            f"\nThis analysis produced result figures in rounds: "
+            f"{', '.join(str(r) for r in rounds_present)}."
+            if len(rounds_present) > 1 else ""
         )
 
         prompt = f"""You are reviewing figures generated during a bioinformatics analysis.
@@ -755,6 +783,7 @@ Research objective: {state.initial_instruction}
 
 All available figures:
 {figures_list}
+{coverage_line}
 
 Select which figures should appear in the Brief Results display (shown to the researcher immediately after analysis).
 Include figures that are:
@@ -765,6 +794,11 @@ Exclude figures that are:
 - QC / technical diagnostics (qc_violin, pca_variance, hvg_plot, and similar)
 - Intermediate/exploratory plots superseded by a final version (e.g. exclude umap_initial if umap_cell_types exists)
 - Redundant older versions (prefer _v2 or _final over earlier versions of the same figure)
+
+How many:
+- Select 8-15 figures when that many qualify. Select fewer only when fewer qualify.
+- Cover the whole analysis: include at least one figure from every round that produced result figures.
+- Where two figures show the same result, prefer the one from the later round.
 
 Return ONLY a JSON array of the selected figure names, with no other text.
 Example: ["umap_cell_types", "cell_type_proportions", "volcano_<celltype>_<condition>_vs_<control>"]

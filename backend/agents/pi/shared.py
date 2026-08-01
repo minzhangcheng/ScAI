@@ -20,7 +20,10 @@ _CONTROL_SIGNAL_RESULTS = {
 
 # Generic heuristics for the brief-gallery selection fallback. No dataset-,
 # disease-, tissue-, or species-specific names.
-_BRIEF_PREFERRED_TYPES = ("umap", "volcano", "dotplot", "heatmap", "barplot")
+# Must stay a superset of the result types `infer_figure_type` can emit, minus
+# the catch-all: a type discovery classifies but this tuple omits is silently
+# unreachable through the deterministic fallback.
+_BRIEF_PREFERRED_TYPES = ("umap", "volcano", "violin", "dotplot", "heatmap", "barplot")
 _BRIEF_QC_MARKERS = (
     "qc", "pca", "elbow", "hvg", "doublet", "silhouette", "variance", "metrics",
 )

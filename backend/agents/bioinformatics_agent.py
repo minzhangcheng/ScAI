@@ -143,7 +143,9 @@ from .bioinformatics.shared import (  # noqa: F401
     parse_expression_contracts,
     prepares_expression_before_sensitive_call,
     record_expression_contract,
+    describe_invalidated_artifacts,
     record_invalidated_file_stems,
+    round_start_ns,
     record_representation_change,
     unchanged_artifact_stems,
     workspace_artifact_versions,
@@ -1782,24 +1784,28 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         )
 
                         # Strip ANSI escape codes from Jupyter traceback
+                        staleness_note = ""
                         if result.error:
                             result.error = strip_ansi(result.error)
                         else:
                             invalidated_count = record_representation_change(state, code)
+                            stale_stems: set[str] = set()
                             if representation_will_change:
-                                record_invalidated_file_stems(
-                                    state,
-                                    unchanged_artifact_stems(
-                                        self.sandbox.working_dir,
-                                        preexisting_artifact_versions,
-                                    ),
+                                stale_stems = unchanged_artifact_stems(
+                                    self.sandbox.working_dir,
+                                    preexisting_artifact_versions,
+                                    since_ns=round_start_ns(state),
                                 )
+                                record_invalidated_file_stems(state, stale_stems)
                             if invalidated_count:
                                 logger.warning(
                                     "[Bioinformatics] Invalidated %d stale artifacts after "
                                     "expression representation change",
                                     invalidated_count,
                                 )
+                            staleness_note = describe_invalidated_artifacts(
+                                stale_stems, invalidated_count
+                            )
 
                         # Cap output/error at source so all downstream consumers
                         # (code_history, LLM tool message, analysis_log, notify)
@@ -1808,6 +1814,11 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             result.output = truncate_for_llm(result.output)
                         if result.error:
                             result.error = truncate_for_llm(result.error)
+                        # Appended after truncation so the agent always sees which of
+                        # its own artifacts this step invalidated; consumers below
+                        # keep the tail of `output`.
+                        if not result.error and staleness_note:
+                            result.output = f"{result.output or ''}\n{staleness_note}".strip()
 
                         code_exec = CodeExecution(
                             code=code,

@@ -7,6 +7,8 @@ import {
   Clock,
   AlertCircle,
   AlertTriangle,
+  ChevronDown,
+  ChevronRight,
   Download,
   X,
   ZoomIn,
@@ -15,18 +17,30 @@ import {
 
 const API_BASE = '/api'
 
+// How many figures the gallery shows before "show all". A completed run can
+// produce dozens; leading with a readable handful keeps the page browsable.
+const PREVIEW_COUNT = 8
+
 interface FigureGalleryProps {
   figures: PublicationFigure[]
+  /** How many leading entries the PI curated for the brief report, if any. */
+  curatedCount?: number
 }
 
-export function FigureGallery({ figures }: FigureGalleryProps) {
+export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
   const { currentSession, language } = useAppStore()
   const { t } = useTranslation(language)
   const [selectedFigure, setSelectedFigure] = useState<PublicationFigure | null>(null)
+  const [showAll, setShowAll] = useState(false)
+  const [collapsed, setCollapsed] = useState(false)
 
   if (figures.length === 0) {
     return null
   }
+
+  const previewCount = Math.max(PREVIEW_COUNT, curatedCount ?? 0)
+  const visibleFigures = showAll ? figures : figures.slice(0, previewCount)
+  const hiddenCount = figures.length - visibleFigures.length
 
   const isSessionCompleted = currentSession?.status === 'completed'
 
@@ -105,14 +119,31 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
 
   return (
     <div className="mt-6">
-      <h3 className="text-sm font-medium text-slate-500 uppercase tracking-wide mb-3 flex items-center gap-2">
+      <button
+        onClick={() => setCollapsed(c => !c)}
+        className="w-full text-sm font-medium text-slate-500 uppercase tracking-wide mb-3 flex items-center gap-2 hover:text-slate-700 transition-colors"
+      >
+        {collapsed ? (
+          <ChevronRight className="w-4 h-4" />
+        ) : (
+          <ChevronDown className="w-4 h-4" />
+        )}
         <FileImage className="w-4 h-4" />
         {t('figureGallery')} ({figures.length})
-      </h3>
+        {!collapsed && hiddenCount > 0 && (
+          <span className="normal-case tracking-normal text-slate-400">
+            {language === 'zh'
+              ? `· 显示 ${visibleFigures.length} / ${figures.length}`
+              : `· showing ${visibleFigures.length} of ${figures.length}`}
+          </span>
+        )}
+      </button>
 
+      {!collapsed && (
+      <>
       {/* Figure Grid */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-        {figures.map((figure) => (
+        {visibleFigures.map((figure) => (
           <div
             key={figure.id}
             className="bg-white border border-slate-200 rounded-lg overflow-hidden hover:shadow-md transition-shadow"
@@ -178,10 +209,31 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
               <p className="text-xs text-slate-500 mt-1 line-clamp-2" title={figure.description}>
                 {figure.description}
               </p>
-              <div className="flex items-center gap-1 mt-2">
+              <div className="flex flex-wrap items-center gap-1 mt-2">
                 <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded">
                   {figure.figureType}
                 </span>
+                {figure.round ? (
+                  <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded">
+                    {language === 'zh' ? `第 ${figure.round} 轮` : `Round ${figure.round}`}
+                  </span>
+                ) : null}
+                {figure.diagnostic && (
+                  <span className="text-xs text-slate-500 bg-slate-200 px-2 py-0.5 rounded">
+                    {language === 'zh' ? '诊断图' : 'Diagnostic'}
+                  </span>
+                )}
+                {/* The status badge alone would read "Final" over a figure the
+                    revision loop never made legible. The renderer's measurement
+                    travels with it. */}
+                {figure.layoutBlocking && (
+                  <span
+                    className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded"
+                    title={language === 'zh' ? '渲染引擎测得文字被遮挡' : 'The renderer measured overlapping text'}
+                  >
+                    {language === 'zh' ? '排版待修' : 'Layout defect'}
+                  </span>
+                )}
               </div>
 
               {/* Download Buttons */}
@@ -211,6 +263,29 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
           </div>
         ))}
       </div>
+
+      {(hiddenCount > 0 || showAll) && (
+        <div className="mt-3 flex justify-center">
+          <button
+            onClick={() => setShowAll(s => !s)}
+            className="flex items-center gap-1 px-4 py-1.5 text-sm text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+          >
+            {showAll ? (
+              <>
+                <ChevronDown className="w-4 h-4 rotate-180" />
+                {language === 'zh' ? '收起' : 'Show less'}
+              </>
+            ) : (
+              <>
+                <ChevronDown className="w-4 h-4" />
+                {language === 'zh' ? `显示全部 (${figures.length})` : `Show all (${figures.length})`}
+              </>
+            )}
+          </button>
+        </div>
+      )}
+      </>
+      )}
 
       {/* Lightbox Modal */}
       {selectedFigure && (

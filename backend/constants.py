@@ -5,7 +5,7 @@ action enums, and LLM failure intervention constants.
 """
 from enum import Enum
 
-VERSION = "0.38.1"
+VERSION = "0.38.2"
 
 
 # ── Authoritative graph node registry — single source of truth ─────
@@ -108,6 +108,14 @@ PI_REVIEW_FALLBACK_DECISION = "revise"
 # at import time rather than silently breaking comparison semantics.
 CONTINUE_SIGNAL = "[CONTINUE]"
 PI_DECIDE_SIGNAL = "[PI_DECIDE]"
+
+# Substituted for a figure message's base64 payload before the message is
+# persisted: keeping 70+ inline images would bloat session.json for no gain,
+# since the figures themselves are on disk. The frontend must recognise this
+# exact value -- rendered as an image source it produces a broken <img>, which
+# is what every reloaded session showed. Mirrored in
+# frontend/src/constants/storage.ts.
+STRIPPED_FIGURE_PLACEHOLDER = "[image]"
 
 # Semantic gate identifiers used by restore targets, wait helpers, and resume routing.
 GATE_ROUND_WAIT = "round_wait"

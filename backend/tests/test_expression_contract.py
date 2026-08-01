@@ -1,15 +1,23 @@
+import os
+from datetime import datetime
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from backend.models.schemas import AnalysisState, PublicationFigure, FigureReviewStatus
+from backend.models.schemas import (
+    AnalysisState, AnalysisStep, PublicationFigure, FigureReviewStatus,
+)
 from backend.utils.expression_contract import (
     build_expression_preflight_code,
+    describe_invalidated_artifacts,
     extract_sensitive_expression_inputs,
     mutates_expression_representation,
     prepares_expression_before_sensitive_call,
     record_representation_change,
+    round_start_ns,
+    unchanged_artifact_stems,
+    workspace_artifact_versions,
 )
 
 
@@ -122,3 +130,93 @@ def test_canonical_mutation_still_detected_alongside_local_copies():
         "adata = load_shared()\n"
         "sc.pp.normalize_total(adata)"
     )
+
+
+# --- Numeric-library calls are not expression mutations -----------------------
+# Taken verbatim from real session code. `np.log1p` shares a name with
+# `sc.pp.log1p` and nothing else; matched on the bare name, its BinOp argument
+# resolved to no target root and took the "unknown source, assume canonical"
+# branch, so every one of these reported a canonical mutation.
+
+@pytest.mark.parametrize("code", [
+    "cpm = np.log1p(counts / counts.sum() * 1e6)",
+    "logcpm = np.log1p(bulk.div(bulk.sum(0), axis=1) * 1e6)",
+    "lc = np.log1p(obs.total_counts)",
+    "z = scipy.stats.zscore(m)\nscaled = sklearn.preprocessing.scale(z)",
+    "vals = numpy.log1p(numpy.asarray(x))",
+])
+def test_numeric_library_calls_are_not_representation_mutations(code):
+    assert not mutates_expression_representation(code)
+
+
+@pytest.mark.parametrize("code", [
+    "sc.pp.log1p(adata)",
+    "sc.pp.normalize_total(adata, target_sum=1e4)",
+    "log1p(adata)",
+    "pp.scale(adata, max_value=10)",
+])
+def test_scanpy_and_bare_mutations_still_detected(code):
+    assert mutates_expression_representation(code)
+
+
+# --- The file-stem blacklist is bounded to the round that is mutating ---------
+
+def _stamp(path, mtime):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x")
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_unchanged_stems_are_bounded_to_the_current_round(tmp_path):
+    _stamp(tmp_path / "figures" / "from_round_1.png", 1000.0)
+    _stamp(tmp_path / "figures" / "from_round_3.png", 3000.0)
+    before = workspace_artifact_versions(tmp_path)
+
+    # Unscoped, one mutating cell in round 3 blacklists round 1's figure too.
+    assert unchanged_artifact_stems(tmp_path, before) == {
+        "from_round_1", "from_round_3",
+    }
+    # Scoped to a round that started at t=2000, only that round's own output is
+    # affected -- matching the rule invalidate_current_artifacts already applies.
+    assert unchanged_artifact_stems(
+        tmp_path, before, since_ns=int(2000.0 * 1_000_000_000)
+    ) == {"from_round_3"}
+
+
+def test_round_start_ns_without_a_logged_step_blacklists_nothing(tmp_path):
+    _stamp(tmp_path / "figures" / "existing.png", 1000.0)
+    before = workspace_artifact_versions(tmp_path)
+    state = AnalysisState(initial_instruction="x", user_id="u")
+    state.current_round = 4  # no analysis_log entry for round 4 yet
+
+    since = round_start_ns(state)
+    assert since > int(1000.0 * 1_000_000_000)
+    assert unchanged_artifact_stems(tmp_path, before, since_ns=since) == set()
+
+
+def test_round_start_ns_uses_the_earliest_step_of_the_current_round():
+    state = AnalysisState(initial_instruction="x", user_id="u")
+    state.current_round = 2
+    early = datetime(2026, 1, 1, 10, 0, 0)
+    state.analysis_log = [
+        AnalysisStep(step_number=1, step_type="execute_code", round_number=1,
+                     timestamp=datetime(2026, 1, 1, 9, 0, 0)),
+        AnalysisStep(step_number=2, step_type="execute_code", round_number=2,
+                     timestamp=early),
+        AnalysisStep(step_number=3, step_type="execute_code", round_number=2,
+                     timestamp=datetime(2026, 1, 1, 11, 0, 0)),
+    ]
+    assert round_start_ns(state) == int(early.timestamp() * 1_000_000_000)
+
+
+# --- The producer is told what it invalidated --------------------------------
+
+def test_invalidation_is_reported_back_to_the_agent():
+    note = describe_invalidated_artifacts({"umap_cell_types", "volcano_a"}, 2)
+    assert "umap_cell_types" in note and "volcano_a" in note
+    assert "Regenerate" in note
+
+
+def test_no_invalidation_produces_no_note():
+    assert describe_invalidated_artifacts(set(), 0) == ""

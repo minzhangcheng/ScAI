@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,17 @@ _SENSITIVE_CALLS = frozenset({
 })
 _REPRESENTATION_MUTATORS = frozenset({
     "normalize_total", "log1p", "scale", "normalize_per_cell",
+})
+# Module roots whose ``log1p``/``scale``/``normalize_*`` are array maths, not an
+# operation on the canonical AnnData. ``np.log1p(counts / total * 1e6)`` shares a
+# name with ``sc.pp.log1p(adata)`` and nothing else; matched on the bare name it
+# was indistinguishable, and because such a call has no resolvable target root it
+# took the "unknown source, assume canonical" branch and always reported True.
+# Measured over 211 real detector firings, 68 (32%) were numpy-only calls of
+# exactly this shape. A call whose module is unknown still counts as canonical.
+_NON_EXPRESSION_CALL_ROOTS = frozenset({
+    "np", "numpy", "pd", "pandas", "sp", "scipy", "sk", "sklearn",
+    "math", "torch", "cp", "cupy", "jnp", "stats",
 })
 _MARKER = "__SCAI_EXPRESSION_CONTRACT__:"
 
@@ -173,14 +185,26 @@ def parse_expression_contracts(output: str | None) -> list[dict[str, Any]]:
 #
 # Deliberately a conservative, closed set: a call whose name is absent (e.g. a
 # user-defined loader like ``create_anndata()``) is treated as binding the
-# canonical object, so a later mutation of that name is flagged. That yields a
-# false positive (an unnecessary figure refresh) but never a false negative (a
-# stale figure), which is the safe direction for this check.
+# canonical object, so a later mutation of that name is flagged.
+#
+# That bias is only cheap where the consequence is a refresh. It is not: every
+# consumer of ``invalidated_artifact_stems`` reads it as "hide this from output",
+# so a false positive deletes a good figure rather than re-rendering it. Keep new
+# entries here generous and keep ``_NON_EXPRESSION_CALL_ROOTS`` current; the
+# blacklist those feed is bounded by round (``unchanged_artifact_stems``) but a
+# same-round false positive still costs the user a figure.
 _FRESH_OBJECT_CALLS = frozenset({
     "copy", "AnnData", "concat", "concatenate",
     "read", "read_h5ad", "read_10x_h5", "read_10x_mtx", "read_mtx",
     "read_csv", "read_text", "read_visium", "read_loom", "read_excel",
 })
+
+
+def _call_module_root(node: ast.Call) -> str | None:
+    """Leftmost module name of a dotted call, or None for a bare call."""
+    if isinstance(node.func, ast.Attribute):
+        return _root_name(node.func.value)
+    return None
 
 
 def _mutation_target_root(node: ast.Call) -> str | None:
@@ -251,7 +275,10 @@ def mutates_expression_representation(code: str) -> bool:
                 events.append((pos, 1, "mutate", _root_name(node.target)))
         elif isinstance(node, ast.Call):
             name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
-            if name in _REPRESENTATION_MUTATORS:
+            if (
+                name in _REPRESENTATION_MUTATORS
+                and _call_module_root(node) not in _NON_EXPRESSION_CALL_ROOTS
+            ):
                 events.append((pos, 1, "mutate", _mutation_target_root(node)))
 
     local: set[str] = set()
@@ -356,15 +383,76 @@ def workspace_artifact_versions(working_dir: str | Path) -> dict[str, int]:
     return versions
 
 
+def round_start_ns(state: Any) -> int:
+    """Wall-clock start of the round in progress, in ns, or now when unknown.
+
+    Returning "now" is the safe default: nothing predates it, so a round that has
+    logged no step yet blacklists nothing rather than blacklisting everything.
+    """
+    current = int(getattr(state, "current_round", 0) or 0)
+    starts = [
+        step.timestamp
+        for step in (getattr(state, "analysis_log", None) or [])
+        if int(getattr(step, "round_number", 0) or 0) == current
+        and getattr(step, "timestamp", None) is not None
+    ]
+    if not starts:
+        return time.time_ns()
+    return int(min(starts).timestamp() * 1_000_000_000)
+
+
 def unchanged_artifact_stems(
-    working_dir: str | Path, before: dict[str, int],
+    working_dir: str | Path, before: dict[str, int], since_ns: int = 0,
 ) -> set[str]:
-    """Return prior artifacts not overwritten by the correcting execution."""
+    """Return prior artifacts not overwritten by the correcting execution.
+
+    ``since_ns`` bounds the answer to artifacts produced during the round that is
+    mutating, matching the rule ``invalidate_current_artifacts`` already applies
+    to the model-level record (``artifact_round not in (0, round_number)``). The
+    file-stem path never got that scoping, so one mutating cell in round N
+    blacklisted every figure from rounds 1..N-1 for the rest of the session --
+    and since the set is a monotonic union with a single narrow subtraction, the
+    only way back out was regenerating that exact figure. Measured across 27 real
+    sessions it removed 76% of all gallery candidates.
+
+    Defaulted rather than required: this function is re-exported by nine
+    ``backend.agents.bioinformatics`` modules.
+    """
     after = workspace_artifact_versions(working_dir)
     return {
         stem for stem, version in before.items()
-        if after.get(stem) == version
+        if after.get(stem) == version and version >= since_ns
     }
+
+
+_MAX_NAMED_STALE_ARTIFACTS = 12
+
+
+def describe_invalidated_artifacts(stems: set[str], model_count: int) -> str:
+    """One line telling the agent which of its own artifacts just went stale.
+
+    Invalidation was silent: seven consumers read the record as "hide this from
+    the report" and none as "regenerate this", and nothing in any prompt, tool
+    result, or context block ever mentioned it. The producer could therefore
+    never repair the deficit it had just caused. This is that missing signal --
+    a statement of fact routed back to the party able to act on it, not an
+    instruction, since whether a figure is still worth having is the agent's
+    call.
+    """
+    if not stems and model_count <= 0:
+        return ""
+    names = sorted(stems)
+    shown = ", ".join(names[:_MAX_NAMED_STALE_ARTIFACTS])
+    if len(names) > _MAX_NAMED_STALE_ARTIFACTS:
+        shown += f", and {len(names) - _MAX_NAMED_STALE_ARTIFACTS} more"
+    total = len(names) or model_count
+    return (
+        f"[Provenance] This step changed the expression representation, so {total} "
+        f"artifact(s) produced earlier in this round no longer match the data they "
+        f"describe and have been withheld from the report"
+        + (f": {shown}." if shown else ".")
+        + " Regenerate any of them you want reported."
+    )
 
 
 def record_invalidated_file_stems(state: Any, stems: set[str]) -> None:

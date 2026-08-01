@@ -29,6 +29,12 @@ interface IntegratedReportContent {
   tables?: PublicationTable[]
 }
 
+// Identity for gallery de-duplication. Names are unique per session (the agent
+// upserts publication figures by name), while ids are regenerated for
+// workspace-only figures every time the brief gallery is assembled — keying on
+// the id alone duplicates them when a report is regenerated.
+const figureKey = (f: PublicationFigure) => f.name || f.id
+
 export function ResultsPanel() {
   const { currentSession, messages, language } = useAppStore()
   const { getReport } = useSession()
@@ -42,6 +48,9 @@ export function ResultsPanel() {
   const [publicationTables, setPublicationTables] = useState<PublicationTable[]>([])
   const [integratedReport, setIntegratedReport] = useState<string | null>(null)
   const [graphicAbstract, setGraphicAbstract] = useState<GraphicAbstractType | null>(null)
+  // Figures the PI curated for the brief report. They are shown first; the rest
+  // of the session's figures stay browsable behind the gallery's "show all".
+  const [curatedKeys, setCuratedKeys] = useState<Set<string>>(new Set())
 
   const loadReport = useCallback(async () => {
     setLoading(true)
@@ -89,6 +98,9 @@ export function ResultsPanel() {
       piFeedback: f.pi_feedback || f.piFeedback,
       revisionCount: f.revision_count ?? f.revisionCount ?? 0,
       createdAt: f.created_at || f.createdAt || '',
+      round: f.round ?? f.round_number ?? undefined,
+      layoutBlocking: f.layout_blocking ?? f.layoutBlocking ?? false,
+      diagnostic: f.diagnostic ?? false,
     })
 
     // Process messages for real-time updates
@@ -111,20 +123,32 @@ export function ResultsPanel() {
         if (content?.report) {
           setIntegratedReport(content.report)
         }
-        if (content?.figures) {
-          const figures = content.figures
+        // An empty array is truthy. Guarding on length keeps an integrated_report
+        // that curated nothing from emptying a gallery the session had populated.
+        if (Array.isArray(content?.figures) && content.figures.length > 0) {
+          const curated = content.figures.map(transformFigure)
           setPublicationFigures(prev => {
-            const newFigs = figures.map(transformFigure)
-            // Preserve pngBase64 from existing figures (integrated_report message may have
-            // been stripped of base64 by localStorage persistence)
-            return newFigs.map((fig: PublicationFigure) => {
-              const existing = prev.find((f: PublicationFigure) => f.id === fig.id)
-              if (existing?.pngBase64 && !fig.pngBase64) {
-                return { ...fig, pngBase64: existing.pngBase64 }
-              }
-              return fig
-            })
+            // Union, not replacement. The curated list is the PI's highlight
+            // reel, not an inventory — replacing dropped every figure the
+            // session already carried, and they were unreachable from the UI.
+            const merged = new Map<string, PublicationFigure>()
+            for (const fig of curated) {
+              // Preserve pngBase64 from existing figures (the integrated_report
+              // message may have been stripped of base64 by persistence)
+              const existing = prev.find(f => figureKey(f) === figureKey(fig))
+              merged.set(
+                figureKey(fig),
+                existing?.pngBase64 && !fig.pngBase64
+                  ? { ...fig, pngBase64: existing.pngBase64 }
+                  : fig
+              )
+            }
+            for (const fig of prev) {
+              if (!merged.has(figureKey(fig))) merged.set(figureKey(fig), fig)
+            }
+            return [...merged.values()]
           })
+          setCuratedKeys(new Set(curated.map(figureKey)))
         }
         if (content?.tables) {
           setPublicationTables(content.tables)
@@ -146,6 +170,16 @@ export function ResultsPanel() {
       }
     }
   }, [currentSession, messages])
+
+  // Curated figures first, everything else after, so the default (collapsed)
+  // gallery view still leads with what the PI picked out.
+  const orderedFigures = curatedKeys.size === 0
+    ? publicationFigures
+    : [
+        ...publicationFigures.filter(f => curatedKeys.has(figureKey(f))),
+        ...publicationFigures.filter(f => !curatedKeys.has(figureKey(f))),
+      ]
+  const curatedCount = publicationFigures.filter(f => curatedKeys.has(figureKey(f))).length
 
   const toggleRound = (key: string) => {
     const newExpanded = new Set(expandedRounds)
@@ -232,6 +266,18 @@ export function ResultsPanel() {
             </a>
           )}
 
+          {currentSession.status === 'completed' && (
+            <a
+              href={`/api/session/${currentSession.id}/report/html`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 px-4 py-2 bg-accent-50 text-accent-700 rounded-xl font-medium hover:bg-accent-100 transition-colors"
+            >
+              <FileText className="w-4 h-4" />
+              {language === 'zh' ? '查看完整报告' : 'View Full Report'}
+            </a>
+          )}
+
           {currentSession.finalSummary && (
             <button
               onClick={downloadReport}
@@ -251,18 +297,18 @@ export function ResultsPanel() {
         </div>
       )}
 
-      {/* Publication Outputs */}
+      {/* Publication Outputs — graphic abstract, then the report, then the figures */}
       {(currentSession.status === 'completed' || publicationFigures.length > 0) && (
         <div className="space-y-4">
-          <FigureGallery figures={publicationFigures} />
+          {graphicAbstract && (
+            <GraphicAbstract graphicAbstract={graphicAbstract} />
+          )}
 
           {integratedReport && (
             <IntegratedReport report={integratedReport} />
           )}
 
-          {graphicAbstract && (
-            <GraphicAbstract graphicAbstract={graphicAbstract} />
-          )}
+          <FigureGallery figures={orderedFigures} curatedCount={curatedCount} />
 
           {publicationFigures.length > 0 && (
             <DownloadButtons

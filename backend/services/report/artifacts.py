@@ -46,6 +46,31 @@ def eligible_artifacts(artifacts: Iterable[Any] | None) -> list[Any]:
     return [artifact for artifact in (artifacts or []) if is_report_eligible(artifact)]
 
 
+def is_gallery_eligible(artifact: Any) -> bool:
+    """Whether a reviewed artifact belongs on the browsing surface.
+
+    Deliberately weaker than ``is_report_eligible``, and the difference is the
+    point. That predicate answers "is this fit to publish", which is the right
+    question for a report and the wrong one for "show me what this run made": it
+    withholds a figure the review loop passed only after revision, and a figure
+    the loop gave up on at the revision cap — both of which exist on disk, are
+    this run's own work, and are what the operator asked to see.
+
+    Review status and measured layout defects travel with the record as badges
+    instead, so nothing is hidden and nothing is misrepresented. Only artifacts
+    superseded by newer data are withheld, because those describe a matrix that
+    no longer exists.
+    """
+    return bool(
+        getattr(artifact, "is_current", True)
+        and not getattr(artifact, "invalidated_at", None)
+    )
+
+
+def gallery_artifacts(artifacts: Iterable[Any] | None) -> list[Any]:
+    return [artifact for artifact in (artifacts or []) if is_gallery_eligible(artifact)]
+
+
 def artifact_stems(artifacts: Iterable[Any] | None) -> set[str]:
     stems: set[str] = set()
     for artifact in artifacts or []:

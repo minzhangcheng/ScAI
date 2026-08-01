@@ -20,7 +20,13 @@ from ...constants import LlmFailureAction
 from ...config import get_session_reports, get_session_workspace
 from ...services.report import DetailedReportGenerator, compress_image_to_base64
 from ...services.report.figure_discovery import discover_workspace_figures
-from ...services.report.artifacts import artifact_stems, eligible_artifacts
+from ...services.report.artifacts import (
+    artifact_stems,
+    eligible_artifacts,
+    gallery_artifacts,
+    has_blocking_layout_defects,
+)
+from ...services.report.figure_attribution import attribute_figures_to_rounds  # noqa: F401
 from ..direction_coverage import current_lineage_id, direction_coverage_status
 from ...services.report.paths import resolve_report_output_dir
 from ...services.report.lineage import build_lineage_report_state
@@ -48,6 +54,9 @@ from .shared import (  # noqa: F401
     discover_workspace_figures,
     artifact_stems,
     eligible_artifacts,
+    gallery_artifacts,
+    has_blocking_layout_defects,
+    attribute_figures_to_rounds,
     current_lineage_id,
     direction_coverage_status,
     resolve_report_output_dir,
@@ -58,6 +67,76 @@ from .shared import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+# A candidate line is rendered into the PI's prompt once per figure against a
+# 200-candidate cap, so the description is an excerpt, not the whole field.
+_MAX_CANDIDATE_DESCRIPTION = 200
+
+
+def _attribute_rounds(
+    analysis_state, publication_figures, workspace_figs,
+) -> Dict[str, Optional[int]]:
+    """Map candidate stem -> producing round, omitting what cannot be resolved.
+
+    Reuses ``attribute_figures_to_rounds`` (supervision records, then publication
+    round_number, then mtime against round boundaries) rather than inferring a
+    second time; it keys on basename, so translate to stems for the caller.
+    """
+    paths: Dict[str, str] = {}
+    for f in workspace_figs:
+        path = f.get("path")
+        if path:
+            paths[os.path.basename(path)] = path
+    for fig in publication_figures:
+        png_path = getattr(fig, "png_path", None)
+        if png_path:
+            paths.setdefault(os.path.basename(png_path), png_path)
+    if not paths:
+        return {}
+    try:
+        attributed = attribute_figures_to_rounds(
+            list(paths),
+            state=analysis_state,
+            records=None,
+            figure_paths=paths,
+        )
+    except Exception:
+        logger.warning("Figure round attribution failed", exc_info=True)
+        return {}
+    return {
+        os.path.splitext(basename)[0]: round_number
+        for basename, round_number in attributed.items()
+    }
+
+
+def _round_coverage_floor(candidates, selected_names) -> set:
+    """Admit one figure per round that produced candidates but won none.
+
+    A gallery that narrates rounds 1 and 5 of an eight-round analysis is not a
+    summary of it. The PI's judgement decides *which* figure represents a round;
+    this only decides that a round which produced results is represented at all.
+    Diagnostics never satisfy the floor and never trigger it.
+    """
+    by_round: Dict[int, List[dict]] = {}
+    for index, cand in enumerate(candidates):
+        round_number = cand.get("round")
+        if not round_number or cand.get("diagnostic"):
+            continue
+        cand = {**cand, "_index": index}
+        by_round.setdefault(int(round_number), []).append(cand)
+
+    admitted = set()
+    for round_number, entries in sorted(by_round.items()):
+        if any(c["name"] in selected_names for c in entries):
+            continue
+        entries.sort(key=lambda c: (not c.get("is_publication"), c["_index"]))
+        admitted.add(entries[0]["name"])
+        logger.info(
+            "Brief figures: round %s produced %d candidates but won none; "
+            "admitting %s for coverage",
+            round_number, len(entries), entries[0]["name"],
+        )
+    return admitted
+
 
 class GraphicAbstractMixin:
     """Graphic abstract: brief figure gallery, image and text variants, reviewer selection."""
@@ -67,7 +146,12 @@ class GraphicAbstractMixin:
     ) -> None:
         """Discover, curate, and emit the brief Results figure gallery."""
         DISCOVERY_CAP = 200
-        publication_figures = eligible_artifacts(analysis_state.publication_figures)
+        # The gallery is a browsing surface, not an archival one. A figure the
+        # review loop passed only after revision — or gave up on at the revision
+        # cap — is still this run's own output and belongs here, badged with the
+        # status it earned. Only artifacts superseded by newer data are withheld.
+        # ``is_report_eligible`` remains the rule for every archival surface.
+        publication_figures = gallery_artifacts(analysis_state.publication_figures)
         pub_figure_names = {fig.name for fig in publication_figures}
         excluded_stems = (
             artifact_stems(analysis_state.publication_figures)
@@ -89,15 +173,35 @@ class GraphicAbstractMixin:
 
         # Build the selection input: workspace candidates + publication figures
         # not already discovered. ``is_publication`` drives the bounded fallback.
+        # ``round`` and ``description`` exist on the record and were never passed;
+        # the PI was choosing "key results" from a name and a plot type alone.
+        round_by_stem = _attribute_rounds(
+            analysis_state, publication_figures, all_workspace_figs
+        )
+        descriptions = {
+            fig.name: (fig.description or "") for fig in publication_figures
+        }
         all_figs_for_ai = [
-            {"name": f["name"], "type": f["type"], "is_publication": f["name"] in pub_figure_names}
+            {
+                "name": f["name"],
+                "type": f["type"],
+                "is_publication": f["name"] in pub_figure_names,
+                "round": round_by_stem.get(f["name"]),
+                "description": descriptions.get(f["name"], "")[:_MAX_CANDIDATE_DESCRIPTION],
+                "diagnostic": bool(f.get("diagnostic")),
+            }
             for f in all_workspace_figs
         ]
         for fig in publication_figures:
             if fig.name not in seen_stems:
-                all_figs_for_ai.append(
-                    {"name": fig.name, "type": fig.figure_type, "is_publication": True}
-                )
+                all_figs_for_ai.append({
+                    "name": fig.name,
+                    "type": fig.figure_type,
+                    "is_publication": True,
+                    "round": round_by_stem.get(fig.name),
+                    "description": (fig.description or "")[:_MAX_CANDIDATE_DESCRIPTION],
+                    "diagnostic": False,
+                })
 
         selected_names = set(
             await self.pi_agent.select_brief_figures(analysis_state, all_figs_for_ai)
@@ -110,6 +214,7 @@ class GraphicAbstractMixin:
         # Fallback: if selection is empty, show all publication figures.
         if not selected_names:
             selected_names = pub_figure_names
+        selected_names |= _round_coverage_floor(all_figs_for_ai, selected_names)
 
         figures_data: List[Dict[str, Any]] = []
         for fig in publication_figures:
@@ -123,6 +228,12 @@ class GraphicAbstractMixin:
                     "pdf_path": fig.pdf_path,
                     "review_status": fig.review_status.value,
                     "revision_count": fig.revision_count,
+                    "round": round_by_stem.get(fig.name),
+                    # A figure the loop gave up on is shown, but the renderer's
+                    # verdict on whether its text is legible travels with it —
+                    # "Final" over an illegible figure would be a lie.
+                    "layout_blocking": has_blocking_layout_defects(fig),
+                    "diagnostic": False,
                 })
 
         for wf in all_workspace_figs:
@@ -142,6 +253,9 @@ class GraphicAbstractMixin:
                     "pdf_path": wf["pdf_path"],
                     "review_status": "pending",
                     "revision_count": 0,
+                    "round": round_by_stem.get(wf["name"]),
+                    "layout_blocking": False,
+                    "diagnostic": bool(wf.get("diagnostic")),
                 })
 
         logger.info(

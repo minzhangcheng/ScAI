@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from backend.config import WS_RECEIVE_TIMEOUT
+from backend.constants import STRIPPED_FIGURE_PLACEHOLDER
 from backend.models.schemas import WebSocketMessage, AnalysisState, TaskStatus, AnalysisPhase
 from backend.workflow.direction_coverage import active_batch_incomplete
 from backend.state import (
@@ -471,7 +472,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         if msg.type == "figure" and isinstance(msg.content, str) and len(msg.content) > 1000:
             from copy import copy
             stripped_msg = copy(msg)
-            stripped_msg.content = "[image]"
+            stripped_msg.content = STRIPPED_FIGURE_PLACEHOLDER
             target.realtime_messages.append(stripped_msg)
         else:
             target.realtime_messages.append(msg)

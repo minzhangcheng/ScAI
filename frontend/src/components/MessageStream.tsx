@@ -27,6 +27,7 @@ import {
   AlertTriangle
 } from 'lucide-react'
 import { base64ToDataUri } from '../utils/image'
+import { STRIPPED_FIGURE_PLACEHOLDER } from '../constants/storage'
 import { agentIcons, agentBgColors, agentGradients, FALLBACK_AGENT_ICON } from '../constants/agents'
 
 // Type interfaces for message content
@@ -204,21 +205,39 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
           </div>
         )
       
-      case 'figure':
+      case 'figure': {
+        // The backend replaces a figure's base64 with a sentinel before
+        // persisting it, so a reloaded session carries the marker rather than
+        // an image. Rendering that as a source produced a broken <img> for
+        // every figure in the history; say what happened instead.
+        const stripped =
+          typeof message.content !== 'string' ||
+          message.content === STRIPPED_FIGURE_PLACEHOLDER ||
+          !message.content
         return (
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-xs text-slate-500">
               <ImageIcon className="w-3 h-3" />
               <span>{language === 'zh' ? '生成图表' : 'Generated Figure'}</span>
             </div>
-            <img
-              src={typeof message.content === 'string' ? base64ToDataUri(message.content) : ''}
-              alt="Analysis figure"
-              className="max-w-full rounded-lg border border-slate-200 shadow-sm"
-              style={{ maxWidth: '800px', maxHeight: '600px' }}
-            />
+            {stripped ? (
+              <div className="flex items-center gap-2 px-3 py-2 text-xs text-slate-400 bg-slate-50 border border-dashed border-slate-200 rounded-lg">
+                <ImageIcon className="w-4 h-4" />
+                {language === 'zh'
+                  ? '图片未随会话保存，请在结果页或报告中查看'
+                  : 'Image not retained with the session — see the Results tab or the report'}
+              </div>
+            ) : (
+              <img
+                src={base64ToDataUri(message.content as string)}
+                alt="Analysis figure"
+                className="max-w-full rounded-lg border border-slate-200 shadow-sm"
+                style={{ maxWidth: '800px', maxHeight: '600px' }}
+              />
+            )}
           </div>
         )
+      }
       
       case 'result':
         const content: ResultContent = (message.content !== null && typeof message.content === 'object' && !Array.isArray(message.content))
