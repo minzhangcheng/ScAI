@@ -10,6 +10,7 @@ the atomic save, so the previous complete runtime remains valid.
 import io
 import dill
 import pytest
+from pathlib import Path
 
 _MAGIC = b"SCAI_ZSTD_DILL_V1\n"
 
@@ -168,6 +169,10 @@ async def test_save_targets_tracked_dependencies_without_anndata_sweep(tmp_path,
 
     async def _capture(code, **_kwargs):
         captured["code"] = code
+        # Production kernel code leaves a staged file for the host-side
+        # authenticated commit.  Preserve that boundary in this code-capture
+        # test instead of exercising the legacy custom-kernel fallback.
+        Path(str(sb.notebook_state.session_path) + ".tmp").write_bytes(b"staged")
         return CodeExecutionResult(success=True, output="Session saved: 1 variables")
 
     monkeypatch.setattr(sb, "_execute_unlocked", _capture)
@@ -241,3 +246,79 @@ async def test_real_kernel_save_restore_round_trip(tmp_path):
             await sb2.stop()
     finally:
         await sb.stop()
+
+
+@pytest.mark.asyncio
+async def test_real_kernel_backed_anndata_materializes_with_aliases_or_fails_closed(
+    tmp_path,
+):
+    """Regular persistence never silently drops a backed AnnData handle."""
+    ad = pytest.importorskip("anndata")
+    np = pytest.importorskip("numpy")
+    from backend.utils.sandbox import LocalJupyterSandbox
+
+    session_id = "test-backed-anndata-regular-save"
+    states_dir = tmp_path / "states"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    input_h5ad = workspace_dir / "input.h5ad"
+    ad.AnnData(np.arange(24, dtype=np.float32).reshape(6, 4)).write_h5ad(
+        input_h5ad
+    )
+
+    sb = LocalJupyterSandbox(
+        session_id=session_id,
+        state_dir=str(states_dir),
+        working_dir=str(workspace_dir),
+        timeout=60,
+    )
+    await sb.start()
+    try:
+        created = await sb.execute(
+            "import anndata as ad\n"
+            f"adata_backed = ad.read_h5ad({str(input_h5ad)!r}, backed='r')\n"
+            "adata_alias = adata_backed\n"
+            "print(adata_backed.isbacked, adata_alias is adata_backed)"
+        )
+        assert created.success, created.error
+        assert "True True" in created.output
+        assert await sb.save_session()
+
+        committed = sb.notebook_state.session_path.read_bytes()
+        broken = await sb.execute(
+            f"broken = ad.read_h5ad({str(input_h5ad)!r}, backed='r')\n"
+            "broken.file.close()\n"
+            "print(broken.isbacked)"
+        )
+        assert broken.success, broken.error
+        assert "True" in broken.output
+        input_h5ad.unlink()
+        with pytest.raises(RuntimeError, match="runtime save failed"):
+            await sb.save_session()
+        # The failed materialization cannot replace the verified generation.
+        assert sb.notebook_state.session_path.read_bytes() == committed
+    finally:
+        # The test intentionally leaves a backed object whose source file was
+        # deleted. Its failed live generation has already been verified not to
+        # replace the committed dump, so test cleanup explicitly discards it.
+        await sb.stop(save=False)
+
+    restored = LocalJupyterSandbox(
+        session_id=session_id,
+        state_dir=str(states_dir),
+        working_dir=str(workspace_dir),
+        timeout=60,
+    )
+    await restored.start()
+    try:
+        check = await restored.execute(
+            "print(adata_backed.isbacked)\n"
+            "print(adata_alias is adata_backed)\n"
+            "print(adata_backed.shape, float(adata_backed.X.sum()))\n"
+            "print('broken' in globals())"
+        )
+        assert check.success, check.error
+        lines = [line.strip() for line in check.output.splitlines() if line.strip()]
+        assert lines == ["False", "True", "(6, 4) 276.0", "False"]
+    finally:
+        await restored.stop()

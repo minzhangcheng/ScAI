@@ -57,7 +57,7 @@ def test_session_roundtrip_strips_base64_from_json(tmp_path, monkeypatch):
     monkeypatch.setattr(ss, "resolve_session_metadata_path", lambda s: session_file)
 
     big = "Z" * 5000
-    state = AnalysisState(user_id="u")
+    state = AnalysisState(id=sid, user_id="u")
     state.publication_figures.append(
         PublicationFigure(name="f1", description="d", figure_type="umap",
                           png_path="", pdf_path="", png_base64=big)
@@ -99,7 +99,7 @@ def test_async_save_offloads_blob_io_to_worker_thread(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ss, "externalize_blobs", spy)
 
-    state = AnalysisState(user_id="u")
+    state = AnalysisState(id=sid, user_id="u")
     state.publication_figures.append(
         PublicationFigure(name="f1", description="d", figure_type="umap",
                           png_path="", pdf_path="", png_base64="Z" * 5000)

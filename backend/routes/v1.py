@@ -41,9 +41,26 @@ async def _create_pending_session(request: Request) -> str:
 
     state = apply_config_to_session(config, user_id=user_id)
     session_id = state.id
-    ensure_session_dirs(session_id)
-    await _update_session_cache(session_id, state)
-    await async_save_session(session_id, state)
+    from backend.services.session_lifecycle import register_new_session_generation
+    from backend.services.session_deletion import delete_session_generation
+
+    await register_new_session_generation(state)
+    try:
+        ensure_session_dirs(session_id)
+        await _update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
+    except BaseException:
+        # Preserve a stable tombstone for a generated ID whose initialization
+        # failed; recreating under the same ID could revive stale client state.
+        try:
+            await asyncio.shield(
+                delete_session_generation(session_id, state, user_id)
+            )
+        except Exception:
+            logger.exception(
+                "Failed to clean up partially-created V1 session %s", session_id
+            )
+        raise
     return session_id
 
 
@@ -101,7 +118,10 @@ async def complete_file_upload(session_id: str, upload_id: str, request: Request
 @router.post("/analyses/{session_id}/start")
 async def start_analysis(session_id: str, request: Request):
     """Start a pending analysis. Idempotent: running/completed/failed return current status."""
-    from backend.services.workflow_runner import start_workflow_if_needed
+    from backend.services.workflow_runner import (
+        SessionWorkflowConflictError,
+        start_workflow_if_needed,
+    )
     from backend.services.session_store import async_save_session, update_session_cache as _update_session_cache
     from backend.models.schemas import TaskStatus
 
@@ -122,44 +142,54 @@ async def start_analysis(session_id: str, request: Request):
     if missing:
         logger.warning(f"Starting analysis {session_id} with missing files: {missing}")
 
-    state.status = TaskStatus.RUNNING
-    await _update_session_cache(session_id, state)
-    await async_save_session(session_id, state)
+    async def _prepare_start() -> None:
+        state.status = TaskStatus.RUNNING
+        await _update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
 
-    await start_workflow_if_needed(session_id)
+    try:
+        started = await start_workflow_if_needed(
+            session_id,
+            expected_state=state,
+            prepare=_prepare_start,
+        )
+    except SessionWorkflowConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not started:
+        raise HTTPException(
+            status_code=409,
+            detail="Another workflow owner became active for this session",
+        )
     return {"job_id": session_id, "status": "running"}
 
 
 @router.delete("/analyses/{session_id}")
 async def delete_analysis(session_id: str, request: Request):
     """Delete an analysis. Cannot delete running sessions (returns 409)."""
-    from backend.state import sessions, workflows, state_lock as _state_lock, initializing_sessions as _initializing_sessions
-    from backend.state import websockets
-    import shutil
-
     user_id = getattr(request.state, "user_id", "")
-    await require_session_ownership(session_id=session_id, user_id=user_id)
+    from backend.services.session_lifecycle import tombstone_visible_to_owner
+    from backend.services.session_deletion import (
+        SessionProducerStopError,
+        cleanup_tombstoned_generation,
+        delete_session_generation,
+    )
 
-    async with _state_lock:
-        if session_id in workflows or session_id in _initializing_sessions:
-            raise HTTPException(status_code=409, detail="Cannot delete a running analysis. Stop it first.")
-        sessions.pop(session_id, None)
-        websockets.pop(session_id, None)
-        from backend.state import release_session_lock_slot
-        release_session_lock_slot(session_id)
-        from backend.routes.reports import clear_detailed_report_cache, clear_generation_pending
-        clear_detailed_report_cache(session_id)
-        clear_generation_pending(session_id)
-
-    await cleanup_session_uploads(session_id)
-
-    session_dir = get_session_dir(session_id)
-    if session_dir.exists():
-        shutil.rmtree(session_dir, ignore_errors=True)
-
-    from backend.utils.auth import get_db
-    db = await get_db()
-    await db.delete_session_record(session_id)
+    if tombstone_visible_to_owner(session_id, user_id):
+        stats = await cleanup_tombstoned_generation(session_id, user_id)
+        return {
+            "deleted": int(stats.get("pending_producers") or 0) == 0,
+            "job_id": session_id,
+            "pending_cleanup": int(stats.get("pending_producers") or 0) > 0,
+        }
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    try:
+        await delete_session_generation(session_id, state, user_id)
+    except SessionProducerStopError:
+        return {
+            "deleted": False,
+            "job_id": session_id,
+            "pending_cleanup": True,
+        }
 
     return {"deleted": True, "job_id": session_id}
 

@@ -67,3 +67,19 @@ def test_annotations_from_cluster_annotations_preserves_group_proportions():
     ]
     out = AnnotationMixin._annotations_from_cluster_annotations(cluster_annotations)
     assert out["3"]["group_proportions"] == {"Control": 25.0, "NASH": 75.0}
+
+
+def test_zero_cell_default_remains_unknown_without_a_count_source():
+    unknown = AnnotationMixin._build_cluster_annotations({
+        "0": {"cell_type": "Unknown"},
+    })[0]
+    measured_zero = AnnotationMixin._build_cluster_annotations({
+        "1": {"cell_type": "Absent", "n_cells": 0},
+    })[0]
+
+    assert unknown.n_cells == 0
+    assert unknown.n_cells_known is False
+    assert unknown.n_cells_source == "unknown"
+    assert measured_zero.n_cells == 0
+    assert measured_zero.n_cells_known is True
+    assert measured_zero.n_cells_source == "annotation_payload"

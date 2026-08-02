@@ -8,14 +8,14 @@
 
 ## 2. 架构与要求
 
-ScAI 由运行在端口 `3000` 的 Vite/React 前端、运行在端口 `8000` 的 FastAPI/Uvicorn 后端、本地分析内核、外部 OpenAI 兼容模型服务，以及基于磁盘的应用与会话存储组成。
+ScAI 在生产模式下由同一个 FastAPI/Uvicorn 进程在端口 `3000` 提供已构建的 Vite/React 应用、REST API 和 WebSocket。开发模式仍在 `3000` 运行 Vite，并将请求代理到 `8000` 上的 FastAPI/Uvicorn。两种模式都使用本地分析内核、外部 OpenAI 兼容模型服务，以及基于磁盘的应用与会话存储。
 
 支持以下部署方式：
 
-- Docker：镜像基于 Python 3.11，安装 Node.js/npm，公开前端端口 `3000`，并在内部端口 `8000` 上运行后端。
-- 直接启动：需要 Linux 环境及与 GNU 兼容的 `find`、`stat`、`sort`、`grep`、`head`、`cut` 和 `tr`；用于创建虚拟环境的 `python3.12`；`python3`；Node.js/npm/npx；以及 `pgrep`、`pkill`、`lsof` 和 `kill`。这些脚本并非按仅兼容可移植 POSIX 工具的方式设计。
+- Docker：Node.js 20.19 构建阶段编译前端；Python 3.11 运行时不包含 Node.js/npm，只公开应用端口 `3000`。
+- 直接启动：需要 Linux 环境及与 GNU 兼容的 `find`、`grep`、`head`、`cut`、`tr`、`cmp` 和 `cp`；用于创建虚拟环境的 `python3.12`；`python3`；以及 `pgrep`、`pkill`、`lsof` 和 `kill`。开发模式以及生产前端产物缺失或过期时，还需要 Node.js 20.19+ 或 22.12+ 以及 npm/npx。这些脚本并非按仅兼容可移植 POSIX 工具的方式设计。
 
-请为上传的数据集、生成的产物、日志、临时上传文件和依赖项预留存储空间。主机必须能够访问已配置的模型端点，并在启动期间访问软件包注册表。Docker 启动会安装 Python requirements，并可能安装 Node 依赖项，因此首次启动可能明显较慢。
+请为上传的数据集、生成的产物、日志、临时上传文件和依赖项预留存储空间。主机必须能够访问已配置的模型端点，并在启动期间访问 Python 软件包注册表。Docker 启动会安装 Python requirements，因此首次启动可能明显较慢；前端依赖只在构建镜像时解析。
 
 ### 内存容量规划
 
@@ -87,9 +87,9 @@ docker run -d --name scai \
 
 **警告：**必须复用旧容器所使用的 `SCAI_JWT_SECRET` 和 `SCAI_CONFIG_SECRET`。以上示例为简洁起见使用受保护的环境变量文件；请限制其他用户读取该文件。使用不同密钥重建容器会使现有 JWT 失效，并可能导致已加密的模型凭据无法读取。
 
-打开 `http://localhost:3000`。`/dep` 存储 Python 环境和 Node 依赖项；`/data` 存储应用数据。入口程序会创建这两个目录，将其所有内容的所有者递归设置为 UID `10001`（`scai`），然后放弃 root 权限。会话目录通常限制为 `0700` 模式。请确保主机目录可以安全地更改所有权；如果备份工具无法读取这些目录，请在主机上使用提升后的权限。不要仅为使备份命令成功而更改在线数据的所有权。
+打开 `http://localhost:3000`。`/dep` 存储 Python 环境；`/data` 存储应用数据。前端产物已编译进镜像，并由 FastAPI 提供。入口程序会创建这两个挂载目录，将其所有内容的所有者递归设置为 UID `10001`（`scai`），然后放弃 root 权限。会话目录通常限制为 `0700` 模式。请确保主机目录可以安全地更改所有权；如果备份工具无法读取这些目录，请在主机上使用提升后的权限。不要仅为使备份命令成功而更改在线数据的所有权。
 
-镜像仅公开 `3000`；除非运维确实需要直接访问 API，否则不要发布 `8000`。如确有需要，请添加 `-p 8000:8000`，并适当限制网络访问。
+镜像仅公开 `3000`；UI、API 和 WebSocket 都使用该端口。运行时不存在可供额外发布的 `8000` 独立服务。
 
 常用容器环境变量如下：
 
@@ -105,11 +105,11 @@ docker run -d --name scai \
   ghcr.io/minzhangcheng/scai:latest
 ```
 
-`SCAI_MODE` 默认为 `prod`；入口程序也接受放在镜像名称后的 `--dev` 或 `--prod`。Docker 始终导出 `SCAI_DATA_DIR=/data`。如果设置了 `PIP_INDEX_URL`，依赖项安装会使用该值。
+`SCAI_MODE` 默认为 `prod`；镜像名称后可传入 `--prod`。生产运行时不包含 Node.js/npm，因此会明确拒绝 `--dev`；需要 Vite 热更新时，请在源码 checkout 中使用 `./start.sh --dev`。Docker 始终导出 `SCAI_DATA_DIR=/data`。如果设置了 `PIP_INDEX_URL`，依赖项安装会使用该值。
 
 ### 健康检查、日志、生命周期与移除
 
-内置健康检查每 30 秒调用一次 `http://127.0.0.1:8000/api/health`，超时时间为 5 秒，启动宽限期为 60 秒。
+内置健康检查每 30 秒调用一次 `http://127.0.0.1:3000/api/health`，超时时间为 5 秒，启动宽限期为 60 秒。
 
 ```bash
 docker ps --filter name=scai
@@ -143,13 +143,13 @@ docker run -d --name scai \
 
 ## 4. 直接启动与关闭
 
-安装 Python 3.12 和 Node.js/npm，克隆仓库，然后运行：
+安装 Python 3.12，克隆仓库，然后运行。当生产前端需要构建或使用开发模式时，还需安装 Node.js 20.19+ 或 22.12+ 以及 npm：
 
 ```bash
 ./start.sh
 ```
 
-默认使用生产模式、主机 `127.0.0.1`、前端端口 `3000` 和后端端口 `8000`。支持的选项严格限定如下：
+默认使用生产模式、主机 `127.0.0.1` 和单一应用端口 `3000`。在开发模式下，`--backport` 选择被代理的后端端口，默认为 `8000`。支持的选项严格限定如下：
 
 ```text
 ./start.sh [--dev | --prod] [--host HOST] [--port PORT] [--backport PORT]
@@ -160,10 +160,10 @@ docker run -d --name scai \
 用于网络访问和非默认端口的示例：
 
 ```bash
-./start.sh --prod --host 0.0.0.0 --port 3000 --backport 8000
+./start.sh --prod --host 0.0.0.0 --port 3000
 ```
 
-相对于仓库目录 `<REPO>`，启动过程将依赖项存储在 `<REPO>/../dep`，将数据存储在 `<REPO>/../data`，并将进程元数据存储在 `<REPO>/.scai.pid`。它使用 `python3.12 -m venv` 创建环境、更新 pip、安装后端 requirements、将前端 `node_modules` 链接到依赖项目录、在生产模式下构建已变更的前端源码，然后记录后端和前端 PID。
+相对于仓库目录 `<REPO>`，启动过程将依赖项存储在 `<REPO>/../dep`，将数据存储在 `<REPO>/../data`，并将进程元数据存储在 `<REPO>/.scai.pid`。它使用 `python3.12 -m venv` 创建环境、更新 pip、安装后端 requirements，然后在应用端口上启动 Uvicorn。如果任一前端构建输入比 `dist/index.html` 更新，脚本会先在 checkout 之外使用 `npm ci` 安装与 `package-lock.json` 严格一致的依赖图，然后重新构建。开发模式则同时记录 Uvicorn 和 Vite PID。
 
 直接运行的环境控制项包括 `SCAI_DATA_DIR`（覆盖后端数据根目录）、`SCAI_JWT_SECRET`、`SCAI_CONFIG_SECRET`、`SCAI_ENABLE_REPRODUCIBILITY` 和 `SCAI_AUTO_FETCH_MARKERS=1`。最后一个选项会在可选标记数据库缺失时获取它们，失败不会阻止启动。设置 `SCAI_DATA_DIR` 后，`start.sh` 仍会创建并打印 `<REPO>/../data`，但后端实际读写覆盖后的路径；请监控和备份覆盖路径，而不是打印出的同级目录。
 
@@ -173,7 +173,7 @@ docker run -d --name scai \
 ./stop.sh
 ```
 
-**警告：**`stop.sh` 的作用范围有意设计得很宽。读取 `.scai.pid` 后，它会在整个主机中搜索命令行与 ScAI Uvicorn、Vite 和 Node 模式匹配的进程。随后它会终止占用默认端口 `8000` 或 `3000` 的**任何进程**，即使该进程属于其他应用或另一个 ScAI 实例。在共享主机或多实例安装中，请先检查记录的 PID 和进程命令行；应优先只停止目标 PID。对于使用自定义端口的实例，请手动识别并停止相应 PID，因为后备逻辑仍硬编码为默认端口：
+**警告：**`stop.sh` 在读取 `.scai.pid` 后仍会使用范围较宽的进程名称后备匹配。它会释放 `start.sh` 记录的应用/后端端口（包括自定义值），因此可能终止占用其中某个端口的无关进程。在共享主机或多实例安装中，请先检查记录的 PID 和进程命令行，并优先只停止目标 PID：
 
 ```bash
 lsof -i:<FRONTEND_PORT>
@@ -198,8 +198,8 @@ docker build -t ghcr.io/minzhangcheng/scai:latest .
 ```
 
 ```bash
-./build.sh --version 0.38.9
-./build.sh --version 0.38.9 --push
+./build.sh --version 0.38.10
+./build.sh --version 0.38.10 --push
 ```
 
 如果未指定 `--version`，辅助脚本使用 `git describe --tags --abbrev=0` 返回的最新 Git 标签；如果不存在标签，则使用 `latest`。`--push` 会将两个标签推送到 `ghcr.io/minzhangcheng/scai`；使用前请先向该注册表进行 Docker 身份验证。该辅助脚本不接受注册表、镜像名称、平台或构建参数 flags。
@@ -236,7 +236,7 @@ Docker 使用 `/data`；直接启动通常使用同级 `data` 目录，除非 `S
 | `logs/`                                               | 服务日志；Docker 写入`logs/scai.log`                  |
 | `upload_temp/`                                        | 正在进行的上传数据                                      |
 
-Docker `/dep` 包含 `/dep/venv` 和 `/dep/node_modules`。直接启动使用 `<REPO>/../dep/venv` 和 `<REPO>/../dep/node_modules`。依赖项可重现并可重新构建，但持久化可缩短重启时间。
+Docker `/dep` 仅需持久化 `/dep/venv`，前端产物已编译进镜像。直接启动使用 `<REPO>/../dep/venv` 和 `<REPO>/../dep/frontend/node_modules`。依赖项可重现并可重新构建，但持久化可缩短重启时间。
 
 ## 8. 快照（实验性 —— 开发中）
 
@@ -396,11 +396,11 @@ docker start scai
 
 ## 10. 监控与日志
 
-使用后端健康端点进行基本存活检查：
+生产模式和 Docker 通过单一应用端口进行基本存活检查；只有直接启动的开发模式才在默认端口 `8000` 上单独暴露后端：
 
 ```bash
-curl -f http://127.0.0.1:8000/api/health
 curl -f http://localhost:3000/api/health
+curl -f http://127.0.0.1:8000/api/health  # 仅开发模式
 ```
 
 对于 Docker，请结合健康状态和日志：
@@ -435,7 +435,7 @@ python3 -m pip install ./clients/python
 from scai_client import Client
 
 client = Client(
-    "http://localhost:8000",
+    "http://localhost:3000",
     api_key="<API_KEY>",
     timeout=3600,
 )
@@ -446,7 +446,7 @@ client = Client(
 使用上下文管理器自动关闭连接：
 
 ```python
-with Client("http://localhost:8000", api_key="<API_KEY>") as client:
+with Client("http://localhost:3000", api_key="<API_KEY>") as client:
     sessions = client.list_sessions()
 ```
 
@@ -463,7 +463,7 @@ with Client("http://localhost:8000", api_key="<API_KEY>") as client:
 ```python
 from scai_client import Client
 
-with Client("http://localhost:8000", api_key="<API_KEY>") as client:
+with Client("http://localhost:3000", api_key="<API_KEY>") as client:
     job = client.submit("analysis-config.json")
     final = job.wait(interval=60, timeout=24 * 3600)
     print(final["status"])
@@ -501,7 +501,7 @@ from scai_client import Client
 def progress(info: dict) -> None:
     print(info.get("phase"), info.get("bytes_processed"), info.get("bytes_total"))
 
-with Client("http://localhost:8000", api_key="<API_KEY>", timeout=86400) as client:
+with Client("http://localhost:3000", api_key="<API_KEY>", timeout=86400) as client:
     session_id = client.import_session(
         "portable-session.tar.gz",
         wait=True,
@@ -520,7 +520,7 @@ with Client("http://localhost:8000", api_key="<API_KEY>", timeout=86400) as clie
 常规导出用法：
 
 ```python
-with Client("http://localhost:8000", api_key="<API_KEY>") as client:
+with Client("http://localhost:3000", api_key="<API_KEY>") as client:
     path = client.export_session(
         "<SESSION_ID>",
         "exports/portable-session.tar.gz",
@@ -552,20 +552,20 @@ with Client("http://localhost:8000", api_key="<API_KEY>") as client:
 
 ```bash
 python3 -m pip install ./clients/python
-python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' list
+python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' list
 ```
 
-全局选项为 `--url URL`（默认 `http://localhost:8000`）和必需的 `--api-key API_KEY`。辅助程序创建 `Client(..., timeout=86400)`。
+全局选项为 `--url URL`（默认 `http://localhost:3000`）和必需的 `--api-key API_KEY`。辅助程序创建 `Client(..., timeout=86400)`。
 
 常规命令如下：
 
 ```bash
 python3 session_manager.py --api-key '<API_KEY>' list
-python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
+python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
   import '<ARCHIVE_PATH>'
-python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
+python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
   export '<SESSION_ID>'
-python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
+python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
   export '<SESSION_ID>' '<OUTPUT_PATH>'
 ```
 
@@ -578,7 +578,7 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 - 以最小权限的所有权和权限保护 `.jwt_secret`、`.config_secret`、`app.db`、归档、备份及所有数据目录。
 - 以非特权账户运行应用进程。容器在准备卷之后切换到 UID `10001`。
 - 将 API 密钥、JWT、模型提供商密钥和代理凭据视为 secrets。不要将其放入源码管理、命令记录、工单或日志；轮换并撤销已暴露的值。
-- 根据用户需求限制对端口 `3000` 和 `8000` 的网络访问。若无明确的网络控制方案，不要将直接启动绑定到 `0.0.0.0`。
+- 根据用户需求限制对生产端口 `3000` 的网络访问；开发模式还需限制后端端口 `8000`。若无明确的网络控制方案，不要将直接启动绑定到 `0.0.0.0`。
 - 向外部模型服务发送 prompts、图像或衍生研究内容前，应评估隐私与监管影响。确认提供商的数据保留和区域政策。
 - 验证归档来源与内容，按照机构政策扫描传入文件，并仅导入到适当隔离的服务账户。
 - 对静态和传输中的备份进行加密，在需要时保留离线/不可变副本，并定期测试恢复。
@@ -589,11 +589,11 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 | 症状                         | 检查与纠正操作                                                                                                                                                                       |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 容器持续不健康               | 运行`docker logs scai`；检查 `/data/logs/scai.log`；验证依赖项安装、磁盘空间、DNS/提供商访问，并在容器内使用 `curl` 访问后端健康端点。                                         |
-| 前端可打开但 API 调用失败    | 检查后端端口/进程、`curl http://127.0.0.1:8000/api/health`、启动程序设置的前端代理变量，以及浏览器/服务器日志。                                                                    |
+| 前端可打开但 API 调用失败    | 生产模式下检查单一进程并运行 `curl http://127.0.0.1:3000/api/health`；开发模式下检查后端端口与 Vite 代理变量。同时查看浏览器/服务器日志。 |
 | 直接启动提示实例正在运行     | 读取`.scai.pid` 并验证每个 PID。在专用主机上运行 `./stop.sh`；在共享主机上仅停止已验证的 PID。只有全部记录的服务均已停止时才能删除 PID 文件。                                    |
-| 地址已被占用                 | 使用`lsof -i:<PORT>`，识别所有者，仅停止目标进程，或选择 `--port`/`--backport`。`stop.sh` 可能终止 3000/8000 的任何占用者，且不会清理自定义端口。                            |
+| 地址已被占用                 | 使用`lsof -i:<PORT>`，识别所有者，仅停止目标进程，或选择 `--port`/开发模式的 `--backport`。`stop.sh` 会清理已记录的自定义端口，但也可能终止占用这些端口的无关进程。 |
 | 未找到`python3.12`         | 安装 Python 3.12 及其 venv 支持；`start.sh` 会先检查通用 `python3`，但首次创建环境时会明确调用 `python3.12`。                                                                  |
-| Node/npm 或软件包安装失败    | 验证 Node.js/npm、注册表访问、代理/index 设置、可用空间及依赖项目录所有权。重试前保留日志。                                                                                          |
+| Node/npm 或软件包安装失败    | 已打包的运行时不使用 Node。对源码构建或开发模式，请验证 Node.js 20.19+ 或 22.12+、npm、注册表访问、代理/index 设置、可用空间及依赖项目录所有权。重试前保留日志。 |
 | 模型配置已保存但分析失败     | 保存不会验证凭据。使用验证操作，确认 base URL/代理/密钥、模型可用性、配额和出站连接。                                                                                                |
 | 存储的模型密钥消失或无法解密 | 从受保护备份恢复原始`SCAI_CONFIG_SECRET` 或 `.config_secret`，然后重启。诊断期间不要覆盖数据库。                                                                                 |
 | 重启后现有登录令牌停止工作   | 恢复稳定的`SCAI_JWT_SECRET` 或 `.jwt_secret`。用户可重新登录以获取新 JWT；API 密钥由数据库支持。                                                                                 |
@@ -609,8 +609,8 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 
 | 项目               | 默认值/值            | 范围                             |
 | ------------------ | -------------------- | -------------------------------- |
-| 前端端口           | `3000`             | Docker 和直接启动                |
-| 后端端口           | `8000`             | Docker 内部后端和直接启动        |
+| 生产应用端口     | `3000`             | Docker 与直接启动的 UI/API/WebSocket |
+| 开发后端端口     | `8000`             | 仅直接启动的开发模式          |
 | Docker 映射        | `3000:3000`        | 推荐的主机映射                   |
 | Docker 数据/依赖项 | `/data`, `/dep`  | 持久卷                           |
 | 直接运行依赖项     | `<REPO>/../dep`    | `start.sh`                     |
@@ -636,7 +636,7 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 | `SCAI_SNAPSHOT_SESSION_QUOTA_GB`      | `500`                     | 每个会话的快照存储上限，单位 GiB。**不建议设置为小于 100 GiB** —— 参见[快照容量](#快照容量)         |
 | `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB` | `50`                      | 一次捕获完成后数据卷上必须保留的剩余空间，单位 GiB                                                         |
 | `SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO`   | `0.8`                     | 一次捕获可规划使用的内核内存余量比例 —— 参见[快照的内存影响](#快照的内存影响)。超出 `(0, 1]` 的取值会被忽略并告警 |
-| `SCAI_MODE`                           | `prod`                    | Docker 入口程序模式（`prod` 或 `dev`）                                                                 |
+| `SCAI_MODE`                           | `prod`                    | Docker 入口程序模式；生产镜像会拒绝 `dev`                                                        |
 | `PIP_INDEX_URL`                       | pip environment/default     | Docker Python 软件包 index                                                                                 |
 | `SCAI_AUTO_FETCH_MARKERS`             | `0`                       | 直接启动；`1` 尝试下载标记数据库                                                                         |
 | `SCAI_HOST`                           | Set internally              | Vite 代理主机；脚本根据启动上下文设置                                                                      |
@@ -675,14 +675,14 @@ Snapshot V2 有两道上限，均在捕获写入之前检查一次、写入落�
 | `start.sh`                  | `--dev`                           | 开发模式                                                  |
 | `start.sh`                  | `--prod`                          | 生产模式；默认值                                          |
 | `start.sh`                  | `--host HOST`                     | `127.0.0.1`                                             |
-| `start.sh`                  | `--port PORT`                     | 前端`3000`                                              |
-| `start.sh`                  | `--backport PORT`                 | 后端`8000`                                              |
+| `start.sh`                  | `--port PORT`                     | 生产应用/开发前端`3000`                                  |
+| `start.sh`                  | `--backport PORT`                 | 开发后端`8000`；生产模式忽略                             |
 | `start.sh`                  | `-h`, `--help`                  | 帮助                                                      |
-| `stop.sh`                   | none                                | 宽泛匹配主机进程，并无条件清理默认端口 3000/8000 的占用者 |
+| `stop.sh`                   | none                                | 清理记录的 PID/端口，并执行宽泛的主机进程名称后备匹配     |
 | `build.sh`                  | `--version TAG`                   | 最新 Git 标签，否则为`latest`                           |
 | `build.sh`                  | `--push`                          | 推送所选标签和`latest`；默认禁用                        |
 | `build.sh`                  | `-h`, `--help`                  | 帮助                                                      |
-| `session_manager.py`        | `--url URL`                       | `http://localhost:8000`                                 |
+| `session_manager.py`        | `--url URL`                       | `http://localhost:3000`                                 |
 | `session_manager.py`        | `--api-key KEY`                   | 必需                                                      |
 | `session_manager.py list`   | none                                | 列出拥有的会话                                            |
 | `session_manager.py import` | `archive`                         | 必需的归档路径                                            |

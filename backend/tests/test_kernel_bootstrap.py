@@ -1,0 +1,996 @@
+"""Contracts for fail-closed Jupyter kernel bootstrap."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from pathlib import Path
+import sys
+import threading
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+import uuid
+
+import pytest
+
+from backend.agents.bioinformatics.kernel_templates import (
+    _build_publication_figure_wrapper,
+)
+from backend.services.figure_layout import (
+    blocking_violations,
+    lint_ran,
+    parse_layout_violations,
+)
+from backend.utils.sandbox import CodeExecutionResult, LocalJupyterSandbox
+
+
+def _sandbox(tmp_path: Path, *, workspace_name: str = "workspace") -> LocalJupyterSandbox:
+    return LocalJupyterSandbox(
+        session_id=f"kernel-bootstrap-{uuid.uuid4().hex[:8]}",
+        state_dir=str(tmp_path / "states"),
+        working_dir=str(tmp_path / workspace_name),
+    )
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_injects_repr_safe_paths_before_workspace_use(tmp_path):
+    workspace_name = "workspace with 'quote\nand newline"
+    sandbox = _sandbox(tmp_path, workspace_name=workspace_name)
+    sandbox._execute_unlocked = AsyncMock(
+        side_effect=[
+            CodeExecutionResult(success=True),
+            CodeExecutionResult(success=True),
+        ]
+    )
+
+    await sandbox._initialize_kernel()
+
+    init_source = sandbox._execute_unlocked.await_args_list[0].args[0]
+    path_source = sandbox._execute_unlocked.await_args_list[1].args[0]
+    compile(init_source, "<kernel-init>", "exec")
+    compile(path_source, "<kernel-path-setup>", "exec")
+
+    workspace = str((tmp_path / workspace_name).absolute())
+    assert repr(workspace) in init_source
+    assert repr(str(sandbox._session_tmp)) in init_source
+    assert init_source.index("_WORKSPACE_DIR = Path(") < init_source.index(
+        "_FIGURES_DIR = _WORKSPACE_DIR"
+    )
+    assert "__SCAI_WORKSPACE_REPR__" not in init_source
+    assert "__SCAI_SESSION_TMP_REPR__" not in init_source
+    assert "os.chdir(" not in init_source
+    assert "_sandboxed_open" not in init_source
+    assert "scai_kernel_trust.capture_runtime" in init_source
+    assert "_scai_threaded_local_cluster_init" in init_source
+    assert "Set num_workers=0" in init_source
+    assert "os.chdir(_WORKSPACE_DIR)" in path_source
+    assert "_sandboxed_open" in path_source
+    assert sandbox._initialized is True
+
+
+def test_kernel_launch_environment_is_session_scoped(tmp_path):
+    sandbox = _sandbox(tmp_path)
+    env = sandbox._kernel_launch_environment()
+
+    assert json.loads(env["SCAI_KERNEL_WRITE_ROOTS"]) == [
+        str(sandbox.working_dir.resolve()),
+        str(sandbox.notebook_state.state_dir.resolve()),
+        str(sandbox._session_tmp.resolve()),
+    ]
+    assert env["SCAI_KERNEL_REQUIRE_LANDLOCK"] == (
+        "1" if sys.platform == "linux" else "0"
+    )
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert env["PYTHONSAFEPATH"] == "1"
+    assert env["DASK_DATAFRAME__QUERY_PLANNING"] == "false"
+    assert env["HOME"].startswith(str(sandbox._session_tmp.resolve()))
+    assert env["TMPDIR"] == str(sandbox._session_tmp.resolve())
+    assert "kernel_startup" in env["PYTHONPATH"].split(os.pathsep)[0]
+
+
+def test_kernel_command_runs_trusted_launcher_before_ipykernel(tmp_path):
+    sandbox = _sandbox(tmp_path)
+    manager = _FakeKernelManager(kernel_name="python3")
+
+    sandbox._install_isolated_kernel_launcher(manager)
+
+    argv = manager.kernel_spec.argv
+    assert argv[:4] == [sys.executable, "-I", "-S", "-B"]
+    assert Path(argv[4]).name == "launcher.py"
+    assert argv[5:8] == [sys.executable, "-P", "-m"]
+    assert argv[-1] == "{connection_file}"
+
+
+def test_kernel_launch_rejects_workspace_symlink_outside_session(tmp_path):
+    session_root = tmp_path / "session"
+    external = tmp_path / "external"
+    session_root.mkdir()
+    external.mkdir()
+    workspace = session_root / "workspace"
+    workspace.symlink_to(external, target_is_directory=True)
+    sandbox = LocalJupyterSandbox(
+        session_id="symlink-workspace",
+        state_dir=str(session_root / "states"),
+        working_dir=str(workspace),
+    )
+
+    with pytest.raises(RuntimeError, match="must not be a symlink"):
+        sandbox._kernel_launch_environment()
+
+
+def test_default_sandbox_does_not_allow_its_entire_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    sandbox = LocalJupyterSandbox(session_id="default-leaf-roots")
+
+    roots = json.loads(
+        sandbox._kernel_launch_environment()["SCAI_KERNEL_WRITE_ROOTS"]
+    )
+
+    assert str(tmp_path.resolve()) not in roots
+    assert roots[:2] == [
+        str((tmp_path / "workspace").resolve()),
+        str((tmp_path / "states").resolve()),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_phase", ["common", "path"])
+async def test_bootstrap_failure_is_not_marked_initialized(tmp_path, failed_phase):
+    sandbox = _sandbox(tmp_path)
+    failed = CodeExecutionResult(success=False, error="bootstrap exploded")
+    succeeded = CodeExecutionResult(success=True)
+    sandbox._execute_unlocked = AsyncMock(
+        side_effect=[failed] if failed_phase == "common" else [succeeded, failed]
+    )
+
+    expected = (
+        "Kernel common initialization failed"
+        if failed_phase == "common"
+        else "Kernel path/sandbox initialization failed"
+    )
+    with pytest.raises(RuntimeError, match=expected):
+        await sandbox._initialize_kernel()
+
+    assert sandbox._initialized is False
+    assert sandbox._execute_unlocked.await_count == (
+        1 if failed_phase == "common" else 2
+    )
+
+
+class _FakeKernelClient:
+    def __init__(self):
+        self.started = False
+        self.stopped = False
+
+    def start_channels(self):
+        self.started = True
+
+    def stop_channels(self):
+        self.stopped = True
+
+    def get_iopub_msg(self, *, timeout):
+        from queue import Empty
+
+        raise Empty
+
+
+class _FakeKernelManager:
+    def __init__(self, *, kernel_name):
+        self.kernel_name = kernel_name
+        self.kernel_spec = SimpleNamespace(
+            argv=["python", "-m", "ipykernel_launcher", "-f", "{connection_file}"]
+        )
+        self._client = _FakeKernelClient()
+        self.shutdown_called = False
+
+    def start_kernel(self, *, cwd, env):
+        self.cwd = cwd
+        self.env = env
+
+    def client(self):
+        return self._client
+
+    def restart_kernel(self):
+        return None
+
+    def shutdown_kernel(self, *, now):
+        assert now is True
+        self.shutdown_called = True
+
+    def is_alive(self):
+        return True
+
+
+def _skip_restart_settle_delay(monkeypatch, kernel_module) -> None:
+    """Short-circuit only the restart delay, not asyncio process-wide."""
+    monkeypatch.setattr(
+        kernel_module,
+        "asyncio",
+        SimpleNamespace(
+            sleep=AsyncMock(),
+            wait_for=asyncio.wait_for,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["readiness", "initialization"])
+async def test_start_cleans_kernel_after_bootstrap_failure(
+    tmp_path, monkeypatch, failure
+):
+    import backend.utils.sandbox_parts.kernel as kernel_module
+
+    sandbox = _sandbox(tmp_path)
+    monkeypatch.setattr(kernel_module, "KernelManager", _FakeKernelManager)
+    sandbox.stop = AsyncMock()
+    sandbox._initialize_kernel = AsyncMock()
+    if failure == "readiness":
+        sandbox._wait_for_ready = AsyncMock(side_effect=asyncio.TimeoutError)
+    else:
+        sandbox._wait_for_ready = AsyncMock(return_value=None)
+        sandbox._initialize_kernel.side_effect = RuntimeError("broken init")
+
+    expected = (
+        "Kernel failed to start within timeout"
+        if failure == "readiness"
+        else "broken init"
+    )
+    with pytest.raises(RuntimeError, match=expected):
+        await sandbox.start()
+
+    sandbox.stop.assert_awaited_once_with(save=False)
+    if failure == "readiness":
+        sandbox._initialize_kernel.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", ["manager", "process", "client", "channels"]
+)
+async def test_start_cleans_every_partially_acquired_kernel_resource(
+    tmp_path, monkeypatch, failure
+):
+    import backend.utils.sandbox_parts.kernel as kernel_module
+
+    sandbox = _sandbox(tmp_path)
+    holder = {}
+
+    def manager_factory(*, kernel_name):
+        if failure == "manager":
+            raise RuntimeError("manager acquisition failed")
+        manager = _FakeKernelManager(kernel_name=kernel_name)
+        holder["manager"] = manager
+        if failure == "process":
+            manager.start_kernel = lambda **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("process acquisition failed")
+            )
+        elif failure == "client":
+            manager.client = lambda: (_ for _ in ()).throw(
+                RuntimeError("client acquisition failed")
+            )
+        elif failure == "channels":
+            manager._client.start_channels = lambda: (_ for _ in ()).throw(
+                RuntimeError("channel acquisition failed")
+            )
+        return manager
+
+    monkeypatch.setattr(kernel_module, "KernelManager", manager_factory)
+
+    with pytest.raises(RuntimeError, match="acquisition failed"):
+        await sandbox.start()
+
+    assert sandbox._initialized is False
+    assert sandbox.km is None
+    assert sandbox.kc is None
+    if failure != "manager":
+        assert holder["manager"].shutdown_called is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["readiness", "initialization", "restore"])
+async def test_start_cancellation_cleans_resources_and_propagates(
+    tmp_path, monkeypatch, phase
+):
+    import backend.utils.sandbox_parts.kernel as kernel_module
+
+    sandbox = _sandbox(tmp_path)
+    manager = _FakeKernelManager(kernel_name="python3")
+    monkeypatch.setattr(
+        kernel_module, "KernelManager", lambda **_kwargs: manager
+    )
+    sandbox._wait_for_ready = AsyncMock(return_value=None)
+    sandbox._initialize_kernel = AsyncMock(return_value=None)
+    sandbox._restore_session = AsyncMock(return_value=None)
+    if phase == "readiness":
+        sandbox._wait_for_ready.side_effect = asyncio.CancelledError
+    elif phase == "initialization":
+        sandbox._initialize_kernel.side_effect = asyncio.CancelledError
+    else:
+        sandbox._restore_session.side_effect = asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await sandbox.start()
+
+    assert sandbox._initialized is False
+    assert sandbox.km is None
+    assert sandbox.kc is None
+    assert manager.shutdown_called is True
+
+
+@pytest.mark.asyncio
+async def test_start_bootstraps_a_new_kernel_after_previous_dead_latch(
+    tmp_path, monkeypatch
+):
+    import backend.utils.sandbox_parts.kernel as kernel_module
+
+    sandbox = _sandbox(tmp_path)
+    manager = _FakeKernelManager(kernel_name="python3")
+    monkeypatch.setattr(
+        kernel_module, "KernelManager", lambda **_kwargs: manager
+    )
+    sandbox._kernel_dead = True
+    sandbox._wait_for_ready = AsyncMock(return_value=None)
+    sandbox._execute_unlocked = AsyncMock(
+        side_effect=[
+            CodeExecutionResult(success=True),
+            CodeExecutionResult(success=True),
+        ]
+    )
+    sandbox._restore_session = AsyncMock(return_value=None)
+
+    await sandbox.start()
+
+    assert sandbox._kernel_dead is False
+    assert sandbox._initialized is True
+    assert sandbox._execute_unlocked.await_count == 2
+    await sandbox.stop(save=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", ["readiness", "common_init", "path_init", "restore"]
+)
+async def test_restart_discards_failed_or_partially_restored_kernel(
+    tmp_path, monkeypatch, failure
+):
+    import backend.utils.sandbox_parts.kernel as kernel_module
+
+    sandbox = _sandbox(tmp_path)
+    manager = _FakeKernelManager(kernel_name="python3")
+    sandbox.km = manager
+    sandbox.kc = manager.client()
+    sandbox._initialized = True
+    _skip_restart_settle_delay(monkeypatch, kernel_module)
+    sandbox._wait_for_ready = AsyncMock(return_value=None)
+    sandbox._initialize_kernel = AsyncMock(return_value=None)
+    sandbox._restore_session = AsyncMock(return_value=None)
+
+    if failure == "readiness":
+        sandbox._wait_for_ready.side_effect = RuntimeError("readiness failed")
+    elif failure == "common_init":
+        sandbox._initialize_kernel.side_effect = RuntimeError(
+            "Kernel common initialization failed"
+        )
+    elif failure == "path_init":
+        sandbox._initialize_kernel.side_effect = RuntimeError(
+            "Kernel path/sandbox initialization failed"
+        )
+    else:
+        sandbox._restore_session.side_effect = RuntimeError("partial restore")
+
+    await sandbox._restart_kernel()
+
+    assert sandbox._kernel_dead is True
+    assert sandbox._initialized is False
+    assert sandbox.km is None
+    assert sandbox.kc is None
+    assert manager.shutdown_called is True
+    assert sandbox._restarting is False
+    if failure != "restore":
+        sandbox._restore_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["readiness", "initialization", "restore"])
+async def test_restart_cancellation_cleans_resources_and_propagates(
+    tmp_path, monkeypatch, phase
+):
+    import backend.utils.sandbox_parts.kernel as kernel_module
+
+    sandbox = _sandbox(tmp_path)
+    manager = _FakeKernelManager(kernel_name="python3")
+    sandbox.km = manager
+    sandbox.kc = manager.client()
+    sandbox._initialized = True
+    _skip_restart_settle_delay(monkeypatch, kernel_module)
+    sandbox._wait_for_ready = AsyncMock(return_value=None)
+    sandbox._initialize_kernel = AsyncMock(return_value=None)
+    sandbox._restore_session = AsyncMock(return_value=None)
+    if phase == "readiness":
+        sandbox._wait_for_ready.side_effect = asyncio.CancelledError
+    elif phase == "initialization":
+        sandbox._initialize_kernel.side_effect = asyncio.CancelledError
+    else:
+        sandbox._restore_session.side_effect = asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await sandbox._restart_kernel()
+
+    assert sandbox._kernel_dead is True
+    assert sandbox._initialized is False
+    assert sandbox.km is None
+    assert sandbox.kc is None
+    assert manager.shutdown_called is True
+    assert sandbox._restarting is False
+
+
+@pytest.mark.asyncio
+async def test_restart_bootstraps_a_new_kernel_after_previous_dead_latch(
+    tmp_path, monkeypatch
+):
+    import backend.utils.sandbox_parts.kernel as kernel_module
+
+    sandbox = _sandbox(tmp_path)
+    manager = _FakeKernelManager(kernel_name="python3")
+    sandbox.km = manager
+    sandbox.kc = manager.client()
+    sandbox._initialized = True
+    sandbox._kernel_dead = True
+    _skip_restart_settle_delay(monkeypatch, kernel_module)
+    sandbox._wait_for_ready = AsyncMock(return_value=None)
+    sandbox._execute_unlocked = AsyncMock(
+        side_effect=[
+            CodeExecutionResult(success=True),
+            CodeExecutionResult(success=True),
+        ]
+    )
+    sandbox._restore_session = AsyncMock(return_value=None)
+
+    await sandbox._restart_kernel()
+
+    assert sandbox._kernel_dead is False
+    assert sandbox._initialized is True
+    assert sandbox._execute_unlocked.await_count == 2
+    await sandbox.stop(save=False)
+
+
+@pytest.mark.asyncio
+async def test_ready_poll_is_drained_before_cancellation_returns(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    exited = threading.Event()
+
+    class _BlockingReadyClient:
+        def kernel_info(self):
+            return None
+
+        def get_shell_msg(self, *, timeout):
+            assert timeout == 5
+            entered.set()
+            release.wait(timeout=5)
+            exited.set()
+            return {"msg_type": "kernel_info_reply"}
+
+    sandbox = _sandbox(tmp_path)
+    sandbox.kc = _BlockingReadyClient()
+    task = asyncio.create_task(sandbox._wait_for_ready())
+    assert await asyncio.to_thread(entered.wait, 1)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    assert exited.is_set() is False
+    assert task.done() is False
+
+    task.cancel()
+    await asyncio.sleep(0)
+    assert exited.is_set() is False
+    assert task.done() is False
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert exited.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_execute_reader_is_drained_before_kernel_teardown(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    exited = threading.Event()
+
+    class _BlockingExecutionClient(_FakeKernelClient):
+        def execute(self, _code):
+            return "execution-id"
+
+        def get_iopub_msg(self, *, timeout):
+            assert timeout > 0
+            entered.set()
+            release.wait(timeout=5)
+            exited.set()
+            return {
+                "parent_header": {"msg_id": "execution-id"},
+                "msg_type": "status",
+                "content": {"execution_state": "idle"},
+            }
+
+    class _OrderingManager(_FakeKernelManager):
+        def shutdown_kernel(self, *, now):
+            assert exited.is_set(), "kernel was stopped while IOPub reader ran"
+            super().shutdown_kernel(now=now)
+
+    sandbox = _sandbox(tmp_path)
+    manager = _OrderingManager(kernel_name="python3")
+    client = _BlockingExecutionClient()
+    manager._client = client
+    sandbox.km = manager
+    sandbox.kc = client
+    sandbox._initialized = True
+
+    task = asyncio.create_task(
+        sandbox._execute_unlocked(
+            "pass", save_to_history=False, skip_safety_check=True
+        )
+    )
+    assert await asyncio.to_thread(entered.wait, 1)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert task.done() is False
+    assert exited.is_set() is False
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await sandbox.stop(save=False)
+    assert manager.shutdown_called is True
+
+
+@pytest.mark.asyncio
+async def test_restart_worker_is_drained_before_manager_teardown(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    exited = threading.Event()
+
+    class _BlockingRestartManager(_FakeKernelManager):
+        def restart_kernel(self):
+            entered.set()
+            release.wait(timeout=5)
+            exited.set()
+
+        def shutdown_kernel(self, *, now):
+            assert exited.is_set(), "manager was shut down while restart worker ran"
+            super().shutdown_kernel(now=now)
+
+    sandbox = _sandbox(tmp_path)
+    manager = _BlockingRestartManager(kernel_name="python3")
+    sandbox.km = manager
+    sandbox.kc = manager.client()
+    sandbox._initialized = True
+
+    task = asyncio.create_task(sandbox._restart_kernel())
+    assert await asyncio.to_thread(entered.wait, 1)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert manager.shutdown_called is False
+    assert task.done() is False
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert manager.shutdown_called is True
+    assert sandbox.km is None
+    assert sandbox.kc is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not os.environ.get("SCAI_RUN_KERNEL_TESTS"),
+    reason="Set SCAI_RUN_KERNEL_TESTS=1 to run kernel-dependent tests",
+)
+async def test_live_kernel_bootstrap_helpers_and_figure_wrappers(tmp_path):
+    sandbox = _sandbox(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+
+    try:
+        await sandbox.start()
+        probe = await sandbox.execute(
+            """
+import json
+import numpy as np
+import scipy.sparse as sp
+import matplotlib.pyplot as plt
+
+class _MatrixBox:
+    pass
+
+_dense = _MatrixBox()
+_dense.X = np.array([[np.nan, np.inf, -np.inf, 1.0]])
+_dense_count = int(check_and_fix_nan(_dense))
+_dense_unchanged = bool(
+    np.isnan(_dense.X[0, 0])
+    and np.isposinf(_dense.X[0, 1])
+    and np.isneginf(_dense.X[0, 2])
+)
+check_and_fix_nan(_dense, fix=True)
+_dense_fixed_only_nan = bool(
+    _dense.X[0, 0] == 0.0
+    and np.isposinf(_dense.X[0, 1])
+    and np.isneginf(_dense.X[0, 2])
+)
+
+_sparse = _MatrixBox()
+_sparse.X = sp.csr_matrix([[np.nan, np.inf, -np.inf, 1.0]])
+_sparse_count = int(check_and_fix_nan(_sparse))
+_sparse_unchanged = bool(
+    np.isnan(_sparse.X.data[0])
+    and np.isposinf(_sparse.X.data[1])
+    and np.isneginf(_sparse.X.data[2])
+)
+check_and_fix_nan(_sparse, fix=True)
+_sparse_fixed_only_nan = bool(
+    _sparse.X.data[0] == 0.0
+    and np.isposinf(_sparse.X.data[1])
+    and np.isneginf(_sparse.X.data[2])
+)
+
+_fig = plt.figure()
+plt.plot([0, 1], [0, 1])
+plt.savefig('kernel_bootstrap.png')
+plt.close(_fig)
+
+print('__SCAI_BOOTSTRAP__' + json.dumps({
+    'workspace': str(_WORKSPACE_DIR),
+    'seed': get_seed(),
+    'dense_count': _dense_count,
+    'dense_unchanged': _dense_unchanged,
+    'dense_fixed_only_nan': _dense_fixed_only_nan,
+    'sparse_count': _sparse_count,
+    'sparse_unchanged': _sparse_unchanged,
+    'sparse_fixed_only_nan': _sparse_fixed_only_nan,
+    'scanpy_figdir': str(sc.settings.figdir) if 'sc' in globals() else None,
+}))
+""",
+            save_to_history=False,
+            skip_safety_check=True,
+        )
+        assert probe.success, probe.error
+        payload_line = next(
+            line for line in probe.output.splitlines()
+            if line.startswith("__SCAI_BOOTSTRAP__")
+        )
+        payload = json.loads(payload_line.removeprefix("__SCAI_BOOTSTRAP__"))
+        assert payload == {
+            "workspace": str(sandbox.working_dir),
+            "seed": 42,
+            "dense_count": 1,
+            "dense_unchanged": True,
+            "dense_fixed_only_nan": True,
+            "sparse_count": 1,
+            "sparse_unchanged": True,
+            "sparse_fixed_only_nan": True,
+            "scanpy_figdir": str(sandbox.working_dir / "figures"),
+        }
+        assert (sandbox.working_dir / "figures" / "kernel_bootstrap.jpg").is_file()
+        assert not (sandbox.working_dir / "kernel_bootstrap.png").exists()
+
+        show = await sandbox.execute(
+            """
+import matplotlib.pyplot as plt
+plt.figure()
+plt.plot([0, 1], [1, 0])
+plt.show()
+print(f'open_figures={len(plt.get_fignums())}')
+""",
+            save_to_history=False,
+            skip_safety_check=True,
+        )
+        assert show.success, show.error
+        assert len(show.figures) == 1
+        assert "open_figures=0" in show.output
+
+        denied = await sandbox.execute(
+            f"""
+import matplotlib.pyplot as plt
+_outside = {str(outside / 'blocked.png')!r}
+plt.figure()
+plt.plot([0, 1], [0, 1])
+try:
+    plt.savefig(_outside)
+except PermissionError:
+    print('outside_save=blocked')
+finally:
+    plt.close('all')
+""",
+            save_to_history=False,
+            skip_safety_check=True,
+        )
+        assert denied.success, denied.error
+        assert "outside_save=blocked" in denied.output
+        assert not (outside / "blocked.jpg").exists()
+
+        async def assert_wrappers_are_single_layer():
+            identities = await sandbox.execute(
+                """
+import json
+import matplotlib.figure as _mf
+import matplotlib.pyplot as plt
+print('__SCAI_WRAPPERS__' + json.dumps({
+    'close': plt.close is _original_plt_close,
+    'show': plt.show is _capturing_show,
+    'savefig': _mf.Figure.savefig is _combined_savefig,
+    'close_noop': bool(getattr(plt.close, '_scai_noop', False)),
+    'show_noop': bool(getattr(plt.show, '_scai_noop', False)),
+}))
+""",
+                save_to_history=False,
+                skip_safety_check=True,
+            )
+            assert identities.success, identities.error
+            line = next(
+                item for item in identities.output.splitlines()
+                if item.startswith("__SCAI_WRAPPERS__")
+            )
+            assert json.loads(line.removeprefix("__SCAI_WRAPPERS__")) == {
+                "close": True,
+                "show": True,
+                "savefig": True,
+                "close_noop": False,
+                "show_noop": False,
+            }
+
+        persisted = await sandbox.execute(
+            "user_value = {'restored': 7}\nprint('user_value_saved')",
+            skip_safety_check=True,
+        )
+        assert persisted.success, persisted.error
+        assert await sandbox.save_session() is True
+
+        await assert_wrappers_are_single_layer()
+        sandbox._kernel_dead = True
+        await sandbox._restart_kernel()
+        assert sandbox._kernel_dead is False
+        await assert_wrappers_are_single_layer()
+        restored = await sandbox.execute(
+            "print(f\"restored_value={user_value['restored']}\")",
+            save_to_history=False,
+            skip_safety_check=True,
+        )
+        assert restored.success, restored.error
+        assert "restored_value=7" in restored.output
+
+        await sandbox.stop(save=False)
+        sandbox._kernel_dead = True
+        await sandbox.start()
+        await assert_wrappers_are_single_layer()
+        restored_again = await sandbox.execute(
+            "print(f\"restored_again={user_value['restored']}\")",
+            save_to_history=False,
+            skip_safety_check=True,
+        )
+        assert restored_again.success, restored_again.error
+        assert "restored_again=7" in restored_again.output
+    finally:
+        await sandbox.stop(save=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not os.environ.get("SCAI_RUN_KERNEL_TESTS"),
+    reason="Set SCAI_RUN_KERNEL_TESTS=1 to run kernel-dependent tests",
+)
+async def test_live_kernel_trust_module_cannot_be_shadowed_by_workspace(tmp_path):
+    sandbox = _sandbox(tmp_path)
+    shadow = sandbox.working_dir / "scai_kernel_trust.py"
+    shadow.write_text(
+        "raise RuntimeError('workspace trust module was imported')\n",
+        encoding="utf-8",
+    )
+
+    try:
+        await sandbox.start()
+        origin = await sandbox.execute(
+            """
+import scai_kernel_trust
+print('__SCAI_TRUST_ORIGIN__' + str(scai_kernel_trust.__file__))
+""",
+            save_to_history=False,
+            skip_safety_check=True,
+        )
+        assert origin.success, origin.error
+        origin_line = next(
+            line for line in origin.output.splitlines()
+            if line.startswith("__SCAI_TRUST_ORIGIN__")
+        )
+        assert origin_line.removeprefix("__SCAI_TRUST_ORIGIN__") != str(shadow)
+        assert origin_line.endswith("kernel_startup/scai_kernel_trust.py")
+
+        wrapper = _build_publication_figure_wrapper(
+            """
+import matplotlib.pyplot as plt
+fig = plt.figure(figsize=(4, 3))
+fig.text(0.5, 0.5, 'OVERLAP', fontsize=12)
+fig.text(0.5, 0.5, 'OVERLAP', fontsize=12)
+""",
+            str(sandbox.working_dir / "figures"),
+            str(sandbox.working_dir / "figures" / "shadow-proof.jpg"),
+            str(sandbox.working_dir / "figures" / "shadow-proof.pdf"),
+        )
+        rendered = await sandbox.execute(
+            wrapper,
+            save_to_history=False,
+            skip_safety_check=True,
+        )
+        assert rendered.success, rendered.error
+        assert lint_ran(rendered.output) is True
+        assert blocking_violations(parse_layout_violations(rendered.output))
+    finally:
+        await sandbox.stop(save=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not os.environ.get("SCAI_RUN_KERNEL_TESTS"),
+    reason="Set SCAI_RUN_KERNEL_TESTS=1 to run kernel-dependent tests",
+)
+async def test_live_publication_lint_reparents_stdout_after_prior_cell_pollution(
+    tmp_path,
+):
+    sandbox = _sandbox(tmp_path)
+
+    try:
+        await sandbox.start()
+        polluted = await sandbox.execute(
+            """
+import sys
+
+class UserStdout:
+    def write(self, value):
+        return len(value)
+
+    def flush(self):
+        return None
+
+sys.stdout = UserStdout()
+""",
+            save_to_history=False,
+        )
+        assert polluted.success, polluted.error
+
+        wrapper = _build_publication_figure_wrapper(
+            """
+import matplotlib.pyplot as plt
+fig = plt.figure(figsize=(4, 3))
+fig.text(0.5, 0.5, 'OVERLAP', fontsize=12)
+fig.text(0.5, 0.5, 'OVERLAP', fontsize=12)
+""",
+            str(sandbox.working_dir / "figures"),
+            str(sandbox.working_dir / "figures" / "reparented.jpg"),
+            str(sandbox.working_dir / "figures" / "reparented.pdf"),
+        )
+        rendered = await sandbox.execute(
+            wrapper,
+            save_to_history=False,
+            skip_safety_check=True,
+        )
+        assert rendered.success, rendered.error
+        assert lint_ran(rendered.output) is True
+        assert blocking_violations(parse_layout_violations(rendered.output))
+        assert rendered.output.rstrip().splitlines()[-1].startswith(
+            "__SCAI_LAYOUT_LINT__"
+        )
+    finally:
+        await sandbox.stop(save=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not os.environ.get("SCAI_RUN_KERNEL_TESTS"),
+    reason="Set SCAI_RUN_KERNEL_TESTS=1 to run kernel-dependent tests",
+)
+async def test_live_kernel_uses_thread_backends_without_shared_posix_semaphores(
+    tmp_path,
+):
+    sandbox = _sandbox(tmp_path)
+    sandbox.timeout = 120
+
+    try:
+        await sandbox.start()
+        probe = await sandbox.execute(
+            """
+import json
+import numpy as np
+import pandas as pd
+import torch
+from arboreto.algo import grnboost2
+from distributed import LocalCluster, Nanny
+
+loader_zero = list(
+    torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(torch.arange(4)),
+        batch_size=2,
+        num_workers=0,
+    )
+)
+try:
+    torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(torch.arange(4)),
+        batch_size=2,
+        num_workers=2,
+    )
+except RuntimeError as exc:
+    loader_error = str(exc)
+else:
+    loader_error = "NOT_BLOCKED"
+
+cluster = LocalCluster(
+    n_workers=1,
+    threads_per_worker=1,
+    processes=True,
+    worker_class=Nanny,
+    dashboard_address=None,
+)
+try:
+    local_processes = cluster.processes
+    worker_types = sorted(type(worker).__name__ for worker in cluster.workers.values())
+finally:
+    cluster.close()
+
+# Exercise distributed.LocalCluster's complete positional signature too. The
+# worker_class slot is positional index 21 (excluding self), so guarding only
+# keyword arguments would leave this valid construction process-backed.
+positional_cluster = LocalCluster(
+    None, 1, 1, True, None, None, None, None, 0, 30, None, None, None,
+    None, None, None, False, None, None, None, None, Nanny,
+)
+try:
+    positional_processes = positional_cluster.processes
+    positional_worker_types = sorted(
+        type(worker).__name__ for worker in positional_cluster.workers.values()
+    )
+finally:
+    positional_cluster.close()
+
+rng = np.random.default_rng(42)
+expression = pd.DataFrame(
+    rng.normal(size=(24, 5)),
+    columns=["TF1", "TF2", "G1", "G2", "G3"],
+)
+network = grnboost2(
+    expression,
+    tf_names=["TF1", "TF2"],
+    client_or_address="local",
+    verbose=False,
+)
+
+print("__SCAI_THREAD_BACKENDS__" + json.dumps({
+    "loader_batches": len(loader_zero),
+    "loader_error": loader_error,
+    "local_processes": local_processes,
+    "worker_types": worker_types,
+    "positional_processes": positional_processes,
+    "positional_worker_types": positional_worker_types,
+    "network_shape": list(network.shape),
+}))
+""",
+            save_to_history=False,
+        )
+        assert probe.success, probe.error
+        payload_line = next(
+            line
+            for line in probe.output.splitlines()
+            if line.startswith("__SCAI_THREAD_BACKENDS__")
+        )
+        payload = json.loads(
+            payload_line.removeprefix("__SCAI_THREAD_BACKENDS__")
+        )
+        assert payload["loader_batches"] == 2
+        assert "Set num_workers=0" in payload["loader_error"]
+        assert payload["local_processes"] is False
+        assert payload["worker_types"] == ["Worker"]
+        assert payload["positional_processes"] is False
+        assert payload["positional_worker_types"] == ["Worker"]
+        assert payload["network_shape"][1] == 3
+        assert payload["network_shape"][0] > 0
+    finally:
+        await sandbox.stop(save=False)

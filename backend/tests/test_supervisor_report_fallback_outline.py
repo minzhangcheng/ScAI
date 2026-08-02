@@ -14,6 +14,7 @@ from PIL import Image
 
 from backend.agents.supervisor_agent import SupervisorAgent
 from backend.models.schemas import (
+    AgentType,
     AnalysisState,
     FigureReviewStatus,
     PublicationFigure,
@@ -138,6 +139,81 @@ async def test_successful_report_is_aligned_to_the_round_outline(tmp_path):
     assert report["unreported_figures"] == []
     assert "figure coverage gaps" in report["current_step"]
     assert "direction_1" in report["current_step"]
+
+
+@pytest.mark.asyncio
+async def test_chat_sections_reuse_frozen_report_client_and_model(
+    tmp_path,
+    monkeypatch,
+):
+    body = (
+        "## [abstract] Summary\nsummary text\n\n"
+        "## [methods] How it was done\nprocedure\n\n"
+        "## [conclusions] Wrap up\nend matter\n"
+    )
+    agent, client = _agent([SimpleNamespace(content=body)])
+    agent._provider.get_model.return_value = "new-model-after-refresh"
+    chat_builder = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        "backend.services.report.chat_sections.build_chat_sections_async",
+        chat_builder,
+    )
+    out = tmp_path / "reports"
+    ws = tmp_path / "workspace"
+    (ws / "figures").mkdir(parents=True, exist_ok=True)
+
+    await agent.generate_detailed_report(
+        _state_with_rounds(),
+        "frozen-report-model",
+        str(out),
+        workspace_dir=str(ws),
+        report_llm_client=client,
+        chat_messages=[{"role": "user", "content": "question"}],
+    )
+
+    kwargs = chat_builder.await_args.kwargs
+    assert kwargs["llm_client"] is client
+    assert kwargs["model"] == "frozen-report-model"
+
+
+@pytest.mark.asyncio
+async def test_chat_sections_reuse_supervisor_fallback_client_when_none_passed(
+    tmp_path,
+    monkeypatch,
+):
+    body = (
+        "## [abstract] Summary\nsummary text\n\n"
+        "## [methods] How it was done\nprocedure\n\n"
+        "## [conclusions] Wrap up\nend matter\n"
+    )
+    agent, supervisor_client = _agent([SimpleNamespace(content=body)])
+    agent.agent_type = AgentType.SUPERVISOR
+    pi_client = MagicMock(name="pi_client_must_not_be_used")
+    agent._provider.get_llm_client.side_effect = lambda name: (
+        supervisor_client if name == "supervisor" else pi_client
+    )
+    chat_builder = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        "backend.services.report.chat_sections.build_chat_sections_async",
+        chat_builder,
+    )
+    out = tmp_path / "reports"
+    ws = tmp_path / "workspace"
+    (ws / "figures").mkdir(parents=True, exist_ok=True)
+
+    await agent.generate_detailed_report(
+        _state_with_rounds(),
+        "supervisor-endpoint-model",
+        str(out),
+        workspace_dir=str(ws),
+        report_llm_client=None,
+        chat_messages=[{"role": "user", "content": "question"}],
+    )
+
+    kwargs = chat_builder.await_args.kwargs
+    assert kwargs["llm_client"] is supervisor_client
+    assert kwargs["llm_client"] is not pi_client
+    assert kwargs["model"] == "supervisor-endpoint-model"
 
 
 @pytest.mark.asyncio

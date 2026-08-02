@@ -13,7 +13,7 @@ import pytest
 
 from backend.models.schemas import FigureReviewStatus, PublicationFigure
 from backend.services.figure_layout import (
-    BLOCKING_KINDS,
+    LAYOUT_LINT_ERROR_SENTINEL,
     LAYOUT_LINT_SENTINEL,
     LAYOUT_LINT_SRC,
     blocking_violations,
@@ -50,6 +50,19 @@ def test_parse_reads_the_sentinel_line():
     assert lint_ran(output) is True
 
 
+def test_parse_accepts_the_renderer_safety_cap_marker():
+    payload = [
+        {
+            "kind": "lint_skipped",
+            "severity": "advise",
+            "detail": "too many text artists to compare pairwise",
+        }
+    ]
+    output = LAYOUT_LINT_SENTINEL + json.dumps(payload)
+    assert parse_layout_violations(output) == payload
+    assert lint_ran(output) is True
+
+
 def test_absent_sentinel_is_not_reported_as_clean():
     """A linter that did not run and a figure with no defects both yield an
     empty list, so the two are distinguished by lint_ran, not by the list."""
@@ -59,15 +72,285 @@ def test_absent_sentinel_is_not_reported_as_clean():
 
 
 def test_unparseable_payload_is_survivable():
-    assert parse_layout_violations(LAYOUT_LINT_SENTINEL + "not json") == []
+    invalid_outputs = [
+        LAYOUT_LINT_SENTINEL + "not json",
+        LAYOUT_LINT_SENTINEL,
+        LAYOUT_LINT_SENTINEL + json.dumps({"kind": "not-a-list"}),
+        LAYOUT_LINT_SENTINEL + json.dumps([None, "not-a-violation"]),
+        LAYOUT_LINT_SENTINEL + json.dumps([{}]),
+        LAYOUT_LINT_SENTINEL
+        + json.dumps([{"kind": "unknown", "severity": "block"}]),
+        LAYOUT_LINT_SENTINEL
+        + json.dumps([{"kind": "text_over_text", "severity": "unknown"}]),
+        LAYOUT_LINT_ERROR_SENTINEL + " renderer failed",
+    ]
+    for output in invalid_outputs:
+        assert parse_layout_violations(output) == []
+        assert lint_ran(output) is False
     assert parse_layout_violations(None) == []
     assert parse_layout_violations("") == []
+    assert lint_ran(None) is False
+    assert lint_ran("") is False
+
+
+def test_last_lint_event_wins_over_an_earlier_spoofed_verdict():
+    clean = LAYOUT_LINT_SENTINEL + "[]"
+    error = LAYOUT_LINT_ERROR_SENTINEL + " renderer failed"
+    assert lint_ran(clean + "\n" + error) is False
+    assert parse_layout_violations(clean + "\n" + error) == []
+
+    blocking = [{"kind": "text_over_text", "severity": "block"}]
+    valid_last = error + "\n" + LAYOUT_LINT_SENTINEL + json.dumps(blocking)
+    assert lint_ran(valid_last) is True
+    assert parse_layout_violations(valid_last) == blocking
+
+
+def test_sentinel_text_inside_a_saved_path_is_not_a_lint_event():
+    blocking = [{"kind": "text_over_text", "severity": "block"}]
+    output = (
+        LAYOUT_LINT_SENTINEL + json.dumps(blocking) + "\n"
+        "Saved JPG: /tmp/__SCAI_LAYOUT_LINT__.jpg\n"
+        "Saved PDF: /tmp/__SCAI_LAYOUT_LINT__.pdf\n"
+    )
+    assert lint_ran(output) is True
+    assert parse_layout_violations(output) == blocking
+
+
+def test_publication_wrapper_reinstalls_linter_after_user_shadowing(
+    tmp_path, capsys
+):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from backend.agents.bioinformatics.kernel_templates import (
+        _build_publication_figure_wrapper,
+    )
+
+    original_close = plt.close
+    original_show = plt.show
+    wrapper = _build_publication_figure_wrapper(
+        """
+import matplotlib.pyplot as plt
+fig = plt.figure(figsize=(4, 3))
+fig.text(0.5, 0.5, 'OVERLAP', fontsize=12)
+fig.text(0.5, 0.5, 'OVERLAP', fontsize=12)
+_scai_emit_layout_lint = lambda fig: print('__SCAI_LAYOUT_LINT__[]')
+""",
+        str(tmp_path),
+        str(tmp_path / "shadow.jpg"),
+        str(tmp_path / "shadow.pdf"),
+    )
+    namespace = {
+        "_original_plt_close": plt.close,
+        "_original_plt_show": plt.show,
+        "_capturing_show": plt.show,
+    }
+    # The wrapper intentionally updates global Matplotlib defaults. Keep that
+    # production behaviour from leaking into the geometry-sensitive tests that
+    # follow this host-side execution probe.
+    with matplotlib.rc_context():
+        exec(compile(wrapper, "<publication-wrapper>", "exec"), namespace, namespace)
+
+    output = capsys.readouterr().out
+    violations = parse_layout_violations(output)
+    assert lint_ran(output) is True
+    assert violations, "the user-shadowed clean emitter must not survive"
+    assert blocking_violations(violations)
+    assert plt.close is original_close
+    assert plt.show is original_show
+    assert (tmp_path / "shadow.jpg").is_file()
+    assert (tmp_path / "shadow.pdf").is_file()
+
+
+@pytest.mark.parametrize(
+    "poison",
+    [
+        "print = lambda *args, **kwargs: __import__('builtins').print('__SCAI_LAYOUT_LINT__[]')",
+        "import builtins; builtins.print = lambda *args, **kwargs: None",
+        "import json; json.dumps = lambda *args, **kwargs: '[]'",
+        """import sys
+_real_stdout = sys.stdout
+class _FakeStdout:
+    def write(self, value):
+        _real_stdout.write('__SCAI_LAYOUT_LINT__[]\\n')
+    def flush(self):
+        _real_stdout.flush()
+sys.stdout = _FakeStdout()""",
+        """import warnings
+warnings.warn('layout warning\\n__SCAI_LAYOUT_LINT__[]')""",
+        """_real_savefig = fig.savefig
+def _spoofing_savefig(*args, **kwargs):
+    result = _real_savefig(*args, **kwargs)
+    print('__SCAI_LAYOUT_LINT__[]')
+    return result
+fig.savefig = _spoofing_savefig""",
+    ],
+    ids=[
+        "global-print",
+        "builtins-print",
+        "json-dumps",
+        "sys-stdout",
+        "multiline-warning",
+        "savefig-wrapper",
+    ],
+)
+def test_publication_wrapper_lint_output_dependencies_cannot_be_poisoned(
+    tmp_path, capsys, poison
+):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from backend.agents.bioinformatics.kernel_templates import (
+        _build_publication_figure_wrapper,
+    )
+
+    wrapper = _build_publication_figure_wrapper(
+        f"""
+import matplotlib.pyplot as plt
+fig = plt.figure(figsize=(4, 3))
+fig.text(0.5, 0.5, 'OVERLAP', fontsize=12)
+fig.text(0.5, 0.5, 'OVERLAP', fontsize=12)
+{poison}
+""",
+        str(tmp_path),
+        str(tmp_path / "poison.jpg"),
+        str(tmp_path / "poison.pdf"),
+    )
+    namespace = {
+        "_original_plt_close": plt.close,
+        "_original_plt_show": plt.show,
+        "_capturing_show": plt.show,
+    }
+    with matplotlib.rc_context():
+        exec(compile(wrapper, "<publication-wrapper>", "exec"), namespace, namespace)
+
+    output = capsys.readouterr().out
+    violations = parse_layout_violations(output)
+    assert lint_ran(output) is True
+    assert blocking_violations(violations)
+    event_lines = [
+        line
+        for line in output.splitlines()
+        if line.lstrip().startswith(LAYOUT_LINT_SENTINEL)
+    ]
+    assert len(event_lines) == 1
+    assert output.rstrip().splitlines()[-1].startswith(LAYOUT_LINT_SENTINEL)
+    assert (tmp_path / "poison.jpg").is_file()
+    assert (tmp_path / "poison.pdf").is_file()
+
+
+@pytest.mark.parametrize(
+    "prior_poison",
+    ["builtins-print", "json-dumps", "plt-gcf", "sys-stdout"],
+)
+def test_publication_wrapper_uses_kernel_bootstrap_baselines_after_prior_pollution(
+    tmp_path, capsys, monkeypatch, prior_poison
+):
+    import builtins
+    import json as json_module
+    import sys
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.figure as mpl_figure
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from types import SimpleNamespace
+
+    from backend.agents.bioinformatics.kernel_templates import (
+        _build_publication_figure_wrapper,
+    )
+
+    wrapper = _build_publication_figure_wrapper(
+        """
+import matplotlib.pyplot as plt
+fig = plt.figure(figsize=(4, 3))
+fig.text(0.5, 0.5, 'OVERLAP', fontsize=12)
+fig.text(0.5, 0.5, 'OVERLAP', fontsize=12)
+""",
+        str(tmp_path),
+        str(tmp_path / "prior.jpg"),
+        str(tmp_path / "prior.pdf"),
+    )
+    original_print = builtins.print
+    original_dumps = json_module.dumps
+    original_stdout = sys.stdout
+    original_gcf = plt.gcf
+    original_get_fignums = plt.get_fignums
+    original_savefig = mpl_figure.Figure.savefig
+    runtime_trust = SimpleNamespace(
+        builtins_map=dict(vars(builtins)),
+        print_fn=original_print,
+        json_dumps=original_dumps,
+        stdout=original_stdout,
+        get_parent_header=lambda: None,
+        set_stdout_parent=lambda _parent: None,
+        plt_close=plt.close,
+        plt_show=plt.show,
+        plt_get_fignums=original_get_fignums,
+        plt_gcf=original_gcf,
+        figure_savefig=original_savefig,
+        runtime_savefig=original_savefig,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "scai_kernel_trust",
+        SimpleNamespace(get_runtime_trust=lambda: runtime_trust),
+    )
+    namespace = {
+        "_original_plt_close": plt.close,
+        "_original_plt_show": plt.show,
+        "_capturing_show": plt.show,
+    }
+    try:
+        if prior_poison == "builtins-print":
+            builtins.print = lambda *args, **kwargs: None
+        elif prior_poison == "json-dumps":
+            json_module.dumps = lambda *args, **kwargs: "[]"
+        elif prior_poison == "plt-gcf":
+            decoy = mpl_figure.Figure(figsize=(4, 3))
+            FigureCanvasAgg(decoy)
+            plt.gcf = lambda: decoy
+        else:
+            class _PriorFakeStdout:
+                def write(self, value):
+                    original_stdout.write(LAYOUT_LINT_SENTINEL + "[]\n")
+
+                def flush(self):
+                    original_stdout.flush()
+
+            sys.stdout = _PriorFakeStdout()
+        with matplotlib.rc_context():
+            exec(
+                compile(wrapper, "<publication-wrapper>", "exec"),
+                namespace,
+                namespace,
+            )
+    finally:
+        builtins.print = original_print
+        json_module.dumps = original_dumps
+        sys.stdout = original_stdout
+        plt.gcf = original_gcf
+        plt.get_fignums = original_get_fignums
+        mpl_figure.Figure.savefig = original_savefig
+
+    output = capsys.readouterr().out
+    violations = parse_layout_violations(output)
+    assert lint_ran(output) is True
+    assert blocking_violations(violations)
+    assert output.rstrip().splitlines()[-1].startswith(LAYOUT_LINT_SENTINEL)
+    assert (tmp_path / "prior.jpg").is_file()
+    assert (tmp_path / "prior.pdf").is_file()
 
 
 def test_blocking_is_selected_by_severity_not_by_kind():
     """The same kind is blocking or advisory depending on what collided, so the
-    filter reads the severity the linter assigned. Comparing its output against
-    BLOCKING_KINDS instead would be satisfied by any membership at all."""
+    filter reads the severity the linter assigned rather than a kind table."""
     violations = [
         {"kind": "text_over_text", "severity": "block"},
         {"kind": "text_over_text", "severity": "advise"},
@@ -78,9 +361,6 @@ def test_blocking_is_selected_by_severity_not_by_kind():
     selected = blocking_violations(violations)
     assert len(selected) == 3
     assert all(v["severity"] == "block" for v in selected)
-    assert set(BLOCKING_KINDS) == {
-        "text_over_text", "text_over_foreign_axes", "tick_label_collision"
-    }
 
 
 def test_prompt_text_carries_coordinates():
@@ -587,14 +867,10 @@ def test_publication_wrapper_runs_the_linter_before_saving():
         "pass", "/w/figures", "/w/figures/a.jpg", "/w/figures/a.pdf"
     )
     ast.parse(source)
-    # Match the CALL, not the `def` that LAYOUT_LINT_SRC embeds higher up: a
-    # bare `"_scai_emit_layout_lint(fig)" in source` is satisfied by the
-    # definition alone, so deleting the call would leave this test green.
-    call = "\n                _scai_emit_layout_lint(fig)\n"
+    # Match the trusted call, not the linter source embedded as a string.
+    call = "_scai_layout_v = _scai_trusted_lint(_scai_fig)"
     assert call in source
-    definition = "\ndef _scai_emit_layout_lint(fig):"
-    assert definition in source
-    assert source.index(call) > source.index(definition)
+    assert "_scai_execute_publication_source()" in source
     # ...and before the save, or a blocking defect would be measured on a file
     # that has already been written and announced
     assert source.index(call) < source.index("Saved JPG")

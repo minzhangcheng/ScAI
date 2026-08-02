@@ -128,7 +128,14 @@ def test_analysis_state_dump_seals_keys_and_round_trip_opens_them():
 
 
 def test_langgraph_checkpoint_serializer_never_contains_raw_key():
-    serializer = JsonPlusSerializer(allowed_msgpack_modules=True)
+    serializer = JsonPlusSerializer(allowed_json_modules=[
+        ("backend.models.schemas", "AgentType"),
+        ("backend.models.schemas", "AnalysisState"),
+        ("backend.models.schemas", "AnalysisPhase"),
+        ("backend.models.schemas", "RoundResult"),
+        ("backend.models.schemas", "TaskStatus"),
+        ("backend.models.schemas", "MessageRole"),
+    ])
     type_name, payload = serializer.dumps_typed({"analysis_state": _state()})
 
     assert type_name == "msgpack"
@@ -226,6 +233,78 @@ def test_portable_export_omits_installation_bound_checkpoint(tmp_path, monkeypat
     assert "portable-session/states/analysis.ipynb" in names
     assert "portable-session/states/checkpoints.sqlite" not in names
     assert "portable-session/states/checkpoints.sqlite-wal" not in names
+
+
+def test_legacy_state_export_excludes_near_prefix_sessions(tmp_path, monkeypatch):
+    from backend.routes import export_import
+
+    session_id = "abc"
+    states = tmp_path / "states"
+    states.mkdir()
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    (legacy / "abc.ipynb").write_bytes(b"owned")
+    (legacy / "abc_session.pkl").write_bytes(b"owned-runtime")
+    (legacy / "abcd_session.pkl").write_bytes(b"other-session")
+    (legacy / "abc-extra_state.json").write_bytes(b"other-session")
+    (legacy / "abc_extra_state.json").write_bytes(b"other-session")
+    setattr_facade(
+        monkeypatch, "backend.routes.export_import", "get_session_states",
+        lambda _session_id: states,
+    )
+    setattr_facade(
+        monkeypatch, "backend.routes.export_import", "STATE_DIR", legacy,
+    )
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        export_import._add_states_to_tar(
+            archive, session_id, include_runtime=True,
+        )
+    buffer.seek(0)
+    with tarfile.open(fileobj=buffer, mode="r") as archive:
+        names = set(archive.getnames())
+
+    assert f"{session_id}/states/abc.ipynb" in names
+    assert f"{session_id}/states/abc_session.pkl" in names
+    assert f"{session_id}/states/abcd_session.pkl" not in names
+    assert f"{session_id}/states/abc-extra_state.json" not in names
+    assert f"{session_id}/states/abc_extra_state.json" not in names
+
+
+@pytest.mark.parametrize(
+    ("session_id", "ambiguous_name"),
+    [
+        ("abc_state", "abc_state.json"),
+        ("abc_session", "abc_session.pkl"),
+    ],
+)
+def test_legacy_state_export_excludes_ambiguous_shorter_id_file(
+    tmp_path, monkeypatch, session_id, ambiguous_name,
+):
+    from backend.routes import export_import
+
+    states = tmp_path / "states"
+    states.mkdir()
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    (legacy / ambiguous_name).write_bytes(b"shorter-session")
+    setattr_facade(
+        monkeypatch, "backend.routes.export_import", "get_session_states",
+        lambda _session_id: states,
+    )
+    setattr_facade(
+        monkeypatch, "backend.routes.export_import", "STATE_DIR", legacy,
+    )
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        export_import._add_states_to_tar(
+            archive, session_id, include_runtime=True,
+        )
+    buffer.seek(0)
+    with tarfile.open(fileobj=buffer, mode="r") as archive:
+        assert f"{session_id}/states/{ambiguous_name}" not in archive.getnames()
 
 
 def _states_export_names(tmp_path, monkeypatch, include_runtime):

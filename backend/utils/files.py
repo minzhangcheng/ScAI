@@ -13,6 +13,30 @@ from fastapi import HTTPException
 logger = logging.getLogger(__name__)
 
 
+# Flat state files written before the session-centric directory migration.
+# Keep this exact: session IDs may contain underscores and one valid ID may be
+# a prefix of another, so a glob such as ``f"{session_id}*"`` crosses session
+# ownership boundaries.
+LEGACY_SESSION_STATE_SUFFIXES = (
+    ".ipynb",
+    "_state.json",
+    "_session.pkl",
+    "_bioinfo_checkpoint.json",
+    "_report_checkpoint.json",
+)
+
+
+def legacy_session_state_paths(
+    state_dir: str | Path,
+    session_id: str,
+) -> tuple[Path, ...]:
+    """Return the exact legacy flat-state paths owned by *session_id*."""
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", session_id or ""):
+        return ()
+    root = Path(state_dir)
+    return tuple(root / f"{session_id}{suffix}" for suffix in LEGACY_SESSION_STATE_SUFFIXES)
+
+
 def safe_filename(filename: str) -> str:
     """Extract safe base filename, preventing path traversal.
     Returns empty string for invalid input.
@@ -57,7 +81,7 @@ async def temp_file_on_error(tmp_path: str) -> AsyncIterator[None]:
     """
     try:
         yield
-    except Exception:
+    except BaseException:
         Path(tmp_path).unlink(missing_ok=True)
         raise
 

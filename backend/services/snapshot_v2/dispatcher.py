@@ -4,7 +4,7 @@ resume-ready AnalysisState metadata with drift detection and branch identity.
 Provides :class:`ContinuationDispatcher` with two public methods:
 
     * ``stage_checkpoint(capsule, state, analysis_state, …) → StagedCheckpoint``
-    * ``activate(analysis_state, staged) → None``
+    * ``activate(analysis_state, staged, workspace_path=...) → None``
 
 The caller (e.g. restore coordinator or snapshot route) stages the checkpoint
 against the current WorkflowState, then activates it to mutate AnalysisState.
@@ -166,6 +166,8 @@ class ContinuationDispatcher:
         self,
         analysis_state: Any,
         staged: StagedCheckpoint,
+        *,
+        workspace_path: Any = None,
     ) -> None:
         """Set resume metadata fields on *analysis_state*.
 
@@ -192,10 +194,10 @@ class ContinuationDispatcher:
         elif staged.kind == "semantic_gate":
             analysis_state.restore_resume_kind = "semantic_gate"
             analysis_state.restore_resume_gate = staged.gate
-            analysis_state.restore_resume_node = staged.payload.get(
-                "node_name"
+            analysis_state.restore_resume_node = (
+                staged.payload.get("next_node")
+                or staged.payload.get("node_name")
             ) if staged.payload else None
-            analysis_state.restore_resume_workflow_state = None
             # Rebuild exact waiting payload from capsule.
             # Fail closed if capsule declared payload_ref but stage lost it.
             if staged.payload is None:
@@ -204,6 +206,30 @@ class ContinuationDispatcher:
                     "semantic_gate staged checkpoint requires payload when "
                     "capsule declares payload_ref",
                 )
+            workflow_fields = {
+                key: copy.deepcopy(staged.payload[key])
+                for key in (
+                    "current_round",
+                    "pi_instructions",
+                    "planning_stage",
+                    "plan_approved",
+                    "planning_result",
+                    "planning_context",
+                    "user_plan_feedback",
+                    "plan_revision_needed",
+                    "plan_revision_context",
+                    "plan_revision_resume",
+                    "report_blocked",
+                    "integration_next",
+                    "failed_node",
+                    "skip_nodes",
+                    "node_retry_count",
+                    "node_errors",
+                    "adjusted_instructions",
+                )
+                if key in staged.payload
+            }
+            analysis_state.restore_resume_workflow_state = workflow_fields
             wait_reason = (
                 staged.payload.get("wait_reason")
                 or staged.payload.get("wait_input_reason")
@@ -249,6 +275,27 @@ class ContinuationDispatcher:
                         setattr(analysis_state, field, staged.payload[field])
                     except Exception:
                         pass
+            exploration_report = getattr(analysis_state, "exploration_report", None)
+            if exploration_report is not None:
+                for field in (
+                    "research_direction_candidates",
+                    "raw_direction_candidates",
+                    "direction_selection_summary",
+                ):
+                    if field in staged.payload:
+                        setattr(
+                            exploration_report,
+                            field,
+                            copy.deepcopy(staged.payload[field]),
+                        )
+            if "annotation_state" in staged.payload:
+                from backend.models.schemas import AnnotationConfirmationState
+
+                raw_annotation = staged.payload.get("annotation_state")
+                if isinstance(raw_annotation, dict):
+                    analysis_state.annotation_state = (
+                        AnnotationConfirmationState.model_validate(raw_annotation)
+                    )
             # Stash full payload for resume consumers.
             if hasattr(analysis_state, "sandbox_state"):
                 ss = dict(getattr(analysis_state, "sandbox_state", None) or {})
@@ -324,6 +371,7 @@ class ContinuationDispatcher:
                 getattr(analysis_state, "publication_figures", None) or [],
                 branch_id=target_lineage_id,
                 source_lineage_id=source_lineage_id,
+                workspace_path=workspace_path,
             )
         analysis_state.restore_branch_id = staged.branch_id
         analysis_state.restore_branch_label = staged.branch_label

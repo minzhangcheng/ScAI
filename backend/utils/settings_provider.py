@@ -7,6 +7,7 @@ freshness even after LangGraph checkpoint-deserialization replaces the
 object. Changes made via session_config API routes are immediately
 visible on the next get_* call.
 """
+import asyncio
 import hashlib
 import json
 import logging
@@ -55,6 +56,13 @@ class AgentSettingsProvider:
         self._global_client = global_client
         self._retry_callback = retry_callback
         self._client_cache: Dict[Tuple[str, str, str], OpenAICompatibleClient] = {}
+        self._retired_clients: set[OpenAICompatibleClient] = set()
+        self._client_close_tasks: set[asyncio.Task[None]] = set()
+        self._client_close_task_ids: set[int] = set()
+        self._client_use_counts: Dict[int, int] = {}
+        self._cleanup_lock = asyncio.Lock()
+        self._closing = False
+        self._cleanup_complete = False
 
     def set_retry_callback(self, callback: Optional[Callable]) -> None:
         """Set or update the retry callback for newly created LLM clients."""
@@ -103,6 +111,8 @@ class AgentSettingsProvider:
         return (self._get_state().agent_vision_settings or {}).get(agent_name, True)
 
     def get_llm_client(self, agent_name: str) -> Optional[OpenAICompatibleClient]:
+        if self._closing:
+            raise RuntimeError("settings provider is closing")
         agent_cfg = (self._get_state().agent_server_configs or {}).get(agent_name, {})
         agent_url = agent_cfg.get("llm_base_url", "")
         agent_key = agent_cfg.get("api_key", "")
@@ -156,23 +166,114 @@ class AgentSettingsProvider:
         Legacy callers pass a two-part key. Store it under a namespaced key so it
         cannot collide with normal per-agent server clients.
         """
+        if self._cleanup_complete:
+            # A completed provider can no longer honour an ownership transfer.
+            # Reject before retaining the client so the caller remains its owner.
+            raise RuntimeError("settings provider is already closed")
+        if self._closing:
+            # Ownership transfers at this API boundary even when registration
+            # races with teardown; retain and close the rejected client.
+            self._retire_client(client)
+            raise RuntimeError("settings provider is closing")
         cache_key = ("registered", key[0], key[1])
+        previous = self._client_cache.get(cache_key)
+        if previous is not None and previous is not client:
+            self._retire_client(previous)
         self._client_cache[cache_key] = client
 
     def cached_clients(self):
         """Iterate over all cached LLM clients (for retry-callback wiring)."""
         return self._client_cache.values()
 
-    def clear_agent_client_cache(self, agent_name: str) -> None:
-        """Drop cached OpenAI-compatible clients for one agent.
+    def lease_client(self, client: OpenAICompatibleClient) -> None:
+        """Prevent a cached client from closing while one request uses it."""
+        if self._closing:
+            raise RuntimeError("settings provider is closing")
+        client_id = id(client)
+        self._client_use_counts[client_id] = (
+            self._client_use_counts.get(client_id, 0) + 1
+        )
 
-        The clients are not awaited/closed here because route handlers are
-        synchronous with respect to the provider and stale clients are harmless
-        once removed from the cache. Workflow cleanup still closes cached clients.
+    def release_client(self, client: OpenAICompatibleClient) -> None:
+        """Release a request lease and close a retired client when now idle."""
+        client_id = id(client)
+        remaining = self._client_use_counts.get(client_id, 0) - 1
+        if remaining > 0:
+            self._client_use_counts[client_id] = remaining
+            return
+        self._client_use_counts.pop(client_id, None)
+        if client in self._retired_clients:
+            self._retire_client(client)
+
+    def clear_agent_client_cache(self, agent_name: str) -> None:
+        """Retire cached clients for one agent and close them when possible.
+
+        This method stays synchronous because agents call it from their runtime
+        refresh hook. Ownership nevertheless remains with the provider: under a
+        running event loop each retired client receives a tracked close task;
+        otherwise it remains queued for :meth:`cleanup`. A removed client must
+        never become unreachable before one of those paths closes it.
         """
         for key in list(self._client_cache):
             if key[0] == agent_name:
-                self._client_cache.pop(key, None)
+                client = self._client_cache.pop(key, None)
+                if client is not None:
+                    self._retire_client(client)
+
+    def clear_client_cache(self) -> None:
+        """Retire every cached client without dropping provider ownership."""
+        for key in list(self._client_cache):
+            client = self._client_cache.pop(key, None)
+            if client is not None:
+                self._retire_client(client)
+
+    def _retire_client(self, client: OpenAICompatibleClient) -> None:
+        self._retired_clients.add(client)
+        client_id = id(client)
+        if self._client_use_counts.get(client_id, 0) > 0:
+            return
+        if client_id in self._client_close_task_ids:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._close_retired_client(client))
+        self._client_close_tasks.add(task)
+        self._client_close_task_ids.add(client_id)
+
+        def _discard(done_task):
+            self._client_close_tasks.discard(done_task)
+            self._client_close_task_ids.discard(client_id)
+            try:
+                outcome = done_task.result()
+            except (Exception, asyncio.CancelledError):
+                return
+            if (
+                outcome == "deferred"
+                and client in self._retired_clients
+                and self._client_use_counts.get(client_id, 0) == 0
+            ):
+                self._retire_client(client)
+
+        task.add_done_callback(_discard)
+
+    async def _close_retired_client(
+        self, client: OpenAICompatibleClient,
+    ) -> str:
+        # A lease can be acquired after retirement but before this scheduled
+        # coroutine starts. Recheck at the actual close boundary.
+        if self._client_use_counts.get(id(client), 0) > 0:
+            return "deferred"
+        try:
+            await client.close()
+        except Exception as exc:
+            # Keep ownership in _retired_clients so cleanup can retry.
+            logger.debug("Failed to close retired LLM client: %s", exc)
+            return "failed"
+        else:
+            self._retired_clients.discard(client)
+            return "closed"
 
     # ------------------------------------------------------------------
     # Literature config
@@ -234,12 +335,69 @@ class AgentSettingsProvider:
         return int(digest, 16)
 
     async def cleanup(self):
-        for client in self._client_cache.values():
-            try:
-                await client.close()
-            except Exception as e:
-                logger.debug(f"Failed to close cached LLM client: {e}")
-        self._client_cache.clear()
+        async with self._cleanup_lock:
+            if self._cleanup_complete:
+                return
+            # This flag is set before the first await. Event-loop callers can
+            # no longer create a client while cleanup is draining ownership.
+            self._closing = True
+
+            while True:
+                self._retired_clients.update(self._client_cache.values())
+                self._client_cache.clear()
+
+                pending_tasks = list(self._client_close_tasks)
+                if pending_tasks:
+                    await asyncio.gather(*pending_tasks, return_exceptions=True)
+                    self._client_close_tasks.difference_update(pending_tasks)
+
+                failures: list[Exception] = []
+                in_use = 0
+                for client in list(self._retired_clients):
+                    client_id = id(client)
+                    if self._client_use_counts.get(client_id, 0) > 0:
+                        in_use += 1
+                        continue
+                    # register_client() can retire a late client while the
+                    # task snapshot above is being awaited. Its tracked task
+                    # remains the single closer; do not close it concurrently.
+                    if client_id in self._client_close_task_ids:
+                        continue
+                    try:
+                        await client.close()
+                    except Exception as exc:
+                        failures.append(exc)
+                        logger.debug("Failed to close cached LLM client: %s", exc)
+                    else:
+                        self._retired_clients.discard(client)
+
+                if failures:
+                    # Keep failed clients strongly owned for the next
+                    # workflow.close()/cleanup() retry.
+                    raise RuntimeError(
+                        f"failed to close {len(failures)} settings-provider client(s)"
+                    ) from failures[0]
+                if in_use:
+                    raise RuntimeError(
+                        f"{in_use} settings-provider client(s) still in use"
+                    )
+
+                if self._client_close_tasks:
+                    continue
+                if self._retired_clients:
+                    await asyncio.sleep(0)
+                    continue
+
+                # clear_agent_client_cache() may have retired an existing
+                # client while this coroutine was awaiting a close. Loop until
+                # every provider-owned source is empty.
+                if (
+                    not self._client_cache
+                    and not self._retired_clients
+                    and not self._client_close_tasks
+                ):
+                    self._cleanup_complete = True
+                    return
 
 
 def _secret_safe_signature(value: Any, key_name: str = "") -> Any:

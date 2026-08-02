@@ -67,6 +67,7 @@ from .shared import (  # noqa: F401
     _integrity_dir,
     _path_is_within,
     compute_remaining_timeout,
+    _to_thread_drained,
     logger,
     _is_kernel_protocol_error,
     DANGEROUS_PATTERNS,
@@ -94,8 +95,11 @@ class ExecutionMixin:
     def _allowed_write_roots(self) -> List[str]:
         """Return the list of write-root paths rendered into the kernel init code,
         so host-side tests can assert that a path is NOT writable by the sandbox."""
-        session_root_abs = str(self.working_dir.absolute().parent)
-        return [session_root_abs, str(self._session_tmp)]
+        return [
+            str(self.working_dir.resolve()),
+            str(self.notebook_state.state_dir.resolve()),
+            str(self._session_tmp.resolve()),
+        ]
 
     async def execute(
         self,
@@ -159,6 +163,20 @@ class ExecutionMixin:
             self.runtime_revision += 1
             if confirmed_declared:
                 self.record_declared_outputs(confirmed_declared)
+                tracker = getattr(self, "runtime_dependency_tracker", None)
+                if tracker is not None:
+                    tracker.confirm_recomputed(
+                        confirmed_declared,
+                        reason=(
+                            "Successful execution explicitly re-produced the "
+                            "declared persistent output."
+                        ),
+                    )
+            self.notebook_state.update_runtime_persistence(
+                "live_dirty",
+                current_revision=self.runtime_revision,
+                saved_revision=self.saved_runtime_revision,
+            )
         return result
 
     async def _execute_unlocked(
@@ -242,7 +260,7 @@ class ExecutionMixin:
                         # Each timeout leaked an orphaned reader thread; multiple
                         # threads reading the same ZMQ socket is unsafe and
                         # eventually triggers libzmq abort (src/msg.cpp:387).
-                        msg = await asyncio.to_thread(
+                        msg = await _to_thread_drained(
                             self.kc.get_iopub_msg,
                             timeout=min(remaining, IOPUB_POLL_CAP)
                         )
@@ -287,7 +305,7 @@ class ExecutionMixin:
                             # Drain any remaining messages to clear the queue
                             try:
                                 while True:
-                                    drain_msg = await asyncio.to_thread(
+                                    drain_msg = await _to_thread_drained(
                                         self.kc.get_iopub_msg, timeout=1.0
                                     )
                                     if drain_msg['msg_type'] == 'status' and drain_msg['content']['execution_state'] == 'idle':

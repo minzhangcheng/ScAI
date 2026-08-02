@@ -10,13 +10,11 @@ from typing import Dict, Any, List, Optional
 
 from PIL import Image
 
-from backend.utils.files import resolve_figure_in_workspace
 from backend.services.report.artifacts import (
     artifact_stems,
+    copy_verified_artifact,
     eligible_artifacts,
     excluded_artifact_stems,
-    image_file_sha256,
-    publication_pdf_is_valid,
     resolve_archival_pdf,
     resolve_archival_render,
 )
@@ -142,6 +140,8 @@ class FiguresMixin:
         publication_figures: Optional[List[Any]] = None,
         analysis_log: Optional[List[Any]] = None,
         invalidated_stems: Optional[set[str]] = None,
+        artifact_registry_version: Optional[int] = None,
+        legacy_artifacts: Optional[List[Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Scan the WORKSPACE directory for existing images from analysis phase.
@@ -197,20 +197,17 @@ class FiguresMixin:
             seen_filenames.add(stem)
             seen_filenames.update(artifact_stems([pf]))
             dest_png = self.figures_dir / source.name
-            try:
-                if source.resolve() != dest_png.resolve():
-                    shutil.copy2(str(source), str(dest_png))
-            except Exception:
+            if not copy_verified_artifact(
+                source, dest_png, pf, kind="image"
+            ):
                 continue
 
             pdf_file = resolve_archival_pdf(pf, self.workspace_dir)
             dest_pdf = self.figures_dir / pdf_file.name if pdf_file else None
-            if pdf_file:
-                try:
-                    if pdf_file.resolve() != dest_pdf.resolve():
-                        shutil.copy2(str(pdf_file), str(dest_pdf))
-                except Exception:
-                    dest_pdf = None
+            if pdf_file and not copy_verified_artifact(
+                pdf_file, dest_pdf, pf, kind="pdf"
+            ):
+                dest_pdf = None
 
             existing_figures.append({
                 "filename": source.name,
@@ -224,6 +221,13 @@ class FiguresMixin:
                 "plan_step_id": getattr(pf, "plan_step_id", None),
                 "plan_id": getattr(pf, "plan_id", None),
                 "purpose": getattr(pf, "purpose", "result") or "result",
+                "logical_figure_id": getattr(pf, "logical_figure_id", None),
+                "render_attempt_id": getattr(pf, "render_attempt_id", None),
+                "revision_of_id": getattr(pf, "revision_of_id", None),
+                "supersedes_id": getattr(pf, "supersedes_id", None),
+                "is_published_head": bool(getattr(pf, "is_published_head", False)),
+                "provenance_kind": "registered_publication",
+                "is_legacy": False,
             })
 
         discovered = prepare_discovered_figures(
@@ -232,7 +236,14 @@ class FiguresMixin:
             invalidated_stems=invalidated_stems,
             report_only=True,
             allow_unregistered_diagnostics=False,
+            registry_version=artifact_registry_version,
+            legacy_artifacts=legacy_artifacts,
         )
+        admitted_by_stem = {
+            Path(str(candidate.get("path") or "")).stem: candidate
+            for candidate in discovered
+            if candidate.get("path")
+        }
         for candidate in discovered:
             png_file = Path(candidate["path"])
             if png_file.stem in excluded_publication_stems:
@@ -242,19 +253,18 @@ class FiguresMixin:
             seen_filenames.add(png_file.stem)
 
             dest_png = self.figures_dir / png_file.name
-            try:
-                shutil.copy2(str(png_file), str(dest_png))
-            except Exception:
+            if not copy_verified_artifact(
+                png_file, dest_png, candidate, kind="image"
+            ):
                 continue
 
             pdf_file = Path(candidate["pdf_path"]) if candidate.get("pdf_path") else None
             dest_pdf = self.figures_dir / pdf_file.name if pdf_file else None
-            if pdf_file and publication_pdf_is_valid(pdf_file):
-                try:
-                    shutil.copy2(str(pdf_file), str(dest_pdf))
-                except Exception:
-                    dest_pdf = None
-            else:
+            if pdf_file and not copy_verified_artifact(
+                pdf_file, dest_pdf, candidate, kind="pdf"
+            ):
+                dest_pdf = None
+            elif not pdf_file:
                 dest_pdf = None
 
             existing_figures.append({
@@ -272,6 +282,14 @@ class FiguresMixin:
                 "plan_step_id": candidate.get("plan_step_id"),
                 "plan_id": candidate.get("plan_id"),
                 "purpose": candidate.get("purpose") or "result",
+                "logical_figure_id": candidate.get("logical_figure_id"),
+                "render_attempt_id": candidate.get("render_attempt_id"),
+                "revision_of_id": candidate.get("revision_of_id"),
+                "supersedes_id": candidate.get("supersedes_id"),
+                "is_published_head": bool(candidate.get("is_published_head")),
+                "provenance_kind": candidate.get("provenance_kind") or "unregistered",
+                "is_legacy": bool(candidate.get("is_legacy")),
+                "legacy_artifact_id": candidate.get("legacy_artifact_id"),
             })
 
         if analysis_log:
@@ -295,14 +313,19 @@ class FiguresMixin:
                 if logged_stem in seen_filenames:
                     continue
                 registered = records_by_stem.get(logged_stem)
+                admitted = admitted_by_stem.get(logged_stem)
                 if registered is not None:
                     src = resolve_archival_render(registered, self.workspace_dir)
                 else:
-                    src = resolve_figure_in_workspace(
-                        base, self.workspace_dir, seen_filenames
+                    # A log entry proves only that a filename was emitted. Its
+                    # bytes must still be admitted by the same record/legacy
+                    # inventory resolver used by the workspace scan above.
+                    # In registry-v1 sessions ``admitted`` is therefore absent
+                    # for every unregistered file.
+                    src = (
+                        Path(str(admitted["path"]))
+                        if admitted is not None else None
                     )
-                    if src is not None and image_file_sha256(src, min_bytes=1) is None:
-                        src = None
                 if src is None:
                     continue
                 # A logged file in annotation_validation is archival only when
@@ -328,26 +351,21 @@ class FiguresMixin:
                     seen_filenames.update(artifact_stems([registered]))
 
                 dest_png = self.figures_dir / src.name
-                try:
-                    shutil.copy2(str(src), str(dest_png))
-                except Exception:
+                source_record = registered if registered is not None else admitted
+                if not copy_verified_artifact(
+                    src, dest_png, source_record, kind="image"
+                ):
                     continue
 
                 pdf_file = (
                     resolve_archival_pdf(registered, self.workspace_dir)
                     if registered is not None else src.with_suffix(".pdf")
                 )
-                pdf_valid = bool(
-                    pdf_file and publication_pdf_is_valid(pdf_file)
-                )
-                if not pdf_valid:
-                    pdf_file = None
                 dest_pdf = self.figures_dir / pdf_file.name if pdf_file else None
-                if pdf_file:
-                    try:
-                        shutil.copy2(str(pdf_file), str(dest_pdf))
-                    except Exception:
-                        dest_pdf = None
+                if pdf_file and not copy_verified_artifact(
+                    pdf_file, dest_pdf, source_record, kind="pdf"
+                ):
+                    dest_pdf = None
 
                 existing_figures.append({
                     "filename": src.name,
@@ -364,6 +382,14 @@ class FiguresMixin:
                     "plan_step_id": (metadata or {}).get("plan_step_id"),
                     "plan_id": (metadata or {}).get("plan_id"),
                     "purpose": (metadata or {}).get("purpose") or "result",
+                    "provenance_kind": (
+                        (admitted or {}).get("provenance_kind")
+                        or ("registered_publication" if registered is not None else "")
+                    ),
+                    "is_legacy": bool((admitted or {}).get("is_legacy")),
+                    "legacy_artifact_id": (admitted or {}).get(
+                        "legacy_artifact_id"
+                    ),
                 })
 
         return existing_figures

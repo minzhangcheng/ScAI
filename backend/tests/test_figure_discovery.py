@@ -10,11 +10,17 @@ import pytest
 from PIL import Image
 
 from backend.services.report.figure_discovery import (
+    discover_figures_in_workspace,
     discover_workspace_figures,
+    ensure_legacy_artifact_inventory,
     infer_figure_type,
     prepare_discovered_figures,
     publication_figure_metadata,
+    resolve_state_figure_candidates,
 )
+from backend.models.schemas import AnalysisState
+from backend.services.report.artifacts import ARTIFACT_REGISTRY_VERSION
+from backend.tests.figure_image_helpers import valid_pdf_bytes
 
 
 def _touch(path: Path, mtime: float | None = None) -> Path:
@@ -389,6 +395,125 @@ def test_unregistered_report_candidate_requires_complete_image_decode(tmp_path):
     assert [item["name"] for item in prepare_discovered_figures(raw, [])] == [
         "valid"
     ]
+
+
+def test_strict_registry_excludes_unregistered_images_without_mtime_guessing(tmp_path):
+    path = _render(tmp_path / "strict.png")
+    os.utime(path, (1.0, 1.0))
+    raw = [{
+        "name": "strict", "type": "other", "path": str(path),
+        "pdf_path": None, "mtime": 1.0, "source": "figures",
+        "rel_path": "figures/strict.png", "diagnostic": False,
+    }]
+
+    assert prepare_discovered_figures(
+        raw,
+        [],
+        registry_version=ARTIFACT_REGISTRY_VERSION,
+    ) == []
+
+
+def test_missing_registry_version_creates_explicit_legacy_inventory(tmp_path):
+    workspace = tmp_path / "workspace"
+    path = _render(workspace / "figures" / "legacy.png")
+    os.utime(path, (1.0, 1.0))
+    state = AnalysisState(id="legacy-session", user_id="u")
+
+    inventory = ensure_legacy_artifact_inventory(state, workspace)
+    candidates = prepare_discovered_figures(
+        discover_figures_in_workspace(workspace),
+        state.publication_figures,
+        registry_version=state.artifact_registry_version,
+        legacy_artifacts=inventory,
+    )
+
+    assert state.artifact_registry_version == ARTIFACT_REGISTRY_VERSION
+    assert len(inventory) == 1
+    assert inventory[0].provenance_kind == "legacy_unregistered"
+    assert candidates[0]["is_legacy"] is True
+    assert candidates[0]["legacy_artifact_id"] == inventory[0].id
+    assert candidates[0]["provenance_kind"] == "legacy_unregistered"
+
+
+def test_legacy_inventory_is_frozen_after_first_migration_scan(tmp_path):
+    workspace = tmp_path / "workspace"
+    _render(workspace / "figures" / "present_at_migration.png")
+    state = AnalysisState(id="legacy-session", user_id="u")
+
+    first = ensure_legacy_artifact_inventory(state, workspace)
+    _render(workspace / "figures" / "appeared_later.png")
+    second = ensure_legacy_artifact_inventory(state, workspace)
+
+    assert state.artifact_registry_version == ARTIFACT_REGISTRY_VERSION
+    assert [item.name for item in first] == ["present_at_migration"]
+    assert [item.name for item in second] == ["present_at_migration"]
+
+
+@pytest.mark.parametrize("pdf_existed_at_freeze", [False, True])
+def test_frozen_legacy_image_cannot_adopt_an_added_or_replaced_pdf(
+    tmp_path, pdf_existed_at_freeze,
+):
+    workspace = tmp_path / "workspace"
+    image = _render(workspace / "figures" / "legacy.png")
+    pdf = image.with_suffix(".pdf")
+    if pdf_existed_at_freeze:
+        pdf.write_bytes(valid_pdf_bytes(color=(10, 20, 30)))
+    state = AnalysisState(id="legacy-session", user_id="u")
+    ensure_legacy_artifact_inventory(state, workspace)
+
+    pdf.write_bytes(valid_pdf_bytes(color=(200, 30, 20)))
+    candidates = resolve_state_figure_candidates(
+        state, workspace, report_only=False
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].get("pdf_path") in (None, "")
+    assert candidates[0].get("pdf_sha256") is None
+
+
+def test_frozen_legacy_pair_keeps_its_exact_pdf_path_and_hash(tmp_path):
+    workspace = tmp_path / "workspace"
+    image = _render(workspace / "figures" / "legacy.png")
+    pdf = image.with_suffix(".pdf")
+    pdf_payload = valid_pdf_bytes(color=(10, 20, 30))
+    pdf.write_bytes(pdf_payload)
+    state = AnalysisState(id="legacy-session", user_id="u")
+    inventory = ensure_legacy_artifact_inventory(state, workspace)
+
+    candidates = resolve_state_figure_candidates(
+        state, workspace, report_only=False
+    )
+
+    assert len(inventory) == 1
+    assert inventory[0].pdf_relative_path == "figures/legacy.pdf"
+    assert inventory[0].pdf_sha256 == hashlib.sha256(pdf_payload).hexdigest()
+    assert candidates[0]["pdf_path"] == str(pdf)
+    assert candidates[0]["pdf_sha256"] == inventory[0].pdf_sha256
+
+
+def test_frozen_legacy_identity_keeps_exact_path_when_same_bytes_are_copied(
+    tmp_path,
+):
+    workspace = tmp_path / "workspace"
+    frozen_path = _render(
+        workspace / "round1_outputs" / "figures" / "shared.png"
+    )
+    state = AnalysisState(id="legacy-session", user_id="u")
+    ensure_legacy_artifact_inventory(state, workspace)
+
+    # A later higher-priority disk entry must not borrow the frozen record merely
+    # because it has the same stem and bytes.
+    copied_path = _render(
+        workspace / "figures" / "shared.png", frozen_path.read_bytes()
+    )
+    candidates = resolve_state_figure_candidates(
+        state, workspace, report_only=False
+    )
+
+    assert copied_path != frozen_path
+    assert len(candidates) == 1
+    assert Path(candidates[0]["path"]) == frozen_path
+    assert candidates[0]["legacy_artifact_id"] == state.legacy_artifacts[0].id
 
 
 def test_ineligible_registered_validation_figure_cannot_reenter_from_disk():

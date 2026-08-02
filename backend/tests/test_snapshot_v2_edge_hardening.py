@@ -659,7 +659,7 @@ def test_failed_zip_import_releases_the_session_directory(monkeypatch, tmp_path)
 
     session_dirs: dict[str, Path] = {}
 
-    def fake_allocate(archive_session_id: str) -> str:
+    def fake_allocate(archive_session_id: str, _user_id: str) -> str:
         d = tmp_path / "sessions" / archive_session_id
         d.mkdir(parents=True, exist_ok=False)
         session_dirs[archive_session_id] = d

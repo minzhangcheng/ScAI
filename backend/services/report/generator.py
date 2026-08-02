@@ -50,6 +50,13 @@ from backend.services.report.interaction_records import (
 )
 from backend.services.report.output_cleanup import reset_report_asset_directories
 from backend.workflow.direction_coverage import normalize_legacy_round_result
+from backend.services.report.quality import (
+    build_report_partial_fields,
+    build_quality_disclosures,
+    render_quality_disclosures_html,
+    render_report_status_banner_html,
+)
+from backend.services.report.report_outline import build_report_outline
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +64,8 @@ logger = logging.getLogger(__name__)
 def report_completion_fields(
     state: AnalysisState,
     unreported_figures: Optional[List[str]] = None,
+    figureless_sections: Optional[List[str]] = None,
+    quality_disclosures: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, str]:
     """Status fields for the non-Supervisor report path.
 
@@ -64,26 +73,52 @@ def report_completion_fields(
     transient workflow notification.  Persist it in ``report.json`` so reloads
     and exports cannot silently relabel it as complete.
     """
-    if unreported_figures:
-        return (
-            "partial",
-            "Complete with unreported figures: " + ", ".join(unreported_figures),
-        )
-    if getattr(state, "allow_partial_report", False):
-        return "partial", "Partial report approved"
-    return "completed", "Complete"
+    status, current_step, _primary, _reasons = build_report_partial_fields(
+        unreported_figures=unreported_figures,
+        figureless_sections=figureless_sections,
+        approved_partial=bool(getattr(state, "allow_partial_report", False)),
+        quality_disclosures=quality_disclosures,
+    )
+    return status, current_step
 
 
 def report_partial_reason(
     state: AnalysisState,
     unreported_figures: Optional[List[str]] = None,
+    figureless_sections: Optional[List[str]] = None,
+    quality_disclosures: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Return the stable machine-readable reason for a partial report."""
-    if unreported_figures:
-        return "figure_coverage"
-    if getattr(state, "allow_partial_report", False):
-        return "approved_partial"
-    return None
+    _status, _current_step, primary, _reasons = build_report_partial_fields(
+        unreported_figures=unreported_figures,
+        figureless_sections=figureless_sections,
+        approved_partial=bool(getattr(state, "allow_partial_report", False)),
+        quality_disclosures=quality_disclosures,
+    )
+    return primary
+
+
+def figureless_outline_sections(
+    state: AnalysisState,
+    sections: List[Dict[str, Any]],
+) -> List[str]:
+    """Return result sections that lack an embed-ready figure."""
+    sections_by_id = {
+        str(section.get("id") or ""): section for section in (sections or [])
+    }
+    missing: List[str] = []
+    for outline_section in build_report_outline(state):
+        if not outline_section.expects_figures:
+            continue
+        section = sections_by_id.get(outline_section.id)
+        usable = any(
+            str(figure.get("png_path") or "").strip()
+            and Path(str(figure.get("png_path"))).is_file()
+            for figure in ((section or {}).get("figures") or [])
+        )
+        if not usable:
+            missing.append(outline_section.id)
+    return missing
 
 
 def ensure_report_plan_figure_coverage(
@@ -371,6 +406,10 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             invalidated_stems=set(
                 getattr(report_state, "invalidated_artifact_stems", None) or []
             ),
+            artifact_registry_version=getattr(
+                report_state, "artifact_registry_version", None
+            ),
+            legacy_artifacts=getattr(report_state, "legacy_artifacts", None),
         )
         existing_tables = self._scan_existing_tables(
             invalidated_stems=excluded_artifact_stems(
@@ -606,10 +645,22 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         unreported_figures = unreported_figure_names(
             existing_figures, self.generated_figures
         )
-        report_status, report_current_step = report_completion_fields(
-            state, unreported_figures
+        figureless_sections = figureless_outline_sections(report_state, sections)
+        quality_disclosures = build_quality_disclosures(report_state)
+        (
+            report_status,
+            report_current_step,
+            partial_reason,
+            partial_reasons,
+        ) = build_report_partial_fields(
+            unreported_figures=unreported_figures,
+            figureless_sections=figureless_sections,
+            approved_partial=bool(getattr(state, "allow_partial_report", False)),
+            quality_disclosures=quality_disclosures,
         )
-        partial_reason = report_partial_reason(state, unreported_figures)
+        appendix_data["report_kind"] = report_status
+        appendix_data["partial_reason"] = partial_reason
+        appendix_data["partial_reasons"] = partial_reasons
         report = {
             "id": report_id,
             "session_id": report_state.id,
@@ -625,8 +676,10 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             "progress": 100,
             "current_step": report_current_step,
             "partial_reason": partial_reason,
-            "figureless_sections": [],
+            "partial_reasons": partial_reasons,
+            "figureless_sections": figureless_sections,
             "unreported_figures": unreported_figures,
+            "quality_disclosures": quality_disclosures,
             "appendix": appendix_data,
             "analysis_log": self._build_full_analysis_log(report_state),
             "score_definitions": [sd.model_dump(mode="json") for sd in report_state.score_definitions] if report_state.score_definitions else []
@@ -802,6 +855,12 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                 # Get interpretation if available
                 fig_interpretation = figure.get("interpretation", "")
                 fig_interpretation_html = markdown_to_html(fig_interpretation) if fig_interpretation else ""
+                legacy_note = (
+                    '<p class="artifact-provenance legacy-unreviewed">'
+                    "Legacy unregistered artifact; no publication review record is available."
+                    "</p>"
+                    if figure.get("is_legacy") else ""
+                )
 
                 img_tag = f"<img src='{img_src}' alt='{html_module.escape(fig_name)}' />" if img_src else ("<p>" + ("Image not available") + "</p>")
 
@@ -821,6 +880,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                         </div>
                         <div class="figure-caption">
                             <h4>{html_module.escape(fig_label)}: {html_module.escape(fig_name)}</h4>
+                            {legacy_note}
                             {"<p><em>" + fig_caption_html + "</em></p>" if fig_caption_html else ""}
                             {interpretation_section}
                             <div class="figure-actions">
@@ -1086,6 +1146,12 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                 "language": "en",
                 "title": _safe_format_value(report.get("title", "Analysis Report")),
                 "generated_at": ("Generated: ") + report.get("generated_at", ""),
+                "report_status_banner_html": _safe_format_value(
+                    render_report_status_banner_html(report)
+                ),
+                "quality_disclosures_html": _safe_format_value(
+                    render_quality_disclosures_html(report)
+                ),
                 "toc_title": "Table of Contents",
                 "toc_items": _safe_format_value("\n".join(toc_items)),
                 "graphic_abstract_html": _safe_format_value(ga_html),

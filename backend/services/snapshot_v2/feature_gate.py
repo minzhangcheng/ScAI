@@ -124,7 +124,19 @@ def normalize_disabled_snapshot_state(
     wait_reason = getattr(state, "wait_input_reason", None)
     transaction = getattr(state, "snapshot_transaction", None)
 
-    failure_gate = bool(failure) or bool(pending) or wait_reason == "snapshot_failure"
+    # Runtime persistence reuses the structured failure envelope so it can
+    # survive load/reconnect and share the hardened dialog, but it is not a
+    # Snapshot V2 feature. Disabling Snapshot V2 must never clear that safety
+    # gate or let analysis run past an unpersisted live namespace.
+    runtime_persistence_failure = bool(
+        isinstance(failure, dict)
+        and str(failure.get("code") or "").startswith("runtime_persistence_")
+    )
+    failure_gate = (
+        (bool(failure) and not runtime_persistence_failure)
+        or bool(pending)
+        or wait_reason == "snapshot_failure"
+    )
     recovery_gate = bool(getattr(state, "recovery_blocked", False)) or (
         isinstance(transaction, dict) and "recovery_error" in transaction
     )

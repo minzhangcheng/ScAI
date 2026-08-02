@@ -57,7 +57,10 @@ from .sandbox_parts.shared import (  # noqa: F401
     _sig_path,
     _pkl_hmac,
     _pkl_hmac_stream,
+    _sha256_file,
     _write_pkl_signature,
+    _commit_pkl_transaction,
+    recover_regular_save_transaction,
     _verify_pkl_integrity,
     _integrity_dir,
     _path_is_within,
@@ -110,24 +113,35 @@ class LocalJupyterSandbox(
         session_id: str,
         state_dir: str = "states",
         working_dir: str = "workspace",
-        timeout: int = 1200
+        timeout: int = 1200,
+        runtime_budgets: Optional[Dict[str, Any]] = None,
     ):
         self.session_id = session_id
         import tempfile as _tmpfile_mod
         self._session_tmp = Path(_tmpfile_mod.gettempdir()) / f"scai-{self.session_id}"
-        self._session_tmp.mkdir(parents=True, exist_ok=True)
+        if self._session_tmp.is_symlink():
+            raise RuntimeError("session temporary root must not be a symlink")
+        self._session_tmp.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._session_tmp.chmod(0o700)
         self.state_dir = state_dir
         # Caller passes session-specific working dir (e.g. sessions/{id}/workspace)
         self.working_dir = Path(working_dir).absolute()
         self.working_dir.mkdir(parents=True, exist_ok=True)
         self.timeout = timeout
+        self.runtime_budgets = dict(runtime_budgets or {})
         
         self.km: Optional[KernelManager] = None
         self.kc = None
         self.notebook_state = NotebookState(session_id, state_dir)
+        self._kernel_staging_root = (
+            self.notebook_state.state_dir / ".kernel-staging"
+        )
+        if self._kernel_staging_root.is_symlink():
+            raise RuntimeError("kernel staging root must not be a symlink")
         self._initialized = False
-        self.runtime_revision: int = 0
-        self.saved_runtime_revision: int = 0
+        persistence = self.notebook_state.runtime_persistence
+        self.runtime_revision: int = int(persistence.get("current_revision") or 0)
+        self.saved_runtime_revision: int = int(persistence.get("saved_revision") or 0)
         self._session_restored = False
         self._session_restore_failed = False  # Track if session restore failed
         self._kernel_dead = False  # Set when kernel restart fails
@@ -170,7 +184,35 @@ class LocalJupyterSandbox(
             verify_live_pkl_or_raise,
             RuntimeApplyError,
         )
-        recover_runtime_apply_journal(self.session_id)
+        from backend.services.session_lifecycle import (
+            assert_session_generation_active,
+            lifecycle_file_lock,
+        )
+
+        with lifecycle_file_lock(self.session_id):
+            assert_session_generation_active(self.session_id)
+            regular_recovery = recover_regular_save_transaction(
+                Path(self.notebook_state.session_path),
+                _integrity_dir(self.session_id),
+                metadata_path=Path(self.notebook_state.state_path),
+                manifest_path=(
+                    Path(self.notebook_state.state_dir)
+                    / RUNTIME_H5AD_MANIFEST_FILENAME
+                ),
+                session_id=self.session_id,
+            )
+            # Snapshot apply and regular save mutate the same live runtime
+            # files. Recover both journals while holding the same lifecycle
+            # transaction lock used by commit and deletion.
+            recover_runtime_apply_journal(self.session_id)
+        if regular_recovery is not None:
+            # NotebookState was constructed before recovery inspected the
+            # journal. Reload the generation metadata that rollback/forward
+            # just made authoritative, even when no .ipynb exists yet.
+            self.notebook_state._load_runtime_persistence_metadata()
+            persistence = self.notebook_state.runtime_persistence
+            self.runtime_revision = int(persistence.get("current_revision") or 0)
+            self.saved_runtime_revision = int(persistence.get("saved_revision") or 0)
 
         # Snapshot V2: unresolved APPLYING journals block kernel rehydrate
         from backend.services.session_store import assert_recovery_clear
@@ -181,8 +223,54 @@ class LocalJupyterSandbox(
         states_dir = Path(self.notebook_state.session_path).parent
         h5ad_manifest = states_dir / RUNTIME_H5AD_MANIFEST_FILENAME
         has_h5ad_manifest = h5ad_manifest.exists()
+        persistence = dict(self.notebook_state.runtime_persistence)
+        attempted_revision = int(
+            persistence.get("last_attempt_revision")
+            or persistence.get("current_revision")
+            or 0
+        )
+        current_revision = int(persistence.get("current_revision") or 0)
+        saved_revision = int(persistence.get("saved_revision") or 0)
+        committed_dump = self.notebook_state.has_session_dump()
+        committed_revision = int(
+            persistence.get("committed_revision") or saved_revision or 0
+        )
+        committed_source = (
+            persistence.get("committed_source")
+            or persistence.get("commit_source")
+        )
+        degraded_recovery = bool(
+            committed_dump
+            and persistence.get("last_attempt_status") == "failed"
+            and attempted_revision > committed_revision
+        )
+        if committed_dump:
+            # A failed newer attempt may have advanced current_revision without
+            # publishing a pkl. Rehydrate the verified committed generation,
+            # not that abandoned in-memory revision.
+            current_revision = committed_revision
+            saved_revision = committed_revision
 
-        if not self.notebook_state.has_session_dump() and not has_h5ad_manifest:
+        if (
+            self.notebook_state.session_path.exists()
+            and not committed_dump
+        ):
+            self.notebook_state.update_runtime_persistence(
+                "stale",
+                current_revision=current_revision,
+                saved_revision=saved_revision,
+                error_summary=(
+                    "A previous runtime dump exists but does not represent the "
+                    "latest live revision. Recompute required continuation state."
+                ),
+            )
+            raise RuntimeError(
+                f"Stale runtime generation for session {self.session_id}: "
+                f"live revision {current_revision}, saved revision {saved_revision}."
+            )
+
+        has_session_dump = committed_dump
+        if not has_session_dump and not has_h5ad_manifest:
             logger.info("No session dump to restore")
             return
 
@@ -190,13 +278,19 @@ class LocalJupyterSandbox(
         # skip: continuing would rehydrate a kernel inconsistent with the state
         # that referenced this pkl. Raising lets the caller surface a typed
         # runtime-failure state (Stage 1 safety contract).
-        if self.notebook_state.has_session_dump():
+        if has_session_dump:
             try:
                 verify_live_pkl_or_raise(self.session_id)
             except RuntimeApplyError:
                 # Symmetric with the dill-restore-failure path below: mark the failure
                 # so start()'s "restore_failed" result reflects it, then abort startup.
                 self._session_restore_failed = True
+                self.notebook_state.update_runtime_persistence(
+                    "failed",
+                    current_revision=current_revision,
+                    saved_revision=saved_revision,
+                    error_summary="Live runtime integrity verification failed.",
+                )
                 logger.error(
                     "[%s] live pkl present but HMAC invalid; aborting session restore",
                     self.session_id,
@@ -207,7 +301,6 @@ class LocalJupyterSandbox(
         h5ad_manifest_path = str(h5ad_manifest.absolute())
         escaped_path = repr(session_path)
         escaped_h5ad_manifest_path = repr(h5ad_manifest_path)
-        has_session_dump = self.notebook_state.has_session_dump()
         logger.info(f"Restoring session from {session_path}")
 
         restore_code = f"""
@@ -315,6 +408,23 @@ except Exception as e:
         if result.success and "Session restored:" in (result.output or ""):
             self._session_restored = True
             self._session_restore_failed = False
+            self.saved_runtime_revision = saved_revision
+            self.runtime_revision = current_revision
+            self.notebook_state.record_runtime_restored(
+                current_revision=current_revision,
+                saved_revision=saved_revision,
+                commit_source=committed_source,
+                degraded_recovery=degraded_recovery,
+                attempted_revision=attempted_revision,
+            )
+            if degraded_recovery:
+                logger.warning(
+                    "[%s] Restored committed runtime revision %d after newer "
+                    "revision %d failed to persist; recovery is degraded",
+                    self.session_id,
+                    committed_revision,
+                    attempted_revision,
+                )
             logger.info("Session restored successfully")
         else:
             # P1-11: dill restore failure leaves the kernel without previously-saved
@@ -336,6 +446,13 @@ except Exception as e:
             # keeps refusing rather than guessing.
             self._restore_failed_globals = await self._snapshot_persistable_globals()
             detail = result.error or result.output or "unknown error"
+            self.notebook_state.update_runtime_persistence(
+                "failed",
+                current_revision=current_revision,
+                saved_revision=saved_revision,
+                failed_variables=sorted(self.get_runtime_dependency_names()),
+                error_summary=detail,
+            )
             logger.error(
                 f"[{self.session_id}] dill session restore failed: {detail}"
             )
@@ -377,11 +494,12 @@ except Exception as e:
         complete. The pkl on disk is better evidence than anything this kernel
         now holds.
 
-        That stops being true the moment the agent rebuilds. ``_restart_kernel``
-        deliberately keeps a kernel alive whose restore failed, so the analysis
-        carries on and recomputes its state from the uploaded data; refusing
-        forever meant none of that work was ever written, and the next resume
-        silently rehydrated the pre-crash pkl instead.
+        Normal start and restart paths now discard a partially restored kernel.
+        The latch remains defense in depth for legacy/manual recovery paths that
+        may still hand save_session a live restore-failed namespace. If such a
+        path explicitly rebuilds the analysis from source data, refusing forever
+        would keep that recomputation from disk and the next resume would silently
+        rehydrate the pre-crash pkl instead.
 
         The evidence that it has rebuilt is what the namespace now *holds*, not
         how many cells have run. ``runtime_revision`` advances on any successful
@@ -397,6 +515,23 @@ except Exception as e:
         restore_failed = bool(getattr(self, "_session_restore_failed", False))
         mark = getattr(self, "_restore_failed_at_revision", None)
         revision = getattr(self, "runtime_revision", 0)
+        saved_revision = getattr(self, "saved_runtime_revision", -1)
+        has_committed_dump = getattr(self.notebook_state, "has_session_dump", None)
+        if (
+            not restore_failed
+            and revision == saved_revision
+            and (
+                getattr(self.notebook_state, "runtime_persistence", {}) or {}
+            ).get("commit_source") == "regular_save"
+            and callable(has_committed_dump)
+            and has_committed_dump()
+        ):
+            logger.debug(
+                "[%s] Reusing integrity-validated runtime generation %d",
+                self.session_id,
+                revision,
+            )
+            return True
         if restore_failed and (mark is None or revision <= mark):
             # Cheap short-circuit: nothing has run, so nothing can have been
             # rebuilt, and the kernel need not be touched to establish that.
@@ -405,7 +540,16 @@ except Exception as e:
                 "which has executed nothing since; keeping the previous pkl",
                 self.session_id,
             )
-            return
+            updater = getattr(self.notebook_state, "update_runtime_persistence", None)
+            if callable(updater):
+                updater(
+                    "failed",
+                    current_revision=revision,
+                    saved_revision=getattr(self, "saved_runtime_revision", 0),
+                    failed_variables=sorted(self.get_runtime_dependency_names()),
+                    error_summary="Runtime restore failed and no recomputation has completed.",
+                )
+            return False
 
         async with self._exec_lock:
             session_path = str(self.notebook_state.session_path.absolute())
@@ -422,7 +566,19 @@ except Exception as e:
                         self.session_id,
                         revision - mark,
                     )
-                    return
+                    updater = getattr(self.notebook_state, "update_runtime_persistence", None)
+                    if callable(updater):
+                        updater(
+                            "failed",
+                            current_revision=revision,
+                            saved_revision=getattr(self, "saved_runtime_revision", 0),
+                            failed_variables=sorted(self.get_runtime_dependency_names()),
+                            error_summary=(
+                                "Runtime restore failed and the live namespace has not "
+                                "rebuilt required continuation state."
+                            ),
+                        )
+                    return False
                 logger.warning(
                     "[%s] restore failed earlier; the kernel has since rebuilt "
                     "%d value(s) (%s), persisting the rebuilt namespace over the "
@@ -434,6 +590,72 @@ except Exception as e:
                 # The latch is cleared only once the write has actually landed --
                 # see the end of this method. Clearing it here would drop the
                 # protection permanently the first time a save raised.
+
+            from backend.utils.runtime_budget import (
+                RuntimeBudgetExceeded,
+                evaluate_runtime_budget,
+            )
+
+            budgets = dict(getattr(self, "runtime_budgets", {}) or {})
+            resource_metrics: Dict[str, Any] = {"top_offenders": []}
+
+            def _record_budget_failure(violations, *, error_summary: str) -> None:
+                serialized = [
+                    item.to_dict() if hasattr(item, "to_dict") else dict(item)
+                    for item in violations
+                ]
+                updater = getattr(
+                    self.notebook_state, "update_runtime_persistence", None
+                )
+                if callable(updater):
+                    updater(
+                        "failed",
+                        current_revision=revision,
+                        saved_revision=getattr(self, "saved_runtime_revision", 0),
+                        error_summary=error_summary,
+                        budget_violations=serialized,
+                        top_offenders=resource_metrics.get("top_offenders") or [],
+                        recommended_action="reduce_runtime_footprint",
+                    )
+
+            if budgets:
+                resource_metrics = await self._runtime_resource_metrics()
+                required_metrics = {
+                    "namespace_count",
+                    "largest_object_bytes",
+                    "anndata_total_bytes",
+                    "rss_bytes",
+                }
+                missing_metrics = sorted(required_metrics - set(resource_metrics))
+                if missing_metrics:
+                    measurement_failure = [{
+                        "resource": "measurement",
+                        "observed": "unavailable",
+                        "limit": ",".join(missing_metrics),
+                    }]
+                    _record_budget_failure(
+                        measurement_failure,
+                        error_summary=(
+                            "Runtime resource measurement failed; persistence was "
+                            "stopped before serialization."
+                        ),
+                    )
+                    raise RuntimeError(
+                        "Sandbox runtime resource measurement failed for session "
+                        f"{self.session_id}: {', '.join(missing_metrics)}"
+                    )
+                preflight_violations = evaluate_runtime_budget(
+                    resource_metrics, budgets
+                )
+                if preflight_violations:
+                    _record_budget_failure(
+                        preflight_violations,
+                        error_summary="Runtime resource budget exceeded before serialization.",
+                    )
+                    raise RuntimeBudgetExceeded(
+                        preflight_violations,
+                        resource_metrics.get("top_offenders"),
+                    )
 
             logger.info(f"Saving session to {session_path}")
 
@@ -464,6 +686,7 @@ except Exception as e:
 
             save_code = """\
 import dill
+import json as _scai_json
 import os
 import types
 import zstandard as zstd
@@ -526,24 +749,31 @@ for _scai_name in list(globals().keys()):
 # names alone silently dropped things like `adata_hepatocyte`, which is exactly
 # the state a resumed analysis cannot recompute.
 #
-# Backed AnnData is the exception: it wraps an open h5py handle that dill
-# refuses ("h5py objects cannot be pickled"), and its matrix already lives in
-# the .h5ad on disk. Promoting one would turn a single read-only file handle
-# into a total save abort, so it is dropped from the namespace instead --
-# including from _required_names, which the host computed before it could know
-# the object was backed.
+# A backed AnnData wraps an open h5py handle that dill cannot pickle. It is
+# still authoritative runtime state: silently removing it and committing the
+# remaining namespace made the metadata claim `current` while a real analysis
+# object had disappeared. Materialize one in-memory copy per object identity
+# for the dump, preserving aliases. If materialization fails, abort the whole
+# generation so the runtime-persistence gate remains armed on the live kernel.
+_scai_materialized_backed = {}
 for _scai_name, _scai_obj in list(_live.items()):
     if not _scai_is_anndata(_scai_obj):
         continue
     if getattr(_scai_obj, 'isbacked', False):
-        _required_names.discard(_scai_name)
-        _live.pop(_scai_name, None)
-        print(
-            "__SCAI_SAVE_SKIPPED__\\t" + _scai_name + "\\tAnnData\\tBackedMode"
-            "\\tbacked AnnData is not picklable; its matrix stays in the .h5ad "
-            "on disk and the variable must be reopened after resume"
-        )
-        continue
+        _scai_object_id = id(_scai_obj)
+        try:
+            _scai_memory_obj = _scai_materialized_backed.get(_scai_object_id)
+            if _scai_memory_obj is None:
+                _scai_memory_obj = _scai_obj.to_memory()
+                if getattr(_scai_memory_obj, 'isbacked', False):
+                    raise RuntimeError('AnnData.to_memory() returned a backed object')
+                _scai_materialized_backed[_scai_object_id] = _scai_memory_obj
+            _live[_scai_name] = _scai_memory_obj
+        except Exception as _e:
+            raise RuntimeError(
+                "backed AnnData could not be materialized for persistence: "
+                + _scai_name + " (" + type(_e).__name__ + ")"
+            ) from _e
     _required_names.add(_scai_name)
 
 _missing_required = sorted(_n for _n in _required_names if _n not in _live)
@@ -568,9 +798,10 @@ for _scai_name in sorted(_live):
 
 _skipped_vars = []
 _saved_object_names = {}
+_saved_names = []
 
-# Write to a temp file then atomically replace, so a mid-write crash can't
-# corrupt the only good pkl.
+# Write to a temp file.  The host signs and installs it together with committed
+# generation metadata; kernel code must never replace the authoritative pkl.
 _tmp_path = """ + escaped_path + """ + '.tmp'
 _saved_count = 0
 _compression_magic = b"SCAI_ZSTD_DILL_V1\\n"
@@ -616,8 +847,8 @@ try:
                         ) from _e
                     continue
                 _saved_object_names.setdefault(_object_id, _var_name)
+                _saved_names.append(_var_name)
                 _saved_count += 1
-    os.replace(_tmp_path, """ + escaped_path + """)
 except Exception:
     try:
         os.remove(_tmp_path)
@@ -626,7 +857,9 @@ except Exception:
     raise
 
 print(f"Session saved: {_saved_count} variables")
+print("__SCAI_SAVED_NAMES__:" + _scai_json.dumps(sorted(_saved_names)))
 """
+            save_started = time.monotonic()
             result = await self._execute_unlocked(save_code, save_to_history=False, skip_safety_check=True)
 
             skipped = []
@@ -642,6 +875,17 @@ print(f"Session saved: {_saved_count} variables")
                         })
             self._last_save_skipped = skipped
 
+            saved_names: set[str] = set()
+            for line in (result.output or "").splitlines():
+                if not line.startswith("__SCAI_SAVED_NAMES__:"):
+                    continue
+                try:
+                    parsed_names = json.loads(line.split(":", 1)[1])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(parsed_names, list):
+                    saved_names = {str(name) for name in parsed_names}
+
             if result.success:
                 if skipped:
                     # Best-effort tier only: a required failure would have made
@@ -653,17 +897,144 @@ print(f"Session saved: {_saved_count} variables")
                         len(skipped),
                         ", ".join(f"{sv['name']}({sv['type']})" for sv in skipped),
                     )
-                logger.info("Session saved successfully")
-
-                # Write HMAC signature (host-side, outside sandbox-writable roots)
-                try:
-                    pkl_path = Path(self.notebook_state.session_path)
-                    if pkl_path.exists():
-                        _write_pkl_signature(
-                            pkl_path, _integrity_dir(self.session_id)
+                pkl_path = Path(self.notebook_state.session_path)
+                staged_path = Path(str(pkl_path) + ".tmp")
+                production_transaction = staged_path.exists()
+                if budgets:
+                    measured_path = staged_path if production_transaction else pkl_path
+                    resource_metrics["pkl_bytes"] = (
+                        measured_path.stat().st_size if measured_path.exists() else 0
+                    )
+                    resource_metrics["save_seconds"] = time.monotonic() - save_started
+                    postflight_violations = evaluate_runtime_budget(
+                        resource_metrics, budgets
+                    )
+                    if postflight_violations:
+                        staged_path.unlink(missing_ok=True)
+                        _record_budget_failure(
+                            postflight_violations,
+                            error_summary=(
+                                "Runtime serialization exceeded its configured "
+                                "size or duration budget; the previous generation "
+                                "was retained."
+                            ),
                         )
-                except Exception:
-                    logger.exception("Failed to write pkl integrity signature")
+                        raise RuntimeBudgetExceeded(
+                            postflight_violations,
+                            resource_metrics.get("top_offenders"),
+                        )
+                previous_persistence = dict(
+                    getattr(self.notebook_state, "runtime_persistence", {}) or {}
+                )
+
+                manifest_path = None
+                target_digest = None
+                if production_transaction:
+                    from backend.utils.runtime_apply import runtime_h5ad_manifest_path
+
+                    manifest_path = runtime_h5ad_manifest_path(
+                        self.session_id,
+                        states_dir=self.notebook_state.state_dir,
+                    )
+                    target_digest = _sha256_file(staged_path)
+
+                def _commit_generation_manifest():
+                    if not production_transaction:
+                        return
+                    from backend.utils.runtime_apply import (
+                        write_runtime_h5ad_manifest,
+                    )
+
+                    write_runtime_h5ad_manifest(
+                        self.session_id,
+                        {},
+                        authoritative_pkl_names=saved_names,
+                        states_dir=self.notebook_state.state_dir,
+                    )
+
+                def _retire_generation_sidecars():
+                    from backend.utils.runtime_apply import (
+                        quarantine_unreferenced_runtime_h5ads,
+                    )
+
+                    quarantine_unreferenced_runtime_h5ads(
+                        self.session_id,
+                        set(),
+                        states_dir=self.notebook_state.state_dir,
+                    )
+
+                def _commit_generation_metadata():
+                    self.saved_runtime_revision = revision
+                    updater = getattr(
+                        self.notebook_state, "update_runtime_persistence", None
+                    )
+                    if callable(updater):
+                        updater(
+                            "current",
+                            current_revision=revision,
+                            saved_revision=revision,
+                            commit_source="regular_save",
+                            runtime_digest=target_digest,
+                        )
+
+                try:
+                    from backend.services.session_lifecycle import (
+                        assert_session_generation_active,
+                        lifecycle_file_lock,
+                    )
+
+                    with lifecycle_file_lock(self.session_id):
+                        assert_session_generation_active(self.session_id)
+                        if staged_path.exists():
+                            _commit_pkl_transaction(
+                                staged_path,
+                                pkl_path,
+                                _integrity_dir(self.session_id),
+                                _commit_generation_metadata,
+                                metadata_path=Path(self.notebook_state.state_path),
+                                manifest_path=manifest_path,
+                                commit_manifest=_commit_generation_manifest,
+                                retire_sidecars=_retire_generation_sidecars,
+                                target_revision=revision,
+                                authoritative_pkl_names=saved_names,
+                                fault_hook=getattr(
+                                    self, "_regular_save_fault_hook", None
+                                ),
+                            )
+                        else:
+                            # Compatibility for test doubles and pre-transaction
+                            # custom kernels. Production save code always leaves
+                            # the staged path and never reaches this branch.
+                            _write_pkl_signature(
+                                pkl_path, _integrity_dir(self.session_id)
+                            )
+                            assert_session_generation_active(self.session_id)
+                            _commit_generation_metadata()
+                    logger.info("Session saved successfully")
+                except Exception as exc:
+                    from backend.services.session_lifecycle import SessionGoneError
+
+                    self.saved_runtime_revision = int(
+                        previous_persistence.get("saved_revision") or 0
+                    )
+                    if hasattr(self.notebook_state, "runtime_persistence"):
+                        self.notebook_state.runtime_persistence = previous_persistence
+                    if isinstance(exc, SessionGoneError):
+                        raise
+                    updater = getattr(
+                        self.notebook_state, "update_runtime_persistence", None
+                    )
+                    if callable(updater):
+                        updater(
+                            "failed",
+                            current_revision=revision,
+                            saved_revision=self.saved_runtime_revision,
+                            failed_variables=[sv["name"] for sv in skipped],
+                            error_summary=f"Runtime commit failed: {type(exc).__name__}",
+                        )
+                    raise RuntimeError(
+                        f"Sandbox runtime commit failed for session {self.session_id}"
+                    ) from exc
             else:
                 if skipped:
                     logger.error(
@@ -673,6 +1044,28 @@ print(f"Session saved: {_saved_count} variables")
                         [sv["name"] for sv in skipped],
                     )
                 logger.warning(f"Failed to save session: {result.error}")
+                failed_names = {
+                    sv["name"] for sv in skipped if sv.get("name") in required_names
+                }
+                error_text = str(result.error or "")
+                failed_names.update(
+                    name for name in required_names if name in error_text
+                )
+                poisoned: set[str] = set()
+                tracker = getattr(self, "runtime_dependency_tracker", None)
+                if tracker is not None and failed_names:
+                    poisoned = tracker.record_persistence_failure(failed_names)
+                updater = getattr(self.notebook_state, "update_runtime_persistence", None)
+                if callable(updater):
+                    updater(
+                        "failed",
+                        current_revision=revision,
+                        saved_revision=getattr(self, "saved_runtime_revision", 0),
+                        failed_variables=sorted(failed_names),
+                        error_summary=result.error or "Runtime serialization failed.",
+                        requires_recompute=bool(poisoned),
+                        recompute_variables=sorted(poisoned),
+                    )
                 raise RuntimeError(
                     f"Sandbox runtime save failed for session {self.session_id}: "
                     f"{result.error or 'unknown error'}"

@@ -21,7 +21,6 @@ import httpx
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
@@ -49,7 +48,7 @@ from .utils.upload import ChunkedUploadManager, stream_save_file
 from .routes.auth import router as auth_router
 from .routes.setup import router as setup_router
 from .routes.v1 import router as v1_router
-from .routes.root import router as root_router
+from .routes.root import frontend_file_response, router as root_router
 from .routes.config import router as config_router
 from .routes.sessions import router as sessions_router
 from .routes.session_config import router as session_config_router
@@ -284,6 +283,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# Production serves the Vite build from the same Uvicorn process as the API and
+# WebSockets.  Keep this catch-all after every backend router so concrete
+# routes always win.  ``frontend_file_response`` refuses API/WS namespaces,
+# missing assets, and paths escaping the build directory.
+@app.api_route("/{spa_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+async def frontend_spa_fallback(spa_path: str):
+    response = frontend_file_response(spa_path)
+    if response is None:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return response
+
 # Global state with lock for thread-safe access
 # Note: websockets are in backend.state; config is accessed via backend.state.system_config
 
@@ -304,7 +315,7 @@ from .models.api_requests import (
 
 
 
-# Run with: uvicorn backend.main:app --reload --port 8000
+# Direct execution follows the single-port production default.
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=3000)

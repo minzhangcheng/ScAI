@@ -80,23 +80,46 @@ async def test_stale_prepared_exports_are_deleted(tmp_path):
     import asyncio
 
     from backend.config import PREPARED_EXPORT_TTL
+    from backend.services.export_lifecycle import (
+        create_export_ownership_marker,
+    )
     from backend.tasks.session_cleanup import _cleanup_stale_prepared_exports
 
     fresh = tmp_path / "fresh.tar.gz"
     stale = tmp_path / "stale.tar.gz"
     fresh.write_bytes(b"a")
     stale.write_bytes(b"b")
+    fresh_marker = create_export_ownership_marker(fresh)
+    stale_marker = create_export_ownership_marker(stale)
     now = 1_000_000.0
     exports = {
-        "fresh": {"path": str(fresh), "created_at": now - 10},
-        "stale": {"path": str(stale), "created_at": now - PREPARED_EXPORT_TTL - 1},
+        "fresh": {
+            "token": "fresh",
+            "path": str(fresh),
+            "path_owned": True,
+            "ownership_marker_required": True,
+            "ownership_marker_owned": True,
+            "phase": "ready",
+            "created_at": now - 10,
+        },
+        "stale": {
+            "token": "stale",
+            "path": str(stale),
+            "path_owned": True,
+            "ownership_marker_required": True,
+            "ownership_marker_owned": True,
+            "phase": "ready",
+            "created_at": now - PREPARED_EXPORT_TTL - 1,
+        },
     }
 
     await _cleanup_stale_prepared_exports(now, exports, asyncio.Lock())
 
     assert set(exports) == {"fresh"}
     assert fresh.exists()
+    assert fresh_marker.exists()
     assert not stale.exists()
+    assert not stale_marker.exists()
 
 
 # --- H4 / L2: what the upload header may carry ----------------------------

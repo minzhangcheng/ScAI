@@ -180,7 +180,7 @@ async def test_enqueue_does_not_borrow_foreign_pending_event(
 
 
 @pytest.mark.asyncio
-async def test_second_enqueue_waits_then_owns_new_generation(
+async def test_second_enqueue_fails_fast_then_owns_new_generation_after_retry(
     v2_paths, preflight_result, restore_request
 ):
     first_manager = make_mgr(v2_paths)
@@ -188,14 +188,16 @@ async def test_second_enqueue_waits_then_owns_new_generation(
     first = await first_manager.enqueue(
         "sess-test", preflight_result, restore_request
     )
-    second_task = asyncio.create_task(
-        second_manager.enqueue("sess-test", preflight_result, restore_request)
-    )
-    await asyncio.sleep(0)
-    assert not second_task.done()
+    with pytest.raises(SnapshotTransactionError) as exc_info:
+        await second_manager.enqueue(
+            "sess-test", preflight_result, restore_request,
+        )
+    assert exc_info.value.code == "SAFE_POINT_BUSY"
 
     await first_manager.cancel(first.transaction_id)
-    second = await asyncio.wait_for(second_task, timeout=1.0)
+    second = await second_manager.enqueue(
+        "sess-test", preflight_result, restore_request,
+    )
     handle = snapshot_restore_jobs[second.transaction_id]
     assert handle.safe_point_request is not None
     assert handle.safe_point_request.owner_token == handle.owner_token
@@ -1003,6 +1005,7 @@ class TestCommittedJobLiveSideEffects:
         )
         sessions[session_id] = live_state
         live_workflow = MagicMock()
+        live_workflow._db_conn = None
         live_workflow.sandbox = None
         live_workflow.get_snapshot_workflow_state.return_value = {
             "current_round": live_state.current_round,
@@ -1950,7 +1953,7 @@ async def test_terminate_stops_and_records_reason(post_report_blocked_session, m
         state.status = TaskStatus.PAUSED
 
     fake_workflow.pause = AsyncMock(side_effect=fake_pause)
-    teardown = AsyncMock()
+    teardown = AsyncMock(return_value=True)
 
     monkeypatch.setattr(lifecycle, "require_session_ownership", fake_owner)
     monkeypatch.setattr(lifecycle, "validate_session_id", lambda *a, **k: None)
@@ -1968,9 +1971,51 @@ async def test_terminate_stops_and_records_reason(post_report_blocked_session, m
     assert getattr(state, "wait_input_reason", None) is None
     assert getattr(state, "termination_reason", None) == "snapshot_failure"
     assert getattr(state, "pending_required_snapshot", "missing") is None
-    teardown.assert_awaited_once_with(session_id)
+    teardown.assert_awaited_once_with(session_id, discard_runtime=True)
     fake_workflow.pause.assert_not_awaited()
     fake_workflow.stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_terminate_reports_committed_stop_when_cleanup_is_incomplete(
+    post_report_blocked_session, monkeypatch,
+):
+    """A cleanup failure must not roll back the already durable STOPPED state."""
+    from backend.models.schemas import TaskStatus
+    from backend.routes import lifecycle
+
+    session_id, state, _fake_workflow = post_report_blocked_session
+    update_cache = AsyncMock()
+    save_session = AsyncMock()
+    teardown = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        lifecycle,
+        "require_session_ownership",
+        AsyncMock(return_value=state),
+    )
+    monkeypatch.setattr(lifecycle, "validate_session_id", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "_update_session_cache", update_cache)
+    monkeypatch.setattr(lifecycle, "async_save_session", save_session)
+    monkeypatch.setattr(lifecycle, "teardown_running_workflow", teardown)
+
+    request = MagicMock()
+    request.state = MagicMock(user_id="u1")
+    response = await lifecycle.snapshot_failure_terminate(session_id, request)
+
+    assert response.success is False
+    assert response.data == {
+        "status": TaskStatus.STOPPED.value,
+        "cleanup_incomplete": True,
+        "termination_committed": True,
+    }
+    assert state.status is TaskStatus.STOPPED
+    assert state.termination_reason == "snapshot_failure"
+    assert state.snapshot_failure is None
+    assert state.wait_input_reason is None
+    assert state.pending_required_snapshot is None
+    update_cache.assert_awaited_once_with(session_id, state)
+    save_session.assert_awaited_once_with(session_id, state, force=True)
+    teardown.assert_awaited_once_with(session_id, discard_runtime=True)
 
 
 @pytest.mark.asyncio

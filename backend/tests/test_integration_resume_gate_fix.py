@@ -6,16 +6,15 @@ from backend.workflow.core import SingleCellAnalysisWorkflow
 
 
 def test_resume_helper_skips_stop_guard_at_integration_gate():
-    """resume_restored_wait_state must NOT call _should_continue or
-    _check_convergence when parked at the integration gate — those guards
-    would route to generate_final_report, bypassing the wait_for_user_input
-    checkpoint that lets the user choose new directions."""
+    """Restored actions use their exact node, never convergence guards."""
     import inspect
     from backend.workflow.core import SingleCellAnalysisWorkflow
 
     src = inspect.getsource(SingleCellAnalysisWorkflow.resume_restored_wait_state)
-    assert "at_integration_gate(analysis_state)" in src
-    assert "if not is_integration_gate" in src
+    assert "prepare_restored_semantic_action" in src
+    assert "_invoke_restore_entry" in src
+    assert "_should_continue(" not in src
+    assert "_check_convergence(" not in src
 
 
 def test_resume_helper_does_not_generate_report_at_integration_gate():
@@ -32,6 +31,8 @@ def test_resume_helper_does_not_generate_report_at_integration_gate():
     state.max_rounds = 3
     state.status = TaskStatus.RUNNING
     state.detailed_report_html_path = None
+    state.restore_resume_kind = "semantic_gate"
+    state.restore_resume_gate = "integration_selection"
 
     called = {"report": False, "ainvoke": False, "should_continue": False}
 
@@ -75,9 +76,48 @@ def test_resume_helper_does_not_generate_report_at_integration_gate():
     wf._make_initial_workflow_state = lambda s, current_round=0: {
         "analysis_state": s, "current_round": current_round
     }
+    async def fake_restore_entry(s, thread_id):
+        called["ainvoke"] = True
+        assert s.restore_resume_kind == "graph_node"
+        assert s.restore_resume_node == "check_convergence"
+        return s
+
+    wf._invoke_restore_entry = fake_restore_entry
     wf.config = types.SimpleNamespace(max_rounds=3)
 
     result = asyncio.run(wf.resume_restored_wait_state(state))
 
     assert called["report"] is False, "_generate_final_report must NOT be called at integration gate"
     assert called["ainvoke"] is True, "compiled_graph.ainvoke must be called to resume the checkpoint"
+
+
+def test_real_wait_node_uses_semantic_gate_after_status_changes_to_running():
+    """A restored gate executes the real wait node with RUNNING lifecycle state."""
+    wf = SingleCellAnalysisWorkflow.__new__(SingleCellAnalysisWorkflow)
+    wf.session_id = "s"
+    wf._continue_event = asyncio.Event()
+
+    async def fake_state_sync(*args, **kwargs):
+        return None
+
+    wf._send_state_sync = fake_state_sync
+    state = AnalysisState(
+        id="s",
+        user_id="u",
+        status=TaskStatus.RUNNING,
+        analysis_phase=AnalysisPhase.INTEGRATION,
+        current_round=4,
+        round_wait_seconds=0,
+        integration_gate_candidates=[{"direction": "NEW"}],
+    )
+
+    result = asyncio.run(wf._wait_for_user_input({
+        "analysis_state": state,
+        "semantic_gate": "integration_selection",
+    }))
+
+    assert result["should_continue"] is True
+    assert result["semantic_gate"] is None
+    assert state.analysis_phase == AnalysisPhase.INNOVATION
+    assert state.status == TaskStatus.RUNNING
+    assert state.user_chosen_direction == "[PI_DECIDE]"

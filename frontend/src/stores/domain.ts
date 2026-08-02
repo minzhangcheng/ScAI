@@ -132,6 +132,20 @@ export interface RoundResult {
   crossModalCandidates: import('../types').CrossModalCandidate[]
   integrationCandidates: { direction: string; score?: number; notes?: string; [key: string]: unknown }[]
   integrationReportSummary?: string
+  roundStatus: 'completed' | 'partial' | 'failed' | 'skipped'
+  evidenceStatus: 'substantive' | 'empty' | 'failed'
+  directionCoverageEligible?: boolean
+  bioinformaticsEvidenceVerified?: boolean
+  evidenceExecutionIds: string[]
+  evidenceNotes: string[]
+  evidenceGateFindings: Record<string, unknown>[]
+  evidenceGateDegraded?: boolean
+  lineageId: string
+  branchId?: string
+  branchLabel?: string
+  restoredFromSnapshotId?: string
+  directionKey: string
+  resultIdentityKey: string
 }
 
 export interface Session {

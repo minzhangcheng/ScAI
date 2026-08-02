@@ -3,6 +3,7 @@ import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..models.schemas import AnalysisState
+from ..utils.error_parsing import compact_traceback
 
 if TYPE_CHECKING:
     from .state import WorkflowState
@@ -144,7 +145,7 @@ class ContextMixin:
             if output:
                 entry += f"\nOutput: {output}"
             if error:
-                entry += f"\nError: {error[:300]}{'...' if len(error) > 300 else ''}"
+                entry += f"\nError: {compact_traceback(error, max_chars=300)}"
             if rec.figures:
                 entry += f"\n[Generated {len(rec.figures)} figure(s)]"
             parts.append(entry)

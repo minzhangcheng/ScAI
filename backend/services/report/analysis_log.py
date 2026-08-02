@@ -4,6 +4,7 @@ import re as _re
 from typing import Dict, Any, List
 
 from backend.models.schemas import AnalysisState
+from backend.utils.error_parsing import compact_traceback
 
 
 def build_round_summaries(state):
@@ -33,8 +34,10 @@ def build_round_summaries(state):
             "round_status": r.round_status,
             "evidence_status": r.evidence_status,
             "bioinformatics_evidence_verified": r.bioinformatics_evidence_verified,
+            "evidence_gate_degraded": r.evidence_gate_degraded,
             "evidence_notes": list(r.evidence_notes or []),
             "evidence_execution_ids": list(r.evidence_execution_ids or []),
+            "evidence_gate_findings": list(r.evidence_gate_findings or []),
             "pi_summary": r.pi_summary or "",
             "pathology_findings": r.pathology_findings or [],
             "bioinformatics_findings": r.bioinformatics_findings or [],
@@ -472,7 +475,7 @@ class AnalysisLogMixin:
                         "code_step_type": step.code_step_type,
                         "code": step.code[:3000] if step.code else None,
                         "code_output": step.code_output[:3000] if step.code_output else None,
-                        "code_error": step.code_error[:3000] if step.code_error else None,
+                        "code_error": compact_traceback(step.code_error, max_chars=3000) if step.code_error else None,
                         "saved_figure_filenames": step.saved_figure_filenames,
                     })
                 elif step.step_type == "consult_pi":

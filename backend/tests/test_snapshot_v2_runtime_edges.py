@@ -8,6 +8,7 @@ import asyncio
 import re
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -556,6 +557,189 @@ async def test_retire_closes_the_checkpoint_connection_and_evicts(monkeypatch):
     assert workflow.checkpointer is None
     assert workflow.compiled_graph is None
     assert "retire-probe" not in state_mod.workflows
+
+
+@pytest.mark.asyncio
+async def test_retire_closes_and_evicts_standalone_report_workflow(monkeypatch):
+    from backend.services.snapshot_v2.service import SnapshotService
+    from backend import state as state_mod
+
+    service = SnapshotService.__new__(SnapshotService)
+    service.session_id = "retire-report-probe"
+    service.safe_point = get_snapshot_safe_point_manager()
+    closed = []
+
+    class _Conn:
+        async def close(self):
+            closed.append(True)
+
+    class _Workflow:
+        def __init__(self):
+            self._db_conn = _Conn()
+            self.checkpointer = object()
+            self.compiled_graph = object()
+
+    workflow = _Workflow()
+    state_mod.report_workflows[service.session_id] = workflow
+    run_task = asyncio.get_running_loop().create_future()
+    state_mod._run_tasks.pop(service.session_id, None)
+    from backend.services import workflow_runner
+
+    monkeypatch.setitem(
+        workflow_runner._report_tasks,
+        service.session_id,
+        _FakeTask(run_task),
+    )
+    try:
+        await service._retire_superseded_workflow(workflow)
+
+        assert closed == [True]
+        assert workflow._db_conn is None
+        assert workflow.checkpointer is None
+        assert workflow.compiled_graph is None
+        assert service.session_id not in state_mod.report_workflows
+        assert get_snapshot_safe_point_manager().is_superseded(
+            service.session_id
+        )
+    finally:
+        workflow_runner._report_tasks.pop(service.session_id, None)
+        state_mod.report_workflows.pop(service.session_id, None)
+        get_snapshot_safe_point_manager().clear_superseded(service.session_id)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_close_failure_refuses_apply_and_retains_owner(
+    monkeypatch,
+    tmp_path,
+):
+    from backend import state as state_mod
+    from backend.models.schemas import AnalysisState
+    from backend.services.snapshot_v2.models import SnapshotRestoreRequest
+    from backend.services.snapshot_v2.paths import SnapshotV2Paths
+    from backend.services.snapshot_v2.preflight import RestorePreflight
+    from backend.services.snapshot_v2.service import SnapshotService
+
+    session_id = "restore-checkpoint-close-failure"
+    state = AnalysisState(id=session_id, user_id="owner")
+    state_mod.sessions[session_id] = state
+    conn = SimpleNamespace(close=AsyncMock(side_effect=OSError("close failed")))
+    checkpointer = object()
+    compiled_graph = object()
+    workflow = SimpleNamespace(
+        _db_conn=conn,
+        checkpointer=checkpointer,
+        compiled_graph=compiled_graph,
+        _current_graph_state={"analysis_state": state},
+        sandbox=None,
+    )
+    state_mod.report_workflows[session_id] = workflow
+
+    service = SnapshotService.__new__(SnapshotService)
+    service.session_id = session_id
+    root = tmp_path / "snapshot-v2"
+    service.paths = SnapshotV2Paths(
+        root=root,
+        objects=root / "objects",
+        staging=root / "staging",
+        journals=root / "journals",
+        integrity=root / "integrity",
+        committed=root / "committed",
+    )
+    service.safe_point = MagicMock()
+    service.safe_point.get_descriptor.return_value = {
+        "kernel_present": False,
+        "status": "running",
+    }
+    service.pre_restore_capture = SimpleNamespace(
+        capture_locked=AsyncMock(
+            return_value=SimpleNamespace(failure=None, snapshot_id="pre-restore")
+        )
+    )
+    staged = SimpleNamespace(staged_checkpoint=None)
+    service.restore_coordinator = SimpleNamespace(
+        stage=AsyncMock(return_value=staged),
+        apply=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    monkeypatch.setattr(
+        RestorePreflight,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="ready",
+            capsule={"kind": "graph_node"},
+        ),
+    )
+    monkeypatch.setattr(
+        "backend.config._config.get_session_dir",
+        lambda _sid: tmp_path / "session",
+    )
+    monkeypatch.setattr(
+        "backend.config._config.get_session_workspace",
+        lambda _sid: tmp_path / "session" / "workspace",
+    )
+    monkeypatch.setattr(
+        "backend.config._config.get_session_states",
+        lambda _sid: tmp_path / "session" / "states",
+    )
+
+    try:
+        result = await service.restore_snapshot(
+            SnapshotRestoreRequest(
+                snapshot_id="snapshot-target",
+                runtime_choice="reset",
+                current_state_choice="abort",
+            ),
+            transaction_id="restore-close-failure",
+        )
+
+        assert result.status == "failed"
+        assert result.failure is not None
+        assert result.failure["code"] == "CHECKPOINT_RETIRE_FAILED"
+        service.restore_coordinator.apply.assert_not_awaited()
+        service.restore_coordinator.cleanup.assert_awaited_once()
+        assert state_mod.report_workflows.get(session_id) is workflow
+        assert workflow._db_conn is conn
+        assert workflow.checkpointer is checkpointer
+        assert workflow.compiled_graph is compiled_graph
+    finally:
+        state_mod.report_workflows.pop(session_id, None)
+        state_mod.sessions.pop(session_id, None)
+        get_snapshot_safe_point_manager().clear_superseded(session_id)
+
+
+@pytest.mark.asyncio
+async def test_restore_enqueue_fast_rejects_active_detailed_report(monkeypatch):
+    from backend import state as state_mod
+    from backend.services.snapshot_v2.errors import SnapshotTransactionError
+    from backend.services.snapshot_v2.jobs import RestoreJobManager
+
+    session_id = "restore-detailed-report-busy"
+    report_task = asyncio.get_running_loop().create_future()
+    monkeypatch.setitem(
+        state_mod.detailed_report_tasks,
+        session_id,
+        report_task,
+    )
+    manager = RestoreJobManager(paths=MagicMock(), session_id=session_id)
+    request = MagicMock(snapshot_id="snapshot-probe")
+
+    try:
+        with pytest.raises(SnapshotTransactionError) as exc_info:
+            await manager.enqueue(
+                session_id,
+                MagicMock(),
+                request,
+                timeout_seconds=1,
+            )
+
+        assert exc_info.value.code == "SESSION_BUSY"
+        assert "Detailed report generation" in str(exc_info.value)
+        assert not manager._safe_point.has_pending_request(session_id)
+        assert not manager._safe_point.is_paused(session_id)
+    finally:
+        report_task.cancel()
+        state_mod.detailed_report_tasks.pop(session_id, None)
 
 
 @pytest.mark.asyncio
@@ -1189,7 +1373,7 @@ def test_dynamic_freeze_still_idles_when_nothing_is_parked():
 async def test_deferred_recovery_does_not_clear_an_existing_block(monkeypatch):
     """Skipping recovery is not evidence that nothing is wrong — clearing the
     block on a deferred pass would unblock a genuinely broken session."""
-    from backend.services import session_store
+    from backend.services import session_lifecycle, session_store
     from backend.state import get_session_lock
 
     sid = "defer-clear-probe"
@@ -1203,8 +1387,19 @@ async def test_deferred_recovery_does_not_clear_an_existing_block(monkeypatch):
     async def _cached(_sid):
         return MagicMock()
 
+    async def _skip_publication_recovery(_sid, _state):
+        return None
+
     monkeypatch.setattr(session_store, "_recover_snapshot_v2_on_load", _never)
     monkeypatch.setattr(session_store, "_get_cached_session", _cached)
+    monkeypatch.setattr(
+        session_store,
+        "_recover_publication_transactions_on_load",
+        _skip_publication_recovery,
+    )
+    monkeypatch.setattr(
+        session_lifecycle, "adopt_persisted_generation", lambda _s: None
+    )
     monkeypatch.setattr(
         session_store, "clear_recovery_blocked",
         lambda *a, **k: (cleared.append(True), False)[1],

@@ -82,6 +82,9 @@ class TestAnalysisStateApiDictRoundTrip:
             "species_input_info",
             "runtime_restore_status",
             "runtime_restore_warning",
+            "runtime_persistence",
+            "evidence_gate_degraded",
+            "evidence_gate_findings",
             "termination_reason",
             "snapshot_failure",
             "snapshot_transaction",
@@ -169,11 +172,10 @@ class TestAnalysisStateApiDictRoundTrip:
         assert api["messages"][0]["content"] == "stripped this"
 
     def test_publication_figures_carry_gallery_badge_fields(self):
-        """The Results gallery badges must survive a reload.
+        """Eligible Results gallery badges must survive a reload.
 
-        round / layout_blocking / diagnostic reach the first render on the
-        integrated_report WebSocket message; a reload rebuilds the gallery from
-        this payload alone, so the record's own values have to travel with it.
+        A reload rebuilds the gallery from this payload alone. Blocking renders
+        are deliberately absent rather than reintroduced as gallery entries.
         """
         state = AnalysisState(user_id="test")
         preview = base64.b64encode(valid_image_bytes("PNG")).decode()
@@ -197,10 +199,10 @@ class TestAnalysisStateApiDictRoundTrip:
         ]
         api = state.to_api_dict()
         json.dumps(api)
-        blocked, diagnostic = api["publication_figures"]
-        assert blocked["round"] == 3
-        assert blocked["layout_blocking"] is True
-        assert blocked["diagnostic"] is False
+        assert [figure["id"] for figure in api["publication_figures"]] == [
+            "f-diagnostic"
+        ]
+        diagnostic = api["publication_figures"][0]
         # An unattributed figure reports no round rather than "round 0".
         assert diagnostic["round"] is None
         assert diagnostic["layout_blocking"] is False

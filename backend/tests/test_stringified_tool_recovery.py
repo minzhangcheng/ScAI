@@ -12,6 +12,20 @@ from unittest.mock import MagicMock
 from backend.utils.llm_client import OpenAICompatibleClient, _recover_stringified_tool_call
 
 
+@pytest.fixture
+def client():
+    value = OpenAICompatibleClient(
+        api_key="k",
+        base_url="http://x/v1/chat/completions",
+        agent_name="t",
+    )
+    value.llm_logger = MagicMock()
+    try:
+        yield value
+    finally:
+        asyncio.run(value.close())
+
+
 def test_recovers_n1n_style_tool_parameters():
     """n1n.ai's stringified form uses {"tool": ..., "parameters": ...}."""
     content = '{"tool":"report_findings","parameters":{"summary":"done","findings":[]}}'
@@ -100,6 +114,7 @@ def _make_fake_response(content: str, tool_calls=None):
     message = MagicMock()
     message.content = content
     message.tool_calls = tool_calls
+    message.refusal = None
     message.model_dump = MagicMock(return_value={
         "role": "assistant",
         "content": content,
@@ -114,11 +129,9 @@ def _make_fake_response(content: str, tool_calls=None):
     return response
 
 
-def test_chat_with_tools_recovers_stringified_call(monkeypatch):
+def test_chat_with_tools_recovers_stringified_call(monkeypatch, client):
     """When upstream returns no tool_calls but content is a stringified tool call,
     chat_with_tools must synthesize a ToolCall and clear content."""
-    client = OpenAICompatibleClient(api_key="k", base_url="http://x/v1/chat/completions", agent_name="t")
-
     stringified = '{"tool":"report_findings","parameters":{"summary":"done"}}'
     fake_response = _make_fake_response(stringified, tool_calls=None)
 
@@ -143,10 +156,8 @@ def test_chat_with_tools_recovers_stringified_call(monkeypatch):
     assert result.content is None, "content must be cleared after recovery"
 
 
-def test_chat_with_tools_keeps_plain_text_when_not_a_tool_call(monkeypatch):
+def test_chat_with_tools_keeps_plain_text_when_not_a_tool_call(monkeypatch, client):
     """Genuine plain-text replies must not be misinterpreted as tool calls."""
-    client = OpenAICompatibleClient(api_key="k", base_url="http://x/v1/chat/completions", agent_name="t")
-
     plain = "I will now proceed with the analysis."
     fake_response = _make_fake_response(plain, tool_calls=None)
 
@@ -165,10 +176,8 @@ def test_chat_with_tools_keeps_plain_text_when_not_a_tool_call(monkeypatch):
     assert result.content == plain
 
 
-def test_chat_with_tools_native_tool_calls_unaffected(monkeypatch):
+def test_chat_with_tools_native_tool_calls_unaffected(monkeypatch, client):
     """When upstream returns proper tool_calls, recovery path must not run."""
-    client = OpenAICompatibleClient(api_key="k", base_url="http://x/v1/chat/completions", agent_name="t")
-
     native_tc = MagicMock()
     native_tc.id = "call_native_1"
     native_tc.function.name = "execute_code"

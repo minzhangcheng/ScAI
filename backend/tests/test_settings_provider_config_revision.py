@@ -1,4 +1,8 @@
+import asyncio
 from typing import Optional
+from unittest.mock import AsyncMock
+
+import pytest
 
 from backend.agents.base import BaseAgent
 from backend.config._config import SystemConfig
@@ -92,7 +96,8 @@ def test_agent_extra_signature_is_empty_for_standard_agents_and_includes_literat
     }
 
 
-def test_get_llm_client_cache_is_per_agent_and_cleared_per_agent():
+@pytest.mark.asyncio
+async def test_get_llm_client_cache_is_per_agent_and_cleared_per_agent():
     state = _state()
     state.agent_server_configs["pi"] = {"llm_base_url": "https://same.example/v1", "api_key": "same-key"}
     state.agent_server_configs["literature"] = {"llm_base_url": "https://same.example/v1", "api_key": "same-key"}
@@ -104,9 +109,15 @@ def test_get_llm_client_cache_is_per_agent_and_cleared_per_agent():
     assert pi_client.agent_name == "pi"
     assert lit_client.agent_name == "literature"
 
-    provider.clear_agent_client_cache("pi")
-    assert provider.get_llm_client("pi") is not pi_client
-    assert provider.get_llm_client("literature") is lit_client
+    try:
+        provider.clear_agent_client_cache("pi")
+        replacement = provider.get_llm_client("pi")
+        assert replacement is not pi_client
+        assert provider.get_llm_client("literature") is lit_client
+        await asyncio.sleep(0)
+        assert pi_client._closed is True
+    finally:
+        await provider.cleanup()
 
 
 def test_provider_reads_fresh_state_from_sessions_for_revision():
@@ -185,7 +196,8 @@ def test_base_agent_refresh_hook_fires_once_per_revision_change():
     assert agent.changed_calls[1][1] != first_current
 
 
-def test_base_agent_refresh_clears_agent_client_cache_on_revision_change():
+@pytest.mark.asyncio
+async def test_base_agent_refresh_clears_agent_client_cache_on_revision_change():
     state = _state()
     state.agent_server_configs["pi"] = {
         "llm_base_url": "https://pi.example/v1",
@@ -197,13 +209,76 @@ def test_base_agent_refresh_clears_agent_client_cache_on_revision_change():
         global_client=None,
         session_id=None,
     )
-    old_client = provider.get_llm_client("pi")
+    try:
+        old_client = provider.get_llm_client("pi")
+        agent = _RefreshProbeAgent(provider)
+
+        agent.refresh_runtime_config_if_needed()
+        same_revision_client = provider.get_llm_client("pi")
+        assert same_revision_client is not old_client
+
+        stable_client = provider.get_llm_client("pi")
+        agent.refresh_runtime_config_if_needed()
+        assert provider.get_llm_client("pi") is stable_client
+    finally:
+        await provider.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_base_agent_hot_reload_does_not_close_inflight_client():
+    from backend.utils.llm_client import LLMResponse
+
+    state = _state()
+    state.agent_server_configs["pi"] = {
+        "llm_base_url": "https://old.example/v1",
+        "api_key": "old-key",
+    }
+    provider = AgentSettingsProvider(
+        state=state,
+        config=SystemConfig(),
+        global_client=None,
+        session_id=None,
+    )
     agent = _RefreshProbeAgent(provider)
-
     agent.refresh_runtime_config_if_needed()
-    same_revision_client = provider.get_llm_client("pi")
-    assert same_revision_client is not old_client
+    client = provider.get_llm_client("pi")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    request_task = None
 
-    stable_client = provider.get_llm_client("pi")
-    agent.refresh_runtime_config_if_needed()
-    assert provider.get_llm_client("pi") is stable_client
+    async def blocked_dispatch(**kwargs):
+        entered.set()
+        await release.wait()
+        return LLMResponse("ok", "model", {}, None)
+
+    client._dispatch_non_streaming = AsyncMock(side_effect=blocked_dispatch)
+    client.client.close = AsyncMock()
+    client.http_client.aclose = AsyncMock()
+
+    try:
+        request_task = asyncio.create_task(agent.chat("hello"))
+        await entered.wait()
+
+        state.agent_server_configs["pi"] = {
+            "llm_base_url": "https://new.example/v1",
+            "api_key": "new-key",
+        }
+        agent.refresh_runtime_config_if_needed()
+        await asyncio.sleep(0)
+
+        assert client._active_requests == 1
+        assert client._closed is False
+        client.client.close.assert_not_awaited()
+
+        release.set()
+        assert await request_task == "ok"
+        await provider.cleanup()
+
+        assert client._closed is True
+        client.client.close.assert_awaited_once()
+    finally:
+        release.set()
+        if request_task is not None and not request_task.done():
+            request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+        await provider.cleanup()

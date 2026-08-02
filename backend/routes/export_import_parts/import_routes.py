@@ -370,7 +370,7 @@ async def import_state(
         # straight from the uploaded document and then stamped the caller's
         # user_id onto it, so posting {"id": "<someone else's session>"} handed
         # that session over.
-        session_id = _allocate_import_session_id(archive_session_id)
+        session_id = _allocate_import_session_id(archive_session_id, user_id)
         # The allocator claims the id by creating sessions/<id>/. Everything
         # below can still fail (a ValidationError from AnalysisState is the
         # ordinary case), and without releasing the claim the directory is left
@@ -416,8 +416,15 @@ async def import_state(
     # Forced: for the inline .json/.zip paths this is the ONLY session.json
     # write, so losing it to the save throttle would leave a session that exists
     # as files and in the cache but has no metadata document at all.
-    await async_save_session(state.id, state, force=True)
-    await _update_session_cache(state.id, state)
+    try:
+        await async_save_session(state.id, state, force=True)
+        await _update_session_cache(state.id, state)
+        from backend.services.session_lifecycle import commit_import_generation
+
+        commit_import_generation(state)
+    except BaseException:
+        _cleanup_partial_session(state.id)
+        raise
 
     return APIResponse(
         success=True,

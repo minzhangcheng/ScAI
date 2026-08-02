@@ -85,6 +85,7 @@ from .schema_parts.outputs import (  # noqa: F401
     ExplorationReport,
     RoundResult,
     PublicationFigure,
+    LegacyArtifactRecord,
     PublicationTable,
     GraphicAbstract,
     APIRequest,
@@ -169,18 +170,33 @@ class AnalysisState(BaseModel):
         """Decrypt credentials emitted by the matching state serializer."""
         if isinstance(value, dict):
             from backend.utils.secret_redaction import open_analysis_state_payload
+            from backend.utils.error_parsing import sanitize_error_payload
 
-            return open_analysis_state_payload(value)
+            payload = open_analysis_state_payload(value)
+            if payload.get("snapshot_failure") is not None:
+                payload = dict(payload)
+                payload["snapshot_failure"] = sanitize_error_payload(
+                    payload["snapshot_failure"], max_chars=3000
+                )
+            return payload
         return value
 
     @model_serializer(mode="wrap")
     def _seal_persisted_secrets(self, handler):
         """Ensure model_dump/checkpoint/snapshot payloads never contain raw keys."""
         from backend.utils.secret_redaction import seal_analysis_state_payload
+        from backend.utils.error_parsing import sanitize_error_payload
 
-        return seal_analysis_state_payload(handler(self))
+        payload = seal_analysis_state_payload(handler(self))
+        if payload.get("snapshot_failure") is not None:
+            payload = dict(payload)
+            payload["snapshot_failure"] = sanitize_error_payload(
+                payload["snapshot_failure"], max_chars=3000
+            )
+        return payload
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    lifecycle_generation: int = 0
     name: str = "Untitled Analysis"
     user_id: str = Field(..., min_length=1)  # Owner user ID (required, non-empty)
     created_at: datetime = Field(default_factory=datetime.now)
@@ -355,6 +371,11 @@ class AnalysisState(BaseModel):
 
     # Publication-quality outputs
     publication_figures: List[PublicationFigure] = Field(default_factory=list)
+    # ``None`` means the session was persisted before artifact registration was
+    # enforced.  New session factories explicitly stamp the current version;
+    # deserialization must not guess from mtimes or today's application version.
+    artifact_registry_version: Optional[int] = None
+    legacy_artifacts: List[LegacyArtifactRecord] = Field(default_factory=list)
     publication_tables: List[PublicationTable] = Field(default_factory=list)
     invalidated_artifact_stems: List[str] = Field(default_factory=list)
     graphic_abstract: Optional[GraphicAbstract] = None
@@ -362,6 +383,10 @@ class AnalysisState(BaseModel):
 
     # Score definitions (methodology tracking for report transparency)
     score_definitions: List[ScoreDefinition] = Field(default_factory=list)
+    # Monotonic session audit: at least one mandatory evidence gate exhausted
+    # its retry ceiling and was force-released.
+    evidence_gate_degraded: bool = False
+    evidence_gate_findings: List[Dict[str, Any]] = Field(default_factory=list)
 
     # Scoring plans frozen before their results were known. register_score cites
     # one of these; the handler re-hashes the panel to detect post-hoc revision.
@@ -412,6 +437,24 @@ class AnalysisState(BaseModel):
     sandbox_state: Optional[Dict[str, Any]] = Field(
         default_factory=lambda: {"runtime_revision": 0, "saved_runtime_revision": 0}
     )
+    runtime_persistence: Dict[str, Any] = Field(default_factory=lambda: {
+        "status": "stale",
+        "current_revision": 0,
+        "saved_revision": 0,
+        "dirty_since": None,
+        "last_saved_at": None,
+        "last_restored_at": None,
+        "last_failed_at": None,
+        "failed_variables": [],
+        "error_summary": None,
+        "requires_recompute": False,
+        "recompute_variables": [],
+        "recommended_action": None,
+        "commit_source": None,
+        "runtime_digest": None,
+        "budget_violations": [],
+        "top_offenders": [],
+    })
     
     # Config snapshot
     config_snapshot: Optional[Dict[str, Any]] = None
@@ -423,7 +466,7 @@ class AnalysisState(BaseModel):
     human_messages: List[Dict[str, Any]] = Field(default_factory=list)  # History of human interventions
 
     # LLM failure user intervention
-    wait_input_reason: Optional[str] = None    # None | "llm_failure" | "agent_disabled" | "marker_db_missing" | "species_input" | "gene_species_mismatch"
+    wait_input_reason: Optional[str] = None    # Pending HITL gate identifier.
     llm_failure_info: Optional[Dict[str, Any]] = None
     # llm_failure_info keys when set:
     #   "agent": str       — agent name (e.g. "pathology")
@@ -474,6 +517,9 @@ class AnalysisState(BaseModel):
         "current_plan": "current_plan",
         "plan_dialogue_history": "plan_dialogue_history",
         "agent_errors": "agent_errors",
+        "runtime_persistence": "runtime_persistence",
+        "evidence_gate_degraded": "evidence_gate_degraded",
+        "evidence_gate_findings": "evidence_gate_findings",
         "publication_figures": "publication_figures",
         "publication_tables": "publication_tables",
         "graphic_abstract": "graphic_abstract",
@@ -779,6 +825,21 @@ class AnalysisState(BaseModel):
              "cross_modal_candidates": _simplify_candidates(r.get("cross_modal_synthesis")),
              "integration_report_summary": r.get("integration_report_summary", ""),
              "integration_candidates": r.get("integration_candidates", []),
+             "round_status": r.get("round_status", "completed"),
+             "evidence_status": r.get("evidence_status", "empty"),
+             "direction_coverage_eligible": r.get("direction_coverage_eligible"),
+             "bioinformatics_evidence_verified": r.get("bioinformatics_evidence_verified"),
+             "evidence_gate_degraded": r.get("evidence_gate_degraded", False),
+             "evidence_execution_ids": r.get("evidence_execution_ids", []),
+             "evidence_notes": r.get("evidence_notes", []),
+             "evidence_gate_findings": r.get("evidence_gate_findings", []),
+             "lineage_id": r.get("lineage_id", "main"),
+             "branch_id": r.get("branch_id"),
+             "branch_label": r.get("branch_label"),
+             "restored_from_snapshot_id": r.get("restored_from_snapshot_id"),
+             "direction": r.get("direction", ""),
+             "direction_key": r.get("direction_key", ""),
+             "result_identity_key": r.get("result_identity_key", ""),
              "timestamp": r["timestamp"]}
             for r in results
         ]
@@ -797,7 +858,10 @@ class AnalysisState(BaseModel):
     @staticmethod
     def _serialize_publication_figures(figures, *, lineage_id: str = "main"):
         from backend.services.figure_layout import blocking_violations
-        from backend.services.report.artifacts import archival_render_available
+        from backend.services.report.artifacts import (
+            archival_render_available,
+            eligible_artifacts,
+        )
 
         # round / layout_blocking / diagnostic are the gallery's badges. The
         # integrated_report WebSocket message carries them for the figures it
@@ -807,6 +871,11 @@ class AnalysisState(BaseModel):
         # round_number (source 2 of services/report/figure_attribution.py),
         # which is set for every promoted figure; 0 means unattributed and is
         # reported as such rather than as round zero.
+        target = lineage_id or "main"
+        current_heads = eligible_artifacts([
+            figure for figure in figures
+            if (figure.get("lineage_id") or "main") == target
+        ])
         return [
             {"id": f["id"], "name": f["name"], "description": f["description"],
              "figure_type": f["figure_type"], "png_path": f["png_path"],
@@ -817,14 +886,18 @@ class AnalysisState(BaseModel):
              "plan_step_id": f.get("plan_step_id"),
              "plan_id": f.get("plan_id"),
              "purpose": f.get("purpose", "result"),
+             "logical_figure_id": f.get("logical_figure_id"),
+             "render_attempt_id": f.get("render_attempt_id"),
+             "producer_status": f.get("producer_status", "published"),
+             "revision_of_id": f.get("revision_of_id"),
+             "supersedes_id": f.get("supersedes_id"),
+             "is_published_head": bool(f.get("is_published_head", True)),
              "is_publication": True,
              "layout_blocking": bool(blocking_violations(f.get("layout_violations"))),
              "diagnostic": bool(f.get("diagnostic")),
              "created_at": f["created_at"]}
-            for f in figures
-            if f.get("is_current", True) and not f.get("invalidated_at")
-            and (f.get("lineage_id") or "main") == (lineage_id or "main")
-            and archival_render_available(f)
+            for f in current_heads
+            if archival_render_available(f)
         ]
 
     @staticmethod
@@ -851,13 +924,14 @@ class AnalysisState(BaseModel):
         }
 
     def _serialize_messages(self, strip_message_base64):
-        from backend.services.report.artifacts import archival_render_available
+        from backend.services.report.artifacts import (
+            archival_render_available,
+            eligible_artifacts,
+        )
 
         current_figures = [
-            figure for figure in self.publication_figures
-            if getattr(figure, "is_current", True)
-            and not getattr(figure, "invalidated_at", None)
-            and (getattr(figure, "lineage_id", None) or "main")
+            figure for figure in eligible_artifacts(self.publication_figures)
+            if (getattr(figure, "lineage_id", None) or "main")
             == (self.restore_branch_id or "main")
             and archival_render_available(figure)
         ]

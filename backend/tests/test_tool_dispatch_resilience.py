@@ -121,6 +121,10 @@ class TestToolDispatchResilience:
         agent.sandbox.start = AsyncMock()
         agent.sandbox.save_session = AsyncMock()
         agent.sandbox.get_code_history = MagicMock(return_value=[])
+        # Runtime persistence synchronization is a mapping contract. A bare
+        # MagicMock fabricates truthy ``.get()`` values and falsely opens the
+        # recovery gate before this dispatch-resilience scenario can run.
+        agent.sandbox.sync_runtime_persistence_state = MagicMock(return_value={})
 
         # --- Null CheckpointManager (no-op load/save/clear) ---
         class _NullCheckpoint:

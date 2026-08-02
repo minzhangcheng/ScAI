@@ -1,5 +1,6 @@
 """Tests for _log_empty_content_diagnostic helper extracted from _extract_content_from_message."""
 from backend.tests.split_facade import patch_facade
+import asyncio
 import sys
 from pathlib import Path
 
@@ -12,7 +13,11 @@ from backend.utils.llm_client import OpenAICompatibleClient
 
 @pytest.fixture
 def client():
-    return OpenAICompatibleClient(api_key="test", base_url="http://test")
+    value = OpenAICompatibleClient(api_key="test", base_url="http://test")
+    try:
+        yield value
+    finally:
+        asyncio.run(value.close())
 
 
 def test_log_diagnostic_returns_completion_tokens(client):

@@ -166,11 +166,20 @@ async def _generate_figures_in_chat(
     except Exception as e:
         logger.exception("Chat figure generation error")
     finally:
-        chat_sandboxes.pop(session_id, None)
         try:
-            await sandbox.stop()
+            from backend.services.session_lifecycle import is_session_tombstoned
+
+            await sandbox.stop(
+                save=not is_session_tombstoned(session_id)
+            )
         except Exception:
             logger.warning("Failed to stop chat code sandbox during cleanup", exc_info=True)
+        finally:
+            # A strict final-save failure deliberately leaves km/kc live. Keep
+            # the only registry handle so stale-session cleanup can retry it.
+            if getattr(sandbox, "km", None) is None:
+                if chat_sandboxes.get(session_id) is sandbox:
+                    chat_sandboxes.pop(session_id, None)
 
     return generated_figures
 

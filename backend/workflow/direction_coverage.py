@@ -31,6 +31,15 @@ def build_result_identity_key(lineage_id: str, phase: str, round_number: int, di
 def has_substantive_findings(result: RoundResult) -> bool:
     if result.round_status in ("failed", "skipped"):
         return False
+    # Integration rounds do not run the four domain agents.  Their evidence is
+    # the cross-direction report itself (and, secondarily, the scored candidate
+    # records), so applying the ordinary finding buckets makes every successful
+    # integration round look empty.
+    if result.phase == "integration":
+        return bool(
+            (result.integration_report_summary or "").strip()
+            or result.integration_candidates
+        )
     finding_groups = (
         result.pathology_findings,
         result.bioinformatics_findings,
@@ -54,9 +63,36 @@ def normalize_legacy_round_result(result: RoundResult) -> RoundResult:
             result.round_number,
             result.direction_key,
         )
-    if result.evidence_status == "empty" and has_substantive_findings(result):
+    integration_has_evidence = bool(
+        result.phase == "integration"
+        and (
+            (result.integration_report_summary or "").strip()
+            or result.integration_candidates
+        )
+    )
+    # 0.38.9 routed integration records through ordinary research-round
+    # completion derivation.  Because those nodes intentionally have no
+    # bioinformatics_result/literature_result, a real report was persisted as
+    # skipped/failed.  This signature is unambiguous: an integration node that
+    # raised never wrote a RoundResult at all.
+    if result.evidence_schema_version is None and integration_has_evidence and (
+        result.round_status in ("failed", "skipped")
+        or result.evidence_status in ("empty", "failed")
+    ):
+        result.round_status = "completed"
         result.evidence_status = "substantive"
-    if result.evidence_status == "failed" and result.round_status == "completed":
+        result.direction_coverage_eligible = None
+    elif (
+        result.evidence_schema_version is None
+        and result.evidence_status == "empty"
+        and has_substantive_findings(result)
+    ):
+        result.evidence_status = "substantive"
+    if (
+        result.evidence_schema_version is None
+        and result.evidence_status == "failed"
+        and result.round_status == "completed"
+    ):
         result.round_status = "partial"
     return result
 

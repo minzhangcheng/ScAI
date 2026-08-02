@@ -8,7 +8,7 @@ Extracted from backend/main.py. Public API:
   - list_saved_sessions() -> list[dict]
   - update_session_cache(session_id, state)
   - touch_session(session_id)
-  - pause_and_restart_ws(session_id, state, websockets)
+  - pause_and_restart_ws(session_id, state)
 """
 import asyncio
 import json
@@ -28,6 +28,7 @@ from backend.constants import WaitInputReason
 from backend.models.schemas import AnalysisState, TaskStatus, DEFAULT_ROUND_WAIT_SECONDS
 from backend.utils.blob_store import externalize_blobs, inline_blobs
 from backend.utils.files import validate_session_id
+from backend.utils.asyncio_tasks import run_in_owned_thread
 from backend.state import (
     sessions, state_lock, session_access_times, last_save_times,
     session_locks,
@@ -110,7 +111,7 @@ async def _persist_recovery_marker(session_id: str, state: AnalysisState) -> Non
     """Persist recovery_blocked / cleared marker to session.json (best-effort)."""
     try:
         dumped = state.model_dump(mode="json")
-        await asyncio.to_thread(_externalize_and_write, session_id, dumped)
+        await _persist_dump_under_lifecycle(session_id, dumped)
     except Exception:
         logger.exception(
             "Session %s: failed to persist recovery marker",
@@ -158,12 +159,27 @@ def _write_session_json(session_id: str, json_str: str) -> None:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(json_str)
+                f.flush()
+                os.fsync(f.fileno())
             # Session metadata can contain encrypted credentials and private
             # analysis content.  App-layer ownership checks do not protect it
             # from other local OS users, so preserve mkstemp's owner-only mode.
             os.chmod(tmp_path, 0o600)
             os.replace(tmp_path, session_file)
             os.chmod(session_file, 0o600)
+            try:
+                directory_fd = os.open(
+                    str(session_file.parent),
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                )
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError:
+                # Some non-POSIX filesystems do not expose directory fsync. The
+                # file itself is already fsynced; retain compatibility there.
+                pass
             logger.info(f"Session {session_id} saved to disk")
         except Exception:
             if os.path.exists(tmp_path):
@@ -171,6 +187,7 @@ def _write_session_json(session_id: str, json_str: str) -> None:
             raise
     except Exception:
         logger.exception(f"Failed to save session {session_id}")
+        raise
 
 
 def _blob_dir_for(session_id: str) -> Path:
@@ -179,17 +196,41 @@ def _blob_dir_for(session_id: str) -> Path:
 
 def _externalize_and_write(session_id: str, dumped: dict) -> None:
     """Externalize blobs to disk and write the session JSON. Blocking I/O —
-    async callers must invoke this via asyncio.to_thread so the large base64
+    async callers must invoke this via ``run_in_owned_thread`` so large base64
     blob writes do not stall the event loop."""
-    externalized = externalize_blobs(dumped, _blob_dir_for(session_id))
-    _write_session_json(session_id, json.dumps(externalized, ensure_ascii=False))
+    from backend.services.session_lifecycle import (
+        assert_dump_writable,
+        lifecycle_file_lock,
+    )
+
+    with lifecycle_file_lock(session_id):
+        assert_dump_writable(session_id, dumped)
+        externalized = externalize_blobs(dumped, _blob_dir_for(session_id))
+        _write_session_json(session_id, json.dumps(externalized, ensure_ascii=False))
+
+
+async def _persist_dump_under_lifecycle(session_id: str, dumped: dict) -> None:
+    """Unthrottled internal write serialized against delete and stale saves."""
+    from backend.services.session_lifecycle import get_lifecycle_lock
+
+    async with get_lifecycle_lock(session_id):
+        await run_in_owned_thread(_externalize_and_write, session_id, dumped)
 
 
 def save_session_to_disk(session_id: str, state: AnalysisState) -> None:
+    """Synchronous startup/test entrypoint guarded by the lifecycle file lock."""
     _externalize_and_write(session_id, state.model_dump(mode="json"))
 
 
-async def async_save_session(session_id: str, state: AnalysisState, force: bool = False) -> None:
+async def _async_save_session_under_lifecycle(
+    session_id: str,
+    state: AnalysisState,
+    force: bool = False,
+) -> None:
+    """Persist while the caller owns ``get_lifecycle_lock(session_id)``."""
+    from backend.services.session_lifecycle import assert_generation_writable
+
+    assert_generation_writable(session_id, state)
     if not force and hasattr(state, "status") and state.status in _FORCE_SAVE_STATUSES:
         force = True
     now = time.monotonic()
@@ -202,7 +243,14 @@ async def async_save_session(session_id: str, state: AnalysisState, force: bool 
     # model_dump on the event loop (snapshot the mutable model here to avoid
     # racing with in-place mutation); offload the blob writes + JSON write.
     dumped = state.model_dump(mode="json")
-    await asyncio.to_thread(_externalize_and_write, session_id, dumped)
+    await run_in_owned_thread(_externalize_and_write, session_id, dumped)
+
+
+async def async_save_session(session_id: str, state: AnalysisState, force: bool = False) -> None:
+    from backend.services.session_lifecycle import get_lifecycle_lock
+
+    async with get_lifecycle_lock(session_id):
+        await _async_save_session_under_lifecycle(session_id, state, force=force)
 
 
 def load_session_from_disk(session_id: str) -> Optional[AnalysisState]:
@@ -224,9 +272,16 @@ def load_session_from_disk(session_id: str) -> Optional[AnalysisState]:
 
 
 async def update_session_cache(session_id: str, state: AnalysisState) -> None:
-    async with state_lock:
-        sessions[session_id] = state
-        session_access_times[session_id] = time.time()
+    from backend.services.session_lifecycle import (
+        adopt_persisted_generation,
+        get_lifecycle_lock,
+    )
+
+    async with get_lifecycle_lock(session_id):
+        adopt_persisted_generation(state)
+        async with state_lock:
+            sessions[session_id] = state
+            session_access_times[session_id] = time.time()
 
 
 async def touch_session(session_id: str) -> None:
@@ -359,8 +414,8 @@ def _snapshot_transaction_in_flight(session_id: str) -> bool:
 
     ``SnapshotService.restore_snapshot`` holds the per-session lock from
     ``stage()`` (journal STAGED) through ``commit()``, and yields inside that
-    window (closing the superseded checkpoint connection, ``asyncio.to_thread``
-    in ``async_save_session``). ``recover_snapshot_transactions`` has no awaits,
+    window (closing the superseded checkpoint connection, the owned worker in
+    ``async_save_session``). ``recover_snapshot_transactions`` has no awaits,
     so a request served at one of those yields runs the entire rollback and
     destroys the restore it was asked to report on.
 
@@ -372,8 +427,115 @@ def _snapshot_transaction_in_flight(session_id: str) -> bool:
     return lock is not None and lock.locked()
 
 
+async def _recover_publication_transactions_on_load(
+    session_id: str,
+    state: AnalysisState,
+) -> bool:
+    """Recover figure pair/record journals from the latest durable state.
+
+    The asyncio lock serializes callers in this process.  The synchronous helper
+    then holds the shared lifecycle flock across latest-state load, transaction-ID
+    merge, session fsync, and exact marker/GC.  Two workers therefore cannot each
+    save a recovery derived from a stale pre-recovery AnalysisState.
+    """
+    from backend.services.session_lifecycle import get_lifecycle_lock
+
+    async with get_lifecycle_lock(session_id):
+        return await run_in_owned_thread(
+            _recover_publication_transactions_under_file_lock,
+            session_id,
+            state,
+        )
+
+
+def _recover_publication_transactions_under_file_lock(
+    session_id: str,
+    state: AnalysisState,
+) -> bool:
+    """Synchronous cross-process publication recovery transaction."""
+    from backend.config import get_session_workspace
+    from backend.services.report.figure_transactions import (
+        mark_figure_record_recovery_durable,
+        recover_figure_publish_transactions,
+    )
+    from backend.services.report.figure_discovery import (
+        ensure_legacy_artifact_inventory,
+    )
+    from backend.services.session_lifecycle import (
+        SessionGoneError,
+        assert_generation_writable,
+        lifecycle_file_lock,
+        read_lifecycle_record,
+    )
+
+    with lifecycle_file_lock(session_id):
+        lifecycle = read_lifecycle_record(session_id)
+        if lifecycle and lifecycle.get("status") == "deleted":
+            raise SessionGoneError(
+                session_id,
+                str(lifecycle.get("owner_id") or ""),
+                int(lifecycle.get("generation") or 0),
+            )
+        latest = load_session_from_disk(session_id)
+        recovery_state = latest if latest is not None else state.model_copy(deep=True)
+        assert_generation_writable(session_id, recovery_state)
+        applied_transaction_ids: set[str] = set()
+        mutated = recover_figure_publish_transactions(
+            recovery_state,
+            get_session_workspace(session_id) / "figures",
+            applied_transaction_ids=applied_transaction_ids,
+        )
+        registry_before = getattr(
+            recovery_state, "artifact_registry_version", None
+        )
+        legacy_count_before = len(recovery_state.legacy_artifacts or [])
+        ensure_legacy_artifact_inventory(
+            recovery_state, get_session_workspace(session_id)
+        )
+        inventory_migrated = bool(
+            registry_before != recovery_state.artifact_registry_version
+            or legacy_count_before != len(recovery_state.legacy_artifacts or [])
+        )
+        if mutated or inventory_migrated:
+            _externalize_and_write(
+                session_id, recovery_state.model_dump(mode="json")
+            )
+        if mutated:
+            mark_figure_record_recovery_durable(
+                get_session_workspace(session_id) / "figures",
+                applied_transaction_ids,
+            )
+        # The caller may itself be a stale cache object.  Publication recovery is
+        # the only state owned by this boundary, so merge those canonical fields
+        # back without replacing unrelated in-memory workflow state.
+        state.publication_figures = [
+            item.model_copy(deep=True)
+            for item in recovery_state.publication_figures
+        ]
+        state.legacy_artifacts = [
+            item.model_copy(deep=True) for item in recovery_state.legacy_artifacts
+        ]
+        state.artifact_registry_version = recovery_state.artifact_registry_version
+        return mutated or inventory_migrated
+
+
+async def recover_publication_transactions_for_state(
+    session_id: str,
+    state: AnalysisState,
+) -> bool:
+    """Public lifecycle-safe entrypoint for an already loaded producer state."""
+    return await _recover_publication_transactions_on_load(session_id, state)
+
+
 async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
     validate_session_id(session_id)
+
+    from backend.services.session_lifecycle import (
+        SessionGoneError,
+        adopt_persisted_generation,
+        get_lifecycle_lock,
+        read_lifecycle_record,
+    )
 
     from backend.config import is_snapshot_v2_enabled
 
@@ -383,15 +545,32 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
     recovery_evaluated = False
     recovery_blocked = False
     recovery_failure = None
-    if snapshot_v2_enabled and not _snapshot_transaction_in_flight(session_id):
-        recovery_evaluated = True
-        recovery_blocked, recovery_failure = await _recover_snapshot_v2_on_load(
-            session_id,
-        )
+    # Recovery mutates journals, session.json, runtime files, and checkpoints.
+    # It therefore shares deletion's lifecycle boundary; a load that passed an
+    # early tombstone check must not recover artifacts after delete committed.
+    async with get_lifecycle_lock(session_id):
+        lifecycle = read_lifecycle_record(session_id)
+        if lifecycle and lifecycle.get("status") == "deleted":
+            raise SessionGoneError(
+                session_id,
+                str(lifecycle.get("owner_id") or ""),
+                int(lifecycle.get("generation") or 0),
+            )
+        if lifecycle and lifecycle.get("status") == "importing":
+            # The destination directory is claimed before extraction starts.
+            # Do not expose a partially extracted state merely because its
+            # session.json happened to arrive before the import commit marker.
+            return None
+        if snapshot_v2_enabled and not _snapshot_transaction_in_flight(session_id):
+            recovery_evaluated = True
+            recovery_blocked, recovery_failure = await _recover_snapshot_v2_on_load(
+                session_id,
+            )
 
     # Check cache before disk load
     cached = await _get_cached_session(session_id)
     if cached is not None:
+        await _recover_publication_transactions_on_load(session_id, cached)
         if not snapshot_v2_enabled:
             from backend.services.snapshot_v2.feature_gate import (
                 normalize_disabled_snapshot_state,
@@ -399,6 +578,12 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
 
             if normalize_disabled_snapshot_state(cached, workflow_active=False):
                 await _persist_recovery_marker(session_id, cached)
+            # The initial lifecycle check preceded the cache read and any
+            # normalization write. Deletion may have committed in between;
+            # linearize this cached return against the same generation guard
+            # used by disk-loaded returns.
+            async with get_lifecycle_lock(session_id):
+                adopt_persisted_generation(cached)
             return cached
         # Apply recovery outcome to cached state and return
         if recovery_blocked:
@@ -407,16 +592,25 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
         elif recovery_evaluated:
             if clear_recovery_blocked(session_id, cached):
                 await _persist_recovery_marker(session_id, cached)
+        async with get_lifecycle_lock(session_id):
+            adopt_persisted_generation(cached)
         return cached
 
-    # Load from disk (outside state_lock via to_thread)
-    state = await asyncio.to_thread(load_session_from_disk, session_id)
+    # Load from disk outside state_lock in a joined, cancellation-safe worker.
+    state = await run_in_owned_thread(load_session_from_disk, session_id)
     if state is None:
         if recovery_blocked:
             mark_recovery_blocked(session_id, None, recovery_failure)
         elif recovery_evaluated:
             clear_recovery_blocked(session_id, None)
         return None
+
+    await _recover_publication_transactions_on_load(session_id, state)
+
+    # A delete may have committed while disk I/O was in flight.  This second
+    # generation check prevents the loaded object from reviving the cache.
+    async with get_lifecycle_lock(session_id):
+        adopt_persisted_generation(state)
 
     # Clean up a stale workflow-bound gate from a previous process. Every reason
     # listed here is resolved only by POST /{id}/llm-failure-action, which needs
@@ -452,7 +646,7 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
         )
         # Save the cleaned-up state so PAUSED status persists
         dumped = state.model_dump(mode="json")
-        await asyncio.to_thread(_externalize_and_write, session_id, dumped)
+        await _persist_dump_under_lifecycle(session_id, dumped)
 
     # Apply Snapshot V2 recovery or disabled-mode stale-state normalization.
     if not snapshot_v2_enabled:
@@ -496,8 +690,11 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
                 session_id, exc_info=True,
             )
 
-    # Install into cache atomically (short lock)
-    return await _install_loaded_session(session_id, state)
+    # Install under the same lifecycle lock deletion uses.  Re-check after all
+    # post-load work because deletion may have committed while it ran.
+    async with get_lifecycle_lock(session_id):
+        adopt_persisted_generation(state)
+        return await _install_loaded_session(session_id, state)
 
 
 def list_saved_sessions() -> List[Dict[str, Any]]:
@@ -509,6 +706,11 @@ def list_saved_sessions() -> List[Dict[str, Any]]:
             with open(session_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             sid = data.get("id", fallback_id)
+            from backend.services.session_lifecycle import read_lifecycle_record
+
+            lifecycle = read_lifecycle_record(sid)
+            if lifecycle and lifecycle.get("status") in ("deleted", "importing"):
+                return
             if sid in seen_ids:
                 return
             seen_ids.add(sid)
@@ -554,13 +756,14 @@ def list_saved_sessions() -> List[Dict[str, Any]]:
     return sessions_list
 
 
-async def pause_and_restart_ws(session_id: str, state: AnalysisState, websockets: Dict[str, Any]) -> None:
+async def pause_and_restart_ws(
+    session_id: str,
+    state: AnalysisState,
+    _legacy_websockets: Optional[Dict[str, Any]] = None,
+) -> None:
     state.status = TaskStatus.PAUSED
     await update_session_cache(session_id, state)
     await async_save_session(session_id, state)
-    ws = websockets.get(session_id)
-    if ws:
-        try:
-            await ws.close(4000, "workflow_restart")
-        except Exception:
-            logger.debug("WebSocket close failed during pause-and-restart", exc_info=True)
+    from backend.utils.websocket_delivery import close_analysis_websocket
+
+    await close_analysis_websocket(session_id, code=4000)

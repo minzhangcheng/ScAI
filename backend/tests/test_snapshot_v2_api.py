@@ -374,6 +374,21 @@ class TestSnapshotErrorDetailFunction:
         assert detail["code"] == "SAFE_POINT_BUSY"
         assert "owns the safe point" in detail["message"]
 
+    def test_session_busy_maps_to_structured_conflict(self):
+        from backend.services.snapshot_v2.errors import (
+            SnapshotTransactionError,
+            snapshot_error_detail,
+        )
+
+        detail = snapshot_error_detail(
+            SnapshotTransactionError(
+                "SESSION_BUSY",
+                "Detailed report generation is active for this session",
+            )
+        )
+        assert detail["status_code"] == 409
+        assert detail["code"] == "SESSION_BUSY"
+
     def test_unknown_v2_error_500(self):
         from backend.services.snapshot_v2.errors import (
             SnapshotCaptureError,

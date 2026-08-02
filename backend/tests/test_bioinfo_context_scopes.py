@@ -88,6 +88,11 @@ def _bare_agent(monkeypatch, tmp_path) -> BioinformaticsAgent:
     agent.sandbox.start = AsyncMock()
     agent.sandbox.save_session = AsyncMock()
     agent.sandbox.get_code_history.return_value = []
+    agent.sandbox.sync_runtime_persistence_state.return_value = {
+        "status": "current",
+        "degraded_recovery": False,
+        "requires_recompute": False,
+    }
     return agent
 
 

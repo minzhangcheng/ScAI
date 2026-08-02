@@ -100,13 +100,13 @@ def test_review_status_still_withholds_independently_of_the_stem_set():
     assert "rejected" in stems
 
 
-def test_gallery_keeps_a_revision_requested_figure_the_stem_set_named():
-    """The gallery's weaker predicate must not be re-tightened by the stem set."""
+def test_gallery_excludes_a_revision_requested_non_head():
+    """Audit-only redraws cannot re-enter through filename reconciliation."""
     revised = _figure("revised", FigureReviewStatus.REVISION_REQUESTED)
     stems = excluded_artifact_stems(
         [revised], gallery_artifacts([revised]), invalidated_stems=["revised"],
     )
-    assert stems == set()
+    assert stems == {"revised"}
 
 
 def test_no_invalidated_stems_is_the_plain_eligibility_difference():

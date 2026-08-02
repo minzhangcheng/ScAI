@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from backend.agents.literature_agent import LiteratureAgent
@@ -46,8 +48,19 @@ class _ClosableClient:
         self.closed = True
 
 
+class _FlakyClosableClient:
+    def __init__(self, failures=1):
+        self.failures = failures
+        self.close_calls = 0
+
+    async def close(self):
+        self.close_calls += 1
+        if self.close_calls <= self.failures:
+            raise RuntimeError("transient close failure")
+
+
 class _GoogleClient:
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         self.closed = False
 
     async def close(self):
@@ -65,7 +78,8 @@ class _OpenAIClient:
 
 def test_sync_literature_config_missing_google_key_preserves_existing_google_client():
     provider = _Provider({"mode": "deep_research"})
-    agent = LiteratureAgent(settings_provider=provider, google_api_key="existing-google")
+    agent = LiteratureAgent(settings_provider=provider, google_api_key="")
+    agent._google_api_key = "existing-google"
     existing_client = _GoogleClient()
     agent._deep_research = existing_client
 
@@ -151,6 +165,12 @@ def test_sync_literature_config_closes_replaced_clients(monkeypatch):
         "OpenAICompatibleClient",
         _OpenAIClient,
     )
+    setattr_facade(
+        monkeypatch,
+        "backend.agents.literature_agent",
+        "GoogleDeepResearchClient",
+        _GoogleClient,
+    )
     provider = _Provider({
         "deep_research_llm_base_url": "https://new.example/v1",
         "deep_research_api_key": "new-key",
@@ -180,6 +200,7 @@ def test_sync_literature_config_closes_replaced_clients(monkeypatch):
     assert old_google_client in closed_clients
     assert agent._deep_research_llm_client is not old_dr_client
     assert agent._deep_research is not old_google_client
+    asyncio.run(agent.close_runtime_clients())
 
 
 @pytest.mark.asyncio
@@ -196,3 +217,65 @@ async def test_close_stale_client_tracks_pending_task_until_runtime_cleanup():
 
     assert stale_client.closed is True
     assert agent._client_close_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_failed_stale_client_close_is_retained_for_runtime_cleanup():
+    provider = _Provider({})
+    agent = LiteratureAgent(settings_provider=provider)
+    stale_client = _FlakyClosableClient()
+
+    agent._close_stale_client(stale_client)
+    await asyncio.sleep(0)
+
+    assert stale_client.close_calls == 1
+    assert agent._retired_runtime_clients[id(stale_client)] is stale_client
+
+    await agent.close_runtime_clients()
+
+    assert stale_client.close_calls == 2
+    assert not agent._retired_runtime_clients
+
+
+@pytest.mark.asyncio
+async def test_failed_current_client_close_is_retryable_by_workflow_cleanup():
+    provider = _Provider({})
+    agent = LiteratureAgent(settings_provider=provider)
+    current_client = _FlakyClosableClient()
+    agent._deep_research_llm_client = current_client
+
+    with pytest.raises(RuntimeError, match="failed to close 1"):
+        await agent.close_runtime_clients()
+
+    assert current_client.close_calls == 1
+    assert agent._retired_runtime_clients[id(current_client)] is current_client
+    assert agent._runtime_clients_closed is False
+
+    await agent.close_runtime_clients()
+
+    assert current_client.close_calls == 2
+    assert not agent._retired_runtime_clients
+    assert agent._runtime_clients_closed is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_cleanup_retains_in_use_client_until_lease_released():
+    provider = _Provider({})
+    agent = LiteratureAgent(settings_provider=provider)
+    current_client = _FlakyClosableClient(failures=0)
+    agent._deep_research_llm_client = current_client
+    agent._lease_runtime_client(current_client)
+
+    with pytest.raises(RuntimeError, match="still in use"):
+        await agent.close_runtime_clients()
+
+    assert current_client.close_calls == 0
+    assert agent._retired_runtime_clients[id(current_client)] is current_client
+
+    agent._release_runtime_client(current_client)
+    await asyncio.sleep(0)
+    await agent.close_runtime_clients()
+
+    assert current_client.close_calls == 1
+    assert not agent._retired_runtime_clients
+    assert agent._runtime_clients_closed is True

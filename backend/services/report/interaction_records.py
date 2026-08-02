@@ -330,13 +330,25 @@ def render_annotation_record_html(rec: AnnotationRecord) -> str:
             prop = " / ".join(f"{c.group_proportions.get(l, 0):.1f}%" for l in rec.proportion_group_labels)
         else:
             prop = "—"
+        cell_count = (
+            f"{c.n_cells} ({_esc(c.n_cells_source)})"
+            if getattr(c, "n_cells_known", False)
+            else "Unknown"
+        )
         rows.append(f"<tr><td style='font-family:monospace'>{_esc(c.cluster_id)}</td>"
                     f"<td>{type_cell}{detail}</td><td>{_conf_badge(c.confidence)}</td>"
-                    f"<td>{_esc(prop)}</td></tr>")
+                    f"<td>{_esc(cell_count)}</td><td>{_esc(prop)}</td></tr>")
     table = (f"<table><thead><tr><th>Cluster</th><th>Cell Type</th>"
-             f"<th>Confidence</th><th>{_esc(prop_header)}</th></tr></thead>"
+             f"<th>Confidence</th><th>Cell Count</th><th>{_esc(prop_header)}</th></tr></thead>"
              f"<tbody>{''.join(rows)}</tbody></table>")
     body = head + table
+    validation_status = getattr(rec, "validation_status", None) or "not_run"
+    validation_summary = getattr(rec, "validation_summary", None) or ""
+    body += (
+        "<h3>Annotation validation</h3>"
+        f"<p><b>Outcome:</b> {_esc(validation_status)}</p>"
+        + (f"<p>{_esc(validation_summary)}</p>" if validation_summary else "")
+    )
     if rec.supplementary_requests:
         body += _supp_block(rec.supplementary_requests)
     return _doc("Cell Annotation Record", body)

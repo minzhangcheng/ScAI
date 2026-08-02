@@ -14,7 +14,6 @@ import shutil
 from pathlib import Path
 from urllib.parse import quote as url_quote
 
-from ...utils.files import resolve_figure_in_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -24,14 +23,16 @@ from ...services.report.artifacts import (
     artifact_stems,
     eligible_artifacts,
     excluded_artifact_stems,
-    image_file_sha256,
-    MIN_ARCHIVAL_PREVIEW_HEIGHT,
-    MIN_ARCHIVAL_PREVIEW_WIDTH,
     resolve_archival_render,
 )
 from ...services.report.figure_discovery import (
     discover_figures_in_workspace,
+    ensure_legacy_artifact_inventory,
     prepare_discovered_figures,
+)
+from ...services.report.quality import (
+    render_quality_disclosures_html,
+    render_report_status_banner_html,
 )
 
 
@@ -101,6 +102,11 @@ class ReportHtmlMixin:
         # overwritten after review and must never become downloadable merely
         # because it happens to exist on disk.
         validated_pdf_by_figure: Dict[str, Path] = {}
+        legacy_figure_stems = {
+            Path(str(figure.get("filename") or figure.get("path") or "")).stem
+            for figure in report_figures
+            if figure.get("is_legacy")
+        }
         for figure in report_figures:
             raw_pdf_path = figure.get("pdf_path")
             if not raw_pdf_path:
@@ -199,6 +205,13 @@ class ReportHtmlMixin:
             desc_html = ""
             if description:
                 desc_html = f'<p><em>{html_module.escape(description)}</em></p>'
+            legacy_html = ""
+            if Path(fig_name).stem in legacy_figure_stems:
+                legacy_html = (
+                    '<p class="artifact-provenance legacy-unreviewed">'
+                    "Legacy unregistered artifact; no publication review record is available."
+                    "</p>"
+                )
 
             # Interpretation block
             interp_html = ""
@@ -233,6 +246,7 @@ class ReportHtmlMixin:
                     </div>
                     <div class="figure-caption">
                         <h4>{html_module.escape(display_name)}</h4>
+                        {legacy_html}
                         {desc_html}
                         {interp_html}
                         <div class="figure-actions">
@@ -487,6 +501,8 @@ class ReportHtmlMixin:
         <div class="meta">Generated: {generated_at}</div>
     </div>
     <div class="content">
+        {render_report_status_banner_html(report)}
+        {render_quality_disclosures_html(report)}
         <div class="toc">
             <h3>Table of Contents</h3>
             <ul>{"".join(toc_items)}</ul>
@@ -868,6 +884,9 @@ class ReportHtmlMixin:
         if not workspace_path:
             return figure_map
 
+        if state is not None:
+            ensure_legacy_artifact_inventory(state, workspace_path)
+
         eligible_figures = eligible_artifacts(
             state.publication_figures if state else []
         )
@@ -891,6 +910,26 @@ class ReportHtmlMixin:
                 getattr(state, "invalidated_artifact_stems", None) if state else None
             ),
         )
+        admitted_candidates = prepare_discovered_figures(
+            discover_figures_in_workspace(workspace_path),
+            state.publication_figures if state else [],
+            invalidated_stems=(
+                getattr(state, "invalidated_artifact_stems", None) if state else None
+            ),
+            report_only=True,
+            allow_unregistered_diagnostics=False,
+            registry_version=(
+                getattr(state, "artifact_registry_version", None) if state else None
+            ),
+            legacy_artifacts=(
+                getattr(state, "legacy_artifacts", None) if state else None
+            ),
+        )
+        admitted_by_stem = {
+            Path(str(candidate.get("path") or "")).stem: candidate
+            for candidate in admitted_candidates
+            if candidate.get("path")
+        }
 
         for rec in records:
             for fname in rec.get("saved_figure_filenames", []):
@@ -913,19 +952,11 @@ class ReportHtmlMixin:
                         # that legacy fallback; a branch may only use a figure
                         # backed by one of its filtered PublicationFigure records.
                         continue
-                    resolved = resolve_figure_in_workspace(
-                        fname, workspace_path, seen_stems
+                    admitted = admitted_by_stem.get(requested_stem)
+                    resolved = (
+                        Path(str(admitted["path"]))
+                        if admitted is not None else None
                     )
-                    if (
-                        resolved is not None
-                        and image_file_sha256(
-                            resolved,
-                            min_bytes=1,
-                            min_width=MIN_ARCHIVAL_PREVIEW_WIDTH,
-                            min_height=MIN_ARCHIVAL_PREVIEW_HEIGHT,
-                        ) is None
-                    ):
-                        resolved = None
                 if resolved is not None:
                     try:
                         rel_dirs = resolved.relative_to(workspace_path).parts[:-1]
@@ -978,15 +1009,7 @@ class ReportHtmlMixin:
         # annotation-validation figures, without letting a stale/rejected record
         # return through its on-disk file. Unregistered validation diagnostics
         # remain annotation-context-only rather than entering this archival report.
-        discovered = prepare_discovered_figures(
-            discover_figures_in_workspace(workspace_path),
-            state.publication_figures if state else [],
-            invalidated_stems=(
-                getattr(state, "invalidated_artifact_stems", None) if state else None
-            ),
-            report_only=True,
-            allow_unregistered_diagnostics=False,
-        )
+        discovered = admitted_candidates
         seen_stems = {Path(f).stem for f in figure_map}
         for candidate in discovered:
             if strict_lineage and not candidate.get("is_publication", False):

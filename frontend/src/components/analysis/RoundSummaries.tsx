@@ -10,7 +10,7 @@ import {
 } from 'lucide-react'
 import type { Session } from '../../stores/appStore'
 import type { RoundSummary } from '../../types'
-import { roundKey } from '../../utils/roundKey'
+import { resultIdentityKey } from '../../utils/roundKey'
 
 interface RoundSummariesProps {
   roundSummaries: RoundSummary[]
@@ -62,7 +62,7 @@ export function RoundSummaries({
           <div className="space-y-3">
             {roundSummaries.map((round) => (
               <div
-                key={roundKey(round.phase, round.round)}
+                key={resultIdentityKey(round)}
                 className={`border rounded-xl overflow-hidden transition-all ${
                   round.status === 'waiting_input'
                     ? 'border-amber-300 bg-amber-50'
@@ -72,9 +72,9 @@ export function RoundSummaries({
                 {/* Round Header */}
                 <button
                   onClick={() => setExpandedRound(
-                    expandedRound === roundKey(round.phase, round.round)
+                    expandedRound === resultIdentityKey(round)
                       ? null
-                      : roundKey(round.phase, round.round)
+                      : resultIdentityKey(round)
                   )}
                   className="w-full flex items-center justify-between p-4 text-left hover:bg-slate-50 transition-colors"
                 >
@@ -96,7 +96,7 @@ export function RoundSummaries({
                       {(round.summary || '').substring(0, 80)}...
                     </span>
                   </div>
-                  {expandedRound === roundKey(round.phase, round.round) ? (
+                  {expandedRound === resultIdentityKey(round) ? (
                     <ChevronUp className="w-5 h-5 text-slate-400" />
                   ) : (
                     <ChevronDown className="w-5 h-5 text-slate-400" />
@@ -104,7 +104,7 @@ export function RoundSummaries({
                 </button>
 
                 {/* Round Details */}
-                {expandedRound === roundKey(round.phase, round.round) && (
+                {expandedRound === resultIdentityKey(round) && (
                   <div className="px-4 pb-4 border-t border-slate-200">
                     {/* Summary */}
                     <div className="mt-3">

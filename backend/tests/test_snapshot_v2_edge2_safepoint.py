@@ -607,21 +607,59 @@ async def test_report_generation_closes_its_workflow(monkeypatch, raises):
             if raises:
                 raise RuntimeError("report generation blew up")
 
-        async def close(self):
+        async def close(self, *, save_runtime=True):
             closed.append(True)
             self._db_conn = None
 
     workflow = _StubWorkflow()
 
+    session_id = "sess-report-close"
+    state = MagicMock()
+
     async def _fake_build(session_id, **_kw):
-        return workflow, MagicMock()
+        return workflow, state
 
     monkeypatch.setattr(workflow_runner, "_build_workflow_for_session", _fake_build)
-
-    await workflow_runner._run_report_generation("sess-report-close")
+    workflow_runner.sessions[session_id] = state
+    try:
+        await workflow_runner._run_report_generation(session_id)
+    finally:
+        workflow_runner.sessions.pop(session_id, None)
+        workflow_runner.report_workflows.pop(session_id, None)
 
     assert closed == [True], (
         "the report-only runner leaked its workflow: the aiosqlite WAL "
         "connection, the LLM clients and the settings provider stay open"
     )
     assert workflow._db_conn is None
+
+
+@pytest.mark.asyncio
+async def test_report_generation_retains_incomplete_workflow_for_deletion(
+    monkeypatch,
+):
+    from backend.services import workflow_runner
+
+    session_id = "sess-report-close-incomplete"
+    state = MagicMock()
+
+    class _StubWorkflow:
+        async def generate_report(self, _state, _thread_id):
+            return None
+
+        async def close(self, *, save_runtime=True):
+            return False
+
+    workflow = _StubWorkflow()
+
+    async def _fake_build(_session_id, **_kw):
+        return workflow, state
+
+    monkeypatch.setattr(workflow_runner, "_build_workflow_for_session", _fake_build)
+    workflow_runner.sessions[session_id] = state
+    try:
+        await workflow_runner._run_report_generation(session_id)
+        assert workflow_runner.report_workflows[session_id] is workflow
+    finally:
+        workflow_runner.sessions.pop(session_id, None)
+        workflow_runner.report_workflows.pop(session_id, None)

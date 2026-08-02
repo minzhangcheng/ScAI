@@ -39,7 +39,13 @@ from backend.state import (
 )
 from backend.utils.auth import require_session_ownership
 from backend.utils.blob_store import inline_blobs
-from backend.utils.files import slugify_session_name, validate_path_within, validate_session_id, temp_file_on_error
+from backend.utils.files import (
+    legacy_session_state_paths,
+    slugify_session_name,
+    temp_file_on_error,
+    validate_path_within,
+    validate_session_id,
+)
 from backend.utils.secret_redaction import ENDPOINT_FIELD_NAMES, strip_analysis_state_secrets
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
@@ -248,7 +254,7 @@ def _add_states_to_tar(tf, session_id: str, include_runtime: bool = False):
             if sf.is_file():
                 _add(sf)
     # Legacy fallback (flat STATE_DIR layout)
-    for sf in sorted(STATE_DIR.glob(f"{session_id}*")):
+    for sf in legacy_session_state_paths(STATE_DIR, session_id):
         if sf.is_file():
             _add(sf)
 

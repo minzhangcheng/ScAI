@@ -22,6 +22,7 @@ from backend.services.report.figure_discovery import discover_figures_in_workspa
 from .shared import (
     AnalysisStep,
     CodeExecution,
+    compact_traceback,
     code_is_statically_unsafe,
     execution_supports_evidence,
     truncate_for_llm,
@@ -350,7 +351,7 @@ class SupplementaryMixin:
                 output = truncate_for_llm(getattr(exec_result, "output", "") or "")
                 error = getattr(exec_result, "error", None)
                 if error:
-                    error = truncate_for_llm(error)
+                    error = compact_traceback(error, max_chars=3000)
                 exec_figures = list(getattr(exec_result, "figures", None) or [])
 
                 record = CodeExecution(
@@ -370,7 +371,7 @@ class SupplementaryMixin:
                 analysis_log.append(AnalysisStep(
                     step_number=len(analysis_log) + 1, step_type="execute_code",
                     code=code, code_output=output[-3000:],
-                    code_error=error[:3000] if error else None,
+                    code_error=error if error else None,
                     code_description=f"Supplementary execution {len(produced)}",
                     code_step_type="technical", round_number=round_number,
                 ))
@@ -519,8 +520,17 @@ class SupplementaryMixin:
             self._interrupt_kernel_after_timeout()
             return _envelope("partial", "Supplementary executor timed out.", ["timeout"])
         except Exception as e:
-            logger.exception(f"[{getattr(self, 'session_id', '?')}] supplementary executor failed")
-            return _envelope("failed", f"Supplementary executor error: {e}", [str(e)])
+            compact_error = compact_traceback(str(e), max_chars=3000)
+            logger.error(
+                "[%s] supplementary executor failed: %s",
+                getattr(self, "session_id", "?"),
+                compact_error,
+            )
+            return _envelope(
+                "failed",
+                f"Supplementary executor error: {compact_error}",
+                [compact_error],
+            )
 
     def _interrupt_kernel_after_timeout(self) -> None:
         """Best-effort kernel interrupt when the pass ceiling fires mid-execution.
@@ -539,9 +549,10 @@ class SupplementaryMixin:
                 f"supplementary pass timeout"
             )
         except Exception as e:
+            compact_error = compact_traceback(str(e), max_chars=1000)
             logger.warning(
                 f"[{getattr(self, 'session_id', '?')}] could not interrupt kernel "
-                f"after supplementary timeout: {e}"
+                f"after supplementary timeout: {compact_error}"
             )
 
     @staticmethod

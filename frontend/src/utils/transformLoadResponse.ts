@@ -17,6 +17,7 @@ import type {
   LlmFailureInfo,
 } from '../stores/appStore'
 import type { SnapshotTransactionRecord } from '../types/snapshotV2'
+import { resultIdentityKey } from './roundKey'
 
 function opt<K extends string, V>(key: K, value: V | null | undefined): Partial<Record<K, V>> {
   return value != null ? { [key]: value } as Partial<Record<K, V>> : {}
@@ -34,18 +35,52 @@ function hasInterventionTarget(
 }
 
 export function transformRoundResults(raw: (RawRoundResult | null)[] | undefined): RoundResult[] {
-  return (raw || []).map((r) => {
+  return (raw || []).map((r): RoundResult | null => {
     if (!r) return null
+    const round = r.round ?? 0
+    const phase: RoundResult['phase'] = (
+      r.phase === 'innovation' || r.phase === 'integration' || r.phase === 'exploration'
+        ? r.phase
+        : 'exploration'
+    )
+    const lineageId = r.lineage_id || 'main'
+    const directionKey = r.direction_key || r.direction || ''
     return {
-      round: r.round ?? 0,
+      round,
       summary: r.pi_summary || r.summary || '',
-      phase: r.phase || '',
+      phase,
       pathologyFindings: Array.isArray(r.pathology_findings) ? r.pathology_findings : [],
       bioinformaticsFindings: Array.isArray(r.bioinformatics_findings) ? r.bioinformatics_findings : [],
       biochemistryFindings: Array.isArray(r.biochemistry_findings) ? r.biochemistry_findings : [],
       literatureFindings: Array.isArray(r.literature_findings) ? r.literature_findings : [],
       crossModalCandidates: Array.isArray(r.cross_modal_candidates) ? r.cross_modal_candidates : [],
       integrationCandidates: Array.isArray(r.integration_candidates) ? r.integration_candidates : [],
+      roundStatus: r.round_status || 'completed',
+      evidenceStatus: r.evidence_status || 'empty',
+      ...(r.direction_coverage_eligible != null
+        ? { directionCoverageEligible: r.direction_coverage_eligible }
+        : {}),
+      ...(r.bioinformatics_evidence_verified != null
+        ? { bioinformaticsEvidenceVerified: r.bioinformatics_evidence_verified }
+        : {}),
+      evidenceExecutionIds: Array.isArray(r.evidence_execution_ids) ? r.evidence_execution_ids : [],
+      evidenceNotes: Array.isArray(r.evidence_notes) ? r.evidence_notes : [],
+      evidenceGateFindings: Array.isArray(r.evidence_gate_findings) ? r.evidence_gate_findings : [],
+      evidenceGateDegraded: r.evidence_gate_degraded === true,
+      lineageId,
+      ...(r.branch_id ? { branchId: r.branch_id } : {}),
+      ...(r.branch_label ? { branchLabel: r.branch_label } : {}),
+      ...(r.restored_from_snapshot_id
+        ? { restoredFromSnapshotId: r.restored_from_snapshot_id }
+        : {}),
+      directionKey,
+      resultIdentityKey: resultIdentityKey({
+        result_identity_key: r.result_identity_key,
+        lineageId,
+        phase,
+        round,
+        directionKey,
+      }),
       ...(r.integration_report_summary ? { integrationReportSummary: r.integration_report_summary } : {}),
     }
   }).filter((r): r is RoundResult => r !== null)

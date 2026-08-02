@@ -8,6 +8,9 @@ echo ""
 # Get the script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PID_FILE="$SCRIPT_DIR/.scai.pid"
+APP_PORT=3000
+BACKEND_PORT=8000
+MODE="unknown"
 
 # Function to kill process and its children
 kill_tree() {
@@ -32,6 +35,11 @@ if [ -f "$PID_FILE" ]; then
     echo "Reading PID file..."
     BACKEND_PID="$(grep -E '^BACKEND_PID=' "$PID_FILE" | head -1 | cut -d= -f2 | tr -dc '0-9')"
     FRONTEND_PID="$(grep -E '^FRONTEND_PID=' "$PID_FILE" | head -1 | cut -d= -f2 | tr -dc '0-9')"
+    APP_PORT="$(grep -E '^APP_PORT=' "$PID_FILE" | head -1 | cut -d= -f2 | tr -dc '0-9')"
+    BACKEND_PORT="$(grep -E '^BACKEND_PORT=' "$PID_FILE" | head -1 | cut -d= -f2 | tr -dc '0-9')"
+    MODE="$(grep -E '^MODE=(dev|prod)$' "$PID_FILE" | head -1 | cut -d= -f2)"
+    APP_PORT="${APP_PORT:-3000}"
+    BACKEND_PORT="${BACKEND_PORT:-8000}"
 
     if [ -n "$BACKEND_PID" ]; then
         echo "   Stopping backend (PID: $BACKEND_PID)..."
@@ -60,8 +68,8 @@ if [ -n "$UVICORN_PIDS" ]; then
     done
 fi
 
-# Kill vite dev server on port 3000
-VITE_PIDS=$(pgrep -f "vite.*--port 3000" 2>/dev/null)
+# Kill the development Vite server on the recorded application port.
+VITE_PIDS=$(pgrep -f "vite.*--port $APP_PORT" 2>/dev/null)
 if [ -n "$VITE_PIDS" ]; then
     echo "   Stopping vite processes: $VITE_PIDS"
     for pid in $VITE_PIDS; do
@@ -82,22 +90,21 @@ fi
 echo ""
 echo "Checking port usage..."
 
-# Check port 8000 (backend)
-PORT_8000_PID=$(lsof -ti:8000 2>/dev/null)
-if [ -n "$PORT_8000_PID" ]; then
-    echo "   Releasing port 8000 (PID: $PORT_8000_PID)"
-    kill $PORT_8000_PID 2>/dev/null
-    sleep 1
-    kill -9 $PORT_8000_PID 2>/dev/null
-fi
+release_port() {
+    local port=$1
+    local port_pids
+    port_pids=$(lsof -ti:"$port" 2>/dev/null)
+    if [ -n "$port_pids" ]; then
+        echo "   Releasing port $port (PID: $port_pids)"
+        kill $port_pids 2>/dev/null
+        sleep 1
+        kill -9 $port_pids 2>/dev/null
+    fi
+}
 
-# Check port 3000 (frontend)
-PORT_3000_PID=$(lsof -ti:3000 2>/dev/null)
-if [ -n "$PORT_3000_PID" ]; then
-    echo "   Releasing port 3000 (PID: $PORT_3000_PID)"
-    kill $PORT_3000_PID 2>/dev/null
-    sleep 1
-    kill -9 $PORT_3000_PID 2>/dev/null
+release_port "$APP_PORT"
+if [ "$BACKEND_PORT" != "$APP_PORT" ]; then
+    release_port "$BACKEND_PORT"
 fi
 
 echo ""
@@ -106,9 +113,10 @@ echo ""
 
 # Verify
 sleep 1
-if lsof -ti:8000 &>/dev/null || lsof -ti:3000 &>/dev/null; then
+if lsof -ti:"$APP_PORT" &>/dev/null || \
+   { [ "$BACKEND_PORT" != "$APP_PORT" ] && lsof -ti:"$BACKEND_PORT" &>/dev/null; }; then
     echo "Warning: Some processes may still be running"
-    echo "   You can check manually: lsof -i:8000 and lsof -i:3000"
+    echo "   You can check manually: lsof -i:$APP_PORT and lsof -i:$BACKEND_PORT"
 else
     echo "All services stopped successfully"
 fi

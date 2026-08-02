@@ -90,7 +90,6 @@ from .reports_parts.publication import (  # noqa: F401
     get_graphic_abstract,
     get_publication_figures,
     get_publication_tables,
-    _find_workspace_figure,
     download_publication_figure_pdf,
     download_publication_figure_png,
     get_integrated_report,
@@ -204,7 +203,6 @@ from .reports_parts.publication import (  # noqa: F401
 # ============================================
 # Code History and Report Summary
 # ============================================
-
 
 
 

@@ -6,6 +6,27 @@ from backend.agents.bioinformatics_agent import _build_exec_autosave_wrapper
 from backend.utils.sandbox import validate_code_safety
 
 
+@pytest.fixture(autouse=True)
+def _restore_host_pyplot_functions():
+    """Kernel wrapper tests must not leave their no-op stubs in pytest."""
+    import matplotlib.pyplot as pyplot
+
+    real_close = pyplot.close
+    while getattr(real_close, "_scai_noop", False):
+        real_close = getattr(real_close, "_scai_prev", real_close)
+    real_show = pyplot.show
+    while getattr(real_show, "_scai_noop", False):
+        real_show = getattr(real_show, "_scai_prev", real_show)
+    pyplot.close = real_close
+    pyplot.show = real_show
+    try:
+        yield
+    finally:
+        pyplot.close = real_close
+        pyplot.show = real_show
+        real_close("all")
+
+
 def test_scientific_stack_is_pinned_to_bounded_compatible_versions():
     # decoupler is installed with --no-deps from requirements-nodeps.txt: its
     # own metadata caps numba below the pinned 0.61.2, so leaving it in the

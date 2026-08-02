@@ -3,7 +3,7 @@
 """
 Data models for the Multi-Agent Single-Cell Analysis System
 """
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 import uuid
@@ -23,7 +23,9 @@ class ClusterAnnotation(BaseModel):
     key_markers: List[str] = Field(default_factory=list)
     confidence: str = "low"  # "high" / "medium" / "low"
     evidence: str = ""
-    n_cells: int = 0  # Number of cells in this cluster
+    n_cells: int = 0  # Number of cells in this cluster; see n_cells_known.
+    n_cells_known: bool = False
+    n_cells_source: str = "unknown"
     group_proportions: Dict[str, float] = Field(default_factory=dict)
     alternative_cell_types: List[str] = Field(default_factory=list)  # Other possible cell types
     low_confidence_reason: str = ""  # Why confidence is low/medium
@@ -33,6 +35,17 @@ class ClusterAnnotation(BaseModel):
     requires_reclustering: bool = False
     reclustering_reason: str = ""
     suggested_reclustering_scope: Optional[str] = None  # targeted_subcluster | higher_resolution_review | rerun_stage1_clustering
+
+    @model_validator(mode="after")
+    def _preserve_known_nonzero_counts(self):
+        # Old snapshots predate the explicit known/source fields.  A positive
+        # persisted value is unambiguous; zero is not (it was also the old default),
+        # so zero remains unknown unless a current producer says otherwise.
+        if self.n_cells > 0 and not self.n_cells_known:
+            self.n_cells_known = True
+            if self.n_cells_source == "unknown":
+                self.n_cells_source = "legacy_record"
+        return self
 
 class AnnotationConfirmationState(BaseModel):
     """State for cell annotation confirmation pause during exploration phase"""
@@ -87,6 +100,17 @@ class AnnotationClusterEntry(BaseModel):
     group_proportions: Dict[str, float] = Field(default_factory=dict)
     alternative_cell_types: List[str] = Field(default_factory=list)
     low_confidence_reason: str = ""
+    n_cells: int = 0
+    n_cells_known: bool = False
+    n_cells_source: str = "unknown"
+
+    @model_validator(mode="after")
+    def _preserve_known_nonzero_counts(self):
+        if self.n_cells > 0 and not self.n_cells_known:
+            self.n_cells_known = True
+            if self.n_cells_source == "unknown":
+                self.n_cells_source = "legacy_record"
+        return self
 
 class AnnotationRecord(BaseModel):
     """Immutable snapshot of the annotation gate at confirm/auto-confirm time."""
@@ -99,6 +123,9 @@ class AnnotationRecord(BaseModel):
     clusters: List[AnnotationClusterEntry] = Field(default_factory=list)
     supplementary_requests: List[str] = Field(default_factory=list)
     auto_confirmed: bool = False
+    validation_status: Optional[str] = None
+    validation_summary: Optional[str] = None
+    validation_text_summary: Optional[str] = None
 
 class AgentRoundCache(BaseModel):
     """Per-round agent-result cache for snapshot-restore idempotency.

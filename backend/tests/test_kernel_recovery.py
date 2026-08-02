@@ -61,12 +61,14 @@ async def test_successful_restart_clears_kernel_dead():
 
 
 @pytest.mark.asyncio
-async def test_restore_failure_keeps_kernel_alive():
+async def test_restore_failure_discards_partial_namespace():
     sb = _bare_sandbox()
     sb._restore_session = AsyncMock(side_effect=RuntimeError("corrupt dill dump"))
     await sb._restart_kernel()
-    # Kernel itself restarted fine; only variable restore failed -> not dead.
-    assert sb._kernel_dead is False
+    assert sb._kernel_dead is True
+    assert sb._initialized is False
+    assert sb.km is None
+    assert sb.kc is None
 
 
 @pytest.mark.asyncio
@@ -74,7 +76,10 @@ async def test_kernel_restart_failure_sets_dead():
     sb = _bare_sandbox()
     sb._wait_for_ready = AsyncMock(side_effect=RuntimeError("kernel never ready"))
     await sb._restart_kernel()
-    assert sb._kernel_dead is True  # genuine kernel-level failure
+    assert sb._kernel_dead is True
+    assert sb._initialized is False
+    assert sb.km is None
+    assert sb.kc is None
 
 
 @pytest.mark.asyncio

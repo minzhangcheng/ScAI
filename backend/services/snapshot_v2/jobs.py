@@ -492,14 +492,44 @@ class RestoreJobManager:
         )
 
         owner_token = f"restore:{tx_id}"
-        reservation = await self._safe_point.request_safe_point_when_available(
-            session_id,
-            owner_token,
-            timeout_seconds=min(
-                float(timeout_seconds), SAFE_POINT_RESERVATION_TIMEOUT_SECONDS
-            ),
+        from backend.services.session_lifecycle import (
+            SessionGoneError,
+            establish_snapshot_operation,
         )
-        if reservation is None:
+        from backend.state import detailed_report_tasks, state_lock
+
+        # Detailed-report generation has no cooperative snapshot boundary and
+        # commonly outlives the restore timeout.  Fail immediately instead of
+        # publishing a restore job that can only sit in waiting_safe_point.  The
+        # shared reservation barrier makes this check atomic with every workflow
+        # producer publication.  Reservation itself is non-blocking: waiting for
+        # a foreign hold while retaining the lifecycle lock would deadlock a
+        # capture that needs the same lock to persist before releasing its hold.
+        async def _validate_report_owner() -> None:
+            async with state_lock:
+                detailed_task = detailed_report_tasks.get(session_id)
+                if detailed_task is not None and not detailed_task.done():
+                    raise SnapshotTransactionError(
+                        "SESSION_BUSY",
+                        "Detailed report generation is active for this session",
+                        details={"session_id": session_id},
+                    )
+
+        try:
+            reservation = await establish_snapshot_operation(
+                session_id,
+                lambda: self._safe_point.request_safe_point(
+                    session_id, owner_token,
+                ),
+                validate=_validate_report_owner,
+            )
+        except SessionGoneError as exc:
+            raise SnapshotTransactionError(
+                "SESSION_GONE",
+                "Session was deleted before restore reservation",
+                details={"session_id": session_id},
+            ) from exc
+        if reservation is None or reservation is False:
             raise SnapshotTransactionError(
                 "SAFE_POINT_BUSY",
                 "Another snapshot or restore operation owns the session safe point",
@@ -822,27 +852,18 @@ class RestoreJobManager:
         record: SnapshotTransactionRecord,
         elapsed: float = 0.0,
     ) -> None:
-        from backend.state import websockets
+        from backend.utils.websocket_delivery import send_analysis_json
 
-        ws = websockets.get(record.session_id)
-        if ws is None:
-            return
-        try:
-            payload = record.model_dump(mode="json")
-            payload["elapsed_seconds"] = round(elapsed, 1)
-            payload["active_sandbox_step"] = 0
-            payload["timeout_seconds"] = 300
+        payload = record.model_dump(mode="json")
+        payload["elapsed_seconds"] = round(elapsed, 1)
+        payload["active_sandbox_step"] = 0
+        payload["timeout_seconds"] = 300
 
-            await ws.send_json({
-                "type": "state_sync",
-                "change_type": "snapshot_transaction",
-                "snapshot_transaction": payload,
-            })
-        except Exception:
-            logger.debug(
-                "[%s] Failed to emit snapshot_transaction state sync",
-                record.session_id,
-            )
+        await send_analysis_json(record.session_id, {
+            "type": "state_sync",
+            "change_type": "snapshot_transaction",
+            "snapshot_transaction": payload,
+        })
 
     def _on_task_done(self, tx_id: str) -> None:
         """Release only the task reference; keep handle for journal queries."""

@@ -2,7 +2,6 @@
 import asyncio
 import logging
 import os
-import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -75,6 +74,7 @@ async def start_session(request: Request, body: StartRequest):
     import uuid
     session_id = str(uuid.uuid4())
     from backend.models.schemas import AnalysisState
+    from backend.services.report.artifacts import ARTIFACT_REGISTRY_VERSION
     state = AnalysisState(
         id=session_id,
         name=body.session_name or f"Analysis-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
@@ -82,11 +82,28 @@ async def start_session(request: Request, body: StartRequest):
         initial_instruction=body.instruction,
         status=TaskStatus.PENDING,
         round_wait_seconds=body.round_wait_seconds,
+        artifact_registry_version=ARTIFACT_REGISTRY_VERSION,
     )
 
+    from backend.services.session_lifecycle import register_new_session_generation
+    from backend.services.session_deletion import delete_session_generation
     from backend.services.session_store import update_session_cache as _update_session_cache
-    await _update_session_cache(session_id, state)
-    await async_save_session(session_id, state)
+    await register_new_session_generation(state)
+    try:
+        await _update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
+    except BaseException:
+        # A generated identifier is never recycled after partial creation.
+        # Tombstoning also removes any cache/disk fragments already produced.
+        try:
+            await asyncio.shield(
+                delete_session_generation(session_id, state, user_id)
+            )
+        except Exception:
+            logger.exception(
+                "Failed to clean up partially-created session %s", session_id
+            )
+        raise
 
     return APIResponse(
         success=True,
@@ -147,85 +164,54 @@ async def delete_session(session_id: str, request: Request):
     """Delete a session completely"""
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
-    await require_session_ownership(session_id=session_id, user_id=user_id)
+    from backend.services.session_lifecycle import tombstone_visible_to_owner
+    from backend.services.session_deletion import (
+        SessionProducerStopError,
+        cleanup_tombstoned_generation,
+        delete_session_generation,
+    )
 
-    async with state_lock:
-        if session_id in workflows or session_id in initializing_sessions:
-            raise HTTPException(status_code=409, detail="Cannot delete a running session. Stop the analysis first.")
-        sessions.pop(session_id, None)
-        session_access_times.pop(session_id, None)
-        last_save_times.pop(session_id, None)
-        from backend.state import release_session_lock_slot
-        release_session_lock_slot(session_id)
-        from backend.routes.reports import clear_detailed_report_cache, clear_generation_pending
-        clear_detailed_report_cache(session_id)
-        clear_generation_pending(session_id)
-
-    def _delete_from_disk():
-        session_dir = get_session_dir(session_id)
-        if session_dir.exists() and session_dir.is_dir():
-            shutil.rmtree(session_dir)
-        legacy_file = SESSION_DIR / f"{session_id}.json"
-        if legacy_file.is_file():
-            legacy_file.unlink()
-        for legacy_dir in [UPLOAD_DIR / session_id, WORKSPACE_DIR / session_id, REPORTS_DIR / session_id]:
-            if legacy_dir.exists():
-                shutil.rmtree(legacy_dir)
-        for state_file in STATE_DIR.glob(f"{session_id}*"):
-            state_file.unlink()
-
-    await asyncio.to_thread(_delete_from_disk)
+    if tombstone_visible_to_owner(session_id, user_id):
+        stats = await cleanup_tombstoned_generation(session_id, user_id)
+        pending = int(stats.get("pending_producers") or 0)
+        return APIResponse(
+            success=pending == 0,
+            message=(
+                "Session deletion cleanup is still waiting for producers"
+                if pending
+                else "Session deletion cleanup completed"
+            ),
+            data=stats,
+        )
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    try:
+        await delete_session_generation(session_id, state, user_id)
+    except SessionProducerStopError:
+        return APIResponse(
+            success=False,
+            message=(
+                "Session is deleted and remains inaccessible; physical cleanup "
+                "will retry after background producers stop"
+            ),
+            data={"pending_cleanup": True},
+        )
     return APIResponse(success=True, message="Session deleted")
 
 
 @router.post("/session/{session_id}/ensure")
 async def ensure_session(session_id: str, request: Request, body: StartRequest):
-    """Ensure session exists, create if not found"""
+    """Ensure a persisted session exists; never recreate a client-supplied ID."""
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
-
-    state = sessions.get(session_id)
-    if state is not None:
-        if user_id and state.user_id and state.user_id != user_id:
-            raise HTTPException(status_code=404, detail="Session not found")
-        return APIResponse(
-            success=True, message="Session exists",
-            session_id=session_id, data={"name": state.name, "created": False}
-        )
-
-    existing = await ensure_session_loaded(session_id)
-    if existing:
-        if user_id and existing.user_id and existing.user_id != user_id:
-            raise HTTPException(status_code=404, detail="Session not found")
-        return APIResponse(
-            success=True, message="Session loaded from disk",
-            session_id=session_id, data={"name": existing.name, "created": False}
-        )
-
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Not authenticated", headers={"WWW-Authenticate": "Bearer"})
-
-    from backend.models.schemas import AnalysisState
-    state = AnalysisState(
-        id=session_id,
-        name=body.session_name or f"Analysis-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
-        initial_instruction=body.instruction,
-        status=TaskStatus.PENDING,
+    existing = await require_session_ownership(
+        session_id=session_id,
         user_id=user_id,
-        round_wait_seconds=body.round_wait_seconds,
     )
-
-    from backend.services.session_store import update_session_cache as _update_session_cache
-    await _update_session_cache(session_id, state)
-    await async_save_session(session_id, state)
-
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.info(f"Recreated session {session_id} after server restart")
-
     return APIResponse(
-        success=True, message="Session recreated",
-        session_id=session_id, data={"name": state.name, "created": True}
+        success=True,
+        message="Session exists",
+        session_id=session_id,
+        data={"name": existing.name, "created": False},
     )
 
 

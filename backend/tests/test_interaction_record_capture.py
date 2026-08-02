@@ -74,10 +74,14 @@ def test_build_annotation_record_original_vs_final():
     st.annotation_state = AnnotationConfirmationState(
         organism="mouse", tissue="heart", proportion_dimension="sample",
         proportion_group_labels=["A", "B"],
+        validation_status="partial",
+        validation_summary="Cluster 0 remains uncertain.",
         cluster_annotations=[
             ClusterAnnotation(cluster_id="0", cell_type="Fibroblast",
                               user_override="Myofibroblast", confidence="medium",
-                              key_markers=["Col1a1"]),
+                              key_markers=["Col1a1"], n_cells=21,
+                              n_cells_known=True,
+                              n_cells_source="cluster_group_proportions"),
             ClusterAnnotation(cluster_id="1", cell_type="Cardiomyocyte",
                               confidence="high"),
         ],
@@ -92,6 +96,12 @@ def test_build_annotation_record_original_vs_final():
     assert rec.supplementary_requests == ["look at cluster 3"]
     assert rec.proportion_dimension == "sample"
     assert rec.auto_confirmed is False
+    assert rec.validation_status == "partial"
+    assert rec.validation_summary == "Cluster 0 remains uncertain."
+    assert rec.clusters[0].n_cells == 21
+    assert rec.clusters[0].n_cells_known is True
+    assert rec.clusters[0].n_cells_source == "cluster_group_proportions"
+    assert rec.clusters[1].n_cells_known is False
 
 
 def test_resolve_integration_gate_preserves_candidates_when_clear_gate_false():

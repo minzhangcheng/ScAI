@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import time
+from contextlib import asynccontextmanager
 from uuid import uuid4
 from urllib.parse import urlparse, urlunparse
 from typing import List, Dict, Any, Optional, AsyncGenerator, Union, Callable, Awaitable, Tuple
@@ -234,9 +235,14 @@ class OpenAICompatibleClient(
         self._responses_adapter: Optional[_ResponsesAdapter] = None
         self._anthropic_adapter: Optional[_AnthropicAdapter] = None
 
-        # H20: Idempotent-close guard. Set True on first close(); prevents
-        # double-free of the httpx.AsyncClient and its underlying connection pool.
+        # H20: Idempotent-close guard. Set only after both owned clients close;
+        # a transient failure must remain retryable by workflow cleanup.
         self._closed: bool = False
+        self._closing: bool = False
+        self._close_lock = asyncio.Lock()
+        self._active_requests = 0
+        self._requests_idle = asyncio.Event()
+        self._requests_idle.set()
 
     def __del__(self):
         if not getattr(self, '_closed', True):
@@ -257,15 +263,174 @@ class OpenAICompatibleClient(
             self._temp_cache_lock = asyncio.Lock()
         if getattr(self, "_toolchoice_cache_lock", None) is None:
             self._toolchoice_cache_lock = asyncio.Lock()
-        
-    async def close(self):
-        if self._closed:
+
+    def _ensure_lifecycle_state(self) -> None:
+        if not hasattr(self, "_closed"):
+            self._closed = False
+        if not hasattr(self, "_active_requests"):
+            self._active_requests = 0
+        if getattr(self, "_requests_idle", None) is None:
+            self._requests_idle = asyncio.Event()
+            if self._active_requests == 0:
+                self._requests_idle.set()
+        if not hasattr(self, "_closing"):
+            self._closing = False
+
+    def _begin_request(self) -> None:
+        """Register one public client call before its first await."""
+        self._ensure_lifecycle_state()
+        if self._closing or self._closed:
+            raise RuntimeError("LLM client is closing")
+        self._active_requests += 1
+        self._requests_idle.clear()
+
+    def _end_request(self) -> None:
+        """Release one public client call and wake a waiting close()."""
+        self._ensure_lifecycle_state()
+        if self._active_requests <= 0:
             return
-        self._closed = True
+        self._active_requests -= 1
+        if self._active_requests == 0:
+            self._requests_idle.set()
+
+    @asynccontextmanager
+    async def direct_request_scope(self):
+        """Protect one logical operation that uses the owned transports directly.
+
+        Public chat methods register themselves automatically. Callers that need
+        the lower-level OpenAI SDK or shared HTTP client must keep this scope for
+        the entire logical operation, including retries, polling, and downloads.
+        """
+        self._begin_request()
         try:
-            await self.client.close()
+            yield self
         finally:
-            await self.http_client.aclose()
+            self._end_request()
+
+    async def chat(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        stream: bool = False,
+        timeout: Optional[float] = None,
+        max_retries: Optional[int] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> LLMResponse:
+        self._begin_request()
+        try:
+            return await ClientChatMixin.chat(
+                self,
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=stream,
+                timeout=timeout,
+                max_retries=max_retries,
+                tools=tools,
+            )
+        finally:
+            self._end_request()
+
+    async def chat_with_tools(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        tool_choice: Union[str, Dict[str, Any]] = "auto",
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+    ) -> LLMToolResponse:
+        self._begin_request()
+        try:
+            return await ClientChatMixin.chat_with_tools(
+                self,
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        finally:
+            self._end_request()
+
+    async def chat_stream(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+    ) -> AsyncGenerator[str, None]:
+        """Yield streamed chunks; callers that stop early must call ``aclose()``."""
+        self._begin_request()
+        try:
+            async for chunk in ClientStreamVisionMixin.chat_stream(
+                self,
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            ):
+                yield chunk
+        finally:
+            self._end_request()
+
+    async def chat_with_vision(
+        self,
+        model: str,
+        text_prompt: str,
+        images: List[str],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        request_timeout: Optional[float] = None,
+    ) -> LLMResponse:
+        self._begin_request()
+        try:
+            return await ClientStreamVisionMixin.chat_with_vision(
+                self,
+                model=model,
+                text_prompt=text_prompt,
+                images=images,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                request_timeout=request_timeout,
+            )
+        finally:
+            self._end_request()
+
+    async def close(self):
+        self._ensure_lifecycle_state()
+        close_lock = getattr(self, "_close_lock", None)
+        if close_lock is None:
+            close_lock = asyncio.Lock()
+            self._close_lock = close_lock
+        async with close_lock:
+            if self._closed:
+                return
+            # Prevent new calls, then let every call that already owns this
+            # client finish before its transport is closed. This covers both
+            # config hot-reload retirement and workflow teardown.
+            self._closing = True
+            await self._requests_idle.wait()
+
+            errors: list[BaseException] = []
+            try:
+                await self.client.close()
+            except BaseException as exc:
+                errors.append(exc)
+            try:
+                await self.http_client.aclose()
+            except BaseException as exc:
+                errors.append(exc)
+
+            if errors:
+                for extra in errors[1:]:
+                    logger.debug("Additional LLM client close failure: %s", extra)
+                raise errors[0]
+            self._closed = True
 
 
 class LLMManager:

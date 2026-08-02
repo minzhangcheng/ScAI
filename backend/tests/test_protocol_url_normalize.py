@@ -1,3 +1,5 @@
+import asyncio
+
 from backend.utils.llm_client import _openai_sdk_base_url, _anthropic_sdk_base_url
 
 
@@ -30,9 +32,12 @@ from backend.utils.llm_client import OpenAICompatibleClient, _route_protocol
 
 def test_client_sdk_base_url_normalized_for_explicit_responses():
     c = OpenAICompatibleClient(api_key="k", base_url="https://x/v1/responses", agent_name="t")
-    # SDK base_url must NOT contain the doubled /responses
-    assert "responses" not in str(c.client.base_url)
-    assert str(c.client.base_url).rstrip("/").endswith("/v1")
-    # but routing still sees the explicit endpoint via the ORIGINAL base_url
-    assert c.base_url == "https://x/v1/responses"
-    assert _route_protocol(c.base_url, "gpt-4o") == "responses"
+    try:
+        # SDK base_url must NOT contain the doubled /responses
+        assert "responses" not in str(c.client.base_url)
+        assert str(c.client.base_url).rstrip("/").endswith("/v1")
+        # but routing still sees the explicit endpoint via the ORIGINAL base_url
+        assert c.base_url == "https://x/v1/responses"
+        assert _route_protocol(c.base_url, "gpt-4o") == "responses"
+    finally:
+        asyncio.run(c.close())

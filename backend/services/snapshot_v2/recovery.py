@@ -684,6 +684,15 @@ def _recover_restore_envelope(
                 f"transaction {tx_id} lacks live verification proof",
             )
         restorer.verify_target_complete(journal)
+        if journal.get("runtime_restore_status") == "complete":
+            from backend.utils.runtime_apply import (
+                commit_runtime_persistence_metadata,
+            )
+
+            commit_runtime_persistence_metadata(
+                session_id,
+                source="snapshot_apply",
+            )
         restorer.remove_staging(journal)
         JournalStore(paths).remove(tx_id)
         recovered_txns.append(tx_id)
@@ -703,6 +712,15 @@ def _recover_restore_envelope(
                 )
             # Live contract gate: never drop APPLYING journal without verify.
             restorer.verify_target_complete(journal)
+            if journal.get("runtime_restore_status") == "complete":
+                from backend.utils.runtime_apply import (
+                    commit_runtime_persistence_metadata,
+                )
+
+                commit_runtime_persistence_metadata(
+                    session_id,
+                    source="snapshot_apply",
+                )
             restorer.remove_staging(journal)
             JournalStore(paths).remove(tx_id)
             recovered_txns.append(tx_id)
@@ -1104,7 +1122,7 @@ def _report_partial_session_state_rewrite(restorer, result) -> None:
 # -- Public recovery entry point ----------------------------------------------
 
 
-async def recover_snapshot_transactions(
+async def _recover_snapshot_transactions_unlocked(
     session_id: str,
     paths,
     session_dir: str,
@@ -1355,6 +1373,35 @@ async def recover_snapshot_transactions(
         )
 
     return result
+
+
+async def recover_snapshot_transactions(
+    session_id: str,
+    paths,
+    session_dir: str,
+    workspace_root: str,
+    states_root: str,
+) -> RecoveryResult:
+    """Recover snapshot journals under the shared lifecycle transaction lock."""
+    from backend.services.session_lifecycle import (
+        assert_session_generation_active,
+        lifecycle_file_lock,
+    )
+
+    # The recovery implementation deliberately has no suspension points. This
+    # lets one flock cover the complete journal decision and every live-file
+    # mutation without blocking unrelated event-loop work mid-transaction.
+    with lifecycle_file_lock(session_id):
+        assert_session_generation_active(session_id)
+        result = await _recover_snapshot_transactions_unlocked(
+            session_id=session_id,
+            paths=paths,
+            session_dir=session_dir,
+            workspace_root=workspace_root,
+            states_root=states_root,
+        )
+        assert_session_generation_active(session_id)
+        return result
 
 
 async def recover_for_all_sessions(paths_factory=None) -> RecoveryResult:

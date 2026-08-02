@@ -1,32 +1,12 @@
 """User data cleanup service: cascade delete sessions and files for a user."""
 import asyncio
-import shutil
 import logging
-from pathlib import Path
 
-from backend.config import STATE_DIR, SESSION_DIR
-from backend.services.session_store import list_saved_sessions
+from backend.services.session_store import list_saved_sessions, load_session_from_disk
 from backend.utils.auth import get_db
 from backend.state import sessions, state_lock
 
 logger = logging.getLogger(__name__)
-
-
-def _scan_and_unlink_state_files(state_dir: Path, sid: str) -> int:
-    """Return number of state files deleted for ``sid`` under ``state_dir``."""
-    if not state_dir.exists():
-        return 0
-    count = 0
-    for pattern in (f"{sid}.pkl", f"{sid}.json"):
-        for f in state_dir.glob(pattern):
-            try:
-                f.unlink()
-                count += 1
-                logger.info(f"Deleted state file: {f}")
-            except OSError as e:
-                logger.warning(f"Failed to delete state file {f}: {e}")
-    return count
-
 
 async def delete_user_data(user_id: str) -> dict:
     """
@@ -41,29 +21,41 @@ async def delete_user_data(user_id: str) -> dict:
     deleted_sessions = 0
     deleted_state_files = 0
 
-    # 1. Remove from in-memory sessions cache
+    # Build the complete owner set before deleting anything. Memory-only
+    # pending sessions matter just as much as persisted ones.
     async with state_lock:
-        to_evict = [sid for sid, state in sessions.items()
-                    if getattr(state, "user_id", None) == user_id]
-        for sid in to_evict:
-            sessions.pop(sid, None)
+        owned_states = {
+            sid: state
+            for sid, state in sessions.items()
+            if getattr(state, "user_id", None) == user_id
+        }
 
-    # 2. Iterate saved sessions and delete those belonging to this user
-    saved = list_saved_sessions()
+    saved = await asyncio.to_thread(list_saved_sessions)
     for sess in saved:
         if sess.get("user_id") != user_id:
             continue
         sid = sess.get("id", "")
-        session_dir = SESSION_DIR / sid
-        if session_dir.exists():
-            await asyncio.to_thread(shutil.rmtree, session_dir)
-            deleted_sessions += 1
-            logger.info(f"Deleted session directory: {session_dir}")
-        deleted_state_files += await asyncio.to_thread(
-            _scan_and_unlink_state_files, STATE_DIR, sid
-        )
+        if sid and sid not in owned_states:
+            loaded = await asyncio.to_thread(load_session_from_disk, sid)
+            if loaded is not None and loaded.user_id == user_id:
+                owned_states[sid] = loaded
 
-    # 3. Delete from database
+    # Every cascade uses the same tombstone-first generation boundary as both
+    # public delete APIs. ``force_stop`` cancels active workflow/report/chat
+    # producers only after the tombstone makes any late save fail closed.
+    from backend.services.session_deletion import delete_session_generation
+
+    for sid, state in owned_states.items():
+        stats = await delete_session_generation(
+            sid,
+            state,
+            user_id,
+            force_stop=True,
+        )
+        deleted_sessions += max(1, int(stats.get("deleted_sessions", 0)))
+        deleted_state_files += int(stats.get("deleted_state_files", 0))
+
+    # Delete credentials/user only after upload cleanup has used the DB.
     db = await get_db()
     await db.delete_api_keys_by_user(user_id)
     await db.delete_user_llm_config(user_id)

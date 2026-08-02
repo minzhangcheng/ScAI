@@ -1,4 +1,12 @@
-from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 from typing import Any, Literal, Annotated
 from pathlib import PurePosixPath
 
@@ -355,6 +363,32 @@ class SnapshotFailureRecord(BaseModel):
     allowed_actions: list[str] = Field(
         default_factory=lambda: ["retry", "manage", "terminate"]
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def sanitize_failure_strings(cls, value):
+        """Seal nested failure text before any record can be persisted."""
+        if not isinstance(value, dict):
+            return value
+        from backend.utils.error_parsing import sanitize_error_payload
+
+        payload = dict(value)
+        if "message" in payload:
+            payload["message"] = sanitize_error_payload(
+                str(payload["message"]), max_chars=3000
+            )
+        if "details" in payload:
+            payload["details"] = sanitize_error_payload(
+                payload["details"], max_chars=3000
+            )
+        return payload
+
+    @model_serializer(mode="wrap")
+    def sanitize_serialized_failure(self, handler):
+        """Re-sanitize after validation in case a nested dict was mutated."""
+        from backend.utils.error_parsing import sanitize_error_payload
+
+        return sanitize_error_payload(handler(self), max_chars=3000)
 
     @model_validator(mode="after")
     def derive_allowed_actions_from_code(self):

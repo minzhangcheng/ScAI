@@ -62,6 +62,35 @@ class _CaptureReporter(reporting_mod.ReportingMixin):
 
 
 @pytest.mark.asyncio
+async def test_registry_v1_graphic_abstract_excludes_disk_only_figure(
+    monkeypatch, tmp_path,
+):
+    workspace = tmp_path / "workspace"
+    disk_only = workspace / "figures" / "appeared_after_registry.jpg"
+    disk_only.parent.mkdir(parents=True)
+    write_valid_image(disk_only, min_bytes=2200)
+    setattr_facade(
+        monkeypatch,
+        "backend.workflow.reporting",
+        "get_session_workspace",
+        lambda _session_id: workspace,
+    )
+    reporter = _CaptureReporter(
+        "strict-session", [], publication_figures=[], pi_return=[]
+    )
+    reporter.analysis_state.artifact_registry_version = 1
+    reporter.analysis_state.legacy_artifacts = []
+    reporter.analysis_state.invalidated_artifact_stems = []
+
+    await reporter._assemble_brief_figures(
+        reporter.analysis_state, {"summary": "s"}
+    )
+
+    assert reporter.captured_selection_input == []
+    assert reporter.sent["integrated_report"]["figures"] == []
+
+
+@pytest.mark.asyncio
 async def test_nested_candidates_reach_selection_and_cap(monkeypatch, tmp_path):
     discovered = [
         {"name": f"umap_{i}", "type": "umap",
@@ -70,7 +99,10 @@ async def test_nested_candidates_reach_selection_and_cap(monkeypatch, tmp_path):
         for i in range(250)
     ]
     setattr_facade(
-        monkeypatch, "backend.workflow.reporting", "discover_workspace_figures", lambda sid: discovered
+        monkeypatch,
+        "backend.workflow.reporting",
+        "resolve_state_figure_candidates",
+        lambda *args, **kwargs: discovered,
     )
     setattr_facade(
         monkeypatch, "backend.workflow.reporting", "compress_image_to_base64", lambda *a, **k: None
@@ -98,7 +130,10 @@ async def test_real_pi_llm_failure_does_not_dump_all(monkeypatch, tmp_path):
         for i in range(160)
     ]
     setattr_facade(
-        monkeypatch, "backend.workflow.reporting", "discover_workspace_figures", lambda sid: discovered
+        monkeypatch,
+        "backend.workflow.reporting",
+        "resolve_state_figure_candidates",
+        lambda *args, **kwargs: discovered,
     )
     setattr_facade(
         monkeypatch, "backend.workflow.reporting", "compress_image_to_base64", lambda *a, **k: None
@@ -133,8 +168,8 @@ async def test_a_blank_on_disk_render_is_not_offered_for_download(monkeypatch, t
     has already overwritten the good file -- with no snapshot to roll back to
     while a blocking defect is outstanding. The record still holds the earlier
     render's base64, so the entry previewed one image and downloaded another.
-    Widening the predicate past ``is_report_eligible`` must not carry that with
-    it, and must not withhold the revised figure beside it either.
+    Gallery selection now shares the eligible logical-head resolver, so neither
+    the corrupt attempt nor another revision-requested audit record is offered.
     """
     blank = tmp_path / "abandoned.jpg"
     blank.write_bytes(b"\xff\xd8" + b"\x00" * 700)      # under the blank floor
@@ -148,7 +183,10 @@ async def test_a_blank_on_disk_render_is_not_offered_for_download(monkeypatch, t
          "mtime": 1.0, "source": "figures"},
     ]
     setattr_facade(
-        monkeypatch, "backend.workflow.reporting", "discover_workspace_figures", lambda sid: discovered
+        monkeypatch,
+        "backend.workflow.reporting",
+        "resolve_state_figure_candidates",
+        lambda *args, **kwargs: discovered,
     )
     setattr_facade(
         monkeypatch, "backend.workflow.reporting", "compress_image_to_base64", lambda *a, **k: None
@@ -166,7 +204,7 @@ async def test_a_blank_on_disk_render_is_not_offered_for_download(monkeypatch, t
     await reporter._assemble_brief_figures(reporter.analysis_state, {"summary": "s"})
 
     names = {f["name"] for f in reporter.sent["integrated_report"]["figures"]}
-    assert names == {"revised"}
+    assert names == set()
     assert "abandoned" not in {c["name"] for c in reporter.captured_selection_input}
 
 
@@ -181,7 +219,10 @@ async def test_invalid_selection_names_self_heal_to_publication(monkeypatch, tmp
          "mtime": 1.0, "source": "r1_outputs/figures"},
     ]
     setattr_facade(
-        monkeypatch, "backend.workflow.reporting", "discover_workspace_figures", lambda sid: discovered
+        monkeypatch,
+        "backend.workflow.reporting",
+        "resolve_state_figure_candidates",
+        lambda *args, **kwargs: discovered,
     )
     setattr_facade(
         monkeypatch, "backend.workflow.reporting", "compress_image_to_base64", lambda *a, **k: None
@@ -214,8 +255,8 @@ async def test_integrated_report_payload_marks_and_binds_registered_figure(
     setattr_facade(
         monkeypatch,
         "backend.workflow.reporting",
-        "discover_workspace_figures",
-        lambda _sid: [],
+        "resolve_state_figure_candidates",
+        lambda *args, **kwargs: [],
     )
     reporter = _CaptureReporter(
         "sess-registered-payload",
@@ -256,8 +297,8 @@ async def test_integrated_report_workspace_payload_carries_download_digests(
     setattr_facade(
         monkeypatch,
         "backend.workflow.reporting",
-        "discover_workspace_figures",
-        lambda _sid: discovered,
+        "resolve_state_figure_candidates",
+        lambda *args, **kwargs: discovered,
     )
     reporter = _CaptureReporter(
         "sess-workspace-payload",

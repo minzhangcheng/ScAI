@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, useMemo, memo } from 'react'
 import { useAppStore, Message, AgentType } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
 import type { GraphicAbstractContent } from '../types'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter'
+import python from 'react-syntax-highlighter/dist/esm/languages/prism/python'
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import {
   Users,
@@ -29,6 +30,8 @@ import {
 import { base64ToDataUri } from '../utils/image'
 import { STRIPPED_FIGURE_PLACEHOLDER } from '../constants/storage'
 import { agentIcons, agentBgColors, agentGradients, FALLBACK_AGENT_ICON } from '../constants/agents'
+
+SyntaxHighlighter.registerLanguage('python', python)
 
 // Type interfaces for message content
 interface ResultContent {

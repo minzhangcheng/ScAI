@@ -198,7 +198,8 @@ class ClientChatMixin:
                 _make_request, _make_request_no_temp, model_key, retry_kwargs
             )
 
-            # Extract content — handles reasoning models, list content, etc.
+            # Extract only the provider's answer channel; reasoning/thinking
+            # fields are private scratch space and are never answer content.
             content = ""
             if response and response.choices and len(response.choices) > 0:
                 message = response.choices[0].message
@@ -206,11 +207,8 @@ class ClientChatMixin:
 
             # Reasoning-model truncation guard: when a reasoning model spends the
             # entire max_tokens budget on reasoning the response comes back with an
-            # empty answer field AND length-truncated. The extractor may salvage the
-            # (also truncated) reasoning text into `content`, so we cannot rely on
-            # the EMPTY_CONTENT_PLACEHOLDER alone — gate on the *answer* content field
-            # being empty instead. Callers that don't special-case this (supervisor,
-            # PI, technique...) would otherwise silently treat it as "no answer".
+            # empty answer field AND length-truncated. Gate on the raw answer
+            # content field so the placeholder does not suppress the retry.
             # Retry once with a larger budget so the model can finish.
             if (
                 not _truncation_retried

@@ -140,6 +140,12 @@ class LiteratureAgent(
         self._annotation_cache: Dict[str, Any] = {}
         self._ANNOTATION_CACHE_MAX = 100
         self._client_close_tasks: Set[asyncio.Task] = set()
+        self._client_close_task_ids: Set[int] = set()
+        self._retired_runtime_clients: Dict[int, Any] = {}
+        self._runtime_client_use_counts: Dict[int, int] = {}
+        self._runtime_client_cleanup_lock = asyncio.Lock()
+        self._runtime_clients_closing = False
+        self._runtime_clients_closed = False
 
 
 
@@ -261,8 +267,6 @@ class LiteratureAgent(
     # ===================================================================
     # Direction novelty literature triage (Task 2)
     # ===================================================================
-
-
 
 
 

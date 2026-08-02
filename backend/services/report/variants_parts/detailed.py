@@ -18,6 +18,7 @@ from backend.services.report.artifacts import (
 )
 from backend.services.report.figure_discovery import (
     discover_figures_in_workspace,
+    ensure_legacy_artifact_inventory,
     prepare_discovered_figures,
 )
 from backend.models.schemas import AnalysisState
@@ -114,6 +115,7 @@ def generate_detailed_report_segment_html(
         from backend.config import get_session_workspace
         workspace_dir = get_session_workspace(state.id)
         if workspace_dir and workspace_dir.exists():
+            ensure_legacy_artifact_inventory(state, workspace_dir)
             fig_desc_map = _build_figure_description_map(segment_steps)
             eligible_figures = eligible_artifacts(state.publication_figures)
             excluded_stems = excluded_artifact_stems(
@@ -145,15 +147,21 @@ def generate_detailed_report_segment_html(
                 invalidated_stems=state.invalidated_artifact_stems,
                 report_only=True,
                 allow_unregistered_diagnostics=False,
+                registry_version=state.artifact_registry_version,
+                legacy_artifacts=state.legacy_artifacts,
             ))
             if discovered:
-                parts.append('<div class="segment-section"><h3>Generated Figures</h3>')
-                parts.append('<div class="figure-gallery">')
+                rendered_blocks = []
+                rendered_keys = set()
                 for fig_info in discovered:
                     try:
                         file_stem = fig_info.get("name", "")
                         figure_key = fig_info.get("record_stem") or file_stem
-                        if figure_key in excluded_stems or figure_key not in allowed_stems:
+                        if (
+                            figure_key in rendered_keys
+                            or figure_key in excluded_stems
+                            or figure_key not in allowed_stems
+                        ):
                             continue
                         fig_path = fig_info.get("path", "")
                         if not fig_path:
@@ -166,11 +174,18 @@ def generate_detailed_report_segment_html(
                             )
                         )
                         key = html_module.escape(str(figure_key), quote=True)
-                        parts.append(f'<div class="figure-item" data-figure-key="{key}"><img src="{b64}" />'
-                                     f'<p class="caption">{html_module.escape(str(caption))}</p></div>')
+                        rendered_blocks.append(
+                            f'<div class="figure-item" data-figure-key="{key}"><img src="{b64}" />'
+                            f'<p class="caption">{html_module.escape(str(caption))}</p></div>'
+                        )
+                        rendered_keys.add(figure_key)
                     except Exception as e:
                         logger.debug(f"Figure embedding failed for {fig_info.get('name', '?')}: {e}")
-                parts.append('</div></div>')
+                if rendered_blocks:
+                    parts.append('<div class="segment-section"><h3>Generated Figures</h3>')
+                    parts.append('<div class="figure-gallery">')
+                    parts.extend(rendered_blocks)
+                    parts.append('</div></div>')
     except Exception as e:
         logger.warning(f"Figure section generation failed: {e}")
 

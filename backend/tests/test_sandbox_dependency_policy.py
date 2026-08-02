@@ -19,11 +19,11 @@ def test_os_system_pip_install_is_blocked():
     assert "os.system" in reason.lower()
 
 
-def test_plain_subprocess_import_without_call_remains_allowed():
+def test_plain_subprocess_import_is_blocked_before_cross_cell_aliasing():
     safe, reason = validate_code_safety("import subprocess\nprint('ready')")
 
-    assert safe is True
-    assert reason == ""
+    assert safe is False
+    assert "subprocess" in reason.lower()
 
 
 def test_subprocess_from_import_run_pip_install_is_blocked():

@@ -7,6 +7,19 @@ from unittest.mock import MagicMock, AsyncMock
 import pytest
 
 
+def _synthetic_long_runtime_traceback(final_exception: str) -> str:
+    synthetic_secret = "synthetic-fixture-credential-value"
+    frames = "\n".join(
+        f'  File "/home/synthetic-user/private-project/frame_{index}.py", '
+        f"line {index}, in helper"
+        for index in range(140)
+    )
+    return (
+        "\x1b[31mTraceback (most recent call last):\x1b[0m\n"
+        f"api_key='{synthetic_secret}'\n{frames}\n{final_exception}"
+    )
+
+
 def test_save_dill_template_rolls_back_failed_frame(tmp_path):
     """A failed frame must not poison the next residual object."""
     import dill
@@ -252,9 +265,23 @@ class TestRuntimeCaptureIntrospection:
     async def test_introspection_failure_cannot_become_empty_complete(self, runtime_capture, sandbox):
         from backend.services.snapshot_v2.errors import SnapshotCaptureError
 
-        sandbox.execute.return_value = MagicMock(success=False, error="timeout", output="")
-        with pytest.raises(SnapshotCaptureError, match="RUNTIME_INTROSPECT_FAILED"):
+        sandbox.execute.return_value = MagicMock(
+            success=False,
+            error=_synthetic_long_runtime_traceback(
+                "TimeoutError: synthetic introspection failure"
+            ),
+            output="",
+        )
+        with pytest.raises(
+            SnapshotCaptureError, match="RUNTIME_INTROSPECT_FAILED"
+        ) as exc_info:
             await runtime_capture.capture(sandbox)
+        rendered = str(exc_info.value)
+        assert "TimeoutError: synthetic introspection failure" in rendered
+        assert len(rendered) <= 3200
+        assert "\x1b" not in rendered
+        assert "synthetic-fixture-credential-value" not in rendered
+        assert "synthetic-user" not in rendered
 
     @pytest.mark.asyncio
     async def test_partial_introspection_is_not_empty_complete(self, runtime_capture, sandbox):
@@ -500,7 +527,13 @@ class TestRuntimeCapture:
                     p = Path(m.group(1))
                     p.parent.mkdir(parents=True, exist_ok=True)
                     p.write_bytes(b"fake")
-                return MagicMock(success=False, output="", error="write failed")
+                return MagicMock(
+                    success=False,
+                    output="",
+                    error=_synthetic_long_runtime_traceback(
+                        "OSError: synthetic h5ad write failure"
+                    ),
+                )
             return MagicMock(success=True, output="ok", error=None)
 
         sandbox = AsyncMock()
@@ -516,6 +549,12 @@ class TestRuntimeCapture:
         with pytest.raises(SnapshotCaptureError) as exc_info:
             await capturer.capture(sandbox, declared_outputs={"adata"})
         assert "required_runtime_unpersistable" in str(exc_info.value.code)
+        rendered = str(exc_info.value)
+        assert "OSError: synthetic h5ad write failure" in rendered
+        assert len(rendered) <= 3400
+        assert "\x1b" not in rendered
+        assert "synthetic-fixture-credential-value" not in rendered
+        assert "synthetic-user" not in rendered
         obj_store.put_file.assert_not_called()
 
     @pytest.mark.asyncio

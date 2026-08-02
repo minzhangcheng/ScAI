@@ -7,9 +7,16 @@ serialises required workflow state into the object store.
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
 from typing import Any
 
-from backend.constants import WORKFLOW_GRAPH_NODES, WaitInputReason
+from pydantic import BaseModel
+
+from backend.constants import (
+    SEMANTIC_GATE_ACTION_NEXT_NODES,
+    WORKFLOW_GRAPH_NODES,
+    WaitInputReason,
+)
 from backend.models.schemas import SnapshotPhase
 from backend.services.snapshot_v2.errors import SnapshotCaptureError
 from backend.services.snapshot_v2.models import (
@@ -343,10 +350,82 @@ class ContinuationRegistry:
             "failed_node": workflow_state.get("failed_node"),
             "skip_nodes": list(workflow_state.get("skip_nodes", [])),
             "integration_next": workflow_state.get("integration_next"),
+            "next_node": SEMANTIC_GATE_ACTION_NEXT_NODES.get(gate),
         }
 
+        # Carry the workflow fields needed by the exact post-action node. The
+        # restored AnalysisState already contains the domain payload; these are
+        # the top-level LangGraph fields that would otherwise be lost when a
+        # semantic capsule is converted to graph-node continuation.
+        for key in (
+            "pi_instructions",
+            "planning_result",
+            "planning_context",
+            "user_plan_feedback",
+            "plan_revision_needed",
+            "plan_revision_context",
+            "plan_revision_resume",
+            "report_blocked",
+            "node_retry_count",
+            "node_errors",
+            "adjusted_instructions",
+        ):
+            if key in workflow_state:
+                value = workflow_state[key]
+                # ``hasattr`` is unsafe here: MagicMock manufactures every
+                # attribute on demand, so a sparse workflow test double was
+                # mistaken for a Pydantic model and its recursive mock dump
+                # exhausted the serializer.  Only actual models own this
+                # conversion contract.
+                if isinstance(value, BaseModel):
+                    value = value.model_dump(mode="json")
+                payload[key] = value
+
+        exploration_report = getattr(analysis_state, "exploration_report", None)
+        if isinstance(exploration_report, (BaseModel, dict)):
+            payload["research_direction_candidates"] = list(
+                (
+                    exploration_report.get("research_direction_candidates")
+                    if isinstance(exploration_report, dict)
+                    else exploration_report.research_direction_candidates
+                )
+                or []
+            )
+            payload["raw_direction_candidates"] = list(
+                (
+                    exploration_report.get("raw_direction_candidates")
+                    if isinstance(exploration_report, dict)
+                    else exploration_report.raw_direction_candidates
+                )
+                or []
+            )
+            payload["direction_selection_summary"] = dict(
+                (
+                    exploration_report.get("direction_selection_summary")
+                    if isinstance(exploration_report, dict)
+                    else exploration_report.direction_selection_summary
+                )
+                or {}
+            )
+        annotation_state = getattr(analysis_state, "annotation_state", None)
+        if isinstance(annotation_state, BaseModel):
+            payload["annotation_state"] = annotation_state.model_dump(mode="json")
+        elif isinstance(annotation_state, dict):
+            payload["annotation_state"] = annotation_state
+
         put_result = self._object_store.put_bytes(
-            json.dumps(payload, sort_keys=True, ensure_ascii=False).encode(),
+            json.dumps(
+                payload,
+                sort_keys=True,
+                ensure_ascii=False,
+                default=lambda value: (
+                    value.model_dump(mode="json")
+                    if isinstance(value, BaseModel)
+                    else value.isoformat()
+                    if isinstance(value, (date, datetime))
+                    else str(value)
+                ),
+            ).encode(),
             "application/json",
         )
         ref = put_result.ref

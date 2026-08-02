@@ -3,6 +3,7 @@ from backend.constants import (
     GATE_DIRECTION_SELECTION,
     GATE_INTEGRATION_SELECTION,
     GATE_ANNOTATION_CONFIRMATION,
+    GATE_PLAN_REVISION,
     SEMANTIC_WAIT_GATES,
 )
 
@@ -15,11 +16,18 @@ def test_gate_constant_values():
 
 
 def test_semantic_wait_gates_membership():
-    assert SEMANTIC_WAIT_GATES == frozenset({"round_wait", "integration_selection"})
+    assert SEMANTIC_WAIT_GATES == frozenset({
+        "round_wait",
+        "direction_selection",
+        "integration_selection",
+        "annotation_confirmation",
+        "plan_revision",
+    })
     assert GATE_ROUND_WAIT in SEMANTIC_WAIT_GATES
+    assert GATE_DIRECTION_SELECTION in SEMANTIC_WAIT_GATES
     assert GATE_INTEGRATION_SELECTION in SEMANTIC_WAIT_GATES
-    assert GATE_DIRECTION_SELECTION not in SEMANTIC_WAIT_GATES
-    assert GATE_ANNOTATION_CONFIRMATION not in SEMANTIC_WAIT_GATES
+    assert GATE_ANNOTATION_CONFIRMATION in SEMANTIC_WAIT_GATES
+    assert GATE_PLAN_REVISION in SEMANTIC_WAIT_GATES
 
 
 def test_restore_targets_use_constants():

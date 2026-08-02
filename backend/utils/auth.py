@@ -83,6 +83,15 @@ API_KEY_PREFIX = "scai_"
 WS_AUTH_SUBPROTOCOL = "scai.jwt.v1"
 WS_AUTH_FAILED_CODE = 4401
 SESSION_NOT_FOUND = "Session not found"
+WS_SESSION_NOT_FOUND_CODE = 4404
+WS_SESSION_GONE_CODE = 4410
+
+
+def session_not_found_detail() -> dict:
+    return {
+        "code": "SESSION_NOT_FOUND",
+        "message": SESSION_NOT_FOUND,
+    }
 
 
 def generate_api_key() -> tuple[str, str]:
@@ -228,13 +237,31 @@ async def require_session_ownership(
     from backend.services.session_store import ensure_session_loaded
     from backend.models.schemas import AnalysisState
 
-    state = await ensure_session_loaded(session_id)
+    try:
+        state = await ensure_session_loaded(session_id)
+    except Exception as exc:
+        from backend.services.session_lifecycle import SessionGoneError
+
+        if isinstance(exc, SessionGoneError):
+            if user_id is not None and exc.owner_id == user_id:
+                raise HTTPException(
+                    status_code=410,
+                    detail={
+                        "code": "SESSION_GONE",
+                        "message": "This session was deleted and cannot be restored.",
+                        "generation": exc.generation,
+                    },
+                ) from exc
+            raise HTTPException(
+                status_code=404, detail=session_not_found_detail()
+            ) from exc
+        raise
     if state is None:
-        raise HTTPException(status_code=404, detail=SESSION_NOT_FOUND)
+        raise HTTPException(status_code=404, detail=session_not_found_detail())
     # When user_id is None (no auth token provided), only verify session exists
     # This is safe because session_id is a UUID that attackers cannot guess
     if user_id is not None and state.user_id != user_id:
-        raise HTTPException(status_code=404, detail=SESSION_NOT_FOUND)
+        raise HTTPException(status_code=404, detail=session_not_found_detail())
     return state
 
 
@@ -274,13 +301,49 @@ async def ws_authenticate_and_load(
     from backend.services.session_store import ensure_session_loaded
     from backend.utils.files import validate_session_id
 
-    validate_session_id(session_id)
+    try:
+        validate_session_id(session_id)
+    except HTTPException:
+        await websocket.close(
+            code=WS_SESSION_NOT_FOUND_CODE,
+            reason="SESSION_NOT_FOUND",
+        )
+        return None
     user_id = await ws_require_auth(websocket)
     if user_id is None:
         return None
-    state = await ensure_session_loaded(session_id)
+    try:
+        state = await ensure_session_loaded(session_id)
+    except Exception as exc:
+        from backend.services.session_lifecycle import SessionGoneError
+
+        if isinstance(exc, SessionGoneError):
+            if exc.owner_id == user_id:
+                await websocket.send_json({
+                    "type": "session_error",
+                    "code": "SESSION_GONE",
+                    "message": "This session was deleted and cannot be restored.",
+                    "session_id": session_id,
+                    "generation": exc.generation,
+                })
+                await websocket.close(
+                    code=WS_SESSION_GONE_CODE,
+                    reason="SESSION_GONE",
+                )
+                return None
+            state = None
+        else:
+            raise
     if state is None or state.user_id != user_id:
-        await websocket.send_json({"error": SESSION_NOT_FOUND})
-        await websocket.close(code=WS_AUTH_FAILED_CODE)
+        await websocket.send_json({
+            "type": "session_error",
+            "code": "SESSION_NOT_FOUND",
+            "message": SESSION_NOT_FOUND,
+            "session_id": session_id,
+        })
+        await websocket.close(
+            code=WS_SESSION_NOT_FOUND_CODE,
+            reason="SESSION_NOT_FOUND",
+        )
         return None
     return (user_id, state)

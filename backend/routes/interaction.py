@@ -23,12 +23,15 @@ from backend.services.session_store import (
 )
 from backend.state import (
     state_lock as _state_lock,
-    websockets,
     workflows,
     get_session_lock,
 )
 from backend.utils.auth import require_session_ownership
 from backend.utils.files import validate_session_id
+from backend.utils.websocket_delivery import (
+    close_analysis_websocket,
+    send_analysis_json,
+)
 from backend.services.interaction_record_capture import (
     get_or_open_direction_record, map_selections, build_annotation_record,
     populate_direction_record_from_state, resolve_integration_gate,
@@ -43,7 +46,7 @@ _UNSAFE_PATTERN = re.compile(r'[{}\[\]\\;`$]|__\w+__|import\s|exec\s*\(|eval\s*\
 
 
 async def _pause_and_restart_ws(session_id: str, state):
-    await _pause_and_restart_ws_impl(session_id, state, websockets)
+    await _pause_and_restart_ws_impl(session_id, state)
 
 
 def _refuse_if_snapshot_blocked(state, action: str) -> None:
@@ -94,9 +97,7 @@ async def send_human_input(session_id: str, request: Request, body: HumanInputRe
             "uploaded_files": [f.model_dump() for f in body.uploaded_files]
         })
 
-        if session_id in websockets:
-            try:
-                await websockets[session_id].send_json({
+        await send_analysis_json(session_id, {
                     "type": "human_input_received",
                     "content": {
                         "message": body.message,
@@ -104,9 +105,7 @@ async def send_human_input(session_id: str, request: Request, body: HumanInputRe
                     },
                     "target_agent": body.target_agent,
                     "timestamp": datetime.now().isoformat()
-                })
-            except Exception:
-                logger.warning("Failed to buffer human input to WebSocket", exc_info=True)
+        })
 
         async with _state_lock:
             workflow = workflows.get(session_id)
@@ -165,11 +164,22 @@ async def confirm_annotations(session_id: str, request: Request, body: Annotatio
             state.annotation_state.pending = False
             state.annotation_record = build_annotation_record(state, auto_confirmed=False)
 
+        async with _state_lock:
+            workflow = workflows.get(session_id)
+        if not workflow:
+            from backend.constants import GATE_ANNOTATION_CONFIRMATION
+            from backend.workflow.restore_targets import (
+                prepare_restored_semantic_action,
+            )
+
+            prepare_restored_semantic_action(
+                state,
+                expected_gate=GATE_ANNOTATION_CONFIRMATION,
+            )
+
         await _update_session_cache(session_id, state)
         await async_save_session(session_id, state)
 
-        async with _state_lock:
-            workflow = workflows.get(session_id)
         if workflow:
             workflow.signal_annotation_confirmed()
         else:
@@ -334,11 +344,30 @@ async def _choose_direction_locked(session_id: str, user_id: str, body: Directio
         state.user_chosen_direction = body.direction
         state.pending_human_input = body.direction
 
+    async with _state_lock:
+        workflow = workflows.get(session_id)
+    if not workflow:
+        from backend.constants import (
+            GATE_DIRECTION_SELECTION,
+            GATE_INTEGRATION_SELECTION,
+        )
+        from backend.workflow.restore_targets import (
+            prepare_restored_semantic_action,
+        )
+
+        expected_gate = (
+            GATE_INTEGRATION_SELECTION
+            if integration_gate
+            else GATE_DIRECTION_SELECTION
+        )
+        prepare_restored_semantic_action(
+            state,
+            expected_gate=expected_gate,
+        )
+
     await _update_session_cache(session_id, state)
     await async_save_session(session_id, state)
 
-    async with _state_lock:
-        workflow = workflows.get(session_id)
     if workflow:
         workflow.signal_continue()
     else:
@@ -393,13 +422,7 @@ async def finalize_from_integration(session_id: str, request: Request):
             await async_save_session(session_id, state)
             # Close any existing WS so the frontend reconnects and triggers
             # the report-only path.
-            from ..state import websockets as _ws_map
-            old_ws = _ws_map.get(session_id)
-            if old_ws:
-                try:
-                    await old_ws.close(4000, "finalize_from_integration")
-                except Exception:
-                    pass
+            await close_analysis_websocket(session_id, code=4000)
         return APIResponse(success=True, message="Finalizing: proceeding to the final report")
 
 
@@ -413,15 +436,11 @@ async def request_human_input(session_id: str, request: Request):
         state = await require_session_ownership(session_id=session_id, user_id=user_id)
         state.human_input_requested = True
 
-    if session_id in websockets:
-        try:
-            await websockets[session_id].send_json({
+    await send_analysis_json(session_id, {
                 "type": "human_input_requested",
                 "content": "System is requesting human guidance",
                 "timestamp": datetime.now().isoformat()
-            })
-        except Exception:
-            logger.warning("Failed to send human_input_requested via WebSocket", exc_info=True)
+    })
 
     return APIResponse(success=True, message="Human input requested")
 

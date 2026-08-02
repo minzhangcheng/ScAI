@@ -23,6 +23,51 @@ from ..llm_logger import get_llm_logger, LLMInteraction
 
 logger = logging.getLogger(__name__)
 
+_PRIVATE_REASONING_BLOCK_TYPES = frozenset({
+    "reasoning", "reasoning_content", "thinking", "thought",
+    "redacted_thinking", "reasoning_details", "analysis",
+})
+_PRIVATE_REASONING_BLOCK_KEYS = frozenset({
+    "reasoning", "reasoning_content", "reasoning_details", "thinking", "thought",
+})
+
+
+def _is_private_reasoning_block(part: dict) -> bool:
+    block_type = str(part.get("type", "") or "").strip().lower()
+    return (
+        block_type in _PRIVATE_REASONING_BLOCK_TYPES
+        or any(
+            marker in block_type
+            for marker in ("reason", "think", "thought")
+        )
+        or any(key in part for key in _PRIVATE_REASONING_BLOCK_KEYS)
+    )
+
+
+def _extract_answer_content(value) -> str:
+    """Extract only explicit public text blocks from one content payload."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, list):
+        return ""
+    text_parts = []
+    for part in value:
+        if isinstance(part, str):
+            text_parts.append(part)
+            continue
+        if not isinstance(part, dict):
+            continue
+        block_type = str(part.get("type", "") or "").strip().lower()
+        if _is_private_reasoning_block(part):
+            continue
+        if block_type in {"text", "output_text"}:
+            text_parts.append(str(part.get("text", "") or ""))
+        elif not block_type and "text" in part:
+            text_parts.append(str(part.get("text", "") or ""))
+    return "\n".join(part for part in text_parts if part)
+
 # Implementations live in ./llm_client_parts/; re-exported here so existing
 # importers and tests keep resolving them from this module.
 
@@ -140,7 +185,6 @@ from .shared import (  # noqa: F401
     _DR_BACKGROUND_TERMINAL_FAILED,
     GoogleDeepResearchClient,
     _recover_stringified_tool_call,
-    _collect_reasoning_parts,
     _REASONING_ECHO_KEYS,
     _reasoning_echo_allowed,
     _build_assistant_echo,
@@ -187,9 +231,9 @@ class ClientContentMixin:
     def _extract_content_from_message(self, message, response=None) -> str:
         """Extract text content from a chat completion message, handling multiple formats.
 
-        Handles: string content, list content (multimodal), None content with
-        model_dump fallback, and reasoning model responses where content may be
-        in the reasoning/reasoning_content field (e.g. OpenRouter deep research).
+        Handles string content, list content (multimodal), and an SDK
+        ``model_dump`` fallback. Provider reasoning/thinking fields are
+        deliberately excluded: they are private scratch space, not an answer.
         """
         if not message:
             return ""
@@ -202,17 +246,9 @@ class ClientContentMixin:
 
         # Case 2: List content (multimodal response format)
         if isinstance(raw_content, list):
-            text_parts = []
-            for part in raw_content:
-                if isinstance(part, dict):
-                    if part.get("type") == "text":
-                        text_parts.append(part.get("text", ""))
-                    elif "text" in part:
-                        text_parts.append(part["text"])
-                elif isinstance(part, str):
-                    text_parts.append(part)
-            if text_parts:
-                return "\n".join(text_parts)
+            public_text = _extract_answer_content(raw_content)
+            if public_text:
+                return public_text
 
         # Case 3: None or empty — try model_dump() for Pydantic SDK objects
         content = ""
@@ -221,41 +257,32 @@ class ClientContentMixin:
                 if hasattr(message, "model_dump"):
                     msg_data = message.model_dump()
                     if "content" in msg_data and msg_data["content"]:
-                        raw = msg_data["content"]
-                        if isinstance(raw, str):
-                            content = raw
-                        elif isinstance(raw, list):
-                            content = "\n".join(
-                                p.get("text", "") if isinstance(p, dict) else str(p)
-                                for p in raw
-                            )
-                    # Reasoning model fallback: content in reasoning/reasoning_content/thinking/thought
-                    if not content:
-                        parts = _collect_reasoning_parts(msg_data.get)
-                        if parts:
-                            content = "\n".join(parts)
+                        content = _extract_answer_content(msg_data["content"])
             except Exception as e:
-                logger.debug(f"[{self.agent_name}] model_dump extraction failed: {e}")
+                logger.debug(
+                    "[%s] model_dump extraction failed (type=%s)",
+                    self.agent_name,
+                    type(e).__name__,
+                )
 
             # Fallback: check text attribute
             if not content and hasattr(message, "text"):
-                content = message.text or ""
-            # Fallback: check reasoning attribute directly on the object
-            if not content:
-                parts = _collect_reasoning_parts(lambda k: getattr(message, k, None))
-                if parts:
-                    content = "\n".join(parts)
+                text_value = message.text
+                if isinstance(text_value, str):
+                    content = text_value
 
-        # Case 4: Other types — convert to string
-        if not content and raw_content is not None:
-            content = str(raw_content)
+        # Other object shapes are not answer channels. In particular, never
+        # stringify a dict that may carry provider-private reasoning fields.
 
         # Check for refusal
         if not content and hasattr(message, "refusal") and message.refusal:
             content = f"[Refusal]: {message.refusal}"
             logger.warning(f"[{self.agent_name}] Request was refused: {message.refusal}")
 
-        # Debug logging: tokens generated but content empty
+        if content:
+            return content
+
+        # Debug logging: tokens generated and final extracted content is empty.
         completion_tokens, has_tool_calls = self._log_empty_content_diagnostic(message, response)
 
         # If tokens were generated but content extraction failed, return an error
@@ -267,7 +294,7 @@ class ClientContentMixin:
             )
             return EMPTY_CONTENT_PLACEHOLDER
 
-        return content
+        return ""
 
     @staticmethod
     def _response_length_truncated(response) -> bool:
@@ -282,9 +309,8 @@ class ClientContentMixin:
     @staticmethod
     def _answer_content_empty(response) -> bool:
         """True when the assistant's *answer* content field is empty and no tool
-        call was made. Note this looks at the raw message.content, not the
-        extracted content — the extractor may have salvaged truncated reasoning
-        text, which is still not a usable answer."""
+        call was made. Reasoning fields are intentionally irrelevant: only the
+        provider's answer channel counts as usable output."""
         try:
             message = response.choices[0].message
         except (AttributeError, IndexError, TypeError):
@@ -339,27 +365,11 @@ class ClientContentMixin:
         if has_tool_calls:
             return completion_tokens, has_tool_calls
 
-        try:
-            if hasattr(message, "model_dump"):
-                raw_dump = message.model_dump()
-                logger.info(
-                    f"[{self.agent_name}] Empty content with {completion_tokens} tokens. "
-                    f"Raw message keys: {list(raw_dump.keys())}, "
-                    f"values preview: {str(raw_dump)[:2000]}"
-                )
-        except Exception as e:
-            logger.debug(f"[{self.agent_name}] Failed to dump raw message for debugging: {e}")
-
         msg_dict = {}
         for attr_name in ("content", "refusal", "role", "reasoning", "reasoning_content", "thinking", "thought"):
             if hasattr(message, attr_name):
                 val = getattr(message, attr_name)
-                msg_dict[attr_name] = str(val)[:200] if val else None
-        try:
-            if hasattr(message, "model_dump"):
-                msg_dict["_all_keys"] = list(message.model_dump().keys())
-        except Exception as e:
-            logger.debug(f"[{self.agent_name}] Failed to extract message keys: {e}")
+                msg_dict[attr_name] = bool(val)
 
         logger.warning(
             f"[{self.agent_name}] Response has {completion_tokens} completion tokens "

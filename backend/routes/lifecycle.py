@@ -35,13 +35,14 @@ from backend.utils.files import validate_session_id
 from backend.state import (
     _run_tasks,
     state_lock as _state_lock,
-    websockets,
     workflows,
     get_session_lock,
     get_snapshot_action_lock,
 )
 from backend.services.session_store import update_session_cache as _update_session_cache
 from backend.routes._helpers import teardown_running_workflow
+from backend.utils.websocket_delivery import send_analysis_json
+from backend.utils.websocket_delivery import close_analysis_websocket
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,7 @@ def resolve_hitl_skip_target(state):
 
 
 async def _pause_and_restart_ws(session_id: str, state):
-    await _pause_and_restart_ws_impl(session_id, state, websockets)
+    await _pause_and_restart_ws_impl(session_id, state)
 
 
 async def _close_hitl_socket_for_redrive(session_id: str, reason: str) -> None:
@@ -108,17 +109,9 @@ async def _close_hitl_socket_for_redrive(session_id: str, reason: str) -> None:
     already ran in-process and that run owns the socket.
     """
     async with _state_lock:
-        ws = None if session_id in workflows else websockets.get(session_id)
-    if ws is not None:
-        try:
-            await ws.close(4000, reason)
-        except Exception:
-            logger.debug(
-                "[%s] Failed to close HITL WebSocket after %s",
-                session_id,
-                reason,
-                exc_info=True,
-            )
+        workflow_live = session_id in workflows
+    if not workflow_live:
+        await close_analysis_websocket(session_id, code=4000)
 
 
 router = APIRouter(prefix="/api/session", tags=["lifecycle"])
@@ -253,18 +246,32 @@ async def _pause_analysis_locked(session_id: str, user_id: str):
         state.pre_pause_status = state.status
     else:
         state.pre_pause_status = None
-    state.status = TaskStatus.PAUSED
-    await async_save_session(session_id, state)
-
     # Grab workflow reference under lock to avoid race with cleanup_stale_sessions
     async with _state_lock:
         workflow = workflows.get(session_id)
     if workflow:
-        await workflow.pause(session_id)
+        result = await workflow.pause(session_id, analysis_state=state)
+        await _update_session_cache(session_id, state)
+        await async_save_session(session_id, state, force=not result.get("success", True))
+        if not result.get("success", True):
+            return APIResponse(
+                success=False,
+                message=(
+                    "Analysis execution is held, but its live runtime could not "
+                    "be persisted. Choose Retry persistence, Recompute or reduce, "
+                    "or Terminate."
+                ),
+                data=result,
+            )
+    else:
+        state.status = TaskStatus.PAUSED
+        await _update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
 
     return APIResponse(
         success=True,
-        message="Analysis paused"
+        message="Analysis paused",
+        data={"status": state.status.value, "still_blocked": False},
     )
 
 
@@ -318,8 +325,13 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
             },
         )
 
-    # Restore original max_rounds if it was saved during a stop operation
-    if state.original_max_rounds is not None:
+    # A completed session first has to retire its old workflow. Do not consume
+    # the saved round limit before that teardown succeeds, otherwise a refused
+    # re-analysis request still mutates the durable analysis contract.
+    if (
+        state.status != TaskStatus.COMPLETED
+        and state.original_max_rounds is not None
+    ):
         state.max_rounds = state.original_max_rounds
         state.original_max_rounds = None
 
@@ -340,7 +352,25 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         # instead of resuming a graph already at END (infinite loop).
         from backend.workflow.provenance import consume_restore_provenance
 
-        await teardown_running_workflow(session_id)
+        cleanup_complete = await teardown_running_workflow(
+            session_id, discard_runtime=True,
+        )
+        if cleanup_complete is False:
+            return APIResponse(
+                success=False,
+                message=(
+                    "Re-analysis was not started because the previous "
+                    "workflow cleanup is incomplete"
+                ),
+                data={
+                    "status": state.status.value,
+                    "needs_reconnect": False,
+                    "cleanup_incomplete": True,
+                },
+            )
+        if state.original_max_rounds is not None:
+            state.max_rounds = state.original_max_rounds
+            state.original_max_rounds = None
         state.status = TaskStatus.RUNNING
         state.max_rounds = state.current_round + 1
         # Clear both durable restore fields so the next run cannot mis-tag
@@ -385,13 +415,27 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
                 state.restore_resume_kind == "semantic_gate"
                 and state.restore_resume_gate in SEMANTIC_WAIT_GATES
             ):
+                from backend.workflow.restore_targets import (
+                    prepare_restored_semantic_action,
+                )
+
+                target = prepare_restored_semantic_action(state)
+                if target is None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Restored semantic gate has no exact post-action target",
+                    )
                 state.status = TaskStatus.RUNNING
                 await _update_session_cache(session_id, state)
                 await async_save_session(session_id, state)
                 return APIResponse(
                     success=True,
                     message="Continuing restored analysis",
-                    data={"needs_reconnect": True, "restored_wait_continuation": True},
+                    data={
+                        "needs_reconnect": True,
+                        "restored_wait_continuation": True,
+                        "next_node": target,
+                    },
                 )
             await _pause_and_restart_ws(session_id, state)
             return APIResponse(
@@ -538,17 +582,12 @@ async def _stop_analysis_locked(session_id: str, user_id: str, req: StopAnalysis
         if task and not task.done():
             task.cancel()
         # Notify via WebSocket
-        ws = websockets.get(session_id)
-        if ws:
-            try:
-                await ws.send_json({
+        await send_analysis_json(session_id, {
                     "type": "status",
                     "agent": None,
                     "content": "Analysis terminated. State saved.",
                     "timestamp": datetime.now().isoformat()
-                })
-            except Exception:
-                logger.warning("Failed to send termination status via WebSocket", exc_info=True)
+        })
         return APIResponse(success=True, message="Analysis terminated")
 
     elif req.action == "summarize":
@@ -689,6 +728,225 @@ async def _llm_failure_action_locked(session_id: str, user_id: str, req: LlmFail
         success=True,
         message=f"LLM failure action '{req.action}' applied to node '{req.node_name}'"
     )
+
+
+def _raise_runtime_persistence_action_409(result) -> None:
+    """Expose stable, machine-readable arbitration outcomes to clients."""
+    from backend.services.runtime_persistence_gate import (
+        RuntimePersistenceActionOutcome,
+    )
+
+    contracts = {
+        RuntimePersistenceActionOutcome.STALE: (
+            "RUNTIME_PERSISTENCE_ACTION_STALE",
+            "The runtime-persistence action targets a stale gate token or generation.",
+        ),
+        RuntimePersistenceActionOutcome.DUPLICATE_OR_CONFLICT: (
+            "RUNTIME_PERSISTENCE_ACTION_DUPLICATE_OR_CONFLICT",
+            "A runtime-persistence action is already pending for this gate.",
+        ),
+        RuntimePersistenceActionOutcome.INACTIVE: (
+            "RUNTIME_PERSISTENCE_ACTION_INACTIVE",
+            "No active runtime-persistence action consumer is available.",
+        ),
+    }
+    code, message = contracts.get(
+        result.outcome,
+        (
+            "RUNTIME_PERSISTENCE_ACTION_CONFLICT",
+            "The runtime-persistence action could not be accepted.",
+        ),
+    )
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": code,
+            "message": message,
+            "action_result": result.outcome.value,
+            "gate_token": result.gate_token,
+            "gate_generation": result.generation,
+        },
+    )
+
+
+async def _runtime_persistence_action_locked(
+    session_id: str,
+    user_id: str,
+    action: str,
+    *,
+    gate_token: str | None = None,
+    generation: int | None = None,
+):
+    from backend.services.runtime_persistence_gate import (
+        RuntimePersistenceActionOutcome,
+        RuntimePersistenceActionResult,
+        clear_runtime_persistence_gate,
+        is_runtime_persistence_blocked,
+        prepare_runtime_recompute,
+        runtime_persistence_gate_identity,
+        validate_runtime_persistence_action,
+    )
+
+    state = await require_session_ownership(
+        session_id=session_id,
+        user_id=user_id,
+    )
+    if not is_runtime_persistence_blocked(state):
+        token, current_generation = runtime_persistence_gate_identity(state)
+        _raise_runtime_persistence_action_409(
+            RuntimePersistenceActionResult(
+                RuntimePersistenceActionOutcome.INACTIVE,
+                action,
+                token,
+                current_generation,
+            )
+        )
+
+    workflow = workflows.get(session_id)
+    if workflow is not None:
+        delivery = workflow.signal_runtime_persistence_action(
+            action,
+            gate_token=gate_token,
+            generation=generation,
+        )
+        if delivery.outcome is RuntimePersistenceActionOutcome.ACCEPTED:
+            await _update_session_cache(session_id, state)
+            await async_save_session(session_id, state, force=True)
+            return APIResponse(
+                success=True,
+                message=f"Runtime persistence action '{action}' accepted",
+                data={
+                    "status": state.status.value,
+                    "action_pending": True,
+                    "still_blocked": True,
+                    "action_result": delivery.outcome.value,
+                    "gate_token": delivery.gate_token,
+                    "gate_generation": delivery.generation,
+                },
+            )
+        _raise_runtime_persistence_action_409(delivery)
+
+    if action == "retry":
+        # The process no longer owns the unsaved kernel namespace. Pretending a
+        # retry succeeded here would silently bless the older committed
+        # generation. Keep the durable gate and direct the user to recompute.
+        retry_claim = validate_runtime_persistence_action(
+            state,
+            action,
+            gate_token=gate_token,
+            generation=generation,
+            active=False,
+        )
+        _raise_runtime_persistence_action_409(retry_claim)
+
+    fallback_claim = validate_runtime_persistence_action(
+        state,
+        action,
+        gate_token=gate_token,
+        generation=generation,
+        active=True,
+    )
+    if fallback_claim.outcome is not RuntimePersistenceActionOutcome.ACCEPTED:
+        _raise_runtime_persistence_action_409(fallback_claim)
+
+    if action == "manage":
+        prepare_runtime_recompute(state)
+        await _update_session_cache(session_id, state)
+        await async_save_session(session_id, state, force=True)
+        await _close_hitl_socket_for_redrive(
+            session_id,
+            "runtime_persistence_recompute",
+        )
+        return APIResponse(
+            success=True,
+            message="Runtime recompute/reduction authorized",
+            data={
+                "status": state.status.value,
+                "still_blocked": False,
+                "snapshot_failure": None,
+                "action_result": fallback_claim.outcome.value,
+            },
+        )
+
+    if action == "terminate":
+        clear_runtime_persistence_gate(state)
+        state.status = TaskStatus.STOPPED
+        state.termination_reason = "runtime_persistence_failure"
+        await _update_session_cache(session_id, state)
+        await async_save_session(session_id, state, force=True)
+        cleanup_complete = await teardown_running_workflow(
+            session_id, discard_runtime=True,
+        )
+        if cleanup_complete is False:
+            return APIResponse(
+                success=False,
+                message=(
+                    "Session termination was committed, but resource cleanup "
+                    "is incomplete"
+                ),
+                data={
+                    "status": state.status.value,
+                    "still_blocked": False,
+                    "action_result": fallback_claim.outcome.value,
+                    "cleanup_incomplete": True,
+                    "termination_committed": True,
+                },
+            )
+        return APIResponse(
+            success=True,
+            message="Session terminated after runtime persistence failure",
+            data={
+                "status": state.status.value,
+                "still_blocked": False,
+                "action_result": fallback_claim.outcome.value,
+            },
+        )
+
+    raise HTTPException(status_code=400, detail="Unknown runtime persistence action")
+
+
+async def _runtime_persistence_action(
+    session_id: str,
+    request: Request,
+    action: str,
+):
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    gate_token = body.get("gate_token")
+    raw_generation = body.get("gate_generation", body.get("generation"))
+    try:
+        generation = int(raw_generation) if raw_generation is not None else None
+    except (TypeError, ValueError):
+        generation = None
+    async with get_session_lock(session_id):
+        return await _runtime_persistence_action_locked(
+            session_id,
+            user_id,
+            action,
+            gate_token=str(gate_token) if gate_token is not None else None,
+            generation=generation,
+        )
+
+
+@router.post("/{session_id}/runtime-persistence/retry")
+async def runtime_persistence_retry(session_id: str, request: Request):
+    return await _runtime_persistence_action(session_id, request, "retry")
+
+
+@router.post("/{session_id}/runtime-persistence/recompute")
+async def runtime_persistence_recompute(session_id: str, request: Request):
+    return await _runtime_persistence_action(session_id, request, "manage")
+
+
+@router.post("/{session_id}/runtime-persistence/terminate")
+async def runtime_persistence_terminate(session_id: str, request: Request):
+    return await _runtime_persistence_action(session_id, request, "terminate")
 
 
 @router.post("/{session_id}/retry-node")
@@ -1104,12 +1362,28 @@ async def _snapshot_failure_terminate_locked(session_id: str, user_id: str):
 
     # After STOPPED + termination_reason: tear down workflow/kernel resources.
     # Do NOT pause — pause would clobber STOPPED → PAUSED on the same state.
-    await teardown_running_workflow(session_id)
+    cleanup_complete = await teardown_running_workflow(
+        session_id, discard_runtime=True,
+    )
+    if cleanup_complete is False:
+        return APIResponse(
+            success=False,
+            message=(
+                "Session termination was committed, but resource cleanup "
+                "is incomplete"
+            ),
+            data={
+                "status": getattr(state.status, "value", str(state.status)),
+                "cleanup_incomplete": True,
+                "termination_committed": True,
+            },
+        )
 
     return APIResponse(
         success=True,
         message="Session terminated due to snapshot failure",
         data={
             "status": getattr(state.status, "value", str(state.status)),
+            "termination_committed": True,
         },
     )

@@ -3,7 +3,7 @@
 Usage:
     from scai_client import Client
 
-    client = Client(base_url="http://localhost:8000", api_key="scai_xxx")
+    client = Client(base_url="http://localhost:3000", api_key="scai_xxx")
 
     # Submit and wait:
     job = client.submit("config.json")

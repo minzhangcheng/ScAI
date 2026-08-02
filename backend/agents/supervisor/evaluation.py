@@ -15,7 +15,12 @@ logger = logging.getLogger(__name__)
 
 
 from ...models.schemas import AnalysisStep, PlanStage
-from ...utils.error_parsing import CODE_GEN_ERROR_TYPES, extract_error_type, TECHNICAL_ERROR_TYPES
+from ...utils.error_parsing import (
+    CODE_GEN_ERROR_TYPES,
+    compact_traceback,
+    extract_error_type,
+    TECHNICAL_ERROR_TYPES,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +69,7 @@ class EvaluationMixin:
             timestamp=step.timestamp,
             code=step.code[-2000:] if step.code else None,
             code_output=step.code_output[-2000:] if step.code_output else None,
-            code_error=step.code_error[:400] if step.code_error else None,
+            code_error=compact_traceback(step.code_error, max_chars=1200) if step.code_error else None,
             saved_figure_filenames=list(step.saved_figure_filenames),
             agent_reasoning=step.agent_reasoning if step.agent_reasoning else None,
             literature_topic=step.literature_topic,
@@ -331,7 +336,9 @@ class EvaluationMixin:
             else:
                 parts.append(f"Output:\n{step.code_output}")
         if step.code_error:
-            parts.append(f"Error:\n{step.code_error[:400]}")
+            parts.append(
+                f"Error:\n{compact_traceback(step.code_error, max_chars=1200)}"
+            )
         if step.step_type == "execute_code":
             if step.code_error:
                 parts.append("Execution status: FAILED (see Error above)")
@@ -414,12 +421,14 @@ class EvaluationMixin:
 
         # Code error
         if step.code_error:
-            err_snippet = step.code_error[:200]
+            err_snippet = compact_traceback(step.code_error, max_chars=600)
             issues.append(f"Code error: {err_snippet}")
 
             # Track recent errors for stuck detection.
             # Keep the TAIL of the traceback (error type appears at the end).
-            self._recent_errors.append(step.code_error[-300:])
+            self._recent_errors.append(
+                compact_traceback(step.code_error, max_chars=800)
+            )
             if len(self._recent_errors) > 5:
                 self._recent_errors = self._recent_errors[-5:]
 

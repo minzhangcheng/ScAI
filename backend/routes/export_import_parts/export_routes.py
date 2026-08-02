@@ -34,6 +34,20 @@ from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
     update_session_cache as _update_session_cache,
 )
+from backend.services.session_lifecycle import (
+    assert_generation_writable,
+    get_lifecycle_lock,
+)
+from backend.services.export_lifecycle import (
+    LifecycleFileResponse,
+    abandon_export_record,
+    bind_export_path,
+    claim_export_stream,
+    create_export_ownership_marker,
+    generation_bound_export_prefix,
+    publish_export_ready,
+    reserve_export_record,
+)
 from backend.state import (
     import_jobs as _import_jobs,
     import_jobs_lock as _import_jobs_lock,
@@ -43,9 +57,12 @@ from backend.state import (
 from backend.utils.auth import require_session_ownership
 from backend.utils.blob_store import inline_blobs
 from backend.utils.files import slugify_session_name, validate_path_within, validate_session_id, temp_file_on_error
+from backend.utils.asyncio_tasks import (
+    await_with_deferred_cancellation,
+    run_in_owned_thread,
+)
 from backend.utils.secret_redaction import strip_analysis_state_secrets
-from starlette.background import BackgroundTask
-from starlette.responses import FileResponse, Response
+from starlette.responses import Response
 
 from .core import (
     ARCHIVE_FORMAT_VERSION,
@@ -155,6 +172,7 @@ async def _pack_session_archive(
     include_runtime: bool,
     *,
     prefix: str,
+    export_info: dict[str, Any],
 ) -> tuple[str, str]:
     """Pack *session_id* into a temp archive and return (tar_path, filename).
 
@@ -175,22 +193,54 @@ async def _pack_session_archive(
     """
     check_export_disk_space()
 
-    await async_save_session(session_id, state, force=True)
+    save_task = asyncio.create_task(
+        async_save_session(session_id, state, force=True),
+        name=f"export-state-save:{session_id}:{export_info['token']}",
+    )
+    await await_with_deferred_cancellation(save_task)
 
     export_dir = UPLOAD_TEMP_DIR
     export_dir.mkdir(parents=True, exist_ok=True)
 
     import tempfile
     tmp = tempfile.NamedTemporaryFile(
-        prefix=prefix, suffix=".tar.gz", delete=False, dir=str(export_dir)
+        prefix=generation_bound_export_prefix(prefix, export_info),
+        suffix=".tar.gz",
+        delete=False,
+        dir=str(export_dir),
     )
     tar_path = tmp.name
     tmp.close()
+    # No await separates creation from this in-record ownership publication.
+    # If deletion wins the following lifecycle lock, it can still name and
+    # reclaim the just-created archive after cancelling this task.
+    export_info["path"] = tar_path
+    export_info["path_owned"] = True
+    create_export_ownership_marker(tar_path)
+    export_info["ownership_marker_required"] = True
+    export_info["ownership_marker_owned"] = True
+    await bind_export_path(export_info, tar_path)
 
-    async with temp_file_on_error(tar_path):
-        await asyncio.to_thread(_build_session_tar, tar_path, session_id, include_runtime)
+    await run_in_owned_thread(
+        _build_session_tar,
+        tar_path,
+        session_id,
+        include_runtime,
+    )
 
     return tar_path, _build_export_filename(session_id, state.name)
+
+
+async def _retire_failed_export(info: dict[str, Any]) -> None:
+    """Drain exact archive cleanup without replacing the primary failure."""
+    try:
+        await abandon_export_record(info)
+    except BaseException:
+        logger.exception(
+            "Failed to retire export owner %s for session %s",
+            info.get("token"),
+            info.get("session_id"),
+        )
 
 
 @router.api_route("/api/session/{session_id}/export", methods=["GET", "HEAD"])
@@ -233,17 +283,39 @@ async def export_state(session_id: str, request: Request, include_runtime: bool 
             },
         )
 
-    # Write tar.gz to a temp file on disk (not in memory).
-    tmp_path, filename = await _pack_session_archive(
-        session_id, state, include_runtime, prefix=EXPORT_STREAM_PREFIX
+    export_token = new_export_token()
+    export_info = await reserve_export_record(
+        export_token,
+        session_id=session_id,
+        user_id=user_id,
+        state=state,
+        kind="direct",
     )
+    try:
+        tmp_path, filename = await _pack_session_archive(
+            session_id,
+            state,
+            include_runtime,
+            prefix=EXPORT_STREAM_PREFIX,
+            export_info=export_info,
+        )
+        await publish_export_ready(
+            export_info,
+            filename=filename,
+            size=Path(tmp_path).stat().st_size,
+        )
+        claimed = await claim_export_stream(export_token, session_id)
+        if claimed is None:
+            raise HTTPException(status_code=410, detail="Export was retired")
+    except BaseException:
+        await _retire_failed_export(export_info)
+        raise
 
-    # FileResponse streams from disk; BackgroundTask deletes the temp file after response is sent
-    return FileResponse(
+    return LifecycleFileResponse(
         tmp_path,
         media_type="application/gzip",
         filename=filename,
-        background=BackgroundTask(Path(tmp_path).unlink, missing_ok=True)
+        export_info=claimed,
     )
 
 @router.post("/api/session/{session_id}/export/prepare")
@@ -267,22 +339,31 @@ async def export_prepare(session_id: str, request: Request, include_runtime: boo
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    tar_path, filename = await _pack_session_archive(
-        session_id, state, include_runtime, prefix=PREPARED_EXPORT_PREFIX
-    )
-
-    size_bytes = Path(tar_path).stat().st_size
-
     export_token = new_export_token()
-    async with _prepared_exports_lock:
-        _prepared_exports[export_token] = {
-            "path": str(tar_path),
-            "filename": filename,
-            "size": size_bytes,
-            "session_id": session_id,
-            "user_id": user_id,
-            "created_at": time.time(),
-        }
+    export_info = await reserve_export_record(
+        export_token,
+        session_id=session_id,
+        user_id=user_id,
+        state=state,
+        kind="prepared",
+    )
+    try:
+        tar_path, filename = await _pack_session_archive(
+            session_id,
+            state,
+            include_runtime,
+            prefix=PREPARED_EXPORT_PREFIX,
+            export_info=export_info,
+        )
+        size_bytes = Path(tar_path).stat().st_size
+        await publish_export_ready(
+            export_info,
+            filename=filename,
+            size=size_bytes,
+        )
+    except BaseException:
+        await _retire_failed_export(export_info)
+        raise
 
     return {
         "status": "ready",
@@ -328,17 +409,24 @@ async def export_download(session_id: str, request: Request, token: str | None =
         # Authenticated caller: ownership still decides.
         await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    async with _prepared_exports_lock:
-        # Consume last. A racing second redemption finds it gone and 404s, so
-        # the one-shot guarantee is unchanged.
-        if _prepared_exports.pop(token, None) is None:
-            raise HTTPException(status_code=404, detail="Export not prepared. Call POST /export/prepare first.")
+    info = await claim_export_stream(token, session_id)
+    if info is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Export not prepared. Call POST /export/prepare first.",
+        )
+    if not os.path.exists(info["path"]):
+        await _retire_failed_export(info)
+        raise HTTPException(
+            status_code=404,
+            detail="Export not prepared. Call POST /export/prepare first.",
+        )
 
-    return FileResponse(
+    return LifecycleFileResponse(
         info["path"],
         media_type="application/gzip",
         filename=info["filename"],
-        background=BackgroundTask(os.unlink, info["path"])
+        export_info=info,
     )
 
 @router.post(
@@ -365,7 +453,9 @@ async def export_v2(
     """
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
-    await require_session_ownership(session_id=session_id, user_id=user_id)
+    state = await require_session_ownership(
+        session_id=session_id, user_id=user_id,
+    )
 
     from backend.services.snapshot_v2.paths import SnapshotV2Paths
     from backend.services.snapshot_v2.service import SnapshotService
@@ -381,47 +471,69 @@ async def export_v2(
     if snapshot_ids:
         parsed_ids = [s.strip() for s in snapshot_ids.split(",") if s.strip()]
 
+    export_token = new_export_token()
+    export_info = await reserve_export_record(
+        export_token,
+        session_id=session_id,
+        user_id=user_id,
+        state=state,
+        kind="snapshot-v2",
+    )
+    export_dir = UPLOAD_TEMP_DIR
+    export_dir.mkdir(parents=True, exist_ok=True)
+    filename = (
+        f"{SNAPSHOT_EXPORT_PREFIX}{session_id}."
+        f"g{export_info['generation']}.{export_token[:12]}.tar.gz"
+    )
+    final_path = export_dir / filename
     service = SnapshotService(session_id, paths)
     try:
+        await bind_export_path(export_info, final_path, owned=False)
+
+        def _reserve_output() -> None:
+            fd = os.open(
+                final_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+            # Deletion waits for this route task before reading side surfaces;
+            # publishing ownership inside the worker also covers cancellation
+            # delivered after the exclusive create but before its await returns.
+            export_info["path_owned"] = True
+            os.close(fd)
+            create_export_ownership_marker(final_path)
+            export_info["ownership_marker_required"] = True
+            export_info["ownership_marker_owned"] = True
+
+        await run_in_owned_thread(_reserve_output)
         export_path = await service.export_snapshots(
             include_runtime=include_runtime,
             snapshot_ids=parsed_ids,
-            # Build the archive where it will live, so publishing it below is a
-            # rename on the same filesystem instead of a multi-GB copy.
             staging_dir=UPLOAD_TEMP_DIR,
+            output_path=final_path,
+            output_preallocated=True,
+        )
+        if Path(export_path) != final_path:
+            raise RuntimeError("Snapshot exporter returned an unexpected path")
+        size_bytes = final_path.stat().st_size
+        await publish_export_ready(
+            export_info,
+            filename=filename,
+            size=size_bytes,
         )
     except SnapshotV2Error as exc:
+        await _retire_failed_export(export_info)
         err = snapshot_error_detail(exc)
         raise HTTPException(
             status_code=err["status_code"],
             detail={key: value for key, value in err.items() if key != "status_code"},
         ) from exc
+    except asyncio.CancelledError:
+        await _retire_failed_export(export_info)
+        raise
     except Exception as exc:
+        await _retire_failed_export(export_info)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    # Move to stable location for download
-    export_dir = UPLOAD_TEMP_DIR
-    export_dir.mkdir(parents=True, exist_ok=True)
-    export_token = new_export_token()
-    filename = f"{SNAPSHOT_EXPORT_PREFIX}{session_id[:8]}-{uuid.uuid4().hex[:8]}.tar.gz"
-    final_path = export_dir / filename
-    # Off the event loop regardless: a deployment that overrides the staging
-    # directory, or a same-name-different-device layout, would otherwise block
-    # every other request and WebSocket ping for the length of the copy.
-    await asyncio.to_thread(shutil.move, str(export_path), str(final_path))
-
-    size_bytes = final_path.stat().st_size
-
-    # Token-keyed prepared export prevents V1/V2 collisions
-    async with _prepared_exports_lock:
-        _prepared_exports[export_token] = {
-            "path": str(final_path),
-            "filename": filename,
-            "size": size_bytes,
-            "session_id": session_id,
-            "user_id": user_id,
-            "created_at": time.time(),
-        }
 
     return {
         "status": "ready",

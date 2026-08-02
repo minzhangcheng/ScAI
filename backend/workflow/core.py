@@ -21,8 +21,7 @@ GRAPH_RECURSION_LIMIT = 100
 CHECKPOINTS_TO_KEEP_PER_NAMESPACE = 5
 
 
-from .direction_coverage import at_integration_gate
-from .helpers import ack_restore_safe_point, wait_with_skip_time, build_integration_gate_payload
+from .helpers import ack_restore_safe_point, wait_with_skip_time
 from .retry import with_retry, MAX_NODE_RETRIES
 from .state import WorkflowState, make_initial_workflow_state
 from .routing import RoutingMixin
@@ -56,10 +55,16 @@ from ..agents.painter_agent import PainterAgent
 from ..agents.supervisor_agent import SupervisorAgent
 from ..agents.technique_agent import TechniqueAgent
 from ..utils.llm_client import LLMManager, UpstreamExhaustedError
-from ..constants import LlmFailureAction, WaitInputReason, StateSyncChangeType, SEMANTIC_WAIT_GATES
+from ..constants import (
+    LlmFailureAction,
+    WaitInputReason,
+    StateSyncChangeType,
+    SEMANTIC_WAIT_GATES,
+)
 from ..utils.settings_provider import AgentSettingsProvider
 from ..utils.sandbox import LocalJupyterSandbox
 from ..utils.runtime_apply import is_forward_resume_blocked
+from ..utils.asyncio_tasks import consume_current_cancellation_request
 from ..config import SystemConfig, get_session_workspace, get_session_states
 
 
@@ -161,16 +166,19 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         return returned
 
     async def resume_restored_wait_state(self, analysis_state: AnalysisState) -> AnalysisState:
+        """Continue a restored HITL gate from its exact post-action node.
+
+        A semantic capsule describes where the user was waiting, not a node to
+        execute again.  Once an action has been accepted, convert that capsule
+        to the gate's declared graph-node continuation and let ``restore_entry``
+        seed the frozen WorkflowState.  Re-running the generic convergence
+        predicates here changes the captured control flow (and used to skip
+        annotation / plan-revision nodes entirely).
+        """
         logger.info("[%s] Continuing restored wait-state snapshot", self.session_id)
         if self.compiled_graph is None:
             self._state = analysis_state
             await self.initialize()
-
-        self._set_status(analysis_state, TaskStatus.RUNNING)
-        workflow_state = self._make_initial_workflow_state(
-            analysis_state,
-            current_round=analysis_state.current_round,
-        )
 
         # Mirror the post-wait max-round extension from _wait_for_user_input().
         has_real_text = bool(
@@ -182,35 +190,19 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         if (has_real_text or has_uploaded_files) and analysis_state.current_round >= max_rounds:
             analysis_state.max_rounds = analysis_state.current_round + 1
 
-        self._consume_restore_resume_metadata(analysis_state)
+        from .restore_targets import prepare_restored_semantic_action
 
-        if at_integration_gate(analysis_state) and not analysis_state.final_report_requested:
-            await self._send_message(
-                "integration_gate",
-                build_integration_gate_payload(analysis_state, self.session_id),
-                AgentType.PI,
+        target = prepare_restored_semantic_action(analysis_state)
+        if target is None:
+            raise ValueError(
+                "Restored semantic gate has no exact post-action target"
             )
-
-        # Integration-gate waiting state: skip the _should_continue /
-        # _check_convergence stop guards — they would route to
-        # generate_final_report on max_rounds, bypassing the
-        # wait_for_user_input checkpoint that lets the user choose new
-        # directions. The graph checkpoint resumes at wait_for_user_input.
-        is_integration_gate = at_integration_gate(analysis_state)
-
-        if not is_integration_gate:
-            if self._should_continue(workflow_state) == "stop":
-                final_state = await self._generate_final_report(workflow_state)
-                return final_state["analysis_state"]
-
-            workflow_state = await self._check_convergence(workflow_state)
-            if self._check_convergence_condition(workflow_state) == "stop":
-                final_state = await self._generate_final_report(workflow_state)
-                return final_state["analysis_state"]
-
-        config = {"configurable": {"thread_id": self.session_id}, "recursion_limit": GRAPH_RECURSION_LIMIT}
-        final_state = await self.compiled_graph.ainvoke(workflow_state, config)
-        return final_state["analysis_state"]
+        logger.info(
+            "[%s] Restored semantic action routes exactly to %s",
+            self.session_id,
+            target,
+        )
+        return await self._invoke_restore_entry(analysis_state, self.session_id)
 
     def __init__(
         self,
@@ -246,6 +238,13 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         self.compiled_graph = None
         self.checkpointer = None
         self._db_conn = None
+        self._close_lock = asyncio.Lock()
+        self._close_complete = False
+        self._close_status: Dict[str, bool] = {}
+        self._close_task: Optional[asyncio.Task] = None
+        self._close_retry_task: Optional[asyncio.Task] = None
+        self._discard_runtime_on_close = False
+        self._close_discard_event = asyncio.Event()
 
         # Current analysis state for callbacks (updated during workflow execution)
         self._current_analysis_state: Optional[AnalysisState] = None
@@ -278,6 +277,17 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         self._llm_failure_events: Dict[str, asyncio.Event] = {}
         self._llm_failure_actions: Dict[str, Optional[str]] = {}
         self._llm_failure_generations: Dict[str, int] = {}  # monotonic counter per node for idempotency
+
+        # Runtime persistence gate. Unlike an ordinary node exception this gate
+        # stays inside the running workflow so Retry still has the exact live
+        # kernel namespace that failed to persist.
+        self._runtime_persistence_event = asyncio.Event()
+        self._runtime_persistence_action: Optional[str] = None
+        self._runtime_persistence_gate_active = False
+        self._runtime_persistence_action_pending = False
+        self._runtime_persistence_gate_token = ""
+        self._runtime_persistence_gate_generation = 0
+        self._runtime_persistence_pause_task: Optional[asyncio.Task] = None
 
         # Supplementary analysis requests queue (set by API, consumed by HITL loop).
         # Each item is (request_text, target) where target is "annotation" | "direction" | "round".
@@ -371,7 +381,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
 
         if action == LlmFailureAction.RETRY.value:
             if clear_cache_on_retry and self._settings_provider is not None:
-                self._settings_provider._client_cache.clear()
+                self._settings_provider.clear_client_cache()
             return LlmFailureAction.RETRY
         if action == LlmFailureAction.TERMINATE.value:
             return LlmFailureAction.TERMINATE
@@ -413,6 +423,276 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             exit_change=StateSyncChangeType.LLM_RETRY.value,
             clear_cache_on_retry=True,
         )
+
+    async def _publish_runtime_persistence_transition(
+        self,
+        analysis_state: AnalysisState,
+        *,
+        persist_state: bool,
+        abort_on_close_discard: bool = False,
+    ) -> bool:
+        """Persist a gate transition before best-effort realtime delivery.
+
+        The return value is a durability proof for close-time transitions. A
+        final runtime save gate must not release its live kernel merely because
+        the in-memory state changed: reconnect reads the persisted state, so a
+        failed callback leaves the transition incomplete and must be retried.
+        """
+        persisted = not persist_state
+        if persist_state and self.state_callback:
+            try:
+                discard_requested = bool(
+                    getattr(self, "_discard_runtime_on_close", False)
+                    or getattr(self, "_restore_superseded", False)
+                )
+                if abort_on_close_discard and discard_requested:
+                    return False
+                callback_task = asyncio.ensure_future(
+                    self.state_callback(analysis_state)
+                )
+                if abort_on_close_discard:
+                    discard_event = getattr(
+                        self, "_close_discard_event", None,
+                    )
+                    if discard_event is None:
+                        discard_event = asyncio.Event()
+                        self._close_discard_event = discard_event
+                    discard_task = asyncio.create_task(discard_event.wait())
+                    try:
+                        done, _pending = await asyncio.wait(
+                            {callback_task, discard_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if discard_task in done and not callback_task.done():
+                            callback_task.cancel()
+                            await asyncio.gather(
+                                callback_task, return_exceptions=True,
+                            )
+                            return False
+                        callback_result = await callback_task
+                    finally:
+                        if not discard_task.done():
+                            discard_task.cancel()
+                        await asyncio.gather(
+                            discard_task, return_exceptions=True,
+                        )
+                else:
+                    callback_result = await callback_task
+                persisted = callback_result is not False
+            except Exception:
+                # The live kernel and in-memory gate remain authoritative. Keep
+                # the intervention reachable even when the session metadata
+                # write itself is temporarily unavailable.
+                logger.exception(
+                    "[%s] Failed to persist runtime-persistence gate transition",
+                    self.session_id,
+                )
+                persisted = False
+        elif persist_state:
+            logger.error(
+                "[%s] Runtime-persistence transition has no state callback; "
+                "durability is unproven",
+                self.session_id,
+            )
+        try:
+            await self._send_state_sync(
+                analysis_state,
+                StateSyncChangeType.RUNTIME_PERSISTENCE_FAILURE.value,
+            )
+        except Exception:
+            # Realtime delivery is observational. A persisted transition stays
+            # authoritative and will be replayed when the client reconnects.
+            logger.exception(
+                "[%s] Failed to deliver runtime-persistence state sync",
+                self.session_id,
+            )
+        return persisted
+
+    async def _wait_for_runtime_persistence_intervention(
+        self,
+        analysis_state: AnalysisState,
+        *,
+        successful_status: Optional[TaskStatus] = TaskStatus.RUNNING,
+        persist_transitions: bool = False,
+        rotate_generation: bool = False,
+    ) -> str:
+        """Hold the live kernel until persistence recovery is explicit."""
+        from ..services.runtime_persistence_gate import (
+            clear_runtime_persistence_gate,
+            enter_runtime_persistence_gate,
+            prepare_runtime_recompute,
+            runtime_persistence_gate_identity,
+        )
+
+        def _discard_requested() -> bool:
+            return bool(
+                getattr(self, "_discard_runtime_on_close", False)
+                or getattr(self, "_restore_superseded", False)
+            )
+
+        async def _publish_until_durable(*, allow_pending_action: bool) -> bool:
+            """Retry a close-time state transition until it is durable.
+
+            A live action may arrive over the current connection even when the
+            entry write failed. Let that action advance to its terminal state,
+            but require the terminal transition itself to persist before the
+            helper returns and the kernel can be shut down.
+            """
+            delay = 0.1
+            while True:
+                persisted = await self._publish_runtime_persistence_transition(
+                    analysis_state,
+                    persist_state=persist_transitions,
+                    abort_on_close_discard=persist_transitions,
+                )
+                if persisted:
+                    return True
+                if _discard_requested():
+                    return False
+                reachable, _registered_here = (
+                    await self._register_close_persistence_gate(analysis_state)
+                )
+                if not reachable:
+                    # A restore or replacement won after the prior reachability
+                    # check. Retrying this old state's callback would either
+                    # spin forever on its compare-and-write guard or overwrite
+                    # the replacement through a less defensive callback.
+                    self._restore_superseded = True
+                    return False
+                if allow_pending_action and bool(
+                    getattr(self, "_runtime_persistence_action_pending", False)
+                ):
+                    return False
+                await asyncio.sleep(delay)
+                delay = min(delay * 2.0, 1.0)
+
+        # A restore, deletion, or explicit clean restart may supersede this
+        # close between the failed save and gate construction. The discard flag
+        # is durable for the lifetime of the workflow, unlike the one-shot
+        # action/event pair, so consult it before publishing a gate at all.
+        if _discard_requested():
+            return "discard"
+
+        event = self._runtime_persistence_event
+        self._runtime_persistence_gate_active = True
+        self._current_analysis_state = analysis_state
+        try:
+            persistence = self.sandbox.sync_runtime_persistence_state(analysis_state)
+            enter_runtime_persistence_gate(
+                analysis_state,
+                persistence,
+                degraded_recovery=bool(persistence.get("degraded_recovery")),
+                rotate_generation=rotate_generation,
+            )
+            (
+                self._runtime_persistence_gate_token,
+                self._runtime_persistence_gate_generation,
+            ) = runtime_persistence_gate_identity(analysis_state)
+            # close(save_runtime=False) may have raced with sync/enter above.
+            # Do not clear its wake-up and then wait forever on an unreachable
+            # gate; clear the newly published durable gate and discard instead.
+            if _discard_requested():
+                clear_runtime_persistence_gate(analysis_state)
+                return "discard"
+            self._runtime_persistence_action = None
+            self._runtime_persistence_action_pending = False
+            event.clear()
+            published = await _publish_until_durable(allow_pending_action=True)
+            if not published and _discard_requested():
+                clear_runtime_persistence_gate(analysis_state)
+                return "discard"
+            while True:
+                if _discard_requested():
+                    clear_runtime_persistence_gate(analysis_state)
+                    return "discard"
+                await wait_with_skip_time(
+                    event,
+                    -1,
+                    self.session_id,
+                    "runtime_persistence_failure",
+                    safe_point_hook=getattr(self, "await_restore_safe_point", None),
+                )
+                action = self._runtime_persistence_action
+                if action == "retry":
+                    try:
+                        saved = await self.sandbox.save_session()
+                    except Exception:
+                        logger.warning(
+                            "[%s] Runtime persistence Retry failed",
+                            self.session_id,
+                            exc_info=True,
+                        )
+                        saved = False
+                    persistence = self.sandbox.sync_runtime_persistence_state(
+                        analysis_state
+                    )
+                    if not saved or persistence.get("status") == "failed":
+                        self._runtime_persistence_action = None
+                        self._runtime_persistence_action_pending = False
+                        event.clear()
+                        enter_runtime_persistence_gate(
+                            analysis_state,
+                            persistence,
+                            rotate_generation=True,
+                        )
+                        (
+                            self._runtime_persistence_gate_token,
+                            self._runtime_persistence_gate_generation,
+                        ) = runtime_persistence_gate_identity(analysis_state)
+                        published = await _publish_until_durable(
+                            allow_pending_action=True
+                        )
+                        if not published and _discard_requested():
+                            clear_runtime_persistence_gate(analysis_state)
+                            return "discard"
+                        continue
+                    clear_runtime_persistence_gate(analysis_state)
+                    self._runtime_persistence_action = None
+                    self._runtime_persistence_action_pending = False
+                    if successful_status is not None:
+                        self._set_status(analysis_state, successful_status)
+                    if not await _publish_until_durable(
+                        allow_pending_action=False
+                    ):
+                        return "discard"
+                    return "retry"
+
+                if action == "manage":
+                    prepare_runtime_recompute(analysis_state, self.sandbox)
+                    self._runtime_persistence_action = None
+                    self._runtime_persistence_action_pending = False
+                    if not await _publish_until_durable(
+                        allow_pending_action=False
+                    ):
+                        return "discard"
+                    return "recompute"
+
+                if action == "terminate":
+                    clear_runtime_persistence_gate(analysis_state)
+                    self._runtime_persistence_action = None
+                    self._runtime_persistence_action_pending = False
+                    return "terminate"
+
+                if action == "discard":
+                    # Internal-only: an authoritative restore/delete has made
+                    # this live generation obsolete. It is never accepted from
+                    # the public action endpoint.
+                    clear_runtime_persistence_gate(analysis_state)
+                    self._runtime_persistence_action = None
+                    self._runtime_persistence_action_pending = False
+                    return "discard"
+
+                logger.warning(
+                    "[%s] Ignoring unknown runtime persistence action %r",
+                    self.session_id,
+                    action,
+                )
+        finally:
+            self._runtime_persistence_gate_active = False
+            self._runtime_persistence_action = None
+            self._runtime_persistence_action_pending = False
+            self._runtime_persistence_gate_token = ""
+            self._runtime_persistence_gate_generation = 0
 
     async def _pathology_llm_intervention_callback(
         self,
@@ -694,6 +974,79 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         event.set()
         return True
 
+    def signal_runtime_persistence_action(
+        self,
+        action: str,
+        gate_token: str | None = None,
+        generation: int | None = None,
+    ):
+        """Arbitrate and deliver one action to the exact live gate generation."""
+        from ..services.runtime_persistence_gate import (
+            RuntimePersistenceActionOutcome,
+            RuntimePersistenceActionResult,
+            runtime_persistence_gate_identity,
+            validate_runtime_persistence_action,
+        )
+
+        if action not in {"retry", "manage", "terminate"}:
+            return RuntimePersistenceActionResult(
+                RuntimePersistenceActionOutcome.DUPLICATE_OR_CONFLICT,
+                action,
+                str(getattr(self, "_runtime_persistence_gate_token", "") or ""),
+                int(getattr(self, "_runtime_persistence_gate_generation", 0) or 0),
+            )
+        if not getattr(self, "_runtime_persistence_gate_active", False):
+            return RuntimePersistenceActionResult(
+                RuntimePersistenceActionOutcome.INACTIVE,
+                action,
+                str(getattr(self, "_runtime_persistence_gate_token", "") or ""),
+                int(getattr(self, "_runtime_persistence_gate_generation", 0) or 0),
+            )
+        state = getattr(self, "_current_analysis_state", None)
+        if state is None:
+            return RuntimePersistenceActionResult(
+                RuntimePersistenceActionOutcome.INACTIVE,
+                action,
+                str(getattr(self, "_runtime_persistence_gate_token", "") or ""),
+                int(getattr(self, "_runtime_persistence_gate_generation", 0) or 0),
+            )
+        current_token, current_generation = runtime_persistence_gate_identity(state)
+        if (
+            not gate_token
+            or generation is None
+            or str(gate_token) != current_token
+            or int(generation) != current_generation
+        ):
+            return RuntimePersistenceActionResult(
+                RuntimePersistenceActionOutcome.STALE,
+                action,
+                current_token,
+                current_generation,
+            )
+        if getattr(self, "_runtime_persistence_action_pending", False):
+            # The live producer already owns an accepted action. Classify the
+            # next request before touching the durable gate so duplicate and
+            # conflicting clicks are observationally read-only.
+            return RuntimePersistenceActionResult(
+                RuntimePersistenceActionOutcome.DUPLICATE_OR_CONFLICT,
+                action,
+                current_token,
+                current_generation,
+            )
+        result = validate_runtime_persistence_action(
+            state,
+            action,
+            gate_token=gate_token,
+            generation=generation,
+            active=True,
+        )
+        if not result.accepted:
+            return result
+        self._runtime_persistence_action_pending = True
+        self._runtime_persistence_action = action
+        self._runtime_persistence_event.set()
+        return result
+
     def signal_supplementary_analysis(self, request_text: str, target: str):
         """Queue a supplementary analysis request at the current HITL point.
 
@@ -822,11 +1175,32 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         )
 
         # Initialize local Jupyter sandbox with session-specific paths
+        from backend.utils.runtime_budget import resolve_effective_runtime_budgets
+
+        runtime_budgets = resolve_effective_runtime_budgets({
+            "max_namespace_count": self.config.runtime_max_namespace_count,
+            "max_single_object_bytes": self.config.runtime_max_single_object_bytes,
+            "max_anndata_total_bytes": self.config.runtime_max_anndata_total_bytes,
+            "max_rss_bytes": self.config.runtime_max_rss_bytes,
+            "max_pkl_bytes": self.config.runtime_max_pkl_bytes,
+            "max_save_seconds": self.config.runtime_max_save_seconds,
+        })
+        logger.info(
+            "[%s] Effective runtime persistence budgets (%s, capacity=%s): %s",
+            self.session_id,
+            runtime_budgets.get("effective_limit_basis"),
+            runtime_budgets.get("effective_memory_capacity_bytes"),
+            {
+                key: value for key, value in runtime_budgets.items()
+                if key.startswith("max_")
+            },
+        )
         self.sandbox = LocalJupyterSandbox(
             session_id=self.session_id,
             state_dir=str(get_session_states(self.session_id)),
             working_dir=str(get_session_workspace(self.session_id)),
-            timeout=self.config.sandbox_timeout
+            timeout=self.config.sandbox_timeout,
+            runtime_budgets=runtime_budgets,
         )
 
         # Create the settings provider — all agents read model/temp/prompt/client from it
@@ -984,7 +1358,13 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
     def _make_initial_workflow_state(analysis_state, current_round=0):
         return make_initial_workflow_state(analysis_state, current_round)
 
-    async def _create_auto_snapshot(self, state: AnalysisState, phase: str):
+    async def _create_auto_snapshot(
+        self,
+        state: AnalysisState,
+        phase: str,
+        *,
+        workflow_state: Optional[dict[str, Any]] = None,
+    ):
         """Create a required workflow snapshot via SnapshotService.
 
         Fail-closed: on capture failure raises RequiredSnapshotBlocked after
@@ -1054,11 +1434,15 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             service = SnapshotService(self.session_id, paths)
             self.snapshot_service = service
 
-        workflow_state = dict(self._current_graph_state or {})
+        capture_workflow_state = dict(
+            workflow_state
+            if workflow_state is not None
+            else self._current_graph_state or {}
+        )
         # Enrich with kernel presence for runtime capture decisions.
-        if "kernel_present" not in workflow_state:
+        if "kernel_present" not in capture_workflow_state:
             sb = getattr(self, "sandbox", None)
-            workflow_state["kernel_present"] = (
+            capture_workflow_state["kernel_present"] = (
                 sb is not None and getattr(sb, "km", None) is not None
             )
 
@@ -1066,7 +1450,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         capsule = ContinuationRegistry(service.object_store).freeze(
             phase,
             state,
-            workflow_state,
+            capture_workflow_state,
             live_safe_point=live_sp,
         )
         request = SnapshotCaptureRequest(
@@ -1101,7 +1485,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
                     state,
                     request,
                     sandbox=getattr(self, "sandbox", None),
-                    workflow_state=workflow_state,
+                    workflow_state=capture_workflow_state,
                     workspace_root=workspace_root,
                 )
             except RequiredSnapshotBlocked as exc:
@@ -1956,7 +2340,76 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         self._consume_restore_resume_metadata(analysis_state)
         return analysis_state
 
-    async def pause(self, thread_id: str):
+    async def _recover_failed_pause_persistence(
+        self,
+        thread_id: str,
+        analysis_state: AnalysisState,
+    ) -> None:
+        """Own the live-kernel pause failure gate until one action completes."""
+        try:
+            action = await self._wait_for_runtime_persistence_intervention(
+                analysis_state,
+                successful_status=TaskStatus.PAUSED,
+            )
+            if action == "retry":
+                self._set_status(analysis_state, TaskStatus.PAUSED)
+            elif action == "recompute":
+                self._set_status(analysis_state, TaskStatus.RUNNING)
+                self._pause_event.set()
+                previous = getattr(analysis_state, "pre_pause_status", None)
+                if previous == TaskStatus.WAITING_ANNOTATION:
+                    self._annotation_event.set()
+                elif previous == TaskStatus.WAITING_PLAN_REVIEW:
+                    self._plan_review_event.set()
+                elif previous == TaskStatus.WAITING_SPECIES_INPUT:
+                    self._species_event.set()
+                elif previous in (
+                    TaskStatus.WAITING_INPUT,
+                ):
+                    self._continue_event.set()
+            elif action == "terminate":
+                self._set_status(analysis_state, TaskStatus.STOPPED)
+                analysis_state.termination_reason = "runtime_persistence_failure"
+                # Release every cooperative waiter after checkpointing a stop
+                # decision. The graph observes should_continue=False at its next
+                # conditional boundary rather than remaining parked forever.
+                config = {"configurable": {"thread_id": thread_id}}
+                try:
+                    await self.compiled_graph.aupdate_state(config, {
+                        "analysis_state": analysis_state,
+                        "human_stop_requested": True,
+                        "should_continue": False,
+                    })
+                except Exception:
+                    logger.warning(
+                        "[%s] Could not checkpoint pause-failure termination",
+                        self.session_id,
+                        exc_info=True,
+                    )
+                self._pause_event.set()
+                self._continue_event.set()
+                self._annotation_event.set()
+                self._plan_review_event.set()
+                self._species_event.set()
+            await self._send_state_sync(
+                analysis_state,
+                StateSyncChangeType.RUNTIME_PERSISTENCE_FAILURE.value,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "[%s] Pause runtime-persistence recovery task failed",
+                self.session_id,
+            )
+        finally:
+            self._runtime_persistence_pause_task = None
+
+    async def pause(
+        self,
+        thread_id: str,
+        analysis_state: Optional[AnalysisState] = None,
+    ) -> Dict[str, Any]:
         """Pause the workflow and save sandbox state including Python session.
 
         Clears the cooperative pause gate FIRST so the bioinformatics agent's
@@ -1981,79 +2434,555 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         state = await self.compiled_graph.aget_state(config)
 
         if state and state.values:
-            analysis_state = state.values["analysis_state"]
+            analysis_state = analysis_state or state.values["analysis_state"]
             self._set_status(analysis_state, TaskStatus.PAUSED)
 
             # Save sandbox state including Python session using dill.
             # The Jupyter kernel is single-threaded, so this queues behind any
             # in-flight execute() and captures a clean post-step snapshot.
             if self.sandbox:
-                await self.sandbox.save_session()
-                self.sandbox.notebook_state.save()
+                try:
+                    saved = await self.sandbox.save_session()
+                    persistence = self.sandbox.sync_runtime_persistence_state(
+                        analysis_state
+                    )
+                    if not saved or persistence.get("status") == "failed":
+                        raise RuntimeError(
+                            "runtime persistence did not commit a current generation"
+                        )
+                    self.sandbox.notebook_state.save()
+                except Exception:
+                    logger.warning(
+                        "[%s] Pause persistence failed; arming live-kernel gate",
+                        self.session_id,
+                        exc_info=True,
+                    )
+                    from ..services.runtime_persistence_gate import (
+                        enter_runtime_persistence_gate,
+                    )
+
+                    try:
+                        persistence = self.sandbox.sync_runtime_persistence_state(
+                            analysis_state
+                        )
+                    except Exception as sync_error:
+                        persistence = dict(
+                            getattr(analysis_state, "runtime_persistence", None) or {}
+                        )
+                        persistence.update({
+                            "status": "failed",
+                            "error_summary": (
+                                "Pause runtime state synchronization failed: "
+                                f"{type(sync_error).__name__}"
+                            ),
+                        })
+                    failure = enter_runtime_persistence_gate(
+                        analysis_state,
+                        persistence,
+                        degraded_recovery=bool(
+                            persistence.get("degraded_recovery")
+                        ),
+                    )
+                    task = getattr(
+                        self, "_runtime_persistence_pause_task", None,
+                    )
+                    if task is None or task.done():
+                        task = asyncio.create_task(
+                            self._recover_failed_pause_persistence(
+                                thread_id, analysis_state,
+                            ),
+                            name=f"runtime-persistence-pause:{self.session_id}",
+                        )
+                        self._runtime_persistence_pause_task = task
+                    # Let the recovery task establish its in-memory arbitration
+                    # fields before the HTTP response exposes the gate token.
+                    await asyncio.sleep(0)
+                    return {
+                        "success": False,
+                        "status": analysis_state.status.value,
+                        "still_blocked": True,
+                        "snapshot_failure": failure,
+                    }
                 logger.info(f"[{self.session_id}] Sandbox state saved")
 
             # State will be automatically checkpointed
             logger.info(f"[{self.session_id}] Workflow paused successfully")
+            return {
+                "success": True,
+                "status": analysis_state.status.value,
+                "still_blocked": False,
+            }
+        return {
+            "success": True,
+            "status": TaskStatus.PAUSED.value,
+            "still_blocked": False,
+        }
     
-    async def close(self):
-        """Clean up resources and save state"""
-        logger.info(f"[{self.session_id}] Closing workflow and cleaning up resources")
-        # sandbox.stop() ends with save_session() + a notebook save. After a
-        # restore superseded this run those writes would land on top of the pkl
-        # and notebook apply() just installed and _verify_live_restore verified —
-        # the same hazard the restore path avoids by tearing down before apply.
-        # Shut the kernel down, but do not let it persist itself.
-        from ..services.snapshot_v2.safe_point import (
-            get_snapshot_safe_point_manager as _sp_manager,
-        )
+    async def _register_close_persistence_gate(
+        self,
+        analysis_state: AnalysisState,
+    ) -> tuple[bool, bool]:
+        """Make a final-save gate reachable without replacing a newer owner.
 
-        superseded = _sp_manager().is_superseded(self.session_id) or getattr(
-            self, "_restore_superseded", False
-        )
-        if self.sandbox:
+        WebSocket and headless workflows are already registered. Standalone
+        report workflows are not, so a final-save failure temporarily publishes
+        their workflow object while the live kernel is awaiting an action.
+        """
+        from backend.state import sessions, state_lock, workflows
+
+        async with state_lock:
+            current_state = sessions.get(self.session_id)
+            current_workflow = workflows.get(self.session_id)
+            # A missing session means a tombstone/delete already detached this
+            # generation. Never resurrect an old workflow into the public
+            # registry merely to host a gate no user can reach.
+            if current_state is not analysis_state:
+                return False, False
+            if current_workflow is None:
+                workflows[self.session_id] = self
+                self._close_gate_registered_here = True
+                return True, True
+            return current_workflow is self, False
+
+    async def _release_close_persistence_gate_registration(self) -> None:
+        """Compare-and-remove this closed workflow's registry ownership."""
+        from backend.state import report_workflows, state_lock, workflows
+
+        async with state_lock:
+            if workflows.get(self.session_id) is self:
+                workflows.pop(self.session_id, None)
+            if report_workflows.get(self.session_id) is self:
+                report_workflows.pop(self.session_id, None)
+        self._close_gate_registered_here = False
+
+    def _ensure_close_retry_task(self) -> None:
+        """Retry incomplete owned-resource cleanup with bounded backoff.
+
+        A literal ``False`` from close is intentionally non-terminal: at least
+        one live handle remains. The workflow stays in the public registry and
+        this owned task makes that retention actionable instead of relying on a
+        future WebSocket/request to happen to call close again.
+        """
+        existing = getattr(self, "_close_retry_task", None)
+        if existing is not None and not existing.done():
+            return
+
+        async def _retry() -> None:
+            delay = 0.5
             try:
-                # This will save the notebook state before stopping
-                await self.sandbox.stop(save=not superseded)
-                logger.info(f"[{self.session_id}] Sandbox stopped")
-            except Exception as e:
-                logger.exception(f"[{self.session_id}] Error stopping sandbox")
-                
-        if hasattr(self, '_db_conn') and self._db_conn:
-            try:
-                await self._compact_checkpoints()
-            except Exception:
-                logger.exception(f"[{self.session_id}] Error compacting sqlite checkpoints")
-            try:
-                await self._db_conn.close()
-            except Exception:
-                logger.exception(f"[{self.session_id}] Error closing sqlite connection")
+                while not getattr(self, "_close_complete", False):
+                    await asyncio.sleep(delay)
+                    try:
+                        result = await self.close(
+                            save_runtime=not bool(
+                                getattr(self, "_discard_runtime_on_close", False)
+                                or getattr(self, "_restore_superseded", False)
+                            )
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception(
+                            "[%s] Automatic workflow cleanup retry failed",
+                            self.session_id,
+                        )
+                        result = False
+                    if result is not False:
+                        return
+                    delay = min(delay * 2.0, 30.0)
             finally:
-                self._db_conn = None
-                
-        if self.llm_manager:
-            try:
-                await self.llm_manager.close()
-                logger.info(f"[{self.session_id}] LLM manager closed")
-            except Exception as e:
-                logger.exception(f"[{self.session_id}] Error closing LLM manager")
+                self._close_retry_task = None
 
-        # Close literature-owned runtime clients before provider cleanup
-        if hasattr(self, 'literature_agent') and self.literature_agent:
-            close_runtime_clients = getattr(self.literature_agent, "close_runtime_clients", None)
-            if close_runtime_clients:
+        self._close_retry_task = asyncio.create_task(
+            _retry(),
+            name=f"workflow-close-retry:{self.session_id}",
+        )
+
+    async def close(self, *, save_runtime: bool = True) -> bool:
+        """Run close as an owned task so caller cancellation cannot orphan a gate.
+
+        ``save_runtime=False`` is reserved for an already-authorized discard
+        such as snapshot supersession, session deletion, or explicit restart
+        from a clean analysis generation.
+        """
+        if not save_runtime:
+            self._discard_runtime_on_close = True
+            discard_event = getattr(self, "_close_discard_event", None)
+            if discard_event is None:
+                discard_event = asyncio.Event()
+                self._close_discard_event = discard_event
+            discard_event.set()
+        discard_requested = bool(
+            getattr(self, "_discard_runtime_on_close", False)
+            or getattr(self, "_restore_superseded", False)
+        )
+        if discard_requested and getattr(
+            self, "_runtime_persistence_gate_active", False
+        ):
+            # Wake an owned close task that is already awaiting a user action.
+            # Restore/delete authority supersedes that action without cancelling
+            # the task and leaving a durable gate with no consumer.
+            self._runtime_persistence_action_pending = True
+            self._runtime_persistence_action = "discard"
+            self._runtime_persistence_event.set()
+        if getattr(self, "_close_complete", False):
+            return True
+
+        task = getattr(self, "_close_task", None)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                self._close_owned_resources(),
+                name=f"workflow-close:{self.session_id}",
+            )
+            self._close_task = task
+        # The workflow owns this cleanup. A WebSocket/request task being
+        # cancelled must not cancel the only consumer of an armed persistence
+        # gate; callers still receive their own cancellation immediately.
+        return await asyncio.shield(task)
+
+    async def _close_owned_resources(self) -> bool:
+        """Close owned resources, preserving a kernel until its final save lands.
+
+        Returns ``True`` only when every owned resource is closed. A caller that
+        receives ``False`` must retain the workflow so a later cleanup retry can
+        reach any resource that is still live.
+        """
+        close_lock = getattr(self, "_close_lock", None)
+        if close_lock is None:
+            close_lock = asyncio.Lock()
+            self._close_lock = close_lock
+        async with close_lock:
+            if getattr(self, "_close_complete", False):
+                return True
+            logger.info(f"[{self.session_id}] Closing workflow and cleaning up resources")
+            cancellation: Optional[asyncio.CancelledError] = None
+            close_status = getattr(self, "_close_status", None)
+            if close_status is None:
+                close_status = {}
+                self._close_status = close_status
+
+            async def _close_resource(key: str, label: str, closer) -> bool:
+                nonlocal cancellation
+                if close_status.get(key, False):
+                    return True
                 try:
-                    await close_runtime_clients()
+                    await closer()
+                    close_status[key] = True
+                    return True
+                except asyncio.CancelledError as exc:
+                    cancellation = cancellation or exc
+                    consume_current_cancellation_request()
+                    logger.warning(
+                        "[%s] Cancellation received while %s; continuing owned-resource cleanup",
+                        self.session_id,
+                        label,
+                    )
+                    return False
                 except Exception:
-                    logger.exception(f"[{self.session_id}] Error closing literature runtime clients")
+                    logger.exception("[%s] Error %s", self.session_id, label)
+                    return False
 
-        # Close per-agent LLM clients managed by the settings provider
-        if hasattr(self, '_settings_provider') and self._settings_provider:
-            await self._settings_provider.cleanup()
+            async def _await_close_critical(awaitable, *, label: str):
+                """Defer caller cancellation until one gate-critical await ends.
+
+                ``close()`` shields the owned close task from ordinary request
+                cancellation, but shutdown code and tests may cancel that task
+                directly. Once a durable final-save gate is armed, abandoning
+                its only consumer would strand a reconnect-visible gate with no
+                live kernel. Keep the child operation owned, remember the first
+                cancellation, and re-raise only after cleanup reaches a safe
+                terminal boundary.
+                """
+                nonlocal cancellation
+                owned = asyncio.ensure_future(awaitable)
+                while not owned.done():
+                    try:
+                        await asyncio.shield(owned)
+                    except asyncio.CancelledError as exc:
+                        cancellation = cancellation or exc
+                        consume_current_cancellation_request()
+                        logger.warning(
+                            "[%s] Cancellation received while %s; deferring "
+                            "it until the persistence gate reaches a durable "
+                            "terminal state",
+                            self.session_id,
+                            label,
+                        )
+                    except BaseException:
+                        break
+                return owned.result()
+
+            # sandbox.stop() ends with save_session() + a notebook save. After a
+            # restore superseded this run those writes would land on top of the pkl
+            # and notebook apply() just installed and _verify_live_restore verified —
+            # the same hazard the restore path avoids by tearing down before apply.
+            # Shut the kernel down, but do not let it persist itself.
+            from ..services.snapshot_v2.safe_point import (
+                get_snapshot_safe_point_manager as _sp_manager,
+            )
+
+            def _is_superseded() -> bool:
+                return (
+                    bool(getattr(self, "_discard_runtime_on_close", False))
+                    or _sp_manager().is_superseded(self.session_id)
+                    or bool(getattr(self, "_restore_superseded", False))
+                )
+
+            sandbox = getattr(self, "sandbox", None)
+            if sandbox and not close_status.get("sandbox", False):
+                from ..services.runtime_persistence_gate import (
+                    RuntimePersistenceShutdownBlocked,
+                )
+
+                prior_status: Optional[TaskStatus] = None
+                persistence_failures = 0
+                while not close_status.get("sandbox", False):
+                    try:
+                        if _is_superseded():
+                            await sandbox.stop(save=False)
+                        else:
+                            await sandbox.stop(save=True)
+                        close_status["sandbox"] = True
+                        logger.info(f"[{self.session_id}] Sandbox stopped")
+                        break
+                    except asyncio.CancelledError as exc:
+                        cancellation = cancellation or exc
+                        consume_current_cancellation_request()
+                        logger.warning(
+                            "[%s] Cancellation received while stopping sandbox; "
+                            "the live kernel remains registered for cleanup retry",
+                            self.session_id,
+                        )
+                        break
+                    except RuntimePersistenceShutdownBlocked:
+                        # A restore/delete may have superseded the workflow while
+                        # the final save was in flight. Its installed generation is
+                        # authoritative, so retry as an explicit no-save shutdown.
+                        if _is_superseded():
+                            continue
+
+                        analysis_state = getattr(
+                            self, "_current_analysis_state", None
+                        )
+                        if analysis_state is None:
+                            from backend.state import sessions
+
+                            analysis_state = sessions.get(self.session_id)
+                        if analysis_state is None:
+                            logger.exception(
+                                "[%s] Final runtime save failed but no analysis "
+                                "state exists to host the intervention gate",
+                                self.session_id,
+                            )
+                            break
+
+                        reachable, _registered_here = (
+                            await self._register_close_persistence_gate(
+                                analysis_state
+                            )
+                        )
+                        if not reachable:
+                            # A replacement state/workflow owns the session. This
+                            # object is stale and must not write over it.
+                            self._restore_superseded = True
+                            continue
+
+                        if prior_status is None:
+                            prior_status = getattr(
+                                analysis_state, "status", TaskStatus.RUNNING
+                            )
+                        persistence_failures += 1
+                        try:
+                            action = await _await_close_critical(
+                                self._wait_for_runtime_persistence_intervention(
+                                    analysis_state,
+                                    successful_status=prior_status,
+                                    persist_transitions=True,
+                                    rotate_generation=persistence_failures > 1,
+                                ),
+                                label="waiting for final-save intervention",
+                            )
+                        except WorkflowSupersededError:
+                            # The safe-point hook can raise from inside this
+                            # persistence-handler block. Convert it into the
+                            # same explicit no-save shutdown used by the normal
+                            # supersession check, then continue cleanup.
+                            self._restore_superseded = True
+                            continue
+                        except asyncio.CancelledError as exc:
+                            cancellation = cancellation or exc
+                            consume_current_cancellation_request()
+                            logger.warning(
+                                "[%s] Runtime-persistence close gate was cancelled; "
+                                "preserving the live kernel for cleanup retry",
+                                self.session_id,
+                            )
+                            break
+                        except Exception:
+                            logger.exception(
+                                "[%s] Runtime-persistence close gate failed; "
+                                "preserving the live kernel for cleanup retry",
+                                self.session_id,
+                            )
+                            break
+                        if action == "retry":
+                            # Retry already committed the namespace. Re-enter
+                            # stop() so it verifies/reuses that generation and
+                            # saves notebook metadata before shutdown.
+                            continue
+
+                        if action == "terminate":
+                            self._set_status(analysis_state, TaskStatus.STOPPED)
+                            analysis_state.termination_reason = (
+                                "runtime_persistence_failure"
+                            )
+                            delay = 0.1
+                            while not _is_superseded():
+                                persisted = await _await_close_critical(
+                                    self._publish_runtime_persistence_transition(
+                                        analysis_state,
+                                        persist_state=True,
+                                        abort_on_close_discard=True,
+                                    ),
+                                    label=(
+                                        "persisting final-save termination"
+                                    ),
+                                )
+                                if persisted:
+                                    break
+                                await _await_close_critical(
+                                    asyncio.sleep(delay),
+                                    label=(
+                                        "retrying final-save termination "
+                                        "persistence"
+                                    ),
+                                )
+                                delay = min(delay * 2.0, 1.0)
+                        # Recompute/manage and terminate are both explicit
+                        # authorization to discard this unsaved live generation.
+                        await _await_close_critical(
+                            sandbox.stop(save=False),
+                            label="discarding an explicitly released runtime",
+                        )
+                        close_status["sandbox"] = True
+                        logger.info(
+                            "[%s] Sandbox stopped after explicit runtime "
+                            "persistence action %s",
+                            self.session_id,
+                            action,
+                        )
+                        break
+                    except Exception:
+                        logger.exception(
+                            "[%s] Error stopping sandbox", self.session_id
+                        )
+                        break
+            else:
+                if not sandbox:
+                    close_status["sandbox"] = True
+
+            db_conn = getattr(self, "_db_conn", None)
+            if db_conn:
+                compacted = await _close_resource(
+                    "db_compaction",
+                    "compacting sqlite checkpoints",
+                    self._compact_checkpoints,
+                )
+                db_closed = await _close_resource(
+                    "db", "closing sqlite connection", db_conn.close
+                )
+                if db_closed:
+                    self._db_conn = None
+                    # Compaction is maintenance, not a separately owned
+                    # resource. If it failed but the connection closed, there
+                    # is nothing safe to retry and no live handle remains.
+                    if not compacted:
+                        close_status["db_compaction"] = True
+            else:
+                close_status["db"] = True
+                close_status["db_compaction"] = True
+
+            llm_manager = getattr(self, "llm_manager", None)
+            if llm_manager:
+                manager_closed = await _close_resource(
+                    "llm_manager", "closing LLM manager", llm_manager.close
+                )
+                if manager_closed:
+                    logger.info(f"[{self.session_id}] LLM manager closed")
+            else:
+                close_status["llm_manager"] = True
+
+            # Close literature-owned runtime clients before provider cleanup.
+            literature_agent = getattr(self, "literature_agent", None)
+            if literature_agent:
+                close_runtime_clients = getattr(
+                    literature_agent, "close_runtime_clients", None
+                )
+                if close_runtime_clients:
+                    await _close_resource(
+                        "literature_clients",
+                        "closing literature runtime clients",
+                        close_runtime_clients,
+                    )
+                else:
+                    close_status["literature_clients"] = True
+            else:
+                close_status["literature_clients"] = True
+
+            # Close per-agent LLM clients managed by the settings provider.
+            settings_provider = getattr(self, "_settings_provider", None)
+            if settings_provider:
+                await _close_resource(
+                    "settings_provider",
+                    "closing settings-provider clients",
+                    settings_provider.cleanup,
+                )
+            else:
+                close_status["settings_provider"] = True
+
+            self._close_complete = all(
+                close_status.get(key, False)
+                for key in (
+                    "sandbox",
+                    "db",
+                    "llm_manager",
+                    "literature_clients",
+                    "settings_provider",
+                )
+            )
+            if not self._close_complete:
+                analysis_state = getattr(self, "_current_analysis_state", None)
+                if analysis_state is None:
+                    from backend.state import sessions
+
+                    analysis_state = sessions.get(self.session_id)
+                reachable = False
+                if analysis_state is not None:
+                    reachable, _registered_here = (
+                        await self._register_close_persistence_gate(
+                            analysis_state
+                        )
+                    )
+                if not reachable:
+                    # A replacement state/workflow or tombstone owns this
+                    # session now. The stale object still owns resources that
+                    # must be retried, but it must never save its runtime over
+                    # the replacement generation.
+                    self._restore_superseded = True
+                self._ensure_close_retry_task()
+            if self._close_complete:
+                await self._release_close_persistence_gate_registration()
+            if cancellation is not None:
+                raise cancellation
+            return self._close_complete
 
     async def _compact_checkpoints(
-        self, keep: int = CHECKPOINTS_TO_KEEP_PER_NAMESPACE
+        self,
+        keep: int = CHECKPOINTS_TO_KEEP_PER_NAMESPACE,
+        *,
+        vacuum: bool = True,
     ) -> None:
-        """Retain only the latest graph checkpoints and reclaim SQLite space."""
+        """Retain latest graph checkpoints; optionally reclaim the main DB."""
         if self._db_conn is None or keep < 1:
             return
         async def _execute(sql: str, parameters: tuple = ()) -> None:
@@ -2122,7 +3051,8 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         )
         await self._db_conn.commit()
         await _execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        await _execute("VACUUM")
+        if vacuum:
+            await _execute("VACUUM")
         logger.info(
             "[%s] Compacted LangGraph checkpoints to %d per namespace",
             self.session_id,

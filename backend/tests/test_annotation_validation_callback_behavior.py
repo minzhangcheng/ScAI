@@ -58,6 +58,8 @@ def test_group_metadata_applies_absolute_cluster_counts():
     )
 
     assert annotations[0].n_cells == 241
+    assert annotations[0].n_cells_known is True
+    assert annotations[0].n_cells_source == "cluster_group_proportions"
     assert annotations[0].group_proportions == {"Control": 12.5}
 
 

@@ -36,7 +36,8 @@ async def test_safe_close_all_closes_through_noop_stub(tmp_path):
         assert "OPEN_BEFORE [1]" in setup.output
 
         r = await sb.execute(
-            _TPL_SAFE_CLOSE_ALL + "\nprint('OPEN_AFTER', plt.get_fignums())"
+            _TPL_SAFE_CLOSE_ALL + "\nprint('OPEN_AFTER', plt.get_fignums())",
+            skip_safety_check=True,
         )
         assert r.success, r.error
         assert "OPEN_AFTER []" in r.output

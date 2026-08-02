@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
+from ...utils.error_parsing import compact_traceback
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,10 @@ from ...services.report.report_outline import (
     build_report_outline,
 )
 from ...services.report.output_cleanup import reset_report_asset_directories
+from ...services.report.quality import (
+    build_report_partial_fields,
+    build_quality_disclosures,
+)
 from ..prompt_blocks import build_integration_block
 
 
@@ -296,9 +301,9 @@ class ReportContentMixin:
                     chat_messages,
                     figures_dir=str(Path(workspace_dir) / "figures") if workspace_dir else "",
                     tables_dir=str(Path(workspace_dir) / "tables") if workspace_dir else "",
-                    llm_client=report_llm_client or self._provider.get_llm_client("pi"),
+                    llm_client=client,
                     progress_callback=progress_callback,
-                    model=self._provider.get_model("pi"),
+                    model=report_model,
                 )
                 sections.extend(chat_sections)
             except Exception as e:
@@ -335,10 +340,16 @@ class ReportContentMixin:
                 stems.add(resolved_record_path.stem)
             for stem in stems:
                 records_by_stem.setdefault(stem, record)
+        legacy_by_stem = {
+            Path(str(getattr(item, "relative_path", "") or "")).stem: item
+            for item in (getattr(analysis_state, "legacy_artifacts", None) or [])
+            if str(getattr(item, "relative_path", "") or "").strip()
+        }
         for fig_name, fig_path in figure_map.items():
             stem = Path(fig_name).stem
             record = records_by_stem.get(stem) or records_by_stem.get(fig_path.stem)
             metadata = figure_metadata_by_stem.get(stem, {})
+            legacy_record = legacy_by_stem.get(stem) or legacy_by_stem.get(fig_path.stem)
             if record is not None:
                 metadata = {
                     **metadata,
@@ -349,6 +360,13 @@ class ReportContentMixin:
                     "plan_step_id": getattr(record, "plan_step_id", None),
                     "plan_id": getattr(record, "plan_id", None),
                     "purpose": getattr(record, "purpose", "result") or "result",
+                    "logical_figure_id": getattr(record, "logical_figure_id", None),
+                    "render_attempt_id": getattr(record, "render_attempt_id", None),
+                    "revision_of_id": getattr(record, "revision_of_id", None),
+                    "supersedes_id": getattr(record, "supersedes_id", None),
+                    "is_published_head": bool(
+                        getattr(record, "is_published_head", False)
+                    ),
                 }
             fig_entry = {
                 "filename": fig_name,
@@ -360,6 +378,24 @@ class ReportContentMixin:
                 "plan_step_id": metadata.get("plan_step_id"),
                 "plan_id": metadata.get("plan_id"),
                 "purpose": metadata.get("purpose") or "result",
+                "logical_figure_id": metadata.get("logical_figure_id"),
+                "render_attempt_id": metadata.get("render_attempt_id"),
+                "revision_of_id": metadata.get("revision_of_id"),
+                "supersedes_id": metadata.get("supersedes_id"),
+                "is_published_head": bool(metadata.get("is_published_head")),
+                "provenance_kind": (
+                    "registered_publication"
+                    if record is not None
+                    else (
+                        getattr(legacy_record, "provenance_kind", None)
+                        or "unregistered"
+                    )
+                ),
+                "is_legacy": legacy_record is not None and record is None,
+                "legacy_artifact_id": (
+                    getattr(legacy_record, "id", None)
+                    if legacy_record is not None and record is None else None
+                ),
             }
             # A same-name PDF can be overwritten independently of the raster.
             # Registered figures resolve through their review-time digest;
@@ -401,42 +437,25 @@ class ReportContentMixin:
         # fully complete: callers and the UI need a machine-readable signal that
         # figure coverage is incomplete. Explicit text-only sections (for
         # example integration gates/syntheses) never enter this list.
-        if used_fallback:
-            report_status = "partial"
-            partial_reason = "degraded_fallback"
-            report_current_step = "Degraded fallback report"
-            if figureless_sections:
-                report_current_step += (
-                    " with figure coverage gaps: "
-                    + ", ".join(figureless_sections)
-                )
-            if unreported_figures:
-                report_current_step += (
-                    "; unreported figures: " + ", ".join(unreported_figures)
-                )
-        elif figureless_sections or unreported_figures:
-            report_status = "partial"
-            partial_reason = "figure_coverage"
-            coverage_details = []
-            if figureless_sections:
-                coverage_details.append(
-                    "figureless sections: " + ", ".join(figureless_sections)
-                )
-            if unreported_figures:
-                coverage_details.append(
-                    "unreported figures: " + ", ".join(unreported_figures)
-                )
-            report_current_step = "Complete with figure coverage gaps: " + "; ".join(
-                coverage_details
-            )
-        elif getattr(analysis_state, "allow_partial_report", False):
-            report_status = "partial"
-            partial_reason = "approved_partial"
-            report_current_step = "Partial report approved"
-        else:
-            report_status = "completed"
-            partial_reason = None
-            report_current_step = "Complete"
+        quality_disclosures = build_quality_disclosures(analysis_state)
+        (
+            report_status,
+            report_current_step,
+            partial_reason,
+            partial_reasons,
+        ) = build_report_partial_fields(
+            degraded_fallback=used_fallback,
+            unreported_figures=unreported_figures,
+            figureless_sections=figureless_sections,
+            approved_partial=bool(
+                getattr(analysis_state, "allow_partial_report", False)
+            ),
+            quality_disclosures=quality_disclosures,
+        )
+
+        appendix_data["report_kind"] = report_status
+        appendix_data["partial_reason"] = partial_reason
+        appendix_data["partial_reasons"] = partial_reasons
 
         report = {
             "id": report_id,
@@ -458,6 +477,8 @@ class ReportContentMixin:
             "figureless_sections": figureless_sections,
             "unreported_figures": unreported_figures,
             "partial_reason": partial_reason,
+            "partial_reasons": partial_reasons,
+            "quality_disclosures": quality_disclosures,
             "analysis_log": all_records,
             "score_definitions": [sd.model_dump(mode="json") for sd in analysis_state.score_definitions] if analysis_state.score_definitions else [],
         }
@@ -852,7 +873,9 @@ IMPORTANT:
                 if rec.get("code_output"):
                     lines.append(f"Output: {rec['code_output'][-400:]}")
                 if rec.get("code_error"):
-                    lines.append(f"Error: {rec['code_error'][:200]}")
+                    lines.append(
+                        f"Error: {compact_traceback(rec['code_error'], max_chars=300)}"
+                    )
                 if rec.get("saved_figure_filenames"):
                     lines.append(f"Figures generated: {', '.join(rec['saved_figure_filenames'])}")
                 if rec.get("literature_topic"):
@@ -902,7 +925,9 @@ IMPORTANT:
         if step.code_output:
             parts.append(f"Output: {step.code_output}")
         if step.code_error:
-            parts.append(f"Error: {step.code_error[:300]}")
+            parts.append(
+                f"Error: {compact_traceback(step.code_error, max_chars=300)}"
+            )
         return "\n".join(parts)
 
     def _build_checkpoint_context(self, step: AnalysisStep) -> str:

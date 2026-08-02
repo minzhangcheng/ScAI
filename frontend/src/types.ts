@@ -193,6 +193,21 @@ export interface RawRoundResult {
   cross_modal_candidates?: CrossModalCandidate[]
   integration_candidates?: { direction: string; score?: number; notes?: string; [key: string]: unknown }[]
   integration_report_summary?: string
+  round_status?: 'completed' | 'partial' | 'failed' | 'skipped'
+  evidence_status?: 'substantive' | 'empty' | 'failed'
+  direction_coverage_eligible?: boolean | null
+  bioinformatics_evidence_verified?: boolean | null
+  evidence_gate_degraded?: boolean | null
+  evidence_execution_ids?: string[]
+  evidence_notes?: string[]
+  evidence_gate_findings?: Record<string, unknown>[]
+  lineage_id?: string
+  branch_id?: string | null
+  branch_label?: string | null
+  restored_from_snapshot_id?: string | null
+  direction?: string
+  direction_key?: string
+  result_identity_key?: string
 }
 
 export interface RawPublicationFigure {
@@ -401,4 +416,7 @@ export interface RoundSummary {
   phase: 'exploration' | 'innovation' | 'integration' | ''
   integrationCandidates: { direction: string; score?: number; notes?: string; [key: string]: unknown }[]
   integrationReportSummary?: string
+  lineageId?: string
+  directionKey?: string
+  resultIdentityKey?: string
 }

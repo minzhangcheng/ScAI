@@ -935,6 +935,225 @@ def test_pre_major_revision_is_plan_revision_gate():
     assert "pre_major_revision" not in _PHASE_TO_NEXT_NODE
 
 
+@pytest.mark.asyncio
+async def test_real_plan_revision_producer_roundtrips_exact_context_to_dialogue(
+    tmp_path, monkeypatch,
+):
+    """Exercise producer -> capsule -> activation -> restore -> consumer."""
+    from types import SimpleNamespace
+
+    from backend.models.schemas import (
+        AnalysisPlan,
+        AnalysisState,
+        DataFile,
+        PlanStep,
+    )
+    from backend.services.snapshot_v2.continuation import ContinuationRegistry
+    from backend.services.snapshot_v2.dispatcher import ContinuationDispatcher
+    from backend.services.snapshot_v2.object_store import ObjectStore
+    from backend.workflow.core import SingleCellAnalysisWorkflow
+    from backend.workflow.restore_targets import prepare_restored_semantic_action
+
+    old_plan = AnalysisPlan(
+        id="plan-before-runtime-revision",
+        phase="exploration",
+        stage="full",
+        overview="Run the original bounded workflow",
+        steps=[PlanStep(id=1, title="Original method", method="method_a")],
+        key_decision_points=["Review the observed mismatch"],
+        status="approved",
+    )
+    revised_plan = AnalysisPlan(
+        id="plan-after-runtime-revision",
+        phase="exploration",
+        stage="full",
+        overview="Use the evidence-triggered revision",
+        steps=[PlanStep(id=1, title="Revised method", method="method_b")],
+        key_decision_points=["Confirm the revision"],
+        status="approved",
+        revision_of=old_plan.id,
+        revision_reason="The observed result requires a different method.",
+    )
+    analysis_state = AnalysisState(
+        id="revision-producer-roundtrip",
+        user_id="owner",
+        current_round=2,
+        current_plan=old_plan,
+        initial_instruction="Run a domain-neutral analysis",
+    )
+    analysis_state.data_files = [DataFile(
+        filename="matrix.h5ad",
+        file_path="/tmp/matrix.h5ad",
+        section="sequencing",
+        data_type="scrnaseq",
+    )]
+    revision_context = {
+        "question": "Replace method_a after the observed incompatibility?",
+        "reason": "executor-observed-method-mismatch",
+        "step_id": 1,
+    }
+    raw_result = {
+        "status": "paused_for_revision",
+        "findings": ["The original method is incompatible with the data."],
+        "figures": [],
+        "steps_executed": 1,
+        "code_history": [],
+        "analysis_log": [],
+        "plan_revision_needed": True,
+        "plan_revision_context": revision_context,
+    }
+
+    workflow = SingleCellAnalysisWorkflow.__new__(SingleCellAnalysisWorkflow)
+    workflow.session_id = analysis_state.id
+    workflow.await_restore_safe_point = AsyncMock()
+    workflow._require_core_agent = AsyncMock(return_value=None)
+    workflow._send_message = AsyncMock()
+    workflow.config = SimpleNamespace(bioinfo_max_steps=5)
+    workflow.supervisor_agent = None
+    workflow.ensure_agent_ready = MagicMock()
+    workflow._figure_review_callback = AsyncMock()
+    workflow._supervisor_callback = AsyncMock()
+    workflow._build_previous_findings_context = MagicMock(return_value="")
+    workflow._build_code_history_summary = MagicMock(return_value="")
+    workflow._audit_round_plan_execution = MagicMock(return_value={})
+    workflow._run_post_execution_review = AsyncMock(return_value=({}, None))
+    workflow._collect_agent_suggestions = MagicMock(return_value=[])
+    workflow.pi_agent = MagicMock()
+    workflow.pi_agent.summarize_bioinformatics_analysis = AsyncMock(
+        return_value="Paused for a bounded plan revision."
+    )
+    workflow.bioinformatics_agent = MagicMock()
+    workflow.bioinformatics_agent.has_resumable_checkpoint = AsyncMock(
+        return_value=True
+    )
+    workflow.bioinformatics_agent.run_autonomous_analysis = AsyncMock(
+        return_value=raw_result
+    )
+
+    class _Paths:
+        root = tmp_path / "v2"
+        objects = tmp_path / "objects"
+        staging = tmp_path / "staging"
+        journals = tmp_path / "journals"
+        integrity = tmp_path / "integrity"
+        committed = tmp_path / "committed"
+
+        def ensure_dirs(self):
+            for directory in (
+                self.root,
+                self.objects,
+                self.staging,
+                self.journals,
+                self.integrity,
+                self.committed,
+            ):
+                directory.mkdir(parents=True, exist_ok=True)
+
+    paths = _Paths()
+    paths.ensure_dirs()
+    store = ObjectStore(paths)
+    captured = {}
+
+    async def capture_snapshot(target_state, phase, *, workflow_state=None):
+        frozen_state = dict(
+            workflow_state
+            if workflow_state is not None
+            else workflow._current_graph_state
+        )
+        captured["phase"] = phase
+        captured["workflow_state"] = frozen_state
+        captured["capsule"] = ContinuationRegistry(store).freeze(
+            phase, target_state, frozen_state,
+        )
+
+    workflow._create_auto_snapshot = capture_snapshot
+
+    class _FigureContract:
+        passed = True
+
+        @staticmethod
+        def summary():
+            return {"passed": True, "missing": []}
+
+    monkeypatch.setattr(
+        "backend.workflow.agents.audit_figure_contract",
+        lambda *args, **kwargs: _FigureContract(),
+    )
+    source_graph_state = {
+        "analysis_state": analysis_state,
+        "current_round": 2,
+        "pi_instructions": {
+            "bioinformatics_tasks": ["Run the approved method"],
+            "overview": "Preserve completed work while revising the method",
+        },
+        "planning_stage": "full",
+        "plan_approved": True,
+        "skip_nodes": [],
+    }
+
+    produced = await workflow._bioinformatics_analysis(source_graph_state)
+
+    assert produced["plan_revision_needed"] is True
+    assert produced["plan_revision_context"] == revision_context
+    assert captured["phase"] == "pre_major_revision"
+    assert captured["workflow_state"]["plan_revision_context"] == revision_context
+    assert captured["workflow_state"] is not source_graph_state
+
+    dispatcher = ContinuationDispatcher(store)
+    staged = dispatcher.stage_checkpoint(
+        captured["capsule"],
+        captured["workflow_state"],
+        analysis_state,
+        snapshot_id="snapshot-from-real-revision-producer",
+        transaction_id="transaction-from-real-revision-producer",
+    )
+    restored_state = analysis_state.model_copy(deep=True)
+    dispatcher.activate(restored_state, staged)
+    assert prepare_restored_semantic_action(
+        restored_state, expected_gate="plan_revision",
+    ) == "planning_dialogue"
+
+    consumer = SingleCellAnalysisWorkflow.__new__(SingleCellAnalysisWorkflow)
+    consumer.session_id = restored_state.id
+    consumer.restore_entry_loader = None
+    graph_state = consumer._restore_entry({
+        "analysis_state": restored_state,
+        "current_round": restored_state.current_round,
+    })
+    assert consumer._route_from_restore_entry(graph_state) == (
+        "route_planning_dialogue"
+    )
+    assert graph_state["plan_revision_context"] == revision_context
+
+    consumer.await_restore_safe_point = AsyncMock()
+    consumer._require_core_agent = AsyncMock(return_value=None)
+    consumer._send_message = AsyncMock()
+    consumer._build_planning_context = MagicMock(
+        return_value={"bioinformatics_findings": ["observed mismatch"]}
+    )
+    consumer._report_direction_coverage_gaps = AsyncMock()
+    consumer.bioinformatics_agent = MagicMock()
+    consumer.bioinformatics_agent.reset_history = MagicMock()
+    consumer.bioinformatics_agent.revise_plan_incrementally = AsyncMock(
+        return_value=revised_plan
+    )
+    consumer.pi_agent = MagicMock()
+    consumer.pi_agent.review_bioinfo_plan = AsyncMock(return_value={
+        "decision": "approved",
+        "feedback": "approved",
+        "modifications": [],
+    })
+
+    await consumer._planning_dialogue(graph_state)
+
+    feedback = consumer.bioinformatics_agent.revise_plan_incrementally.await_args.kwargs[
+        "pi_feedback"
+    ]
+    assert revision_context["question"] in feedback
+    assert revision_context["reason"] in feedback
+    assert "observed mismatch" in feedback
+
+
 def test_pre_execution_full_maps_to_bioinformatics_analysis():
     from backend.services.snapshot_v2.continuation import _PHASE_TO_NEXT_NODE
     from backend.workflow.restore_targets import SNAPSHOT_RESUME_TARGET

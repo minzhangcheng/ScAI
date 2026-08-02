@@ -7,11 +7,23 @@ tool_choice="auto" so the autonomous loop can keep going instead of
 crashing the round.
 """
 import pytest
-from unittest.mock import MagicMock
+import pytest_asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 from openai import BadRequestError
 
 from backend.utils.llm_client import is_tool_choice_error, UpstreamExhaustedError
+
+
+@pytest_asyncio.fixture
+async def close_stub_clients():
+    clients = []
+    yield clients.append
+    for client in clients:
+        client.client.close = AsyncMock()
+        client.http_client = MagicMock()
+        client.http_client.aclose = AsyncMock()
+        await client.close()
 
 
 def _make_bad_request(message: str) -> BadRequestError:
@@ -60,11 +72,13 @@ class TestChatWithToolsFallback:
     tool_choice='auto'."""
 
     @pytest.mark.asyncio
-    async def test_demotes_to_auto_on_bad_request(self, monkeypatch):
-        from unittest.mock import AsyncMock
+    async def test_demotes_to_auto_on_bad_request(
+        self, monkeypatch, close_stub_clients,
+    ):
         from backend.utils.llm_client import OpenAICompatibleClient
 
         client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
+        close_stub_clients(client)
         client.agent_name = "test"
         client.base_url = "https://fake.example.com/v1/chat/completions"
         client.session_id = "test-session"
@@ -114,11 +128,13 @@ class TestChatWithToolsFallback:
         assert "some-model" in client._toolchoice_unsupported_models
 
     @pytest.mark.asyncio
-    async def test_cached_model_demoted_preemptively(self, monkeypatch):
-        from unittest.mock import AsyncMock
+    async def test_cached_model_demoted_preemptively(
+        self, monkeypatch, close_stub_clients,
+    ):
         from backend.utils.llm_client import OpenAICompatibleClient
 
         client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
+        close_stub_clients(client)
         client.agent_name = "test"
         client.base_url = "https://fake.example.com/v1/chat/completions"
         client.session_id = "test-session"
@@ -157,11 +173,13 @@ class TestChatWithToolsFallback:
         assert create_mock.call_args_list[0].kwargs.get("tool_choice") == "auto"
 
     @pytest.mark.asyncio
-    async def test_unrelated_bad_request_propagates(self, monkeypatch):
-        from unittest.mock import AsyncMock
+    async def test_unrelated_bad_request_propagates(
+        self, monkeypatch, close_stub_clients,
+    ):
         from backend.utils.llm_client import OpenAICompatibleClient
 
         client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
+        close_stub_clients(client)
         client.agent_name = "test"
         client.base_url = "https://fake.example.com/v1/chat/completions"
         client.session_id = "test-session"

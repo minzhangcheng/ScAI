@@ -96,6 +96,20 @@ class AnnotationMixin:
                 confidence=info.get("confidence", "low"),
                 evidence=info.get("evidence", ""),
                 n_cells=max(0, int(info.get("n_cells", 0) or 0)),
+                n_cells_known=(
+                    bool(info.get("n_cells_known"))
+                    if "n_cells_known" in info
+                    else "n_cells" in info and info.get("n_cells") is not None
+                ),
+                n_cells_source=(
+                    str(info.get("n_cells_source") or "unknown")
+                    if "n_cells_source" in info
+                    else (
+                        "annotation_payload"
+                        if "n_cells" in info and info.get("n_cells") is not None
+                        else "unknown"
+                    )
+                ),
                 group_proportions=info.get("group_proportions", {}) or {},
                 alternative_cell_types=info.get("alternative_cell_types", []),
                 low_confidence_reason=info.get("low_confidence_reason", ""),
@@ -119,6 +133,8 @@ class AnnotationMixin:
             count = counts.get(str(ca.cluster_id))
             if count is not None:
                 ca.n_cells = max(0, int(count))
+                ca.n_cells_known = True
+                ca.n_cells_source = "cluster_group_proportions"
 
     @staticmethod
     def _annotations_from_cluster_annotations(cluster_annotations) -> Dict[str, Any]:
@@ -133,6 +149,8 @@ class AnnotationMixin:
                 "confidence": ca.confidence,
                 "evidence": ca.evidence,
                 "n_cells": ca.n_cells,
+                "n_cells_known": ca.n_cells_known,
+                "n_cells_source": ca.n_cells_source,
                 "group_proportions": dict(ca.group_proportions or {}),
                 "alternative_cell_types": list(ca.alternative_cell_types),
                 "low_confidence_reason": ca.low_confidence_reason,
@@ -390,6 +408,9 @@ class AnnotationMixin:
                 result["annotations"] = annotations
             except Exception as e:
                 logger.warning(f"[{self.session_id}] annotation validation round failed (non-fatal): {e}")
+                validation_meta = self._empty_validation_meta(
+                    "failed", f"Annotation validation failed: {e}"
+                )
 
             try:
                 proportion_meta = await self.bioinformatics_agent.compute_cluster_group_proportions(state)
@@ -525,6 +546,9 @@ class AnnotationMixin:
                         cluster_anns = self._build_cluster_annotations(annotations)
                     except Exception as e:
                         logger.warning(f"[{self.session_id}] post-supplementary re-validation failed: {e}")
+                        validation_meta = self._empty_validation_meta(
+                            "failed", f"Post-supplementary annotation validation failed: {e}"
+                        )
 
                     try:
                         proportion_meta = await self.bioinformatics_agent.compute_cluster_group_proportions(state)

@@ -215,7 +215,9 @@ class LifecycleMixin:
             "steps_executed": result["steps_executed"],
             "mechanism_programs": result.get("mechanism_programs", []),
             "evidence_verified": result.get("evidence_verified", False),
+            "evidence_gate_degraded": result.get("evidence_gate_degraded", False),
             "evidence_execution_ids": result.get("evidence_execution_ids", []),
+            "evidence_gate_findings": result.get("evidence_gate_findings", []),
         }
 
     def get_all_code(self) -> str:

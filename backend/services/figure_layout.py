@@ -30,20 +30,17 @@ logger = logging.getLogger(__name__)
 
 
 LAYOUT_LINT_SENTINEL = "__SCAI_LAYOUT_LINT__"
-
-# Violation kinds that make a figure unusable rather than merely imperfect.
-# A blocking violation means some text cannot be read at all because another
-# artist is drawn on top of it. Advisory kinds are legibility risks that a
-# reader can still work around.
-BLOCKING_KINDS = frozenset({
-    "text_over_text",
-    "text_over_foreign_axes",
-    "tick_label_collision",
-})
-
-ADVISORY_KINDS = frozenset({
-    "tiny_text",
-})
+LAYOUT_LINT_ERROR_SENTINEL = "__SCAI_LAYOUT_LINT_ERROR__"
+LAYOUT_LINT_KINDS = frozenset(
+    {
+        "text_over_text",
+        "text_over_foreign_axes",
+        "tick_label_collision",
+        "tiny_text",
+        "lint_skipped",
+    }
+)
+LAYOUT_LINT_SEVERITIES = frozenset({"block", "advise"})
 
 
 # ---------------------------------------------------------------------------
@@ -51,8 +48,9 @@ ADVISORY_KINDS = frozenset({
 # ---------------------------------------------------------------------------
 # Injected verbatim into the publication-figure wrapper. Must be self-contained
 # (no imports from this package), must never raise into the caller, and must
-# never be able to prevent the figure from being saved: every failure path ends
-# in an empty violation list.
+# never be able to prevent the figure from being saved. Measurement/serialization
+# failures emit an error sentinel and no normal verdict, so the backend records
+# the layout as unverified rather than measured-clean.
 #
 # Note on units: every bbox below is in display pixels at the figure's current
 # dpi, which is what Text/Legend/Axes ``get_window_extent`` returns. The saved
@@ -609,6 +607,48 @@ def _scai_emit_layout_lint(fig):
 # Backend-side helpers
 # ---------------------------------------------------------------------------
 
+def _parse_layout_verdict(
+    output: str | None,
+) -> List[Dict[str, Any]] | None:
+    """Return the last authoritative lint verdict, or None if it is invalid.
+
+    The injected linter runs after user plotting code. Reading the last lint
+    event prevents an earlier user-printed normal sentinel from masking a later
+    renderer error. A syntactically valid payload must still be a JSON list;
+    malformed, empty, or wrong-shaped payloads are not measurements.
+    """
+    if not output:
+        return None
+    for line in reversed(output.splitlines()):
+        event = line.lstrip()
+        if event.startswith(LAYOUT_LINT_ERROR_SENTINEL):
+            return None
+        if not event.startswith(LAYOUT_LINT_SENTINEL):
+            continue
+        payload = event[len(LAYOUT_LINT_SENTINEL):].strip()
+        if not payload:
+            logger.warning("[LayoutLint] sentinel present without a payload")
+            return None
+        try:
+            parsed = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("[LayoutLint] sentinel present but payload is not JSON")
+            return None
+        if not isinstance(parsed, list):
+            logger.warning("[LayoutLint] verdict payload is not a list")
+            return None
+        if any(
+            not isinstance(violation, dict)
+            or violation.get("kind") not in LAYOUT_LINT_KINDS
+            or violation.get("severity") not in LAYOUT_LINT_SEVERITIES
+            for violation in parsed
+        ):
+            logger.warning("[LayoutLint] verdict contains an invalid violation")
+            return None
+        return parsed
+    return None
+
+
 def parse_layout_violations(output: str | None) -> List[Dict[str, Any]]:
     """Extract the violation list from sandbox stdout.
 
@@ -616,29 +656,13 @@ def parse_layout_violations(output: str | None) -> List[Dict[str, Any]]:
     could not run must never be read as "the figure is clean", so callers that
     need to distinguish the two should use :func:`lint_ran`.
     """
-    if not output or LAYOUT_LINT_SENTINEL not in output:
-        return []
-    for line in output.splitlines():
-        idx = line.find(LAYOUT_LINT_SENTINEL)
-        if idx < 0:
-            continue
-        payload = line[idx + len(LAYOUT_LINT_SENTINEL):].strip()
-        if not payload:
-            continue
-        try:
-            parsed = json.loads(payload)
-        except (json.JSONDecodeError, TypeError):
-            logger.warning("[LayoutLint] sentinel present but payload is not JSON")
-            return []
-        if isinstance(parsed, list):
-            return [v for v in parsed if isinstance(v, dict)]
-        return []
-    return []
+    verdict = _parse_layout_verdict(output)
+    return verdict if verdict is not None else []
 
 
 def lint_ran(output: str | None) -> bool:
-    """Whether the sandbox linter produced a verdict at all."""
-    return bool(output) and LAYOUT_LINT_SENTINEL in output
+    """Whether the sandbox linter produced a valid list-shaped verdict."""
+    return _parse_layout_verdict(output) is not None
 
 
 def blocking_violations(

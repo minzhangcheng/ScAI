@@ -290,6 +290,10 @@ async def test_restore_session_recovers_journal_even_without_dump():
     ns = MagicMock()
     ns.load = MagicMock()
     ns.has_session_dump = MagicMock(return_value=False)
+    ns.session_path = states / f"{sid}_session.pkl"
+    ns.state_path = states / f"{sid}_state.json"
+    ns.state_dir = states
+    ns.runtime_persistence = {}
     sb.notebook_state = ns
     try:
         await sb._restore_session()

@@ -90,11 +90,53 @@ class ClientsMixin:
         if client is None or not hasattr(client, "close"):
             return
 
+        # Keep a strong ownership record until close succeeds. Runtime config
+        # refresh is synchronous, so the actual close may run in a background
+        # task; a transient failure must remain retryable during workflow close.
+        self._retired_runtime_clients[id(client)] = client
+        self._schedule_retired_runtime_client_close(client)
+
+    def _lease_runtime_client(self, client) -> None:
+        if client is None:
+            return
+        provider_lease = getattr(self._provider, "lease_client", None)
+        if provider_lease:
+            provider_lease(client)
+        client_id = id(client)
+        self._runtime_client_use_counts[client_id] = (
+            self._runtime_client_use_counts.get(client_id, 0) + 1
+        )
+
+    def _release_runtime_client(self, client) -> None:
+        if client is None:
+            return
+        client_id = id(client)
+        provider_release = getattr(self._provider, "release_client", None)
+        if provider_release:
+            provider_release(client)
+        remaining = self._runtime_client_use_counts.get(client_id, 0) - 1
+        if remaining > 0:
+            self._runtime_client_use_counts[client_id] = remaining
+            return
+        self._runtime_client_use_counts.pop(client_id, None)
+        if self._retired_runtime_clients.get(client_id) is client:
+            self._schedule_retired_runtime_client_close(client)
+
+    def _schedule_retired_runtime_client_close(self, client) -> None:
+        client_id = id(client)
+        if self._runtime_client_use_counts.get(client_id, 0) > 0:
+            return
+        if client_id in self._client_close_task_ids:
+            return
+
         async def _close():
             try:
                 await client.close()
             except Exception as e:
                 logger.debug(f"[Literature] Failed to close stale runtime client: {e}")
+            else:
+                if self._retired_runtime_clients.get(id(client)) is client:
+                    self._retired_runtime_clients.pop(id(client), None)
 
         try:
             loop = asyncio.get_running_loop()
@@ -103,7 +145,13 @@ class ClientsMixin:
         else:
             task = loop.create_task(_close())
             self._client_close_tasks.add(task)
-            task.add_done_callback(self._client_close_tasks.discard)
+            self._client_close_task_ids.add(client_id)
+
+            def _discard(done_task):
+                self._client_close_tasks.discard(done_task)
+                self._client_close_task_ids.discard(client_id)
+
+            task.add_done_callback(_discard)
 
     def _deep_research_client_signature(self) -> Tuple[str, str]:
         return (
@@ -123,7 +171,12 @@ class ClientsMixin:
         The deep research model handles web search and synthesis internally.
         """
         self.refresh_runtime_config_if_needed()
-        if not self.deep_research_model:
+        # Freeze one coherent request configuration before the first await.
+        # A retry must not combine an old endpoint/key client with a model or
+        # system prompt that changed while the request was in flight.
+        request_model = self.deep_research_model
+        request_system_prompt = self.system_prompt
+        if not request_model:
             raise ValueError("deep_research_model not configured for deep_research mode")
 
         if research_brief:
@@ -137,7 +190,7 @@ class ClientsMixin:
         prompt = f"{body}\n\n{self._DEEP_RESEARCH_CITATION_FOOTER}"
 
         logger.info(
-            f"[Literature] Deep Research via {self.deep_research_model}: "
+            f"[Literature] Deep Research via {request_model}: "
             f"{topic[:200]}"
         )
 
@@ -145,39 +198,43 @@ class ClientsMixin:
 
         # Use separate deep research LLM client if configured
         dr_client = self._deep_research_llm_client or self.llm_client
+        self._lease_runtime_client(dr_client)
 
         # The LLM client disables retries for timeout>300s (to avoid re-running
         # expensive long requests). Retry transient *connection* errors here.
         _max_conn_retries = 2
         _last_err: Optional[Exception] = None
-        for _attempt in range(_max_conn_retries + 1):
-            try:
-                response = await dr_client.chat(
-                    model=self.deep_research_model,
-                    messages=[
-                        {"role": "system", "content": self.system_prompt},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.3,
-                    max_tokens=None,
-                    timeout=1800.0,
-                    tools=[{"type": "web_search_preview"}],
-                )
-                break
-            except (OpenAIConnectionError, httpx.ConnectError, httpx.ConnectTimeout, OSError) as e:
-                _last_err = e
-                if _attempt < _max_conn_retries:
-                    _delay = 5 * (_attempt + 1)
-                    logger.warning(
-                        f"[Literature] Deep research connection error "
-                        f"(attempt {_attempt + 1}/{_max_conn_retries + 1}): "
-                        f"{type(e).__name__}: {str(e)[:150]}. Retrying in {_delay}s..."
+        try:
+            for _attempt in range(_max_conn_retries + 1):
+                try:
+                    response = await dr_client.chat(
+                        model=request_model,
+                        messages=[
+                            {"role": "system", "content": request_system_prompt},
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=0.3,
+                        max_tokens=None,
+                        timeout=1800.0,
+                        tools=[{"type": "web_search_preview"}],
                     )
-                    await asyncio.sleep(_delay)
-                else:
-                    raise
-        else:
-            raise _last_err  # type: ignore[misc]
+                    break
+                except (OpenAIConnectionError, httpx.ConnectError, httpx.ConnectTimeout, OSError) as e:
+                    _last_err = e
+                    if _attempt < _max_conn_retries:
+                        _delay = 5 * (_attempt + 1)
+                        logger.warning(
+                            f"[Literature] Deep research connection error "
+                            f"(attempt {_attempt + 1}/{_max_conn_retries + 1}): "
+                            f"{type(e).__name__}: {str(e)[:150]}. Retrying in {_delay}s..."
+                        )
+                        await asyncio.sleep(_delay)
+                    else:
+                        raise
+            else:
+                raise _last_err  # type: ignore[misc]
+        finally:
+            self._release_runtime_client(dr_client)
 
         report_text = response.content or ""
         if not report_text:
@@ -228,7 +285,12 @@ class ClientsMixin:
         query = research_brief if research_brief else topic
         logger.info(f"[Literature] Gemini Deep Research: {query[:200]}")
 
-        result = await self._deep_research.research(query)
+        deep_research_client = self._deep_research
+        self._lease_runtime_client(deep_research_client)
+        try:
+            result = await deep_research_client.research(query)
+        finally:
+            self._release_runtime_client(deep_research_client)
         report_text = result.get("report", "")
         sources = result.get("sources", [])
 
@@ -240,6 +302,8 @@ class ClientsMixin:
         return await self._finalize_result(topic, report_text, references, state, 1)
 
     def _sync_literature_config_from_provider(self) -> None:
+        if self._runtime_clients_closing:
+            raise RuntimeError("literature runtime clients are closing")
         lit_config = self._provider.get_literature_config() or {}
 
         new_mode = lit_config.get("mode", self.literature_mode)
@@ -277,20 +341,68 @@ class ClientsMixin:
 
     async def close_runtime_clients(self) -> None:
         """Close literature-owned clients that are not owned by AgentSettingsProvider."""
-        clients = [self._deep_research_llm_client, self._deep_research]
-        self._deep_research_llm_client = None
-        self._deep_research = None
-        if self._client_close_tasks:
-            pending_tasks = list(self._client_close_tasks)
-            await asyncio.gather(*pending_tasks, return_exceptions=True)
-            self._client_close_tasks.clear()
-        for client in clients:
-            if client is None or not hasattr(client, "close"):
-                continue
-            try:
-                await client.close()
-            except Exception as e:
-                logger.debug(f"[Literature] Failed to close runtime client: {e}")
+        async with self._runtime_client_cleanup_lock:
+            if self._runtime_clients_closed:
+                return
+            self._runtime_clients_closing = True
+
+            for client in (
+                self._deep_research_llm_client,
+                self._deep_research,
+            ):
+                if client is not None and hasattr(client, "close"):
+                    self._retired_runtime_clients[id(client)] = client
+            self._deep_research_llm_client = None
+            self._deep_research = None
+
+            while True:
+                if self._client_close_tasks:
+                    pending_tasks = list(self._client_close_tasks)
+                    await asyncio.gather(*pending_tasks, return_exceptions=True)
+                    self._client_close_tasks.difference_update(pending_tasks)
+
+                failures: list[Exception] = []
+                in_use = 0
+                for client_id, client in list(
+                    self._retired_runtime_clients.items()
+                ):
+                    if self._runtime_client_use_counts.get(client_id, 0) > 0:
+                        in_use += 1
+                        continue
+                    # A lease may have been released while another close was
+                    # awaited. Let its tracked task finish before this cleanup
+                    # retries the same client.
+                    if client_id in self._client_close_task_ids:
+                        continue
+                    try:
+                        await client.close()
+                    except Exception as exc:
+                        failures.append(exc)
+                        logger.debug(
+                            "[Literature] Failed to close runtime client: %s", exc
+                        )
+                    else:
+                        if self._retired_runtime_clients.get(client_id) is client:
+                            self._retired_runtime_clients.pop(client_id, None)
+
+                if failures:
+                    raise RuntimeError(
+                        f"failed to close {len(failures)} literature runtime client(s)"
+                    ) from failures[0]
+                if in_use:
+                    raise RuntimeError(
+                        f"{in_use} literature runtime client(s) still in use"
+                    )
+                if self._client_close_tasks:
+                    continue
+                if self._retired_runtime_clients:
+                    # A tracked task callback can run just after the task set
+                    # was sampled. Yield once, then drain the retained client.
+                    await asyncio.sleep(0)
+                    continue
+
+                self._runtime_clients_closed = True
+                return
 
     @property
     def fallback_llm_client(self) -> OpenAICompatibleClient:

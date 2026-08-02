@@ -198,6 +198,14 @@ describe('useWebSocket', () => {
             literatureFindings: [],
             crossModalCandidates: [],
             integrationCandidates: [],
+            roundStatus: 'completed',
+            evidenceStatus: 'substantive',
+            evidenceExecutionIds: ['exec-innovation'],
+            evidenceNotes: [],
+            evidenceGateFindings: [],
+            lineageId: 'main',
+            directionKey: 'innovation-axis',
+            resultIdentityKey: 'main:innovation:3:innovation-axis',
           },
         ],
       })
@@ -218,6 +226,17 @@ describe('useWebSocket', () => {
             summary: 'Integration round',
             integration_report_summary: 'Shared mechanism summary',
             integration_candidates: [{ direction: 'New axis X', score: 0.85 }],
+            round_status: 'partial',
+            evidence_status: 'substantive',
+            direction_coverage_eligible: false,
+            bioinformatics_evidence_verified: false,
+            evidence_execution_ids: ['exec-integration'],
+            evidence_notes: ['A mandatory gate was force-released.'],
+            evidence_gate_findings: [{ gate: 'analysis-unit', forced_release: true }],
+            lineage_id: 'restore-snapshot-4',
+            branch_label: 'Restored branch',
+            restored_from_snapshot_id: 'snapshot-4',
+            result_identity_key: 'restore-snapshot-4:integration:3:',
           },
         }),
       } as MessageEvent)
@@ -228,5 +247,165 @@ describe('useWebSocket', () => {
     expect(rounds.map((round) => round.phase)).toEqual(['innovation', 'integration'])
     expect(rounds[1].integrationReportSummary).toBe('Shared mechanism summary')
     expect(rounds[1].integrationCandidates[0].score).toBe(0.85)
+    expect(rounds[1]).toMatchObject({
+      roundStatus: 'partial',
+      evidenceStatus: 'substantive',
+      directionCoverageEligible: false,
+      bioinformaticsEvidenceVerified: false,
+      evidenceExecutionIds: ['exec-integration'],
+      evidenceNotes: ['A mandatory gate was force-released.'],
+      evidenceGateFindings: [{ gate: 'analysis-unit', forced_release: true }],
+      lineageId: 'restore-snapshot-4',
+      branchLabel: 'Restored branch',
+      restoredFromSnapshotId: 'snapshot-4',
+      resultIdentityKey: 'restore-snapshot-4:integration:3:',
+    })
+  })
+
+  it('does not overwrite a main result with a same-round restored-branch result', async () => {
+    const { result } = renderHook(() => useWebSocket())
+
+    act(() => {
+      useAppStore.getState().setCurrentSession({
+        id: 'session-branch-identity',
+        name: 'Branch identity session',
+        status: 'running' as const,
+        currentRound: 4,
+        createdAt: new Date().toISOString(),
+        instruction: '',
+        treatmentGroups: [],
+        dataFiles: [],
+        biochemistryIndicators: [],
+        roundResults: [{
+          round: 4,
+          summary: 'Main result',
+          phase: 'innovation',
+          pathologyFindings: [],
+          bioinformaticsFindings: ['main finding'],
+          biochemistryFindings: [],
+          literatureFindings: [],
+          crossModalCandidates: [],
+          integrationCandidates: [],
+          roundStatus: 'completed',
+          evidenceStatus: 'substantive',
+          evidenceExecutionIds: [],
+          evidenceNotes: [],
+          evidenceGateFindings: [],
+          lineageId: 'main',
+          directionKey: 'same-axis',
+          resultIdentityKey: 'main:innovation:4:same-axis',
+        }],
+      })
+    })
+
+    await act(async () => {
+      result.current.connect()
+    })
+    act(() => {
+      wsInstances[0].onmessage?.({
+        data: JSON.stringify({
+          type: 'round_summary',
+          agent: 'pi',
+          content: {
+            round: 4,
+            phase: 'innovation',
+            direction_key: 'same-axis',
+            lineage_id: 'restore-snapshot-4',
+            branch_id: 'restore-snapshot-4',
+            summary: 'Branch result',
+            bioinformatics_findings: ['branch finding'],
+          },
+        }),
+      } as MessageEvent)
+    })
+
+    const rounds = useAppStore.getState().currentSession?.roundResults || []
+    expect(rounds).toHaveLength(2)
+    expect(rounds.map((round) => round.resultIdentityKey)).toEqual([
+      'main:innovation:4:same-axis',
+      'restore-snapshot-4:innovation:4:same-axis',
+    ])
+    expect(rounds.map((round) => round.summary)).toEqual([
+      'Main result',
+      'Branch result',
+    ])
+  })
+
+  it('uses lifecycle-aware reload for state-version conflicts', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      detail: { code: 'SESSION_GONE', message: 'deleted' },
+    }), {
+      status: 410,
+      headers: { 'Content-Type': 'application/json' },
+    })))
+    useAppStore.getState().setCurrentSession({
+      id: 'session-gone',
+      name: 'Gone session',
+      status: 'running',
+      currentRound: 2,
+      createdAt: new Date().toISOString(),
+      instruction: '',
+      treatmentGroups: [],
+      dataFiles: [],
+      biochemistryIndicators: [],
+      roundResults: [],
+    })
+    useAppStore.getState().setStateVersion(5)
+    const { result } = renderHook(() => useWebSocket())
+
+    await act(async () => result.current.connect())
+    act(() => {
+      wsInstances[0].onmessage?.({
+        data: JSON.stringify({ type: 'state_sync', version: 4 }),
+      } as MessageEvent)
+    })
+
+    await vi.waitFor(() => {
+      expect(useAppStore.getState().currentSession).toBeNull()
+    })
+  })
+
+  it('drops a delayed conflict reload after the active session changes', async () => {
+    let resolveFetch!: (response: Response) => void
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(new Promise<Response>((resolve) => {
+      resolveFetch = resolve
+    })))
+    const sessionA = {
+      id: 'session-reload-A',
+      name: 'Session A',
+      status: 'running' as const,
+      currentRound: 4,
+      createdAt: new Date().toISOString(),
+      instruction: '',
+      treatmentGroups: [],
+      dataFiles: [],
+      biochemistryIndicators: [],
+      roundResults: [],
+    }
+    useAppStore.getState().setCurrentSession(sessionA)
+    useAppStore.getState().setStateVersion(10)
+    const { result } = renderHook(() => useWebSocket())
+    await act(async () => result.current.connect())
+
+    act(() => {
+      wsInstances[0].onmessage?.({
+        data: JSON.stringify({ type: 'state_sync', version: 9 }),
+      } as MessageEvent)
+      useAppStore.getState().setCurrentSession({ ...sessionA, id: 'session-reload-B', name: 'Session B' })
+      resolveFetch(new Response(JSON.stringify({
+        id: 'session-reload-A',
+        name: 'Stale A response',
+        status: 'completed',
+        current_round: 99,
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+    })
+
+    await vi.waitFor(() => {
+      expect(useAppStore.getState().currentSession?.id).toBe('session-reload-B')
+      expect(useAppStore.getState().currentSession?.currentRound).toBe(4)
+    })
   })
 })

@@ -2,6 +2,7 @@ from backend.models.schemas import RoundResult
 from backend.workflow.direction_coverage import (
     active_batch_complete,
     completed_innovation_direction_keys,
+    normalize_legacy_round_result,
 )
 from backend.workflow.synthesis import derive_round_completion_status
 from backend.models.schemas import AnalysisPhase, AnalysisState
@@ -312,3 +313,54 @@ def test_missing_core_results_without_evidence_mark_round_skipped():
 
     assert result.round_status == "skipped"
     assert result.evidence_status == "failed"
+
+
+def test_integration_completion_uses_integration_evidence_not_core_agent_slots():
+    result = RoundResult(
+        round_number=4,
+        phase="integration",
+        integration_report_summary="Cross-direction evidence synthesis",
+        integration_candidates=[{"direction": "New direction"}],
+    )
+
+    derive_round_completion_status({"analysis_state": AnalysisState(id="s", user_id="u")}, result)
+
+    assert result.round_status == "completed"
+    assert result.evidence_status == "substantive"
+    assert result.direction_coverage_eligible is None
+
+
+def test_integration_record_never_satisfies_innovation_direction_coverage():
+    result = RoundResult(
+        round_number=4,
+        phase="integration",
+        direction="A",
+        integration_report_summary="Cross-direction evidence synthesis",
+        direction_coverage_eligible=True,
+    )
+    state = AnalysisState(
+        id="s",
+        user_id="u",
+        analysis_phase=AnalysisPhase.INTEGRATION,
+        user_chosen_directions=[{"direction": "A"}],
+        round_results=[result],
+    )
+
+    assert completed_innovation_direction_keys(state) == set()
+
+
+def test_legacy_integration_false_failure_is_normalized_from_own_evidence():
+    result = RoundResult(
+        round_number=4,
+        phase="integration",
+        integration_report_summary="Persisted integration synthesis",
+        round_status="skipped",
+        evidence_status="failed",
+        direction_coverage_eligible=False,
+    )
+
+    result = normalize_legacy_round_result(result)
+
+    assert result.round_status == "completed"
+    assert result.evidence_status == "substantive"
+    assert result.direction_coverage_eligible is None

@@ -197,22 +197,25 @@ async def test_chat_only_model_fallback_does_not_mark_base_url_no_responses():
     llm_mod._NO_RESPONSES_ENDPOINT.clear()
     llm_mod._PROBE_CACHE.clear()
     c = OpenAICompatibleClient(api_key="k", base_url="https://x/v1", agent_name="t")
-    fake = MagicMock()
-    fake.complete = AsyncMock(side_effect=_Err("This model is only supported in v1/chat/completions"))
-    c._responses_adapter = fake
+    try:
+        fake = MagicMock()
+        fake.complete = AsyncMock(side_effect=_Err("This model is only supported in v1/chat/completions"))
+        c._responses_adapter = fake
 
-    inline_resp = MagicMock()
-    inline_resp.choices = [MagicMock(message=MagicMock(content="CHAT", tool_calls=None))]
-    inline_resp.model = "gpt-chat-only"
-    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
-                                  prompt_tokens_details=None)
-    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
+        inline_resp = MagicMock()
+        inline_resp.choices = [MagicMock(message=MagicMock(content="CHAT", tool_calls=None))]
+        inline_resp.model = "gpt-chat-only"
+        inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
+                                      prompt_tokens_details=None)
+        c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
 
-    r = await c.chat(model="gpt-chat-only", messages=[{"role": "user", "content": "hi"}])
+        r = await c.chat(model="gpt-chat-only", messages=[{"role": "user", "content": "hi"}])
 
-    assert r.content == "CHAT"
-    assert "https://x/v1" not in llm_mod._NO_RESPONSES_ENDPOINT
-    assert llm_mod._PROBE_CACHE[("https://x/v1", "gpt-chat-only")] == "chat"
+        assert r.content == "CHAT"
+        assert "https://x/v1" not in llm_mod._NO_RESPONSES_ENDPOINT
+        assert llm_mod._PROBE_CACHE[("https://x/v1", "gpt-chat-only")] == "chat"
+    finally:
+        await c.close()
 
 
 from backend.utils.llm_client import _route_protocol_order

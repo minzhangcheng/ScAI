@@ -58,7 +58,6 @@ class TestWithRetryLlmFailure:
         mock._set_status = MagicMock()
         # Mock settings_provider for client cache clearing
         mock._settings_provider = MagicMock()
-        mock._settings_provider._client_cache = {}
         # Bind real async methods — MagicMock auto-creates a non-awaitable stub
         mock._wait_for_llm_intervention = SingleCellAnalysisWorkflow._wait_for_llm_intervention.__get__(mock, type(mock))
         mock._drive_hitl_gate = SingleCellAnalysisWorkflow._drive_hitl_gate.__get__(mock, type(mock))
@@ -200,11 +199,8 @@ class TestWithRetryLlmFailure:
 
     @pytest.mark.asyncio
     async def test_retry_clears_client_cache(self, mock_self, base_state):
-        """On retry, the settings_provider client cache is cleared."""
+        """On retry, the provider's ownership-preserving clear API is called."""
         from backend.workflow import with_retry
-
-        # Pre-populate the cache
-        mock_self._settings_provider._client_cache["old_model"] = MagicMock()
 
         call_count = 0
 
@@ -228,8 +224,7 @@ class TestWithRetryLlmFailure:
         result = await decorated(mock_self, base_state)
         await task
 
-        # Cache should have been cleared
-        assert len(mock_self._settings_provider._client_cache) == 0
+        mock_self._settings_provider.clear_client_cache.assert_called_once_with()
 
 
 # ── Test 2: signal_llm_failure_action with generation idempotency ────

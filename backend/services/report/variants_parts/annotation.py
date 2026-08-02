@@ -22,6 +22,7 @@ from backend.services.report.artifacts import (
 )
 from backend.services.report.figure_discovery import (
     discover_figures_in_workspace,
+    ensure_legacy_artifact_inventory,
     prepare_discovered_figures,
 )
 from backend.models.schemas import AnalysisState
@@ -85,6 +86,7 @@ def generate_annotation_context_report_html(
     workspace_dir = get_session_workspace(state.id) if state.id else None
     discovered_figures = []
     if workspace_dir and workspace_dir.exists():
+        ensure_legacy_artifact_inventory(state, workspace_dir)
         discovered_figures = prepare_discovered_figures(
             discover_figures_in_workspace(workspace_dir),
             state.publication_figures,
@@ -95,6 +97,8 @@ def generate_annotation_context_report_html(
             # figures are useful here; registered ineligible figures were already
             # removed by prepare_discovered_figures.
             allow_unregistered_diagnostics=True,
+            registry_version=state.artifact_registry_version,
+            legacy_artifacts=state.legacy_artifacts,
         )
     discovered_by_name = {
         Path(candidate["path"]).name: candidate for candidate in discovered_figures

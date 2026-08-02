@@ -369,10 +369,11 @@ class RestoreCoordinator:
             # replays over the restored image on the next open, silently undoing
             # the restore. Closing the in-process checkpointer connection makes
             # SQLite retire the companions, but that only happens in
-            # `_retire_superseded_workflow`, which returns immediately when the
-            # session has no workflow object — the normal state right after a
-            # process restart, and one `_acknowledge_if_quiescent` explicitly
-            # supports. Orphans left by an unclean shutdown therefore survived.
+            # `_retire_superseded_workflow`, which can close either the analysis
+            # or standalone-report owner but necessarily returns when the
+            # session has no live workflow object — the normal state right after
+            # a process restart. Orphans left by an unclean shutdown therefore
+            # survived.
             # Clear them here so the replacement covers the whole triple; the
             # connection close stays as the in-process guard.
             #
@@ -513,6 +514,21 @@ class RestoreCoordinator:
         _write_journal_hmac_signed(paths, transaction_id, journal)
 
         self._check_fault("journal_committed")
+        # The verified journal is the recovery authority.  Stamp lifecycle
+        # metadata only after COMMITTED is durable; if the process dies in this
+        # gap, COMMITTED recovery performs the stamp idempotently.  Reversing
+        # this order lets APPLYING rollback restore old bytes while leaving
+        # metadata that incorrectly calls them the new current generation.
+        if journal.get("runtime_restore_status") == "complete":
+            from backend.utils.runtime_apply import (
+                commit_runtime_persistence_metadata,
+            )
+
+            commit_runtime_persistence_metadata(
+                str(journal.get("session_id") or ""),
+                source="snapshot_apply",
+            )
+        self._check_fault("runtime_metadata_committed")
 
     def write_committed_restore_v0_for_test(
         self,

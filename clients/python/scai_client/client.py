@@ -3,7 +3,7 @@
 Usage:
     from scai_client import Client
 
-    client = Client(base_url="http://localhost:8000", api_key="scai_xxx")
+    client = Client(base_url="http://localhost:3000", api_key="scai_xxx")
     job = client.submit("my-config.json")
     job.wait(timeout=3600)
     job.download_export("results.zip")
@@ -24,7 +24,7 @@ class Client:
     """ScAI API client.
 
     Args:
-        base_url: Server URL (e.g., "http://localhost:8000")
+        base_url: Server URL (e.g., "http://localhost:3000")
         api_key: API key for authentication (starts with "scai_")
         jwt: JWT token for authentication
         timeout: HTTP request timeout in seconds

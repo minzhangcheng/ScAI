@@ -63,6 +63,7 @@ class GoogleDeepResearchClient:
         else:
             self.client = httpx.AsyncClient(timeout=600.0)  # Long timeout for research
         self._closed: bool = False
+        self._close_lock = asyncio.Lock()
 
     def __del__(self):
         if not getattr(self, '_closed', True):
@@ -71,10 +72,15 @@ class GoogleDeepResearchClient:
             )
 
     async def close(self):
-        if self._closed:
-            return
-        self._closed = True
-        await self.client.aclose()
+        close_lock = getattr(self, "_close_lock", None)
+        if close_lock is None:
+            close_lock = asyncio.Lock()
+            self._close_lock = close_lock
+        async with close_lock:
+            if self._closed:
+                return
+            await self.client.aclose()
+            self._closed = True
 
     def _check_response(self, response: httpx.Response, context: str) -> None:
         """Raise HTTPStatusError for 4xx/5xx responses with logging.

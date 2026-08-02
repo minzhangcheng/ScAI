@@ -6,33 +6,40 @@ tar.gz, so after import `inline_blobs()` left `@scai-blob:<hash>` tokens
 in messages instead of restoring the original payload.
 """
 import asyncio
-import importlib
 import io
 import json
+import os
+import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
 import pytest
 
-from backend.tests.split_facade import reload_split
+
+_ISOLATED_TEST_ENV = "SCAI_EXPORT_BLOB_ROUNDTRIP_TEST"
 
 
-@pytest.fixture(autouse=True)
-def _isolated_data_dir(tmp_path, monkeypatch):
-    """Point all path helpers at tmp_path so export/import uses a clean tree.
+def _run_isolated_roundtrip(test_name: str, tmp_path: Path) -> None:
+    """Run a round-trip in a fresh interpreter with its data root set early.
 
-    Reloads the config chain so module-level constants (DATA_BASE_DIR, etc.)
-    pick up the new SCAI_DATA_DIR. Each test function gets its own tmp_path,
-    and monkeypatch restores the original env var on teardown.
+    These tests exercise modules that intentionally bind path helpers and the
+    default configuration at import time. Reloading them inside the shared
+    pytest process changes class and singleton identities for later tests.
     """
-    monkeypatch.setenv("SCAI_DATA_DIR", str(tmp_path))
-    import backend.config._config as _cfg
-    importlib.reload(_cfg)
-    import backend.config as _config
-    importlib.reload(_config)
-    reload_split("backend.routes.export_import")
-    import backend.services.session_store as _ss
-    importlib.reload(_ss)
+    env = os.environ.copy()
+    env["SCAI_DATA_DIR"] = str(tmp_path / "data")
+    env[_ISOLATED_TEST_ENV] = test_name
+    node = f"{Path(__file__).resolve()}::{test_name}"
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", node],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def _build_state_with_blob(session_id: str, payload: str):
@@ -95,6 +102,11 @@ def _build_export_tar(session_id: str) -> bytes:
 
 @pytest.mark.asyncio
 async def test_export_import_preserves_session_blob(tmp_path):
+    test_name = "test_export_import_preserves_session_blob"
+    if os.environ.get(_ISOLATED_TEST_ENV) != test_name:
+        await asyncio.to_thread(_run_isolated_roundtrip, test_name, tmp_path)
+        return
+
     from backend.config import get_session_dir, get_session_metadata_path
     from backend.routes.export_import import _import_tar_gz
     from backend.services.session_store import async_save_session
@@ -126,6 +138,11 @@ async def test_export_import_preserves_session_blob(tmp_path):
 
 @pytest.mark.asyncio
 async def test_export_import_preserves_snapshot_blob(tmp_path):
+    test_name = "test_export_import_preserves_snapshot_blob"
+    if os.environ.get(_ISOLATED_TEST_ENV) != test_name:
+        await asyncio.to_thread(_run_isolated_roundtrip, test_name, tmp_path)
+        return
+
     from backend.config import get_session_dir
     from backend.routes.export_import import _import_tar_gz
     from backend.services.session_store import async_save_session
@@ -146,9 +163,9 @@ async def test_export_import_preserves_snapshot_blob(tmp_path):
 
     tar_path = tmp_path / "export.tar.gz"
     tar_path.write_bytes(tar_bytes)
-    await asyncio.to_thread(_import_tar_gz, str(tar_path), "tester")
+    restored = await asyncio.to_thread(_import_tar_gz, str(tar_path), "tester")
 
     # Snapshot blob file must have been restored to its sibling directory.
-    snap_blob = get_session_dir(session_id) / "snapshots" / f"{snap_id}_blobs" / f"{digest}.b64"
+    snap_blob = get_session_dir(restored.id) / "snapshots" / f"{snap_id}_blobs" / f"{digest}.b64"
     assert snap_blob.exists(), f"snapshot blob not restored: {snap_blob}"
     assert snap_blob.read_text(encoding="utf-8") == payload

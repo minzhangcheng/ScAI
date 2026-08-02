@@ -54,34 +54,110 @@ async def capture_post_chat_snapshot(session_id: str, state: AnalysisState):
     from backend.services.snapshot_v2.paths import SnapshotV2Paths
     from backend.services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
     from backend.services.snapshot_v2.service import SnapshotService
-    from backend.state import workflows
+    from backend.services.session_lifecycle import (
+        SessionGoneError,
+        establish_snapshot_operation,
+    )
+    from backend.services.workflow_runner import session_has_any_workflow_owner
+    from backend.state import sessions, workflows
 
     paths = SnapshotV2Paths.for_session(session_id)
     service = SnapshotService(session_id, paths)
     sp = get_snapshot_safe_point_manager()
     workspace_root = str(get_session_workspace(session_id))
-    workflow = workflows.get(session_id)
+    workflow = None
     # True only when THIS call created the pending request or acquired the pause.
     owned = False
     # Requester token retained through finally for cancel/release ownership.
     owner_token = f"chat:{session_id}:{uuid.uuid4().hex[:12]}"
 
-    try:
+    # Compute idle eligibility before the reservation.  The lifecycle barrier
+    # below rechecks whether a workflow owner appeared before it publishes the
+    # hold, so these fields cannot turn a build/publication gap into an idle
+    # snapshot.
+    from backend.models.schemas import TaskStatus
+
+    status = getattr(state, "status", None)
+    terminal = status in (
+        TaskStatus.COMPLETED,
+        getattr(TaskStatus, "FAILED", None),
+    ) or str(status) in ("completed", "failed")
+    inactive = status in (
+        TaskStatus.PENDING,
+        TaskStatus.PAUSED,
+        TaskStatus.WAITING_INPUT,
+        TaskStatus.WAITING_ANNOTATION,
+        TaskStatus.WAITING_PLAN_REVIEW,
+        TaskStatus.WAITING_SPECIES_INPUT,
+    ) or terminal or status is None
+    descriptor = {
+        "kernel_present": False,
+        "current_round": getattr(state, "current_round", 0) or 0,
+    }
+    if terminal:
+        descriptor["status"] = "completed"
+        descriptor["continuation_kind"] = "terminal"
+    else:
+        descriptor["inactive"] = bool(inactive)
+
+    async def _reserve() -> str:
+        nonlocal owned, workflow
+
+        async with state_lock:
+            current = sessions.get(session_id)
+            if current is not None and current is not state:
+                raise RequiredSnapshotBlocked(
+                    "LIVE_SANDBOX_REQUIRED",
+                    "Session generation changed before post-chat capture",
+                )
+            workflow = workflows.get(session_id)
+            other_owner = (
+                workflow is None and session_has_any_workflow_owner(session_id)
+            )
+
         if workflow is not None:
-            # Foreign hold / pending request — do not steal.
-            if sp.is_paused(session_id) or sp.has_pending_request(session_id):
+            request = await sp.request_safe_point(session_id, owner_token)
+            owned = request is not False and request is not None
+            if not owned:
                 raise RequiredSnapshotBlocked(
                     "LIVE_SANDBOX_REQUIRED",
                     "Post-chat capture cannot steal an existing safe-point hold",
                 )
+            return "active"
 
-            req = await sp.request_safe_point(session_id, owner_token)
-            owned = req is not False and req is not None
-            if not owned:
-                raise RequiredSnapshotBlocked(
-                    "LIVE_SANDBOX_REQUIRED",
-                    "Post-chat capture failed to create a safe-point request",
-                )
+        if other_owner:
+            raise RequiredSnapshotBlocked(
+                "LIVE_SANDBOX_REQUIRED",
+                "Post-chat capture cannot classify an active producer as idle",
+            )
+        if not (terminal or inactive):
+            raise RequiredSnapshotBlocked(
+                "LIVE_SANDBOX_REQUIRED",
+                "Post-chat capture without workflow cannot prove idle/terminal",
+            )
+        acquired = await sp.acquire(
+            session_id, descriptor, owner_token=owner_token,
+        )
+        owned = bool(acquired)
+        if not owned:
+            raise RequiredSnapshotBlocked(
+                "LIVE_SANDBOX_REQUIRED",
+                "Post-chat capture cannot steal an existing safe-point hold",
+            )
+        return "idle"
+
+    try:
+        try:
+            reservation_kind = await establish_snapshot_operation(
+                session_id, _reserve,
+            )
+        except SessionGoneError as exc:
+            raise RequiredSnapshotBlocked(
+                "LIVE_SANDBOX_REQUIRED",
+                "Session was deleted before post-chat snapshot reservation",
+            ) from exc
+
+        if reservation_kind == "active":
 
             # Wait for boundary acknowledgement.
             if not sp.is_paused(session_id):
@@ -156,54 +232,7 @@ async def capture_post_chat_snapshot(session_id: str, state: AnalysisState):
                 safe_point_owner_token=owner_token,
             )
 
-        # No active workflow — derive terminal/idle from persisted state.
-        from backend.models.schemas import TaskStatus
-
-        status = getattr(state, "status", None)
-        terminal = status in (
-            TaskStatus.COMPLETED,
-            getattr(TaskStatus, "FAILED", None),
-        ) or str(status) in ("completed", "failed")
-        # All non-running HITL / idle statuses authorize empty-complete.
-        inactive = status in (
-            TaskStatus.PENDING,
-            TaskStatus.PAUSED,
-            TaskStatus.WAITING_INPUT,
-            TaskStatus.WAITING_ANNOTATION,
-            TaskStatus.WAITING_PLAN_REVIEW,
-            TaskStatus.WAITING_SPECIES_INPUT,
-        ) or terminal or status is None
-
-        descriptor = {
-            "kernel_present": False,
-            "current_round": getattr(state, "current_round", 0) or 0,
-        }
-        if terminal:
-            descriptor["status"] = "completed"
-            descriptor["continuation_kind"] = "terminal"
-        else:
-            descriptor["inactive"] = True if inactive else False
-
-        # Only authorize empty-complete when we can prove idle/terminal.
-        if not (terminal or inactive):
-            raise RequiredSnapshotBlocked(
-                "LIVE_SANDBOX_REQUIRED",
-                "Post-chat capture without workflow cannot prove idle/terminal",
-            )
-
-        # Foreign hold — do not steal.
-        if sp.is_paused(session_id) or sp.has_pending_request(session_id):
-            raise RequiredSnapshotBlocked(
-                "LIVE_SANDBOX_REQUIRED",
-                "Post-chat capture cannot steal an existing safe-point hold",
-            )
-
-        if not await sp.acquire(session_id, descriptor, owner_token=owner_token):
-            raise RequiredSnapshotBlocked(
-                "LIVE_SANDBOX_REQUIRED",
-                "Post-chat capture failed to acquire idle safe point",
-            )
-        owned = True
+        # The idle hold was published atomically with the no-owner proof.
         live_sp = dict(descriptor)
         workflow_state = dict(descriptor)
         capsule = ContinuationRegistry(service.object_store).freeze(

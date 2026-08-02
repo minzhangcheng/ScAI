@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.utils.error_parsing import sanitize_error_payload
+
 
 # Snapshot V2 failure HITL base actions. Retry re-enters capture only; manage
 # opens snapshot management; terminate stops the workflow. Used for producers
@@ -55,8 +57,8 @@ def is_snapshot_failure_blocked(state: Any) -> bool:
 class SnapshotV2Error(Exception):
     def __init__(self, code: str, message: str, *, details: dict | None = None):
         self.code = code
-        self.details = details or {}
-        super().__init__(message)
+        self.details = sanitize_error_payload(details or {}, max_chars=3000)
+        super().__init__(sanitize_error_payload(str(message), max_chars=3000))
 
     def __str__(self) -> str:
         base = super().__str__()
@@ -158,7 +160,7 @@ def _snapshot_error_status(exc: SnapshotV2Error) -> int:
     if isinstance(exc, SnapshotDeleteConflict):
         return 409
     if isinstance(exc, SnapshotTransactionError):
-        if exc.code == "SAFE_POINT_BUSY":
+        if exc.code in ("SAFE_POINT_BUSY", "SESSION_BUSY"):
             return 409
         return 503
     # ExportIntegrityError lives in exporter.py but inherits SnapshotV2Error
@@ -179,4 +181,4 @@ def snapshot_error_detail(exc: SnapshotV2Error, context: dict | None = None) -> 
     for key in ("runtime_status",):
         if context and context.get(key) is not None:
             result[key] = context[key]
-    return result
+    return sanitize_error_payload(result, max_chars=3000)

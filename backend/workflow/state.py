@@ -45,6 +45,9 @@ class WorkflowState(TypedDict, total=False):
     report_blocked: bool
     # Integration loop routing (set by _integration_synthesis, read by _after_integration)
     integration_next: Optional[str]  # "gate" | "stop"
+    # Stable checkpoint identity.  TaskStatus is lifecycle state and may be
+    # RUNNING while a restored semantic wait node is executing.
+    semantic_gate: Optional[str]
 
 
 def make_initial_workflow_state(analysis_state: AnalysisState, current_round: int = 0) -> "WorkflowState":

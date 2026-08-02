@@ -172,6 +172,8 @@ class RuntimeDependencyTracker:
     def __init__(self) -> None:
         self._created: set[str] = set()
         self._required: set[str] = set()
+        self._persistence_failures: dict[str, int] = {}
+        self._release_log: list[dict[str, str]] = []
         self._needs_legacy_declared_cleanup = False
 
     @property
@@ -203,6 +205,8 @@ class RuntimeDependencyTracker:
         removed = set(removed or set())
 
         self._created.update(created)
+        for name in created:
+            self._persistence_failures.pop(name, None)
         # Declared outputs are required immediately.
         self._required.update(declared)
         # Cross-cell promotion: prior-created name later loaded becomes required.
@@ -214,9 +218,78 @@ class RuntimeDependencyTracker:
         # output then deleted would stay permanently required and fail every
         # subsequent snapshot capture (required_runtime_unpersistable).
         if removed:
-            self._required.difference_update(removed)
-            self._created.difference_update(removed)
+            self.release(
+                removed,
+                lifecycle="explicit_delete",
+                reason="Variable no longer exists in the live namespace.",
+            )
         return set(self._required)
+
+    def release(
+        self,
+        names: set[str] | list[str],
+        *,
+        lifecycle: str,
+        reason: str,
+    ) -> set[str]:
+        """Release dependencies only at an explicit continuation lifecycle edge."""
+        allowed = {"explicit_delete", "consumed", "superseded", "recomputed"}
+        if lifecycle not in allowed:
+            raise ValueError(f"unsupported runtime dependency lifecycle: {lifecycle}")
+        clean = {str(name) for name in names if str(name).strip()}
+        if not clean or not str(reason).strip():
+            raise ValueError("runtime dependency release requires names and a reason")
+        self._required.difference_update(clean)
+        self._created.difference_update(clean)
+        for name in clean:
+            self._persistence_failures.pop(name, None)
+            self._release_log.append({
+                "name": name,
+                "lifecycle": lifecycle,
+                "reason": str(reason)[:300],
+            })
+        self._release_log = self._release_log[-200:]
+        return set(self._required)
+
+    def record_persistence_failure(
+        self,
+        names: set[str] | list[str],
+        *,
+        poison_threshold: int = 3,
+    ) -> set[str]:
+        """Record repeated required-save failures and return poisoned names."""
+        for name in {str(value) for value in names if str(value).strip()}:
+            if name not in self._required:
+                continue
+            self._persistence_failures[name] = (
+                self._persistence_failures.get(name, 0) + 1
+            )
+        return {
+            name
+            for name, count in self._persistence_failures.items()
+            if count >= poison_threshold
+        }
+
+    def confirm_recomputed(self, names: set[str] | list[str], *, reason: str) -> None:
+        """Clear poison for explicitly re-produced outputs without releasing them."""
+        clean = {str(name) for name in names if str(name).strip()}
+        if not clean or not str(reason).strip():
+            raise ValueError("recomputed dependencies require names and a reason")
+        for name in clean:
+            # A successful declared output is a new lifecycle generation even
+            # when it reuses the same Python name, so before/after set diffs
+            # cannot observe the boundary. Keep it required and only clear the
+            # failure history for the superseded value.
+            self._created.add(name)
+            self._required.add(name)
+            self._persistence_failures.pop(name, None)
+            self._release_log.append({
+                "name": name,
+                "lifecycle": "recomputed",
+                "reason": str(reason)[:300],
+                "retained": "true",
+            })
+        self._release_log = self._release_log[-200:]
 
     def merge_declared(self, names: set[str] | list[str] | None) -> None:
         if names:
@@ -224,9 +297,11 @@ class RuntimeDependencyTracker:
 
     def to_state_dict(self) -> dict:
         return {
-            "version": 2,
+            "version": 3,
             "created": sorted(self._created),
             "required": sorted(self._required),
+            "persistence_failures": dict(sorted(self._persistence_failures.items())),
+            "release_log": list(self._release_log),
         }
 
     @classmethod
@@ -236,5 +311,10 @@ class RuntimeDependencyTracker:
             return tracker
         tracker._created = set(data.get("created") or [])
         tracker._required = set(data.get("required") or [])
+        tracker._persistence_failures = {
+            str(name): max(0, int(count))
+            for name, count in (data.get("persistence_failures") or {}).items()
+        }
+        tracker._release_log = list(data.get("release_log") or [])[-200:]
         tracker._needs_legacy_declared_cleanup = int(data.get("version") or 1) < 2
         return tracker

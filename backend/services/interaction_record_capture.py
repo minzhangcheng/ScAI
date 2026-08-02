@@ -123,6 +123,9 @@ def build_annotation_record(
                 group_proportions=dict(ca.group_proportions),
                 alternative_cell_types=list(ca.alternative_cell_types),
                 low_confidence_reason=ca.low_confidence_reason,
+                n_cells=ca.n_cells,
+                n_cells_known=ca.n_cells_known,
+                n_cells_source=ca.n_cells_source,
             ))
     return AnnotationRecord(
         organism=ann.organism if ann else "",
@@ -133,4 +136,7 @@ def build_annotation_record(
         clusters=clusters,
         supplementary_requests=list(state.annotation_supplementary_requests),
         auto_confirmed=auto_confirmed,
+        validation_status=ann.validation_status if ann else None,
+        validation_summary=ann.validation_summary if ann else None,
+        validation_text_summary=ann.validation_text_summary if ann else None,
     )

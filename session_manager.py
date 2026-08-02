@@ -99,7 +99,7 @@ def export_session(
 def main():
     parser = argparse.ArgumentParser(description="ScAI Session Manager")
     parser.add_argument(
-        "--url", default="http://localhost:8000", help="Server URL"
+        "--url", default="http://localhost:3000", help="Server URL"
     )
     parser.add_argument(
         "--api-key", required=True, help="API key (starts with scai_)"

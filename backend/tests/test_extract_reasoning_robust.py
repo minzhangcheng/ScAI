@@ -1,4 +1,4 @@
-"""Tests for robust reasoning extraction in _extract_content_from_message (P2-3)."""
+"""Provider reasoning shapes are tolerated but never exposed as answers."""
 import pytest
 from types import SimpleNamespace
 from backend.utils.llm_client import OpenAICompatibleClient
@@ -17,44 +17,43 @@ def _msg(content=None, **kwargs):
     return m
 
 
-def test_reasoning_list_of_dicts_with_text():
+def test_reasoning_list_of_dicts_with_text_is_private():
     c = _client_proxy()
     msg = _msg(content=None, reasoning=[{"text": "step 1"}, {"text": "step 2"}])
     out = c._extract_content_from_message(msg)
-    assert "step 1" in out and "step 2" in out
+    assert out == ""
 
 
-def test_reasoning_list_of_strings_no_attribute_error():
-    """Provider returns list of plain strings — must not raise."""
+def test_reasoning_list_of_strings_is_private_without_attribute_error():
     c = _client_proxy()
     msg = _msg(content=None, reasoning=["thought a", "thought b"])
     out = c._extract_content_from_message(msg)
-    assert "thought a" in out and "thought b" in out
+    assert out == ""
 
 
-def test_reasoning_string():
+def test_reasoning_string_is_private():
     c = _client_proxy()
     msg = _msg(content=None, reasoning="single reasoning")
     out = c._extract_content_from_message(msg)
-    assert "single reasoning" in out
+    assert out == ""
 
 
 def test_reasoning_none_returns_empty():
     c = _client_proxy()
     msg = _msg(content=None)
     out = c._extract_content_from_message(msg)
-    assert out is not None
+    assert out == ""
 
 
-def test_reasoning_list_of_dicts_with_content_key():
+def test_reasoning_list_of_dicts_with_content_key_is_private():
     c = _client_proxy()
     msg = _msg(content=None, reasoning_content=[{"content": "alt key"}])
     out = c._extract_content_from_message(msg)
-    assert "alt key" in out
+    assert out == ""
 
 
-def test_reasoning_dict_value():
+def test_reasoning_dict_value_is_private():
     c = _client_proxy()
     msg = _msg(content=None, thinking={"text": "dict thought"})
     out = c._extract_content_from_message(msg)
-    assert "dict thought" in out
+    assert out == ""

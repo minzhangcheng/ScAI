@@ -62,8 +62,11 @@ async def test_reanalysis_clears_restore_provenance(monkeypatch):
     async def noop(*a, **k):
         return None
 
+    async def teardown_ok(*a, **k):
+        return True
+
     monkeypatch.setattr(life, "require_session_ownership", fake_owner)
-    monkeypatch.setattr(life, "teardown_running_workflow", noop)
+    monkeypatch.setattr(life, "teardown_running_workflow", teardown_ok)
     monkeypatch.setattr(life, "_update_session_cache", noop)
     monkeypatch.setattr(life, "async_save_session", noop)
 
@@ -82,6 +85,58 @@ async def test_reanalysis_clears_restore_provenance(monkeypatch):
     next_round = RoundResult(round_number=3)
     next_round.restored_from_snapshot_id = restore_provenance_id(state)
     assert next_round.restored_from_snapshot_id is None
+
+
+@pytest.mark.asyncio
+async def test_reanalysis_refuses_to_mutate_when_teardown_is_incomplete(
+    monkeypatch,
+):
+    import backend.routes.lifecycle as life
+
+    sid = "sess-reanalysis-cleanup-incomplete"
+    state = AnalysisState(
+        id=sid,
+        user_id="u1",
+        status=TaskStatus.COMPLETED,
+        current_round=2,
+        max_rounds=9,
+        original_max_rounds=4,
+        last_restored_snapshot_id="snap-old-restore",
+        restore_provenance_snapshot_id="snap-old-restore",
+        runtime_restore_status="unavailable",
+        runtime_restore_warning="runtime unavailable",
+    )
+
+    monkeypatch.setattr(
+        life,
+        "require_session_ownership",
+        AsyncMock(return_value=state),
+    )
+    teardown = AsyncMock(return_value=False)
+    update_cache = AsyncMock()
+    save_session = AsyncMock()
+    monkeypatch.setattr(life, "teardown_running_workflow", teardown)
+    monkeypatch.setattr(life, "_update_session_cache", update_cache)
+    monkeypatch.setattr(life, "async_save_session", save_session)
+
+    response = await life._resume_analysis_locked(sid, "u1")
+
+    assert response.success is False
+    assert response.data == {
+        "status": TaskStatus.COMPLETED.value,
+        "needs_reconnect": False,
+        "cleanup_incomplete": True,
+    }
+    assert state.status is TaskStatus.COMPLETED
+    assert state.max_rounds == 9
+    assert state.original_max_rounds == 4
+    assert state.last_restored_snapshot_id == "snap-old-restore"
+    assert state.restore_provenance_snapshot_id == "snap-old-restore"
+    assert state.runtime_restore_status == "unavailable"
+    assert state.runtime_restore_warning == "runtime unavailable"
+    teardown.assert_awaited_once_with(sid, discard_runtime=True)
+    update_cache.assert_not_awaited()
+    save_session.assert_not_awaited()
 
 
 @pytest.fixture
@@ -196,6 +251,7 @@ async def test_idle_explicit_start_reaches_graph(workflow_with_idle_restore):
 @pytest.mark.asyncio
 async def test_headless_runner_idle_explicit_start_invokes_graph(monkeypatch):
     from backend.services import workflow_runner
+    from backend.state import sessions, workflows
 
     state = AnalysisState(
         id="idle-start", user_id="u1", status=TaskStatus.RUNNING,
@@ -209,8 +265,13 @@ async def test_headless_runner_idle_explicit_start_invokes_graph(monkeypatch):
         "_build_workflow_for_session",
         AsyncMock(return_value=(workflow, state)),
     )
-    await workflow_runner._headless_workflow_runner(state.id)
-    workflow.resume.assert_awaited_once_with(state.id, state)
+    sessions[state.id] = state
+    try:
+        await workflow_runner._headless_workflow_runner(state.id)
+        workflow.resume.assert_awaited_once_with(state.id, state)
+    finally:
+        sessions.pop(state.id, None)
+        workflows.pop(state.id, None)
 
 
 @pytest.mark.asyncio

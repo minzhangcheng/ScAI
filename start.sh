@@ -41,8 +41,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --dev              Start in development mode (default: prod)"
             echo "  --prod             Start in production mode"
             echo "  --host HOST        Listen address (default: 127.0.0.1)"
-            echo "  --port PORT        Frontend port (default: 3000)"
-            echo "  --backport PORT    Backend port (default: 8000)"
+            echo "  --port PORT        Application port (default: 3000)"
+            echo "  --backport PORT    Development backend port (default: 8000)"
             echo "  -h, --help         Show this help message"
             exit 0
             ;;
@@ -53,6 +53,22 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+validate_port() {
+    local label=$1
+    local value=$2
+    if [[ ! "$value" =~ ^[0-9]+$ ]] \
+       || [ "$((10#$value))" -lt 1 ] \
+       || [ "$((10#$value))" -gt 65535 ]; then
+        echo "Error: $label must be an integer from 1 to 65535 (received: $value)"
+        exit 1
+    fi
+}
+
+validate_port "--port" "$PORT"
+validate_port "--backport" "$BACKPORT"
+PORT=$((10#$PORT))
+BACKPORT=$((10#$BACKPORT))
 
 echo "Starting ScAI - Single Cell Sequencing Analysis Driven by AI ($MODE mode)..."
 echo ""
@@ -65,7 +81,8 @@ PID_FILE="$SCRIPT_DIR/.scai.pid"
 # Dependencies directory (outside code directory)
 DEP_DIR="$PARENT_DIR/dep"
 VENV_DIR="$DEP_DIR/venv"
-NODE_MODULES_DIR="$DEP_DIR/node_modules"
+FRONTEND_DEP_DIR="$DEP_DIR/frontend"
+NODE_MODULES_DIR="$FRONTEND_DEP_DIR/node_modules"
 
 # Data directory (outside code directory)
 DATA_DIR="$PARENT_DIR/data"
@@ -83,10 +100,44 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
-# Check if Node.js is available
-if ! command -v node &> /dev/null; then
-    echo "Error: Node.js not installed. Please install Node.js first"
-    exit 1
+# Production needs Node.js only when the checked-out frontend build is missing
+# or stale. Packaged deployments can run the FastAPI-served dist without a
+# Node.js runtime; development always needs the Vite server.
+NEEDS_FRONTEND_BUILD=0
+if [ "$MODE" = "prod" ]; then
+    if [ ! -f "$SCRIPT_DIR/frontend/dist/index.html" ]; then
+        NEEDS_FRONTEND_BUILD=1
+    elif find "$SCRIPT_DIR/frontend" \
+        \( -path "$SCRIPT_DIR/frontend/dist" \
+           -o -path "$SCRIPT_DIR/frontend/node_modules" \
+           -o -path "$SCRIPT_DIR/frontend/.pytest_cache" \
+           -o -path "$SCRIPT_DIR/frontend/.benchmarks" \) -prune \
+        -o -type f -newer "$SCRIPT_DIR/frontend/dist/index.html" -print -quit \
+        | grep -q .; then
+        NEEDS_FRONTEND_BUILD=1
+    fi
+fi
+
+NEEDS_NODE=0
+if [ "$MODE" = "dev" ] || [ "$NEEDS_FRONTEND_BUILD" -eq 1 ]; then
+    NEEDS_NODE=1
+fi
+
+if [ "$NEEDS_NODE" -eq 1 ]; then
+    VITE_VERSION="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["packages"]["node_modules/vite"]["version"])' "$SCRIPT_DIR/frontend/package-lock.json" 2>/dev/null)"
+    VITE_MAJOR="${VITE_VERSION%%.*}"
+    if [ -z "$VITE_VERSION" ] || [ "$VITE_MAJOR" != "8" ]; then
+        echo "Error: Unable to determine a supported Node.js range for locked Vite ${VITE_VERSION:-unknown}."
+        exit 1
+    fi
+    if ! command -v node &> /dev/null; then
+        echo "Error: Node.js is required for Vite $VITE_VERSION development/builds. Install Node.js 20.19+ or 22.12+."
+        exit 1
+    fi
+    if ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); const ok = (major === 20 && minor >= 19) || (major === 22 && minor >= 12) || major > 22; process.exit(ok ? 0 : 1)'; then
+        echo "Error: Locked Vite $VITE_VERSION requires Node.js 20.19+ or 22.12+ (current: $(node --version))."
+        exit 1
+    fi
 fi
 
 # Create dependencies directory
@@ -135,71 +186,46 @@ if [ -f "$SCRIPT_DIR/requirements-nodeps.txt" ]; then
     "${PIP_CMD[@]}" install -q --no-deps -r "$SCRIPT_DIR/requirements-nodeps.txt"
 fi
 
-# Setup frontend dependencies (must be done BEFORE building)
-# Create symlink for node_modules in frontend directory pointing to shared location
-if [ ! -d "$NODE_MODULES_DIR" ]; then
-    echo "Installing frontend dependencies to shared directory..."
-    mkdir -p "$NODE_MODULES_DIR"
+if [ "$NEEDS_NODE" -eq 1 ]; then
+    # Install the exact lockfile graph in a dependency directory outside the
+    # checkout. Both package files are compared so a lock-only security update
+    # cannot accidentally build against stale modules.
+    NEEDS_NPM_CI=0
+    if [ ! -f "$FRONTEND_DEP_DIR/.install-complete" ] \
+       || [ ! -d "$NODE_MODULES_DIR" ] \
+       || ! cmp -s "$SCRIPT_DIR/frontend/package.json" "$FRONTEND_DEP_DIR/package.json" \
+       || ! cmp -s "$SCRIPT_DIR/frontend/package-lock.json" "$FRONTEND_DEP_DIR/package-lock.json"; then
+        NEEDS_NPM_CI=1
+    fi
 
-    # Install dependencies to the shared location
+    if [ "$NEEDS_NPM_CI" -eq 1 ]; then
+        echo "Installing the locked frontend dependency graph..."
+        mkdir -p "$FRONTEND_DEP_DIR"
+        rm -f "$FRONTEND_DEP_DIR/.install-complete"
+        cp "$SCRIPT_DIR/frontend/package.json" "$FRONTEND_DEP_DIR/package.json"
+        cp "$SCRIPT_DIR/frontend/package-lock.json" "$FRONTEND_DEP_DIR/package-lock.json"
+        cd "$FRONTEND_DEP_DIR"
+        npm ci
+        touch "$FRONTEND_DEP_DIR/.install-complete"
+        cd "$SCRIPT_DIR"
+    else
+        echo "Locked frontend dependencies are up to date."
+    fi
+
     cd "$SCRIPT_DIR/frontend"
-
-    # Remove existing node_modules only if it's a real directory (not a symlink)
-    if [ -e "node_modules" ] && [ ! -L "node_modules" ] && [ -d "node_modules" ]; then
-        echo "Removing existing node_modules directory..."
-        rm -rf node_modules
-    fi
-
-    # Create symlink
-    if [ ! -L "node_modules" ]; then
-        ln -s "$NODE_MODULES_DIR" node_modules
-    fi
-
-    # Install dependencies
-    npm install
-    cd "$SCRIPT_DIR"
-else
-    echo "Using existing frontend dependencies..."
-    cd "$SCRIPT_DIR/frontend"
-
-    # Ensure symlink exists
-    if [ ! -L "node_modules" ]; then
-        # Remove only if it's a real directory (not a symlink)
-        if [ -e "node_modules" ] && [ ! -L "node_modules" ] && [ -d "node_modules" ]; then
-            echo "Removing existing node_modules directory..."
-            rm -rf node_modules
-        fi
-        ln -s "$NODE_MODULES_DIR" node_modules
-    fi
-
-    # Check if dependencies need update
-    if [ "$SCRIPT_DIR/frontend/package.json" -nt "$NODE_MODULES_DIR/.package-lock.json" ] 2>/dev/null; then
-        echo "Updating frontend dependencies..."
-        npm install
-    fi
+    bash "$SCRIPT_DIR/scripts/link_frontend_node_modules.sh" \
+        "$SCRIPT_DIR/frontend" "$NODE_MODULES_DIR"
     cd "$SCRIPT_DIR"
 fi
 
 # ── Frontend build for production mode ───────────────────────────
-if [ "$MODE" = "prod" ]; then
-    echo "Production mode: Building frontend..."
-    if [ ! -d "$SCRIPT_DIR/frontend/dist" ]; then
-        echo "Building frontend for production (no dist found)..."
-        cd "$SCRIPT_DIR/frontend"
-        npm run build
-        cd "$SCRIPT_DIR"
-    else
-        _SRC_MTIME=$(find "$SCRIPT_DIR/frontend/src" -type f -exec stat -c %Y {} + 2>/dev/null | sort -rn | head -1)
-        _DIST_MTIME=$(stat -c %Y "$SCRIPT_DIR/frontend/dist/index.html" 2>/dev/null || echo 0)
-        if [ "$_SRC_MTIME" -gt "$_DIST_MTIME" ]; then
-            echo "Building frontend for production (src modified)..."
-            cd "$SCRIPT_DIR/frontend"
-            npm run build
-            cd "$SCRIPT_DIR"
-        else
-            echo "Frontend build up to date, skipping."
-        fi
-    fi
+if [ "$MODE" = "prod" ] && [ "$NEEDS_FRONTEND_BUILD" -eq 1 ]; then
+    echo "Building frontend for FastAPI static serving..."
+    cd "$SCRIPT_DIR/frontend"
+    npm run build
+    cd "$SCRIPT_DIR"
+elif [ "$MODE" = "prod" ]; then
+    echo "Frontend build up to date; Node.js is not required at runtime."
 fi
 
 # Optional: fetch marker databases for ORA priors (off by default; never blocks startup)
@@ -214,28 +240,63 @@ echo ""
 echo "Starting services..."
 echo ""
 
-# Start backend in background
-echo "   Backend: http://$HOST:$BACKPORT"
+# Development keeps Vite's API/WebSocket proxy. Production exposes one Uvicorn
+# port and serves the prebuilt SPA, API, and WebSockets from that process.
+if [ "$MODE" = "dev" ]; then
+    BACKEND_PORT="$BACKPORT"
+else
+    BACKEND_PORT="$PORT"
+fi
+
+echo "   Backend: http://$HOST:$BACKEND_PORT"
 cd "$SCRIPT_DIR"
-"$VENV_DIR/bin/uvicorn" backend.main:app --host "$HOST" --port "$BACKPORT" &
+if [ "$MODE" = "dev" ]; then
+    "$VENV_DIR/bin/uvicorn" backend.main:app --host "$HOST" --port "$BACKEND_PORT" --reload &
+else
+    "$VENV_DIR/bin/uvicorn" backend.main:app --host "$HOST" --port "$BACKEND_PORT" &
+fi
 BACKEND_PID=$!
 
 # Wait for backend to start
-sleep 2
-
-# Start frontend
-echo "   Frontend: http://$HOST:$PORT"
-cd "$SCRIPT_DIR/frontend"
-if [ "$MODE" = "dev" ]; then
-    SCAI_HOST="$HOST" SCAI_BACKPORT="$BACKPORT" npx vite --host "$HOST" --port "$PORT" &
+echo "Waiting for application health check..."
+if [ "$HOST" = "0.0.0.0" ] || [ "$HOST" = "::" ] || [ "$HOST" = "[::]" ]; then
+    PROBE_HOST="127.0.0.1"
 else
-    SCAI_HOST="$HOST" SCAI_BACKPORT="$BACKPORT" npx vite preview --host "$HOST" --port "$PORT" &
+    PROBE_HOST="$HOST"
 fi
-FRONTEND_PID=$!
+for i in $(seq 1 30); do
+    if SCAI_PROBE_HOST="$PROBE_HOST" SCAI_PROBE_PORT="$BACKEND_PORT" \
+       "$VENV_DIR/bin/python" -c \
+        'import os, urllib.request; host = os.environ["SCAI_PROBE_HOST"]; host = f"[{host}]" if ":" in host and not host.startswith("[") else host; urllib.request.urlopen(f"http://{host}:{int(os.environ['"'"'SCAI_PROBE_PORT'"'"'])}/api/health", timeout=1).read()' \
+        >/dev/null 2>&1; then
+        break
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo "Error: application did not become healthy within 30 seconds."
+        kill "$BACKEND_PID" 2>/dev/null
+        exit 1
+    fi
+    sleep 1
+done
+
+FRONTEND_PID=""
+if [ "$MODE" = "dev" ]; then
+    echo "   Vite frontend: http://$HOST:$PORT"
+    cd "$SCRIPT_DIR/frontend"
+    SCAI_HOST="$HOST" SCAI_BACKPORT="$BACKPORT" npx vite --host "$HOST" --port "$PORT" &
+    FRONTEND_PID=$!
+else
+    echo "   Application: http://$HOST:$PORT"
+fi
 
 # Save PIDs and paths to file for stop.sh
 echo "BACKEND_PID=$BACKEND_PID" > "$PID_FILE"
-echo "FRONTEND_PID=$FRONTEND_PID" >> "$PID_FILE"
+if [ -n "$FRONTEND_PID" ]; then
+    echo "FRONTEND_PID=$FRONTEND_PID" >> "$PID_FILE"
+fi
+echo "MODE=$MODE" >> "$PID_FILE"
+echo "APP_PORT=$PORT" >> "$PID_FILE"
+echo "BACKEND_PORT=$BACKEND_PORT" >> "$PID_FILE"
 echo "SCRIPT_DIR=$SCRIPT_DIR" >> "$PID_FILE"
 echo "VENV_DIR=$VENV_DIR" >> "$PID_FILE"
 
@@ -258,10 +319,14 @@ cleanup() {
     echo ""
     echo "Stopping services..."
     kill "$BACKEND_PID" 2>/dev/null
-    kill "$FRONTEND_PID" 2>/dev/null
+    if [ -n "$FRONTEND_PID" ]; then
+        kill "$FRONTEND_PID" 2>/dev/null
+    fi
     # Also kill any child processes
     pkill -P "$BACKEND_PID" 2>/dev/null
-    pkill -P "$FRONTEND_PID" 2>/dev/null
+    if [ -n "$FRONTEND_PID" ]; then
+        pkill -P "$FRONTEND_PID" 2>/dev/null
+    fi
     rm -f "$PID_FILE"
     deactivate 2>/dev/null
     echo "Stopped"
@@ -270,5 +335,11 @@ cleanup() {
 
 trap cleanup SIGINT SIGTERM
 
-# Wait for processes
-wait
+# Wait for the production server, or either development process.
+if [ "$MODE" = "dev" ]; then
+    wait -n "$BACKEND_PID" "$FRONTEND_PID"
+    cleanup
+else
+    wait "$BACKEND_PID"
+    rm -f "$PID_FILE"
+fi

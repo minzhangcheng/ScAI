@@ -150,6 +150,15 @@ TOOLS = [
                         "type": "string",
                         "description": "Name for the figure file (English, no spaces, e.g., 'umap_cell_types')"
                     },
+                    "logical_figure_id": {
+                        "type": "string",
+                        "description": (
+                            "Stable semantic identity for this figure across redraws. "
+                            "Reuse the exact same value when revising or regenerating "
+                            "the same scientific figure; change it only for a distinct "
+                            "figure. Filename suffixes are not revision metadata."
+                        )
+                    },
                     "description": {
                         "type": "string",
                         "description": "Description of what the figure shows (will be used for figure legend)"
@@ -177,7 +186,13 @@ TOOLS = [
                         )
                     }
                 },
-                "required": ["code", "figure_name", "description", "figure_type"]
+                "required": [
+                    "code",
+                    "figure_name",
+                    "logical_figure_id",
+                    "description",
+                    "figure_type",
+                ]
             }
         }
     },

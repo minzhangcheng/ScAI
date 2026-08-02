@@ -154,6 +154,12 @@ _HEAD_POST_CSS_BODY = """\
         </div>
 
         <div class="content">
+            <!-- Report Completion Status -->
+            {report_status_banner_html}
+
+            <!-- Deterministic Analysis Quality Disclosures -->
+            {quality_disclosures_html}
+
             <!-- Table of Contents -->
             <div class="toc">
                 <h3>{toc_title}</h3>
@@ -206,6 +212,9 @@ def render_report_html(context: dict) -> str:
     _HEAD_POST_CSS_BODY (e.g. language, title, generated_at, abstract,
     sections_html, ...).
     """
+    context = dict(context)
+    context.setdefault("report_status_banner_html", "")
+    context.setdefault("quality_disclosures_html", "")
     head = _HEAD_PRE_CSS.format(**context)
     body = _HEAD_POST_CSS_BODY.format(**context)
     return head + REPORT_CSS + body

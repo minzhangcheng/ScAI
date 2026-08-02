@@ -136,12 +136,12 @@ async def test_a_cell_that_built_nothing_does_not_disarm_the_restore_guard(tmp_p
 
 @pytest.mark.asyncio
 async def test_a_rebuilt_namespace_is_persisted_over_the_previous_pkl(tmp_path):
-    """The other half of the contract: real rebuilt state must reach disk.
+    """A legacy/manual recovery latch may persist genuinely rebuilt state.
 
-    ``_restart_kernel`` deliberately keeps a restore-failed kernel alive so the
-    analysis can recompute from the uploaded data. Refusing forever meant none
-    of that work was ever written and the next resume silently rehydrated the
-    pre-crash pkl instead.
+    Normal start/restart discards a partial namespace. This defense-in-depth
+    branch covers a restore-failed namespace supplied by an older or manual
+    recovery path: once it proves real recomputation, refusing forever would
+    make the next resume silently rehydrate the pre-crash pkl instead.
     """
     baseline = {"In", "Out", "SEED"}
     sandbox, pkl = _latched_sandbox(

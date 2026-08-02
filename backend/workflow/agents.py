@@ -339,14 +339,38 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         record_round_start(analysis_state)
 
         max_steps = self.config.bioinfo_max_steps
-        result = await self.bioinformatics_agent.run_autonomous_analysis(
-            analysis_state,
-            instruction,
-            max_steps=max_steps,
-            figure_review_callback=self._figure_review_callback,
-            supervisor_callback=self._supervisor_callback,
-            planning_stage=planning_stage,  # Pass stage context to agent
-        )
+        while True:
+            try:
+                result = await self.bioinformatics_agent.run_autonomous_analysis(
+                    analysis_state,
+                    instruction,
+                    max_steps=max_steps,
+                    figure_review_callback=self._figure_review_callback,
+                    supervisor_callback=self._supervisor_callback,
+                    planning_stage=planning_stage,  # Pass stage context to agent
+                )
+                break
+            except Exception as exc:
+                from backend.services.runtime_persistence_gate import (
+                    RuntimePersistenceBlocked,
+                )
+
+                if not isinstance(exc, RuntimePersistenceBlocked):
+                    raise
+                action = await self._wait_for_runtime_persistence_intervention(
+                    analysis_state
+                )
+                if action == "terminate":
+                    from backend.workflow.helpers import WorkflowTerminatedError
+
+                    raise WorkflowTerminatedError(
+                        "User terminated after runtime persistence failure"
+                    )
+                # Retry re-enters from the executor checkpoint after the exact
+                # live namespace is committed. Recompute/reduce likewise
+                # re-enters, with runtime_recompute_pending adding the recovery
+                # instruction to the agent's data context.
+                continue
 
         # Collect supervisor stats
         if self.supervisor_agent:
@@ -500,7 +524,16 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             # because each of those consumers tests `is False` and an absent key
             # reads as None.
             "evidence_verified": result.get("evidence_verified"),
+            "evidence_gate_degraded": bool(
+                result.get("evidence_gate_degraded")
+                or any(
+                    item.get("forced_release")
+                    for item in result.get("evidence_gate_findings") or []
+                    if isinstance(item, dict)
+                )
+            ),
             "evidence_execution_ids": list(result.get("evidence_execution_ids") or []),
+            "evidence_gate_findings": list(result.get("evidence_gate_findings") or []),
             # The executing agent's own view of what is left undone. It is present
             # in every real report_findings call and used to be dropped here, so
             # the PI synthesizing the round never saw it.
@@ -518,7 +551,11 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             {
                 "findings": all_findings,
                 "summary": summary,
-                "steps_executed": result.get("steps_executed", 0)
+                "steps_executed": result.get("steps_executed", 0),
+                "evidence_verified": final_result["evidence_verified"],
+                "evidence_gate_degraded": final_result["evidence_gate_degraded"],
+                "evidence_execution_ids": final_result["evidence_execution_ids"],
+                "evidence_gate_findings": final_result["evidence_gate_findings"],
             },
             AgentType.BIOINFORMATICS
         )
@@ -575,7 +612,15 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             )
             # Required boundary: plan_revision semantic gate (pre_major_revision).
             # Fail closed via capture_required_snapshot → RequiredSnapshotBlocked.
-            await self._create_auto_snapshot(analysis_state, "pre_major_revision")
+            # This revision signal exists only on the node output. LangGraph has
+            # not installed that output yet, so the workflow-level pointer still
+            # names the input and cannot be the capture source.
+            self._current_graph_state = result_state
+            await self._create_auto_snapshot(
+                analysis_state,
+                "pre_major_revision",
+                workflow_state=result_state,
+            )
         elif action == "stage1_complete":
             # Stage transition: stage1 genuinely completed → set up for stage2.
             # Don't cache the stage1 result — stage2 re-enters this node and must

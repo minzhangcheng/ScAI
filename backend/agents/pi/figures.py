@@ -835,7 +835,8 @@ Exclude figures that are:
   a single quality-control overview panel when one exists, since the composition of the
   data every later result rests on is itself a result the researcher needs to see
 - Intermediate/exploratory plots superseded by a final version (e.g. exclude umap_initial if umap_cell_types exists)
-- Redundant older versions (prefer _v2 or _final over earlier versions of the same figure)
+- Redundant views of the same scientific result. The caller has already resolved
+  explicit logical-figure lineage; never infer revision order from filename suffixes.
 
 How many:
 - Select 8-15 figures when that many qualify. Select fewer only when fewer qualify.

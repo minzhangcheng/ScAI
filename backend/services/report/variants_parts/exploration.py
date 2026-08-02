@@ -15,6 +15,7 @@ from backend.utils.image_utils import compress_image_to_base64
 from backend.services.report.score_section import build_score_definitions_section_html
 from backend.services.report.figure_discovery import (
     discover_figures_in_workspace,
+    ensure_legacy_artifact_inventory,
     prepare_discovered_figures,
 )
 from backend.models.schemas import AnalysisState
@@ -79,6 +80,7 @@ def generate_exploration_report_html(
     try:
         workspace_dir = get_session_workspace(state.id) if state.id else None
         if workspace_dir and workspace_dir.exists():
+            ensure_legacy_artifact_inventory(state, workspace_dir)
             fig_desc_map = _build_figure_description_map(state.analysis_log)
             figure_blocks = []
             seen_stems: set = set()
@@ -96,6 +98,8 @@ def generate_exploration_report_html(
                 invalidated_stems=state.invalidated_artifact_stems,
                 report_only=True,
                 allow_unregistered_diagnostics=False,
+                registry_version=state.artifact_registry_version,
+                legacy_artifacts=state.legacy_artifacts,
             ))
             for candidate in discovered:
                 img_file = Path(candidate["path"])

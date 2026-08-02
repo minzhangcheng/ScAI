@@ -17,6 +17,8 @@ import re
 import ast
 import textwrap
 import time
+import os
+import shutil
 from pathlib import Path
 from datetime import datetime
 
@@ -35,6 +37,7 @@ from backend.services import ora_kernel
 from backend.services.marker_priors import MarkerDB, summarize_database_priors
 
 from ...utils.formatting import format_revision_history, truncate_for_llm
+from ...utils.error_parsing import compact_traceback
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ...services.figure_layout import (
     blocking_violations,
@@ -44,10 +47,25 @@ from ...services.figure_layout import (
     summarize_violations,
 )
 from ...services.report.artifacts import (
+    archival_render_available,
+    eligible_artifacts,
     image_file_sha256,
+    is_report_eligible,
+    logical_figure_key,
     pdf_file_sha256,
     preview_render_sha256,
     publication_pdf_is_valid,
+)
+from ...services.report.figure_transactions import (
+    acquire_figure_publish_locks,
+    apply_publish_record_paths,
+    begin_figure_publish_transaction,
+    commit_figure_publish_transaction,
+    mark_figure_record_recovery_durable,
+    mark_publish_record_applied,
+    refreeze_pending_figure_attempt,
+    register_pending_figure_attempt,
+    rollback_figure_publish_transaction,
 )
 
 # Configure logger
@@ -70,6 +88,94 @@ _SAVE_FAILED_MARKER = "could not save JPG"
 _PDF_SAVE_FAILED_MARKER = "could not save PDF"
 _JPG_SAVED_MARKER = "Saved JPG"
 _PDF_SAVED_MARKER = "Saved PDF"
+
+
+def _new_render_attempt_paths(figures_dir: Path, safe_name: str, attempt_id: str):
+    """Return a hidden staging directory and its JPG/PDF paths."""
+    attempt_dir = figures_dir / ".attempts" / attempt_id
+    attempt_dir.mkdir(parents=True, exist_ok=False)
+    return attempt_dir, attempt_dir / f"{safe_name}.jpg", attempt_dir / f"{safe_name}.pdf"
+
+
+def _discard_render_attempt(attempt_dir: Path) -> None:
+    try:
+        shutil.rmtree(attempt_dir)
+        parent = attempt_dir.parent
+        if parent.exists() and not any(parent.iterdir()):
+            parent.rmdir()
+    except OSError:
+        logger.warning("Could not remove failed figure attempt directory %s", attempt_dir)
+
+
+def _publish_render_attempt(
+    attempt_dir: Path,
+    staged_jpg: Path,
+    staged_pdf: Path,
+    final_jpg: Path,
+    final_pdf: Path,
+    *,
+    archived_record: Any = None,
+) -> str | None:
+    """Expose a validated pair and preserve the previous registered render.
+
+    A same-name redraw must not destroy the bytes referenced by an older
+    reportable record.  Copies of that pair are therefore placed in an explicit
+    record-owned archive before either public path is replaced.  If either
+    replacement fails, the old pair is restored before the attempt is removed.
+    """
+    backups: list[tuple[Path, Path]] = []
+    published: list[Path] = []
+    archive_dir: Path | None = None
+    archive_paths: dict[str, Path] = {}
+    try:
+        final_jpg.parent.mkdir(parents=True, exist_ok=True)
+        for final in (final_jpg, final_pdf):
+            if final.exists():
+                backup = attempt_dir / f"previous_{final.name}"
+                shutil.copy2(final, backup)
+                backups.append((backup, final))
+        if archived_record is not None and backups:
+            archive_dir = (
+                final_jpg.parent
+                / ".revisions"
+                / str(getattr(archived_record, "id", "unknown"))
+            )
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            for backup, final in backups:
+                archived_path = archive_dir / final.name
+                shutil.copy2(backup, archived_path)
+                archive_paths[final.suffix.lower()] = archived_path
+        os.replace(staged_jpg, final_jpg)
+        published.append(final_jpg)
+        os.replace(staged_pdf, final_pdf)
+        published.append(final_pdf)
+    except OSError as exc:
+        for path in published:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        for backup, final in backups:
+            try:
+                shutil.copy2(backup, final)
+            except OSError:
+                logger.exception("Could not restore prior figure render %s", final)
+        if archive_dir is not None:
+            try:
+                shutil.rmtree(archive_dir)
+            except OSError:
+                pass
+        _discard_render_attempt(attempt_dir)
+        return f"Could not publish validated figure render: {exc}"
+    if archived_record is not None:
+        archived_jpg = archive_paths.get(".jpg") or archive_paths.get(".jpeg")
+        archived_pdf = archive_paths.get(".pdf")
+        if archived_jpg is not None:
+            archived_record.png_path = str(archived_jpg)
+        if archived_pdf is not None:
+            archived_record.pdf_path = str(archived_pdf)
+    _discard_render_attempt(attempt_dir)
+    return None
 
 
 def _render_landed(output: str | None) -> bool:
@@ -252,22 +358,22 @@ from .shared import (  # noqa: F401
     tool_calls_are_paired,
     append_missing_tool_results,
     PLAN_REVISION_NEEDED_TAG,
-    strip_ansi,
+    compact_traceback,
     extract_error_type,
     TECHNICAL_ERROR_TYPES,
     detect_swallowed_error,
+    build_expression_runtime_code,
     build_expression_preflight_code,
     extract_sensitive_expression_inputs,
+    has_direct_expression_contract_call,
+    instrument_expression_contract_calls,
     mutates_expression_representation,
     parse_expression_contracts,
     prepares_expression_before_sensitive_call,
     record_expression_contract,
-    describe_invalidated_artifacts,
-    record_invalidated_file_stems,
-    round_start_ns,
-    record_representation_change,
-    unchanged_artifact_stems,
+    record_executed_representation_change,
     workspace_artifact_versions,
+    strip_expression_contract_markers,
     SupervisorEvalResult,
     _DYNAMIC_CONTEXT_PREFIX,
     _APPROVED_PLAN_PREFIX,
@@ -301,6 +407,7 @@ class FiguresMixin:
         diagnostic: bool = False,
         plan_step_id: Optional[int] = None,
         purpose: Optional[str] = None,
+        logical_figure_id: Optional[str] = None,
     ) -> str:
         """
         Handle generate_publication_figure tool call.
@@ -318,6 +425,7 @@ class FiguresMixin:
                 review that, for this kind of figure, never happens.
             plan_step_id: Approved plan step this figure fulfils, when known.
             purpose: Semantic role of the figure (result, baseline, diagnostic).
+            logical_figure_id: Stable semantic identity reused by later redraws.
 
         Returns:
             Tool result message
@@ -331,64 +439,145 @@ class FiguresMixin:
 
         # Ensure figures directory exists
         figures_dir = Path(self.sandbox.working_dir) / "figures"
+        # A previous worker may have died after either public-file replace or
+        # after the durable record write but before its commit marker. Recover
+        # that transaction before resolving the current logical head.
+        try:
+            from ...config import get_session_workspace
+            if figures_dir.resolve() == (
+                get_session_workspace(state.id) / "figures"
+            ).resolve():
+                from ...services.session_store import (
+                    recover_publication_transactions_for_state,
+                )
+                await recover_publication_transactions_for_state(state.id, state)
+        except Exception:
+            logger.exception(
+                "Could not recover publication transactions for %s", state.id
+            )
+            return "Could not recover pending publication figure transactions"
 
         # Clean up figure name
         safe_name = "".join(c if c.isalnum() or c == '_' else '_' for c in figure_name)
-        jpg_path = figures_dir / f"{safe_name}.jpg"
-        pdf_path = figures_dir / f"{safe_name}.pdf"
+        final_jpg_path = figures_dir / f"{safe_name}.jpg"
+        final_pdf_path = figures_dir / f"{safe_name}.pdf"
 
-        # Wrap code to save both JPG and PDF; paths are repr()'d inside the
-        # shared wrapper to prevent injection.
-        wrapped_code = _build_publication_figure_wrapper(code, figures_dir, jpg_path, pdf_path)
+        sandbox_state = state.sandbox_state or {}
+        current_plan = getattr(state, "current_plan", None)
+        current_plan_id = str(getattr(current_plan, "id", "") or "").strip() or None
+        active_lineage = getattr(state, "restore_branch_id", None) or "main"
+        logical_id = str(logical_figure_id or "").strip()[:240]
+        if not logical_id:
+            # Tool calls require an explicit semantic ID.  Direct/internal
+            # callers that predate the schema remain usable, but their attempts
+            # are deliberately independent rather than grouped by filename.
+            logical_id = f"render:{uuid.uuid4()}"
+        prior_attempts = [
+            item for item in eligible_artifacts(state.publication_figures)
+            if (getattr(item, "lineage_id", None) or "main") == active_lineage
+            and str(getattr(item, "logical_figure_id", None) or "") == logical_id
+        ]
+        prior_attempt = prior_attempts[-1] if prior_attempts else None
+        render_attempt_id = str(uuid.uuid4())
 
-        expression_specs = extract_sensitive_expression_inputs(code)
+        instrumented_code, sensitive_call_count = (
+            instrument_expression_contract_calls(code)
+        )
+        preinstall_expression_runtime = has_direct_expression_contract_call(code)
+        guarded_code = (
+            instrumented_code
+            if preinstall_expression_runtime or not sensitive_call_count
+            else build_expression_runtime_code() + "\n" + instrumented_code
+        )
+        if preinstall_expression_runtime:
+            runtime_setup = await self.sandbox.execute(
+                build_expression_runtime_code(),
+                save_to_history=False,
+                skip_safety_check=True,
+            )
+            if runtime_setup.error:
+                return (
+                    "Figure generation blocked: "
+                    + compact_traceback(runtime_setup.error, max_chars=3000)
+                )
+
         representation_will_change = mutates_expression_representation(code)
         preexisting_artifact_versions = (
             workspace_artifact_versions(self.sandbox.working_dir)
             if representation_will_change else {}
         )
-        if (
-            expression_specs
-            and not prepares_expression_before_sensitive_call(code)
-        ):
-            preflight = await self.sandbox.execute(
-                build_expression_preflight_code(expression_specs),
-                save_to_history=False,
-                skip_safety_check=True,
-            )
-            if preflight.error:
-                return f"Figure generation blocked: {strip_ansi(preflight.error)}"
-            record_expression_contract(
-                state, parse_expression_contracts(preflight.output)
-            )
+        attempt_dir, staged_jpg_path, staged_pdf_path = _new_render_attempt_paths(
+            figures_dir, safe_name, render_attempt_id
+        )
+        # Wrap code to save both JPG and PDF; paths are repr()'d inside the
+        # shared wrapper to prevent injection.
+        wrapped_code = _build_publication_figure_wrapper(
+            guarded_code, attempt_dir, staged_jpg_path, staged_pdf_path
+        )
 
-        # Execute the code
-        result = await self.sandbox.execute(wrapped_code, skip_safety_check=True)
+        # Execute the code. A transport/runtime exception must not strand an
+        # attempt directory even though no CodeExecutionResult was returned.
+        staleness_note = ""
+        user_code_execution_started = False
+        try:
+            try:
+                # Conservatively treat a transport failure or cancellation after
+                # dispatch as a possibly executed, non-transactional mutation.
+                user_code_execution_started = True
+                result = await self.sandbox.execute(
+                    wrapped_code, skip_safety_check=True
+                )
+            finally:
+                try:
+                    (
+                        _invalidated_count,
+                        _stale_stems,
+                        staleness_note,
+                    ) = record_executed_representation_change(
+                        state,
+                        code,
+                        self.sandbox.working_dir,
+                        preexisting_artifact_versions,
+                        execution_started=user_code_execution_started,
+                    )
+                except Exception as provenance_error:
+                    logger.warning(
+                        "[Bioinformatics] Could not record figure expression "
+                        "representation invalidation: %s",
+                        compact_traceback(str(provenance_error), max_chars=1000),
+                    )
+        except BaseException:
+            _discard_render_attempt(attempt_dir)
+            raise
+
+        expression_contracts = parse_expression_contracts(result.output)
+        if expression_contracts:
+            record_expression_contract(state, expression_contracts)
+        result.output = strip_expression_contract_markers(result.output)
 
         if result.error:
-            result.error = strip_ansi(result.error)
+            _discard_render_attempt(attempt_dir)
+            result.error = compact_traceback(result.error, max_chars=3000)
+            if staleness_note:
+                result.error = f"{result.error}\n{staleness_note}".strip()
             error_msg = f"Figure generation failed: {result.error}"
             logger.error(f"[Bioinformatics] {error_msg}")
             await self._notify("error", error_msg)
             return error_msg
 
-        invalidated_count = record_representation_change(state, code)
-        staleness_note = ""
-        if representation_will_change:
-            stale_stems = unchanged_artifact_stems(
-                self.sandbox.working_dir,
-                preexisting_artifact_versions,
-                since_ns=round_start_ns(state),
-            )
-            record_invalidated_file_stems(state, stale_stems)
-            staleness_note = describe_invalidated_artifacts(
-                stale_stems, invalidated_count
-            )
-
-        output_error = _publication_output_error(jpg_path, pdf_path, result.output)
+        output_error = _publication_output_error(
+            staged_jpg_path, staged_pdf_path, result.output
+        )
         if output_error:
+            _discard_render_attempt(attempt_dir)
             logger.warning("[Bioinformatics] %s", output_error)
             return output_error
+
+        # Keep all review/revision work under the hidden attempt directory.  A
+        # report or workspace scan must continue to see the prior published
+        # bytes until this logical attempt reaches a terminal producer state.
+        jpg_path = staged_jpg_path
+        pdf_path = staged_pdf_path
 
         # Ask the rendering engine where the text actually landed. This is the
         # deterministic half of the figure gate: the vision reviewer can say a
@@ -414,12 +603,13 @@ class FiguresMixin:
             )
 
         # Read JPG and compress to base64
-        png_b64 = self._compress_image_to_base64(jpg_path, max_width=800)
+        try:
+            png_b64 = self._compress_image_to_base64(jpg_path, max_width=800)
+        except BaseException:
+            _discard_render_attempt(attempt_dir)
+            raise
 
         # Create PublicationFigure object (png_path field stores JPG path for web display)
-        sandbox_state = state.sandbox_state or {}
-        current_plan = getattr(state, "current_plan", None)
-        current_plan_id = str(getattr(current_plan, "id", "") or "").strip() or None
         figure = PublicationFigure(
             id=str(uuid.uuid4()),
             name=safe_name,
@@ -434,7 +624,12 @@ class FiguresMixin:
             plan_step_id=plan_step_id,
             plan_id=current_plan_id,
             purpose=purpose or ("diagnostic" if diagnostic else "result"),
-            lineage_id=(getattr(state, "restore_branch_id", None) or "main"),
+            logical_figure_id=logical_id,
+            render_attempt_id=render_attempt_id,
+            producer_status="pending",
+            revision_of_id=getattr(prior_attempt, "id", None),
+            is_published_head=False,
+            lineage_id=active_lineage,
             round_number=int(state.current_round or 0),
             analysis_generation=int(sandbox_state.get("analysis_generation", 0) or 0),
             expression_provenance=dict(
@@ -443,14 +638,308 @@ class FiguresMixin:
         )
         self._refresh_figure_integrity_hashes(figure)
 
+        # Register and durably journal the pending render before asking any
+        # reviewer to inspect it. A process death during that await is recovered
+        # as an abandoned audit record on the next load.
+        try:
+            pending_transaction = register_pending_figure_attempt(
+                attempt_dir=attempt_dir,
+                staged_jpg=staged_jpg_path,
+                staged_pdf=staged_pdf_path,
+                final_jpg=final_jpg_path,
+                final_pdf=final_pdf_path,
+                published_record=figure,
+                session_id=state.id,
+            )
+        except Exception as exc:
+            _discard_render_attempt(attempt_dir)
+            return f"Could not journal publication figure attempt: {exc}"
+
         # Register the pending render before asking any reviewer to inspect it.
         # Review events intentionally omit the large preview and the frontend
         # fetches it through the figure API; without this upsert that request
         # races the review callback and returns 404 (or shows an older revision).
         self._upsert_publication_figure(state, figure)
+        try:
+            await self._persist_figure_record_boundary(state, figures_dir)
+        except Exception as exc:
+            rollback_figure_publish_transaction(
+                Path(pending_transaction["journal_path"]),
+                state=state,
+                producer_status="failed",
+            )
+            return f"Could not persist pending publication figure record: {exc}"
+
+        render_published = False
+
+        async def _persist_terminal_rollback() -> None:
+            try:
+                persisted = await self._persist_figure_record_boundary(
+                    state, figures_dir
+                )
+                if persisted:
+                    mark_figure_record_recovery_durable(
+                        figures_dir,
+                        [str(getattr(figure, "render_attempt_id", "") or "")],
+                    )
+            except Exception:
+                # The terminal marker remains deliberately non-durable. The
+                # next session load will reapply the rollback and retry the
+                # lifecycle-locked session write.
+                logger.exception(
+                    "Could not persist terminal figure rollback for %s",
+                    figure.id,
+                )
+
+        async def _finalize_render() -> str | None:
+            """Commit this reviewed render once, preserving any path owner."""
+            nonlocal render_published
+            if render_published:
+                return None
+            lock_error = acquire_figure_publish_locks(
+                figures_dir=figures_dir,
+                final_jpg=final_jpg_path,
+                published_record=figure,
+            )
+            if lock_error:
+                rollback_figure_publish_transaction(
+                    Path(pending_transaction["journal_path"]),
+                    state=state,
+                    producer_status="failed",
+                )
+                await _persist_terminal_rollback()
+                return lock_error
+            try:
+                frozen_transaction = refreeze_pending_figure_attempt(
+                    pending_transaction,
+                    attempt_dir=attempt_dir,
+                    staged_jpg=jpg_path,
+                    staged_pdf=pdf_path,
+                    final_jpg=final_jpg_path,
+                    final_pdf=final_pdf_path,
+                    published_record=figure,
+                )
+                pending_transaction.clear()
+                pending_transaction.update(frozen_transaction)
+            except Exception as exc:
+                freeze_error = (
+                    "Could not authenticate final reviewed figure bytes: "
+                    f"{exc}"
+                )
+                rollback_figure_publish_transaction(
+                    Path(pending_transaction["journal_path"]),
+                    state=state,
+                    producer_status="failed",
+                )
+                await _persist_terminal_rollback()
+                return freeze_error
+            archival_owner = next(
+                (
+                    item for item in reversed(state.publication_figures)
+                    if item is not figure
+                    and (getattr(item, "lineage_id", None) or "main")
+                    == active_lineage
+                    and str(getattr(item, "png_path", "")) == str(final_jpg_path)
+                    and archival_render_available(item)
+                ),
+                None,
+            )
+            figure.producer_status = "publishing"
+            self._upsert_publication_figure(state, figure)
+            transaction = None
+            try:
+                transaction, publish_error = begin_figure_publish_transaction(
+                    attempt_dir=attempt_dir,
+                    staged_jpg=jpg_path,
+                    staged_pdf=pdf_path,
+                    final_jpg=final_jpg_path,
+                    final_pdf=final_pdf_path,
+                    published_record=figure,
+                    archived_record=archival_owner,
+                )
+            except BaseException:
+                figure.producer_status = "abandoned"
+                self._clear_unpublished_figure_payload(figure)
+                self._upsert_publication_figure(state, figure)
+                rollback_figure_publish_transaction(
+                    Path(pending_transaction["journal_path"]),
+                    state=state,
+                    producer_status="abandoned",
+                )
+                await _persist_terminal_rollback()
+                raise
+            if publish_error:
+                figure.producer_status = "failed"
+                self._clear_unpublished_figure_payload(figure)
+                figure.review_status = FigureReviewStatus.REVISION_REQUESTED
+                figure.pi_feedback = (
+                    f"{figure.pi_feedback}\n\n{publish_error}"
+                    if figure.pi_feedback else publish_error
+                )
+                self._upsert_publication_figure(state, figure)
+                await _persist_terminal_rollback()
+                return publish_error
+            try:
+                apply_publish_record_paths(transaction, figure, archival_owner)
+                figure.producer_status = "published"
+                self._refresh_figure_integrity_hashes(figure)
+                self._upsert_publication_figure(state, figure)
+                mark_publish_record_applied(
+                    transaction,
+                    published_record=figure,
+                    archived_record=archival_owner,
+                )
+                # The transaction marker is written only after session.json has
+                # crossed its own fsync boundary.  Tests and non-session direct
+                # callers do not own that canonical workspace and safely skip
+                # the persistence callback.
+                await self._persist_figure_record_boundary(state, figures_dir)
+                commit_figure_publish_transaction(transaction)
+            except BaseException:
+                if transaction is not None:
+                    rollback_figure_publish_transaction(
+                        Path(transaction["journal_path"]),
+                        state=state,
+                        producer_status="abandoned",
+                    )
+                else:
+                    figure.producer_status = "abandoned"
+                    self._clear_unpublished_figure_payload(figure)
+                    self._upsert_publication_figure(state, figure)
+                await _persist_terminal_rollback()
+                raise
+            render_published = True
+            return None
+
+        def _abandon_render() -> None:
+            """Remove a non-terminal attempt without disturbing any old head."""
+            if not render_published:
+                rollback_figure_publish_transaction(
+                    Path(pending_transaction["journal_path"]),
+                    state=state,
+                    producer_status="abandoned",
+                )
+            else:
+                self._upsert_publication_figure(state, figure)
+
+        async def _guard_attempt_await(awaitable):
+            """Clean staging if an external await aborts the producer attempt."""
+            try:
+                return await awaitable
+            except BaseException:
+                _abandon_render()
+                await _persist_terminal_rollback()
+                raise
 
         # Send figure to frontend for display
-        await self._notify("figure", png_b64)
+        await _guard_attempt_await(self._notify("figure", png_b64))
+
+        async def _execute_revision_candidate(source: str):
+            nonlocal staleness_note
+            candidate_id = str(uuid.uuid4())
+            candidate_dir, candidate_jpg, candidate_pdf = _new_render_attempt_paths(
+                figures_dir, safe_name, candidate_id
+            )
+            instrumented_source, candidate_sensitive_call_count = (
+                instrument_expression_contract_calls(source)
+            )
+            candidate_preinstall_runtime = has_direct_expression_contract_call(
+                source
+            )
+            guarded_source = (
+                instrumented_source
+                if candidate_preinstall_runtime or not candidate_sensitive_call_count
+                else build_expression_runtime_code() + "\n" + instrumented_source
+            )
+            if candidate_preinstall_runtime:
+                try:
+                    runtime_setup = await self.sandbox.execute(
+                        build_expression_runtime_code(),
+                        save_to_history=False,
+                        skip_safety_check=True,
+                    )
+                except BaseException:
+                    _discard_render_attempt(candidate_dir)
+                    raise
+                if runtime_setup.error:
+                    runtime_setup.error = compact_traceback(
+                        runtime_setup.error, max_chars=3000
+                    )
+                    _discard_render_attempt(candidate_dir)
+                    return runtime_setup, None
+
+            candidate_representation_will_change = (
+                mutates_expression_representation(source)
+            )
+            candidate_preexisting_versions = (
+                workspace_artifact_versions(self.sandbox.working_dir)
+                if candidate_representation_will_change else {}
+            )
+            candidate_wrapper = _build_publication_figure_wrapper(
+                guarded_source, candidate_dir, candidate_jpg, candidate_pdf
+            )
+            candidate_staleness_note = ""
+            candidate_execution_started = False
+            try:
+                try:
+                    candidate_execution_started = True
+                    candidate_result = await self.sandbox.execute(
+                        candidate_wrapper, skip_safety_check=True
+                    )
+                finally:
+                    try:
+                        (
+                            _candidate_invalidated_count,
+                            _candidate_stale_stems,
+                            candidate_staleness_note,
+                        ) = record_executed_representation_change(
+                            state,
+                            source,
+                            self.sandbox.working_dir,
+                            candidate_preexisting_versions,
+                            execution_started=candidate_execution_started,
+                        )
+                        if candidate_staleness_note:
+                            staleness_note = candidate_staleness_note
+                    except Exception as provenance_error:
+                        logger.warning(
+                            "[Bioinformatics] Could not record revised figure "
+                            "expression representation invalidation: %s",
+                            compact_traceback(
+                                str(provenance_error), max_chars=1000
+                            ),
+                        )
+            except BaseException:
+                _discard_render_attempt(candidate_dir)
+                raise
+            candidate_contracts = parse_expression_contracts(
+                candidate_result.output
+            )
+            if candidate_contracts:
+                record_expression_contract(state, candidate_contracts)
+            candidate_result.output = strip_expression_contract_markers(
+                candidate_result.output
+            )
+            if candidate_result.error:
+                candidate_result.error = compact_traceback(
+                    candidate_result.error, max_chars=3000
+                )
+                if candidate_staleness_note:
+                    candidate_result.error = (
+                        f"{candidate_result.error}\n{candidate_staleness_note}"
+                    ).strip()
+                _discard_render_attempt(candidate_dir)
+                return candidate_result, None
+            candidate_error = _publication_output_error(
+                candidate_jpg, candidate_pdf, candidate_result.output
+            )
+            if candidate_error:
+                _discard_render_attempt(candidate_dir)
+                return candidate_result, candidate_error
+            candidate_error = _publish_render_attempt(
+                candidate_dir, candidate_jpg, candidate_pdf, jpg_path, pdf_path
+            )
+            return candidate_result, candidate_error
 
         # If review callback provided, get PI review
         # Allow up to 3 revisions (4 reviews total: initial + 3 revisions)
@@ -527,9 +1016,10 @@ class FiguresMixin:
                 figure.review_status = FigureReviewStatus.PENDING
                 self._upsert_publication_figure(state, figure)
                 logger.info(f"[Bioinformatics] Submitting figure for PI review (attempt {revision_count + 1})")
-                await self._notify("status", f"PI reviewing figure: {figure_name}...")
-
-                review = await review_callback(figure)
+                await _guard_attempt_await(
+                    self._notify("status", f"PI reviewing figure: {figure_name}...")
+                )
+                review = await _guard_attempt_await(review_callback(figure))
                 quality_score = review.get('quality_score', 5)
                 blocking = blocking_violations(figure.layout_violations)
                 budget_left = revision_count < 3
@@ -579,7 +1069,9 @@ class FiguresMixin:
                     figure.revision_history = revision_history
                     figure.pi_feedback = review.get('feedback', '') or None
                     _record_unresolved(_violation_must_fix_items(blocking))
-                    self._upsert_publication_figure(state, figure)
+                    publish_error = await _finalize_render()
+                    if publish_error:
+                        return publish_error
                     await self._emit_figure_record(
                         "figure_approved", figure, review=review
                     )
@@ -605,14 +1097,19 @@ class FiguresMixin:
                 # break out of the revision loop and defer to the main analysis flow
                 if review.get('requires_reanalysis', False):
                     logger.warning(f"[Bioinformatics] Figure {figure_name} requires upstream reanalysis, skipping revision loop")
-                    await self._notify("status", f"Figure {figure_name}: PI identified data-level issue, deferring to analysis")
+                    await _guard_attempt_await(self._notify(
+                        "status",
+                        f"Figure {figure_name}: PI identified data-level issue, deferring to analysis",
+                    ))
                     figure.review_status = FigureReviewStatus.REVISION_REQUESTED
                     figure.pi_feedback = f"[REQUIRES REANALYSIS] {feedback}"
                     figure.revision_history = revision_history
                     _record_unresolved(
                         list(must_fix) + _violation_must_fix_items(blocking)
                     )
-                    self._upsert_publication_figure(state, figure)
+                    publish_error = await _finalize_render()
+                    if publish_error:
+                        return publish_error
                     await self._emit_figure_record(
                         "figure_revision", figure, review=review
                     )
@@ -649,9 +1146,9 @@ class FiguresMixin:
                 figure.revision_history = revision_history
                 figure.review_status = FigureReviewStatus.REVISION_REQUESTED
                 self._upsert_publication_figure(state, figure)
-                await self._emit_figure_record(
+                await _guard_attempt_await(self._emit_figure_record(
                     "figure_revision", figure, review=review
-                )
+                ))
 
                 if revision_count >= 3:
                     # Out of revision budget
@@ -693,7 +1190,9 @@ class FiguresMixin:
                         )
                         figure.review_status = FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
                         _record_unresolved(must_fix)
-                        self._upsert_publication_figure(state, figure)
+                        publish_error = await _finalize_render()
+                        if publish_error:
+                            return publish_error
                         await self._emit_figure_record(
                             "figure_approved", figure, review=review
                         )
@@ -712,7 +1211,9 @@ class FiguresMixin:
                         )
 
                 # Try to revise the figure
-                await self._notify("status", f"Revising figure based on PI feedback...")
+                await _guard_attempt_await(self._notify(
+                    "status", "Revising figure based on PI feedback..."
+                ))
                 logger.info(f"[Bioinformatics] Revising figure {figure_name}: {feedback}")
 
                 # Generate revised code with full revision history
@@ -723,10 +1224,21 @@ class FiguresMixin:
                         layout_violations=figure.layout_violations,
                     )
                 except UpstreamExhaustedError:
+                    _abandon_render()
                     raise
                 except Exception as revise_err:
-                    logger.error(f"[Bioinformatics] _revise_figure_code failed: {revise_err}, keeping current version")
-                    await self._notify("status", f"Figure revision failed ({revise_err}), keeping current version")
+                    revise_error = compact_traceback(
+                        str(revise_err), max_chars=1000
+                    )
+                    logger.error(
+                        "[Bioinformatics] _revise_figure_code failed: %s; "
+                        "keeping current version",
+                        revise_error,
+                    )
+                    await self._notify(
+                        "status",
+                        f"Figure revision failed ({revise_error}), keeping current version",
+                    )
                     break
 
                 # Only increment revision count after successful code generation
@@ -739,26 +1251,34 @@ class FiguresMixin:
                     logger.warning(f"[Bioinformatics] Revised code failed validation: {error_msg}")
                     break
 
-                # A physically bad redraw may already have overwritten both
-                # files before the wrapper reports the problem. Keep the
-                # immediately previous render for integrity rollback even when
-                # it has a blocking layout defect and therefore is not eligible
-                # for the separate "best quality" snapshot.
+                # Keep the previous bytes for quality-score rollback. Physical
+                # failures no longer need this snapshot: candidates stay hidden
+                # in staging until their JPG/PDF pair has passed validation.
                 pre_revision_snapshot = _take_snapshot(quality_score)
 
-                # Re-execute with revised code (rebuild wrapper instead of str.replace to avoid corruption)
-                revised_wrapped = _build_publication_figure_wrapper(revised_code, figures_dir, jpg_path, pdf_path)
-                result = await self.sandbox.execute(
-                    revised_wrapped, skip_safety_check=True
-                )
-
-                physical_error = (
-                    None if result.error else
-                    _publication_output_error(jpg_path, pdf_path, result.output)
-                )
+                try:
+                    result, physical_error = await _execute_revision_candidate(revised_code)
+                except BaseException:
+                    _abandon_render()
+                    raise
                 if not result.error and not physical_error:
                     # Update figure with new image and re-measure its layout
                     figure.png_base64 = self._compress_image_to_base64(jpg_path, max_width=800)
+                    revised_sandbox_state = state.sandbox_state or {}
+                    figure.analysis_generation = int(
+                        revised_sandbox_state.get("analysis_generation", 0) or 0
+                    )
+                    figure.expression_provenance = dict(
+                        revised_sandbox_state.get("expression_contract_v1") or {}
+                    )
+                    # The previous bytes of this pending attempt were correctly
+                    # invalidated when the revision mutated the canonical
+                    # representation.  The replacement render was produced
+                    # afterwards and is therefore current for the new
+                    # generation.
+                    figure.is_current = True
+                    figure.invalidated_at = None
+                    figure.invalidation_reason = None
                     self._refresh_figure_integrity_hashes(figure)
                     figure.review_status = FigureReviewStatus.PENDING
                     self._upsert_publication_figure(state, figure)
@@ -779,7 +1299,9 @@ class FiguresMixin:
                             f"{revision_count}: layout unverified, keeping the "
                             f"previous measurement"
                         )
-                    await self._notify("figure", figure.png_base64)
+                    await _guard_attempt_await(
+                        self._notify("figure", figure.png_base64)
+                    )
                     current_code = revised_code
                 elif physical_error:
                     logger.warning(
@@ -790,9 +1312,11 @@ class FiguresMixin:
                     _restore_snapshot(pre_revision_snapshot or best_snapshot)
                     break
                 else:
-                    result.error = strip_ansi(result.error) if result.error else result.error
-                    logger.warning(f"[Bioinformatics] Revision failed: {result.error}")
-                    error_msg = str(result.error)[:1000]
+                    error_msg = compact_traceback(str(result.error), max_chars=1000)
+                    result.error = error_msg
+                    logger.warning(
+                        "[Bioinformatics] Revision failed: %s", error_msg
+                    )
 
                     # Technique Agent documentation lookup for technical errors
                     extra_context = ""
@@ -821,15 +1345,8 @@ class FiguresMixin:
                         )
                         is_valid_retry, err_retry = self._validate_code(retry_code)
                         if is_valid_retry:
-                            retry_wrapped = _build_publication_figure_wrapper(retry_code, figures_dir, jpg_path, pdf_path)
-                            retry_result = await self.sandbox.execute(
-                                retry_wrapped, skip_safety_check=True
-                            )
-                            retry_physical_error = (
-                                None if retry_result.error else
-                                _publication_output_error(
-                                    jpg_path, pdf_path, retry_result.output
-                                )
+                            retry_result, retry_physical_error = (
+                                await _execute_revision_candidate(retry_code)
                             )
                             if not retry_result.error and not retry_physical_error:
                                 logger.info(f"[Bioinformatics] Auto-retry succeeded for {figure_name}")
@@ -839,7 +1356,9 @@ class FiguresMixin:
                                 self._upsert_publication_figure(state, figure)
                                 if lint_ran(retry_result.output):
                                     figure.layout_violations = parse_layout_violations(retry_result.output)
-                                await self._notify("figure", figure.png_base64)
+                                await _guard_attempt_await(
+                                    self._notify("figure", figure.png_base64)
+                                )
                                 current_code = retry_code
                                 continue  # Back to review loop
                             else:
@@ -848,9 +1367,16 @@ class FiguresMixin:
                                     retry_result.error or retry_physical_error,
                                 )
                     except UpstreamExhaustedError:
+                        _abandon_render()
+                        raise
+                    except asyncio.CancelledError:
+                        _abandon_render()
                         raise
                     except Exception as retry_err:
-                        logger.warning(f"[Bioinformatics] Auto-retry exception: {retry_err}")
+                        logger.warning(
+                            "[Bioinformatics] Auto-retry exception: %s",
+                            compact_traceback(str(retry_err), max_chars=1000),
+                        )
                     _restore_snapshot(pre_revision_snapshot or best_snapshot)
                     break  # Both attempts failed
 
@@ -860,7 +1386,9 @@ class FiguresMixin:
             _record_unresolved(
                 list(must_fix or []) + _violation_must_fix_items(remaining_blocking)
             )
-            self._upsert_publication_figure(state, figure)
+            publish_error = await _finalize_render()
+            if publish_error:
+                return publish_error
             await self._emit_figure_record(
                 "figure_revision", figure, review=review
             )
@@ -877,11 +1405,13 @@ class FiguresMixin:
             )
 
         # No review callback, just save the figure
-        self._upsert_publication_figure(state, figure)
+        publish_error = await _finalize_render()
+        if publish_error:
+            return publish_error
         await self._emit_figure_record("figure_review", figure)
         return (
             f"Figure {figure_name} has been generated and saved.\n"
-            f"JPG: {jpg_path}\nPDF: {pdf_path}"
+            f"JPG: {final_jpg_path}\nPDF: {final_pdf_path}"
             + (f"\n{staleness_note}" if staleness_note else "")
         )
 
@@ -891,6 +1421,35 @@ class FiguresMixin:
         figure.render_sha256 = image_file_sha256(figure.png_path)
         figure.preview_sha256 = preview_render_sha256(figure.png_base64)
         figure.pdf_sha256 = pdf_file_sha256(figure.pdf_path)
+
+    @staticmethod
+    def _clear_unpublished_figure_payload(figure) -> None:
+        """Keep audit metadata while removing staged bytes and direct paths."""
+        figure.png_base64 = None
+        figure.png_path = ""
+        figure.pdf_path = ""
+        figure.render_sha256 = None
+        figure.preview_sha256 = None
+        figure.pdf_sha256 = None
+        figure.is_published_head = False
+
+    async def _persist_figure_record_boundary(
+        self, state: AnalysisState, figures_dir: Path
+    ) -> bool:
+        """Durably persist the record half for canonical session workspaces."""
+        try:
+            from ...config import get_session_workspace
+
+            canonical = (get_session_workspace(state.id) / "figures").resolve()
+            actual = figures_dir.resolve()
+        except Exception:
+            return False
+        if actual != canonical:
+            return False
+        from ...services.session_store import async_save_session
+
+        await async_save_session(state.id, state, force=True)
+        return True
 
     async def _emit_figure_record(
         self,
@@ -934,6 +1493,16 @@ class FiguresMixin:
                     "plan_step_id": getattr(figure, "plan_step_id", None),
                     "plan_id": getattr(figure, "plan_id", None),
                     "purpose": getattr(figure, "purpose", "result") or "result",
+                    "logical_figure_id": getattr(figure, "logical_figure_id", None),
+                    "render_attempt_id": getattr(figure, "render_attempt_id", None),
+                    "producer_status": getattr(
+                        figure, "producer_status", "published"
+                    ),
+                    "revision_of_id": getattr(figure, "revision_of_id", None),
+                    "supersedes_id": getattr(figure, "supersedes_id", None),
+                    "is_published_head": bool(
+                        getattr(figure, "is_published_head", False)
+                    ),
                     "round": getattr(figure, "round_number", 0) or None,
                     "diagnostic": bool(getattr(figure, "diagnostic", False)),
                     "layout_blocking": bool(
@@ -945,8 +1514,25 @@ class FiguresMixin:
         )
 
     def _upsert_publication_figure(self, state, figure):
-        """Replace existing figure with same name, or append if new."""
+        """Update one attempt and advance its published head only when eligible."""
         self._refresh_figure_integrity_hashes(figure)
+        existing_idx = next(
+            (
+                i for i, f in enumerate(state.publication_figures)
+                if getattr(f, "id", None) == getattr(figure, "id", None)
+            ),
+            None
+        )
+        if existing_idx is not None:
+            state.publication_figures[existing_idx] = figure
+        else:
+            state.publication_figures.append(figure)
+
+        if not is_report_eligible(figure):
+            return
+
+        # A pending or failed redraw must never make an invalidated logical
+        # artifact current again merely because it reused the old filename.
         refreshed_stems = {
             Path(str(figure.name)).stem,
             Path(str(figure.png_path)).stem,
@@ -955,19 +1541,27 @@ class FiguresMixin:
             stem for stem in (state.invalidated_artifact_stems or [])
             if stem not in refreshed_stems
         ]
-        existing_idx = next(
+
+        family_key = logical_figure_key(figure)
+        prior_heads = [
+            item for item in state.publication_figures
+            if item is not figure
+            and logical_figure_key(item) == family_key
+            and is_report_eligible(item)
+        ]
+        prior_head = next(
             (
-                i for i, f in enumerate(state.publication_figures)
-                if f.name == figure.name
-                and (getattr(f, "lineage_id", None) or "main")
-                == (getattr(figure, "lineage_id", None) or "main")
+                item for item in reversed(prior_heads)
+                if getattr(item, "is_published_head", False)
             ),
-            None
+            prior_heads[-1] if prior_heads else None,
         )
-        if existing_idx is not None:
-            state.publication_figures[existing_idx] = figure
-        else:
-            state.publication_figures.append(figure)
+        if prior_head is not None and not figure.supersedes_id:
+            figure.supersedes_id = prior_head.id
+        for item in state.publication_figures:
+            if item is not figure and logical_figure_key(item) == family_key:
+                item.is_published_head = False
+        figure.is_published_head = True
 
     def _compress_image_to_base64(self, image_path: Path, max_width: int = 800) -> str:
         """

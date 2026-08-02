@@ -6,6 +6,7 @@ which figures are shown; PI curation happens in
 tissue-, species-, or project-specific file names.
 """
 import logging
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
@@ -18,9 +19,16 @@ from backend.services.report.artifacts import (
     excluded_artifact_stems,
     gallery_artifacts,
     image_file_sha256,
+    pdf_file_sha256,
+    resolve_archival_pdf,
+    resolve_archival_render,
+    resolve_legacy_artifact_pdf,
+    resolve_legacy_artifact_render,
     MIN_ARCHIVAL_PREVIEW_HEIGHT,
     MIN_ARCHIVAL_PREVIEW_WIDTH,
+    ARTIFACT_REGISTRY_VERSION,
 )
+from backend.models.schemas import LegacyArtifactRecord
 from backend.utils.files import validate_path_within, validate_session_id
 
 logger = logging.getLogger(__name__)
@@ -37,7 +45,14 @@ _PRIORITY_DIAGNOSTIC = 4
 # Directory names the agent does not create as analysis output. ``reports`` holds
 # copies the report generators already wrote; re-discovering them would offer the
 # same image twice under a path that is not the analysis's own.
-_SKIP_DIRS = frozenset({"__pycache__", ".ipynb_checkpoints", "reports", "tables"})
+_SKIP_DIRS = frozenset({
+    "__pycache__",
+    ".ipynb_checkpoints",
+    ".attempts",
+    ".revisions",
+    "reports",
+    "tables",
+})
 
 # Platform-written validation output. It is real and worth reaching, but it is a
 # diagnostic rather than a result, so it sorts last and is tagged for the caller.
@@ -217,9 +232,9 @@ def publication_figure_metadata(
 ) -> Dict[str, Dict[str, Any]]:
     """Index authoritative figure metadata by every known filename stem.
 
-    Registered metadata outranks filename inference. For archival reports only
-    report-eligible records are indexed; browsing callers may request the weaker
-    gallery predicate explicitly.
+    Registered metadata outranks filename inference. Archival and browsing
+    callers now share the same publication predicate and published-head
+    resolver; ``report_only`` remains for API compatibility.
     """
     figures = list(publication_figures or [])
     kept = eligible_artifacts(figures) if report_only else gallery_artifacts(figures)
@@ -227,6 +242,7 @@ def publication_figure_metadata(
     for figure in kept:
         status = getattr(figure, "review_status", None)
         metadata = {
+            "id": getattr(figure, "id", "") or "",
             "publication_name": getattr(figure, "name", "") or "",
             "type": getattr(figure, "figure_type", "") or "other",
             "description": getattr(figure, "description", "") or "",
@@ -237,7 +253,18 @@ def publication_figure_metadata(
             "plan_step_id": getattr(figure, "plan_step_id", None),
             "plan_id": getattr(figure, "plan_id", None),
             "purpose": getattr(figure, "purpose", "result") or "result",
+            "logical_figure_id": getattr(figure, "logical_figure_id", None),
+            "render_attempt_id": getattr(figure, "render_attempt_id", None),
+            "producer_status": getattr(figure, "producer_status", "published"),
+            "revision_of_id": getattr(figure, "revision_of_id", None),
+            "supersedes_id": getattr(figure, "supersedes_id", None),
+            "is_published_head": bool(
+                getattr(figure, "is_published_head", False)
+            ),
             "is_publication": True,
+            "render_sha256": getattr(figure, "render_sha256", None),
+            "preview_sha256": getattr(figure, "preview_sha256", None),
+            "pdf_sha256": getattr(figure, "pdf_sha256", None),
         }
         for stem in artifact_stems([figure]):
             indexed[stem] = metadata
@@ -251,6 +278,8 @@ def prepare_discovered_figures(
     invalidated_stems: Iterable[str] | None = None,
     report_only: bool = True,
     allow_unregistered_diagnostics: bool = False,
+    registry_version: int | None = None,
+    legacy_artifacts: Iterable[Any] | None = None,
 ) -> List[Dict[str, Any]]:
     """Apply eligibility and authoritative metadata to discovered files.
 
@@ -282,6 +311,11 @@ def prepare_discovered_figures(
         for stem in artifact_stems([figure]):
             records_by_stem.setdefault(stem, figure)
 
+    legacy_records = list(legacy_artifacts or [])
+    strict_registry = bool(
+        registry_version is not None
+        and int(registry_version) >= ARTIFACT_REGISTRY_VERSION
+    )
     prepared: List[Dict[str, Any]] = []
     for candidate in candidates:
         name = str(candidate.get("name") or "")
@@ -289,25 +323,38 @@ def prepare_discovered_figures(
             continue
         metadata = metadata_by_stem.get(name)
         record = records_by_stem.get(name)
-        if (
-            report_only
-            and record is None
-            and image_file_sha256(
+        candidate_digest = None
+        if record is None and (report_only or strict_registry or legacy_records):
+            candidate_digest = image_file_sha256(
                 candidate.get("path"),
                 min_bytes=1,
                 min_width=MIN_ARCHIVAL_PREVIEW_WIDTH,
                 min_height=MIN_ARCHIVAL_PREVIEW_HEIGHT,
-            ) is None
-        ):
+            )
+        if record is None and (report_only or strict_registry) and candidate_digest is None:
             # Filename extensions and PNG/JPEG magic bytes are not physical
             # evidence that an image can be embedded. Unregistered legacy
             # workspace outputs have no record-owned preview to fall back to,
             # so require a complete pixel decode before an archival/context
             # report may admit them.
             continue
+        legacy_record = None
+        if record is None and candidate_digest is not None:
+            relative_path = str(candidate.get("rel_path") or "")
+            for item in legacy_records:
+                if (
+                    str(getattr(item, "render_sha256", "") or "") == candidate_digest
+                    and str(getattr(item, "relative_path", "") or "")
+                    == relative_path
+                ):
+                    legacy_record = item
+                    break
+            if legacy_record is None and strict_registry:
+                # New sessions are record-only on every report/gallery surface.
+                continue
         if (
-            report_only
-            and record is not None
+            record is not None
+            and (report_only or strict_registry)
             and not archival_path_matches_record(record, candidate.get("path"))
         ):
             # Same stem is not provenance: require the candidate bytes to match
@@ -323,6 +370,36 @@ def prepare_discovered_figures(
         ):
             continue
         merged = dict(candidate)
+        if legacy_record is not None:
+            # The image identity and its optional PDF are one frozen legacy
+            # record. A same-stem PDF that appeared or changed after migration
+            # must not borrow the retained JPG identity on gallery, report, or
+            # download surfaces.
+            frozen_pdf_path = None
+            frozen_pdf_digest = str(
+                getattr(legacy_record, "pdf_sha256", "") or ""
+            ).strip().lower()
+            frozen_pdf_relative = str(
+                getattr(legacy_record, "pdf_relative_path", "") or ""
+            ).strip()
+            candidate_pdf_path = candidate.get("pdf_path")
+            candidate_pdf_relative = (
+                Path(str(candidate.get("rel_path") or ""))
+                .with_suffix(".pdf")
+                .as_posix()
+                if candidate_pdf_path else ""
+            )
+            if (
+                frozen_pdf_digest
+                and frozen_pdf_relative
+                and candidate_pdf_relative == frozen_pdf_relative
+                and pdf_file_sha256(candidate_pdf_path) == frozen_pdf_digest
+            ):
+                frozen_pdf_path = str(candidate_pdf_path)
+            merged["pdf_path"] = frozen_pdf_path
+            merged["pdf_sha256"] = (
+                frozen_pdf_digest if frozen_pdf_path else None
+            )
         if metadata is not None:
             merged.update(metadata)
             # Directory provenance remains meaningful even for an older record
@@ -334,5 +411,174 @@ def prepare_discovered_figures(
             merged.setdefault("description", "")
             merged.setdefault("interpretation", "")
             merged.setdefault("is_publication", False)
+            if report_only or strict_registry:
+                relative_path = str(candidate.get("rel_path") or "")
+                legacy_id = (
+                    str(getattr(legacy_record, "id", "") or "")
+                    if legacy_record is not None
+                    else str(uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"scai-legacy:{relative_path}:{candidate_digest}",
+                    ))
+                )
+                merged.update({
+                    "id": legacy_id,
+                    "is_legacy": True,
+                    "legacy_artifact_id": legacy_id,
+                    "provenance_kind": "legacy_unregistered",
+                    "render_sha256": candidate_digest,
+                })
         prepared.append(merged)
+    return prepared
+
+
+def ensure_legacy_artifact_inventory(state: Any, workspace: Path) -> list[Any]:
+    """Inventory valid unregistered images for an explicitly legacy session.
+
+    The absence of ``artifact_registry_version`` is the compatibility signal.
+    File times are deliberately irrelevant.  The resulting records are labelled
+    unreviewed legacy provenance and can never satisfy PublicationFigure review.
+    """
+    if getattr(state, "artifact_registry_version", None) is not None:
+        return list(getattr(state, "legacy_artifacts", None) or [])
+    existing = list(getattr(state, "legacy_artifacts", None) or [])
+    prepared = prepare_discovered_figures(
+        discover_figures_in_workspace(Path(workspace)),
+        getattr(state, "publication_figures", None) or [],
+        invalidated_stems=getattr(state, "invalidated_artifact_stems", None),
+        report_only=True,
+        allow_unregistered_diagnostics=False,
+        registry_version=None,
+        legacy_artifacts=existing,
+    )
+    known_ids = {str(getattr(item, "id", "") or "") for item in existing}
+    for candidate in prepared:
+        if candidate.get("is_publication") or not candidate.get("is_legacy"):
+            continue
+        record_id = str(candidate.get("legacy_artifact_id") or "")
+        if not record_id or record_id in known_ids:
+            continue
+        existing.append(LegacyArtifactRecord(
+            id=record_id,
+            name=str(candidate.get("name") or "legacy_figure"),
+            relative_path=str(candidate.get("rel_path") or ""),
+            render_sha256=str(candidate.get("render_sha256") or ""),
+            pdf_relative_path=(
+                Path(str(candidate.get("rel_path") or "")).with_suffix(".pdf").as_posix()
+                if candidate.get("pdf_path") else None
+            ),
+            pdf_sha256=(
+                pdf_file_sha256(candidate.get("pdf_path"))
+                if candidate.get("pdf_path") else None
+            ),
+            source=str(candidate.get("source") or "legacy_workspace"),
+            lineage_id="main",
+        ))
+        known_ids.add(record_id)
+    state.legacy_artifacts = existing
+    # The first scan is a migration boundary, not a perpetual compatibility
+    # mode.  Persisting the registry version freezes this exact inventory so a
+    # later file cannot acquire report/download identity merely by appearing on
+    # disk.
+    state.artifact_registry_version = ARTIFACT_REGISTRY_VERSION
+    return existing
+
+
+def resolve_state_figure_candidates(
+    state: Any,
+    workspace: Path,
+    *,
+    report_only: bool,
+    lineage_id: str | None = None,
+) -> List[Dict[str, Any]]:
+    """Resolve every report/gallery candidate through retained state identity."""
+    workspace = Path(workspace).resolve()
+    ensure_legacy_artifact_inventory(state, workspace)
+    target_lineage = str(
+        lineage_id or getattr(state, "restore_branch_id", None) or "main"
+    )
+    records = [
+        item for item in (getattr(state, "publication_figures", None) or [])
+        if str(getattr(item, "lineage_id", None) or "main") == target_lineage
+    ]
+    prepared = prepare_discovered_figures(
+        discover_figures_in_workspace(workspace),
+        records,
+        invalidated_stems=getattr(state, "invalidated_artifact_stems", None),
+        report_only=report_only,
+        allow_unregistered_diagnostics=False,
+        registry_version=getattr(state, "artifact_registry_version", None),
+        legacy_artifacts=getattr(state, "legacy_artifacts", None),
+    )
+
+    represented_ids = {
+        str(candidate.get("id") or candidate.get("legacy_artifact_id") or "")
+        for candidate in prepared
+    }
+    for legacy in (getattr(state, "legacy_artifacts", None) or []):
+        if str(getattr(legacy, "lineage_id", None) or "main") != target_lineage:
+            continue
+        legacy_id = str(getattr(legacy, "id", "") or "")
+        if not legacy_id or legacy_id in represented_ids:
+            continue
+        image_path = resolve_legacy_artifact_render(legacy, workspace)
+        if image_path is None:
+            continue
+        pdf_path = resolve_legacy_artifact_pdf(legacy, workspace)
+        name = str(getattr(legacy, "name", "") or image_path.stem)
+        prepared.append({
+            "id": legacy_id,
+            "legacy_artifact_id": legacy_id,
+            "name": name,
+            "type": infer_figure_type(name),
+            "path": str(image_path),
+            "pdf_path": str(pdf_path) if pdf_path else None,
+            "mtime": image_path.stat().st_mtime,
+            "source": str(getattr(legacy, "source", "") or "legacy_inventory"),
+            "rel_path": str(getattr(legacy, "relative_path", "") or ""),
+            "diagnostic": False,
+            "description": "",
+            "interpretation": "",
+            "is_publication": False,
+            "is_legacy": True,
+            "provenance_kind": "legacy_unregistered",
+            "render_sha256": getattr(legacy, "render_sha256", None),
+            "pdf_sha256": getattr(legacy, "pdf_sha256", None),
+        })
+        represented_ids.add(legacy_id)
+
+    kept = eligible_artifacts(records) if report_only else gallery_artifacts(records)
+    for record in kept:
+        record_id = str(getattr(record, "id", "") or "")
+        if not record_id or record_id in represented_ids:
+            continue
+        image_path = resolve_archival_render(record, workspace)
+        if image_path is None:
+            continue
+        pdf_path = resolve_archival_pdf(record, workspace)
+        status = getattr(record, "review_status", None)
+        prepared.append({
+            "id": record_id,
+            "name": str(getattr(record, "name", "") or image_path.stem),
+            "type": str(getattr(record, "figure_type", "") or "other"),
+            "path": str(image_path),
+            "pdf_path": str(pdf_path) if pdf_path else None,
+            "mtime": image_path.stat().st_mtime,
+            "source": "publication_registry",
+            "rel_path": (
+                image_path.relative_to(workspace).as_posix()
+                if image_path.is_relative_to(workspace) else image_path.name
+            ),
+            "diagnostic": bool(getattr(record, "diagnostic", False)),
+            "description": str(getattr(record, "description", "") or ""),
+            "interpretation": str(getattr(record, "interpretation", "") or ""),
+            "is_publication": True,
+            "review_status": str(getattr(status, "value", status) or ""),
+            "round": int(getattr(record, "round_number", 0) or 0) or None,
+            "purpose": str(getattr(record, "purpose", "result") or "result"),
+            "render_sha256": getattr(record, "render_sha256", None),
+            "preview_sha256": getattr(record, "preview_sha256", None),
+            "pdf_sha256": getattr(record, "pdf_sha256", None),
+        })
+        represented_ids.add(record_id)
     return prepared

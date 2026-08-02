@@ -18,7 +18,9 @@ def _reset_state():
     """Clear module-level dicts/locks between tests."""
     state_mod.sessions.clear()
     state_mod.workflows.clear()
+    state_mod.report_workflows.clear()
     state_mod.initializing_sessions.clear()
+    state_mod.initializing_session_owners.clear()
     state_mod.session_locks.clear()
     state_mod.session_access_times.clear()
     state_mod.last_save_times.clear()
@@ -27,7 +29,9 @@ def _reset_state():
     yield
     state_mod.sessions.clear()
     state_mod.workflows.clear()
+    state_mod.report_workflows.clear()
     state_mod.initializing_sessions.clear()
+    state_mod.initializing_session_owners.clear()
     state_mod.session_locks.clear()
     state_mod.session_access_times.clear()
     state_mod.last_save_times.clear()
@@ -61,7 +65,7 @@ async def test_idle_session_is_saved_and_evicted():
     with patch.object(sc_mod, "CLEANUP_INTERVAL", 0), \
          patch.object(sc_mod, "SESSION_CACHE_TTL", 1), \
          patch.object(sc_mod, "MAX_CACHED_SESSIONS", 100), \
-         patch.object(sc_mod, "async_save_session", mock_save):
+         patch.object(sc_mod, "_async_save_session_under_lifecycle", mock_save):
         await _run_one_cleanup_cycle(
             asyncio.Lock(), {}, {}, asyncio.Lock(),
         )
@@ -81,12 +85,39 @@ async def test_initializing_session_not_evicted():
     with patch.object(sc_mod, "CLEANUP_INTERVAL", 0), \
          patch.object(sc_mod, "SESSION_CACHE_TTL", 1), \
          patch.object(sc_mod, "MAX_CACHED_SESSIONS", 100), \
-         patch.object(sc_mod, "async_save_session", mock_save):
+         patch.object(sc_mod, "_async_save_session_under_lifecycle", mock_save):
         await _run_one_cleanup_cycle(
             asyncio.Lock(), {}, {}, asyncio.Lock(),
         )
 
     mock_save.assert_not_awaited()
+    assert "s1" in state_mod.sessions
+
+
+@pytest.mark.asyncio
+async def test_report_only_workflow_not_selected_for_eviction():
+    state_mod.sessions["s1"] = {"data": "x"}
+    state_mod.session_access_times["s1"] = time.time() - 10_000
+    state_mod.report_workflows["s1"] = object()
+
+    with patch.object(sc_mod, "SESSION_CACHE_TTL", 1), \
+         patch.object(sc_mod, "MAX_CACHED_SESSIONS", 100):
+        selected = await sc_mod._collect_sessions_to_evict(time.time())
+
+    assert selected == []
+
+
+@pytest.mark.asyncio
+async def test_report_owner_installed_after_selection_blocks_eviction():
+    state_mod.sessions["s1"] = {"data": "x"}
+    state_mod.session_access_times["s1"] = time.time() - 10_000
+    state_mod.report_workflows["s1"] = object()
+    save = AsyncMock()
+
+    with patch.object(sc_mod, "_async_save_session_under_lifecycle", save):
+        await sc_mod._evict_single_session("s1", asyncio.Lock(), {})
+
+    save.assert_not_awaited()
     assert "s1" in state_mod.sessions
 
 
@@ -101,7 +132,7 @@ async def test_chat_sandbox_stopped_on_eviction():
     with patch.object(sc_mod, "CLEANUP_INTERVAL", 0), \
          patch.object(sc_mod, "SESSION_CACHE_TTL", 1), \
          patch.object(sc_mod, "MAX_CACHED_SESSIONS", 100), \
-         patch.object(sc_mod, "async_save_session", AsyncMock()):
+         patch.object(sc_mod, "_async_save_session_under_lifecycle", AsyncMock()):
         await _run_one_cleanup_cycle(
             asyncio.Lock(), chat_sandboxes, {}, asyncio.Lock(),
         )
@@ -123,7 +154,7 @@ async def test_stale_import_jobs_cleaned():
          patch.object(sc_mod, "IMPORT_JOB_TTL", 100), \
          patch.object(sc_mod, "SESSION_CACHE_TTL", 1_000_000), \
          patch.object(sc_mod, "MAX_CACHED_SESSIONS", 100), \
-         patch.object(sc_mod, "async_save_session", AsyncMock()):
+         patch.object(sc_mod, "_async_save_session_under_lifecycle", AsyncMock()):
         await _run_one_cleanup_cycle(
             asyncio.Lock(), {}, import_jobs, asyncio.Lock(),
         )

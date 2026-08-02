@@ -28,6 +28,23 @@ def test_report_regenerator_smoke(tmp_path):
         "abstract": "This is a test abstract with **bold** content.",
         "conclusions": "Test conclusions here.",
         "generated_at": "2024-01-01T00:00:00",
+        "status": "partial",
+        "partial_reason": "figure_coverage",
+        "partial_reasons": ["figure_coverage"],
+        "figureless_sections": ["overview"],
+        "quality_disclosures": {
+            "schema_version": 1,
+            "status": "qualified",
+            "rounds": [],
+            "post_execution_reviews": [],
+            "annotation": {
+                "confirmation": {"status": "not_applicable"},
+                "validation": {"status": "not_run"},
+                "cell_counts": {"known_clusters": 0, "unknown_clusters": 0},
+            },
+            "blocking_issues": [],
+            "cautions": ["Evidence is qualified."],
+        },
         "sections": [
             {
                 "id": "overview",
@@ -67,3 +84,7 @@ def test_report_regenerator_smoke(tmp_path):
     assert "<html" in html_content.lower(), "HTML structure missing"
     assert "<div" in html_content, "HTML div elements missing"
     assert "<h1" in html_content, "HTML h1 element missing"
+    assert "Partial report" in html_content
+    assert "overview" in html_content
+    assert "Analysis completed with quality qualifications" in html_content
+    assert "Evidence is qualified" in html_content

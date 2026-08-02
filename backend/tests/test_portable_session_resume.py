@@ -178,6 +178,11 @@ def _extract_save_code(monkeypatch, live_names, tracker_required):
         session_path=get_session_states("save-code-probe") / "probe_session.pkl"
     )
     sandbox.notebook_state.session_path.parent.mkdir(parents=True, exist_ok=True)
+    # Tests execute the captured kernel code separately, so a staged file from
+    # a prior case is not evidence that this mocked save attempt produced one.
+    sandbox.notebook_state.session_path.with_name(
+        sandbox.notebook_state.session_path.name + ".tmp"
+    ).unlink(missing_ok=True)
 
     captured = {}
 
@@ -245,7 +250,11 @@ def _read_frames(path):
 
     magic = b"SCAI_ZSTD_DILL_V1\n"
     out = {}
-    with open(path, "rb") as raw:
+    staged = path.with_name(path.name + ".tmp")
+    # Kernel serialization now stops at a staged file; the host installs pkl,
+    # HMAC, and generation metadata transactionally after this code returns.
+    source = staged if staged.exists() else path
+    with open(source, "rb") as raw:
         assert raw.read(len(magic)) == magic
         with zstd.ZstdDecompressor().stream_reader(raw) as stream:
             while True:

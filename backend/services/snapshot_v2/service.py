@@ -62,6 +62,7 @@ from backend.services.snapshot_v2.safe_point import (
 )
 from backend.services.snapshot_v2.workspace import WorkspaceCapture
 from backend.state import get_session_lock
+from backend.utils.asyncio_tasks import run_in_owned_thread
 
 logger = logging.getLogger(__name__)
 
@@ -257,7 +258,7 @@ class SnapshotService(
         )
         from backend.services.snapshot_v2.pre_restore import RestoreCaptureContext
         from backend.services.snapshot_v2.preflight import RestorePreflight
-        from backend.state import sessions, workflows
+        from backend.state import report_workflows, sessions, workflows
 
         def _status(status: str, **kw: Any) -> SnapshotTransactionRecord:
             rec = SnapshotTransactionRecord(
@@ -315,7 +316,19 @@ class SnapshotService(
                 return _status("cancelled")
 
             analysis_state = sessions.get(self.session_id)
-            workflow = workflows.get(self.session_id)
+            analysis_workflow = workflows.get(self.session_id)
+            report_workflow = report_workflows.get(self.session_id)
+            workflow = analysis_workflow or report_workflow
+            workflow_owners = tuple(
+                owner
+                for owner in (analysis_workflow, report_workflow)
+                if owner is not None
+            )
+            if (
+                len(workflow_owners) == 2
+                and workflow_owners[0] is workflow_owners[1]
+            ):
+                workflow_owners = workflow_owners[:1]
             sandbox = getattr(workflow, "sandbox", None) if workflow else None
             workflow_state = _workflow_state_for_snapshot(workflow)
             live_sp = self.safe_point.get_descriptor(self.session_id) or {}
@@ -494,15 +507,11 @@ class SnapshotService(
             # predates the restore must not survive as this session's runtime.
             # Tear it down HERE, before apply.
             #
-            # sandbox.stop() is not a bare shutdown: it ends with save_session()
-            # + a notebook save, which write the very live pkl and notebook that
-            # apply() installs and _verify_live_restore then hashes against the
-            # target manifest. Running it after apply meant the session's own
-            # teardown overwrote what the restore had just installed, and every
-            # terminal-capsule restore died LIVE_VERIFY_FAILED -> RECOVERY_BLOCKED.
-            # Run it before apply and that save is harmless: apply overwrites it
-            # moments later, and if apply fails nothing is lost — pre_restore
-            # captured the same kernel and rollback re-installs its residual.
+            # stop(save=False) is mandatory here. The pre-restore capture is the
+            # rollback authority and this workflow has already been superseded;
+            # asking stop() to save would either publish stale bytes immediately
+            # before apply or preserve a failed-save kernel that restore is
+            # explicitly replacing.
             # Retire the pre-restore run BEFORE apply replaces the checkpoint DB.
             #
             # This is a correctness requirement, not tidiness. LangGraph opens
@@ -516,32 +525,73 @@ class SnapshotService(
             # hashes the main file while it does briefly hold the staged bytes.
             # Closing first removes -wal/-shm, and only then is the os.replace
             # visible to everyone afterwards.
-            await self._retire_superseded_workflow(workflow)
+            try:
+                for workflow_owner in workflow_owners:
+                    await self._retire_superseded_workflow(workflow_owner)
+            except SnapshotTransactionError as exc:
+                # No live bytes have been replaced yet.  A checkpoint owner
+                # that could not be closed must remain registered so normal
+                # workflow teardown or a retry can still reach it; applying in
+                # this state would let its stale WAL shadow the restored DB.
+                try:
+                    await self.restore_coordinator.cleanup(
+                        transaction_id, self.paths,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[%s] Failed to clean staged restore after checkpoint "
+                        "retirement refusal",
+                        self.session_id,
+                    )
+                return _status(
+                    "failed",
+                    recovery_mode=recovery_mode,
+                    failure={"code": exc.code, "message": str(exc)},
+                )
 
             if capsule_kind in ("terminal", "idle"):
                 if workflow is not None and getattr(workflow, "sandbox", None):
+                    stopped = False
                     try:
                         stop = getattr(workflow.sandbox, "stop", None)
                         if stop is not None:
-                            maybe = stop()
+                            maybe = stop(save=False)
                             if asyncio.iscoroutine(maybe):
                                 await maybe
+                            stopped = True
                     except Exception as exc:
                         logger.warning(
                             "[%s] terminal/idle kernel teardown failed: %s",
                             self.session_id, exc,
                         )
-                    workflow.sandbox = None
+                    if stopped:
+                        workflow.sandbox = None
 
             try:
-                applied_result = await self.restore_coordinator.apply(
-                    staged,
-                    self.paths,
-                    session_dir=session_dir,
-                    workspace_root=workspace_root or str(Path(session_dir) / "workspace"),
-                    states_root=states_root,
-                    runtime_choice=request.runtime_choice,
+                from backend.services.session_lifecycle import (
+                    assert_session_generation_active,
+                    lifecycle_file_lock,
                 )
+
+                # Snapshot apply mutates the same live runtime/notebook/state
+                # surfaces as regular persistence. The coordinator contains no
+                # suspension points, so hold the cross-process lifecycle lock
+                # for its complete journaled mutation and revalidate before it
+                # publishes any bytes.
+                with lifecycle_file_lock(self.session_id):
+                    assert_session_generation_active(self.session_id)
+                    applied_result = await self.restore_coordinator.apply(
+                        staged,
+                        self.paths,
+                        session_dir=session_dir,
+                        workspace_root=(
+                            workspace_root
+                            or str(Path(session_dir) / "workspace")
+                        ),
+                        states_root=states_root,
+                        runtime_choice=request.runtime_choice,
+                    )
+                    assert_session_generation_active(self.session_id)
                 applied = True
             except Exception as exc:
                 # After APPLYING, cancellation/failure → recovery path (not pretend clean).
@@ -636,7 +686,11 @@ class SnapshotService(
             # graph_node: seed exact next-node via activate
             # terminal: do not instantiate/run a workflow
             # idle: load content without starting analysis
-            self.continuation_dispatcher.activate(restored_state, staged_ckpt)
+            self.continuation_dispatcher.activate(
+                restored_state,
+                staged_ckpt,
+                workspace_path=Path(workspace_root or session_dir),
+            )
 
             if getattr(applied_result, "runtime_restore_status", None):
                 restored_state.runtime_restore_status = applied_result.runtime_restore_status
@@ -681,11 +735,19 @@ class SnapshotService(
 
             # Only after live verification: HMAC-signed COMMITTED with proof.
             try:
-                await self.restore_coordinator.commit(
-                    transaction_id,
-                    self.paths,
-                    verification_proof=verification_proof,
+                from backend.services.session_lifecycle import (
+                    assert_session_generation_active,
+                    lifecycle_file_lock,
                 )
+
+                with lifecycle_file_lock(self.session_id):
+                    assert_session_generation_active(self.session_id)
+                    await self.restore_coordinator.commit(
+                        transaction_id,
+                        self.paths,
+                        verification_proof=verification_proof,
+                    )
+                    assert_session_generation_active(self.session_id)
             except Exception as exc:
                 failure = {
                     "code": "COMMIT_FAILED",
@@ -748,9 +810,10 @@ class SnapshotService(
         which ends in ``save_session()`` + a notebook save — writing the very
         artifacts apply() is about to install.
 
-        Best-effort: a restore must not fail over bookkeeping.
+        Failure to close the checkpoint connection aborts the restore before
+        apply.  That handle is live mutation authority, not bookkeeping.
         """
-        from backend.state import workflows
+        from backend.state import report_workflows, workflows
 
         if workflow is None:
             return
@@ -782,15 +845,21 @@ class SnapshotService(
         if conn is not None:
             try:
                 await conn.close()
-            except Exception:
-                logger.warning(
-                    "[%s] Could not close the pre-restore checkpoint connection; "
-                    "stale -wal may shadow the restored checkpoint",
-                    self.session_id,
-                    exc_info=True,
+            except Exception as exc:
+                from backend.services.snapshot_v2.errors import (
+                    SnapshotTransactionError,
                 )
-            # Cleared regardless: core.py rebuilds the checkpointer when
-            # _db_conn is None, and a half-closed handle must not be reused.
+
+                raise SnapshotTransactionError(
+                    "CHECKPOINT_RETIRE_FAILED",
+                    (
+                        "Could not close the pre-restore checkpoint connection; "
+                        "restore apply was refused to protect the checkpoint WAL"
+                    ),
+                    details={"session_id": self.session_id},
+                ) from exc
+            # After a confirmed close, core.py must rebuild every checkpoint
+            # object against the restored file rather than reuse this handle.
             for attr in ("_db_conn", "checkpointer", "compiled_graph"):
                 try:
                     setattr(workflow, attr, None)
@@ -799,8 +868,12 @@ class SnapshotService(
         try:
             # Only evict the object we actually superseded — a workflow rebuilt
             # concurrently is already reading the restored checkpoint.
-            if workflows.get(self.session_id) is workflow:
-                workflows.pop(self.session_id, None)
+            evicted = False
+            for registry in (workflows, report_workflows):
+                if registry.get(self.session_id) is workflow:
+                    registry.pop(self.session_id, None)
+                    evicted = True
+            if evicted:
                 logger.info(
                     "[%s] Retired the pre-restore workflow; the next run rebuilds "
                     "it against the restored checkpoint",
@@ -1013,6 +1086,8 @@ class SnapshotService(
         include_runtime: bool = True,
         snapshot_ids: list[str] | None = None,
         staging_dir: Any = None,
+        output_path: Any = None,
+        output_preallocated: bool = False,
     ) -> Path:
         """Export verified V2 snapshots under the session lock.
 
@@ -1025,12 +1100,14 @@ class SnapshotService(
         lock = get_session_lock(self.session_id)
         async with lock:
             exporter = SnapshotExporter(self.session_id, self.paths)
-            return await asyncio.to_thread(
+            return await run_in_owned_thread(
                 exporter.export,
                 self.session_id,
                 include_runtime=include_runtime,
                 snapshot_ids=snapshot_ids,
                 staging_dir=Path(staging_dir) if staging_dir is not None else None,
+                output_path=Path(output_path) if output_path is not None else None,
+                output_preallocated=output_preallocated,
             )
 
 
@@ -1060,7 +1137,7 @@ class SnapshotService(
                 self.paths,
                 limits=SnapshotImportLimits.from_config(default_config),
             )
-            result = await asyncio.to_thread(
+            result = await run_in_owned_thread(
                 importer.import_bundle,
                 str(archive_path),
                 trust_runtime=trust_runtime,
@@ -1102,7 +1179,10 @@ class SnapshotService(
         # Restore path already holds the cooperative safe point; do not
         # create/release it or pre_restore capture would unpause the workflow.
         if not skip_safe_point_lifecycle:
-            await self._create_safe_point(workflow_state or {})
+            await self._create_safe_point(
+                workflow_state or {},
+                analysis_state=analysis_state,
+            )
 
         # Released either at Step 11 (success) or by the finally below. The flag
         # keeps the success path's ordering — release before returning the
@@ -1619,5 +1699,3 @@ class SnapshotService(
 
 
     # ── Failure helpers ──────────────────────────────────────────────
-
-

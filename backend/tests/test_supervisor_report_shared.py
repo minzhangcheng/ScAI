@@ -113,3 +113,49 @@ def test_live_appendix_includes_complete_direction_selection_history():
     assert "Selection Event" in html
     assert "PI-selected" in html
     assert "Integration Cycle 1" in html
+
+
+def test_supervisor_html_renders_partial_and_quality_banners(tmp_path):
+    state = AnalysisState(id="s5", name="Partial", initial_instruction="x", user_id="u1")
+    sup = _make_supervisor(state)
+    report = {
+        "title": "Partial report",
+        "status": "partial",
+        "partial_reason": "approved_partial",
+        "partial_reasons": ["approved_partial"],
+        "quality_disclosures": {
+            "schema_version": 1,
+            "status": "qualified",
+            "rounds": [],
+            "post_execution_reviews": [],
+            "annotation": {
+                "confirmation": {"status": "not_applicable"},
+                "validation": {"status": "not_run"},
+                "cell_counts": {"known_clusters": 0, "unknown_clusters": 0},
+            },
+            "blocking_issues": [],
+            "cautions": ["Qualification retained."],
+        },
+        "appendix": {},
+        "score_definitions": [],
+        "_analysis_state": state,
+    }
+
+    path = sup._generate_html_report(
+        report,
+        sections=[],
+        abstract="Abstract",
+        conclusions="Conclusions",
+        report_figures=[],
+        figure_map={},
+        stats={},
+        language="en",
+        output_path=tmp_path,
+        workspace_path=None,
+    )
+    html = path.read_text(encoding="utf-8")
+
+    assert "Partial report" in html
+    assert "explicitly approved" in html
+    assert "Analysis completed with quality qualifications" in html
+    assert "Qualification retained" in html

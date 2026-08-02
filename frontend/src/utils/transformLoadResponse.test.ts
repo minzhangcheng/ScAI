@@ -3,6 +3,7 @@ import { transformLoadResponse, transformRoundResults, type RawFigureBadges } fr
 import { applyStoreUpdates } from '../hooks/useApi'
 import { useAppStore } from '../stores/appStore'
 import type { SessionLoadResponse, RawPublicationFigure } from '../types'
+import { resultIdentityKey } from './roundKey'
 
 const MINIMAL_RESPONSE: SessionLoadResponse = {
   session_id: 'test-123',
@@ -329,6 +330,70 @@ describe('transformRoundResults integration fields', () => {
       { round: 1, pi_summary: 'Round 1', pathology_findings: [], bioinformatics_findings: [], biochemistry_findings: [], literature_findings: [] },
     ])
     expect(round.integrationReportSummary).toBeUndefined()
+  })
+
+  it('preserves evidence, coverage, and restore lineage identically on reload', () => {
+    const [round] = transformRoundResults([{
+      round: 6,
+      phase: 'innovation',
+      round_status: 'partial',
+      evidence_status: 'substantive',
+      direction_coverage_eligible: false,
+      bioinformatics_evidence_verified: false,
+      evidence_execution_ids: ['exec-6'],
+      evidence_notes: ['Mandatory gate was force-released.'],
+      evidence_gate_findings: [{ gate: 'analysis-unit', forced_release: true }],
+      lineage_id: 'restore-snapshot-2',
+      branch_id: 'restore-snapshot-2',
+      branch_label: 'Alternative branch',
+      restored_from_snapshot_id: 'snapshot-2',
+      direction_key: 'candidate-axis',
+      result_identity_key: 'restore-snapshot-2:innovation:6:candidate-axis',
+    }])
+
+    expect(round).toMatchObject({
+      roundStatus: 'partial',
+      evidenceStatus: 'substantive',
+      directionCoverageEligible: false,
+      bioinformaticsEvidenceVerified: false,
+      evidenceExecutionIds: ['exec-6'],
+      evidenceNotes: ['Mandatory gate was force-released.'],
+      evidenceGateFindings: [{ gate: 'analysis-unit', forced_release: true }],
+      lineageId: 'restore-snapshot-2',
+      branchId: 'restore-snapshot-2',
+      branchLabel: 'Alternative branch',
+      restoredFromSnapshotId: 'snapshot-2',
+      directionKey: 'candidate-axis',
+      resultIdentityKey: 'restore-snapshot-2:innovation:6:candidate-axis',
+    })
+  })
+
+  it('keeps main and restored-branch results distinct without explicit identity keys', () => {
+    const rounds = transformRoundResults([
+      {
+        round: 6,
+        phase: 'innovation',
+        direction: '  Candidate Axis  ',
+        pi_summary: 'Main result',
+      },
+      {
+        round: 6,
+        phase: 'innovation',
+        // Backend normalize_direction_text uses lowercase, collapsed spaces;
+        // the fallback must share that contract so raw `direction` and an
+        // explicit `direction_key` identify the same biological direction.
+        direction_key: 'candidate axis',
+        lineage_id: 'restore-snapshot-6',
+        branch_id: 'restore-snapshot-6',
+        pi_summary: 'Branch result',
+      },
+    ])
+
+    expect(rounds.map(resultIdentityKey)).toEqual([
+      'main:innovation:6:candidate axis',
+      'restore-snapshot-6:innovation:6:candidate axis',
+    ])
+    expect(new Set(rounds.map(resultIdentityKey)).size).toBe(2)
   })
 })
 

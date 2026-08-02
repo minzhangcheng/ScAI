@@ -6,6 +6,7 @@ publication-figures, publication-tables, figure/{id}/pdf, figure/{id}/png, integ
 Extracted from backend/main.py to decouple report generation and serving route handlers.
 """
 import asyncio
+import uuid
 import json
 import logging
 import math
@@ -57,30 +58,35 @@ router = APIRouter(prefix="/api/session", tags=["reports"])
 # (e.g., uvicorn --workers N), cross-worker concurrency is not prevented. This is
 # consistent with the existing chat_task_lock pattern in chat.py. For multi-worker
 # production, a Redis-based lock would be needed — out of scope for this fix.
-_report_generation_pending: set = set()
+_report_generation_pending: dict[str, str] = {}
 
 _pending_lock = asyncio.Lock()
 
-async def _try_begin_generation(session_id: str) -> bool:
+async def _try_begin_generation(session_id: str) -> str | None:
     """Atomically check-and-set _report_generation_pending.
 
-    Returns True if generation was started (session_id was not already
-    pending), False if generation is already in progress.
+    Returns an opaque ownership token if generation was started, or ``None``
+    when another owner is already pending. The token prevents an old request's
+    cleanup from clearing a marker installed after same-ID reuse.
     """
     async with _pending_lock:
         if session_id in _report_generation_pending:
-            return False
-        _report_generation_pending.add(session_id)
-        return True
+            return None
+        token = uuid.uuid4().hex
+        _report_generation_pending[session_id] = token
+        return token
 
-def clear_generation_pending(session_id: str) -> None:
+def clear_generation_pending(session_id: str, token: str | None = None) -> None:
     """Remove session_id from the report-generation-pending set.
 
     Public helper so that external cleanup code (session deletion, periodic
     cleanup) does not need to import the private ``_report_generation_pending``
-    set directly.
+    mapping directly. Lifecycle deletion intentionally omits ``token`` to clear
+    the current generation; producer finalizers must provide their token and
+    therefore compare-and-clear only their own marker.
     """
-    _report_generation_pending.discard(session_id)
+    if token is None or _report_generation_pending.get(session_id) == token:
+        _report_generation_pending.pop(session_id, None)
 
 def clear_detailed_report_cache(session_id: str) -> None:
     """Remove all in-memory detailed report cache entries for a session."""

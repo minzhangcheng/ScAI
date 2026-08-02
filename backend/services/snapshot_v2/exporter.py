@@ -13,6 +13,7 @@ import io
 import json
 import logging
 import os
+import sys
 import tarfile
 import tempfile
 import uuid
@@ -93,7 +94,12 @@ def _write_export_protection(
 
 def _remove_export_protection(paths, export_id: str) -> None:
     from backend.services.snapshot_v2.journal_store import JournalStore
-    JournalStore(paths).remove(f"export-{export_id}")
+    try:
+        JournalStore(paths).remove(f"export-{export_id}")
+    except FileNotFoundError:
+        # Session deletion may remove the journal directory after the export
+        # owner has been cancelled. Absence is already the desired result.
+        return
 
 
 def load_active_export_protected_ids(paths) -> set[str]:
@@ -293,6 +299,8 @@ class SnapshotExporter:
         include_runtime: bool = True,
         snapshot_ids: list[str] | None = None,
         staging_dir: Path | None = None,
+        output_path: Path | None = None,
+        output_preallocated: bool = False,
     ) -> Path:
         """Build a tar.gz archive of verified snapshot objects (streaming).
 
@@ -363,11 +371,24 @@ class SnapshotExporter:
             # volume has terabytes free.
             if staging_dir is not None:
                 staging_dir.mkdir(parents=True, exist_ok=True)
-            fd, tmp_path = tempfile.mkstemp(
-                suffix=".tar.gz",
-                prefix=f"{SNAPSHOT_EXPORT_PREFIX}{export_id}-",
-                dir=str(staging_dir) if staging_dir is not None else None,
-            )
+            if output_path is None:
+                fd, tmp_path = tempfile.mkstemp(
+                    suffix=".tar.gz",
+                    prefix=f"{SNAPSHOT_EXPORT_PREFIX}{export_id}-",
+                    dir=str(staging_dir) if staging_dir is not None else None,
+                )
+            else:
+                output_path = Path(output_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                flags = os.O_WRONLY
+                if output_preallocated:
+                    if not output_path.is_file():
+                        raise FileNotFoundError(output_path)
+                    flags |= os.O_TRUNC
+                else:
+                    flags |= os.O_CREAT | os.O_EXCL
+                fd = os.open(output_path, flags, 0o600)
+                tmp_path = str(output_path)
             os.close(fd)
 
             total_object_size = 0
@@ -434,7 +455,17 @@ class SnapshotExporter:
             return Path(tmp_path)
 
         finally:
-            _remove_export_protection(self.paths, export_id)
+            primary_failure = sys.exc_info()[0] is not None
+            protection_error = None
+            try:
+                _remove_export_protection(self.paths, export_id)
+            except Exception as exc:
+                protection_error = exc
+                logger.warning(
+                    "Could not remove export protection %s: %s",
+                    export_id,
+                    exc,
+                )
             # The archive is a multi-GB temp file in the system temp dir. Any
             # failure after mkstemp -- a missing object (ExportIntegrityError),
             # a hash mismatch, ENOSPC mid-write -- propagates to the route,
@@ -443,10 +474,19 @@ class SnapshotExporter:
             # every failed export (and every user retry of it) leaves another
             # partial archive behind until the host fills up -- which then also
             # breaks session-metadata writes, since those use mkstemp too.
-            if not exported and tmp_path is not None:
+            # A protection journal that could not be retired makes a nominally
+            # successful archive non-publishable. Clean it like a failed build;
+            # the route's generation-bound record provides a second cleanup
+            # attempt if this unlink is also temporarily refused.
+            if (not exported or protection_error is not None) and tmp_path is not None:
                 try:
                     os.unlink(tmp_path)
                 except OSError:
                     logger.warning(
                         "Could not remove partial export archive %s", tmp_path,
                     )
+            if protection_error is not None and not primary_failure:
+                raise ExportIntegrityError(
+                    "EXPORT_PROTECTION_CLEANUP_FAILED",
+                    f"Could not retire export protection: {protection_error}",
+                ) from protection_error

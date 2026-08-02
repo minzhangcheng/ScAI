@@ -1,6 +1,10 @@
 """Tests for partial report approval triggering report generation."""
+import asyncio
+import uuid
+
 import pytest
 import pytest_asyncio
+from unittest.mock import AsyncMock, MagicMock
 from httpx import AsyncClient, ASGITransport
 
 from backend.utils import auth as auth_module
@@ -9,6 +13,7 @@ from backend.utils.db import AppDB
 from backend.state import sessions, state_lock
 from backend.models.schemas import AnalysisState, TaskStatus
 from backend.services import workflow_runner as wr
+from backend.routes.reports_parts import publication
 
 
 @pytest_asyncio.fixture
@@ -31,10 +36,13 @@ async def client_and_auth(tmp_path):
 @pytest.mark.asyncio
 async def test_approve_partial_triggers_report_generation(client_and_auth, monkeypatch):
     uid, headers = client_and_auth
-    session_id = "test-partial-approve"
+    session_id = f"test-partial-approve-{uuid.uuid4().hex}"
 
     called = {}
-    async def fake_start_report(sid):
+    async def fake_start_report(sid, *, expected_state=None, prepare=None):
+        assert expected_state is state_obj
+        if prepare is not None:
+            await prepare()
         called["sid"] = sid
     monkeypatch.setattr(wr, "start_report_generation", fake_start_report)
 
@@ -65,3 +73,53 @@ async def test_approve_partial_triggers_report_generation(client_and_auth, monke
     finally:
         async with state_lock:
             sessions.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_partial_approval_save_failure_leaves_original_state_and_no_owner(
+    monkeypatch,
+):
+    session_id = "test-partial-save-failure"
+    state_obj = AnalysisState(
+        id=session_id,
+        user_id="owner",
+        status=TaskStatus.COMPLETED,
+        allow_partial_report=False,
+    )
+    sessions[session_id] = state_obj
+    monkeypatch.setattr(
+        publication,
+        "require_session_ownership",
+        AsyncMock(return_value=state_obj),
+    )
+    monkeypatch.setattr(
+        publication,
+        "_async_save_session_under_lifecycle",
+        AsyncMock(side_effect=OSError("disk full")),
+    )
+    monkeypatch.setattr(wr, "assert_generation_writable", lambda *_args: None)
+    monkeypatch.setattr(
+        publication, "assert_generation_writable", lambda *_args: None,
+    )
+    report_runner = AsyncMock()
+    monkeypatch.setattr(wr, "_run_report_generation", report_runner)
+    request = MagicMock()
+    request.state.user_id = "owner"
+
+    try:
+        with pytest.raises(OSError, match="disk full"):
+            await publication.approve_partial_report(session_id, request)
+        await asyncio.sleep(0)
+
+        assert sessions.get(session_id) is state_obj
+        assert state_obj.status == TaskStatus.COMPLETED
+        assert state_obj.allow_partial_report is False
+        assert state_obj.partial_report_requested_at is None
+        assert session_id not in wr._report_tasks
+        report_runner.assert_not_awaited()
+    finally:
+        sessions.pop(session_id, None)
+        task = wr._report_tasks.pop(session_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)

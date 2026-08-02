@@ -4,6 +4,9 @@ Without these checks, a user who learns another user's upload_id can write
 chunks into the victim's temp directory or read upload progress.
 """
 import asyncio
+import logging
+import re
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -57,7 +60,10 @@ def users_ab(client):
 def user_a_session(users_ab):
     """Register an in-memory session owned by user_a."""
     uid_a, _ = users_ab
-    session_id = "test-upload-own-sess-a"
+    # Lifecycle ownership records are intentionally durable.  Reusing one
+    # fixed ID while the auth fixture creates a new random owner per test makes
+    # later cases look like a cross-owner resurrection attempt.
+    session_id = f"test-upload-own-{uuid.uuid4().hex}"
     state = AnalysisState(id=session_id, user_id=uid_a, name="A")
     sessions[session_id] = state
     yield session_id, uid_a, users_ab[1]
@@ -111,7 +117,7 @@ async def test_upload_status_rejects_non_owner(client, user_a_session):
 
 
 def test_upload_chunk_owner_passes_ownership_check(client, user_a_session):
-    """Owner is not blocked by ownership; reaches upload manager (400 for unknown upload_id)."""
+    """Owner reaches the manager, which hides an unknown upload as not found."""
     session_id, uid_a, _ = user_a_session
     upload_id = "unknown-upload-id"
     headers = {"Authorization": f"Bearer {_token(uid_a)}"}
@@ -121,4 +127,70 @@ def test_upload_chunk_owner_passes_ownership_check(client, user_a_session):
         headers=headers,
         files=files,
     )
-    assert resp.status_code == 400, resp.text
+    assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.asyncio
+async def test_cancel_chunked_upload_owner_uses_current_generation(
+    client, user_a_session,
+):
+    """The owner can cancel under the lifecycle barrier without NameError."""
+    from backend.services.upload import upload_manager
+
+    session_id, uid_a, _ = user_a_session
+    upload_id = await upload_manager.init_upload(
+        session_id=session_id,
+        filename="cancel-me.h5ad",
+        total_size=100,
+        total_chunks=1,
+        file_type="snrna_seq",
+        group="control",
+    )
+    headers = {"Authorization": f"Bearer {_token(uid_a)}"}
+
+    resp = client.delete(
+        f"/api/session/{session_id}/upload/cancel/{upload_id}",
+        headers=headers,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "success": True,
+        "message": "Upload cancelled",
+    }
+
+
+def test_upload_data_validation_has_safe_error_code_and_request_id(
+    client, user_a_session, caplog
+):
+    session_id, uid_a, _ = user_a_session
+    headers = {"Authorization": f"Bearer {_token(uid_a)}"}
+    files = {
+        "file": (
+            "../../private-study.h5ad",
+            b"secret-upload-body",
+            "application/octet-stream",
+        )
+    }
+    data = {"section": "invalid\nsection", "data_type": "single-cell"}
+
+    with caplog.at_level(logging.WARNING, logger="backend.routes.upload"):
+        resp = client.post(
+            f"/api/session/{session_id}/upload/data",
+            headers=headers,
+            files=files,
+            data=data,
+        )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == (
+        "Section must be 'pathology', 'sequencing', or 'biochemistry'"
+    )
+    assert resp.headers["x-scai-error-code"] == "UPLOAD_INVALID_SECTION"
+    assert re.fullmatch(r"[0-9a-f]{32}", resp.headers["x-request-id"])
+    assert f"request_id={resp.headers['x-request-id']}" in caplog.text
+    assert "stage=validation status=400" in caplog.text
+    assert "invalid_section" in caplog.text
+    assert "private-study.h5ad" in caplog.text
+    assert "../../private-study.h5ad" not in caplog.text
+    assert "secret-upload-body" not in caplog.text

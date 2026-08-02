@@ -2,30 +2,38 @@ import asyncio
 import json
 
 import pytest
+import pytest_asyncio
 from unittest.mock import MagicMock, AsyncMock
 from backend.utils.llm_client import OpenAICompatibleClient
 
 
-@pytest.mark.asyncio
-async def test_emit_log_response_tolerates_magicmock_logger():
-    c = OpenAICompatibleClient(api_key="test", base_url="http://test")
-    c.llm_logger = MagicMock()
-    await c._emit_log_response(interaction=MagicMock(), response_content="x", usage=None, duration_ms=1.0)
-    c.llm_logger.log_response.assert_called_once()
+@pytest_asyncio.fixture
+async def client():
+    value = OpenAICompatibleClient(api_key="test", base_url="http://test")
+    try:
+        yield value
+    finally:
+        await value.close()
 
 
 @pytest.mark.asyncio
-async def test_emit_log_response_awaits_real_coroutine():
-    c = OpenAICompatibleClient(api_key="test", base_url="http://test")
-    c.llm_logger = MagicMock()
-    c.llm_logger.log_response_async = AsyncMock()
-    await c._emit_log_response(interaction=MagicMock(), response_content="x", usage=None, duration_ms=1.0)
-    c.llm_logger.log_response_async.assert_awaited_once()
-    c.llm_logger.log_response.assert_not_called()
+async def test_emit_log_response_tolerates_magicmock_logger(client):
+    client.llm_logger = MagicMock()
+    await client._emit_log_response(interaction=MagicMock(), response_content="x", usage=None, duration_ms=1.0)
+    client.llm_logger.log_response.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_emit_log_response_falls_back_to_sync_only_logger():
+async def test_emit_log_response_awaits_real_coroutine(client):
+    client.llm_logger = MagicMock()
+    client.llm_logger.log_response_async = AsyncMock()
+    await client._emit_log_response(interaction=MagicMock(), response_content="x", usage=None, duration_ms=1.0)
+    client.llm_logger.log_response_async.assert_awaited_once()
+    client.llm_logger.log_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_emit_log_response_falls_back_to_sync_only_logger(client):
     class SyncOnlyLogger:
         def __init__(self):
             self.calls = 0
@@ -33,11 +41,10 @@ async def test_emit_log_response_falls_back_to_sync_only_logger():
         def log_response(self, **kwargs):
             self.calls += 1
 
-    c = OpenAICompatibleClient(api_key="test", base_url="http://test")
     logger = SyncOnlyLogger()
-    c.llm_logger = logger
+    client.llm_logger = logger
 
-    await c._emit_log_response(
+    await client._emit_log_response(
         interaction=MagicMock(),
         response_content="x",
         usage=None,
@@ -49,7 +56,7 @@ async def test_emit_log_response_falls_back_to_sync_only_logger():
 
 @pytest.mark.asyncio
 async def test_emit_log_response_writes_one_daily_and_one_session_record(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, client,
 ):
     from backend.utils import llm_logger as llm_logger_module
 
@@ -80,7 +87,6 @@ async def test_emit_log_response_writes_one_daily_and_one_session_record(
         model="test-model",
         messages=[{"role": "user", "content": "hello"}],
     )
-    client = OpenAICompatibleClient(api_key="test", base_url="http://test")
     client.llm_logger = logger
 
     await client._emit_log_response(
@@ -139,3 +145,56 @@ def test_session_log_is_bounded_and_redacts_inline_images(tmp_path, monkeypatch)
     assert "inline image omitted" in str(record["messages"][-1])
     assert len(record["response_content"]) < 41_000
     assert (session_dir / "llm.jsonl").stat().st_size < 300_000
+
+
+def test_compact_messages_omits_private_reasoning_everywhere():
+    from backend.utils.llm_logger import _compact_messages
+
+    private_values = {
+        "top reasoning",
+        "top reasoning content",
+        "top reasoning details",
+        "top thinking",
+        "top thought",
+        "thinking block",
+        "redacted thinking block",
+        "unknown reasoning block",
+        "untyped reasoning block",
+    }
+    message = {
+        "role": "assistant",
+        "reasoning": "top reasoning",
+        "reasoning_content": "top reasoning content",
+        "reasoning_details": [{"text": "top reasoning details"}],
+        "thinking": "top thinking",
+        "thought": "top thought",
+        "content": [
+            {"type": "thinking", "text": "thinking block"},
+            {"type": "redacted_thinking", "text": "redacted thinking block"},
+            {"type": "vendor_reasoning_v9", "text": "unknown reasoning block"},
+            {
+                "reasoning_content": "provider metadata",
+                "text": "untyped reasoning block",
+            },
+            {"type": "text", "text": "public answer"},
+        ],
+        "refusal": "public refusal",
+        "tool_calls": [{"id": "tool-1", "type": "function"}],
+    }
+
+    compacted = _compact_messages([message])[0]
+    rendered = json.dumps(compacted)
+
+    for private_value in private_values:
+        assert private_value not in rendered
+    for key in (
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details",
+        "thinking",
+        "thought",
+    ):
+        assert key not in compacted
+    assert "public answer" in rendered
+    assert compacted["refusal"] == "public refusal"
+    assert compacted["tool_calls"] == [{"id": "tool-1", "type": "function"}]

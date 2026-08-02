@@ -1,18 +1,10 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { lazy, Suspense, useState, useEffect, useRef, useCallback } from 'react'
 import { useAppStore } from './stores/appStore'
 import { useConfig, useWebSocket, useUserConfig } from './hooks/useApi'
 import { useTranslation } from './i18n/translations'
 import { devWarn } from './utils/logger'
 import { ErrorBoundary } from './components/ErrorBoundary'
-import { ConfigPanel } from './components/ConfigPanel'
 import { Sidebar } from './components/Sidebar'
-import { AnalysisPanel } from './components/AnalysisPanel'
-import { DataPanel } from './components/DataPanel'
-import { PromptsPanel } from './components/PromptsPanel'
-import { ResultsPanel } from './components/ResultsPanel'
-import { ReportPanel } from './components/ReportPanel'
-import { ChatPanel } from './components/ChatPanel'
-import { MessageStream } from './components/MessageStream'
 import { LanguageSelector } from './components/LanguageSelector'
 import {
   Beaker,
@@ -30,6 +22,19 @@ import {
   AlertTriangle
 } from 'lucide-react'
 
+const ConfigPanel = lazy(() => import('./components/ConfigPanel').then(module => ({ default: module.ConfigPanel })))
+const AnalysisPanel = lazy(() => import('./components/AnalysisPanel').then(module => ({ default: module.AnalysisPanel })))
+const DataPanel = lazy(() => import('./components/DataPanel').then(module => ({ default: module.DataPanel })))
+const PromptsPanel = lazy(() => import('./components/PromptsPanel').then(module => ({ default: module.PromptsPanel })))
+const ResultsPanel = lazy(() => import('./components/ResultsPanel').then(module => ({ default: module.ResultsPanel })))
+const ReportPanel = lazy(() => import('./components/ReportPanel').then(module => ({ default: module.ReportPanel })))
+const ChatPanel = lazy(() => import('./components/ChatPanel').then(module => ({ default: module.ChatPanel })))
+const MessageStream = lazy(() => import('./components/MessageStream').then(module => ({ default: module.MessageStream })))
+
+function PanelFallback() {
+  return <div className="flex h-full items-center justify-center text-sm text-surface-400">Loading…</div>
+}
+
 function App() {
   const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks, authUser, sessionLoading } = useAppStore()
   const { checkStatus } = useConfig()
@@ -42,6 +47,11 @@ function App() {
   // Resizable panel state
   const [isResizing, setIsResizing] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
+  // Load a tab only when first visited, then keep it mounted so switching tabs
+  // preserves its local UI state without forcing every large panel into the
+  // initial production bundle.
+  const mountedTabsRef = useRef(new Set([activeTab]))
+  mountedTabsRef.current.add(activeTab)
 
   // Handle mouse move for resizing
   const handleMouseMove = useCallback((e: MouseEvent) => {
@@ -179,24 +189,26 @@ function App() {
 
       {/* Config Modal */}
       {showConfig && (
-        <ConfigPanel
-          onClose={() => {
-            setShowConfig(false)
-          }}
-          onSave={() => {
-            setConfigured(true)
-            setShowConfig(false)
-            useAppStore.getState().setReadMode(false)
-          }}
-          onReadMode={!configured ? () => {
-            setShowConfig(false)
-            useAppStore.getState().setReadMode(true)
-            setTimeout(() => {
-              useAppStore.getState().openSessionBrowser?.()
-            }, 100)
-          } : undefined}
-          isAdmin={authUser?.role === 'admin'}
-        />
+        <Suspense fallback={<PanelFallback />}>
+          <ConfigPanel
+            onClose={() => {
+              setShowConfig(false)
+            }}
+            onSave={() => {
+              setConfigured(true)
+              setShowConfig(false)
+              useAppStore.getState().setReadMode(false)
+            }}
+            onReadMode={!configured ? () => {
+              setShowConfig(false)
+              useAppStore.getState().setReadMode(true)
+              setTimeout(() => {
+                useAppStore.getState().openSessionBrowser?.()
+              }, 100)
+            } : undefined}
+            isAdmin={authUser?.role === 'admin'}
+          />
+        </Suspense>
       )}
 
       <div className="flex h-screen overflow-hidden">
@@ -288,22 +300,22 @@ function App() {
               style={{ width: currentSession ? `${100 - messagePanelWidth}%` : '100%' }}
             >
               <div className="flex-1 overflow-auto p-6" style={{ display: activeTab === 'analysis' ? 'block' : 'none' }}>
-                <AnalysisPanel />
+                {mountedTabsRef.current.has('analysis') && <Suspense fallback={<PanelFallback />}><AnalysisPanel /></Suspense>}
               </div>
               <div className="flex-1 overflow-auto p-6" style={{ display: activeTab === 'data' ? 'block' : 'none' }}>
-                <DataPanel />
+                {mountedTabsRef.current.has('data') && <Suspense fallback={<PanelFallback />}><DataPanel /></Suspense>}
               </div>
               <div className="flex-1 overflow-auto p-6" style={{ display: activeTab === 'prompts' ? 'block' : 'none' }}>
-                <PromptsPanel />
+                {mountedTabsRef.current.has('prompts') && <Suspense fallback={<PanelFallback />}><PromptsPanel /></Suspense>}
               </div>
               <div className="flex-1 overflow-auto p-6" style={{ display: activeTab === 'results' ? 'block' : 'none' }}>
-                <ResultsPanel />
+                {mountedTabsRef.current.has('results') && <Suspense fallback={<PanelFallback />}><ResultsPanel /></Suspense>}
               </div>
               <div className="flex-1 flex flex-col min-h-0" style={{ display: activeTab === 'report' ? 'flex' : 'none' }}>
-                <ReportPanel />
+                {mountedTabsRef.current.has('report') && <Suspense fallback={<PanelFallback />}><ReportPanel /></Suspense>}
               </div>
               <div className="flex-1 flex flex-col min-h-0" style={{ display: activeTab === 'chat' ? 'flex' : 'none' }}>
-                <ChatPanel />
+                {mountedTabsRef.current.has('chat') && <Suspense fallback={<PanelFallback />}><ChatPanel /></Suspense>}
               </div>
             </div>
 
@@ -325,7 +337,7 @@ function App() {
                 className="hidden lg:flex border-l border-surface-200/60 bg-white overflow-hidden flex-col"
                 style={{ width: `${messagePanelWidth}%` }}
               >
-                <MessageStream />
+                <Suspense fallback={<PanelFallback />}><MessageStream /></Suspense>
               </div>
             )}
           </div>

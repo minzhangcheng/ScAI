@@ -19,6 +19,11 @@ class TestChunkIndexBounds:
             return _DB()
         monkeypatch.setattr(up, "get_db", _get_db)
         monkeypatch.setattr(up, "UPLOAD_TEMP_DIR", tmp_path)
+        # Generation membership is a separate route/service contract. This
+        # unit test starts from a current cached session so it can reach the
+        # chunk-index validation it is specifically asserting.
+        monkeypatch.setattr(up, "sessions", {"s": object()})
+        monkeypatch.setattr(up, "assert_generation_writable", lambda *_: None)
 
         with pytest.raises(HTTPException) as ei:
             await up.upload_chunk("s", "uid", chunk_index=99, chunk_data=b"x")

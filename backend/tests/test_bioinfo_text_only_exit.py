@@ -163,6 +163,11 @@ class TestAutonomousLoopTextOnlyEscalation:
         agent.sandbox.start = AsyncMock()
         agent.sandbox.save_session = AsyncMock()
         agent.sandbox.get_code_history = MagicMock(return_value=[])
+        # The runtime persistence hook is synchronous.  An unstubbed
+        # MagicMock returns another MagicMock, which is not a state mapping and
+        # makes this text-only control-flow test fail before reaching the LLM
+        # exhaustion path it owns.
+        agent.sandbox.sync_runtime_persistence_state.return_value = {}
 
         # --- CheckpointManager: no-op load/save/clear ---
         class _NullCheckpoint:

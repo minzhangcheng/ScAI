@@ -17,6 +17,23 @@ _MAX_LOG_MESSAGES = 12
 _MAX_LOG_TEXT_CHARS = 20_000
 _MAX_LOG_RESPONSE_CHARS = 40_000
 _MAX_LOG_TOOL_CALL_CHARS = 8_000
+_PRIVATE_REASONING_KEYS = frozenset({
+    "reasoning",
+    "reasoning_content",
+    "reasoning_details",
+    "thinking",
+    "thought",
+    "redacted_thinking",
+})
+_PRIVATE_REASONING_BLOCK_TYPES = frozenset({
+    "reasoning",
+    "reasoning_content",
+    "reasoning_details",
+    "thinking",
+    "redacted_thinking",
+    "thought",
+    "analysis",
+})
 
 
 def _truncate_text(value: Any, limit: int) -> Any:
@@ -37,7 +54,21 @@ def _compact_content(value: Any) -> Any:
             if not isinstance(item, dict):
                 compact.append(_truncate_text(item, _MAX_LOG_TEXT_CHARS))
                 continue
-            cleaned = dict(item)
+            block_type = str(item.get("type", "") or "").strip().lower()
+            if (
+                block_type in _PRIVATE_REASONING_BLOCK_TYPES
+                or any(
+                    marker in block_type
+                    for marker in ("reason", "think", "thought")
+                )
+                or any(key in item for key in _PRIVATE_REASONING_KEYS)
+            ):
+                continue
+            cleaned = {
+                key: nested
+                for key, nested in item.items()
+                if key not in _PRIVATE_REASONING_KEYS
+            }
             for key in ("text", "content"):
                 if key in cleaned:
                     cleaned[key] = _compact_content(cleaned[key])
@@ -50,6 +81,22 @@ def _compact_content(value: Any) -> Any:
                 cleaned["image_url"] = image_url
             compact.append(cleaned)
         return compact
+    if isinstance(value, dict):
+        block_type = str(value.get("type", "") or "").strip().lower()
+        if (
+            block_type in _PRIVATE_REASONING_BLOCK_TYPES
+            or any(
+                marker in block_type
+                for marker in ("reason", "think", "thought")
+            )
+            or any(key in value for key in _PRIVATE_REASONING_KEYS)
+        ):
+            return "[private reasoning omitted]"
+        return {
+            key: _compact_content(nested) if key in {"text", "content"} else nested
+            for key, nested in value.items()
+            if key not in _PRIVATE_REASONING_KEYS
+        }
     return value
 
 
@@ -61,10 +108,16 @@ def _compact_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         first_system = next((m for m in messages if m.get("role") == "system"), None)
         recent_count = _MAX_LOG_MESSAGES - (1 if first_system is not None else 0)
         selected = ([first_system] if first_system is not None else []) + messages[-recent_count:]
-    return [
-        {**message, "content": _compact_content(message.get("content"))}
-        for message in selected
-    ]
+    compact = []
+    for message in selected:
+        cleaned = {
+            key: value
+            for key, value in message.items()
+            if key not in _PRIVATE_REASONING_KEYS
+        }
+        cleaned["content"] = _compact_content(message.get("content"))
+        compact.append(cleaned)
+    return compact
 
 
 def _compact_tools(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:

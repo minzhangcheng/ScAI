@@ -19,7 +19,10 @@ from ...utils.llm_client import UpstreamExhaustedError
 from ...constants import LlmFailureAction
 from ...config import get_session_reports, get_session_workspace
 from ...services.report import DetailedReportGenerator, compress_image_to_base64
-from ...services.report.figure_discovery import discover_workspace_figures
+from ...services.report.figure_discovery import (
+    discover_workspace_figures,
+    resolve_state_figure_candidates,
+)
 from ...services.report.artifacts import (
     artifact_stems,
     eligible_artifacts,
@@ -151,11 +154,11 @@ class GraphicAbstractMixin:
     ) -> None:
         """Discover, curate, and emit the brief Results figure gallery."""
         DISCOVERY_CAP = 200
-        # The gallery is a browsing surface, not an archival one. A figure the
-        # review loop passed only after revision — or gave up on at the revision
-        # cap — is still this run's own output and belongs here, badged with the
-        # status it earned. Only artifacts superseded by newer data are withheld.
-        # ``is_report_eligible`` remains the rule for every archival surface.
+        # Browsing and archival surfaces share the same publication predicate
+        # and published-head resolver. Pending, failed, rejected, superseded,
+        # invalidated, layout-blocked, or otherwise unreportable attempts stay
+        # in audit state but cannot become current gallery entries merely because
+        # their bytes still exist.
         #
         # The one thing that breadth must not carry with it is an entry whose
         # file is no longer the figure it advertises: see ``render_is_intact``.
@@ -176,7 +179,12 @@ class GraphicAbstractMixin:
             ),
         )
 
-        discovered = discover_workspace_figures(self.session_id)
+        discovered = resolve_state_figure_candidates(
+            analysis_state,
+            get_session_workspace(self.session_id),
+            report_only=False,
+            lineage_id=current_lineage_id(analysis_state),
+        )
         discovered = [f for f in discovered if f["name"] not in excluded_stems]
         all_workspace_figs = discovered[:DISCOVERY_CAP]
         if len(discovered) > DISCOVERY_CAP:
@@ -261,9 +269,15 @@ class GraphicAbstractMixin:
                     "plan_step_id": getattr(fig, "plan_step_id", None),
                     "plan_id": getattr(fig, "plan_id", None),
                     "purpose": getattr(fig, "purpose", "result") or "result",
+                    "logical_figure_id": getattr(fig, "logical_figure_id", None),
+                    "render_attempt_id": getattr(fig, "render_attempt_id", None),
+                    "revision_of_id": getattr(fig, "revision_of_id", None),
+                    "supersedes_id": getattr(fig, "supersedes_id", None),
+                    "is_published_head": bool(
+                        getattr(fig, "is_published_head", False)
+                    ),
                     "round": round_by_stem.get(fig.name),
-                    # A figure the loop gave up on is shown, but the renderer's
-                    # verdict on whether its text is legible travels with it —
+                    # The renderer's verdict travels with every eligible head;
                     # "Final" over an illegible figure would be a lie.
                     "layout_blocking": has_blocking_layout_defects(fig),
                     "diagnostic": bool(getattr(fig, "diagnostic", False)),
@@ -278,7 +292,11 @@ class GraphicAbstractMixin:
                     logger.warning("Failed to compress image", exc_info=True)
                     b64 = None
                 figures_data.append({
-                    "id": str(uuid.uuid4()),
+                    "id": str(
+                        wf.get("id")
+                        or wf.get("legacy_artifact_id")
+                        or uuid.uuid4()
+                    ),
                     "name": wf["name"],
                     "description": "",
                     "figure_type": wf["type"],

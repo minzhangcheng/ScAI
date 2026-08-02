@@ -244,6 +244,12 @@ def _finalize_imported_state(
         normalize_disabled_snapshot_state(state, workflow_active=False)
     _normalize_imported_status(state)
     _arm_restore_intent_after_import(state)
+    # Lifecycle generations belong to this installation, not to the archive.
+    # Bind the imported state to the destination reservation (generation 1 for
+    # a new ID, or the next generation after a same-ID deletion).
+    from backend.services.session_lifecycle import bind_import_generation
+
+    bind_import_generation(state)
 
 
 def _resign_imported_live_pkl(session_id: str) -> bool:
@@ -278,7 +284,7 @@ def _resign_imported_live_pkl(session_id: str) -> bool:
     return True
 
 
-def _session_id_is_taken(session_id: str) -> bool:
+def _session_id_is_taken(session_id: str, user_id: str | None = None) -> bool:
     """Whether *session_id* already names a session on this installation.
 
     Checks disk and the in-memory registries, because a session evicted from
@@ -287,12 +293,21 @@ def _session_id_is_taken(session_id: str) -> bool:
     """
     from backend.state import sessions as _live_sessions, workflows as _live_workflows
 
+    from backend.services.session_lifecycle import read_lifecycle_record
+
+    lifecycle = read_lifecycle_record(session_id)
+    if lifecycle is not None and not (
+        lifecycle.get("status") == "deleted"
+        and user_id is not None
+        and str(lifecycle.get("owner_id") or "") == user_id
+    ):
+        return True
     if get_session_dir(session_id).exists():
         return True
     return session_id in _live_sessions or session_id in _live_workflows
 
 
-def _claim_session_id(session_id: str) -> bool:
+def _claim_session_id(session_id: str, user_id: str) -> bool:
     """Take exclusive ownership of *session_id* by creating its directory.
 
     ``mkdir(exist_ok=False)`` is the claim, so two imports racing for the same
@@ -300,19 +315,21 @@ def _claim_session_id(session_id: str) -> bool:
     other falls through to a fresh id. Checking-then-creating would let both
     extract into the same tree and interleave two sessions' files.
     """
-    if _session_id_is_taken(session_id):
+    if _session_id_is_taken(session_id, user_id):
         return False
-    try:
-        get_session_dir(session_id).mkdir(parents=True, exist_ok=False, mode=0o700)
-    except FileExistsError:
-        return False
-    except OSError as exc:
-        logger.warning("Cannot claim session directory for %s: %s", session_id, exc)
+    from backend.services.session_lifecycle import claim_import_generation
+
+    generation = claim_import_generation(
+        session_id,
+        user_id,
+        get_session_dir(session_id),
+    )
+    if generation is None:
         return False
     return True
 
 
-def _allocate_import_session_id(archive_session_id: str) -> str:
+def _allocate_import_session_id(archive_session_id: str, user_id: str) -> str:
     """Pick the session id an archive should be extracted into, and claim it.
 
     Reusing the archive's own id is what makes an import round-trip on the same
@@ -323,10 +340,10 @@ def _allocate_import_session_id(archive_session_id: str) -> str:
     "create a session", never "overwrite one": on any collision the archive is
     materialized under a fresh id and every embedded path is rebound to it.
     """
-    if _claim_session_id(archive_session_id):
+    if _claim_session_id(archive_session_id, user_id):
         return archive_session_id
     new_id = str(uuid.uuid4())
-    while not _claim_session_id(new_id):  # pragma: no cover - uuid4 collision
+    while not _claim_session_id(new_id, user_id):  # pragma: no cover - uuid4 collision
         new_id = str(uuid.uuid4())
     logger.warning(
         "Import target %s already exists on this installation; extracting into "
@@ -372,6 +389,9 @@ async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: st
         # session, and PAUSED does not bypass the save throttle on its own.
         await async_save_session(state.id, state, force=True)
         await _update_session_cache(state.id, state)
+        from backend.services.session_lifecycle import commit_import_generation
+
+        commit_import_generation(state)
         async with _import_jobs_lock:
             _import_jobs[import_job_id] = import_job_record(
                 "completed",
@@ -420,11 +440,15 @@ def _cleanup_partial_session(session_id: Optional[str]) -> None:
         validate_session_id(session_id)
     except Exception:
         return
+    from backend.services.session_deletion import (
+        cleanup_failed_import_generation,
+    )
+
     try:
-        sess_dir = get_session_dir(session_id)
-        if sess_dir.exists():
-            shutil.rmtree(sess_dir, ignore_errors=True)
-            logger.info(f"Cleaned up partial session directory: {sess_dir}")
+        if cleanup_failed_import_generation(session_id):
+            logger.info(
+                "Cleaned up partial import generation for %s", session_id,
+            )
     except Exception as e:
         logger.warning(f"Failed to clean up partial session {session_id}: {e}")
 
@@ -799,7 +823,7 @@ def _import_tar_gz(
             return
         validate_session_id(candidate)
         archive_session_id = candidate
-        session_id = _allocate_import_session_id(candidate)
+        session_id = _allocate_import_session_id(candidate, user_id)
         if outcome is not None:
             outcome["session_id"] = session_id
             outcome["archive_session_id"] = archive_session_id
@@ -1084,7 +1108,7 @@ def _import_zip(content: bytes, user_id: str, trust: bool = False) -> AnalysisSt
 
             archive_session_id = namelist[0].split('/')[0]
             validate_session_id(archive_session_id)
-            session_id = _allocate_import_session_id(archive_session_id)
+            session_id = _allocate_import_session_id(archive_session_id, user_id)
 
             # Extract state.json
             state_json_path = f"{archive_session_id}/state.json"

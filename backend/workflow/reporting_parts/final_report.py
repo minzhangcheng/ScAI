@@ -69,7 +69,20 @@ def detailed_report_event_payload(report: Dict[str, Any]) -> Dict[str, Any]:
         "sections_count": len(report.get("sections", [])),
         "figures_count": len(report.get("figures", [])),
         "tables_count": len(report.get("tables", [])),
+        "partial_reason": report.get("partial_reason"),
+        "partial_reasons": list(report.get("partial_reasons") or []),
+        "figureless_sections": list(report.get("figureless_sections") or []),
+        "unreported_figures": list(report.get("unreported_figures") or []),
+        "quality_disclosures": report.get("quality_disclosures") or {},
     }
+
+
+def analysis_completion_message(report: Optional[Dict[str, Any]]) -> str:
+    """Describe terminal workflow completion without hiding a partial report."""
+    if report and report.get("status") == "partial":
+        detail = report.get("current_step") or report.get("partial_reason") or "partial"
+        return f"Analysis completed; report is partial: {detail}"
+    return "Analysis completed"
 
 
 class FinalReportMixin:
@@ -267,6 +280,7 @@ class FinalReportMixin:
             )
 
         # === LLM call with retry + user intervention ===
+        report: Optional[Dict[str, Any]] = None
         while True:
             try:
                 llm_client = self._settings_provider.get_llm_client('pi')
@@ -348,7 +362,9 @@ class FinalReportMixin:
         # raised before this point and the run remains in its failure gate.
         if analysis_state.pending_required_snapshot is None:
             self._set_status(analysis_state, TaskStatus.COMPLETED)
-            await self._send_message("completed", "Analysis completed", AgentType.PI)
+            await self._send_message(
+                "completed", analysis_completion_message(report), AgentType.PI
+            )
 
             await self._send_state_sync(analysis_state, "analysis_complete")
 

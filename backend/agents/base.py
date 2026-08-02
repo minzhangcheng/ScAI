@@ -262,6 +262,9 @@ class BaseAgent(ABC):
 
         Yields:
             Response chunks
+
+        Callers that stop consuming before exhaustion must close the returned
+        async generator so its client request lease can be released promptly.
         """
         # Set context before each call (client is shared between agents)
         self.refresh_runtime_config_if_needed()

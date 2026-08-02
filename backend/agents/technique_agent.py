@@ -13,7 +13,12 @@ from typing import Optional, Dict, Any, AsyncGenerator, Callable, Awaitable
 from ..constants import REASONING_MODEL_MIN_TOKENS
 from .base import BaseAgent, AgentConfig
 from ..models.schemas import AgentType, AnalysisState
-from ..utils.error_parsing import API_ERROR_TYPES, extract_error_type, strip_ansi
+from ..utils.error_parsing import (
+    API_ERROR_TYPES,
+    compact_traceback,
+    extract_error_type,
+    strip_ansi,
+)
 from ..utils.llm_client import OpenAICompatibleClient
 from ..utils.settings_provider import AgentSettingsProvider
 
@@ -322,8 +327,9 @@ except ImportError as e:
 
         combined = "\n\n".join(doc_parts)
 
+        compact_error = compact_traceback(error_text, max_chars=500)
         user_msg = (
-            f"The user's code failed with this error:\n```\n{error_text[:500]}\n```\n\n"
+            f"The user's code failed with this error:\n```\n{compact_error}\n```\n\n"
             f"Here is the relevant API documentation:\n{combined[:3000]}\n\n"
             f"Provide:\n"
             f"1. Brief explanation of why the error occurred (1 line)\n"
@@ -369,4 +375,3 @@ except ImportError as e:
                 mid = m.group(1) or ""
                 return f"{full}.{mid}{func_name}"
         return ""
-

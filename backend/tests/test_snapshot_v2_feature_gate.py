@@ -209,16 +209,40 @@ def test_all_snapshot_v2_http_operations_use_central_dependency():
         ("POST", "/api/session/{session_id}/snapshot-failure/terminate"),
     }
 
+    def iter_effective_routes(routes):
+        """Expand FastAPI's lazy IncludedRouter wrappers recursively."""
+        for route in routes:
+            candidates = getattr(route, "effective_candidates", None)
+            if callable(candidates):
+                yield from iter_effective_routes(candidates())
+                low_priority = getattr(
+                    route, "effective_low_priority_routes", None,
+                )
+                if callable(low_priority):
+                    yield from iter_effective_routes(low_priority())
+                continue
+            source = getattr(route, "original_route", route)
+            path = (
+                getattr(route, "path", None)
+                or getattr(getattr(route, "starlette_route", None), "path", None)
+                or getattr(source, "path", None)
+            )
+            if path:
+                yield route, source, path
+
     gated = set()
-    for route in app.routes:
-        dependencies = getattr(route, "dependencies", [])
+    for route, source, path in iter_effective_routes(app.routes):
+        dependencies = [
+            *list(getattr(route, "dependencies", []) or []),
+            *list(getattr(source, "dependencies", []) or []),
+        ]
         if not any(
             getattr(dep, "dependency", None) is require_snapshot_v2_enabled
             for dep in dependencies
         ):
             continue
-        for method in getattr(route, "methods", set()):
-            gated.add((method, route.path))
+        for method in getattr(source, "methods", set()) or set():
+            gated.add((method, path))
 
     assert expected <= gated
 

@@ -15,6 +15,7 @@ image already exists, so it has a small wall-clock budget rather than repeating 
 full 180-second cascades.
 """
 from typing import Dict, Any, Optional, List
+from dataclasses import dataclass
 import logging
 import base64
 import json
@@ -45,6 +46,17 @@ _REVISION_MAX_RETRY_ROUNDS = 2
 _REVISION_TOTAL_TIMEOUT = 720.0
 _INTER_PROTOCOL_DELAY = 1.0    # seconds to wait when switching protocols within a round
 _PROTOCOL_TIMEOUT = 180.0      # per-attempt timeout for Images API / Chat protocols
+
+
+@dataclass(frozen=True)
+class _PainterRuntimeSnapshot:
+    """Configuration and transport frozen for one complete image operation."""
+
+    llm_client: OpenAICompatibleClient
+    model: str
+    system_prompt: str
+    temperature: float
+    has_vision: bool
 
 
 def _estimate_tokens(text: str) -> int:
@@ -124,6 +136,18 @@ class PainterAgent(BaseAgent):
 
         logger.info(f"[Painter] Initialized with model={self.model}")
 
+    def _capture_runtime(self) -> _PainterRuntimeSnapshot:
+        """Capture one coherent runtime before an operation reaches its first await."""
+        llm_client = self.llm_client
+        llm_client.set_context(self.session_id, self.agent_type.value)
+        return _PainterRuntimeSnapshot(
+            llm_client=llm_client,
+            model=self.model,
+            system_prompt=self.system_prompt,
+            temperature=self.config.temperature,
+            has_vision=self.has_vision,
+        )
+
     async def generate_graphic_abstract(
         self,
         state: AnalysisState,
@@ -188,7 +212,7 @@ class PainterAgent(BaseAgent):
             ValueError: If revision fails
         """
         self.refresh_runtime_config_if_needed()
-        self._set_llm_context()
+        runtime = self._capture_runtime()
         logger.info(f"[{self.session_id}][Painter] Revising graphic abstract (revision {len(revision_history)})")
 
         # Build revision prompt with history to prevent regression
@@ -234,7 +258,7 @@ class PainterAgent(BaseAgent):
 """
 
         # Validate text input token count (excludes image tokens which are counted separately)
-        text_input = (self.system_prompt or "") + revision_prompt
+        text_input = (runtime.system_prompt or "") + revision_prompt
         est_tokens = _estimate_tokens(text_input)
         # Image tokens add overhead (~258 tokens for a 1024px image), leave extra margin
         est_tokens += 300
@@ -258,20 +282,33 @@ class PainterAgent(BaseAgent):
         )
 
         try:
-            # Revision has an input image, so the Images protocol uses /v1/images/edits.
-            protocols = self._build_protocols(
-                image_run=lambda: self._images_edit_attempt(revision_prompt, current_image_base64),
-                chat_run=lambda: self._chat_image_attempt(
-                    revision_prompt, input_image_b64=current_image_base64
-                ),
-                dashscope_run=lambda: self._generate_image_dashscope(text_only_prompt),
-            )
-            new_image = await self._run_protocol_cascade(
-                protocols,
-                op="revision",
-                max_rounds=_REVISION_MAX_RETRY_ROUNDS,
-                total_timeout=_REVISION_TOTAL_TIMEOUT,
-            )
+            # The scope protects the frozen transport across every retry, poll,
+            # and result download, even if runtime settings change concurrently.
+            async with runtime.llm_client.direct_request_scope():
+                # Revision has an input image, so the Images protocol uses /v1/images/edits.
+                protocols = self._build_protocols(
+                    image_run=lambda: self._images_edit_attempt(
+                        revision_prompt,
+                        current_image_base64,
+                        runtime=runtime,
+                    ),
+                    chat_run=lambda: self._chat_image_attempt(
+                        revision_prompt,
+                        input_image_b64=current_image_base64,
+                        runtime=runtime,
+                    ),
+                    dashscope_run=lambda: self._generate_image_dashscope(
+                        text_only_prompt,
+                        runtime=runtime,
+                    ),
+                    runtime=runtime,
+                )
+                new_image = await self._run_protocol_cascade(
+                    protocols,
+                    op="revision",
+                    max_rounds=_REVISION_MAX_RETRY_ROUNDS,
+                    total_timeout=_REVISION_TOTAL_TIMEOUT,
+                )
             logger.info(f"[{self.session_id}][Painter] Graphic abstract revision successful")
             return new_image
         except Exception as e:
@@ -477,7 +514,12 @@ The graphic abstract should tell the story of the research at a glance, highligh
 
         raise ValueError("No image data found in response")
 
-    async def _download_image_as_base64(self, url: str) -> str:
+    async def _download_image_as_base64(
+        self,
+        url: str,
+        *,
+        runtime: _PainterRuntimeSnapshot,
+    ) -> str:
         """Download image from URL and return as base64 string.
 
         Used for providers (e.g. SiliconFlow) that return temporary image URLs
@@ -485,11 +527,16 @@ The graphic abstract should tell the story of the research at a glance, highligh
         so proxy and timeout settings are inherited.
         """
         # Reuse the shared httpx client (inherits proxy config)
-        resp = await self.llm_client.http_client.get(url, timeout=60.0)
+        resp = await runtime.llm_client.http_client.get(url, timeout=60.0)
         resp.raise_for_status()
         return base64.b64encode(resp.content).decode('utf-8')
 
-    async def _generate_image_dashscope(self, prompt: str) -> str:
+    async def _generate_image_dashscope(
+        self,
+        prompt: str,
+        *,
+        runtime: _PainterRuntimeSnapshot,
+    ) -> str:
         """Generate image using DashScope native async task API.
 
         DashScope's OpenAI compatibility mode does not support image generation.
@@ -498,21 +545,24 @@ The graphic abstract should tell the story of the research at a glance, highligh
         2. Poll  GET /api/v1/tasks/{task_id}                      → until SUCCEEDED
         3. Download the result URL and return as base64.
         """
-        api_key = self.llm_client.api_key
+        api_key = runtime.llm_client.api_key
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "X-DashScope-Async": "enable",
         }
         payload = {
-            "model": self.model,
+            "model": runtime.model,
             "input": {"prompt": prompt},
             "parameters": {"size": "1024*1024", "n": 1},
         }
         create_url = f"{_DASHSCOPE_BASE_URL}/api/v1/services/aigc/text2image/image-synthesis"
 
-        logger.info(f"[{self.session_id}][Painter] DashScope: submitting image task (model={self.model})")
-        resp = await self.llm_client.http_client.post(
+        logger.info(
+            f"[{self.session_id}][Painter] DashScope: submitting image task "
+            f"(model={runtime.model})"
+        )
+        resp = await runtime.llm_client.http_client.post(
             create_url, json=payload, headers=headers, timeout=30.0
         )
         resp.raise_for_status()
@@ -526,7 +576,7 @@ The graphic abstract should tell the story of the research at a glance, highligh
         poll_url = f"{_DASHSCOPE_BASE_URL}/api/v1/tasks/{task_id}"
         for attempt in range(60):  # up to 5 minutes (60 × 5 s)
             await asyncio.sleep(5)
-            poll_resp = await self.llm_client.http_client.get(
+            poll_resp = await runtime.llm_client.http_client.get(
                 poll_url, headers=headers, timeout=30.0
             )
             poll_resp.raise_for_status()
@@ -546,7 +596,7 @@ The graphic abstract should tell the story of the research at a glance, highligh
                         logger.info(
                             f"[{self.session_id}][Painter] DashScope task succeeded, downloading image"
                         )
-                        return await self._download_image_as_base64(url)
+                        return await self._download_image_as_base64(url, runtime=runtime)
                 raise ValueError(
                     f"DashScope image generation succeeded but no result URL found: {status_data}"
                 )
@@ -580,10 +630,10 @@ The graphic abstract should tell the story of the research at a glance, highligh
             ValueError: If image generation fails
         """
         self.refresh_runtime_config_if_needed()
-        self._set_llm_context()
+        runtime = self._capture_runtime()
 
         # Validate input token count before calling API
-        system_text = self.system_prompt or ""
+        system_text = runtime.system_prompt or ""
         total_input = system_text + prompt
         est_tokens = _estimate_tokens(total_input)
         logger.debug(
@@ -602,23 +652,35 @@ The graphic abstract should tell the story of the research at a glance, highligh
 
         logger.debug(f"[{self.session_id}][Painter] Calling image generation")
 
-        _is_zhipu = _ZHIPU_BASE_URL in (self.llm_client.base_url or "")
+        _is_zhipu = _ZHIPU_BASE_URL in (runtime.llm_client.base_url or "")
 
         try:
-            # No input image, so the Images protocol uses /v1/images/generations.
-            protocols = self._build_protocols(
-                image_run=lambda: self._images_api_attempt(prompt, is_zhipu=_is_zhipu),
-                chat_run=lambda: self._chat_image_attempt(prompt),
-                dashscope_run=lambda: self._generate_image_dashscope(prompt),
-            )
-            return await self._run_protocol_cascade(protocols, op="generation")
+            async with runtime.llm_client.direct_request_scope():
+                # No input image, so the Images protocol uses /v1/images/generations.
+                protocols = self._build_protocols(
+                    image_run=lambda: self._images_api_attempt(
+                        prompt,
+                        runtime=runtime,
+                        is_zhipu=_is_zhipu,
+                    ),
+                    chat_run=lambda: self._chat_image_attempt(prompt, runtime=runtime),
+                    dashscope_run=lambda: self._generate_image_dashscope(
+                        prompt,
+                        runtime=runtime,
+                    ),
+                    runtime=runtime,
+                )
+                return await self._run_protocol_cascade(protocols, op="generation")
         except ValueError:
             raise
         except Exception as e:
             logger.exception(f"[{self.session_id}][Painter] Error generating image")
             raise ValueError(f"Image generation failed: {e}") from e
 
-    def _protocol_order(self) -> List[str]:
+    def _protocol_order(
+        self,
+        runtime: Optional[_PainterRuntimeSnapshot] = None,
+    ) -> List[str]:
         """Return protocols eligible for the configured provider, in order.
 
         - DashScope: use only its native task API.
@@ -627,14 +689,22 @@ The graphic abstract should tell the story of the research at a glance, highligh
           ...): use Images API then chat.  Never send a non-DashScope model/key
           to the DashScope native endpoint.
         """
-        base = (self.llm_client.base_url or "").lower()
+        llm_client = runtime.llm_client if runtime is not None else self.llm_client
+        base = (llm_client.base_url or "").lower()
         if _DASHSCOPE_BASE_URL in base:
             return ["dashscope"]
         if "openrouter" in base:
             return ["chat", "images"]
         return ["images", "chat"]
 
-    def _build_protocols(self, *, image_run, chat_run, dashscope_run) -> List[Dict[str, Any]]:
+    def _build_protocols(
+        self,
+        *,
+        image_run,
+        chat_run,
+        dashscope_run,
+        runtime: Optional[_PainterRuntimeSnapshot] = None,
+    ) -> List[Dict[str, Any]]:
         """Assemble the ordered protocol list consumed by ``_run_protocol_cascade``.
 
         Each entry carries a human-readable ``name``, the async ``run`` callable,
@@ -646,7 +716,7 @@ The graphic abstract should tell the story of the research at a glance, highligh
             "chat": {"name": "chat_modalities", "run": chat_run, "timeout": _PROTOCOL_TIMEOUT},
             "dashscope": {"name": "dashscope_native", "run": dashscope_run, "timeout": None},
         }
-        return [runners[p] for p in self._protocol_order()]
+        return [runners[p] for p in self._protocol_order(runtime)]
 
     async def _run_protocol_cascade(
         self,
@@ -747,7 +817,11 @@ The graphic abstract should tell the story of the research at a glance, highligh
         )
 
     async def _chat_image_attempt(
-        self, prompt: str, *, input_image_b64: Optional[str] = None
+        self,
+        prompt: str,
+        *,
+        runtime: _PainterRuntimeSnapshot,
+        input_image_b64: Optional[str] = None,
     ) -> str:
         """One attempt at image generation via chat completions modalities.
 
@@ -755,7 +829,7 @@ The graphic abstract should tell the story of the research at a glance, highligh
         current image is attached so the model can see and modify it; otherwise the
         prompt is sent text-only (the "look at the attached image" line is stripped).
         """
-        if input_image_b64 is not None and self.has_vision:
+        if input_image_b64 is not None and runtime.has_vision:
             from ..utils.llm_client import _detect_image_mime_type
             mime_type = _detect_image_mime_type(input_image_b64)
             user_content: Any = [
@@ -770,19 +844,25 @@ The graphic abstract should tell the story of the research at a glance, highligh
         else:
             user_content = prompt
 
-        response = await self.llm_client.client.chat.completions.create(
-            model=self.model,
+        response = await runtime.llm_client.client.chat.completions.create(
+            model=runtime.model,
             messages=[
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": runtime.system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            temperature=self.config.temperature,
+            temperature=runtime.temperature,
             max_tokens=4096,
             extra_body={"modalities": ["image", "text"]},
         )
         return self._extract_image_from_response(response)
 
-    async def _images_edit_attempt(self, prompt: str, input_image_b64: str) -> str:
+    async def _images_edit_attempt(
+        self,
+        prompt: str,
+        input_image_b64: str,
+        *,
+        runtime: _PainterRuntimeSnapshot,
+    ) -> str:
         """One attempt at image revision via the Images edits API (/v1/images/edits).
 
         Sends the current image plus the revision prompt. Falls back to omitting
@@ -796,8 +876,8 @@ The graphic abstract should tell the story of the research at a glance, highligh
         image_file = (f"image.{ext}", img_bytes, mime)
 
         try:
-            response = await self.llm_client.client.images.edit(
-                model=self.model,
+            response = await runtime.llm_client.client.images.edit(
+                model=runtime.model,
                 image=image_file,
                 prompt=prompt,
                 n=1,
@@ -813,15 +893,21 @@ The graphic abstract should tell the story of the research at a glance, highligh
                 f"[{self.session_id}][Painter] Images edits with b64_json failed ({fmt_err}), "
                 f"retrying without response_format"
             )
-            response = await self.llm_client.client.images.edit(
-                model=self.model,
+            response = await runtime.llm_client.client.images.edit(
+                model=runtime.model,
                 image=image_file,
                 prompt=prompt,
                 n=1,
             )
-        return await self._extract_image_from_images_response(response)
+        return await self._extract_image_from_images_response(response, runtime=runtime)
 
-    async def _images_api_attempt(self, prompt: str, *, is_zhipu: bool = False) -> str:
+    async def _images_api_attempt(
+        self,
+        prompt: str,
+        *,
+        runtime: _PainterRuntimeSnapshot,
+        is_zhipu: bool = False,
+    ) -> str:
         """One attempt at the Images API (/v1/images/generations).
 
         Handles the b64_json -> URL response-format fallback for providers that
@@ -842,16 +928,16 @@ The graphic abstract should tell the story of the research at a glance, highligh
                 f"[{self.session_id}][Painter] Zhipu AI detected, "
                 f"using default URL response format"
             )
-            response = await self.llm_client.client.images.generate(
-                model=self.model,
+            response = await runtime.llm_client.client.images.generate(
+                model=runtime.model,
                 prompt=prompt,
             )
         else:
             # Try with b64_json first (OpenAI, Google AI Studio, n1n.ai)
             # then fall back without it (SiliconFlow only supports URL responses)
             try:
-                response = await self.llm_client.client.images.generate(
-                    model=self.model,
+                response = await runtime.llm_client.client.images.generate(
+                    model=runtime.model,
                     prompt=prompt,
                     n=1,
                     response_format="b64_json",
@@ -865,15 +951,20 @@ The graphic abstract should tell the story of the research at a glance, highligh
                     f"[{self.session_id}][Painter] Images API with b64_json failed ({b64_err}), "
                     f"trying without response_format"
                 )
-                response = await self.llm_client.client.images.generate(
-                    model=self.model,
+                response = await runtime.llm_client.client.images.generate(
+                    model=runtime.model,
                     prompt=prompt,
                     n=1,
                 )
 
-        return await self._extract_image_from_images_response(response)
+        return await self._extract_image_from_images_response(response, runtime=runtime)
 
-    async def _extract_image_from_images_response(self, response) -> str:
+    async def _extract_image_from_images_response(
+        self,
+        response,
+        *,
+        runtime: _PainterRuntimeSnapshot,
+    ) -> str:
         """Extract a base64 image from an Images API response (generations or edits).
 
         Handles standard ``data[0].b64_json`` / ``data[0].url`` shapes plus the
@@ -898,7 +989,10 @@ The graphic abstract should tell the story of the research at a glance, highligh
             # Fall back to URL and download (SiliconFlow returns temporary URLs)
             if hasattr(img_item, 'url') and img_item.url:
                 logger.info(f"[{self.session_id}][Painter] Downloading image from URL")
-                return await self._download_image_as_base64(img_item.url)
+                return await self._download_image_as_base64(
+                    img_item.url,
+                    runtime=runtime,
+                )
 
         # SiliconFlow non-standard: 'images' array
         # Zhipu / standard: 'data' array
@@ -920,7 +1014,7 @@ The graphic abstract should tell the story of the research at a glance, highligh
                     url = img.get('url', '') if isinstance(img, dict) else ''
                     if url:
                         logger.info(f"[{self.session_id}][Painter] Downloading image from non-standard response")
-                        return await self._download_image_as_base64(url)
+                        return await self._download_image_as_base64(url, runtime=runtime)
 
             # Zhipu / standard: 'data' array
             if 'data' in raw and raw['data']:
@@ -929,7 +1023,7 @@ The graphic abstract should tell the story of the research at a glance, highligh
                     url = img_data.get('url', '')
                     if url:
                         logger.info(f"[{self.session_id}][Painter] Downloading image from standard response (data[0].url)")
-                        return await self._download_image_as_base64(url)
+                        return await self._download_image_as_base64(url, runtime=runtime)
 
         raise ValueError("Images API returned no image data")
 

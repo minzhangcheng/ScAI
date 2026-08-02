@@ -3,7 +3,14 @@
 // every consumer and every vi.mock() target uses — keeps working unchanged.
 
 export { ApiError, API_BASE, WS_CONNECT_TIMEOUT_MS, applyStoreUpdates, generateId, authHeaders, apiFetch } from './api/client'
-export { useSession } from './api/useSession'
+import { useSession as useSessionImplementation } from './api/useSession'
+
+// Keep the public facade (and its established test/mock target) while making
+// this a local hook export. A direct re-export across lazy panel chunks creates
+// a Rollup circular-chunk edge between the facade and implementation.
+export function useSession() {
+  return useSessionImplementation()
+}
 export { useWebSocket } from './api/useWebSocket'
 export { useConfig, usePrompts, useUserConfig } from './api/useConfig'
 export { listSnapshotsV2, previewSnapshotV2, restoreSnapshotV2, cancelSnapshotTransaction, getSnapshotTransaction, deleteSnapshotV2, exportSnapshotsV2, importSnapshotsV2 } from './api/snapshots'

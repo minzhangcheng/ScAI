@@ -1,4 +1,5 @@
 """Unit tests for AgentSettingsProvider."""
+import asyncio
 import os
 os.environ.setdefault("SCAI_DATA_DIR", "/tmp/scai_test_data")
 
@@ -225,6 +226,199 @@ class TestCleanup:
     async def test_no_error_on_empty_cache(self, provider):
         await provider.cleanup()
 
+    @pytest.mark.asyncio
+    async def test_clear_cache_closes_retired_client_on_running_loop(
+        self, provider,
+    ):
+        client = AsyncMock()
+        provider._client_cache[("pi", "https://custom.test/v1", "key")] = client
+
+        provider.clear_agent_client_cache("pi")
+        await asyncio.sleep(0)
+
+        client.close.assert_awaited_once()
+        assert client not in provider._retired_clients
+        await provider.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_clear_all_cache_retires_every_owned_client(self, provider):
+        first = AsyncMock()
+        second = AsyncMock()
+        provider._client_cache[("pi", "https://first.test/v1", "key")] = first
+        provider._client_cache[
+            ("literature", "https://second.test/v1", "key")
+        ] = second
+
+        provider.clear_client_cache()
+        await asyncio.sleep(0)
+
+        assert not provider._client_cache
+        first.close.assert_awaited_once()
+        second.close.assert_awaited_once()
+        assert not provider._retired_clients
+        await provider.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_clear_cache_defers_close_until_client_lease_released(
+        self, provider,
+    ):
+        client = AsyncMock()
+        provider._client_cache[("pi", "https://custom.test/v1", "key")] = client
+        provider.lease_client(client)
+
+        provider.clear_agent_client_cache("pi")
+        await asyncio.sleep(0)
+
+        client.close.assert_not_awaited()
+        assert client in provider._retired_clients
+
+        provider.release_client(client)
+        await asyncio.sleep(0)
+
+        client.close.assert_awaited_once()
+        assert client not in provider._retired_clients
+        await provider.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_scheduled_close_rechecks_late_lease_before_transport_close(
+        self, provider,
+    ):
+        client = AsyncMock()
+        provider._client_cache[("pi", "https://custom.test/v1", "key")] = client
+
+        provider.clear_agent_client_cache("pi")
+        provider.lease_client(client)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        client.close.assert_not_awaited()
+        assert client in provider._retired_clients
+
+        provider.release_client(client)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        client.close.assert_awaited_once()
+        assert client not in provider._retired_clients
+        await provider.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_retains_in_use_client_for_retry(self, provider):
+        client = AsyncMock()
+        provider._client_cache[("pi", "https://custom.test/v1", "key")] = client
+        provider.lease_client(client)
+
+        with pytest.raises(RuntimeError, match="still in use"):
+            await provider.cleanup()
+
+        client.close.assert_not_awaited()
+        assert client in provider._retired_clients
+        provider.release_client(client)
+        await asyncio.sleep(0)
+        await provider.cleanup()
+        client.close.assert_awaited_once()
+
+    def test_clear_cache_retains_client_until_cleanup_without_running_loop(
+        self, provider,
+    ):
+        client = AsyncMock()
+        provider._client_cache[("pi", "https://custom.test/v1", "key")] = client
+
+        provider.clear_agent_client_cache("pi")
+
+        assert client in provider._retired_clients
+        asyncio.run(provider.cleanup())
+        client.close.assert_awaited_once()
+        assert not provider._retired_clients
+
+    @pytest.mark.asyncio
+    async def test_cleanup_retains_failed_client_for_retry(self, provider):
+        client = AsyncMock()
+        client.close.side_effect = [RuntimeError("close failed"), None]
+        provider._client_cache[("pi", "https://custom.test/v1", "key")] = client
+
+        with pytest.raises(RuntimeError, match="failed to close 1"):
+            await provider.cleanup()
+
+        assert client in provider._retired_clients
+        assert provider._cleanup_complete is False
+        await provider.cleanup()
+        assert client.close.await_count == 2
+        assert provider._cleanup_complete is True
+
+    @pytest.mark.asyncio
+    async def test_cleanup_rejects_late_client_creation(self, provider, state):
+        blocker = asyncio.Event()
+        entered = asyncio.Event()
+        client = AsyncMock()
+
+        async def blocked_close():
+            entered.set()
+            await blocker.wait()
+
+        client.close.side_effect = blocked_close
+        provider._client_cache[("pi", "https://custom.test/v1", "key")] = client
+        cleanup_task = asyncio.create_task(provider.cleanup())
+        await entered.wait()
+
+        state.agent_server_configs["literature"] = {
+            "llm_base_url": "https://late.test/v1",
+            "api_key": "late-key",
+        }
+        with pytest.raises(RuntimeError, match="provider is closing"):
+            provider.get_llm_client("literature")
+        with pytest.raises(RuntimeError, match="provider is closing"):
+            provider.register_client(("late", "client"), AsyncMock())
+
+        blocker.set()
+        await cleanup_task
+        assert client.close.await_count == 1
+        assert provider._cleanup_complete is True
+
+    @pytest.mark.asyncio
+    async def test_cleanup_does_not_double_close_late_registered_client(
+        self, provider,
+    ):
+        initial_entered = asyncio.Event()
+        initial_release = asyncio.Event()
+        late_entered = asyncio.Event()
+        late_release = asyncio.Event()
+
+        initial = AsyncMock()
+
+        async def close_initial():
+            initial_entered.set()
+            await initial_release.wait()
+
+        initial.close.side_effect = close_initial
+        provider._client_cache[("pi", "https://initial.test/v1", "key")] = initial
+        provider.clear_agent_client_cache("pi")
+        await initial_entered.wait()
+
+        cleanup_task = asyncio.create_task(provider.cleanup())
+        await asyncio.sleep(0)
+
+        late = AsyncMock()
+
+        async def close_late():
+            late_entered.set()
+            await late_release.wait()
+
+        late.close.side_effect = close_late
+        with pytest.raises(RuntimeError, match="provider is closing"):
+            provider.register_client(("late", "client"), late)
+        await late_entered.wait()
+
+        initial_release.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert late.close.await_count == 1
+
+        late_release.set()
+        await cleanup_task
+        assert late.close.await_count == 1
+        assert provider._cleanup_complete is True
+
 
 class TestRegisterClient:
     def test_register_external_client(self, provider):
@@ -233,6 +427,35 @@ class TestRegisterClient:
         assert provider.get_llm_client("pi") is not mock_client
         # Registered client is in cache and will be cleaned up
         assert ("registered", "deep_research", "deep_research") in provider._client_cache
+
+    @pytest.mark.asyncio
+    async def test_reregister_same_key_retires_previous_client(self, provider):
+        previous = AsyncMock()
+        replacement = AsyncMock()
+
+        provider.register_client(("deep_research", "deep_research"), previous)
+        provider.register_client(("deep_research", "deep_research"), replacement)
+        await asyncio.sleep(0)
+
+        previous.close.assert_awaited_once()
+        assert previous not in provider._retired_clients
+        assert provider._client_cache[
+            ("registered", "deep_research", "deep_research")
+        ] is replacement
+        await provider.cleanup()
+        replacement.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_register_after_cleanup_keeps_ownership_with_caller(self, provider):
+        await provider.cleanup()
+        late_client = AsyncMock()
+
+        with pytest.raises(RuntimeError, match="already closed"):
+            provider.register_client(("late", "client"), late_client)
+
+        late_client.close.assert_not_awaited()
+        assert late_client not in provider._retired_clients
+        assert not provider._client_cache
 
     def test_cached_clients_returns_all(self, provider, state):
         state.agent_server_configs["pi"] = {

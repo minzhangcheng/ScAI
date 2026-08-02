@@ -89,9 +89,9 @@ def test_websocket_creation_holds_lock():
     the per-session lock so two concurrent connections cannot both decide to
     create a workflow.
 
-    The fix should acquire get_session_lock(session_id) before the
-    `session_id in workflows` / `session_id in initializing_sessions` check
-    and hold it through `workflows[session_id] = workflow`.
+    The fix should acquire get_session_lock(session_id) before the shared
+    graph/report activity classifier and reserve ``initializing_sessions``
+    before releasing it.
     """
     src = inspect.getsource(ws)
     body = _extract_async_fn(src, "websocket_endpoint")
@@ -102,7 +102,7 @@ def test_websocket_creation_holds_lock():
     # The lock acquisition must come before the workflow_running decision —
     # otherwise the TOCTOU race remains.
     lock_pos = body.find("get_session_lock")
-    decision_pos = body.find("workflow_running = session_id in workflows")
+    decision_pos = body.find("_session_workflow_activity(session_id)")
     assert lock_pos != -1 and decision_pos != -1
     assert lock_pos < decision_pos, \
         "P1-8: get_session_lock must be acquired BEFORE the workflow_running check"

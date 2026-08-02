@@ -64,6 +64,12 @@ from backend.services.snapshot_v2.safe_point import (
 )
 from backend.services.snapshot_v2.workspace import WorkspaceCapture
 from backend.state import get_session_lock
+from backend.services.session_lifecycle import (
+    SessionGenerationError,
+    SessionGoneError,
+    assert_generation_writable,
+    establish_snapshot_operation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,18 +133,50 @@ from .shared import (  # noqa: F401
 class SessionStateMixin:
     """Safe-point ownership, session state load/save, and websocket state sync."""
 
-    async def _create_safe_point(self, workflow_state: dict[str, Any] | None = None) -> None:
+    async def _create_safe_point(
+        self,
+        workflow_state: dict[str, Any] | None = None,
+        *,
+        analysis_state: Any = None,
+    ) -> None:
         # Capture lifecycle may store graph-position metadata, but must NOT
         # authorize empty-complete from untrusted capture args.
         # Token is process-local for this service instance's lifecycle hold.
         owner_token = f"capture:{self.session_id}:{id(self)}"
         self._safe_point_owner_token = owner_token
-        acquired = await self.safe_point.acquire(
-            self.session_id,
-            workflow_state,
-            eligibility_trusted=False,
-            owner_token=owner_token,
-        )
+        def _validate_generation() -> None:
+            if analysis_state is None:
+                return
+            from backend.state import sessions
+
+            current = sessions.get(self.session_id)
+            if current is not None and current is not analysis_state:
+                raise SessionGenerationError(
+                    "session state was replaced before snapshot reservation"
+                )
+            # Unit-level/legacy captures may operate before cache publication.
+            # When the current cache owns this state, prove its exact lifecycle
+            # generation while the producer barrier is held.
+            if current is analysis_state:
+                assert_generation_writable(self.session_id, analysis_state)
+
+        try:
+            acquired = await establish_snapshot_operation(
+                self.session_id,
+                lambda: self.safe_point.acquire(
+                    self.session_id,
+                    workflow_state,
+                    eligibility_trusted=False,
+                    owner_token=owner_token,
+                ),
+                validate=_validate_generation,
+            )
+        except (SessionGoneError, SessionGenerationError) as exc:
+            self._safe_point_owner_token = None
+            raise SnapshotCaptureError(
+                "SESSION_GENERATION_CHANGED",
+                "Session generation changed before snapshot reservation",
+            ) from exc
         if not acquired:
             self._safe_point_owner_token = None
             raise SnapshotCaptureError(
@@ -257,17 +295,10 @@ class SessionStateMixin:
 
     async def _send_state_sync(self, payload: dict[str, Any]) -> None:
         """Emit a state_sync message for the snapshot failure gate."""
-        from backend.state import websockets
-        ws = websockets.get(self.session_id)
-        if ws is not None:
-            try:
-                await ws.send_json({
-                    "type": "state_sync",
-                    "change_type": payload.get("change_type", "snapshot_failure"),
-                    **payload,
-                })
-            except Exception as exc:
-                logger.warning(
-                    "[%s] Failed to send snapshot failure state sync: %s",
-                    self.session_id, exc,
-                )
+        from backend.utils.websocket_delivery import send_analysis_json
+
+        await send_analysis_json(self.session_id, {
+            "type": "state_sync",
+            "change_type": payload.get("change_type", "snapshot_failure"),
+            **payload,
+        })

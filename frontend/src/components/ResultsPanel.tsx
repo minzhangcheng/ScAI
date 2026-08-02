@@ -5,7 +5,7 @@ import { useTranslation } from '../i18n/translations'
 import type { GraphicAbstractContent } from '../types'
 import { FigureGallery, IntegratedReport, GraphicAbstract, DownloadButtons } from './analysis'
 import { downloadBlob } from '../utils/download'
-import { roundKey } from '../utils/roundKey'
+import { resultIdentityKey } from '../utils/roundKey'
 import {
   FileText,
   Download,
@@ -376,8 +376,19 @@ export function ResultsPanel() {
         </h3>
         <div className="space-y-3">
           {(currentSession.roundResults || []).map((round) => {
-            const key = roundKey(round.phase, round.round)
+            const key = resultIdentityKey(round)
             const isExpanded = expandedRounds.has(key)
+            const roundStatusLabel = {
+              completed: t('roundStatusCompleted'),
+              partial: t('roundStatusPartial'),
+              failed: t('roundStatusFailed'),
+              skipped: t('roundStatusSkipped'),
+            }[round.roundStatus]
+            const evidenceStatusLabel = {
+              substantive: t('evidenceStatusSubstantive'),
+              empty: t('evidenceStatusEmpty'),
+              failed: t('evidenceStatusFailed'),
+            }[round.evidenceStatus]
 
             return (
               <div
@@ -389,7 +400,7 @@ export function ResultsPanel() {
                   onClick={() => toggleRound(key)}
                   className="w-full flex items-center justify-between p-4 hover:bg-slate-50 transition-colors"
                 >
-                  <div className="flex items-center gap-3">
+                  <div className="flex flex-wrap items-center gap-3">
                     {isExpanded ? (
                       <ChevronDown className="w-5 h-5 text-slate-400" />
                     ) : (
@@ -403,6 +414,48 @@ export function ResultsPanel() {
                     <span className="text-sm text-slate-500">
                       {(round.pathologyFindings?.length || 0) + (round.bioinformaticsFindings?.length || 0) + (round.biochemistryFindings?.length || 0) + (round.literatureFindings?.length || 0)} {t('findings')}
                     </span>
+                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                      round.roundStatus === 'completed'
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : round.roundStatus === 'partial'
+                          ? 'bg-amber-100 text-amber-700'
+                          : 'bg-rose-100 text-rose-700'
+                    }`}>
+                      {roundStatusLabel}
+                    </span>
+                    <span className={`rounded-full px-2 py-0.5 text-xs ${
+                      round.evidenceStatus === 'substantive'
+                        ? 'bg-blue-100 text-blue-700'
+                        : 'bg-slate-100 text-slate-600'
+                    }`}>
+                      {t('evidenceBadge', { status: evidenceStatusLabel })}
+                    </span>
+                    {round.bioinformaticsEvidenceVerified != null && (
+                      <span className={`rounded-full px-2 py-0.5 text-xs ${
+                        round.bioinformaticsEvidenceVerified
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : 'bg-amber-100 text-amber-700'
+                      }`}>
+                        {round.bioinformaticsEvidenceVerified
+                          ? t('evidenceVerified')
+                          : t('evidenceUnverified')}
+                      </span>
+                    )}
+                    {round.directionCoverageEligible != null && (
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
+                        {round.directionCoverageEligible
+                          ? t('coverageEligible')
+                          : t('coverageWithheld')}
+                      </span>
+                    )}
+                    {round.lineageId !== 'main' && (
+                      <span
+                        className="max-w-40 truncate rounded-full bg-violet-100 px-2 py-0.5 text-xs text-violet-700"
+                        title={round.branchLabel || round.lineageId}
+                      >
+                        {round.branchLabel || round.lineageId}
+                      </span>
+                    )}
                   </div>
                 </button>
 
@@ -413,6 +466,19 @@ export function ResultsPanel() {
                     {round.summary && (
                       <div className="p-3 bg-slate-50 rounded-lg">
                         <p className="text-sm text-slate-700">{round.summary}</p>
+                      </div>
+                    )}
+
+                    {round.evidenceNotes.length > 0 && (
+                      <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                        <h4 className="mb-1 text-sm font-medium text-amber-800">
+                          {t('evidenceLimitations')}
+                        </h4>
+                        <ul className="space-y-1 text-sm text-amber-800">
+                          {round.evidenceNotes.map((note, index) => (
+                            <li key={`${round.resultIdentityKey}-evidence-note-${index}`}>• {note}</li>
+                          ))}
+                        </ul>
                       </div>
                     )}
 

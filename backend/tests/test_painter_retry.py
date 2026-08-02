@@ -1,5 +1,7 @@
 """Tests for PainterAgent's unified protocol-cascade + round-retry behavior."""
+import asyncio
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -33,8 +35,15 @@ def _make_painter(base_url: str = f"https://{_GOOGLE_AI_STUDIO_BASE_URL}/v1beta"
 
     llm_client = MagicMock()
     llm_client.base_url = base_url
+    llm_client.api_key = "test-key"
     llm_client.set_context = MagicMock()
     llm_client.client = MagicMock()
+
+    @asynccontextmanager
+    async def direct_request_scope():
+        yield llm_client
+
+    llm_client.direct_request_scope = direct_request_scope
 
     provider = MagicMock()
     provider.get_model.return_value = "test-model"
@@ -188,8 +197,6 @@ async def test_all_rounds_exhausted_raises():
 @pytest.mark.asyncio
 async def test_timeout_switches_protocol():
     """A per-protocol timeout is treated as a switchable failure, not fatal."""
-    import asyncio
-
     painter = _make_painter()
     real_sleep = asyncio.sleep
 
@@ -361,7 +368,8 @@ async def test_images_api_attempt_b64_fallback_preserved():
         good_response,
     ])
 
-    result = await painter._images_api_attempt("a prompt")
+    runtime = painter._capture_runtime()
+    result = await painter._images_api_attempt("a prompt", runtime=runtime)
 
     assert result == "FALLBACKDATA"
     assert painter.llm_client.client.images.generate.await_count == 2
@@ -376,7 +384,192 @@ async def test_images_edit_generic_403_does_not_repeat_denied_endpoint():
         )
     )
 
+    runtime = painter._capture_runtime()
     with pytest.raises(Exception, match="403"):
-        await painter._images_edit_attempt("revise", "QUJD")
+        await painter._images_edit_attempt("revise", "QUJD", runtime=runtime)
 
     assert painter.llm_client.client.images.edit.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_generation_freezes_runtime_across_protocol_switch():
+    """One cascade must not combine an old protocol order with new settings."""
+    painter = _make_painter(base_url="https://old.example/v1")
+    old_client = painter.llm_client
+    new_client = MagicMock()
+    new_client.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    captured = []
+
+    async def old_images_fails(*args, runtime, **kwargs):
+        captured.append(runtime)
+        painter._provider.get_llm_client.return_value = new_client
+        painter._provider.get_model.return_value = "new-model"
+        painter._provider.get_system_prompt.return_value = "new-system"
+        painter._provider.get_temperature.return_value = 0.9
+        raise RuntimeError("switch protocol")
+
+    async def old_chat_succeeds(*args, runtime, **kwargs):
+        captured.append(runtime)
+        return "OLD_RUNTIME_RESULT"
+
+    painter._images_api_attempt = AsyncMock(side_effect=old_images_fails)
+    painter._chat_image_attempt = AsyncMock(side_effect=old_chat_succeeds)
+    painter._generate_image_dashscope = AsyncMock(
+        side_effect=AssertionError("old protocol order must remain frozen")
+    )
+
+    with patch("backend.agents.painter_agent.asyncio.sleep", new=AsyncMock()):
+        result = await painter._generate_image("a prompt")
+
+    assert result == "OLD_RUNTIME_RESULT"
+    assert len(captured) == 2
+    assert all(snapshot.llm_client is old_client for snapshot in captured)
+    assert all(snapshot.model == "test-model" for snapshot in captured)
+    assert all(snapshot.system_prompt == "draw" for snapshot in captured)
+    assert all(snapshot.temperature == 0.7 for snapshot in captured)
+    painter._generate_image_dashscope.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_revision_freezes_runtime_and_vision_across_protocol_switch():
+    painter = _make_painter(base_url="https://openrouter.ai/api/v1")
+    painter._provider.get_vision_setting.return_value = True
+    old_client = painter.llm_client
+    new_client = MagicMock()
+    new_client.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    captured = []
+
+    async def old_chat_fails(*args, runtime, **kwargs):
+        captured.append(runtime)
+        painter._provider.get_llm_client.return_value = new_client
+        painter._provider.get_model.return_value = "new-model"
+        painter._provider.get_system_prompt.return_value = "new-system"
+        painter._provider.get_temperature.return_value = 0.9
+        painter._provider.get_vision_setting.return_value = False
+        raise RuntimeError("switch protocol")
+
+    async def old_edit_succeeds(*args, runtime, **kwargs):
+        captured.append(runtime)
+        return "OLD_REVISION_RESULT"
+
+    painter._chat_image_attempt = AsyncMock(side_effect=old_chat_fails)
+    painter._images_edit_attempt = AsyncMock(side_effect=old_edit_succeeds)
+    painter._generate_image_dashscope = AsyncMock(
+        side_effect=AssertionError("old protocol order must remain frozen")
+    )
+
+    with patch("backend.agents.painter_agent.asyncio.sleep", new=AsyncMock()):
+        result = await painter.revise_graphic_abstract(
+            state=MagicMock(),
+            current_image_base64="QUJD",
+            original_prompt="orig",
+            feedback="fix",
+            suggestions=[],
+            must_fix=[],
+            revision_history=[{"round": 1}],
+        )
+
+    assert result == "OLD_REVISION_RESULT"
+    assert len(captured) == 2
+    assert all(snapshot.llm_client is old_client for snapshot in captured)
+    assert all(snapshot.model == "test-model" for snapshot in captured)
+    assert all(snapshot.system_prompt == "draw" for snapshot in captured)
+    assert all(snapshot.temperature == 0.7 for snapshot in captured)
+    assert all(snapshot.has_vision is True for snapshot in captured)
+    painter._generate_image_dashscope.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dashscope_submit_poll_and_download_share_frozen_transport():
+    painter = _make_painter(
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+    )
+    old_client = painter.llm_client
+    new_client = MagicMock()
+    new_client.base_url = "https://new.example/v1"
+    new_client.http_client = MagicMock()
+    new_client.http_client.post = AsyncMock()
+    new_client.http_client.get = AsyncMock()
+
+    submit_response = MagicMock()
+    submit_response.json.return_value = {"output": {"task_id": "old-task"}}
+    poll_response = MagicMock()
+    poll_response.json.return_value = {
+        "output": {
+            "task_status": "SUCCEEDED",
+            "results": [{"url": "https://old.example/image.png"}],
+        }
+    }
+    download_response = MagicMock()
+    download_response.content = b"image"
+    old_client.http_client.post = AsyncMock(return_value=submit_response)
+    old_client.http_client.get = AsyncMock(
+        side_effect=[poll_response, download_response]
+    )
+
+    async def switch_config_during_poll(*args, **kwargs):
+        painter._provider.get_llm_client.return_value = new_client
+        painter._provider.get_model.return_value = "new-model"
+
+    with patch(
+        "backend.agents.painter_agent.asyncio.sleep",
+        new=AsyncMock(side_effect=switch_config_during_poll),
+    ):
+        result = await painter._generate_image("a prompt")
+
+    assert result == "aW1hZ2U="
+    old_client.http_client.post.assert_awaited_once()
+    assert old_client.http_client.get.await_count == 2
+    new_client.http_client.post.assert_not_awaited()
+    new_client.http_client.get.assert_not_awaited()
+    submit_kwargs = old_client.http_client.post.await_args.kwargs
+    assert submit_kwargs["json"]["model"] == "test-model"
+    assert submit_kwargs["headers"]["Authorization"] == "Bearer test-key"
+
+
+@pytest.mark.asyncio
+async def test_painter_direct_transport_keeps_client_open_until_generation_finishes():
+    """Raw Images API calls participate in the client's active-request guard."""
+    from backend.utils.llm_client import OpenAICompatibleClient
+
+    painter = _make_painter(base_url="https://api.openai.com/v1")
+    client = OpenAICompatibleClient(
+        api_key="test-key",
+        base_url="https://api.openai.com/v1",
+    )
+    painter._provider.get_llm_client.return_value = client
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    item = MagicMock()
+    item.b64_json = "IMAGE_DATA"
+    response = MagicMock()
+    response.data = [item]
+    response.model_dump.return_value = {"data": [{"b64_json": "IMAGE_DATA"}]}
+
+    async def blocked_generate(**kwargs):
+        entered.set()
+        await release.wait()
+        return response
+
+    client.client.images.generate = AsyncMock(side_effect=blocked_generate)
+    client.client.close = AsyncMock()
+    client.http_client.aclose = AsyncMock()
+
+    generation_task = asyncio.create_task(painter._generate_image("a prompt"))
+    await entered.wait()
+    close_task = asyncio.create_task(client.close())
+    await asyncio.sleep(0)
+
+    assert client._active_requests == 1
+    assert close_task.done() is False
+    client.client.close.assert_not_awaited()
+
+    release.set()
+    assert await generation_task == "IMAGE_DATA"
+    await close_task
+
+    assert client._active_requests == 0
+    assert client._closed is True
+    client.client.close.assert_awaited_once()
+    client.http_client.aclose.assert_awaited_once()

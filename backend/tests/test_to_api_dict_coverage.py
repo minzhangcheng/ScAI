@@ -99,6 +99,13 @@ _EXCLUDED_FIELDS = {
     "final_report_requested",
     "report_generation_id",
     "recovery_blocked",
+    # Server-side report artifact inventory; clients consume the dedicated
+    # report and gallery endpoints instead of the raw registry records.
+    "artifact_registry_version",
+    "legacy_artifacts",
+    # Persistent server-side incarnation used to reject stale writes/deletes;
+    # clients use state_version and never submit a lifecycle generation.
+    "lifecycle_generation",
 }
 
 _COMPUTED_FIELDS = {

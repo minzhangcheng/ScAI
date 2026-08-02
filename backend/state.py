@@ -14,11 +14,41 @@ sessions: Dict[str, Any] = {}
 # Running workflow instances: session_id -> SingleCellAnalysisWorkflow
 workflows: Dict[str, Any] = {}
 
+# Standalone partial-report workflow instances. These are intentionally
+# separate from ``workflows`` because they must not make a WebSocket reconnect
+# look like a graph analysis is running, but deletion still needs an ownership
+# handle until every resource has closed.
+report_workflows: Dict[str, Any] = {}
+
 # Background run tasks: session_id -> asyncio.Task
 _run_tasks: Dict[str, Any] = {}
 
 # Sessions currently being initialized (prevents concurrent workflow creation).
 initializing_sessions: set = set()
+# Identity owners for producer-created initialization markers. A restore/test
+# may still install a set-only marker; producer cleanup must never clear one it
+# did not claim.
+initializing_session_owners: Dict[str, object] = {}
+
+
+def claim_initializing_session(session_id: str) -> object:
+    """Install and return an identity token for one initialization owner."""
+    token = object()
+    initializing_sessions.add(session_id)
+    initializing_session_owners[session_id] = token
+    return token
+
+
+def release_initializing_session(
+    session_id: str,
+    token: object | None = None,
+) -> bool:
+    """Clear an initialization marker unconditionally or by exact ownership."""
+    if token is not None and initializing_session_owners.get(session_id) is not token:
+        return False
+    initializing_sessions.discard(session_id)
+    initializing_session_owners.pop(session_id, None)
+    return True
 
 # Lock for protecting concurrent access to the dicts above.
 state_lock: asyncio.Lock = asyncio.Lock()
@@ -101,7 +131,9 @@ system_config: Dict[str, Optional[Any]] = {"current": None}
 # Exposed here to avoid circular imports with routes that need to check/modify.
 websockets: Dict[str, Any] = {}
 
-# Prepared exports for two-phase export: session_id -> {"path": str, "filename": str, "size": int}
+# Export lifecycle records keyed by one-shot token. Records cover building,
+# ready, streaming, and cleanup-failed phases so deletion can drain every
+# producer before allowing a same-ID generation to be created.
 prepared_exports: Dict[str, Dict[str, Any]] = {}
 prepared_exports_lock: asyncio.Lock = asyncio.Lock()
 
@@ -130,6 +162,11 @@ report_ws_lock: asyncio.Lock = asyncio.Lock()
 # Detailed report generation state: session_id -> report dict
 detailed_reports: Dict[str, Any] = {}
 
+# Tracked background detailed-report producers. Unlike the process-local
+# pending marker, these task handles let deletion cancel and await the writer
+# before removing a session tree or permitting same-ID reuse.
+detailed_report_tasks: Dict[str, asyncio.Task] = {}
+
 # Snapshot V2 capture jobs: job_id -> status dict
 snapshot_jobs: Dict[str, Any] = {}
 
@@ -141,13 +178,20 @@ snapshot_restore_jobs: Dict[str, Any] = {}
 def has_live_session_task(session_id: str) -> bool:
     """Whether any registry holds an unfinished task for this session.
 
-    These three are the complete set of places a session's work can be
-    executing, so a caller asking "is anything running here?" must consult all
-    of them — answering from one registry answers for one entry point only.
+    These task registries plus an incomplete standalone report workflow are the
+    complete set of places a session's work can be executing, so a caller asking
+    "is anything running here?" must consult all of them.
     """
     from backend.services.workflow_runner import _report_tasks  # local: cycle
 
-    for registry in (_run_tasks, _report_tasks, chat_tasks):
+    if session_id in report_workflows:
+        return True
+    for registry in (
+        _run_tasks,
+        _report_tasks,
+        chat_tasks,
+        detailed_report_tasks,
+    ):
         task = registry.get(session_id)
         if task is not None and not task.done():
             return True

@@ -70,10 +70,9 @@ async def test_length_truncated_empty_content_retries_with_bigger_budget(client)
 
 
 @pytest.mark.asyncio
-async def test_salvaged_truncated_reasoning_still_retries(client):
-    # The extractor salvages the (truncated) reasoning_content into `content`, so
-    # the result is non-empty and != EMPTY_CONTENT_PLACEHOLDER — but the *answer*
-    # field is still empty and the response is length-truncated, so we must retry.
+async def test_private_truncated_reasoning_still_retries(client):
+    # A private reasoning field is not answer content. The empty public answer
+    # plus length truncation must still trigger the larger-budget retry.
     truncated = _resp(None, finish_reason="length", reasoning="First, the user is asking me to...")
     recovered = _resp('{"severity": "warning"}', finish_reason="stop")
     call = AsyncMock(side_effect=[truncated, recovered])

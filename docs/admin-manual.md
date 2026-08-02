@@ -8,14 +8,14 @@ Examples use visibly marked values such as `<API_KEY>`, `<SESSION_ID>`, and `<AR
 
 ## 2. Architecture and requirements
 
-ScAI consists of a Vite/React frontend on port `3000`, a FastAPI/Uvicorn backend on port `8000`, local analysis kernels, external OpenAI-compatible model services, and disk-backed application/session storage.
+ScAI production serves the built Vite/React application, REST API, and WebSockets from one FastAPI/Uvicorn process on port `3000`. Development keeps a Vite server on `3000` and a proxied FastAPI/Uvicorn backend on `8000`. Both modes use local analysis kernels, external OpenAI-compatible model services, and disk-backed application/session storage.
 
 The supported deployment choices are:
 
-- Docker: the image is based on Python 3.11, installs Node.js/npm, exposes frontend port `3000`, and runs the backend internally on `8000`.
-- Direct startup: a Linux environment with GNU-compatible `find`, `stat`, `sort`, `grep`, `head`, `cut`, and `tr`; `python3.12` for virtual-environment creation; `python3`; Node.js/npm/npx; and `pgrep`, `pkill`, `lsof`, and `kill` is required. The scripts are not designed as portable POSIX-only tooling.
+- Docker: a Node.js 20.19 build stage compiles the frontend; the Python 3.11 runtime contains no Node.js/npm and exposes the single application port `3000`.
+- Direct startup: a Linux environment with GNU-compatible `find`, `grep`, `head`, `cut`, `tr`, `cmp`, and `cp`; `python3.12` for virtual-environment creation; `python3`; and `pgrep`, `pkill`, `lsof`, and `kill` is required. Node.js 20.19+ or 22.12+ and npm/npx are required for development and whenever production must rebuild stale frontend assets. The scripts are not designed as portable POSIX-only tooling.
 
-Size storage for uploaded datasets, generated artifacts, logs, temporary uploads, and dependencies. The host must be able to reach configured model endpoints and package registries during startup. Docker startup installs Python requirements and may install Node dependencies, so the first start can be substantially slower.
+Size storage for uploaded datasets, generated artifacts, logs, temporary uploads, and dependencies. The host must be able to reach configured model endpoints and the Python package registry during startup. Docker startup installs Python requirements, so the first start can be substantially slower; frontend dependencies are resolved only while the image is built.
 
 ### Memory sizing
 
@@ -96,9 +96,9 @@ docker run -d --name scai \
 
 **Warning:** reuse the same protected `SCAI_JWT_SECRET` and `SCAI_CONFIG_SECRET` values used by the previous container. The example uses an environment file for brevity; protect that file from other users. Recreating the container with different secrets invalidates existing JWTs and can make encrypted model credentials unreadable.
 
-Open `http://localhost:3000`. `/dep` stores the Python environment and Node dependencies; `/data` stores application data. The entrypoint creates both, recursively assigns them to UID `10001` (`scai`), then drops root privileges. Session directories are normally restricted to mode `0700`. Ensure the host directories can safely have their ownership changed, and use elevated host privileges when backup tooling cannot read them. Do not change ownership on live data merely to make a backup command succeed.
+Open `http://localhost:3000`. `/dep` stores the Python environment; `/data` stores application data. Frontend assets are compiled into the image and served by FastAPI. The entrypoint creates both mounted directories, recursively assigns them to UID `10001` (`scai`), then drops root privileges. Session directories are normally restricted to mode `0700`. Ensure the host directories can safely have their ownership changed, and use elevated host privileges when backup tooling cannot read them. Do not change ownership on live data merely to make a backup command succeed.
 
-The image exposes only `3000`; do not publish `8000` unless direct API access is operationally required. If it is required, add `-p 8000:8000` and restrict network access appropriately.
+The image exposes only `3000`; the UI, API, and WebSockets all use that port. There is no separate runtime service on `8000` to publish.
 
 Useful container environment variables are:
 
@@ -114,11 +114,11 @@ docker run -d --name scai \
   ghcr.io/minzhangcheng/scai:latest
 ```
 
-`SCAI_MODE` defaults to `prod`; the entrypoint also accepts `--dev` or `--prod` after the image name. Docker always exports `SCAI_DATA_DIR=/data`. `PIP_INDEX_URL` is passed to dependency installation when set.
+`SCAI_MODE` defaults to `prod`; `--prod` is accepted after the image name. The production runtime deliberately rejects `--dev` because it contains no Node.js/npm; use a source checkout with `./start.sh --dev` for Vite hot reload. Docker always exports `SCAI_DATA_DIR=/data`. `PIP_INDEX_URL` is passed to dependency installation when set.
 
 ### Health, logs, lifecycle, and removal
 
-The built-in health check calls `http://127.0.0.1:8000/api/health` every 30 seconds, with a 5-second timeout and 60-second startup grace period.
+The built-in health check calls `http://127.0.0.1:3000/api/health` every 30 seconds, with a 5-second timeout and 60-second startup grace period.
 
 ```bash
 docker ps --filter name=scai
@@ -152,13 +152,13 @@ To remove the service but preserve data, stop and remove only the container. **W
 
 ## 4. Direct startup and shutdown
 
-Install Python 3.12 and Node.js/npm, clone the repository, and run:
+Install Python 3.12, clone the repository, and run. Install Node.js 20.19+ or 22.12+ with npm when the production frontend must be built or when using development mode:
 
 ```bash
 ./start.sh
 ```
 
-Defaults are production mode, host `127.0.0.1`, frontend port `3000`, and backend port `8000`. Supported options are exactly:
+Defaults are production mode, host `127.0.0.1`, and a single application port `3000`. In development, `--backport` selects the proxied backend port and defaults to `8000`. Supported options are exactly:
 
 ```text
 ./start.sh [--dev | --prod] [--host HOST] [--port PORT] [--backport PORT]
@@ -169,10 +169,10 @@ Defaults are production mode, host `127.0.0.1`, frontend port `3000`, and backen
 Example for network access and non-default ports:
 
 ```bash
-./start.sh --prod --host 0.0.0.0 --port 3000 --backport 8000
+./start.sh --prod --host 0.0.0.0 --port 3000
 ```
 
-Relative to the repository directory `<REPO>`, startup stores dependencies in `<REPO>/../dep`, data in `<REPO>/../data`, and process metadata in `<REPO>/.scai.pid`. It creates the environment with `python3.12 -m venv`, updates pip, installs backend requirements, links frontend `node_modules` to the dependency directory, builds changed frontend sources in production mode, then records backend and frontend PIDs.
+Relative to the repository directory `<REPO>`, startup stores dependencies in `<REPO>/../dep`, data in `<REPO>/../data`, and process metadata in `<REPO>/.scai.pid`. It creates the environment with `python3.12 -m venv`, updates pip, installs backend requirements, and starts Uvicorn on the application port. If any frontend build input is newer than `dist/index.html`, it installs the exact `package-lock.json` graph with `npm ci` outside the checkout and rebuilds first. Development instead records both Uvicorn and Vite PIDs.
 
 Direct-run environment controls include `SCAI_DATA_DIR` (backend data-root override), `SCAI_JWT_SECRET`, `SCAI_CONFIG_SECRET`, `SCAI_ENABLE_REPRODUCIBILITY`, and `SCAI_AUTO_FETCH_MARKERS=1`. The last option fetches optional marker databases if missing and does not block startup on failure. When `SCAI_DATA_DIR` is set, `start.sh` still creates and prints `<REPO>/../data`, but the backend actually reads and writes the override path; monitor and back up the override, not the printed sibling directory.
 
@@ -182,7 +182,7 @@ Stop the instance with:
 ./stop.sh
 ```
 
-**Warning:** `stop.sh` is intentionally broad. After reading `.scai.pid`, it searches the whole host for command lines matching ScAI Uvicorn, Vite, and Node patterns. It then terminates **any process occupying default port `8000` or `3000`**, even if that process belongs to another application or another ScAI instance. On shared hosts or multi-instance installations, inspect the recorded PIDs and process command lines first; prefer stopping only the intended PIDs. For instances using custom ports, identify and stop those PIDs manually because the fallback remains hard-coded to the defaults:
+**Warning:** `stop.sh` still has broad fallback process-name matching after it reads `.scai.pid`. It releases the application/backend ports recorded by `start.sh`, including custom values, but may terminate an unrelated process occupying one of those ports. On shared hosts or multi-instance installations, inspect the recorded PIDs and process command lines first and prefer stopping only the intended PIDs:
 
 ```bash
 lsof -i:<FRONTEND_PORT>
@@ -207,8 +207,8 @@ The release helper always builds both the selected tag and `latest`:
 ```
 
 ```bash
-./build.sh --version 0.38.9
-./build.sh --version 0.38.9 --push
+./build.sh --version 0.38.10
+./build.sh --version 0.38.10 --push
 ```
 
 Without `--version`, the helper uses the newest Git tag returned by `git describe --tags --abbrev=0`, or `latest` if none exists. `--push` pushes both tags to `ghcr.io/minzhangcheng/scai`; authenticate Docker to that registry before using it. The helper does not accept registry, image-name, platform, or build-argument flags.
@@ -245,7 +245,7 @@ Docker uses `/data`; direct startup normally uses the sibling `data` directory u
 | `logs/` | Service logs; Docker writes `logs/scai.log` |
 | `upload_temp/` | In-progress upload data |
 
-Docker `/dep` contains `/dep/venv` and `/dep/node_modules`. Direct startup uses `<REPO>/../dep/venv` and `<REPO>/../dep/node_modules`. Dependencies are reproducible and may be rebuilt, but persistence reduces restart time.
+Docker only needs `/dep/venv` persisted; the frontend assets are compiled into the image. Direct startup uses `<REPO>/../dep/venv` and `<REPO>/../dep/frontend/node_modules`. Dependencies are reproducible and may be rebuilt, but persistence reduces restart time.
 
 ## 8. Snapshots (experimental — in development)
 
@@ -440,11 +440,11 @@ Portable session export/import moves individual sessions between installations. 
 
 ## 10. Monitoring and logs
 
-Use the backend health endpoint as the basic liveness check:
+Production and Docker use the single application port for liveness. Only direct development mode exposes the backend separately on default port `8000`:
 
 ```bash
-curl -f http://127.0.0.1:8000/api/health
 curl -f http://localhost:3000/api/health
+curl -f http://127.0.0.1:8000/api/health  # development mode only
 ```
 
 For Docker, combine health state and logs:
@@ -479,7 +479,7 @@ Create an API key in the user interface and initialize the client:
 from scai_client import Client
 
 client = Client(
-    "http://localhost:8000",
+    "http://localhost:3000",
     api_key="<API_KEY>",
     timeout=3600,
 )
@@ -490,7 +490,7 @@ Constructor: `Client(base_url: str, *, api_key: str | None = None, jwt: str | No
 Use a context manager to close connections automatically:
 
 ```python
-with Client("http://localhost:8000", api_key="<API_KEY>") as client:
+with Client("http://localhost:3000", api_key="<API_KEY>") as client:
     sessions = client.list_sessions()
 ```
 
@@ -507,7 +507,7 @@ Public ordinary lifecycle methods are `close() -> None`, `__enter__() -> Client`
 ```python
 from scai_client import Client
 
-with Client("http://localhost:8000", api_key="<API_KEY>") as client:
+with Client("http://localhost:3000", api_key="<API_KEY>") as client:
     job = client.submit("analysis-config.json")
     final = job.wait(interval=60, timeout=24 * 3600)
     print(final["status"])
@@ -545,7 +545,7 @@ from scai_client import Client
 def progress(info: dict) -> None:
     print(info.get("phase"), info.get("bytes_processed"), info.get("bytes_total"))
 
-with Client("http://localhost:8000", api_key="<API_KEY>", timeout=86400) as client:
+with Client("http://localhost:3000", api_key="<API_KEY>", timeout=86400) as client:
     session_id = client.import_session(
         "portable-session.tar.gz",
         wait=True,
@@ -564,7 +564,7 @@ Ordinary signature: `import_session(archive_path: str | Path, *, wait: bool = Tr
 Ordinary export usage:
 
 ```python
-with Client("http://localhost:8000", api_key="<API_KEY>") as client:
+with Client("http://localhost:3000", api_key="<API_KEY>") as client:
     path = client.export_session(
         "<SESSION_ID>",
         "exports/portable-session.tar.gz",
@@ -596,20 +596,20 @@ Install the local client package before using the repository helper:
 
 ```bash
 python3 -m pip install ./clients/python
-python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' list
+python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' list
 ```
 
-Global options are `--url URL` (default `http://localhost:8000`) and required `--api-key API_KEY`. The helper creates `Client(..., timeout=86400)`.
+Global options are `--url URL` (default `http://localhost:3000`) and required `--api-key API_KEY`. The helper creates `Client(..., timeout=86400)`.
 
 Ordinary commands are:
 
 ```bash
 python3 session_manager.py --api-key '<API_KEY>' list
-python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
+python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
   import '<ARCHIVE_PATH>'
-python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
+python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
   export '<SESSION_ID>'
-python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
+python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
   export '<SESSION_ID>' '<OUTPUT_PATH>'
 ```
 
@@ -622,7 +622,7 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 - Protect `.jwt_secret`, `.config_secret`, `app.db`, archives, backups, and all data directories with least-privilege ownership and permissions.
 - Run application processes as an unprivileged account. The container drops to UID `10001` after volume preparation.
 - Treat API keys, JWTs, model-provider keys, and proxy credentials as secrets. Do not place them in source control, command transcripts, tickets, or logs; rotate and revoke exposed values.
-- Restrict network access to ports `3000` and `8000` according to user need. Do not bind direct startup to `0.0.0.0` without an explicit network-control plan.
+- Restrict network access to production port `3000` and, in development only, backend port `8000` according to user need. Do not bind direct startup to `0.0.0.0` without an explicit network-control plan.
 - Assess the privacy and regulatory impact before sending prompts, images, or derived research content to external model services. Verify provider retention and regional policies.
 - Validate archive origin and content, scan incoming files according to institutional policy, and import only into an appropriately isolated service account.
 - Encrypt backups at rest and in transit, maintain offline/immutable copies where required, and test recovery regularly.
@@ -633,11 +633,11 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 | Symptom | Checks and corrective action |
 |---|---|
 | Container remains unhealthy | Run `docker logs scai`; inspect `/data/logs/scai.log`; verify dependency installation, disk space, DNS/provider access, and `curl` to backend health inside the container. |
-| Frontend opens but API calls fail | Check backend port/process, `curl http://127.0.0.1:8000/api/health`, frontend proxy variables set by startup, and browser/server logs. |
+| Frontend opens but API calls fail | In production, check the single process and `curl http://127.0.0.1:3000/api/health`; in development, check the backend port and Vite proxy variables. Review browser/server logs. |
 | Direct startup says instance is running | Read `.scai.pid` and verify each PID. On a dedicated host, run `./stop.sh`; on a shared host, stop only verified PIDs. Remove the PID file only if all recorded services are gone. |
-| Address already in use | Use `lsof -i:<PORT>`, identify ownership, stop only the intended process, or choose `--port`/`--backport`. `stop.sh` can kill any occupant of 3000/8000 and does not clean custom ports. |
+| Address already in use | Use `lsof -i:<PORT>`, identify ownership, stop only the intended process, or choose `--port`/development `--backport`. `stop.sh` cleans the recorded custom ports but can kill an unrelated occupant of them. |
 | `python3.12` not found | Install Python 3.12 and its venv support; `start.sh` checks generic `python3` first but explicitly invokes `python3.12` for initial environment creation. |
-| Node/npm or package installation fails | Verify Node.js/npm, registry access, proxy/index settings, free space, and ownership of the dependency directory. Preserve logs before retrying. |
+| Node/npm or package installation fails | Node is not used by the packaged runtime. For a source build or development, verify Node.js 20.19+ or 22.12+, npm, registry access, proxy/index settings, free space, and ownership of the dependency directory. Preserve logs before retrying. |
 | Model configuration saves but analysis fails | Saving does not validate credentials. Use the validation action, confirm base URL/proxy/key, model availability, quotas, and outbound connectivity. |
 | Stored model key disappears or cannot decrypt | Restore the original `SCAI_CONFIG_SECRET` or `.config_secret` from protected backup, then restart. Do not overwrite the database while diagnosing. |
 | Existing login tokens stop working after restart | Restore the stable `SCAI_JWT_SECRET` or `.jwt_secret`. Users can log in again to receive new JWTs; API keys are database-backed. |
@@ -653,8 +653,8 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 
 | Item | Default/value | Scope |
 |---|---|---|
-| Frontend port | `3000` | Docker and direct startup |
-| Backend port | `8000` | Internal Docker backend and direct startup |
+| Production application port | `3000` | Docker and direct-start UI/API/WebSocket |
+| Development backend port | `8000` | Direct development mode only |
 | Docker mapping | `3000:3000` | Recommended host mapping |
 | Docker data/dependencies | `/data`, `/dep` | Persistent volumes |
 | Direct dependencies | `<REPO>/../dep` | `start.sh` |
@@ -680,7 +680,7 @@ python3 session_manager.py --url http://localhost:8000 --api-key '<API_KEY>' \
 | `SCAI_SNAPSHOT_SESSION_QUOTA_GB` | `500` | Per-session snapshot store ceiling, in GiB. **Values below 100 GiB are not advised** — see [Snapshot capacity](#snapshot-capacity) |
 | `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB` | `50` | Free space that must remain on the data volume after a capture, in GiB |
 | `SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO` | `0.8` | Fraction of measured kernel memory headroom a capture may plan against — see [Memory impact of snapshots](#memory-impact-of-snapshots). Values outside `(0, 1]` are ignored with a warning |
-| `SCAI_MODE` | `prod` | Docker entrypoint mode (`prod` or `dev`) |
+| `SCAI_MODE` | `prod` | Docker entrypoint mode; the production image rejects `dev` |
 | `PIP_INDEX_URL` | pip environment/default | Docker Python package index |
 | `SCAI_AUTO_FETCH_MARKERS` | `0` | Direct startup; `1` attempts marker-database download |
 | `SCAI_HOST` | Set internally | Vite proxy host; scripts set it from startup context |
@@ -728,14 +728,14 @@ quota, so the ceiling is normally approached with notice rather than hit blind.
 | `start.sh` | `--dev` | Development mode |
 | `start.sh` | `--prod` | Production mode; default |
 | `start.sh` | `--host HOST` | `127.0.0.1` |
-| `start.sh` | `--port PORT` | Frontend `3000` |
-| `start.sh` | `--backport PORT` | Backend `8000` |
+| `start.sh` | `--port PORT` | Production application / development frontend `3000` |
+| `start.sh` | `--backport PORT` | Development backend `8000`; ignored in production |
 | `start.sh` | `-h`, `--help` | Help |
-| `stop.sh` | none | Broad host process matching plus unconditional cleanup of occupants on default ports 3000/8000 |
+| `stop.sh` | none | Recorded PID/port cleanup plus broad host process-name fallback |
 | `build.sh` | `--version TAG` | Newest Git tag, else `latest` |
 | `build.sh` | `--push` | Push selected tag and `latest`; disabled by default |
 | `build.sh` | `-h`, `--help` | Help |
-| `session_manager.py` | `--url URL` | `http://localhost:8000` |
+| `session_manager.py` | `--url URL` | `http://localhost:3000` |
 | `session_manager.py` | `--api-key KEY` | Required |
 | `session_manager.py list` | none | List owned sessions |
 | `session_manager.py import` | `archive` | Required archive path |

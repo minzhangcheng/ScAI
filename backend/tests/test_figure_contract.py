@@ -791,3 +791,10 @@ def test_publication_figure_tool_uses_open_type_vocabulary():
     figure_type = tool["function"]["parameters"]["properties"]["figure_type"]
     assert "enum" not in figure_type
     assert "exact figure_type" in figure_type["description"]
+    properties = tool["function"]["parameters"]["properties"]
+    required = tool["function"]["parameters"]["required"]
+    assert "logical_figure_id" in properties
+    assert "logical_figure_id" in required
+    assert "Filename suffixes are not revision metadata" in properties[
+        "logical_figure_id"
+    ]["description"]

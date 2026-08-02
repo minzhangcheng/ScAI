@@ -155,6 +155,44 @@ class TestSnapshotV2Export:
 
         return manifest_a, manifest_b, ws_hash, rt_hash, extra_hash
 
+    def test_protection_cleanup_failure_refuses_and_removes_built_archive(
+        self, monkeypatch, v2_paths, tmp_path,
+    ):
+        from backend.services.snapshot_v2 import exporter as exporter_module
+        from backend.services.snapshot_v2.exporter import (
+            ExportIntegrityError,
+            SnapshotExporter,
+        )
+        from backend.services.snapshot_v2.paths import SnapshotV2Paths
+
+        self._setup_two_snapshots(v2_paths)
+        paths = SnapshotV2Paths(
+            root=v2_paths.root,
+            objects=v2_paths.objects,
+            staging=v2_paths.staging,
+            journals=v2_paths.journals,
+            integrity=v2_paths.integrity,
+            committed=v2_paths.committed,
+        )
+        output_path = tmp_path / "v2-export-protection-failure.tar.gz"
+        monkeypatch.setattr(
+            exporter_module,
+            "_remove_export_protection",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("journal busy")
+            ),
+        )
+
+        with pytest.raises(ExportIntegrityError) as exc_info:
+            SnapshotExporter(self.SESSION_ID, paths).export(
+                self.SESSION_ID,
+                include_runtime=False,
+                output_path=output_path,
+            )
+
+        assert exc_info.value.code == "EXPORT_PROTECTION_CLEANUP_FAILED"
+        assert not output_path.exists()
+
     # ── RED tests (will fail before exporter is implemented) ─────────
 
     def test_export_includes_base_objects_without_runtime_flag(self, v2_paths):
@@ -457,10 +495,13 @@ class TestSnapshotV2ExportRoute:
         async def fake_owner(session_id, user_id=None):
             return state
 
-        async def fake_export(self, *, include_runtime=True, snapshot_ids=None, staging_dir=None):
+        async def fake_export(
+            self, *, include_runtime=True, snapshot_ids=None, staging_dir=None,
+            output_path=None, output_preallocated=False,
+        ):
             called["include_runtime"] = include_runtime
             called["snapshot_ids"] = snapshot_ids
-            out = tmp_path / "fake-export.tar.gz"
+            out = Path(output_path)
             import tarfile
             with tarfile.open(out, "w:gz") as tf:
                 import io, json
@@ -521,8 +562,11 @@ class TestSnapshotV2ExportRoute:
         async def fake_owner(session_id, user_id=None):
             return state
 
-        async def fake_export(self, *, include_runtime=True, snapshot_ids=None, staging_dir=None):
-            out = tmp_path / "fake-export-token.tar.gz"
+        async def fake_export(
+            self, *, include_runtime=True, snapshot_ids=None, staging_dir=None,
+            output_path=None, output_preallocated=False,
+        ):
+            out = Path(output_path)
             import tarfile, io, json
             with tarfile.open(out, "w:gz") as tf:
                 data = json.dumps({"format_version": 2}).encode()
@@ -582,7 +626,10 @@ class TestSnapshotV2ExportRoute:
         async def fake_owner(session_id, user_id=None):
             return state
 
-        async def fake_export(self, *, include_runtime=True, snapshot_ids=None, staging_dir=None):
+        async def fake_export(
+            self, *, include_runtime=True, snapshot_ids=None, staging_dir=None,
+            output_path=None, output_preallocated=False,
+        ):
             raise ExportIntegrityError(
                 "UNKNOWN_SNAPSHOT_IDS",
                 "Snapshot IDs not found: snap-nonexistent",

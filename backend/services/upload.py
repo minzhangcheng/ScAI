@@ -6,6 +6,7 @@ callback injection for session persistence.
 import hashlib
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Callable, Awaitable, Optional
@@ -16,7 +17,12 @@ from backend.config import UPLOAD_CHUNK_SIZE, UPLOAD_TEMP_DIR, MAX_UPLOAD_SIZE, 
 from backend.utils.auth import get_db
 from backend.utils.files import safe_filename, validate_path_within
 from backend.utils.upload import ChunkedUploadManager
-from backend.state import sessions
+from backend.services.session_lifecycle import (
+    assert_generation_writable,
+    get_lifecycle_lock,
+)
+from backend.services.session_store import _async_save_session_under_lifecycle
+from backend.state import session_access_times, sessions, state_lock
 
 # Singleton upload manager (supports chunked uploads up to 10GB)
 upload_manager = ChunkedUploadManager(UPLOAD_TEMP_DIR, UPLOAD_CHUNK_SIZE)
@@ -93,22 +99,25 @@ async def init_upload(session_id: str, request: Request) -> dict:
     if target is None:
         raise HTTPException(status_code=400, detail=f"No placeholder for filename {filename}")
 
-    db = await get_db()
-    expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+    async with get_lifecycle_lock(session_id):
+        assert_generation_writable(session_id, state)
+        db = await get_db()
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(hours=24)
+        ).isoformat()
 
-    upload_id = await db.create_upload_session(
-        session_id=session_id,
-        filename=filename,
-        expected_sha256=expected_sha256,
-        total_chunks=total_chunks,
-        chunk_size=chunk_size,
-        expires_at_iso=expires_at,
-        placeholder_file_id=target.id,
-    )
+        upload_id = await db.create_upload_session(
+            session_id=session_id,
+            filename=filename,
+            expected_sha256=expected_sha256,
+            total_chunks=total_chunks,
+            chunk_size=chunk_size,
+            expires_at_iso=expires_at,
+            placeholder_file_id=target.id,
+        )
 
-    UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)
-
-    return {"upload_id": upload_id, "chunk_size": chunk_size}
+        UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        return {"upload_id": upload_id, "chunk_size": chunk_size}
 
 
 async def upload_chunk(
@@ -122,37 +131,46 @@ async def upload_chunk(
     Returns: {"received_chunks": int, "total_chunks": int}
     Raises: HTTPException on not found, already completed, or chunk too large.
     """
-    db = await get_db()
-    upload = await db.get_upload_session(upload_id)
+    state = sessions.get(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
 
-    if upload is None or upload["session_id"] != session_id:
-        raise HTTPException(status_code=404, detail="Upload session not found")
+    async with get_lifecycle_lock(session_id):
+        assert_generation_writable(session_id, state)
+        db = await get_db()
+        upload = await db.get_upload_session(upload_id)
 
-    if upload["completed"]:
-        raise HTTPException(status_code=400, detail="Upload already completed")
+        if upload is None or upload["session_id"] != session_id:
+            raise HTTPException(status_code=404, detail="Upload session not found")
 
-    if len(chunk_data) > upload["chunk_size"] * 2:
-        raise HTTPException(status_code=400, detail="Chunk too large")
+        if upload["completed"]:
+            raise HTTPException(status_code=400, detail="Upload already completed")
 
-    total_chunks = upload.get("total_chunks", 0) or 0
-    if chunk_index < 0 or chunk_index >= total_chunks:
-        raise HTTPException(
-            status_code=400,
-            detail=f"chunk_index {chunk_index} out of range [0,{total_chunks})",
-        )
+        if len(chunk_data) > upload["chunk_size"] * 2:
+            raise HTTPException(status_code=400, detail="Chunk too large")
 
-    chunk_path = UPLOAD_TEMP_DIR / f"{upload_id}.chunk.{chunk_index}"
-    tmp_path = chunk_path.with_suffix(".tmp")
-    tmp_path.write_bytes(chunk_data)
-    tmp_path.rename(chunk_path)
+        total_chunks = upload.get("total_chunks", 0) or 0
+        if chunk_index < 0 or chunk_index >= total_chunks:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"chunk_index {chunk_index} out of range "
+                    f"[0,{total_chunks})"
+                ),
+            )
 
-    result = await db.mark_chunk_received(upload_id, chunk_index)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Upload session not found")
-    return {
-        "received_chunks": result["received_chunks"],
-        "total_chunks": result["total_chunks"],
-    }
+        chunk_path = UPLOAD_TEMP_DIR / f"{upload_id}.chunk.{chunk_index}"
+        tmp_path = chunk_path.with_suffix(".tmp")
+        tmp_path.write_bytes(chunk_data)
+        tmp_path.rename(chunk_path)
+
+        result = await db.mark_chunk_received(upload_id, chunk_index)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Upload session not found")
+        return {
+            "received_chunks": result["received_chunks"],
+            "total_chunks": result["total_chunks"],
+        }
 
 
 async def complete_upload(session_id: str, upload_id: str) -> dict:
@@ -163,7 +181,13 @@ async def complete_upload(session_id: str, upload_id: str) -> dict:
     """
     lock, _ = await _acquire_complete_lock(upload_id)
     async with lock:
+        generation_lock = get_lifecycle_lock(session_id)
+        await generation_lock.acquire()
         try:
+            state = sessions.get(session_id)
+            if state is None:
+                raise HTTPException(status_code=404, detail="Session not found")
+            assert_generation_writable(session_id, state)
             db = await get_db()
             upload = await db.get_upload_session(upload_id)
 
@@ -173,7 +197,6 @@ async def complete_upload(session_id: str, upload_id: str) -> dict:
             # Idempotent: already completed — return the actual stored path
             if upload["completed"]:
                 stored_path = ""
-                state = sessions.get(session_id)
                 if state:
                     placeholder_id = upload.get("placeholder_file_id")
                     target = next(
@@ -251,34 +274,50 @@ async def complete_upload(session_id: str, upload_id: str) -> dict:
 
             await db.complete_upload_session(upload_id)
 
-            # Update session state via callbacks
-            state = sessions.get(session_id)
-            if state:
-                placeholder_id = upload.get("placeholder_file_id")
-                target = next(
-                    (df for df in state.data_files if df.id == placeholder_id), None
-                ) if placeholder_id else None
-                if target:
-                    target.file_path = str(final_path)
-                if _on_session_update:
-                    await _on_session_update(session_id, state)
-                if _on_session_save:
-                    await _on_session_save(session_id, state)
+            placeholder_id = upload.get("placeholder_file_id")
+            target = next(
+                (df for df in state.data_files if df.id == placeholder_id), None
+            ) if placeholder_id else None
+            if target:
+                target.file_path = str(final_path)
+            async with state_lock:
+                if sessions.get(session_id) is not state:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Session generation changed during upload",
+                    )
+                session_access_times[session_id] = time.time()
+            await _async_save_session_under_lifecycle(
+                session_id, state, force=True,
+            )
 
             return {"success": True, "filename": upload["filename"], "path": str(final_path)}
         finally:
+            generation_lock.release()
             _release_complete_lock(upload_id)
 
 
 async def cleanup_session_uploads(session_id: str) -> None:
     """Delete all upload session records and chunk files for a session."""
+    # The web upload API predates the DB-backed V1 uploader and stores JSON
+    # metadata beside its chunks. Both stores are generation-agnostic, so both
+    # must be empty before a tombstone can permit same-ID reuse.
+    await upload_manager.cleanup_session_artifacts(session_id)
+
     db = await get_db()
     uploads = await db.list_uploads_for_session(session_id)
+    failures: list[tuple[Path, OSError]] = []
     for u in uploads:
         for i in range(u.get("total_chunks", 0) or 0):
             p = UPLOAD_TEMP_DIR / f"{u['id']}.chunk.{i}"
             try:
                 p.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as exc:
+                failures.append((p, exc))
+    if failures:
+        first_path, first_error = failures[0]
+        raise OSError(
+            f"failed to remove {len(failures)} upload chunk(s); "
+            f"first path: {first_path}"
+        ) from first_error
     await db.delete_uploads_for_session(session_id)

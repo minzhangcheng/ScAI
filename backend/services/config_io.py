@@ -131,6 +131,7 @@ def apply_config_to_session(config: ConfigV1, user_id: str = "") -> AnalysisStat
         agent_server_configs=agent_server_configs,
         literature_config=literature_config,
         agent_vision_settings=agent_vision_settings,
+        artifact_registry_version=1,
     )
 
     # Write config_snapshot after creation

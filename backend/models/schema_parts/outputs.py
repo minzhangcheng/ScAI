@@ -76,11 +76,19 @@ class RoundResult(BaseModel):
     restored_from_snapshot_id: Optional[str] = None
     direction_key: str = ""
     result_identity_key: str = ""
+    # Version 1 means the completion/evidence fields below were derived from the
+    # retained node results by the current workflow.  ``None`` is intentional for
+    # sessions written before that derivation existed: historical model defaults
+    # were serialized as if they were measured verdicts, so consumers must not
+    # turn those defaults into new blocking failures.
+    evidence_schema_version: Optional[int] = None
     round_status: Literal["completed", "partial", "failed", "skipped"] = "completed"
     evidence_status: Literal["substantive", "empty", "failed"] = "empty"
     bioinformatics_evidence_verified: Optional[bool] = None
+    evidence_gate_degraded: bool = False
     evidence_execution_ids: List[str] = Field(default_factory=list)
     evidence_notes: List[str] = Field(default_factory=list)
+    evidence_gate_findings: List[Dict[str, Any]] = Field(default_factory=list)
     # Whether this innovation round has enough core-agent evidence to satisfy
     # direction-batch coverage. Optional modality degradation may leave the
     # overall round_status as "partial" while the direction is still covered.
@@ -134,6 +142,26 @@ class PublicationFigure(BaseModel):
     # diagnostics use ``diagnostic`` so completeness checks can distinguish
     # scientific deliverables from supporting visual context.
     purpose: str = "result"
+    # Stable semantic identity across separately rendered attempts.  Filenames are
+    # presentation details and must never be parsed for ``_v2``/``_final`` style
+    # suffixes to decide which records supersede one another.
+    logical_figure_id: Optional[str] = None
+    render_attempt_id: Optional[str] = None
+    # Producer lifecycle is independent of PI review.  A pending/rejected review
+    # can still refer to a physically complete render, while a process crash can
+    # leave a review-pending record whose staged files no longer exist.  Older
+    # persisted records predate this distinction and represent completed
+    # producers, hence the backward-compatible ``published`` default.
+    producer_status: Literal[
+        "pending", "publishing", "published", "failed", "abandoned"
+    ] = "published"
+    # Attempt lineage is distinct from snapshot branch ownership.  ``revision_of``
+    # records what this attempt tried to replace; ``supersedes`` is set only after
+    # the new attempt becomes report-eligible, so a failed/pending redraw cannot
+    # withdraw the last good archival render.
+    revision_of_id: Optional[str] = None
+    supersedes_id: Optional[str] = None
+    is_published_head: bool = True
     # Snapshot/branch lineage that owns this render.  Report generation filters
     # on this field just as it filters RoundResult; otherwise equal round numbers
     # from two restore branches can leak figures across reports.
@@ -145,6 +173,26 @@ class PublicationFigure(BaseModel):
     invalidated_at: Optional[datetime] = None
     invalidation_reason: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
+
+
+class LegacyArtifactRecord(BaseModel):
+    """Explicit inventory entry for a pre-registry unreviewed image.
+
+    These records preserve old-session report compatibility without pretending a
+    plain workspace file passed publication review.  New strict-registry sessions
+    never create them from an unregistered current-run file.
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    relative_path: str
+    render_sha256: str
+    pdf_relative_path: Optional[str] = None
+    pdf_sha256: Optional[str] = None
+    source: str = "legacy_workspace"
+    provenance_kind: Literal["legacy_unregistered"] = "legacy_unregistered"
+    lineage_id: str = "main"
+    discovered_at: datetime = Field(default_factory=datetime.now)
 
 class PublicationTable(BaseModel):
     """Publication-quality table"""

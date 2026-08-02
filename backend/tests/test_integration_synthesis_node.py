@@ -106,6 +106,9 @@ def test_integration_creates_round_result():
     assert rr.integration_report_summary == "INTEGRATION ANALYSIS TEXT"
     assert len(rr.integration_candidates) == 1
     assert rr.integration_candidates[0]["direction"] == "NEW"
+    assert rr.round_status == "completed"
+    assert rr.evidence_status == "substantive"
+    assert rr.direction_coverage_eligible is None
 
 
 def test_integration_sends_round_summary_message():

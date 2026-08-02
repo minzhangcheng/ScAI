@@ -136,20 +136,31 @@ from ...models.schemas import (
 from ...utils.llm_client import OpenAICompatibleClient, ToolCall, UpstreamExhaustedError, EMPTY_CONTENT_PLACEHOLDER
 from ...utils.tool_messages import tool_calls_are_paired, append_missing_tool_results
 from ...constants import PLAN_REVISION_NEEDED_TAG
-from ...utils.error_parsing import strip_ansi, extract_error_type, TECHNICAL_ERROR_TYPES, detect_swallowed_error
+from ...utils.error_parsing import (
+    compact_traceback,
+    strip_ansi,
+    extract_error_type,
+    TECHNICAL_ERROR_TYPES,
+    detect_swallowed_error,
+)
 from ...utils.expression_contract import (
+    build_expression_runtime_code,
     build_expression_preflight_code,
     extract_sensitive_expression_inputs,
+    has_direct_expression_contract_call,
+    instrument_expression_contract_calls,
     mutates_expression_representation,
     parse_expression_contracts,
     prepares_expression_before_sensitive_call,
     record_expression_contract,
+    record_executed_representation_change,
     describe_invalidated_artifacts,
     record_invalidated_file_stems,
     round_start_ns,
     record_representation_change,
     unchanged_artifact_stems,
     workspace_artifact_versions,
+    strip_expression_contract_markers,
 )
 from ..supervisor_agent import SupervisorEvalResult
 

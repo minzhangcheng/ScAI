@@ -6,49 +6,62 @@ import { useAppStore, Message, Session, AgentType, RoundResult } from '../../sto
 import { transformRawMessage, restoreAgentErrors } from '../../utils/messageTransform'
 import { transformLoadResponse, transformRoundResults } from '../../utils/transformLoadResponse'
 import { devLog } from '../../utils/logger'
-import { roundKey } from '../../utils/roundKey'
+import { resultIdentityKey } from '../../utils/roundKey'
 import { getToken } from '../../utils/authStorage'
 import { WS_AUTH_SUBPROTOCOL } from '../../constants/auth'
 import type { ChatMessage } from '../../types'
 import { resolveSnapshotFailureActions } from '../../utils/snapshotV2'
-import { API_BASE, WS_CONNECT_TIMEOUT_MS, apiFetch, applyStoreUpdates, authHeaders, generateId } from './client'
+import { WS_CONNECT_TIMEOUT_MS, ApiError, apiFetch, applyStoreUpdates, generateId } from './client'
 
 const SNAPSHOT_CLEANUP_THRESHOLD = 20
 const SNAPSHOT_REMINDER_INTERVAL = 5
+const MAX_RESTORE_COMMIT_REFRESH_KEYS = 64
 
 /**
  * Refetch `/session/{id}/load` and apply it to the store.
  *
- * `staleGuardSessionId`, when given, drops the response if the active session
- * changed while the request was in flight.
+ * The response owner must still own both the session and WebSocket generation
+ * when the request completes. This also guards lifecycle side effects inside
+ * `apiFetch` itself.
  */
 function reloadSessionState(
   sessionId: string,
   errorLabel: string,
-  staleGuardSessionId?: string,
-): Promise<void> {
-  return fetch(`${API_BASE}/session/${sessionId}/load`, { headers: authHeaders() })
-    .then(resp => resp.ok ? resp.json() : null)
+  ownsResponse: () => boolean,
+): Promise<boolean> {
+  return apiFetch<any>(
+    `/session/${sessionId}/load`,
+    undefined,
+    ownsResponse,
+  )
     .then(reloadData => {
-      if (!reloadData) return
+      if (!reloadData || typeof reloadData !== 'object') return false
       if (
-        staleGuardSessionId
-        && useAppStore.getState().currentSession?.id !== staleGuardSessionId
-      ) return
+        !ownsResponse()
+        || useAppStore.getState().currentSession?.id !== sessionId
+      ) return false
       const { sessionUpdates, storeUpdates } = transformLoadResponse(reloadData)
       useAppStore.getState().updateSession(sessionUpdates)
       applyStoreUpdates(storeUpdates)
+      return true
     })
-    .catch(reloadErr => console.error(errorLabel, reloadErr))
+    .catch(reloadErr => {
+      if (ownsResponse()) console.error(errorLabel, reloadErr)
+      return false
+    })
 }
 
 export function useWebSocket() {
   const { currentSession, addMessage, updateSession, setWsConnected, setMessages, addAgentError, setStateVersion } = useAppStore()
   const wsRef = useRef<WebSocket | null>(null)
-  const connectingRef = useRef<boolean>(false)  // Prevent multiple simultaneous connect attempts
+  const connectionAttemptRef = useRef(0)
+  const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const reconnectCountRef = useRef<number>(0)  // Track reconnection attempts for history recovery
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const restoreCommitRefreshedRef = useRef<string | null>(null)  // Transaction whose commit already triggered a /load refetch
+  const restoreCommitRefreshesRef = useRef<{
+    keys: Set<string>
+    order: string[]
+  }>({ keys: new Set(), order: [] })
   const [connected, setConnected] = useState(false)
 
   const connect = useCallback(() => {
@@ -59,22 +72,30 @@ export function useWebSocket() {
       return
     }
 
-    // Close existing connection before opening a new one
-    if (wsRef.current) {
-      const state = wsRef.current.readyState
+    // Each call owns a distinct generation. Retiring a CONNECTING socket must
+    // not leave the next call behind the previous generation's 10-second
+    // timeout, and callbacks from the retired socket must become inert.
+    const attempt = connectionAttemptRef.current + 1
+    connectionAttemptRef.current = attempt
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = null
+    }
+    if (connectTimeoutRef.current) {
+      clearTimeout(connectTimeoutRef.current)
+      connectTimeoutRef.current = null
+    }
+    const previousSocket = wsRef.current
+    wsRef.current = null
+    if (previousSocket) {
+      const state = previousSocket.readyState
       if (state === WebSocket.CONNECTING || state === WebSocket.OPEN) {
         devLog('WebSocket: Closing existing connection before reconnecting')
-        wsRef.current.close()
+        previousSocket.close()
       }
-      wsRef.current = null
     }
-
-    if (connectingRef.current) {
-      devLog('WebSocket: Connection already in progress, skipping')
-      return
-    }
-
-    connectingRef.current = true
+    setConnected(false)
+    setWsConnected(false)
     const isReconnect = reconnectCountRef.current > 0
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -86,20 +107,31 @@ export function useWebSocket() {
 
     const ws = new WebSocket(wsUrl, wsProtocols)
     wsRef.current = ws
+    const isCurrentAttempt = () => (
+      connectionAttemptRef.current === attempt && wsRef.current === ws
+    )
+    const clearCurrentConnectTimeout = () => {
+      if (!isCurrentAttempt()) return
+      if (connectTimeoutRef.current) {
+        clearTimeout(connectTimeoutRef.current)
+        connectTimeoutRef.current = null
+      }
+    }
 
     // Connection timeout: close and retry if onopen doesn't fire within 10 seconds
     const connectTimeout = setTimeout(() => {
+      if (!isCurrentAttempt()) return
+      connectTimeoutRef.current = null
       if (ws.readyState !== WebSocket.OPEN) {
         devLog('WebSocket: Connection timeout (10s), closing')
-        connectingRef.current = false
         ws.close()
       }
     }, WS_CONNECT_TIMEOUT_MS)
+    connectTimeoutRef.current = connectTimeout
 
     ws.onopen = async () => {
-      if (wsRef.current !== ws) return
-      clearTimeout(connectTimeout)
-      connectingRef.current = false
+      if (!isCurrentAttempt()) return
+      clearCurrentConnectTimeout()
       setConnected(true)
       setWsConnected(true)
       devLog('WebSocket: Connected successfully')
@@ -109,11 +141,21 @@ export function useWebSocket() {
 
       // On reconnect, restore message history from server
       if (isReconnect && freshSession) {
+        const loadingSessionId = freshSession.id
         try {
           devLog('WebSocket: Reconnect detected, loading message history...')
           // Mark that we're loading history to prevent race conditions
-          const loadingSessionId = freshSession.id
-          const data = await apiFetch<any>(`/session/${freshSession.id}/load`)
+          const ownsReconnectLoad = () => (
+            isCurrentAttempt()
+            && useAppStore.getState().currentSession?.id === loadingSessionId
+          )
+          const data = await apiFetch<any>(
+            `/session/${freshSession.id}/load`,
+            undefined,
+            ownsReconnectLoad,
+          )
+
+          if (!isCurrentAttempt()) return
 
           // Verify session hasn't changed during fetch (race condition protection)
           const currentState = useAppStore.getState()
@@ -163,12 +205,16 @@ export function useWebSocket() {
               applyStoreUpdates(storeUpdates)
             }
           }
-        } catch (e: any) {
-          // Session no longer exists on server - clear stale session to stop reconnect loop
-          if (e?.message?.includes('not found') || e?.message?.includes('404')) {
-            console.warn('WebSocket: Session not found on server (404), clearing stale session')
-            useAppStore.getState().setCurrentSession(null)
-            useAppStore.getState().clearMessages()
+        } catch (e: unknown) {
+          if (!isCurrentAttempt()) return
+          // apiFetch already applies the lifecycle contract. Keep this guard so
+          // the socket also closes immediately, but key only on stable codes.
+          if (
+            e instanceof ApiError &&
+            (e.code === 'SESSION_NOT_FOUND' || e.code === 'SESSION_GONE') &&
+            useAppStore.getState().currentSession?.id === loadingSessionId
+          ) {
+            console.warn(`WebSocket: ${e.code}, closing stale connection`)
             ws.close()
             return
           }
@@ -177,29 +223,33 @@ export function useWebSocket() {
       }
 
       // Reset reconnect count on successful connection
-      reconnectCountRef.current = 0
+      if (isCurrentAttempt()) reconnectCountRef.current = 0
     }
     
     ws.onmessage = (event) => {
+      if (!isCurrentAttempt()) return
       try {
         const data = JSON.parse(event.data)
 
         // Server heartbeat ping — ignore silently
         if (data.type === 'ping') return
 
+        if (
+          data.type === 'session_error' &&
+          (data.code === 'SESSION_NOT_FOUND' || data.code === 'SESSION_GONE')
+        ) {
+          const current = useAppStore.getState().currentSession
+          if (data.session_id === session.id && current?.id === session.id) {
+            useAppStore.getState().setCurrentSession(null)
+            useAppStore.getState().clearMessages()
+          }
+          ws.close()
+          return
+        }
+
         // Handle error messages that indicate session/config issues
         if (data.error) {
           console.error('WebSocket: Server error:', data.error)
-          // If session not found, clear stale session to stop reconnect loop
-          // Match specific backend error pattern: "Session {id} not found" or "Session not found"
-          if (typeof data.error === 'string' && /session\b.*\bnot found/i.test(data.error)) {
-            const currentSessionId = useAppStore.getState().currentSession?.id
-            if (currentSessionId) {
-              console.warn(`WebSocket: Session ${currentSessionId} not found on server, clearing stale session`)
-              useAppStore.getState().setCurrentSession(null)
-              useAppStore.getState().clearMessages()
-            }
-          }
           return
         }
 
@@ -215,7 +265,15 @@ export function useWebSocket() {
             console.warn('WebSocket: Received outdated state sync, current:', currentVersion, 'received:', syncContent.version, '. Reloading session state.')
             const sessionId = useAppStore.getState().currentSession?.id
             if (sessionId) {
-              void reloadSessionState(sessionId, 'WebSocket: Failed to reload session state:')
+              const ownsReload = () => (
+                isCurrentAttempt()
+                && useAppStore.getState().currentSession?.id === sessionId
+              )
+              void reloadSessionState(
+                sessionId,
+                'WebSocket: Failed to reload session state:',
+                ownsReload,
+              )
             }
           } else {
             // Update state version and session status. Producers that omit
@@ -300,21 +358,49 @@ export function useWebSocket() {
                 // because `_resend_wait_input_state_sync` replays the stored
                 // transaction on every reconnect.
                 const activeSessionId = store.currentSession?.id
+                const refreshKey = (
+                  activeSessionId && info.transaction_id
+                    ? `${activeSessionId}:${attempt}:${info.transaction_id}`
+                    : null
+                )
                 if (
                   info.status === 'committed'
                   && activeSessionId
                   && info.session_id === activeSessionId
-                  && restoreCommitRefreshedRef.current !== info.transaction_id
+                  && refreshKey
+                  && !restoreCommitRefreshesRef.current.keys.has(refreshKey)
                 ) {
-                  restoreCommitRefreshedRef.current = info.transaction_id
+                  const refreshes = restoreCommitRefreshesRef.current
+                  refreshes.keys.add(refreshKey)
+                  refreshes.order.push(refreshKey)
+                  while (refreshes.order.length > MAX_RESTORE_COMMIT_REFRESH_KEYS) {
+                    const expired = refreshes.order.shift()
+                    if (expired) refreshes.keys.delete(expired)
+                  }
+                  const ownsRestoreReload = () => (
+                    isCurrentAttempt()
+                    && useAppStore.getState().currentSession?.id === activeSessionId
+                  )
                   void reloadSessionState(
                     activeSessionId,
                     'WebSocket: Failed to reload session state after restore commit:',
-                    activeSessionId,
-                  )
+                    ownsRestoreReload,
+                  ).then(applied => {
+                    if (
+                      !applied
+                      && restoreCommitRefreshesRef.current.keys.has(refreshKey)
+                    ) {
+                      const retained = restoreCommitRefreshesRef.current
+                      retained.keys.delete(refreshKey)
+                      retained.order = retained.order.filter(key => key !== refreshKey)
+                    }
+                  })
                 }
               }
-            } else if (syncContent.change_type === 'snapshot_failure') {
+            } else if (
+              syncContent.change_type === 'snapshot_failure' ||
+              syncContent.change_type === 'runtime_persistence_failure'
+            ) {
               const failure = syncContent.snapshot_failure
               if (failure) {
                 const store = useAppStore.getState()
@@ -322,6 +408,8 @@ export function useWebSocket() {
                   failure,
                   allowed_actions: resolveSnapshotFailureActions(failure),
                 })
+              } else if (failure === null) {
+                useAppStore.getState().clearSnapshotFailure()
               }
               const txn = syncContent.snapshot_transaction
               if (txn) {
@@ -399,11 +487,24 @@ export function useWebSocket() {
           // Refresh full chat history from backend to ensure consistency
           const sessionId = useAppStore.getState().currentSession?.id
           if (sessionId) {
-            apiFetch<{ messages: ChatMessage[] }>(`/session/${sessionId}/chat`)
+            const ownsChatRefresh = () => (
+              isCurrentAttempt()
+              && useAppStore.getState().currentSession?.id === sessionId
+            )
+            apiFetch<{ messages: ChatMessage[] }>(
+              `/session/${sessionId}/chat`,
+              undefined,
+              ownsChatRefresh,
+            )
               .then((res) => {
+                if (!ownsChatRefresh()) return
                 useAppStore.getState().setChatMessages(res.messages || [])
               })
-              .catch((e) => { devLog('Chat refresh after delegation failed:', e) })
+              .catch((e) => {
+                if (ownsChatRefresh()) {
+                  devLog('Chat refresh after delegation failed:', e)
+                }
+              })
           }
           useAppStore.getState().setChatLoading(false)
           useAppStore.getState().setChatDelegationActive(false)
@@ -512,23 +613,16 @@ export function useWebSocket() {
           const latestSession = useAppStore.getState().currentSession
           if (latestSession) {
             const existingRounds = latestSession.roundResults || []
-            const incomingKey = roundKey(roundData.phase || '', roundData.round)
-            const existingIndex = existingRounds.findIndex((r: RoundResult) => (
-              roundKey(r.phase, r.round) === incomingKey
-            ))
 
-            const newRoundResult = {
-              round: roundData.round,
-              summary: roundData.summary || '',
-              phase: roundData.phase || '',
-              pathologyFindings: roundData.pathology_findings || [],
-              bioinformaticsFindings: roundData.bioinformatics_findings || [],
-              biochemistryFindings: roundData.biochemistry_findings || [],
-              literatureFindings: roundData.literature_findings || [],
-              crossModalCandidates: roundData.cross_modal_candidates || [],
-              integrationCandidates: roundData.integration_candidates || [],
-              integrationReportSummary: roundData.integration_report_summary || '',
-            }
+            // Use the same DTO transformer as reload/reconnect.  Maintaining a
+            // second hand-written mapping here caused evidence and lineage
+            // fields to disappear until the next page refresh.
+            const newRoundResult = transformRoundResults([roundData])[0]
+            if (!newRoundResult) return
+            const incomingKey = resultIdentityKey(newRoundResult)
+            const existingIndex = existingRounds.findIndex((r: RoundResult) => (
+              resultIdentityKey(r) === incomingKey
+            ))
 
             let updatedRounds
             if (existingIndex >= 0) {
@@ -553,19 +647,27 @@ export function useWebSocket() {
     }
     
     ws.onerror = (error) => {
-      clearTimeout(connectTimeout)
-      connectingRef.current = false
+      if (!isCurrentAttempt()) return
+      clearCurrentConnectTimeout()
       console.error('WebSocket: Error:', error)
     }
 
     ws.onclose = (event) => {
-      if (wsRef.current !== ws) return
-      clearTimeout(connectTimeout)
-      connectingRef.current = false
+      if (!isCurrentAttempt()) return
+      clearCurrentConnectTimeout()
       setConnected(false)
       setWsConnected(false)
       wsRef.current = null
       devLog('WebSocket: Disconnected, code:', event.code, 'reason:', event.reason)
+
+      if (event.code === 4404 || event.code === 4410) {
+        const store = useAppStore.getState()
+        if (store.currentSession?.id === session.id) {
+          store.setCurrentSession(null)
+          store.clearMessages()
+        }
+        return
+      }
 
       // Don't reconnect on auth failure (4401) or if no token
       if (event.code === 4401 || !getToken()) {
@@ -583,12 +685,17 @@ export function useWebSocket() {
         if (reconnectCountRef.current < 5) {  // Max 5 reconnect attempts
           const delay = Math.min(1000 * Math.pow(2, reconnectCountRef.current - 1), 10000)  // Exponential backoff, max 10s
           devLog(`WebSocket: Auto-reconnecting in ${delay}ms (attempt ${reconnectCountRef.current})...`)
-          reconnectTimerRef.current = setTimeout(() => {
+          const reconnectTimer = setTimeout(() => {
+            if (
+              connectionAttemptRef.current !== attempt
+              || reconnectTimerRef.current !== reconnectTimer
+            ) return
             reconnectTimerRef.current = null
-            if (!wsRef.current && !connectingRef.current) {
+            if (!wsRef.current) {
               connect()
             }
           }, delay)
+          reconnectTimerRef.current = reconnectTimer
         } else {
           // Max reconnect attempts reached - notify user
           console.error('WebSocket: Max reconnection attempts reached, giving up')
@@ -605,17 +712,24 @@ export function useWebSocket() {
   }, [currentSession, addMessage, updateSession, setWsConnected, setMessages, addAgentError, setStateVersion])
   
   const disconnect = useCallback(() => {
+    connectionAttemptRef.current += 1
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current)
       reconnectTimerRef.current = null
     }
-    if (wsRef.current) {
-      devLog('WebSocket: Disconnecting manually')
-      wsRef.current.close()
-      wsRef.current = null
+    if (connectTimeoutRef.current) {
+      clearTimeout(connectTimeoutRef.current)
+      connectTimeoutRef.current = null
     }
-    connectingRef.current = false
-  }, [])
+    const currentSocket = wsRef.current
+    wsRef.current = null
+    if (currentSocket) {
+      devLog('WebSocket: Disconnecting manually')
+      currentSocket.close()
+    }
+    setConnected(false)
+    setWsConnected(false)
+  }, [setWsConnected])
   
   useEffect(() => {
     return () => {

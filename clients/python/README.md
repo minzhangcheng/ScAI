@@ -26,7 +26,7 @@ pytest clients/python/tests
 
 Sign in to ScAI, open the user menu, and select **API Keys**. Create a labeled key and store it securely; the full value is shown only when it is created. ScAI API keys begin with `scai_`.
 
-When ScAI is started with the documented Docker command, use `http://localhost:3000` as the client base URL. The frontend port proxies `/api` requests to the backend. For a direct run, or when backend port `8000` is explicitly published, `http://localhost:8000` can be used instead.
+Docker and direct production mode serve the UI, API, and WebSockets from the single application URL `http://localhost:3000`. Only native `./start.sh --dev` runs a separate backend on `http://localhost:8000`; the Vite development server on port `3000` proxies API requests to it.
 
 ## Create a Client
 

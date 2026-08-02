@@ -1,4 +1,5 @@
 """Reporting mixin — final report, graphic abstract, and detailed report generation."""
+import asyncio
 import logging
 import os
 import uuid
@@ -223,38 +224,91 @@ class ReportingMixin(
         sp = service.safe_point
         owner_token = f"report:{self.session_id}:{id(self)}"
         if not kernel_present:
-            if sp.is_paused(self.session_id) or sp.has_pending_request(self.session_id):
+            from ..models.schemas import TaskStatus
+            from ..services.session_lifecycle import (
+                SessionGoneError,
+                establish_snapshot_operation,
+            )
+            from ..services.workflow_runner import (
+                _report_tasks,
+                session_has_any_workflow_owner,
+            )
+            from ..state import (
+                _run_tasks,
+                report_workflows,
+                sessions,
+                state_lock,
+                workflows,
+            )
+
+            status = getattr(analysis_state, "status", None)
+            terminal = status in (
+                TaskStatus.COMPLETED,
+                getattr(TaskStatus, "FAILED", None),
+            ) or str(status) in ("completed", "failed")
+            descriptor = {
+                "kernel_present": False,
+                "current_round": analysis_state.current_round or 0,
+                "inactive": True,
+            }
+            if terminal or status == TaskStatus.GENERATING_REPORT:
+                descriptor["status"] = (
+                    "completed" if terminal else str(status or "generating_report")
+                )
+                if terminal:
+                    descriptor["continuation_kind"] = "terminal"
+
+            async def _reserve_idle_report_hold() -> bool:
+                nonlocal owned_sp
+                async with state_lock:
+                    current = sessions.get(self.session_id)
+                    if current is not None and current is not analysis_state:
+                        raise RequiredSnapshotBlocked(
+                            "LIVE_SANDBOX_REQUIRED",
+                            "Session generation changed before post-report capture",
+                        )
+                    owners = (
+                        workflows.get(self.session_id),
+                        report_workflows.get(self.session_id),
+                    )
+                    foreign_owner = any(
+                        owner is not None and owner is not self for owner in owners
+                    )
+                    current_task = asyncio.current_task()
+                    current_task_owns_slot = current_task is not None and any(
+                        registry.get(self.session_id) is current_task
+                        for registry in (_run_tasks, _report_tasks)
+                    )
+                    unbound_owner = (
+                        all(owner is not self for owner in owners)
+                        and session_has_any_workflow_owner(self.session_id)
+                        and not current_task_owns_slot
+                    )
+                if foreign_owner or unbound_owner:
+                    raise RequiredSnapshotBlocked(
+                        "LIVE_SANDBOX_REQUIRED",
+                        "Post-report capture cannot overlap another producer",
+                    )
+                acquired = await sp.acquire(
+                    self.session_id, descriptor, owner_token=owner_token,
+                )
+                owned_sp = bool(acquired)
+                return owned_sp
+
+            try:
+                acquired = await establish_snapshot_operation(
+                    self.session_id, _reserve_idle_report_hold,
+                )
+            except SessionGoneError as exc:
+                raise RequiredSnapshotBlocked(
+                    "LIVE_SANDBOX_REQUIRED",
+                    "Session was deleted before post-report snapshot reservation",
+                ) from exc
+            if not acquired:
                 raise RequiredSnapshotBlocked(
                     "LIVE_SANDBOX_REQUIRED",
                     "Post-report capture cannot steal an existing safe-point hold",
                 )
-            if not sp.is_eligibility_trusted(self.session_id):
-                from ..models.schemas import TaskStatus
-
-                status = getattr(analysis_state, "status", None)
-                terminal = status in (
-                    TaskStatus.COMPLETED,
-                    getattr(TaskStatus, "FAILED", None),
-                ) or str(status) in ("completed", "failed")
-                descriptor = {
-                    "kernel_present": False,
-                    "current_round": analysis_state.current_round or 0,
-                    "inactive": True,
-                }
-                if terminal or status == TaskStatus.GENERATING_REPORT:
-                    descriptor["status"] = (
-                        "completed" if terminal else str(status or "generating_report")
-                    )
-                    if terminal:
-                        descriptor["continuation_kind"] = "terminal"
-                if not await sp.acquire(
-                    self.session_id, descriptor, owner_token=owner_token,
-                ):
-                    raise RequiredSnapshotBlocked(
-                        "LIVE_SANDBOX_REQUIRED",
-                        "Post-report capture failed to acquire idle safe point",
-                    )
-                owned_sp = True
 
         try:
             capsule = ContinuationRegistry(service.object_store).freeze(

@@ -29,7 +29,7 @@ def test_finalize_only_valid_at_integration_gate_source():
 
 def test_integration_gate_accepts_let_pi_decide(monkeypatch):
     """let_pi_decide is now accepted at the integration gate — PI auto-selects directions."""
-    s = AnalysisState(name="t", user_id="u", initial_instruction="o")
+    s = AnalysisState(id="sess", name="t", user_id="u", initial_instruction="o")
     s.status = TaskStatus.WAITING_INPUT
     s.analysis_phase = AnalysisPhase.INTEGRATION
     s.integration_gate_candidates = [{"direction": "X"}]
@@ -43,6 +43,7 @@ def test_integration_gate_accepts_let_pi_decide(monkeypatch):
     monkeypatch.setattr(ix, "_update_session_cache", fake_update)
     monkeypatch.setattr(ix, "async_save_session", fake_save)
     monkeypatch.setattr(ix, "workflows", {})
+    monkeypatch.setattr(ix, "_pause_and_restart_ws", fake_update)
     monkeypatch.setattr(ix, "resolve_integration_gate", lambda state, event_type, **kwargs: MagicMock())
 
     result = asyncio.run(ix._choose_direction_locked("sess", "u", DirectionChoice(let_pi_decide=True)))

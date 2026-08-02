@@ -740,6 +740,14 @@ Generate a comprehensive scientific narrative for this section. Your response mu
                         "plan_step_id": fig.get("plan_step_id"),
                         "plan_id": fig.get("plan_id"),
                         "purpose": fig.get("purpose") or "result",
+                        "provenance_kind": fig.get("provenance_kind") or "unregistered",
+                        "is_legacy": bool(fig.get("is_legacy")),
+                        "legacy_artifact_id": fig.get("legacy_artifact_id"),
+                        "logical_figure_id": fig.get("logical_figure_id"),
+                        "render_attempt_id": fig.get("render_attempt_id"),
+                        "revision_of_id": fig.get("revision_of_id"),
+                        "supersedes_id": fig.get("supersedes_id"),
+                        "is_published_head": bool(fig.get("is_published_head")),
                         "section": section_id,
                         "analysis_type": analysis_type
                     })
@@ -833,6 +841,14 @@ Generate a comprehensive scientific narrative for this section. Your response mu
                 "plan_step_id": fig.get("plan_step_id"),
                 "plan_id": fig.get("plan_id"),
                 "purpose": fig.get("purpose") or "result",
+                "provenance_kind": fig.get("provenance_kind") or "unregistered",
+                "is_legacy": bool(fig.get("is_legacy")),
+                "legacy_artifact_id": fig.get("legacy_artifact_id"),
+                "logical_figure_id": fig.get("logical_figure_id"),
+                "render_attempt_id": fig.get("render_attempt_id"),
+                "revision_of_id": fig.get("revision_of_id"),
+                "supersedes_id": fig.get("supersedes_id"),
+                "is_published_head": bool(fig.get("is_published_head")),
                 "section": section_id,
                 "analysis_type": analysis_type
             })

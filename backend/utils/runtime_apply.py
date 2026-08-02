@@ -129,6 +129,55 @@ def _live_sig(session_id: str) -> Path:
     return _sig_path(_live_pkl(session_id), _integrity_dir(session_id))
 
 
+def commit_runtime_persistence_metadata(
+    session_id: str,
+    *,
+    source: str = "snapshot_apply",
+) -> dict:
+    """Stamp explicit committed-generation metadata after a verified apply."""
+    from .sandbox import NotebookState
+
+    states = get_session_states(session_id)
+    session_json = states.parent / "session.json"
+    state_payload = {}
+    if session_json.exists():
+        try:
+            state_payload = json.loads(session_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            state_payload = {}
+    sandbox_state = state_payload.get("sandbox_state") or {}
+    revision = int(
+        sandbox_state.get("runtime_revision")
+        or sandbox_state.get("saved_runtime_revision")
+        or 0
+    )
+    notebook = NotebookState(session_id, str(states))
+    live_pkl = notebook.session_path
+    from .sandbox import _sha256_file
+
+    runtime_digest = _sha256_file(live_pkl) if live_pkl.is_file() else None
+    persistence = notebook.update_runtime_persistence(
+        "current",
+        current_revision=revision,
+        saved_revision=revision,
+        commit_source=source,
+        runtime_digest=runtime_digest,
+    )
+    if state_payload:
+        state_payload["runtime_persistence"] = persistence
+        sandbox_state["runtime_revision"] = revision
+        sandbox_state["saved_runtime_revision"] = revision
+        sandbox_state["runtime_persistence"] = persistence
+        state_payload["sandbox_state"] = sandbox_state
+        from backend.utils.files import atomic_write_bytes
+
+        atomic_write_bytes(
+            session_json,
+            json.dumps(state_payload, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+    return persistence
+
+
 def _journal_path(session_id: str) -> Path:
     from .sandbox import _integrity_dir
     return _integrity_dir(session_id) / "runtime_apply.journal.json"
@@ -336,12 +385,23 @@ def _states_dir(session_id: str) -> Path:
 RUNTIME_H5AD_MANIFEST_FILENAME = "runtime_h5ad_manifest.json"
 
 
-def runtime_h5ad_manifest_path(session_id: str) -> Path:
+def runtime_h5ad_manifest_path(
+    session_id: str,
+    *,
+    states_dir: str | Path | None = None,
+) -> Path:
     """Return the live h5ad sidecar manifest path for a session."""
-    return _states_dir(session_id) / RUNTIME_H5AD_MANIFEST_FILENAME
+    root = Path(states_dir) if states_dir is not None else _states_dir(session_id)
+    return root / RUNTIME_H5AD_MANIFEST_FILENAME
 
 
-def write_runtime_h5ad_manifest(session_id: str, entries: dict[str, str]) -> Path:
+def write_runtime_h5ad_manifest(
+    session_id: str,
+    entries: dict[str, str],
+    *,
+    authoritative_pkl_names: set[str] | list[str] | None = None,
+    states_dir: str | Path | None = None,
+) -> Path:
     """Atomically write the live h5ad sidecar manifest.
 
     entries maps validated runtime variable name to the SHA-256 of the live
@@ -361,10 +421,20 @@ def write_runtime_h5ad_manifest(session_id: str, entries: dict[str, str]) -> Pat
             "sha256": sha256,
         }
     payload = {
-        "version": 1,
+        "version": 2 if authoritative_pkl_names is not None else 1,
         "entries": manifest_entries,
     }
-    path = runtime_h5ad_manifest_path(session_id)
+    if authoritative_pkl_names is not None:
+        validated_names = []
+        for name in sorted(set(authoritative_pkl_names)):
+            try:
+                validated_names.append(validate_runtime_global_name(name))
+            except ValueError as exc:
+                raise RuntimeApplyError(
+                    f"[{session_id}] invalid authoritative pkl name: {name!r}"
+                ) from exc
+        payload["authoritative_pkl_names"] = validated_names
+    path = runtime_h5ad_manifest_path(session_id, states_dir=states_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_bytes(
         path,
@@ -504,10 +574,13 @@ def _reclaim_orphan_staged_temps(states: Path, states_resolved: Path) -> None:
 
 
 def _quarantine_unreferenced_live_h5ads(
-    session_id: str, keep_names: set[str],
+    session_id: str,
+    keep_names: set[str],
+    *,
+    states_dir: str | Path | None = None,
 ) -> None:
     """Quarantine live ``*.h5ad`` files not in *keep_names* (confined to states)."""
-    states = _states_dir(session_id)
+    states = Path(states_dir) if states_dir is not None else _states_dir(session_id)
     if not states.is_dir():
         return
     try:
@@ -535,6 +608,20 @@ def _quarantine_unreferenced_live_h5ads(
         if p.name in keep_filenames:
             continue
         _quarantine_path(p)
+
+
+def quarantine_unreferenced_runtime_h5ads(
+    session_id: str,
+    keep_names: set[str],
+    *,
+    states_dir: str | Path | None = None,
+) -> None:
+    """Public bounded cleanup after an authoritative manifest is committed."""
+    _quarantine_unreferenced_live_h5ads(
+        session_id,
+        keep_names,
+        states_dir=states_dir,
+    )
 
 
 def finalize_live_runtime_h5ad_set(

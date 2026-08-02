@@ -1,7 +1,11 @@
+import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 import backend.utils.llm_client as llm_mod
 from backend.utils.llm_client import _ResponsesAdapter, _AnthropicAdapter
+
+
+_OPEN_CLIENTS = []
 
 
 def _responses_adapter_with_capture():
@@ -48,10 +52,22 @@ def _clear_caches():
     llm_mod._NO_RESPONSES_ENDPOINT.clear()
     llm_mod._PROBE_CACHE.clear()
     llm_mod._PROBE_LOCKS.clear()
+    _OPEN_CLIENTS.clear()
+    try:
+        yield
+    finally:
+        async def close_all():
+            for client in _OPEN_CLIENTS:
+                await client.close()
+
+        asyncio.run(close_all())
+        _OPEN_CLIENTS.clear()
 
 
-def _client():
-    return OpenAICompatibleClient(api_key="k", base_url="https://x/v1", agent_name="t")
+def _client(base_url="https://x/v1"):
+    client = OpenAICompatibleClient(api_key="k", base_url=base_url, agent_name="t")
+    _OPEN_CLIENTS.append(client)
+    return client
 
 
 @pytest.mark.asyncio
@@ -238,7 +254,7 @@ async def test_dispatch_non_streaming_uses_responses_then_caches():
 
 @pytest.mark.asyncio
 async def test_dispatch_non_streaming_reactive_responses_only_fallback():
-    c = OpenAICompatibleClient(api_key="k", base_url="https://x/v1/chat/completions", agent_name="t")
+    c = _client("https://x/v1/chat/completions")
     c.llm_logger = MagicMock()
     err = BadRequestError(message="This model is only supported in v1/responses",
                           response=MagicMock(status_code=400), body=None)

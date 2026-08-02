@@ -239,7 +239,9 @@ def test_final_result_carries_evidence_binding_keys():
     assert block, "could not locate the final_result literal"
     body = block.group(0)
     assert '"evidence_verified"' in body
+    assert '"evidence_gate_degraded"' in body
     assert '"evidence_execution_ids"' in body
+    assert '"evidence_gate_findings"' in body
 
 
 def _healthy_round(evidence_verified):

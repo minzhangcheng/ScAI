@@ -143,6 +143,8 @@ def snapshot_v2(request, monkeypatch):
         (True, True, True),     # same instance: the id collides, a new one is allocated
         (False, False, False),  # the default export: no runtime at all
         (True, False, False),   # runtime exported, not trusted on the way in
+        (False, True, False),   # trust is harmless without exported runtime
+        (False, False, True),   # colliding source without runtime gets a new ID
     ],
 )
 def test_export_import_continue(
@@ -170,13 +172,42 @@ def test_export_import_continue(
     blob = _export_download(client, token, src_id, include_runtime=include_runtime)
     assert blob[:2] == b"\x1f\x8b", "export is not gzip"
 
+    stale_generation = None
     if not keep_source:
+        stale_generation = sessions[src_id].model_copy(deep=True)
         client.delete(f"/api/session/{src_id}", headers=_auth(token))
         sessions.pop(src_id, None)
 
     new_id = _import_archive(client, token, blob, trust=trust)
     if keep_source:
         assert new_id != src_id, "a colliding id must not be reused"
+    else:
+        from backend.services.session_lifecycle import (
+            SessionGoneError,
+            assert_generation_writable,
+            read_lifecycle_record,
+        )
+
+        assert new_id == src_id, (
+            "after deletion the archive ID should be rebuilt as a new local "
+            "generation, not permanently exiled by the old tombstone"
+        )
+        lifecycle = read_lifecycle_record(new_id)
+        assert lifecycle["status"] == "active"
+        assert lifecycle["generation"] == 2
+        assert lifecycle["deleted_generations"] == [1]
+        with pytest.raises(SessionGoneError):
+            assert_generation_writable(new_id, stale_generation)
+        # A cleanup invocation retained from generation 1 must re-read the
+        # lifecycle record and leave the newly active generation 2 untouched.
+        from backend.services.session_deletion import _delete_tombstoned_files
+
+        stale_sweep = asyncio.run(_delete_tombstoned_files(new_id))
+        assert stale_sweep == {
+            "deleted_sessions": 0,
+            "deleted_state_files": 0,
+        }
+        assert get_session_dir(new_id).is_dir()
 
     # --- everything the archive carried is readable through the API ---
     loaded = client.get(f"/api/session/{new_id}/load", headers=_auth(token))

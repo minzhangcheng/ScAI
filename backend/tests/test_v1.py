@@ -107,7 +107,8 @@ class TestUploadService:
     async def test_upload_chunk_writes_file(self, tmp_path):
         """upload_chunk writes data atomically and marks received."""
         from backend.services.upload import upload_chunk
-        from backend.config import UPLOAD_TEMP_DIR
+        from backend.models.schemas import AnalysisState
+        from backend.state import sessions
 
         # Set up a mock DB with an upload session
         mock_db = AsyncMock()
@@ -124,9 +125,13 @@ class TestUploadService:
         mock_db.get_upload_session = AsyncMock(side_effect=[mock_upload, {**mock_upload, "received_chunks": 1}])
         mock_db.mark_chunk_received = AsyncMock(return_value={"is_new": True, "received_chunks": 1, "total_chunks": 2})
 
-        with patch("backend.services.upload.get_db", return_value=mock_db), \
-             patch("backend.services.upload.UPLOAD_TEMP_DIR", tmp_path):
-            result = await upload_chunk("sid1", "u1", 0, b"hello")
+        sessions["sid1"] = AnalysisState(id="sid1", user_id="u1")
+        try:
+            with patch("backend.services.upload.get_db", return_value=mock_db), \
+                 patch("backend.services.upload.UPLOAD_TEMP_DIR", tmp_path):
+                result = await upload_chunk("sid1", "u1", 0, b"hello")
+        finally:
+            sessions.pop("sid1", None)
 
         assert result["received_chunks"] == 1
         assert result["total_chunks"] == 2
@@ -146,6 +151,8 @@ class TestUploadService:
     @pytest.mark.asyncio
     async def test_upload_chunk_rejects_completed(self, tmp_path):
         from backend.services.upload import upload_chunk
+        from backend.models.schemas import AnalysisState
+        from backend.state import sessions
 
         mock_db = AsyncMock()
         mock_db.get_upload_session = AsyncMock(return_value={
@@ -153,10 +160,14 @@ class TestUploadService:
             "chunk_size": 1024, "received_chunks": 2, "total_chunks": 2,
         })
 
-        with patch("backend.services.upload.get_db", return_value=mock_db):
-            with pytest.raises(Exception) as exc_info:
-                await upload_chunk("sid1", "u1", 0, b"data")
-            assert "already completed" in str(exc_info.value.detail).lower()
+        sessions["sid1"] = AnalysisState(id="sid1", user_id="u1")
+        try:
+            with patch("backend.services.upload.get_db", return_value=mock_db):
+                with pytest.raises(Exception) as exc_info:
+                    await upload_chunk("sid1", "u1", 0, b"data")
+                assert "already completed" in str(exc_info.value.detail).lower()
+        finally:
+            sessions.pop("sid1", None)
 
 
 class TestValidation:

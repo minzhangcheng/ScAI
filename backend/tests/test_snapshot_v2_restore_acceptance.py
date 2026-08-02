@@ -438,7 +438,7 @@ async def sandbox(session_layout, session_id):
         pass
 
 
-@pytest.fixture(autouse=True)
+@pytest_asyncio.fixture(autouse=True)
 async def _clear_global_state():
     from backend.state import sessions, snapshot_restore_jobs, workflows
     from backend.services.snapshot_v2.safe_point import get_snapshot_safe_point_manager

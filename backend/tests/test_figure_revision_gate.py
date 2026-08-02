@@ -7,8 +7,11 @@ counted as stalled), and reviewer approval, which nothing cross-checked. These
 tests pin the repaired behaviour: a measured collision is not something either
 exit may override, and a regression is rolled back rather than shipped.
 """
+import asyncio
 import json
 import base64
+import ast
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,7 +21,13 @@ from backend.agents.bioinformatics.figures import FiguresMixin
 from backend.models.schemas import AnalysisState, FigureReviewStatus
 from backend.models.schemas import PublicationFigure
 from backend.services.figure_layout import LAYOUT_LINT_SENTINEL, blocking_violations
-from backend.services.report.artifacts import publication_pdf_is_valid
+from backend.services.report.artifacts import (
+    eligible_artifacts,
+    image_file_sha256,
+    pdf_file_sha256,
+    preview_render_sha256,
+    publication_pdf_is_valid,
+)
 from backend.tests.figure_image_helpers import valid_image_bytes, valid_pdf_bytes
 
 BLOCKING = [{
@@ -48,8 +57,11 @@ class _FakeSandbox:
         if not isinstance(step, dict):
             step = {"violations": step}
         self.executions += 1
-        figures = Path(self.working_dir) / "figures"
-        figures.mkdir(parents=True, exist_ok=True)
+        jpg_match = re.search(r"^\s*_jpg_path = (.+)$", code, re.MULTILINE)
+        pdf_match = re.search(r"^\s*_pdf_path = (.+)$", code, re.MULTILINE)
+        jpg_path = Path(ast.literal_eval(jpg_match.group(1)))
+        pdf_path = Path(ast.literal_eval(pdf_match.group(1)))
+        jpg_path.parent.mkdir(parents=True, exist_ok=True)
         out = []
         if step.get("no_figure"):
             # the wrapper's own wording when the code left nothing to save;
@@ -68,11 +80,11 @@ class _FakeSandbox:
                     min_bytes=size,
                     trailing=bytes([self.executions]) * 100,
                 )
-            (figures / "f.jpg").write_bytes(jpg)
+            jpg_path.write_bytes(jpg)
             if step.get("corrupt_pdf"):
-                (figures / "f.pdf").write_bytes(b"%PDF-corrupt" + b"x" * 1000)
+                pdf_path.write_bytes(b"%PDF-corrupt" + b"x" * 1000)
             elif not step.get("missing_pdf"):
-                (figures / "f.pdf").write_bytes(
+                pdf_path.write_bytes(
                     valid_pdf_bytes(color=(self.executions, 34, 56))
                 )
             out.append("Saved JPG")
@@ -84,6 +96,28 @@ class _FakeSandbox:
         if violations is not None:
             out.append(LAYOUT_LINT_SENTINEL + json.dumps(violations))
         return SimpleNamespace(output="\n".join(out) + "\n", error=None)
+
+
+class _TransportFailureSandbox:
+    def __init__(self, working_dir, failure):
+        self.working_dir = str(working_dir)
+        self.failure = failure
+        self.executions = 0
+
+    async def execute(self, _code, **_kwargs):
+        self.executions += 1
+        raise self.failure
+
+
+class _SetupFailureSandbox:
+    def __init__(self, working_dir, error):
+        self.working_dir = str(working_dir)
+        self.error = error
+        self.executions = 0
+
+    async def execute(self, _code, **_kwargs):
+        self.executions += 1
+        return SimpleNamespace(output="", error=self.error)
 
 
 class _Agent(FiguresMixin):
@@ -326,6 +360,21 @@ async def test_an_unmeasured_first_render_is_not_recorded_as_clean(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_malformed_lint_verdict_is_recorded_as_unverified(tmp_path):
+    agent = _Agent(_FakeSandbox(tmp_path, [{"violations": {"not": "a list"}}]))
+    state = AnalysisState(user_id="u")
+
+    await agent._handle_generate_publication_figure(
+        code="plot()", figure_name="malformed", description="d",
+        figure_type="qc", state=state, review_callback=None, diagnostic=True,
+    )
+
+    figure = state.publication_figures[0]
+    assert [item["kind"] for item in figure.layout_violations] == ["lint_skipped"]
+    assert eligible_artifacts([figure]) == []
+
+
+@pytest.mark.asyncio
 async def test_a_revision_with_no_verdict_does_not_clear_a_known_collision(tmp_path):
     """An unmeasured render must not read as a fixed one. Clearing the previous
     measurement would re-open both the stall shortcut and report eligibility --
@@ -496,3 +545,202 @@ async def test_data_level_objection_carries_layout_defects_forward(tmp_path):
     assert figure.review_status == FigureReviewStatus.REVISION_REQUESTED
     assert "Cyp7a1" in result, "the measured collision must survive the early exit"
     assert figure.unresolved_must_fix
+
+
+def _approved_prior_figure(tmp_path: Path) -> tuple[PublicationFigure, bytes]:
+    figures = tmp_path / "figures"
+    figures.mkdir(parents=True, exist_ok=True)
+    jpg = figures / "f.jpg"
+    pdf = figures / "f.pdf"
+    old_bytes = valid_image_bytes("JPEG", color=(90, 20, 20), min_bytes=4000)
+    jpg.write_bytes(old_bytes)
+    pdf.write_bytes(valid_pdf_bytes(color=(90, 20, 20)))
+    preview = base64.b64encode(old_bytes).decode()
+    figure = PublicationFigure(
+        id="prior-head",
+        name="f",
+        description="Prior accepted render",
+        figure_type="heatmap",
+        png_path=str(jpg),
+        pdf_path=str(pdf),
+        png_base64=preview,
+        render_sha256=image_file_sha256(jpg),
+        preview_sha256=preview_render_sha256(preview),
+        pdf_sha256=pdf_file_sha256(pdf),
+        review_status=FigureReviewStatus.APPROVED,
+        logical_figure_id="logical-result",
+        is_published_head=True,
+        layout_violations=[],
+    )
+    return figure, old_bytes
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
+@pytest.mark.asyncio
+async def test_dispatched_figure_transport_failure_invalidates_expression_artifacts(
+    tmp_path, failure_type
+):
+    prior, _old_bytes = _approved_prior_figure(tmp_path)
+    prior.round_number = 1
+    sandbox = _TransportFailureSandbox(
+        tmp_path, failure_type("synthetic figure transport failure")
+    )
+    agent = _Agent(sandbox)
+    state = AnalysisState(
+        user_id="u", current_round=1, publication_figures=[prior]
+    )
+
+    with pytest.raises(failure_type, match="synthetic figure transport failure"):
+        await agent._handle_generate_publication_figure(
+            code="sc.pp.log1p(adata)\nplot()",
+            figure_name="candidate",
+            description="mutating candidate",
+            figure_type="heatmap",
+            state=state,
+        )
+
+    assert sandbox.executions == 1
+    assert prior.is_current is False
+    assert state.sandbox_state["analysis_generation"] == 1
+    assert not (tmp_path / "figures" / ".attempts").exists()
+
+
+@pytest.mark.asyncio
+async def test_figure_runtime_setup_failure_is_compacted_without_invalidation(tmp_path):
+    prior, _old_bytes = _approved_prior_figure(tmp_path)
+    prior.round_number = 1
+    private_path = "/home/synthetic-user/private-project/analysis.py"
+    synthetic_secret = "synthetic-fixture-credential-value"
+    frames = "\n".join(
+        f'  File "{private_path}", line {index}, in helper'
+        for index in range(120)
+    )
+    runtime_error = (
+        "\x1b[31mTraceback (most recent call last):\x1b[0m\n"
+        f"api_key='{synthetic_secret}'\n{frames}\n"
+        "TypeError: synthetic runtime setup failure"
+    )
+    sandbox = _SetupFailureSandbox(tmp_path, runtime_error)
+    agent = _Agent(sandbox)
+    state = AnalysisState(
+        user_id="u", current_round=1, publication_figures=[prior]
+    )
+
+    result = await agent._handle_generate_publication_figure(
+        code=(
+            "sc.pp.log1p(adata)\n"
+            "sc.tl.score_genes(adata, gene_list=['A'])\n"
+            "plot()"
+        ),
+        figure_name="candidate",
+        description="blocked candidate",
+        figure_type="heatmap",
+        state=state,
+    )
+
+    assert sandbox.executions == 1
+    assert "TypeError: synthetic runtime setup failure" in result
+    assert len(result) <= 3100
+    assert "\x1b" not in result
+    assert synthetic_secret not in result
+    assert "synthetic-user" not in result
+    assert prior.is_current is True
+    assert "analysis_generation" not in state.sandbox_state
+
+
+@pytest.mark.asyncio
+async def test_failed_same_name_attempt_never_touches_the_published_pair(tmp_path):
+    prior, old_bytes = _approved_prior_figure(tmp_path)
+    agent = _Agent(_FakeSandbox(tmp_path, [{"no_figure": True, "violations": None}]))
+    state = AnalysisState(user_id="u", publication_figures=[prior])
+
+    result = await agent._handle_generate_publication_figure(
+        code="plot()",
+        figure_name="f",
+        logical_figure_id="logical-result",
+        description="failed redraw",
+        figure_type="heatmap",
+        state=state,
+        review_callback=_reviews(_review(approved=True, score=9)),
+    )
+
+    assert "no new JPG render" in result
+    assert (tmp_path / "figures" / "f.jpg").read_bytes() == old_bytes
+    assert state.publication_figures == [prior]
+    assert not (tmp_path / "figures" / ".attempts").exists()
+
+
+@pytest.mark.asyncio
+async def test_reviewer_crash_abandons_staging_and_preserves_prior_head(tmp_path):
+    prior, old_bytes = _approved_prior_figure(tmp_path)
+    agent = _Agent(_FakeSandbox(tmp_path, [CLEAN]))
+    state = AnalysisState(user_id="u", publication_figures=[prior])
+
+    async def crashing_reviewer(_figure):
+        raise RuntimeError("review transport failed")
+
+    with pytest.raises(RuntimeError, match="review transport failed"):
+        await agent._handle_generate_publication_figure(
+            code="plot()",
+            figure_name="f",
+            logical_figure_id="logical-result",
+            description="candidate redraw",
+            figure_type="heatmap",
+            state=state,
+            review_callback=crashing_reviewer,
+        )
+
+    assert (tmp_path / "figures" / "f.jpg").read_bytes() == old_bytes
+    assert prior.is_published_head is True
+    assert eligible_artifacts(state.publication_figures) == [prior]
+    assert not (tmp_path / "figures" / ".attempts").exists()
+
+
+@pytest.mark.asyncio
+async def test_rejected_redraw_retains_the_prior_reportable_head(tmp_path):
+    prior, old_bytes = _approved_prior_figure(tmp_path)
+    agent = _Agent(_FakeSandbox(tmp_path, [CLEAN]))
+    state = AnalysisState(user_id="u", publication_figures=[prior])
+
+    await agent._handle_generate_publication_figure(
+        code="plot()",
+        figure_name="f",
+        logical_figure_id="logical-result",
+        description="candidate redraw",
+        figure_type="heatmap",
+        state=state,
+        review_callback=_reviews(_review(requires_reanalysis=True)),
+    )
+
+    candidate = state.publication_figures[-1]
+    assert candidate.revision_of_id == prior.id
+    assert candidate.is_published_head is False
+    assert prior.is_published_head is True
+    assert eligible_artifacts(state.publication_figures) == [prior]
+    assert Path(prior.png_path).read_bytes() == old_bytes
+    assert ".revisions" in Path(prior.png_path).parts
+
+
+@pytest.mark.asyncio
+async def test_approved_redraw_advances_explicit_logical_head(tmp_path):
+    prior, old_bytes = _approved_prior_figure(tmp_path)
+    agent = _Agent(_FakeSandbox(tmp_path, [CLEAN]))
+    state = AnalysisState(user_id="u", publication_figures=[prior])
+
+    await agent._handle_generate_publication_figure(
+        code="plot()",
+        figure_name="f",
+        logical_figure_id="logical-result",
+        description="accepted redraw",
+        figure_type="heatmap",
+        state=state,
+        review_callback=_reviews(_review(approved=True, score=9)),
+    )
+
+    head = state.publication_figures[-1]
+    assert head.revision_of_id == prior.id
+    assert head.supersedes_id == prior.id
+    assert head.is_published_head is True
+    assert prior.is_published_head is False
+    assert eligible_artifacts(state.publication_figures) == [head]
+    assert Path(prior.png_path).read_bytes() == old_bytes

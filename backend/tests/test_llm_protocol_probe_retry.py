@@ -1,5 +1,6 @@
 from backend.tests.split_facade import setattr_facade
 import pytest
+import pytest_asyncio
 
 from backend.utils import llm_client as llm_mod
 from backend.utils.llm_client import OpenAICompatibleClient
@@ -9,9 +10,21 @@ class ProbeTransientError(RuntimeError):
     pass
 
 
+@pytest_asyncio.fixture
+async def client():
+    value = OpenAICompatibleClient(
+        api_key="test",
+        base_url="https://example.test/v1",
+        agent_name="pi",
+    )
+    try:
+        yield value
+    finally:
+        await value.close()
+
+
 @pytest.mark.asyncio
-async def test_chat_probe_fallback_retries_transient_without_upstream_wrapper(monkeypatch):
-    client = OpenAICompatibleClient(api_key="test", base_url="https://example.test/v1", agent_name="pi")
+async def test_chat_probe_fallback_retries_transient_without_upstream_wrapper(monkeypatch, client):
     calls = {"count": 0}
     sentinel = object()
 
@@ -41,8 +54,7 @@ async def test_chat_probe_fallback_retries_transient_without_upstream_wrapper(mo
 
 
 @pytest.mark.asyncio
-async def test_decided_chat_protocol_uses_normal_retry_settings(monkeypatch):
-    client = OpenAICompatibleClient(api_key="test", base_url="https://example.test/v1", agent_name="pi")
+async def test_decided_chat_protocol_uses_normal_retry_settings(monkeypatch, client):
     seen = {"predicate": False, "retries": None}
     sentinel = object()
 

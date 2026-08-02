@@ -19,7 +19,7 @@ from backend.models.schemas import WebSocketMessage, AgentType, DataFile, Analys
 from backend.services.session_store import ensure_session_loaded, async_save_session, update_session_cache
 from backend.state import (
     chat_tasks, chat_task_lock, chat_sandboxes,
-    websockets, workflows, state_lock,
+    workflows, state_lock,
 )
 from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.auth import require_session_ownership
@@ -27,6 +27,7 @@ from backend.utils.files import safe_filename, validate_session_id
 from backend.utils.upload import stream_save_file
 from backend.utils.settings_provider import AgentSettingsProvider
 from backend.utils.sandbox import _TPL_NOOP_INSTALL
+from backend.utils.websocket_delivery import send_analysis_json
 
 from .core import _build_chat_context
 
@@ -39,19 +40,14 @@ logger = logging.getLogger(__name__)
 
 async def _send_chat_ws(session_id: str, msg_type: str, content: Any):
     """Send a WebSocket message for chat delegation events."""
-    ws = websockets.get(session_id)
-    if ws:
-        try:
-            await ws.send_json({
+    delivered = await send_analysis_json(session_id, {
                 "type": msg_type,
                 "agent": None,
                 "content": content,
                 "timestamp": datetime.now().isoformat(),
                 "id": str(uuid.uuid4()),
-            })
-        except Exception as e:
-            logger.warning(f"Chat WS send failed for {session_id} ({msg_type}): {e}")
-    else:
+    })
+    if not delivered:
         logger.warning(f"Chat WS: no connection for {session_id}, message {msg_type} not delivered")
 
 def _try_parse_delegation(content: str) -> Optional[Dict[str, Any]]:
@@ -264,11 +260,20 @@ async def _execute_chat_agent(
             result["figures"] = _collect_session_figures(session_id, since_time=analysis_start_time)
             return result, extra_clients
         finally:
-            chat_sandboxes.pop(session_id, None)
             try:
-                await sandbox.stop()
+                from backend.services.session_lifecycle import (
+                    is_session_tombstoned,
+                )
+
+                await sandbox.stop(
+                    save=not is_session_tombstoned(session_id)
+                )
             except Exception:
                 logger.warning("Failed to stop delegation sandbox during cleanup", exc_info=True)
+            finally:
+                if getattr(sandbox, "km", None) is None:
+                    if chat_sandboxes.get(session_id) is sandbox:
+                        chat_sandboxes.pop(session_id, None)
 
     elif agent_name == "pathology":
         from backend.agents.pathology_agent import PathologyAgent
@@ -354,18 +359,13 @@ async def _run_chat_delegation(
 
         # 3. Create message callback that sends to WebSocket + persists
         async def chat_msg_callback(msg: WebSocketMessage):
-            ws = websockets.get(session_id)
-            if ws:
-                try:
-                    await ws.send_json({
+            await send_analysis_json(session_id, {
                         "type": msg.type,
                         "agent": msg.agent.value if msg.agent else None,
                         "content": msg.content,
                         "timestamp": msg.timestamp.isoformat(),
                         "id": msg.id,
-                    })
-                except Exception:
-                    logger.warning(f"[{session_id}] Failed to send chat delegation message via WebSocket", exc_info=True)
+            })
             # Persist to realtime_messages
             if hasattr(state, 'realtime_messages'):
                 state.realtime_messages.append(msg)
@@ -657,7 +657,9 @@ async def _run_chat_delegation(
     finally:
         async with chat_task_lock:
             chat_tasks.pop(session_id, None)
-        chat_sandboxes.pop(session_id, None)
+        active_sandbox = chat_sandboxes.get(session_id)
+        if active_sandbox is not None and getattr(active_sandbox, "km", None) is None:
+            chat_sandboxes.pop(session_id, None)
         if llm_manager:
             try:
                 await llm_manager.close()

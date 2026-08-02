@@ -19,7 +19,7 @@ from backend.services.snapshot_v2.errors import (
     SNAPSHOT_MEMORY_INSUFFICIENT_CODE,
     SnapshotCaptureError,
 )
-from backend.utils.error_parsing import strip_ansi
+from backend.utils.error_parsing import compact_traceback
 from backend.services.snapshot_v2.models import (
     ObjectRef,
     RuntimeDependencyManifest,
@@ -286,7 +286,8 @@ class RuntimeCapture:
         if not result.success:
             raise SnapshotCaptureError(
                 "RUNTIME_INTROSPECT_FAILED",
-                f"Kernel globals introspection failed: {strip_ansi(result.error or '')}",
+                "Kernel globals introspection failed: "
+                + compact_traceback(result.error or "", max_chars=3000),
             )
         output = result.output or ""
         begin_marker = "__RUNTIME_GLOBALS_BEGIN__"
@@ -346,7 +347,8 @@ class RuntimeCapture:
                 "required_runtime_unpersistable",
                 (
                     f"AnnData variable '{var_name}' (type={type_str or 'unknown'}, "
-                    f"serializer=h5ad) write failed: {strip_ansi(result.error or '')}"
+                    "serializer=h5ad) write failed: "
+                    + compact_traceback(result.error or "", max_chars=3000)
                 ),
                 details={
                     "name": var_name,
@@ -374,11 +376,12 @@ class RuntimeCapture:
         except SnapshotCaptureError:
             raise
         except Exception as e:
+            compact_error = compact_traceback(str(e), max_chars=1500)
             raise SnapshotCaptureError(
                 "required_runtime_unpersistable",
                 (
                     f"AnnData variable '{var_name}' (type={type_str or 'unknown'}, "
-                    f"serializer=h5ad) object store put failed: {e}"
+                    f"serializer=h5ad) object store put failed: {compact_error}"
                 ),
                 details={
                     "name": var_name,
@@ -520,7 +523,31 @@ class RuntimeCapture:
                 "No runtime variables found to capture from live kernel",
             )
 
-        capture_dir = self._paths.staging / f"rtcap_{uuid.uuid4().hex[:12]}"
+        # Kernel writes must stay inside one of its explicit leaf roots. Keep
+        # transient runtime material under the sandbox state directory (the
+        # same storage device as regular persistence), then let the host-side
+        # object store authenticate and commit it. Snapshot V2's shared
+        # staging tree is intentionally not kernel-writable.
+        kernel_staging = getattr(sandbox, "_kernel_staging_root", None)
+        capture_root = (
+            Path(kernel_staging)
+            if isinstance(kernel_staging, (str, Path))
+            else self._paths.staging
+        )
+        if isinstance(kernel_staging, (str, Path)):
+            if capture_root.is_symlink():
+                raise SnapshotCaptureError(
+                    "RUNTIME_CAPTURE_STAGING_INVALID",
+                    "Kernel capture staging root must not be a symlink",
+                )
+            capture_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            capture_root.chmod(0o700)
+            if capture_root.resolve().parent != capture_root.parent.resolve():
+                raise SnapshotCaptureError(
+                    "RUNTIME_CAPTURE_STAGING_INVALID",
+                    "Kernel capture staging root escaped its state directory",
+                )
+        capture_dir = capture_root / f"rtcap_{uuid.uuid4().hex[:12]}"
         capture_dir.mkdir(parents=True, exist_ok=True)
 
         captured_adata_refs: dict[str, ObjectRef] = {}

@@ -28,6 +28,7 @@ from backend.services.snapshot_v2.errors import (
     RequiredSnapshotBlocked,
 )
 from backend.services.snapshot_v2.models import RetryOutcome, SnapshotRetryContext
+from backend.utils.error_parsing import sanitize_error_payload
 
 
 SnapshotFailureActions = tuple[str, ...]
@@ -423,7 +424,7 @@ def enter_snapshot_failure_gate(
     # answering Proceed re-arms it — nothing is lost, and an approval can no
     # longer drift onto a capture it was never given for.
     clear_memory_preflight_override(state)
-    payload = dict(failure)
+    payload = sanitize_error_payload(dict(failure), max_chars=3000)
     declared = payload.get("allowed_actions")
     if not declared:
         payload["allowed_actions"] = _actions_for_code(
@@ -444,7 +445,9 @@ def enter_snapshot_failure_gate(
             else SNAPSHOT_FAILURE_GATE_ACTIONS,
         )
     if retry_context is not None:
-        payload["retry_context"] = dict(retry_context)
+        payload["retry_context"] = sanitize_error_payload(
+            dict(retry_context), max_chars=3000
+        )
     state.snapshot_failure = payload
 
 
@@ -879,7 +882,7 @@ async def default_retry_post_report(
     from datetime import datetime
 
     from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
-    from backend.state import workflows, websockets, state_lock as _state_lock
+    from backend.state import workflows, state_lock as _state_lock
 
     temporary_workflow = False
     workflow = None
@@ -963,16 +966,14 @@ async def default_retry_post_report(
         state.status = TaskStatus.COMPLETED
         state.wait_input_reason = None
         state.snapshot_failure = None
-        ws = websockets.get(session_id)
-        if ws is not None:
-            try:
-                await ws.send_json({
+        from backend.utils.websocket_delivery import send_analysis_json
+        await send_analysis_json(session_id, {
                     "type": "completed",
                     "agent": "pi",
                     "content": "Analysis completed",
                     "timestamp": datetime.now().isoformat(),
-                })
-                await ws.send_json({
+        })
+        await send_analysis_json(session_id, {
                     "type": "state_sync",
                     "agent": None,
                     "content": {
@@ -982,15 +983,7 @@ async def default_retry_post_report(
                         "snapshot_failure": None,
                     },
                     "timestamp": datetime.now().isoformat(),
-                })
-            except Exception:
-                import logging
-
-                logging.getLogger(__name__).warning(
-                    "[%s] Failed to emit post-report retry completion",
-                    session_id,
-                    exc_info=True,
-                )
+        })
         return RetryOutcome(
             success=True,
             still_blocked=False,
@@ -1001,8 +994,10 @@ async def default_retry_post_report(
         )
     finally:
         if temporary_workflow and workflow is not None:
+            close_complete = False
             try:
-                await workflow.close()
+                close_result = await workflow.close()
+                close_complete = close_result is not False
             except Exception:
                 import logging
 
@@ -1012,7 +1007,7 @@ async def default_retry_post_report(
                     exc_info=True,
                 )
             async with _state_lock:
-                if workflows.get(session_id) is workflow:
+                if close_complete and workflows.get(session_id) is workflow:
                     workflows.pop(session_id, None)
 
 

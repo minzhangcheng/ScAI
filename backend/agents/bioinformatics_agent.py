@@ -116,6 +116,30 @@ logger = logging.getLogger(__name__)
 _PLAN_REVISION_REPAIR_STEPS = 30
 
 
+def _evidence_gate_record(
+    *,
+    gate: str,
+    detail: str,
+    severity: str,
+    rule_id: str = "",
+    subject: str = "",
+    rejection_count: int = 0,
+    rejection_limit: int = 0,
+    forced_release: bool = False,
+) -> Dict[str, Any]:
+    """Return the stable, serializable audit record for one gate outcome."""
+    return {
+        "gate": str(gate),
+        "rule_id": str(rule_id),
+        "detail": str(detail),
+        "subject": str(subject),
+        "severity": str(severity),
+        "rejection_count": max(0, int(rejection_count)),
+        "rejection_limit": max(0, int(rejection_limit)),
+        "forced_release": bool(forced_release),
+    }
+
+
 def _resume_budget_after_plan_revision(
     checkpoint: Optional[Dict[str, Any]],
     *,
@@ -218,22 +242,22 @@ from .bioinformatics.shared import (  # noqa: F401
     tool_calls_are_paired,
     append_missing_tool_results,
     PLAN_REVISION_NEEDED_TAG,
-    strip_ansi,
+    compact_traceback,
     extract_error_type,
     TECHNICAL_ERROR_TYPES,
     detect_swallowed_error,
+    build_expression_runtime_code,
     build_expression_preflight_code,
     extract_sensitive_expression_inputs,
+    has_direct_expression_contract_call,
+    instrument_expression_contract_calls,
     mutates_expression_representation,
     parse_expression_contracts,
     prepares_expression_before_sensitive_call,
     record_expression_contract,
-    describe_invalidated_artifacts,
-    record_invalidated_file_stems,
-    round_start_ns,
-    record_representation_change,
-    unchanged_artifact_stems,
+    record_executed_representation_change,
     workspace_artifact_versions,
+    strip_expression_contract_markers,
     SupervisorEvalResult,
     _DYNAMIC_CONTEXT_PREFIX,
     _APPROVED_PLAN_PREFIX,
@@ -353,14 +377,29 @@ class BioinformaticsAgent(
         """Build context about available data"""
         data_parts = ["=== Available Data ===\n"]
         if getattr(state, "runtime_recompute_pending", False):
-            data_parts.append(
-                "**KERNEL STATE IS EMPTY.** This session was restored from an archive "
-                "that carried no kernel runtime, so no variables from the earlier run "
-                "exist -- `adata` and every other in-memory object are gone. Load the "
-                "input files listed below from disk before doing anything else, and "
-                "recompute whatever downstream objects you need. Do not assume any "
-                "variable is already defined.\n"
-            )
+            persistence = dict(getattr(state, "runtime_persistence", None) or {})
+            if (
+                persistence.get("degraded_recovery")
+                or persistence.get("recommended_action")
+                in {"reduce_runtime_footprint", "recompute_or_reduce_runtime"}
+            ):
+                data_parts.append(
+                    "**RUNTIME RECOVERY REQUIRED.** The last verified runtime may be "
+                    "older than the latest failed persistence attempt, or the live "
+                    "namespace exceeded its persistence budget. Recompute any missing "
+                    "continuation state from the input files and reduce disposable or "
+                    "duplicated large objects before the next checkpoint. Do not treat "
+                    "the restored namespace as proof that the newest work survived.\n"
+                )
+            else:
+                data_parts.append(
+                    "**KERNEL STATE IS EMPTY.** This session was restored from an archive "
+                    "that carried no kernel runtime, so no variables from the earlier run "
+                    "exist -- `adata` and every other in-memory object are gone. Load the "
+                    "input files listed below from disk before doing anything else, and "
+                    "recompute whatever downstream objects you need. Do not assume any "
+                    "variable is already defined.\n"
+                )
 
         # Experimental design overview
         design = state.build_experimental_design_summary()
@@ -1057,13 +1096,19 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             # retypes the panel from memory, which is what this helper exists to
             # prevent.
             if result.error:
+                compact_error = compact_traceback(result.error, max_chars=1000)
                 logger.warning(
-                    f"[{self.session_id}] {label} injection failed: {result.error}"
+                    f"[{self.session_id}] {label} injection failed: {compact_error}"
                 )
                 return None
             return var_name
         except Exception as exc:
-            logger.warning(f"[{self.session_id}] {label} injection failed: {exc}")
+            logger.warning(
+                "[%s] %s injection failed: %s",
+                self.session_id,
+                label,
+                compact_traceback(str(exc), max_chars=1000),
+            )
             return None
 
     async def run_autonomous_analysis(
@@ -1207,6 +1252,46 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                     ))
                 logger.info(f"[Bioinformatics] Restored {len(self.code_history)} cells into code_history from notebook state")
 
+        # A verified older generation may be the only runtime that survived a
+        # newer failed save. Do not silently call that fully current: stop at a
+        # durable HITL gate unless the user already chose recompute/reduce.
+        persistence = self.sandbox.sync_runtime_persistence_state(state)
+        if getattr(state, "runtime_recompute_pending", False) and persistence.get(
+            "requires_recompute"
+        ):
+            from backend.services.runtime_persistence_gate import (
+                prepare_runtime_recompute,
+            )
+
+            # A process restart leaves the notebook metadata as the
+            # authoritative failed/degraded record while the user's explicit
+            # Recompute action lives in AnalysisState. Apply that authorization
+            # to the newly-created sandbox before the executor loop checks the
+            # latch, otherwise it immediately re-arms the same gate.
+            prepare_runtime_recompute(state, self.sandbox)
+            persistence = self.sandbox.sync_runtime_persistence_state(state)
+        if (
+            (
+                persistence.get("degraded_recovery")
+                or persistence.get("status") == "failed"
+                or persistence.get("requires_recompute")
+            )
+            and not getattr(state, "runtime_recompute_pending", False)
+        ):
+            from backend.services.runtime_persistence_gate import (
+                RuntimePersistenceBlocked,
+                enter_runtime_persistence_gate,
+            )
+
+            enter_runtime_persistence_gate(
+                state,
+                persistence,
+                degraded_recovery=bool(persistence.get("degraded_recovery")),
+            )
+            raise RuntimePersistenceBlocked(
+                "Runtime persistence requires an explicit recovery action"
+            )
+
         # Build initial prompt — split into static prefix (cacheable) and dynamic context
         self._current_analysis_state = state
         static_system_prompt = self._static_system_prompt
@@ -1346,7 +1431,20 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             }
             await checkpoint_mgr.save(checkpoint_data)
             if save_sandbox:
-                await self.sandbox.save_session()
+                try:
+                    await self.sandbox.save_session()
+                finally:
+                    persistence = self.sandbox.sync_runtime_persistence_state(state)
+                    if persistence.get("status") == "failed" or persistence.get("requires_recompute"):
+                        from backend.services.runtime_persistence_gate import (
+                            RuntimePersistenceBlocked,
+                            enter_runtime_persistence_gate,
+                        )
+
+                        enter_runtime_persistence_gate(state, persistence)
+                        raise RuntimePersistenceBlocked(
+                            "Runtime persistence failed; waiting for user action"
+                        )
 
         # A resumed executor must keep its original tool transcript, but an
         # approved replacement plan has to be made visible before the next LLM
@@ -1415,6 +1513,43 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         innovation_bulk_reject_count = 0
         MAX_INNOVATION_BULK_REJECTIONS = 2
         evidence_gate_degraded = False
+        evidence_gate_findings: List[Dict[str, Any]] = []
+
+        def _record_forced_score_gate(record: Dict[str, Any]) -> None:
+            """Persist register_score ceiling escapes before report_findings."""
+            nonlocal evidence_gate_degraded
+            enriched = {**record, "round_number": state.current_round}
+            key = (
+                enriched.get("gate"),
+                enriched.get("rule_id"),
+                enriched.get("subject"),
+                enriched.get("round_number"),
+            )
+            if not any(
+                (
+                    existing.get("gate"),
+                    existing.get("rule_id"),
+                    existing.get("subject"),
+                    existing.get("round_number"),
+                ) == key
+                for existing in evidence_gate_findings
+                if isinstance(existing, dict)
+            ):
+                evidence_gate_findings.append(enriched)
+            evidence_gate_degraded = True
+            state.evidence_gate_degraded = True
+            if not any(
+                (
+                    existing.get("gate"),
+                    existing.get("rule_id"),
+                    existing.get("subject"),
+                    existing.get("round_number"),
+                ) == key
+                for existing in state.evidence_gate_findings
+                if isinstance(existing, dict)
+            ):
+                state.evidence_gate_findings.append(dict(enriched))
+
         reported_evidence_ids: List[str] = []
         llm_error: Optional[str] = None
         text_response_count = 0
@@ -1438,6 +1573,16 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         force_break = False  # Set by supervisor force-skip to hard-exit the loop
 
         while step_count < max_steps and not completed:
+            if (state.runtime_persistence or {}).get("requires_recompute"):
+                from backend.services.runtime_persistence_gate import (
+                    RuntimePersistenceBlocked,
+                    enter_runtime_persistence_gate,
+                )
+
+                enter_runtime_persistence_gate(state, state.runtime_persistence)
+                raise RuntimePersistenceBlocked(
+                    "Runtime dependencies require recomputation before continuing"
+                )
             # Cooperative pause: block here between steps when the workflow has
             # been paused. The Jupyter kernel naturally serializes against
             # sandbox.save_session(), so any in-flight execute() finishes first.
@@ -1505,6 +1650,13 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         save_sandbox=True,
                     )
                 except Exception as e:
+                    from backend.services.runtime_persistence_gate import (
+                        RuntimePersistenceBlocked,
+                        is_runtime_persistence_blocked,
+                    )
+
+                    if isinstance(e, RuntimePersistenceBlocked) or is_runtime_persistence_blocked(state):
+                        raise RuntimePersistenceBlocked(str(e)) from e
                     logger.warning(f"[Bioinformatics] Checkpoint save failed at step {step_count}: {e}")
             
             self._set_llm_context()
@@ -1858,46 +2010,97 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         await self._notify("status", f"[{step_type.upper()}] {description}")
                         await self._notify("code", code)
 
+                        # Validate the object that the sensitive call actually
+                        # receives. Source instrumentation forwards the original
+                        # callable and arguments once, preserving evaluation order.
+                        instrumented_code, sensitive_call_count = (
+                            instrument_expression_contract_calls(code)
+                        )
+                        preinstall_expression_runtime = (
+                            has_direct_expression_contract_call(code)
+                        )
+                        guarded_code = (
+                            instrumented_code
+                            if (
+                                preinstall_expression_runtime
+                                or not sensitive_call_count
+                            )
+                            else (
+                                build_expression_runtime_code()
+                                + "\n"
+                                + instrumented_code
+                            )
+                        )
+
                         # === Wrap code to auto-save figures in PNG + PDF ===
                         figures_dir = Path(self.sandbox.working_dir) / "figures"
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                         wrapped_code = _build_exec_autosave_wrapper(
-                            code, str(figures_dir), timestamp
+                            guarded_code, str(figures_dir), timestamp
                         )
 
-                        expression_specs = extract_sensitive_expression_inputs(code)
                         representation_will_change = mutates_expression_representation(code)
                         preexisting_artifact_versions = (
                             workspace_artifact_versions(self.sandbox.working_dir)
                             if representation_will_change else {}
                         )
-                        preflight_result = None
-                        if (
-                            expression_specs
-                            and not prepares_expression_before_sensitive_call(code)
-                        ):
-                            preflight_result = await self.sandbox.execute(
-                                build_expression_preflight_code(expression_specs),
-                                save_to_history=False,
-                                skip_safety_check=True,
-                            )
-                            if not preflight_result.error:
-                                record_expression_contract(
-                                    state,
-                                    parse_expression_contracts(preflight_result.output),
-                                )
-
                         execution_started = time.perf_counter()
-                        if preflight_result is not None and preflight_result.error:
-                            result = preflight_result
-                        else:
-                            result = await self.sandbox.execute(
-                                wrapped_code,
-                                declared_outputs=list(persistent_outputs or []),
-                                track_globals=True,
-                                skip_safety_check=True,
-                            )
-                        execution_time = time.perf_counter() - execution_started
+                        user_code_execution_started = False
+                        invalidated_count = 0
+                        staleness_note = ""
+                        try:
+                            runtime_setup_result = None
+                            if preinstall_expression_runtime:
+                                runtime_setup_result = await self.sandbox.execute(
+                                    build_expression_runtime_code(),
+                                    save_to_history=False,
+                                    skip_safety_check=True,
+                                )
+                            if (
+                                runtime_setup_result is not None
+                                and runtime_setup_result.error
+                            ):
+                                result = runtime_setup_result
+                            else:
+                                # Dynamic/aliased calls carry the dispatcher in
+                                # this same transaction. Once dispatched, a
+                                # transport error or cancellation cannot prove
+                                # that a preceding mutation did not run.
+                                user_code_execution_started = True
+                                result = await self.sandbox.execute(
+                                    wrapped_code,
+                                    declared_outputs=list(persistent_outputs or []),
+                                    track_globals=True,
+                                    skip_safety_check=True,
+                                )
+                        finally:
+                            execution_time = time.perf_counter() - execution_started
+                            try:
+                                (
+                                    invalidated_count,
+                                    _stale_stems,
+                                    staleness_note,
+                                ) = record_executed_representation_change(
+                                    state,
+                                    code,
+                                    self.sandbox.working_dir,
+                                    preexisting_artifact_versions,
+                                    execution_started=user_code_execution_started,
+                                )
+                            except Exception as provenance_error:
+                                logger.warning(
+                                    "[Bioinformatics] Could not record expression "
+                                    "representation invalidation: %s",
+                                    compact_traceback(
+                                        str(provenance_error), max_chars=1000
+                                    ),
+                                )
+                            if invalidated_count:
+                                logger.warning(
+                                    "[Bioinformatics] Invalidated %d stale artifacts "
+                                    "after expression representation change",
+                                    invalidated_count,
+                                )
 
 
                         # Auto-fix: ensure obs/var names are unique after every execution
@@ -1912,28 +2115,10 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         )
 
                         # Strip ANSI escape codes from Jupyter traceback
-                        staleness_note = ""
-                        if result.error:
-                            result.error = strip_ansi(result.error)
-                        else:
-                            invalidated_count = record_representation_change(state, code)
-                            stale_stems: set[str] = set()
-                            if representation_will_change:
-                                stale_stems = unchanged_artifact_stems(
-                                    self.sandbox.working_dir,
-                                    preexisting_artifact_versions,
-                                    since_ns=round_start_ns(state),
-                                )
-                                record_invalidated_file_stems(state, stale_stems)
-                            if invalidated_count:
-                                logger.warning(
-                                    "[Bioinformatics] Invalidated %d stale artifacts after "
-                                    "expression representation change",
-                                    invalidated_count,
-                                )
-                            staleness_note = describe_invalidated_artifacts(
-                                stale_stems, invalidated_count
-                            )
+                        expression_contracts = parse_expression_contracts(result.output)
+                        if expression_contracts:
+                            record_expression_contract(state, expression_contracts)
+                        result.output = strip_expression_contract_markers(result.output)
 
                         # Cap output/error at source so all downstream consumers
                         # (code_history, LLM tool message, analysis_log, notify)
@@ -1941,12 +2126,15 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         if result.output:
                             result.output = truncate_for_llm(result.output)
                         if result.error:
-                            result.error = truncate_for_llm(result.error)
+                            result.error = compact_traceback(result.error, max_chars=3000)
                         # Appended after truncation so the agent always sees which of
                         # its own artifacts this step invalidated; consumers below
                         # keep the tail of `output`.
-                        if not result.error and staleness_note:
-                            result.output = f"{result.output or ''}\n{staleness_note}".strip()
+                        if staleness_note:
+                            if result.error:
+                                result.error = f"{result.error}\n{staleness_note}".strip()
+                            else:
+                                result.output = f"{result.output or ''}\n{staleness_note}".strip()
 
                         code_exec = CodeExecution(
                             code=code,
@@ -1967,7 +2155,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             step_number=step_count, step_type="execute_code",
                             agent_reasoning=agent_reasoning,
                             code=code, code_output=(result.output or "")[-3000:],
-                            code_error=(result.error or "")[:3000] if result.error else None,
+                            code_error=compact_traceback(result.error, max_chars=3000) if result.error else None,
                             code_description=description,
                             code_step_type=step_type, saved_figure_filenames=_saved_figs,
                         ))
@@ -2038,6 +2226,9 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                     self.sandbox, "runtime_revision", 0
                                 )
                                 self._current_analysis_state.sandbox_state = sandbox_state
+                                self.sandbox.sync_runtime_persistence_state(
+                                    self._current_analysis_state
+                                )
 
                         tool_result = (
                             f"Execution {'successful' if not result.error else 'failed'}.\n"
@@ -2542,6 +2733,13 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         # rejections. Initialized in the common scope so every branch
                         # (exploration / stage1 / innovation) can read it post-gate.
                         _escaped_notes = []
+                        # Gate state belongs to this report attempt.  A rejected
+                        # attempt must not poison a later call that genuinely
+                        # satisfies every mandatory check.
+                        _attempt_gate_degraded = evidence_gate_degraded
+                        _attempt_gate_findings: List[Dict[str, Any]] = list(
+                            evidence_gate_findings
+                        )
 
                         # Gate S (statistical validity). Runs against structured
                         # state -- registered scores and frozen plans -- rather
@@ -2573,6 +2771,16 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         _stats_advice = _stats_report.advisory_message()
                         if _stats_advice:
                             _escaped_notes.append(_stats_advice)
+                            _attempt_gate_findings.extend(
+                                _evidence_gate_record(
+                                    gate=finding.gate,
+                                    rule_id=finding.rule_id,
+                                    detail=finding.detail,
+                                    subject=finding.subject,
+                                    severity="advise",
+                                )
+                                for finding in _stats_report.advisories
+                            )
 
                         # A design defect the model cannot repair mid-run must not
                         # be argued with three times. Every session in the corpus
@@ -2609,6 +2817,20 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 + str(_cap)
                                 + " attempt(s) and were force-released: "
                                 + "; ".join(f.detail for f in _stats_report.blocking)
+                            )
+                            _attempt_gate_degraded = True
+                            _attempt_gate_findings.extend(
+                                _evidence_gate_record(
+                                    gate=finding.gate,
+                                    rule_id=finding.rule_id,
+                                    detail=finding.detail,
+                                    subject=finding.subject,
+                                    severity="block",
+                                    rejection_count=_cap,
+                                    rejection_limit=_cap,
+                                    forced_release=True,
+                                )
+                                for finding in _stats_report.blocking
                             )
 
                         # Gate M (mandatory data-driven mechanism program capture) — Stage 2
@@ -2648,6 +2870,16 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 continue
                             else:
                                 _escaped_notes.append(build_gate_skip_note("data-driven mechanism program capture"))
+                                _attempt_gate_degraded = True
+                                _attempt_gate_findings.append(_evidence_gate_record(
+                                    gate="mechanism-program-capture",
+                                    rule_id="scai-native/mechanism-program-capture",
+                                    detail="register_mechanism_programs was not completed before reporting findings.",
+                                    severity="block",
+                                    rejection_count=MAX_MECHANISM_REJECTIONS,
+                                    rejection_limit=MAX_MECHANISM_REJECTIONS,
+                                    forced_release=True,
+                                ))
 
                         # Gate 0 (mandatory annotate_clusters) always applies in exploration;
                         # Gates 1-3 are Stage 2 tasks, skip in stage1.
@@ -2722,7 +2954,16 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                     continue
                                 if escaped:
                                     _escaped_notes.append(build_gate_skip_note("bulk/scRNA-seq cross-validation"))
-                                    evidence_gate_degraded = True
+                                    _attempt_gate_degraded = True
+                                    _attempt_gate_findings.append(_evidence_gate_record(
+                                        gate="bulk-scrna-cross-validation",
+                                        rule_id="scai-native/bulk-scrna-cross-validation",
+                                        detail="Bulk and single-cell results were not cross-validated.",
+                                        severity="block",
+                                        rejection_count=MAX_INTEGRATION_REJECTIONS,
+                                        rejection_limit=MAX_INTEGRATION_REJECTIONS,
+                                        forced_release=True,
+                                    ))
 
                             # Gate 3: Cell-type deconvolution
                             if has_scrna_data and has_bulk_data:
@@ -2755,7 +2996,16 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                     continue
                                 if escaped:
                                     _escaped_notes.append(build_gate_skip_note("cell-type deconvolution"))
-                                    evidence_gate_degraded = True
+                                    _attempt_gate_degraded = True
+                                    _attempt_gate_findings.append(_evidence_gate_record(
+                                        gate="cell-type-deconvolution",
+                                        rule_id="scai-native/cell-type-deconvolution",
+                                        detail="Cell-type deconvolution was not completed.",
+                                        severity="block",
+                                        rejection_count=MAX_DECONV_REJECTIONS,
+                                        rejection_limit=MAX_DECONV_REJECTIONS,
+                                        forced_release=True,
+                                    ))
 
                         # Gate 4: INNOVATION-phase bulk direction validation
                         elif state.analysis_phase == AnalysisPhase.INNOVATION and has_bulk_data and has_scrna_data:
@@ -2789,7 +3039,16 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 continue
                             if escaped:
                                 _escaped_notes.append(build_gate_skip_note("innovation-phase bulk direction validation"))
-                                evidence_gate_degraded = True
+                                _attempt_gate_degraded = True
+                                _attempt_gate_findings.append(_evidence_gate_record(
+                                    gate="innovation-bulk-validation",
+                                    rule_id="scai-native/innovation-bulk-validation",
+                                    detail="Innovation findings were not independently validated in bulk data.",
+                                    severity="block",
+                                    rejection_count=MAX_INNOVATION_BULK_REJECTIONS,
+                                    rejection_limit=MAX_INNOVATION_BULK_REJECTIONS,
+                                    forced_release=True,
+                                ))
 
                         requested_evidence_ids = {
                             str(value).strip()
@@ -2831,6 +3090,34 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 
                         all_findings.extend(findings)
                         reported_evidence_ids = sorted(requested_evidence_ids)
+                        evidence_gate_degraded = _attempt_gate_degraded
+                        evidence_gate_findings = list(_attempt_gate_findings)
+                        if evidence_gate_degraded:
+                            state.evidence_gate_degraded = True
+                            known_gate_records = {
+                                (
+                                    item.get("gate"), item.get("rule_id"),
+                                    item.get("subject"), item.get("round_number"),
+                                )
+                                for item in state.evidence_gate_findings
+                                if isinstance(item, dict)
+                            }
+                            for item in evidence_gate_findings:
+                                if not isinstance(item, dict):
+                                    continue
+                                enriched = {
+                                    **item,
+                                    "round_number": item.get(
+                                        "round_number", state.current_round,
+                                    ),
+                                }
+                                key = (
+                                    enriched.get("gate"), enriched.get("rule_id"),
+                                    enriched.get("subject"), enriched.get("round_number"),
+                                )
+                                if key not in known_gate_records:
+                                    state.evidence_gate_findings.append(enriched)
+                                    known_gate_records.add(key)
 
                         await self._notify("findings", json.dumps({
                             "findings": findings,
@@ -3230,6 +3517,16 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 f"{MAX_SCORE_GATE_REJECTIONS} attempts; treat this panel "
                                 "as unattributed."
                             )
+                            _record_forced_score_gate(_evidence_gate_record(
+                                gate="register-score-provenance",
+                                rule_id="cite-the-resource-version",
+                                detail=str(prov_error),
+                                subject=str(args.get("score_name", "") or ""),
+                                severity="block",
+                                rejection_count=score_gate_reject_count,
+                                rejection_limit=MAX_SCORE_GATE_REJECTIONS,
+                                forced_release=True,
+                            ))
 
                         # A panel score must cite the plan that froze the panel.
                         plan_id = str(args.get("plan_id", "") or "").strip()
@@ -3251,18 +3548,20 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         panel_members = list(gene_list)
                         if gene_list:
                             if not plan_id or plan is None:
+                                known = ", ".join(
+                                    pl.id for pl in state.scoring_plans[-5:]
+                                )
+                                detail = (
+                                    "this score uses a gene panel, so it must cite the "
+                                    "plan_id returned by register_analysis_plan. Call "
+                                    "register_analysis_plan FIRST with this panel, then "
+                                    "re-call register_score with the plan_id it returns."
+                                    if not plan_id else
+                                    f"no frozen plan with plan_id={plan_id!r}. "
+                                    f"Recent plan_ids: {known or 'none'}."
+                                )
                                 if score_gate_reject_count < MAX_SCORE_GATE_REJECTIONS:
                                     score_gate_reject_count += 1
-                                    known = ", ".join(pl.id for pl in state.scoring_plans[-5:])
-                                    detail = (
-                                        "this score uses a gene panel, so it must cite the "
-                                        "plan_id returned by register_analysis_plan. Call "
-                                        "register_analysis_plan FIRST with this panel, then "
-                                        "re-call register_score with the plan_id it returns."
-                                        if not plan_id else
-                                        f"no frozen plan with plan_id={plan_id!r}. "
-                                        f"Recent plan_ids: {known or 'none'}."
-                                    )
                                     logger.warning(
                                         f"[Bioinformatics] register_score rejected: plan "
                                         f"({score_gate_reject_count}/{MAX_SCORE_GATE_REJECTIONS})"
@@ -3283,6 +3582,16 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                     f"pre-specified, so it cannot be distinguished from one "
                                     f"chosen after seeing the result."
                                 )
+                                _record_forced_score_gate(_evidence_gate_record(
+                                    gate="register-score-plan",
+                                    rule_id="prespecify-the-family-before-results",
+                                    detail=detail,
+                                    subject=str(args.get("score_name", "") or ""),
+                                    severity="block",
+                                    rejection_count=score_gate_reject_count,
+                                    rejection_limit=MAX_SCORE_GATE_REJECTIONS,
+                                    forced_release=True,
+                                ))
                                 plan_id = ""
                             else:
                                 drift = diff_panels(plan.panel_genes, gene_list)
@@ -3568,6 +3877,9 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                     elif tool_name == "generate_publication_figure":
                         code = args.get("code", "")
                         figure_name = args.get("figure_name", f"figure_{len(state.publication_figures) + 1}")
+                        logical_figure_id = str(
+                            args.get("logical_figure_id") or figure_name
+                        ).strip()
                         description = args.get("description", "")
                         figure_type = args.get("figure_type", "other")
                         raw_plan_step_id = args.get("plan_step_id")
@@ -3613,16 +3925,12 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             )
 
                             active_lineage = getattr(state, "restore_branch_id", None) or "main"
-                            previous_figure = next(
-                                (
-                                    fig for fig in state.publication_figures
-                                    if fig.name == safe_fig_name
-                                    and (getattr(fig, "lineage_id", None) or "main")
-                                    == active_lineage
-                                ),
-                                None,
-                            )
-                            previous_figure_id = getattr(previous_figure, "id", None)
+                            previous_figure_ids = {
+                                getattr(fig, "id", None)
+                                for fig in state.publication_figures
+                                if (getattr(fig, "lineage_id", None) or "main")
+                                == active_lineage
+                            }
                             # Generate the figure with PI review
                             tool_result = await self._handle_generate_publication_figure(
                                 code=code,
@@ -3632,20 +3940,19 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 state=state,
                                 review_callback=review_callback,
                                 plan_step_id=plan_step_id,
+                                logical_figure_id=logical_figure_id,
                             )
                             current_figure = next(
                                 (
-                                    fig for fig in state.publication_figures
-                                    if fig.name == safe_fig_name
+                                    fig for fig in reversed(state.publication_figures)
+                                    if getattr(fig, "id", None) not in previous_figure_ids
+                                    and fig.name == safe_fig_name
                                     and (getattr(fig, "lineage_id", None) or "main")
                                     == active_lineage
                                 ),
                                 None,
                             )
-                            rendered = bool(
-                                current_figure is not None
-                                and getattr(current_figure, "id", None) != previous_figure_id
-                            )
+                            rendered = current_figure is not None
                             if rendered:
                                 has_figure_work = True
                                 figures_rendered += 1
@@ -3704,20 +4011,29 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                 except UpstreamExhaustedError:
                     raise
                 except Exception as _exc_tool:
-                    logger.exception(
-                        "[Bioinformatics] Tool '%s' failed on args=%r; continuing",
-                        tool_call.name, tool_call.arguments,
+                    compact_error = compact_traceback(
+                        str(_exc_tool), max_chars=3000
+                    )
+                    logger.warning(
+                        "[Bioinformatics] Tool '%s' failed: %s; continuing",
+                        tool_call.name,
+                        compact_error,
                     )
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": f"Error processing tool '{tool_call.name}': {_exc_tool}",
+                        "content": (
+                            f"Error processing tool '{tool_call.name}': "
+                            f"{compact_error}"
+                        ),
                     })
                     analysis_log.append(AnalysisStep(
                         step_number=step_count,
                         step_type="tool_error",
                         agent_reasoning=agent_reasoning,
-                        text_content=f"Tool '{tool_call.name}' failed: {_exc_tool}",
+                        text_content=(
+                            f"Tool '{tool_call.name}' failed: {compact_error}"
+                        ),
                     ))
 
             # Clear reasoning after all tool calls in this iteration are processed
@@ -3806,6 +4122,15 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                 # degraded-evidence channel so the workflow cannot advance a
                 # stage or report the round as fully verified.
                 evidence_gate_degraded = True
+                evidence_gate_findings = [
+                    _evidence_gate_record(
+                        gate="supervisor-force-stop",
+                        rule_id="scai-native/supervisor-force-stop",
+                        detail="Analysis was forcibly stopped after repeated execution failures.",
+                        severity="block",
+                        forced_release=True,
+                    )
+                ]
                 completed = True
                 break
 
@@ -3829,6 +4154,13 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         save_sandbox=True,
                     )
                 except Exception as e:
+                    from backend.services.runtime_persistence_gate import (
+                        RuntimePersistenceBlocked,
+                        is_runtime_persistence_blocked,
+                    )
+
+                    if isinstance(e, RuntimePersistenceBlocked) or is_runtime_persistence_blocked(state):
+                        raise RuntimePersistenceBlocked(str(e)) from e
                     logger.warning(
                         "[Bioinformatics] Plan-revision checkpoint save failed at "
                         "step %s: %s",
@@ -3928,7 +4260,9 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             "success": status != "error",
             "mechanism_programs": mechanism_programs,
             "evidence_verified": bool(reported_evidence_ids) and not evidence_gate_degraded,
+            "evidence_gate_degraded": evidence_gate_degraded,
             "evidence_execution_ids": reported_evidence_ids,
+            "evidence_gate_findings": evidence_gate_findings,
             "figure_contract": _final_figure_contract.summary(),
             "forced_stop": bool(force_break),
             **({"error": llm_error} if llm_error else {}),

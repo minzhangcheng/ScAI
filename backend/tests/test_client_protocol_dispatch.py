@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 import json
 from unittest.mock import AsyncMock, MagicMock
@@ -5,15 +6,29 @@ import backend.utils.llm_client as llm_mod
 from backend.utils.llm_client import OpenAICompatibleClient, LLMResponse, LLMToolResponse, NotFoundError, BadRequestError, InternalServerError, RateLimitError
 
 
+_OPEN_CLIENTS = []
+
+
 @pytest.fixture(autouse=True)
 def _clear(monkeypatch):
     llm_mod._NO_RESPONSES_ENDPOINT.clear()
     llm_mod._PROBE_CACHE.clear()
     monkeypatch.setattr(llm_mod.asyncio, "sleep", AsyncMock())
+    _OPEN_CLIENTS.clear()
+    try:
+        yield
+    finally:
+        async def close_all():
+            for client in _OPEN_CLIENTS:
+                await client.close()
+
+        asyncio.run(close_all())
+        _OPEN_CLIENTS.clear()
 
 
 def _client(base_url):
     c = OpenAICompatibleClient(api_key="k", base_url=base_url, agent_name="t")
+    _OPEN_CLIENTS.append(c)
     return c
 
 
@@ -447,7 +462,10 @@ async def test_chat_stream_true_rejected_before_protocol_dispatch():
     fake.complete = AsyncMock(return_value=LLMResponse("R", "gpt", {}, None))
     c._responses_adapter = fake
 
-    with pytest.raises(ValueError, match="use chat_stream\(\) for streaming responses"):
+    with pytest.raises(
+        ValueError,
+        match=r"use chat_stream\(\) for streaming responses",
+    ):
         await c.chat(
             model="gpt-4o",
             messages=[{"role": "user", "content": "hi"}],

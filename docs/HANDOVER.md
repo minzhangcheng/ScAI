@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.38.9 · **Last updated**: 2026-08-02
+**Version**: 0.38.10 · **Last updated**: 2026-08-03
 
 ## 1. Runtime Architecture
 
@@ -98,6 +98,58 @@ Bioinformatics execution uses Stage 1 for broad QC, clustering, and annotation, 
 
 **Session lifecycle**: in-memory state is authoritative while active. `session_store.py` performs throttled disk writes and LRU eviction, while per-session locks serialize mutations. Portable export/import includes session data and generated artifacts; runtime workflow state remains managed by backend lifecycle services.
 
+### Kernel filesystem boundary
+
+The Jupyter subprocess is launched through the trusted absolute launcher in
+`backend/utils/kernel_startup/launcher.py`. On Linux, a first Python process
+runs with `-I -S -B`, installs a Landlock ruleset before importing IPython or
+workspace code, and then starts the kernel interpreter with `-P` and the
+trusted startup directory. Kernel startup fails closed unless Landlock ABI 3
+or newer is available and every rule can be installed; a workspace-provided
+`sitecustomize.py` cannot run before the boundary.
+
+The native boundary permits content writes, file creation/removal,
+rename/link, and truncation only below three exact per-session roots: the
+workspace, the dill state directory, and the private kernel temporary
+directory. Cache and home variables are redirected into that temporary root;
+allowed roots must exist, must not be symlinks, and must not resolve to `/`.
+The enclosing session directory remains kernel-read-only, protecting
+`session.json`, uploads, reports, Snapshot V2 objects, and journals. Runtime
+snapshot material is first written to `states/.kernel-staging`, which the host
+validates before performing the authoritative object-store commit.
+
+Python wrappers and the audit hook produce actionable errors and cover normal
+Python metadata mutations, while Landlock constrains native SQLite, HDF5, and
+similar extension I/O. The scope is intentionally narrower than full process
+isolation: reads and network access are not restricted, Landlock cannot mediate
+every native metadata syscall, non-Linux systems have only best-effort Python
+guards, and the state directory remains writable because dill persistence is
+generated there. Do not represent this boundary as host isolation or as a
+confidential-data sandbox.
+
+The first-stage launcher must perform one trusted `exec` to enter ipykernel.
+Only after that transition, the second interpreter's trusted
+`sitecustomize.py` installs an irreversible CPython audit hook that rejects
+`subprocess.Popen`, `os.system`, fork/forkpty, exec, and posix-spawn events
+before IPython or workspace code loads. Local subprocesses and process pools
+are therefore unavailable to analysis code; use threads or a remote scheduler.
+Joblib/scikit-learn may silently fall back to a sequential backend when given
+`n_jobs>1`. This Python audit layer prevents ordinary Python and external-tool
+metadata bypasses, but it does not turn the kernel into a hostile-code sandbox:
+native FFI can bypass Python audit events, so the native-metadata caveat above
+remains load-bearing.
+
+The container-wide `/dev/shm` is not writable from a kernel: exposing it would
+give sessions a shared semaphore and shared-memory namespace. Consequently,
+local `distributed.LocalCluster` construction is normalized to
+`processes=False` and `Worker` threads even when callers request `Nanny`
+processes; clients that connect to a remote Dask scheduler are not changed.
+`DASK_DATAFRAME__QUERY_PLANNING=false` keeps arboreto 0.1.x on the compatible
+legacy dataframe implementation. PyTorch `DataLoader` works with
+`num_workers=0` and rejects larger values immediately with an actionable
+message. These are deliberate capability restrictions of the per-session
+filesystem boundary, not transient dependency failures.
+
 ## 8. Snapshot V2 (in development — not stable)
 
 > **Status: in development, disabled by default, not stable.** The feature is off
@@ -167,6 +219,15 @@ use the capsule to resume: `IdleCapsule` for a session with no live position,
 capsule for a mid-round position. Do not assume a run always begins at
 `initialize_round`.
 
+Accepted actions at the five frozen semantic gates are converted by
+`prepare_restored_semantic_action()` through `SEMANTIC_GATE_ACTION_NEXT_NODES`
+to their exact post-action graph nodes before reconnect. `round_wait`,
+`direction_selection`, and `integration_selection` continue at
+`check_convergence`; `annotation_confirmation` continues at
+`bioinformatics_analysis`; and `plan_revision` continues at
+`planning_dialogue`. The parked gate is not replayed, and there is no
+normal-versus-dedicated resume split.
+
 ### Capacity
 
 Two ceilings, both checked before a capture writes and again after it lands: a
@@ -228,7 +289,20 @@ memory-policed (that is the container memory limit's job).
 
 Two detailed-report generators must remain aligned: `backend/agents/supervisor_agent.py` is the live generation path, while `backend/services/report/generator.py` is the fallback. Shared report services provide planning, sections, figures, rendering, scoring, variants, and regeneration. Exploration and integrated reports use the workflow/report variants alongside the detailed HTML report.
 
-Publication figures pass two reviewers of different standing before a report can carry them. The vision reviewers *judge*: PI `review_figure` (`agents/pi/figures.py`) is the blocking one, while `SupervisorAgent` evaluates any step that produced a figure and is advisory only — its verdict appends a `[Supervisor]` message and cannot reject anything, because `force_skip` derives from `code_error` alone and a figure that rendered has none. The linter *measures*: `services/figure_layout.py` supplies source injected into the publication-figure wrapper, which draws the figure inside the kernel before `savefig`, asks the renderer for every text artist's window extent, and prints one `__SCAI_LAYOUT_LINT__` line. It runs in the kernel because only the kernel holds a live `Figure`; the backend ever sees JPEG bytes. `text_over_text`, `text_over_foreign_axes` and `tick_label_collision` block; `tiny_text` and `text_outside_figure` advise. A blocking violation is not overridable by either reviewer while revision budget remains, and `is_report_eligible` rejects it regardless of `review_status`. An absent verdict means unverified, not clean — `lint_ran()` distinguishes them.
+Publication figures pass two reviewers of different standing before a report can carry them. The vision reviewers *judge*: PI `review_figure` (`agents/pi/figures.py`) is the blocking one, while `SupervisorAgent` evaluates any step that produced a figure and is advisory only — its verdict appends a `[Supervisor]` message and cannot reject anything, because `force_skip` derives from `code_error` alone and a figure that rendered has none. The linter *measures*: `services/figure_layout.py` supplies source injected into the publication-figure wrapper, which draws the figure inside the kernel before `savefig`, asks the renderer for every text artist's window extent, and prints one `__SCAI_LAYOUT_LINT__` line. It runs in the kernel because only the kernel holds a live `Figure`; the backend ever sees JPEG bytes. Every violation carries its own `severity`: `text_over_text` and `text_over_foreign_axes` can block or advise according to what collided, `tick_label_collision` blocks, and `tiny_text` advises. There is deliberately no out-of-canvas check because every report save uses `bbox_inches='tight'`. Consumers must read `severity`, never infer it from `kind`. A blocking violation is not overridable by either reviewer while revision budget remains, and `is_report_eligible` rejects it regardless of `review_status`. An absent verdict means unverified, not clean — `lint_ran()` distinguishes them.
+
+A measurement or serialization failure emits `__SCAI_LAYOUT_LINT_ERROR__` without a normal verdict. The backend parser represents absent or malformed payloads as `[]`, but `lint_ran()` accepts only a valid list-shaped verdict. An unmeasured first render is persisted as `lint_skipped`; an unmeasured revision retains the previous valid measurement, and the renderer itself uses the same marker when its comparison safety cap skips a complete measurement. A diagnostic artifact waives only reviewer status and only when `layout_was_measured()` is true. Gallery and archival surfaces share `is_report_eligible()` and `published_head_artifacts()`; audit-only attempts cannot become current gallery entries merely because their files remain on disk.
+
+Renderer verdict dependencies are captured once in the bootstrap-owned
+`scai_kernel_trust` module rather than in IPython's mutable `user_ns`.
+`sitecustomize.py` preloads that module before the workspace enters `sys.path`,
+so an old workspace file cannot shadow it. A wrapper re-parents the pristine
+ipykernel `OutStream` to the current execute request before user code, restores
+shared plotting/output functions afterward, and emits the validated lint event
+as its final output line. This ordering prevents prior-cell changes to
+`sys.stdout`, `json.dumps`, `builtins.print`, or Matplotlib helpers from turning
+a measured collision into an apparently clean verdict or routing it to an old
+request.
 
 Docker and direct-run deployment are supported. For ports, volumes, environment variables, build flags, reverse proxy setup, user administration, backup, and troubleshooting, use the [Administrator Manual](admin-manual.md) or [管理员手册](admin-manual-zh.md) rather than duplicating operational parameters here.
 
@@ -254,6 +328,17 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.38.x — (2026-08-01 onward)**
+
+- `0.38.10` — Long-running work is now bound to an exact session generation from request entry through persistence, publication, delivery, and teardown. The three-container runtime audit exposed a common failure class behind otherwise unrelated symptoms: a cancelled coroutine, stale in-memory object, reused session ID, or path-shaped filename could outlive the operation that owned it and then overwrite, delete, publish, or resurrect another operation's state. This release adds durable ownership records and fail-closed transactions at those boundaries, hardens the kernel and report pipelines, and moves production to a single prebuilt SPA process. The complete backend corpus passed in resource-safe shards (`4,915 passed, 84 skipped`); the Python client passed 28 tests; the frontend passed 290 tests and built with Vite 8.2.0; the production launch contract passed all 7 tests (2026-08-03):
+  - **Session deletion and same-ID reuse are generation transactions (`backend/services/session_lifecycle.py`, `session_deletion.py`, lifecycle/session routes)**: durable owner-scoped generation records and tombstones fence every mutation before any path is removed. One deletion path retires and drains workflows, analysis/chat/report tasks, WebSockets, imports, exports, kernels, snapshot jobs, caches, and per-session artifacts before a generation can be reused. Legacy state discovery now matches only exact supported suffixes, so deleting or exporting `abc` cannot consume the state of `abc_state`, `abc_session`, or another near-prefix session.
+  - **Ordinary and chunked uploads, imports, and exports publish only operation-owned bytes (`backend/routes/upload.py`, `backend/services/upload.py`, `backend/services/export_lifecycle.py`)**: no-clobber staging, fsync boundaries, hard-link identity proofs, and memory/disk rollback replace direct writes to final paths. Cancellation and save failure cannot truncate a prior upload or leave an unrecorded file, including on CPython 3.13. Prepared exports carry a hard-link ownership marker tied to the archive inode; direct, TTL, and orphan cleanup refuse replacement or prefix-only candidates. Import and chunk assembly records remain owner/session/generation scoped and recoverable until state persistence commits.
+  - **Async task and WebSocket ownership is explicit (`backend/utils/asyncio_tasks.py`, `websocket_delivery.py`, workflow runner and WebSocket routes)**: blocking resource calls run in dedicated executors that are drained and joined before cancellation propagates; ordered delivery is bound to the connection's event loop and generation. Report stop-summary tasks are registered before execution, so deletion can cancel and await them instead of allowing a completed run to recreate state after force-delete. The frontend rejects stale socket callbacks and closes the previous connection before reconnecting.
+  - **Runtime persistence and Snapshot V2 fail closed (`backend/services/runtime_persistence_gate.py`, `backend/services/snapshot_v2/`, workflow continuation code)**: a failed final save preserves the live kernel and opens a retry/manage/terminate intervention instead of reporting a clean stop. Capture, restore, recovery, import/export, and deletion carry generation checks, durable transaction evidence, sanitized errors, safe-point reservations, and bounded runtime memory policy. Restored semantic actions map to their exact post-gate nodes, preventing a reconnect from replaying the parked gate or taking a stale branch. Snapshot V2 remains experimental and disabled by default.
+  - **The Jupyter boundary is installed before workspace code (`backend/utils/kernel_startup/`, sandbox modules)**: the trusted absolute launcher installs a fail-closed Landlock write boundary on Linux before IPython and scientific imports, redirects writable cache/home/temp state per session, and then installs an irreversible process-launch audit hook. Workspace shadow modules cannot preempt trusted startup. Local Dask and joblib use thread/serial fallbacks, and PyTorch `DataLoader` rejects process workers because container-wide shared memory is deliberately outside the allowlist. Reads and network remain outside this boundary; it is not represented as full host or confidential-data isolation.
+  - **Figures and reports commit as evidence-bound transactions (`backend/services/report/figure_transactions.py`, `figure_layout.py`, report services and agent figure paths)**: JPG, PDF, review metadata, and session state are journaled and recovered as one publication attempt. Only the current eligible head reaches galleries, reports, archives, and downloads; failed, abandoned, superseded, unmeasured, or layout-blocked attempts remain audit evidence rather than current output. Renderer capabilities live in a trusted bootstrap module, layout consumers honor each violation's recorded severity, and every report surface emits deterministic partial/failure and evidence-coverage disclosures.
+  - **Provider calls freeze one coherent runtime and close safely (`backend/utils/llm_client.py`, settings provider, Literature and Painter agents)**: in-flight requests lease their transport/config snapshot across retries, protocol fallback, streaming, deep research, and image polling. Client retirement waits for active calls and remains retryable after close failure; empty/reasoning/tool-call recovery and provider-specific image generation/edit fallbacks no longer mix configuration revisions or lose otherwise valid results.
+  - **Production is one prebuilt FastAPI application (`Dockerfile`, `docker-entrypoint.sh`, `start.sh`, `backend/routes/root.py`, frontend entry/hooks)**: a Node build stage produces the Vite SPA, while the runtime image contains no Node toolchain and serves UI, REST, and WebSockets on port 3000. Static assets are opened beneath the configured build root without symlink traversal and streamed from the validated descriptor; API-like and missing extension paths remain real 404s. Native production follows the same single-process topology, while development retains the Vite proxy and hot reload. Lazy panel loading reduces the initial bundle without remounting visited UI state.
+  - **The frontend lock now matches the supported toolchain (`frontend/package.json`, `package-lock.json`)**: Vite 8.2.0, Plugin React 6.0.5, React Router 7.18.2, and patched transitive `picomatch` 2.3.2 are installed reproducibly. `npm audit` retains two records for one React Router advisory that applies only to unstable RSC APIs; ScAI is a declarative `BrowserRouter` SPA with no RSC plugin, server actions, or framework server entry, while the patched Router 8 line requires React 19.2.7 and Node 22.22 and removes `react-router-dom`. The audited path is therefore unreachable in this deployment rather than hidden by an incompatible downgrade.
 
 - `0.38.9` — Result figures are now a checked workflow deliverable instead of an optional side effect. Quantitative analyses must produce report-eligible visuals, while integration and genuinely narrative tasks may remain text-only only through an explicit, justified exception. Stage 1 now renders the annotation and exploration baselines the report previously lacked, and the figure, report, download, restore-branch, and frontend paths all agree on which rendered bytes are current. The modified-code regression suite passed 503 backend tests and 267 frontend tests; `tsc --noEmit` and `git diff --check` were clean. +10,144 / −682 across 101 files (2026-08-02):
   - **Structured visual contracts close the no-figure escape (`backend/services/figure_contract.py`, planning and post-execution review)**: plan steps carry typed minimum figure requirements and plan/step provenance; result-bearing work cannot finish until matching current-round, current-lineage, report-eligible renders exist. Revised plans inherit unchanged completed visual steps, legacy snapshots retain narrow compatibility, and integration or pure narrative work can opt out only with an explicit reason. Five successful figure-only turns are free, and one bounded 30-step repair window lets a revised plan close a real visual gap after executor exhaustion.

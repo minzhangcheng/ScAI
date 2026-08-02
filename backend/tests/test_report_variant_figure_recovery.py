@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import os
 from pathlib import Path
 
 from backend.models.schemas import (
@@ -110,3 +111,71 @@ def test_detailed_variant_recovers_record_preview(monkeypatch, tmp_path):
     assert 'data-figure-key="reviewed_result"' in html
     assert embedded_payloads == [preview]
     assert replacement not in embedded_payloads
+
+
+def test_detailed_variant_checks_candidates_beyond_the_first_five(monkeypatch, tmp_path):
+    workspace = tmp_path / "beyond-five" / "workspace"
+    figures = workspace / "figures"
+    figures.mkdir(parents=True)
+    for index in range(5):
+        path = figures / f"unrelated_{index}.jpg"
+        write_valid_image(path, min_bytes=2200)
+        os.utime(path, (100 - index, 100 - index))
+    target = figures / "round_result.jpg"
+    write_valid_image(target, min_bytes=2200)
+    os.utime(target, (1, 1))
+    state = AnalysisState(
+        id="beyond-five",
+        name="Beyond five",
+        user_id="u",
+        current_round=1,
+        analysis_log=[AnalysisStep(
+            step_number=1,
+            step_type="execute_code",
+            round_number=1,
+            saved_figure_filenames=["round_result.jpg"],
+        )],
+    )
+    monkeypatch.setattr(
+        "backend.config.get_session_workspace", lambda _session_id: workspace
+    )
+    monkeypatch.setattr(
+        detailed,
+        "compress_image_to_base64",
+        lambda *_args, **_kwargs: "data:image/jpeg;base64,AA==",
+    )
+
+    html = detailed.generate_detailed_report_segment_html(
+        state,
+        "exploration_complete",
+        "Exploration complete",
+        round_result=RoundResult(round_number=1, phase="exploration"),
+    )
+
+    assert 'data-figure-key="round_result"' in html
+    assert html.count('class="figure-item"') == 1
+
+
+def test_detailed_variant_omits_empty_gallery_shell(monkeypatch, tmp_path):
+    workspace = tmp_path / "empty-gallery" / "workspace"
+    (workspace / "figures").mkdir(parents=True)
+    write_valid_image(workspace / "figures" / "unrelated.jpg", min_bytes=2200)
+    state = AnalysisState(
+        id="empty-gallery",
+        name="Empty gallery",
+        user_id="u",
+        current_round=1,
+    )
+    monkeypatch.setattr(
+        "backend.config.get_session_workspace", lambda _session_id: workspace
+    )
+
+    html = detailed.generate_detailed_report_segment_html(
+        state,
+        "exploration_complete",
+        "Exploration complete",
+        round_result=RoundResult(round_number=1, phase="exploration"),
+    )
+
+    assert "Generated Figures" not in html
+    assert 'class="figure-gallery"' not in html

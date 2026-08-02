@@ -5,7 +5,7 @@ action enums, and LLM failure intervention constants.
 """
 from enum import Enum
 
-VERSION = "0.38.9"
+VERSION = "0.38.10"
 
 
 # ── Authoritative graph node registry — single source of truth ─────
@@ -79,6 +79,7 @@ class WaitInputReason(str, Enum):
     SPECIES_INPUT = "species_input"
     GENE_SPECIES_MISMATCH = "gene_species_mismatch"
     SNAPSHOT_FAILURE = "snapshot_failure"
+    RUNTIME_PERSISTENCE_FAILURE = "runtime_persistence_failure"
 
 
 class StateSyncChangeType(str, Enum):
@@ -91,6 +92,7 @@ class StateSyncChangeType(str, Enum):
     SPECIES_RESOLVED = "species_resolved"
     SPECIES_AUTO_SKIPPED = "species_auto_skipped"
     SNAPSHOT_FAILURE = "snapshot_failure"
+    RUNTIME_PERSISTENCE_FAILURE = "runtime_persistence_failure"
 
 
 # Core agents whose absence blocks the workflow. Disabling any of these
@@ -122,12 +124,25 @@ GATE_ROUND_WAIT = "round_wait"
 GATE_DIRECTION_SELECTION = "direction_selection"
 GATE_INTEGRATION_SELECTION = "integration_selection"
 GATE_ANNOTATION_CONFIRMATION = "annotation_confirmation"
+GATE_PLAN_REVISION = "plan_revision"
 
-# Only gates that can resume through the normal wait_for_user_input path.
+# Every frozen semantic gate with a supported user action. The action endpoint
+# converts the capsule to its exact post-action graph node before reconnect.
 SEMANTIC_WAIT_GATES: frozenset[str] = frozenset({
     GATE_ROUND_WAIT,
+    GATE_DIRECTION_SELECTION,
     GATE_INTEGRATION_SELECTION,
+    GATE_ANNOTATION_CONFIRMATION,
+    GATE_PLAN_REVISION,
 })
+
+SEMANTIC_GATE_ACTION_NEXT_NODES: dict[str, str] = {
+    GATE_ROUND_WAIT: "check_convergence",
+    GATE_DIRECTION_SELECTION: "check_convergence",
+    GATE_INTEGRATION_SELECTION: "check_convergence",
+    GATE_ANNOTATION_CONFIRMATION: "bioinformatics_analysis",
+    GATE_PLAN_REVISION: "planning_dialogue",
+}
 
 # ── PI human-input stop keywords (single source of truth) ─────────
 # Used by pi_agent.process_human_guidance and pi_agent.process_user_input

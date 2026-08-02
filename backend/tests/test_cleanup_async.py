@@ -6,32 +6,35 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 @pytest.mark.asyncio
 async def test_delete_user_data_offloads_blocking_io(tmp_path, monkeypatch):
-    """shutil.rmtree, glob, and unlink must all go through asyncio.to_thread."""
+    """Cascade discovery is offloaded and deletion uses the unified tombstone path."""
     from backend.services import user_cleanup
+    from backend.models.schemas import AnalysisState
+    from backend.services import session_deletion
 
     # Track every call to asyncio.to_thread
-    original_to_thread = asyncio.to_thread
     calls = []
 
     async def tracking_to_thread(func, *args, **kwargs):
         calls.append(getattr(func, "__name__", repr(func)))
-        return await original_to_thread(func, *args, **kwargs)
+        # The contract under test is that blocking work is routed through this
+        # boundary. Execute inline so Python 3.13 + old AnyIO test hosts do not
+        # hang while shutting down the default executor.
+        return func(*args, **kwargs)
 
-    # Setup: one fake session belonging to user-X with a directory on disk
     sess_id = "sess-abc"
-    session_dir = tmp_path / "sessions" / sess_id
-    session_dir.mkdir(parents=True)
-    (session_dir / "marker.txt").write_text("x")
-    state_dir = tmp_path / "states"
-    state_dir.mkdir()
-    (state_dir / f"{sess_id}.pkl").write_text("blob")
-
-    monkeypatch.setattr(user_cleanup, "SESSION_DIR", tmp_path / "sessions")
-    monkeypatch.setattr(user_cleanup, "STATE_DIR", state_dir)
+    state = AnalysisState(id=sess_id, user_id="user-X")
 
     monkeypatch.setattr(
         user_cleanup, "list_saved_sessions",
         lambda: [{"id": sess_id, "user_id": "user-X"}],
+    )
+    monkeypatch.setattr(user_cleanup, "load_session_from_disk", lambda _sid: state)
+    unified_delete = AsyncMock(return_value={
+        "deleted_sessions": 1,
+        "deleted_state_files": 1,
+    })
+    monkeypatch.setattr(
+        session_deletion, "delete_session_generation", unified_delete,
     )
 
     fake_db = MagicMock()
@@ -46,14 +49,11 @@ async def test_delete_user_data_offloads_blocking_io(tmp_path, monkeypatch):
 
     assert result["deleted_sessions"] == 1
     assert result["deleted_state_files"] == 1
-    # Both the rmtree and the unlink path must have been routed via to_thread.
-    assert any("rmtree" in n or "_rmtree" in n for n in calls), \
-        f"shutil.rmtree not offloaded to thread; to_thread calls: {calls}"
-    assert any("unlink" in n or "_unlink" in n or "scan_and_unlink" in n for n in calls), \
-        f"state-file unlink not offloaded; to_thread calls: {calls}"
-    # And the session directory + state file are actually gone.
-    assert not session_dir.exists()
-    assert not (state_dir / f"{sess_id}.pkl").exists()
+    assert calls.count("<lambda>") >= 2
+    unified_delete.assert_awaited_once_with(
+        sess_id, state, "user-X", force_stop=True,
+    )
+    fake_db.delete_user.assert_awaited_once_with("user-X")
 
 
 @pytest.mark.asyncio

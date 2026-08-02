@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from ..constants import (
     CONTINUE_SIGNAL,
     GATE_DIRECTION_SELECTION,
+    GATE_INTEGRATION_SELECTION,
     GATE_ROUND_WAIT,
     LlmFailureAction,
     PI_DECIDE_SIGNAL,
@@ -136,6 +137,36 @@ def derive_round_completion_status(state: Dict[str, Any], result: RoundResult) -
     partial so the report can disclose degraded modality coverage.
     """
     failed_node = state.get("failed_node")
+    # This assignment is the provenance boundary for report-quality consumers.
+    # Older persisted RoundResult objects contain the same field defaults but no
+    # evidence that those defaults were ever derived from node execution.
+    result.evidence_schema_version = 1
+
+    # Integration is a first-class evidence-producing phase, but it deliberately
+    # does not execute the ordinary bioinformatics/literature nodes.  Judge it by
+    # its own output instead of manufacturing two ``not_run`` core-agent states.
+    if result.phase == "integration":
+        has_integration_evidence = bool(
+            (result.integration_report_summary or "").strip()
+            or result.integration_candidates
+        )
+        if failed_node == "integration_synthesis":
+            result.round_status = "partial" if has_integration_evidence else "failed"
+            result.evidence_status = (
+                "substantive" if has_integration_evidence else "failed"
+            )
+            result.direction_coverage_eligible = None
+            return result
+        result.round_status = "completed" if has_integration_evidence else "partial"
+        result.evidence_status = (
+            "substantive" if has_integration_evidence else "empty"
+        )
+        # Direction coverage is an innovation-batch concept. Integration has a
+        # valid completion/evidence verdict of its own but is not applicable to
+        # that ledger.
+        result.direction_coverage_eligible = None
+        return result
+
     has_evidence = has_substantive_findings(result)
     has_core_evidence = bool(
         result.bioinformatics_findings
@@ -235,11 +266,25 @@ def _upsert_round_result(
         result.direction_key,
     )
     result = normalize_legacy_round_result(result)
-    for idx, existing in enumerate(results):
-        if getattr(existing, "result_identity_key", "") == result.result_identity_key:
-            results[idx] = result
-            return
-    results.append(result)
+    normalized: list[RoundResult] = []
+    identity_indexes: dict[str, int] = {}
+    for raw in results:
+        existing = normalize_legacy_round_result(raw)
+        key = existing.result_identity_key
+        if key in identity_indexes:
+            # A retry written before identity-aware upsert may have appended a
+            # second legacy record. Keep the later retained value in the first
+            # stable slot so API/WS ordering does not jump on migration.
+            normalized[identity_indexes[key]] = existing
+            continue
+        identity_indexes[key] = len(normalized)
+        normalized.append(existing)
+    target_index = identity_indexes.get(result.result_identity_key)
+    if target_index is None:
+        normalized.append(result)
+    else:
+        normalized[target_index] = result
+    results[:] = normalized
 
 
 def _should_force_next_round(analysis_state: AnalysisState) -> bool:
@@ -354,6 +399,22 @@ def build_round_summary_payload(
         "phase": round_result.phase,
         "integration_candidates": round_result.integration_candidates,
         "integration_report_summary": round_result.integration_report_summary,
+        "round_status": round_result.round_status,
+        "evidence_status": round_result.evidence_status,
+        "direction_coverage_eligible": round_result.direction_coverage_eligible,
+        "bioinformatics_evidence_verified": round_result.bioinformatics_evidence_verified,
+        "evidence_gate_degraded": round_result.evidence_gate_degraded,
+        "evidence_execution_ids": list(round_result.evidence_execution_ids or []),
+        "evidence_notes": list(round_result.evidence_notes or []),
+        "evidence_gate_findings": list(round_result.evidence_gate_findings or []),
+        "lineage_id": round_result.lineage_id,
+        "branch_id": round_result.branch_id,
+        "branch_label": round_result.branch_label,
+        "restored_from_snapshot_id": round_result.restored_from_snapshot_id,
+        "direction": round_result.direction,
+        "direction_key": round_result.direction_key,
+        "result_identity_key": round_result.result_identity_key,
+        "evidence_schema_version": round_result.evidence_schema_version,
     }
 
 
@@ -724,9 +785,31 @@ class SynthesisMixin:
         bioinformatics_result = state.get("bioinformatics_result") or {}
         round_result.data_driven_mechanism_programs = bioinformatics_result.get("mechanism_programs", [])
         round_result.bioinformatics_evidence_verified = bioinformatics_result.get("evidence_verified")
+        round_result.evidence_gate_degraded = bool(
+            bioinformatics_result.get("evidence_gate_degraded")
+            or any(
+                finding.get("forced_release")
+                for finding in bioinformatics_result.get("evidence_gate_findings") or []
+                if isinstance(finding, dict)
+            )
+        )
         round_result.evidence_execution_ids = list(
             bioinformatics_result.get("evidence_execution_ids") or []
         )
+        round_result.evidence_gate_findings = list(
+            bioinformatics_result.get("evidence_gate_findings") or []
+        )
+        for gate_finding in round_result.evidence_gate_findings:
+            if not gate_finding.get("forced_release"):
+                continue
+            gate = gate_finding.get("gate") or "mandatory-evidence-gate"
+            rule_id = gate_finding.get("rule_id") or "unregistered-rule"
+            count = gate_finding.get("rejection_count", 0)
+            limit = gate_finding.get("rejection_limit", 0)
+            round_result.evidence_notes.append(
+                f"Mandatory gate {gate} ({rule_id}) was force-released after "
+                f"{count}/{limit} rejection attempts; affected findings are degraded."
+            )
         if round_result.bioinformatics_evidence_verified is False:
             round_result.evidence_notes.append(
                 "Bioinformatics findings were not fully bound to successful execution evidence; "
@@ -780,6 +863,18 @@ class SynthesisMixin:
                 await self.state_callback(analysis_state)
             except Exception as e:
                 logger.exception("Failed to save state after round")
+
+        # Bound long-running checkpoint growth at a semantic round boundary.
+        # Pruning includes associated writes and dangling parent links; VACUUM
+        # remains close-time maintenance because it takes a stronger SQLite
+        # lock and is unnecessary on every round.
+        try:
+            await self._compact_checkpoints(vacuum=False)
+        except Exception:
+            logger.exception(
+                "[%s] Failed to compact checkpoints at round boundary",
+                self.session_id,
+            )
 
         # Extract data requests from PI
         try:
@@ -879,8 +974,8 @@ class SynthesisMixin:
         # /finalize-from-integration) still sets final_report_requested and
         # is handled first.
         is_integration_gate = (
-            analysis_state.analysis_phase == AnalysisPhase.INTEGRATION
-            and analysis_state.status == TaskStatus.WAITING_INPUT
+            state.get("semantic_gate") == GATE_INTEGRATION_SELECTION
+            or at_integration_gate(analysis_state)
         )
         if is_integration_gate:
             wait_seconds = analysis_state.round_wait_seconds
@@ -902,7 +997,12 @@ class SynthesisMixin:
             if analysis_state.consume_final_report_request():
                 self._set_status(analysis_state, TaskStatus.RUNNING)
                 await self._send_state_sync(analysis_state, "integration_finalize")
-                return {**state, "analysis_state": analysis_state, "should_continue": False}
+                return {
+                    **state,
+                    "analysis_state": analysis_state,
+                    "should_continue": False,
+                    "semantic_gate": None,
+                }
 
             # Robustness: a generic continue (e.g. /human-input with no direction,
             # or any signal that did not go through /choose-direction) leaves the
@@ -922,7 +1022,12 @@ class SynthesisMixin:
                 analysis_state.analysis_phase = AnalysisPhase.INNOVATION
             self._set_status(analysis_state, TaskStatus.RUNNING)
             await self._send_state_sync(analysis_state, "integration_continue")
-            return {**state, "analysis_state": analysis_state, "should_continue": True}
+            return {
+                **state,
+                "analysis_state": analysis_state,
+                "should_continue": True,
+                "semantic_gate": None,
+            }
 
         # Note: _continue_event is cleared in _pi_synthesis before the waiting
         # status is announced, to prevent a race condition with signal_continue().

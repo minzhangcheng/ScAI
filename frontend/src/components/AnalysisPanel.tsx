@@ -5,7 +5,7 @@ import { useTranslation } from '../i18n/translations'
 import type { RoundSummary } from '../types'
 import { RoundSummaries } from './analysis/RoundSummaries'
 import type { SnapshotFailureAction, SnapshotTransactionRecord } from '../types/snapshotV2'
-import { roundKey } from '../utils/roundKey'
+import { resultIdentityKey } from '../utils/roundKey'
 import type { AnnotationData } from '../utils/annotationGate'
 import ReactMarkdown from 'react-markdown'
 import { RoundFeedbackDialog, UploadedFileWithAgent } from './RoundFeedbackDialog'
@@ -87,6 +87,10 @@ interface RoundSummaryContent {
   phase?: string
   integration_candidates?: { direction: string; score?: number; notes?: string; [key: string]: unknown }[]
   integration_report_summary?: string
+  lineage_id?: string
+  direction?: string
+  direction_key?: string
+  result_identity_key?: string
 }
 
 export function buildDirectionsPayload(
@@ -446,7 +450,7 @@ export function AnalysisPanel() {
 
   // Extract round summaries from messages (memoized to avoid recalculation on every render)
   const roundSummaries = useMemo((): RoundSummary[] => {
-    const summaries: RoundSummary[] = []
+    const summaries = new Map<string, RoundSummary>()
 
     // Look for round_summary messages from PI
     const piMessages = messages.filter(m => m.agent === 'pi')
@@ -454,8 +458,19 @@ export function AnalysisPanel() {
     for (const msg of piMessages) {
       if (msg.type === 'round_summary' && typeof msg.content === 'object') {
         const content = msg.content as RoundSummaryContent
-        summaries.push({
-          round: content.round || summaries.length + 1,
+        const round = content.round || summaries.size + 1
+        const phase = (content.phase as RoundSummary['phase']) || ''
+        const lineageId = content.lineage_id || 'main'
+        const directionKey = content.direction_key || content.direction || ''
+        const identity = resultIdentityKey({
+          result_identity_key: content.result_identity_key,
+          lineageId,
+          phase,
+          round,
+          directionKey,
+        })
+        summaries.set(identity, {
+          round,
           maxRounds: content.max_rounds,
           summary: content.summary || '',
           findings: content.findings || [],
@@ -469,9 +484,12 @@ export function AnalysisPanel() {
           bioinformaticsFindings: content.bioinformatics_findings || [],
           biochemistryFindings: content.biochemistry_findings || [],
           literatureFindings: content.literature_findings || [],
-          phase: (content.phase as RoundSummary['phase']) || '',
+          phase,
           integrationCandidates: content.integration_candidates || [],
           integrationReportSummary: content.integration_report_summary || '',
+          lineageId,
+          directionKey,
+          resultIdentityKey: identity,
         })
       }
     }
@@ -479,9 +497,9 @@ export function AnalysisPanel() {
     // Also check roundResults from session
     if (currentSession?.roundResults) {
       for (const round of currentSession.roundResults) {
-        const existing = summaries.find(s => s.round === round.round && s.phase === round.phase)
-        if (!existing) {
-          summaries.push({
+        const identity = resultIdentityKey(round)
+        if (!summaries.has(identity)) {
+          summaries.set(identity, {
             round: round.round,
             summary: round.summary || '',
             findings: [
@@ -498,12 +516,18 @@ export function AnalysisPanel() {
             phase: round.phase || '',
             integrationCandidates: round.integrationCandidates || [],
             integrationReportSummary: round.integrationReportSummary || '',
+            lineageId: round.lineageId,
+            directionKey: round.directionKey,
+            resultIdentityKey: identity,
           })
         }
       }
     }
 
-    return summaries.sort((a, b) => a.round - b.round)
+    return Array.from(summaries.values()).sort(
+      (a, b) => a.round - b.round
+        || resultIdentityKey(a).localeCompare(resultIdentityKey(b)),
+    )
   }, [messages, currentSession?.roundResults])
 
   const notifySyncFailures = (failures: string[]) => {
@@ -956,8 +980,26 @@ export function AnalysisPanel() {
   }, [currentSession, clearSnapshotFailure, monitorSnapshotRetry, wsConnected, wsConnect])
 
   const handleSnapshotFailureRetry = useCallback(
-    () => runSnapshotFailureCapture('retry'),
-    [runSnapshotFailureCapture],
+    async () => {
+      if (!currentSession) return
+      if ((snapshotFailure?.failure.code || '').startsWith('runtime_persistence_')) {
+        try {
+          const details = snapshotFailure?.failure.details || {}
+          await apiFetch(`/session/${currentSession.id}/runtime-persistence/retry`, {
+            method: 'POST',
+            body: JSON.stringify({
+              gate_token: details.gate_token,
+              gate_generation: details.gate_generation,
+            }),
+          })
+        } catch (e) {
+          console.error('Runtime persistence retry failed:', e)
+        }
+        return
+      }
+      await runSnapshotFailureCapture('retry')
+    },
+    [currentSession, snapshotFailure, runSnapshotFailureCapture],
   )
 
   const handleSnapshotFailureProceed = useCallback(
@@ -988,21 +1030,92 @@ export function AnalysisPanel() {
     }
   }, [currentSession, clearSnapshotFailure, wsConnected, wsConnect])
 
-  const handleSnapshotFailureManage = useCallback(() => {
+  const handleSnapshotFailureManage = useCallback(async () => {
+    if (!currentSession) return
+    if ((snapshotFailure?.failure.code || '').startsWith('runtime_persistence_')) {
+      try {
+        const details = snapshotFailure?.failure.details || {}
+        const resp = await apiFetch<{
+          success?: boolean
+          data?: { status?: TaskStatus; still_blocked?: boolean }
+        }>(`/session/${currentSession.id}/runtime-persistence/recompute`, {
+          method: 'POST',
+          body: JSON.stringify({
+            gate_token: details.gate_token,
+            gate_generation: details.gate_generation,
+          }),
+        })
+        if (resp?.data?.status) {
+          useAppStore.getState().updateSession({ status: resp.data.status })
+        }
+        if (resp?.success && resp?.data?.still_blocked === false) {
+          clearSnapshotFailure()
+        }
+      } catch (e) {
+        console.error('Runtime persistence recompute failed:', e)
+      }
+      return
+    }
     setShowSnapshotPanel(true)
-  }, [])
+  }, [currentSession, snapshotFailure, clearSnapshotFailure])
 
   const handleSnapshotFailureTerminate = useCallback(async () => {
     if (!currentSession) return
     try {
-      await apiFetch(`/session/${currentSession.id}/snapshot-failure/terminate`, {
+      const runtimeFailure = (snapshotFailure?.failure.code || '').startsWith('runtime_persistence_')
+      const endpoint = runtimeFailure
+        ? `/session/${currentSession.id}/runtime-persistence/terminate`
+        : `/session/${currentSession.id}/snapshot-failure/terminate`
+      const resp = await apiFetch<{
+        success?: boolean
+        message?: string
+        data?: {
+          status?: TaskStatus
+          still_blocked?: boolean
+          action_pending?: boolean
+          cleanup_incomplete?: boolean
+          termination_committed?: boolean
+        }
+      }>(endpoint, {
         method: 'POST',
+        ...(runtimeFailure
+          ? {
+              body: JSON.stringify({
+                gate_token: snapshotFailure?.failure.details?.gate_token,
+                gate_generation: snapshotFailure?.failure.details?.gate_generation,
+              }),
+            }
+          : {}),
       })
-      clearSnapshotFailure()
+      if (resp?.data?.status) {
+        useAppStore.getState().updateSession({ status: resp.data.status })
+      }
+      if (
+        resp?.data?.termination_committed
+        || (resp?.success && resp?.data?.still_blocked === false)
+      ) {
+        // A committed termination clears the recovery gate even when resource
+        // cleanup needs a background retry. A live workflow's accepted action
+        // remains pending and must keep the dialog reachable until its close
+        // consumer publishes the committed STOPPED transition.
+        clearSnapshotFailure()
+      }
+      if (!resp?.success) {
+        addMessage({
+          id: generateId(),
+          type: 'error',
+          content: resp?.message || (
+            language === 'zh'
+              ? '终止已提交，但后台资源清理尚未完成；系统将继续重试。'
+              : 'Termination was committed, but background resource cleanup is incomplete and will be retried.'
+          ),
+          timestamp: new Date().toISOString(),
+        })
+      }
     } catch (e) {
       console.error('Snapshot failure terminate failed:', e)
     }
-  }, [currentSession, clearSnapshotFailure])
+  }, [currentSession, snapshotFailure, clearSnapshotFailure, addMessage, language])
 
   // Stop handler (immediate or summarize)
   const handleStop = useCallback(async (action: 'immediate' | 'summarize') => {
@@ -1193,7 +1306,7 @@ export function AnalysisPanel() {
   useEffect(() => {
     if (roundSummaries.length > 0) {
       const latest = roundSummaries[roundSummaries.length - 1]
-      setExpandedRound(roundKey(latest.phase, latest.round))
+      setExpandedRound(resultIdentityKey(latest))
 
       // Show feedback dialog when a round completes and is waiting for input.
       // Use ref guard to prevent duplicate triggers for the same round.
@@ -1884,7 +1997,7 @@ export function AnalysisPanel() {
 
       {/* Snapshot failure HITL — Retry re-enters capture only; Skip continues
           without capturing at that boundary (skippable producers only) */}
-      {snapshotV2Enabled && snapshotFailure && !showSnapshotPanel && (
+      {(snapshotV2Enabled || (snapshotFailure?.failure.code || '').startsWith('runtime_persistence_')) && snapshotFailure && !showSnapshotPanel && (
         <SnapshotFailureDialog
           failure={snapshotFailure}
           isZh={language === 'zh'}

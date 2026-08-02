@@ -2,7 +2,7 @@
 
 ScAI is a general-purpose, multi-agent platform for biomedical analysis. It coordinates sequencing analysis, pathology imaging, biochemical indicators, literature research, and human review in one iterative workflow. Models can be configured per agent through OpenAI-compatible endpoints, Google APIs, or local deployments.
 
-**Version**: 0.38.9 | **License**: Apache 2.0
+**Version**: 0.38.10 | **License**: Apache 2.0
 
 ## Core Capabilities
 
@@ -36,7 +36,7 @@ cd scai
 ./start.sh --prod
 ```
 
-Requirements: the application supports Python 3.11+, but the current startup script specifically invokes `python3.12` when creating its virtual environment; install Python 3.12 and Node.js LTS for this path. The script installs dependencies and starts the frontend and backend. Stop with `./stop.sh`; use `./start.sh --dev` for development.
+Requirements: the application supports Python 3.11+, but the current startup script specifically invokes `python3.12` when creating its virtual environment. Production starts one FastAPI/Uvicorn process on port `3000`, which serves the prebuilt frontend, API, and WebSockets. Node.js 20.19+ or 22.12+ is needed only when that frontend build is missing or stale, and always for `./start.sh --dev`, which keeps the Vite development proxy on `3000` and backend on `8000`. Stop either mode with `./stop.sh`.
 
 ## Minimal Usage
 

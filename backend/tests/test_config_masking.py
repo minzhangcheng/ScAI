@@ -36,7 +36,7 @@ async def test_get_literature_config_masks_key(client_and_token):
     uid, headers = client_and_token
     from backend.state import sessions
     from backend.models.schemas import AnalysisState
-    state = AnalysisState(session_id="test-mask-lit", user_id=uid)
+    state = AnalysisState(id="test-mask-lit", user_id=uid)
     state.literature_config["deep_research_api_key"] = "sk-secret"
     sessions["test-mask-lit"] = state
 
@@ -54,7 +54,7 @@ async def test_get_agent_server_config_masks_key(client_and_token):
     uid, headers = client_and_token
     from backend.state import sessions
     from backend.models.schemas import AnalysisState
-    state = AnalysisState(session_id="test-mask-agt", user_id=uid)
+    state = AnalysisState(id="test-mask-agt", user_id=uid)
     state.agent_server_configs["pi"] = {"llm_base_url": "http://x", "api_key": "sk-secret"}
     sessions["test-mask-agt"] = state
 

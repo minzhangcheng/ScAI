@@ -41,6 +41,7 @@ from backend.config import (
     get_session_dir, get_session_metadata_path, get_session_workspace,
     get_session_states, get_session_uploads, get_session_reports, get_session_logs,
 )
+from backend.utils.files import legacy_session_state_paths
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -159,7 +160,7 @@ def migrate_session(session_id: str, dry_run: bool):
         states_dest = get_session_states(session_id)
         if not dry_run:
             states_dest.mkdir(parents=True, exist_ok=True)
-        for sf in STATE_DIR.glob(f"{session_id}*"):
+        for sf in legacy_session_state_paths(STATE_DIR, session_id):
             if sf.is_file():
                 _move(sf, states_dest / sf.name, dry_run)
 

@@ -31,6 +31,16 @@ export class ApiError extends Error {
 export const API_BASE = '/api'
 export const WS_CONNECT_TIMEOUT_MS = 10_000
 
+function sessionLifecycleTarget(endpoint: string): string | null {
+  const match = endpoint.match(/^\/session\/([^/?]+)\/(?:load|ensure)(?:\?|$)/)
+  if (!match) return null
+  try {
+    return decodeURIComponent(match[1])
+  } catch {
+    return match[1]
+  }
+}
+
 export function applyStoreUpdates(updates: StoreUpdates): void {
   const store = useAppStore.getState()
   const setSecretFromLoad = (
@@ -114,7 +124,8 @@ export function authHeaders(extra?: Record<string, string>): Record<string, stri
 // Generic fetch wrapper (exported for direct use) — auto-injects Authorization header
 export async function apiFetch<T>(
   endpoint: string,
-  options?: RequestInit
+  options?: RequestInit,
+  ownsResponse?: () => boolean,
 ): Promise<T> {
   const token = getAuthToken()
   const isFormData = options?.body instanceof FormData
@@ -147,6 +158,23 @@ export async function apiFetch<T>(
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: 'Unknown error' }))
     const detail = typeof body.detail === 'object' ? body.detail : { message: body.detail || 'API request failed' }
+    const lifecycleSessionId = sessionLifecycleTarget(endpoint)
+    if (
+      lifecycleSessionId &&
+      (detail.code === 'SESSION_GONE' || detail.code === 'SESSION_NOT_FOUND') &&
+      (response.status === 404 || response.status === 410)
+    ) {
+      // Only a load/ensure failure for the active session retires client state.
+      // A 404 from an unrelated artifact or nested resource must not do so.
+      const store = useAppStore.getState()
+      if (
+        store.currentSession?.id === lifecycleSessionId
+        && (!ownsResponse || ownsResponse())
+      ) {
+        store.setCurrentSession(null)
+        store.clearMessages()
+      }
+    }
     throw new ApiError(
       response.status,
       detail.code || `HTTP_${response.status}`,

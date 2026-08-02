@@ -57,6 +57,24 @@ def test_collect_figure_paths_missing_file_skipped(tmp_path):
     assert "nonexistent.png" not in figure_map
 
 
+def test_registry_v1_supervision_log_cannot_admit_unregistered_file(tmp_path):
+    ws = tmp_path / "workspace"
+    path = ws / "results" / "figures" / "logged_only.png"
+    _png(path)
+    state = AnalysisState(
+        id="strict-session",
+        user_id="test-user",
+        artifact_registry_version=1,
+    )
+    agent = SupervisorAgent.__new__(SupervisorAgent)
+
+    figure_map = agent._collect_figure_paths(
+        [{"saved_figure_filenames": [path.name]}], ws, state=state
+    )
+
+    assert figure_map == {}
+
+
 def test_supervision_filename_cannot_bypass_registered_render_hash(tmp_path):
     ws = tmp_path / "workspace"
     figures = ws / "figures"

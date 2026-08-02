@@ -21,7 +21,21 @@ class IntegrationMixin:
     session_id: str
 
     def _cumulative_innovation_rounds(self, analysis_state) -> List[RoundResult]:
-        return [rr for rr in analysis_state.round_results if getattr(rr, "phase", None) == "innovation"]
+        from .direction_coverage import (
+            current_lineage_id,
+            normalize_legacy_round_result,
+        )
+
+        lineage = current_lineage_id(analysis_state)
+        by_identity: dict[str, RoundResult] = {}
+        for raw in analysis_state.round_results:
+            result = normalize_legacy_round_result(raw)
+            if result.phase != "innovation" or result.lineage_id != lineage:
+                continue
+            # Replayed/retried synthesis can leave duplicate legacy records.
+            # The last retained record is the canonical upsert result.
+            by_identity[result.result_identity_key] = result
+        return list(by_identity.values())
 
     @with_retry("integration_synthesis")
     async def _integration_synthesis(self, state: WorkflowState) -> WorkflowState:

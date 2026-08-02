@@ -4,6 +4,7 @@ import os
 import pytest
 from backend.models.config_schema import ConfigV1
 from backend.services.config_io import apply_config_to_session, export_session_to_config
+from backend.services.report.artifacts import ARTIFACT_REGISTRY_VERSION
 
 
 def _config_dict(**overrides) -> dict:
@@ -46,6 +47,7 @@ class TestConfigRoundtrip:
         assert state.data_files[0].filename == "ctrl.h5ad"
         assert state.data_files[1].filename == "treat.h5ad"
         assert state.round_wait_seconds == 60
+        assert state.artifact_registry_version == ARTIFACT_REGISTRY_VERSION
 
         exported = export_session_to_config(state)
         assert exported["analysis"]["name"] == "Roundtrip Test"

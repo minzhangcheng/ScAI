@@ -1,6 +1,9 @@
+import asyncio
 import os
 import time
+from contextlib import redirect_stdout
 from datetime import datetime
+from io import StringIO
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,11 +13,15 @@ from backend.models.schemas import (
     AnalysisState, AnalysisStep, PublicationFigure, FigureReviewStatus,
 )
 from backend.utils.expression_contract import (
+    build_expression_runtime_code,
     build_expression_preflight_code,
     describe_invalidated_artifacts,
     extract_sensitive_expression_inputs,
+    instrument_expression_contract_calls,
     mutates_expression_representation,
     prepares_expression_before_sensitive_call,
+    record_executed_representation_change,
+    record_expression_contract,
     record_representation_change,
     record_round_start,
     round_start_ns,
@@ -61,6 +68,604 @@ def test_runtime_preflight_rejects_raw_counts_and_accepts_log_values():
     exec(guard, namespace)
 
 
+def _execute_instrumented(code, namespace):
+    instrumented, count = instrument_expression_contract_calls(code)
+    assert count > 0
+    exec(build_expression_runtime_code(), namespace)
+    exec(instrumented, namespace)
+    return instrumented, count
+
+
+def test_runtime_contract_checks_new_same_cell_copy_not_stale_global():
+    calls = []
+
+    class Source:
+        def __init__(self):
+            self.copy_count = 0
+
+        def copy(self):
+            self.copy_count += 1
+            return SimpleNamespace(
+                X=np.array([[0, 1], [2, 5]]), shape=(2, 2), layers={}
+            )
+
+    source = Source()
+    stale = SimpleNamespace(
+        X=np.array([[0.0, np.log1p(2.0)]]), shape=(1, 2), layers={}
+    )
+    namespace = {
+        "source": source,
+        "work": stale,
+        "sc": SimpleNamespace(
+            tl=SimpleNamespace(rank_genes_groups=lambda obj, **kwargs: calls.append(obj))
+        ),
+    }
+
+    with pytest.raises(ValueError, match="raw integer counts"):
+        _execute_instrumented(
+            "work = source.copy()\nsc.tl.rank_genes_groups(work, groupby='g')",
+            namespace,
+        )
+
+    assert source.copy_count == 1
+    assert calls == []
+    assert namespace["work"] is not stale
+
+
+def test_runtime_contract_forwards_actual_object_and_preserves_side_effects():
+    calls = []
+    counters = {"object": 0, "layer": 0}
+    matrix = np.array([[0.0, np.log1p(3.0)], [np.log1p(8.0), 0.0]])
+    obj = SimpleNamespace(X=matrix, shape=matrix.shape, layers={"log": matrix})
+
+    def next_object():
+        counters["object"] += 1
+        return obj
+
+    def next_layer():
+        counters["layer"] += 1
+        return "log"
+
+    def score_genes(adata=None, *, gene_list, layer=None):
+        calls.append((adata, tuple(gene_list), layer))
+
+    namespace = {
+        "items": [obj],
+        "next_object": next_object,
+        "next_layer": next_layer,
+        "score": score_genes,
+        "sc": SimpleNamespace(tl=SimpleNamespace(score_genes=score_genes)),
+    }
+    code = (
+        "alias = sc.tl.score_genes\n"
+        "alias(adata=next_object(), gene_list=['A'], layer=next_layer())\n"
+        "sc.tl.score_genes(items[0], gene_list=['B'])"
+    )
+    _, count = _execute_instrumented(code, namespace)
+
+    # Every call expression passes through the runtime dispatcher so aliases
+    # cannot evade classification.  The count is therefore the number of
+    # wrappers, not a static guess at how many calls are sensitive.
+    assert count == 4
+    assert counters == {"object": 1, "layer": 1}
+    assert calls == [(obj, ("A",), "log"), (obj, ("B",), None)]
+
+
+def test_runtime_contract_instruments_nmf_and_evaluates_matrix_once():
+    seen = []
+    counter = {"matrix": 0}
+    matrix = np.array([[0.0, np.log1p(2.0)]])
+
+    def make_matrix():
+        counter["matrix"] += 1
+        return matrix
+
+    class NMF:
+        def fit_transform(self, value):
+            seen.append(value)
+            return value
+
+    namespace = {"NMF": NMF, "make_matrix": make_matrix}
+    _, count = _execute_instrumented(
+        "model = NMF()\nresult = model.fit_transform(make_matrix())", namespace
+    )
+
+    assert count == 3
+    assert counter["matrix"] == 1
+    assert seen == [matrix]
+
+
+def test_runtime_contract_handles_nested_sensitive_calls_without_overlapping_edits():
+    calls = []
+    matrix = np.array([[0.0, np.log1p(3.0)]])
+    obj = SimpleNamespace(X=matrix, shape=matrix.shape, layers={})
+
+    def score_genes(value, *, gene_list):
+        calls.append((value, tuple(gene_list)))
+        return value
+
+    namespace = {
+        "adata": obj,
+        "sc": SimpleNamespace(tl=SimpleNamespace(score_genes=score_genes)),
+    }
+    instrumented, count = _execute_instrumented(
+        "result = sc.tl.score_genes("
+        "sc.tl.score_genes(adata, gene_list=['inner']), "
+        "gene_list=['outer'])",
+        namespace,
+    )
+
+    assert count == 2
+    assert instrumented.count("_scai_expression_contract_call(") == 2
+    assert calls == [(obj, ("inner",)), (obj, ("outer",))]
+    assert namespace["result"] is obj
+
+
+def test_runtime_contract_handles_nested_nmf_and_non_ascii_byte_offsets():
+    counters = {"construct": 0, "fit": 0}
+    matrix = np.array([[0.0, np.log1p(2.0)]])
+
+    class NMF:
+        def __init__(self):
+            counters["construct"] += 1
+
+        def fit_transform(self, value):
+            counters["fit"] += 1
+            return value
+
+    namespace = {"NMF": NMF, "X": matrix}
+    instrumented, count = _execute_instrumented(
+        "label = 'café prefix'; "
+        "result = NMF().fit_transform(NMF().fit_transform(X))",
+        namespace,
+    )
+
+    assert count == 2
+    assert "label = 'café prefix'" in instrumented
+    assert counters == {"construct": 2, "fit": 2}
+    assert namespace["result"] is matrix
+
+
+def test_runtime_contract_guards_sensitive_call_inside_method_chain():
+    calls = []
+    raw = np.array([[0.0, 4.0]])
+
+    class NMF:
+        def fit_transform(self, value):
+            calls.append(value)
+            return value
+
+    namespace = {"NMF": NMF, "raw": raw}
+    instrumented, count = instrument_expression_contract_calls(
+        "result = NMF().fit_transform(raw).sum()"
+    )
+
+    assert count == 2
+    assert instrumented.count("_scai_expression_contract_call(") == 2
+    exec(build_expression_runtime_code(), namespace)
+    with pytest.raises(ValueError, match="raw integer counts"):
+        exec(instrumented, namespace)
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "first = sc.tl.score_genes\nsecond = first\nsecond(adata=raw, gene_list=['A'])",
+        "getattr(sc.tl, 'score_genes')(adata=raw, gene_list=['A'])",
+        "funcs = {'score': sc.tl.score_genes}\nfuncs['score'](adata=raw, gene_list=['A'])",
+        "sg, other = (sc.tl.score_genes, None)\nsg(adata=raw, gene_list=['A'])",
+        "sg = lambda **kw: sc.tl.score_genes(**kw)\nsg(adata=raw, gene_list=['A'])",
+        "def sg(**kw):\n    return sc.tl.score_genes(**kw)\nsg(adata=raw, gene_list=['A'])",
+    ],
+)
+def test_runtime_contract_alias_forms_validate_the_runtime_callable(code):
+    calls = []
+    raw = SimpleNamespace(
+        X=np.array([[0.0, 5.0]]), shape=(1, 2), layers={}
+    )
+
+    def replacement(value=None, *, adata=None, **_kwargs):
+        calls.append(value if value is not None else adata)
+
+    namespace = {
+        "raw": raw,
+        "sc": SimpleNamespace(tl=SimpleNamespace(score_genes=replacement)),
+    }
+    with pytest.raises(ValueError, match="raw integer counts"):
+        _execute_instrumented(code, namespace)
+    assert calls == []
+    assert namespace["sc"].tl.score_genes is replacement
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "model = NMF()\nmodel.fit_transform(raw)",
+        "Factor = NMF\nFactor2 = Factor\nmodel = Factor2()\nmodel.fit_transform(raw)",
+        "model = NMF()\nother = model\nother.fit_transform(raw)",
+        "Factor = getattr(sk, 'NMF')\nmodel = Factor()\nmodel.fit_transform(raw)",
+    ],
+)
+def test_runtime_contract_nmf_alias_forms_validate_actual_matrix(code):
+    calls = []
+    raw = np.array([[0.0, 3.0]])
+
+    class NMF:
+        def fit_transform(self, value):
+            calls.append(value)
+            return value
+
+    namespace = {"raw": raw, "NMF": NMF, "sk": SimpleNamespace(NMF=NMF)}
+    with pytest.raises(ValueError, match="raw integer counts"):
+        _execute_instrumented(code, namespace)
+    assert calls == []
+
+
+def test_runtime_contract_does_not_block_unrelated_same_named_callable():
+    calls = []
+    raw = np.array([[0.0, 7.0]])
+
+    def score_genes(value):
+        calls.append(value)
+        return "ordinary helper result"
+
+    namespace = {"raw": raw, "score_genes": score_genes}
+    _execute_instrumented("result = score_genes(raw)", namespace)
+
+    assert calls == [raw]
+    assert namespace["result"] == "ordinary helper result"
+
+
+def test_runtime_contract_does_not_block_same_name_on_ordinary_namespace():
+    calls = []
+    raw = np.array([[0.0, 7.0]])
+
+    def score_genes(value):
+        calls.append(value)
+        return "ordinary namespace result"
+
+    namespace = {
+        "raw": raw,
+        "sc": SimpleNamespace(utils=SimpleNamespace(score_genes=score_genes)),
+    }
+    _execute_instrumented("result = sc.utils.score_genes(raw)", namespace)
+
+    assert calls == [raw]
+    assert namespace["result"] == "ordinary namespace result"
+
+
+def test_runtime_contract_validates_each_sensitive_calls_actual_input():
+    calls = []
+    valid = SimpleNamespace(
+        X=np.array([[0.0, np.log1p(4.0)]]), shape=(1, 2), layers={}
+    )
+    raw = SimpleNamespace(
+        X=np.array([[0.0, 4.0]]), shape=(1, 2), layers={}
+    )
+
+    def score_genes(value, **_kwargs):
+        calls.append(value)
+
+    namespace = {
+        "valid": valid,
+        "raw": raw,
+        "sc": SimpleNamespace(tl=SimpleNamespace(score_genes=score_genes)),
+    }
+    with pytest.raises(ValueError, match="raw integer counts"):
+        _execute_instrumented(
+            "first = sc.tl.score_genes\n"
+            "first(valid, gene_list=['A'])\n"
+            "second = first\n"
+            "second(raw, gene_list=['B'])",
+            namespace,
+        )
+
+    assert calls == [valid]
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("boom"), asyncio.CancelledError()])
+def test_runtime_contract_does_not_pollute_callable_after_error_or_cancel(failure):
+    valid = SimpleNamespace(
+        X=np.array([[0.0, np.log1p(4.0)]]), shape=(1, 2), layers={}
+    )
+    should_fail = True
+    calls = []
+
+    def monkeypatched_score(value, **_kwargs):
+        nonlocal should_fail
+        calls.append(value)
+        if should_fail:
+            should_fail = False
+            raise failure
+        return "recovered"
+
+    api = SimpleNamespace(score_genes=monkeypatched_score)
+    namespace = {"valid": valid, "sc": SimpleNamespace(tl=api)}
+    instrumented, count = instrument_expression_contract_calls(
+        "alias = sc.tl.score_genes\nresult = alias(valid, gene_list=['A'])"
+    )
+    assert count > 0
+    exec(build_expression_runtime_code(), namespace)
+
+    with pytest.raises(type(failure)):
+        exec(instrumented, namespace)
+    assert api.score_genes is monkeypatched_score
+
+    exec(instrumented, namespace)
+    assert api.score_genes is monkeypatched_score
+    assert namespace["result"] == "recovered"
+    assert calls == [valid, valid]
+
+
+@pytest.mark.parametrize(
+    "matrix",
+    [
+        np.array([["secret-value"]], dtype=object),
+        np.array([["secret-value"]], dtype="U20"),
+        np.array([[True]], dtype=bool),
+        np.array([[1 + 2j]], dtype=complex),
+        np.array([["2026-01-01"]], dtype="datetime64[D]"),
+    ],
+)
+def test_runtime_contract_rejects_unsupported_dtype_without_values(matrix):
+    guard = build_expression_preflight_code([{"name": "adata", "layer": None}])
+    with pytest.raises(ValueError, match="unsupported dtype") as exc_info:
+        exec(
+            guard,
+            {"adata": SimpleNamespace(X=matrix, shape=matrix.shape, layers={})},
+        )
+    assert "secret-value" not in str(exc_info.value)
+
+
+def test_runtime_contract_supports_sparse_and_numeric_pandas_inputs():
+    scipy_sparse = pytest.importorskip("scipy.sparse")
+    pd = pytest.importorskip("pandas")
+    guard = build_expression_preflight_code([{"name": "adata", "layer": None}])
+
+    sparse = scipy_sparse.csr_matrix([[0.0, np.log1p(4.0)]])
+    exec(guard, {"adata": SimpleNamespace(X=sparse, shape=sparse.shape, layers={})})
+
+    frame = pd.DataFrame({"a": [0.0, np.log1p(3.0)], "b": [np.nan, 0.0]})
+    exec(guard, {"adata": frame})
+
+    bad_frame = pd.DataFrame({"a": ["secret-value"]})
+    with pytest.raises(ValueError, match="unsupported dtype") as exc_info:
+        exec(guard, {"adata": bad_frame})
+    assert "secret-value" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "matrix",
+    [
+        np.zeros((2, 2), dtype=np.int64),
+        np.array([[0, 1], [1, 0]], dtype=np.uint8),
+        np.array([[0, 2]], dtype=np.int16),
+    ],
+)
+def test_runtime_contract_rejects_every_nonnegative_integer_dtype(matrix):
+    guard = build_expression_preflight_code([{"name": "adata", "layer": None}])
+    with pytest.raises(ValueError, match="raw integer counts"):
+        exec(
+            guard,
+            {"adata": SimpleNamespace(X=matrix, shape=matrix.shape, layers={})},
+        )
+
+
+def test_runtime_contract_rejects_sparse_and_nullable_integer_inputs():
+    scipy_sparse = pytest.importorskip("scipy.sparse")
+    pd = pytest.importorskip("pandas")
+    guard = build_expression_preflight_code([{"name": "adata", "layer": None}])
+
+    sparse = scipy_sparse.csr_matrix(np.array([[0, 1]], dtype=np.int32))
+    with pytest.raises(ValueError, match="raw integer counts"):
+        exec(
+            guard,
+            {"adata": SimpleNamespace(X=sparse, shape=sparse.shape, layers={})},
+        )
+
+    for sparse_float in (
+        scipy_sparse.csr_matrix(np.zeros((2, 2), dtype=float)),
+        scipy_sparse.csr_matrix(np.array([[0.0, 1.0]], dtype=float)),
+    ):
+        with pytest.raises(ValueError, match="raw integer counts"):
+            exec(
+                guard,
+                {
+                    "adata": SimpleNamespace(
+                        X=sparse_float, shape=sparse_float.shape, layers={}
+                    )
+                },
+            )
+
+    nullable = pd.DataFrame({"a": pd.array([0, 1], dtype="Int64")})
+    with pytest.raises(ValueError, match="raw integer counts"):
+        exec(guard, {"adata": nullable})
+
+
+@pytest.mark.parametrize(
+    "matrix",
+    [
+        np.zeros((2, 2), dtype=float),
+        np.array([[0.0, 1.0], [1.0, 0.0]]),
+        np.array([[0.0, 2.0], [3.0, 0.0]]),
+        np.full((2, 2), np.nan),
+        np.full((2, 2), np.inf),
+    ],
+)
+def test_runtime_contract_fails_closed_without_continuous_evidence(matrix):
+    guard = build_expression_preflight_code([{"name": "adata", "layer": None}])
+    with pytest.raises(ValueError, match="raw integer counts"):
+        exec(
+            guard,
+            {"adata": SimpleNamespace(X=matrix, shape=matrix.shape, layers={})},
+        )
+
+
+def test_runtime_contract_rejects_mixed_raw_and_continuous_dataframe():
+    pd = pytest.importorskip("pandas")
+    frame = pd.DataFrame({
+        "raw": pd.array([0, 4], dtype="Int64"),
+        "normalized": pd.array([0.0, np.log1p(4.0)], dtype="Float64"),
+    })
+    guard = build_expression_preflight_code([{"name": "adata", "layer": None}])
+
+    with pytest.raises(ValueError, match="raw integer counts"):
+        exec(guard, {"adata": frame})
+
+
+def test_runtime_contract_checks_every_value_beyond_old_sampling_limit():
+    values = np.full(10001, 0.5, dtype=float)
+    old_sample = set(np.linspace(0, values.size - 1, 10000, dtype=int))
+    missed_index = next(index for index in range(values.size) if index not in old_sample)
+    values[missed_index] = 4.0
+    guard = build_expression_preflight_code([{"name": "adata", "layer": None}])
+
+    with pytest.raises(ValueError, match="raw integer counts"):
+        exec(
+            guard,
+            {
+                "adata": SimpleNamespace(
+                    X=values.reshape(1, -1),
+                    shape=(1, values.size),
+                    layers={},
+                )
+            },
+        )
+
+
+def test_runtime_contract_checks_last_value_in_every_chunked_matrix_kind():
+    scipy_sparse = pytest.importorskip("scipy.sparse")
+    pd = pytest.importorskip("pandas")
+    runtime = {}
+    exec(build_expression_runtime_code(), runtime)
+    chunk_size = runtime["_scai_expression_chunk_size"]
+    values = np.full(chunk_size * 2 + 17, 0.5, dtype=float)
+    values[-1] = 4.0
+    matrices = (
+        values.reshape(1, -1),
+        scipy_sparse.csr_matrix(values.reshape(1, -1)),
+        pd.DataFrame({"normalized": values}),
+    )
+
+    for matrix in matrices:
+        with pytest.raises(ValueError, match="raw integer counts"):
+            runtime["_scai_validate_expression_contract"](
+                matrix, "chunked input", emit=False
+            )
+
+
+def test_runtime_contract_bounds_dense_sparse_and_pandas_temporary_vectors(
+    monkeypatch,
+):
+    scipy_sparse = pytest.importorskip("scipy.sparse")
+    pd = pytest.importorskip("pandas")
+    runtime = {}
+    exec(build_expression_runtime_code(), runtime)
+    chunk_size = runtime["_scai_expression_chunk_size"]
+    real_numpy = runtime["_scai_expression_np"]
+    observed_sizes = {
+        name: [] for name in ("isfinite", "isclose", "rint", "count_nonzero")
+    }
+
+    class BoundedOperationNumpy:
+        def __getattr__(self, name):
+            original = getattr(real_numpy, name)
+            if name not in observed_sizes:
+                return original
+
+            def tracked(*args, **kwargs):
+                for argument in args:
+                    try:
+                        observed_sizes[name].append(int(real_numpy.asarray(argument).size))
+                    except (TypeError, ValueError):
+                        pass
+                return original(*args, **kwargs)
+
+            return tracked
+
+    runtime["_scai_expression_np"] = BoundedOperationNumpy()
+    pandas_slice_sizes = []
+    original_to_numpy = pd.Series.to_numpy
+
+    def tracked_to_numpy(series, *args, **kwargs):
+        pandas_slice_sizes.append(len(series))
+        return original_to_numpy(series, *args, **kwargs)
+
+    monkeypatch.setattr(pd.Series, "to_numpy", tracked_to_numpy)
+    size = chunk_size * 2 + 18
+    values = np.full(size, np.log1p(2.0), dtype=float)
+    noncontiguous_dense = values.reshape(-1, 2).T
+    matrices = (
+        noncontiguous_dense,
+        scipy_sparse.csr_matrix(values.reshape(1, -1)),
+        pd.DataFrame({"normalized": values}),
+    )
+
+    for matrix in matrices:
+        contract = runtime["_scai_validate_expression_contract"](
+            matrix, "bounded input", emit=False
+        )
+        assert contract["scale"] == "normalized_continuous"
+
+    assert all(observed_sizes.values())
+    assert max(max(sizes) for sizes in observed_sizes.values()) <= chunk_size
+    assert pandas_slice_sizes
+    assert max(pandas_slice_sizes) <= chunk_size
+
+
+def test_runtime_contract_accepts_nullable_continuous_dataframe():
+    pd = pytest.importorskip("pandas")
+    frame = pd.DataFrame({
+        "normalized": pd.array([0.0, np.log1p(4.0), pd.NA], dtype="Float64"),
+    })
+    guard = build_expression_preflight_code([{"name": "adata", "layer": None}])
+    exec(guard, {"adata": frame})
+
+
+def test_runtime_contract_marker_and_persisted_record_exclude_raw_extrema():
+    matrix = np.array([[0.0, np.log1p(7.0)]])
+    obj = SimpleNamespace(X=matrix, shape=matrix.shape, layers={})
+    namespace = {
+        "adata": obj,
+        "sc": SimpleNamespace(
+            tl=SimpleNamespace(score_genes=lambda value, **kwargs: None)
+        ),
+    }
+    stream = StringIO()
+    with redirect_stdout(stream):
+        _execute_instrumented(
+            "sc.tl.score_genes(adata, gene_list=['A'])", namespace
+        )
+
+    marker = stream.getvalue()
+    assert "__SCAI_EXPRESSION_CONTRACT__" in marker
+    assert '"min"' not in marker
+    assert '"max"' not in marker
+
+    state = AnalysisState(id="safe-contract", user_id="u", current_round=1)
+    record_expression_contract(
+        state,
+        [{
+            "name": "score_genes",
+            "layer": None,
+            "shape": [1, 2],
+            "scale": "normalized_continuous",
+            "dtype_class": "floating",
+            "min": "secret-minimum",
+            "max": "secret-maximum",
+        }],
+    )
+    persisted = state.sandbox_state["expression_contract_v1"]["inputs"][0]
+    assert persisted == {
+        "name": "score_genes",
+        "layer": None,
+        "shape": [1, 2],
+        "scale": "normalized_continuous",
+        "dtype_class": "floating",
+    }
+
+
 def test_representation_change_invalidates_same_round_artifacts_only():
     state = AnalysisState(id="expr", user_id="u", current_round=2)
     state.publication_figures = [
@@ -81,6 +686,116 @@ def test_representation_change_invalidates_same_round_artifacts_only():
     assert state.publication_figures[0].invalidated_at is not None
     assert state.publication_figures[1].is_current
     assert state.sandbox_state["analysis_generation"] == 1
+
+
+def _state_with_current_expression_artifact(tmp_path, name):
+    figures_dir = tmp_path / "figures"
+    figures_dir.mkdir(exist_ok=True)
+    (figures_dir / f"{name}.jpg").write_bytes(b"old figure")
+    state = AnalysisState(id=f"expr-{name}", user_id="u", current_round=2)
+    state.publication_figures = [
+        PublicationFigure(
+            name=name,
+            description="",
+            figure_type="umap",
+            png_path=f"{name}.jpg",
+            pdf_path=f"{name}.pdf",
+            review_status=FigureReviewStatus.APPROVED,
+            round_number=2,
+        )
+    ]
+    return state, workspace_artifact_versions(tmp_path)
+
+
+def test_failed_sensitive_call_after_mutation_invalidates_artifacts(tmp_path):
+    state, before = _state_with_current_expression_artifact(
+        tmp_path, "before_contract_failure"
+    )
+    matrix = np.array([[0.0, np.log1p(7.0)]])
+    adata = SimpleNamespace(X=matrix.copy(), shape=matrix.shape, layers={})
+    score_calls = []
+
+    def scale(obj):
+        obj.X = obj.X - 1.0
+
+    namespace = {
+        "adata": adata,
+        "sc": SimpleNamespace(
+            pp=SimpleNamespace(scale=scale),
+            tl=SimpleNamespace(
+                score_genes=lambda value, **kwargs: score_calls.append(value)
+            ),
+        ),
+    }
+    code = (
+        "sc.pp.scale(adata)\n"
+        "sc.tl.score_genes(adata, gene_list=['A'])"
+    )
+    with pytest.raises(ValueError, match="centered/scaled"):
+        _execute_instrumented(code, namespace)
+
+    count, stems, note = record_executed_representation_change(
+        state,
+        code,
+        tmp_path,
+        before,
+        execution_started=True,
+    )
+
+    assert score_calls == []
+    assert count == 1
+    assert stems == {"before_contract_failure"}
+    assert "withheld from the report" in note
+    assert not state.publication_figures[0].is_current
+    assert state.sandbox_state["analysis_generation"] == 1
+
+
+def test_failed_statement_after_mutation_invalidates_artifacts(tmp_path):
+    state, before = _state_with_current_expression_artifact(
+        tmp_path, "before_runtime_failure"
+    )
+    matrix = np.array([[0.0, 1.0]])
+    adata = SimpleNamespace(X=matrix.copy(), shape=matrix.shape, layers={})
+
+    def log1p(obj):
+        obj.X = np.log1p(obj.X)
+
+    namespace = {
+        "adata": adata,
+        "sc": SimpleNamespace(pp=SimpleNamespace(log1p=log1p)),
+    }
+    code = "sc.pp.log1p(adata)\nraise RuntimeError('later failure')"
+    with pytest.raises(RuntimeError, match="later failure"):
+        exec(code, namespace)
+
+    count, stems, _note = record_executed_representation_change(
+        state,
+        code,
+        tmp_path,
+        before,
+        execution_started=True,
+    )
+
+    assert count == 1
+    assert stems == {"before_runtime_failure"}
+    assert not state.publication_figures[0].is_current
+
+
+def test_setup_failure_before_user_cell_does_not_invalidate_artifacts(tmp_path):
+    state, before = _state_with_current_expression_artifact(
+        tmp_path, "before_setup_failure"
+    )
+    count, stems, note = record_executed_representation_change(
+        state,
+        "sc.pp.log1p(adata)",
+        tmp_path,
+        before,
+        execution_started=False,
+    )
+
+    assert (count, stems, note) == (0, set(), "")
+    assert state.publication_figures[0].is_current
+    assert "analysis_generation" not in state.sandbox_state
 
 
 def test_local_copy_mutation_is_not_a_representation_change():
