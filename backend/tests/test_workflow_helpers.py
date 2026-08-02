@@ -56,6 +56,30 @@ class TestDiffPlanSteps:
         diff = _diff_plan_steps(prev, curr)
         assert diff[1] == "unchanged"
 
+    def test_changed_figure_contract_is_modified(self):
+        prev = [{"id": 1, "title": "DE", "method": "scanpy"}]
+        curr = [{
+            **prev[0],
+            "figure_requirements": [{"figure_type": "volcano", "minimum_count": 1}],
+        }]
+        assert _diff_plan_steps(prev, curr)[1] == "modified"
+
+    def test_changed_text_only_exception_is_modified(self):
+        prev = [{"id": 1, "title": "Integration", "method": "synthesis"}]
+        curr = [{**prev[0], "allow_text_only": True}]
+        assert _diff_plan_steps(prev, curr)[1] == "modified"
+
+    def test_changed_text_only_reason_is_modified(self):
+        prev = [{
+            "id": 1,
+            "title": "Integration",
+            "method": "synthesis",
+            "allow_text_only": True,
+            "text_only_reason": "Narrative synthesis",
+        }]
+        curr = [{**prev[0], "text_only_reason": "Workflow integration checkpoint"}]
+        assert _diff_plan_steps(prev, curr)[1] == "modified"
+
 
 class TestGetTaskText:
     def test_string_returned_as_lower(self):

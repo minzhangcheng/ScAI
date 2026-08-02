@@ -493,6 +493,19 @@ Generate a detailed, method-level analysis plan. For each step specify:
 - **method**: The specific Python library/method to use (e.g., "scanpy.pp.filter_cells with min_genes=200")
 - **input**: What data/result this step consumes
 - **expected_output**: What this step produces
+- **figure_requirements**: A JSON list of publication figure deliverables. Each
+  item has ``figure_type``, ``description``, and ``minimum_count``. Result-bearing
+  analytical steps should normally have at least one; use multiple entries for
+  complementary views such as a UMAP plus a violin plot, or a volcano plot plus
+  a heatmap. Technical setup steps may use an empty list. In Stage 1, a standard
+  platform-owned panel may additionally name ``platform_baseline`` as exactly
+  ``annotation``, ``batch``, ``cluster``, or ``markers``; never use that field
+  for comparisons, subclustering, uncertainty, filtering, or other decision views.
+- **allow_text_only**: ``true`` only for a genuinely narrative or special task
+  for which a meaningful result figure cannot be produced. Do not use it merely
+  to save execution time. It cannot override a non-empty figure_requirements list.
+- **text_only_reason**: Required when allow_text_only is true; explain why a
+  meaningful data-result visualization is not applicable to this special task.
 - **rationale**: Why this step is needed (biological/analytical justification)
 - **depends_on**: List of step IDs that must complete before this step
 
@@ -521,6 +534,12 @@ Return the plan as a JSON object:
             "method": "...",
             "input": "...",
             "expected_output": "...",
+            "figure_requirements": [
+                {{"figure_type": "umap", "description": "...", "minimum_count": 1,
+                  "platform_baseline": ""}}
+            ],
+            "allow_text_only": false,
+            "text_only_reason": "",
             "rationale": "...",
             "depends_on": []
         }},
@@ -545,6 +564,9 @@ Return the plan as a JSON object:
                 method=s.get("method", ""),
                 input=s.get("input", ""),
                 expected_output=s.get("expected_output", ""),
+                figure_requirements=s.get("figure_requirements", []) or [],
+                allow_text_only=s.get("allow_text_only", False),
+                text_only_reason=s.get("text_only_reason", ""),
                 rationale=s.get("rationale", ""),
                 depends_on=s.get("depends_on", []),
             ))
@@ -688,6 +710,11 @@ Return the plan as a JSON object:
 - Updated plan must maintain logical dependency order.
 - The feedback tells you how to analyse, not what to stop analysing. Every entity, gene, pathway, module, hypothesis, and named mechanism present in the current plan, the PI's tasks, or the research context MUST still appear in the revised plan unless the feedback explicitly says to drop it. Dropping one because the evidence for it is weak is not permitted — keep the step and state the limitation.
 - Return every step with a populated input, expected_output, and rationale. Do not replace a concrete list with a category label: "curated gene sets for A, B, C" must not become "relevant gene modules".
+- Preserve or explicitly revise every step's figure_requirements. Result-bearing
+  steps should normally retain at least one publication figure. Set
+  allow_text_only=true only for genuinely narrative or special tasks with no
+  meaningful visual representation, keep figure_requirements empty, and provide
+  a concrete text_only_reason.
 - A caution about how strongly a result may be interpreted is not a reason to stop measuring it.
 
 Return the FULL revised plan as JSON (include ALL steps, both completed and revised):
@@ -730,6 +757,18 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
                 method=s.get("method", ""),
                 input=s.get("input", ""),
                 expected_output=s.get("expected_output", ""),
+                figure_requirements=(s.get(
+                    "figure_requirements",
+                    getattr(original, "figure_requirements", []) if original else [],
+                ) or []),
+                allow_text_only=s.get(
+                    "allow_text_only",
+                    getattr(original, "allow_text_only", False) if original else False,
+                ),
+                text_only_reason=s.get(
+                    "text_only_reason",
+                    getattr(original, "text_only_reason", "") if original else "",
+                ),
                 rationale=s.get("rationale", ""),
                 depends_on=s.get("depends_on", []),
                 status="pending",

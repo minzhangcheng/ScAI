@@ -64,7 +64,7 @@ interface ReportAppendix {
   human_messages?: string[]
 }
 
-interface DetailedReport {
+export interface DetailedReport {
   id: string
   session_id: string
   title: string
@@ -75,11 +75,14 @@ interface DetailedReport {
   tables: ReportTable[]
   graphic_abstract_path?: string
   generated_at: string
-  status: 'pending' | 'generating' | 'completed' | 'failed'
+  status: 'pending' | 'generating' | 'completed' | 'partial' | 'failed'
   progress: number
   current_step: string
   html_path?: string
   appendix?: ReportAppendix
+  partial_reason?: 'degraded_fallback' | 'figure_coverage' | 'approved_partial' | string | null
+  figureless_sections?: string[]
+  unreported_figures?: string[]
 }
 
 interface ReportPreview {
@@ -91,6 +94,73 @@ interface ReportPreview {
   figures: { name: string; png_url: string; pdf_url: string | null }[]
   tables: { name: string; csv_url: string }[]
   has_html: boolean
+}
+
+export function reportCompletionContent(report: DetailedReport, language: string) {
+  const isPartial = report.status === 'partial'
+  return {
+    status: report.status,
+    message: language === 'zh'
+      ? (isPartial ? '报告已生成（部分报告）' : '报告生成完成')
+      : (isPartial ? 'Report generated (partial)' : 'Report generation completed'),
+  }
+}
+
+export function partialReportNotice(
+  report: DetailedReport,
+  language: string,
+): string | null {
+  if (report.status !== 'partial') return null
+
+  const figurelessSections = report.figureless_sections ?? []
+  const unreportedFigures = report.unreported_figures ?? []
+  const coverageDetails: string[] = []
+  if (figurelessSections.length > 0) {
+    coverageDetails.push(
+      language === 'zh'
+        ? `缺少结果图的章节：${figurelessSections.join(', ')}`
+        : `sections without result figures: ${figurelessSections.join(', ')}`,
+    )
+  }
+  if (unreportedFigures.length > 0) {
+    coverageDetails.push(
+      language === 'zh'
+        ? `未纳入报告的图片：${unreportedFigures.join(', ')}`
+        : `figures not included in the report: ${unreportedFigures.join(', ')}`,
+    )
+  }
+
+  if (report.partial_reason === 'degraded_fallback') {
+    const base = language === 'zh'
+      ? '报告模型失败后已生成降级版报告。'
+      : 'A degraded fallback report was generated after the report model failed.'
+    return coverageDetails.length > 0
+      ? `${base} ${coverageDetails.join('；')}`
+      : base
+  }
+
+  if (
+    report.partial_reason === 'figure_coverage'
+    || coverageDetails.length > 0
+  ) {
+    const base = language === 'zh'
+      ? '报告已生成，但图片覆盖不完整。'
+      : 'The report was generated with incomplete figure coverage.'
+    const details = coverageDetails.length > 0
+      ? coverageDetails.join('；')
+      : report.current_step
+    return details ? `${base} ${details}` : base
+  }
+
+  if (report.partial_reason === 'approved_partial') {
+    return language === 'zh'
+      ? '报告已按批准的部分结果范围生成。'
+      : 'The report was generated for the approved partial result scope.'
+  }
+
+  return language === 'zh'
+    ? '报告已生成，但被标记为部分报告。'
+    : 'The report was generated but is marked as partial.'
 }
 
 export function ReportPanel() {
@@ -189,20 +259,19 @@ export function ReportPanel() {
           timestamp: new Date().toISOString()
         })
       } else if (data.type === 'complete') {
-        setReport(data.report)
+        const completedReport = data.report as DetailedReport
+        setReport(completedReport)
         setGenerating(false)
         setReportGenerated(true)
         // Load preview after generation
         Promise.all([loadPreview(), fetchArchives()])
         // Add completion message
+        const completion = reportCompletionContent(completedReport, language)
         addMessage({
           id: `report-complete-${Date.now()}`,
           type: 'completed',
           agent: 'pi',
-          content: {
-            status: 'completed',
-            message: language === 'zh' ? '报告生成完成' : 'Report generation completed'
-          },
+          content: completion,
           timestamp: new Date().toISOString()
         })
       } else if (data.type === 'error') {
@@ -257,8 +326,9 @@ export function ReportPanel() {
       const data = await apiFetch<any>(`/session/${currentSession.id}/detailed-report`)
       if (data?.report) {
         setReport(data.report)
-        // Mark report as generated if it's completed
-        if (data.report.status === 'completed') {
+        // A partial report is a finished, downloadable artifact with an
+        // explicit coverage warning, not an in-progress generation.
+        if (data.report.status === 'completed' || data.report.status === 'partial') {
           setReportGenerated(true)
         }
         // Also load preview
@@ -467,7 +537,7 @@ export function ReportPanel() {
           </div>
 
           <div className="flex items-center gap-2">
-            {report && report.status === 'completed' && (
+            {report && (report.status === 'completed' || report.status === 'partial') && (
               <>
                 {preview?.has_html && (
                   <button
@@ -504,7 +574,7 @@ export function ReportPanel() {
             )}
 
             {/* Only show regenerate button when report exists */}
-            {report && report.status === 'completed' && (
+            {report && (report.status === 'completed' || report.status === 'partial') && (
               <button
                 onClick={generateReport}
                 disabled={generating}
@@ -530,6 +600,12 @@ export function ReportPanel() {
         {archiveWarning && (
           <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-sm text-yellow-800">
             {language === 'zh' ? '归档历史报告失败：' : 'Previous report archive failed: '}{archiveWarning}
+          </div>
+        )}
+
+        {report?.status === 'partial' && (
+          <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded text-sm text-amber-800">
+            {partialReportNotice(report, language)}
           </div>
         )}
 

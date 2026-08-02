@@ -69,6 +69,7 @@ from .schema_parts.session import (  # noqa: F401
     AgentRoundCache,
     DetailedReportSegment,
     Snapshot,
+    FigureRequirement,
     PlanStep,
     AnalysisPlan,
     SpeciesTissueQualification,
@@ -686,7 +687,10 @@ class AnalysisState(BaseModel):
             elif field_name == "agent_errors":
                 result[api_key] = self._serialize_agent_errors(val)
             elif field_name == "publication_figures":
-                result[api_key] = self._serialize_publication_figures(val)
+                result[api_key] = self._serialize_publication_figures(
+                    val,
+                    lineage_id=(self.restore_branch_id or "main"),
+                )
             elif field_name == "publication_tables":
                 result[api_key] = self._serialize_publication_tables(val)
             elif field_name == "graphic_abstract":
@@ -791,8 +795,9 @@ class AnalysisState(BaseModel):
         ]
 
     @staticmethod
-    def _serialize_publication_figures(figures):
+    def _serialize_publication_figures(figures, *, lineage_id: str = "main"):
         from backend.services.figure_layout import blocking_violations
+        from backend.services.report.artifacts import archival_render_available
 
         # round / layout_blocking / diagnostic are the gallery's badges. The
         # integrated_report WebSocket message carries them for the figures it
@@ -809,10 +814,17 @@ class AnalysisState(BaseModel):
              "review_status": f["review_status"],
              "pi_feedback": f["pi_feedback"], "revision_count": f["revision_count"],
              "round": f.get("round_number") or None,
+             "plan_step_id": f.get("plan_step_id"),
+             "plan_id": f.get("plan_id"),
+             "purpose": f.get("purpose", "result"),
+             "is_publication": True,
              "layout_blocking": bool(blocking_violations(f.get("layout_violations"))),
              "diagnostic": bool(f.get("diagnostic")),
              "created_at": f["created_at"]}
             for f in figures
+            if f.get("is_current", True) and not f.get("invalidated_at")
+            and (f.get("lineage_id") or "main") == (lineage_id or "main")
+            and archival_render_available(f)
         ]
 
     @staticmethod
@@ -839,15 +851,51 @@ class AnalysisState(BaseModel):
         }
 
     def _serialize_messages(self, strip_message_base64):
-        return [
-            {"id": msg.id, "type": msg.type,
-             "agent": msg.agent.value if msg.agent else None,
-             "content": (strip_message_base64(msg.type, msg.content)
-                         if strip_message_base64 else msg.content),
-             "timestamp": msg.timestamp.isoformat() if msg.timestamp else ""}
-            for msg in self.realtime_messages
+        from backend.services.report.artifacts import archival_render_available
+
+        current_figures = [
+            figure for figure in self.publication_figures
+            if getattr(figure, "is_current", True)
+            and not getattr(figure, "invalidated_at", None)
+            and (getattr(figure, "lineage_id", None) or "main")
+            == (self.restore_branch_id or "main")
+            and archival_render_available(figure)
         ]
+        current_ids = {str(figure.id) for figure in current_figures}
+        current_names = {str(figure.name) for figure in current_figures}
 
+        def _registered_figure_is_current(raw) -> bool:
+            if not isinstance(raw, dict):
+                return True
+            if raw.get("is_publication") is False:
+                return True
+            figure_id = str(raw.get("id") or raw.get("figure_id") or "")
+            name = str(raw.get("name") or raw.get("figure_name") or "")
+            if figure_id:
+                return figure_id in current_ids
+            return bool(name and name in current_names)
 
-
-
+        serialized = []
+        for msg in self.realtime_messages:
+            content = (
+                strip_message_base64(msg.type, msg.content)
+                if strip_message_base64 else msg.content
+            )
+            if msg.type in {"figure_review", "figure_approved", "figure_revision"}:
+                nested = content.get("figure") if isinstance(content, dict) else None
+                if nested is not None and not _registered_figure_is_current(nested):
+                    continue
+            elif msg.type == "integrated_report" and isinstance(content, dict):
+                content = dict(content)
+                content["figures"] = [
+                    raw for raw in (content.get("figures") or [])
+                    if _registered_figure_is_current(raw)
+                ]
+            serialized.append({
+                "id": msg.id,
+                "type": msg.type,
+                "agent": msg.agent.value if msg.agent else None,
+                "content": content,
+                "timestamp": msg.timestamp.isoformat() if msg.timestamp else "",
+            })
+        return serialized

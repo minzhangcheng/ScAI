@@ -1,14 +1,16 @@
 """Deterministic quality-control diagnostic panel for the exploration round.
 
 Measured over seven real multi-round sessions: the agent ran a full QC pass every
-single time and plotted it zero times. Three things line up to produce that. The
-Stage-1 instruction lists ten mandatory steps, none of them a plot, and then
-defers figures wholesale (``Do NOT generate publication figures``); Stage 2 then
-forbids re-running Round-1 work; and the plan audit cannot notice, because
+single time and plotted it zero times. The original Stage-1 instruction listed ten
+mandatory steps but deferred result figures wholesale; Stage 2 then forbade
+re-running Round-1 work; and the plan audit could not notice, because
 ``METHOD_SIGNATURES`` holds tool families and no plotting token, so a step that
-promised a plot is ``verifiable=False`` and by design never counted as a gap. The
-quality-control chapter of the report is therefore fluent prose over numbers that
-were never shown to anyone.
+promised a plot was ``verifiable=False`` and by design never counted as a gap. The
+instruction now distinguishes downstream result figures from required Stage-1
+baselines, but prompt wording still is not an artifact guarantee. This module is
+the deterministic quality-control half of that guarantee; the annotation,
+batch/sample, cluster, and marker half lives in
+``stage1_baseline_figures.py``.
 
 Asking the model for the figure is the other half of this fix and is not enough on
 its own. The same class of prompt-only figure rule has already failed here once:

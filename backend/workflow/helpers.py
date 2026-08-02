@@ -190,7 +190,12 @@ def _has_stage1_keyword(text: str) -> bool:
             idx = pos + len(kw)
     return False
 
-def decide_bioinfo_post_execution(planning_stage: str, plan_revision_requested: bool) -> str:
+def decide_bioinfo_post_execution(
+    planning_stage: str,
+    plan_revision_requested: bool,
+    result_status: str = "completed",
+    figure_contract_passed: bool = True,
+) -> str:
     """Decide what _bioinformatics_analysis should do after the agent returns.
 
     A "paused_for_revision" return is NOT a stage completion: the agent stopped
@@ -200,11 +205,17 @@ def decide_bioinfo_post_execution(planning_stage: str, plan_revision_requested: 
     Returns one of:
       "revision"        — agent paused mid-plan; keep current stage + current_plan,
                           do not cache the partial result.
+      "incomplete"      — execution or required-figure contract is incomplete;
+                          keep the stage and request a bounded plan revision.
       "stage1_complete" — stage1 genuinely finished; advance to stage2.
       "complete"        — stage2/full finished normally; cache result.
     """
     if plan_revision_requested:
         return "revision"
+    if str(result_status or "").strip().lower() not in ("completed", "partial"):
+        return "incomplete"
+    if not figure_contract_passed:
+        return "incomplete"
     if planning_stage == "stage1":
         return "stage1_complete"
     return "complete"
@@ -233,7 +244,11 @@ def _diff_plan_steps(prev_steps: List[Dict], curr_steps: List[Dict]) -> Dict[int
             prev = prev_by_id[sid]
             curr = curr_by_id[sid]
             if (prev.get('title') != curr.get('title') or
-                prev.get('method') != curr.get('method')):
+                prev.get('method') != curr.get('method') or
+                prev.get('figure_requirements', []) != curr.get('figure_requirements', []) or
+                bool(prev.get('allow_text_only', False)) !=
+                bool(curr.get('allow_text_only', False)) or
+                prev.get('text_only_reason', '') != curr.get('text_only_reason', '')):
                 diff[sid] = 'modified'
             else:
                 diff[sid] = 'unchanged'

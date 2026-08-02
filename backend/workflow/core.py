@@ -1206,7 +1206,10 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             try:
                 combined_instruction = "Supplementary analysis tasks:\n" + "\n".join(f"- {t}" for t in bio_tasks)
                 supp_result = await self.bioinformatics_agent.run_autonomous_analysis(
-                    state, combined_instruction, max_steps=30
+                    state,
+                    combined_instruction,
+                    max_steps=30,
+                    figure_review_callback=self._figure_review_callback,
                 )
                 if supp_result:
                     self._merge_supplementary_findings(

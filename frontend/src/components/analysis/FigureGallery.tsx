@@ -42,12 +42,9 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
   const visibleFigures = showAll ? figures : figures.slice(0, previewCount)
   const hiddenCount = figures.length - visibleFigures.length
 
-  const isSessionCompleted = currentSession?.status === 'completed'
-
-  const getStatusIcon = (status: FigureReviewStatus) => {
-    // When session is completed, revision_requested figures are the final accepted version
-    if (isSessionCompleted && status === 'revision_requested') {
-      return <CheckCircle2 className="w-4 h-4 text-green-500" />
+  const getStatusIcon = (status: FigureReviewStatus, diagnostic?: boolean) => {
+    if (diagnostic && status === 'pending') {
+      return <FileImage className="w-4 h-4 text-sky-600" />
     }
     switch (status) {
       case 'approved':
@@ -61,9 +58,9 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
     }
   }
 
-  const getStatusLabel = (status: FigureReviewStatus) => {
-    if (isSessionCompleted && status === 'revision_requested') {
-      return language === 'zh' ? '最终版' : 'Final'
+  const getStatusLabel = (status: FigureReviewStatus, diagnostic?: boolean) => {
+    if (diagnostic && status === 'pending') {
+      return language === 'zh' ? '平台图' : 'Platform figure'
     }
     switch (status) {
       case 'approved':
@@ -77,9 +74,9 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
     }
   }
 
-  const getStatusColor = (status: FigureReviewStatus) => {
-    if (isSessionCompleted && status === 'revision_requested') {
-      return 'bg-green-100 text-green-700 border-green-200'
+  const getStatusColor = (status: FigureReviewStatus, diagnostic?: boolean) => {
+    if (diagnostic && status === 'pending') {
+      return 'bg-sky-100 text-sky-700 border-sky-200'
     }
     switch (status) {
       case 'approved':
@@ -161,6 +158,7 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
                 />
               ) : currentSession?.id ? (
                 <img
+                  key={`api-${figure.id}-${figure.reviewStatus}-${figure.revisionCount}`}
                   src={`${API_BASE}/session/${currentSession.id}/figure/${figure.id}/png`}
                   alt={figure.name}
                   className="w-full h-full object-contain"
@@ -186,10 +184,10 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
               </div>
 
               {/* Status Badge */}
-              <div className={`absolute top-2 right-2 px-2 py-1 rounded-full text-xs font-medium border ${getStatusColor(figure.reviewStatus)}`}>
+              <div className={`absolute top-2 right-2 px-2 py-1 rounded-full text-xs font-medium border ${getStatusColor(figure.reviewStatus, figure.diagnostic)}`}>
                 <span className="flex items-center gap-1">
-                  {getStatusIcon(figure.reviewStatus)}
-                  {getStatusLabel(figure.reviewStatus)}
+                  {getStatusIcon(figure.reviewStatus, figure.diagnostic)}
+                  {getStatusLabel(figure.reviewStatus, figure.diagnostic)}
                 </span>
               </div>
 
@@ -221,6 +219,23 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
                 {figure.diagnostic && (
                   <span className="text-xs text-slate-500 bg-slate-200 px-2 py-0.5 rounded">
                     {language === 'zh' ? '诊断图' : 'Diagnostic'}
+                  </span>
+                )}
+                {figure.planStepId !== undefined && (
+                  <span
+                    className="text-xs text-violet-600 bg-violet-50 px-2 py-0.5 rounded"
+                    title={figure.planId
+                      ? `${language === 'zh' ? '计划' : 'Plan'} ${figure.planId}`
+                      : undefined}
+                  >
+                    {language === 'zh'
+                      ? `计划步骤 ${figure.planStepId}`
+                      : `Plan step ${figure.planStepId}`}
+                  </span>
+                )}
+                {figure.purpose && figure.purpose !== 'result' && (
+                  <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded">
+                    {figure.purpose}
                   </span>
                 )}
                 {/* The status badge alone would read "Final" over a figure the
@@ -344,9 +359,9 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
             {/* Modal Footer */}
             <div className="p-4 border-t border-slate-200 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className={`px-3 py-1 rounded-full text-sm font-medium border ${getStatusColor(selectedFigure.reviewStatus)}`}>
-                  {getStatusIcon(selectedFigure.reviewStatus)}
-                  <span className="ml-1">{getStatusLabel(selectedFigure.reviewStatus)}</span>
+                <span className={`px-3 py-1 rounded-full text-sm font-medium border ${getStatusColor(selectedFigure.reviewStatus, selectedFigure.diagnostic)}`}>
+                  {getStatusIcon(selectedFigure.reviewStatus, selectedFigure.diagnostic)}
+                  <span className="ml-1">{getStatusLabel(selectedFigure.reviewStatus, selectedFigure.diagnostic)}</span>
                 </span>
                 {selectedFigure.piFeedback && (
                   <span className="text-sm text-slate-500 italic">

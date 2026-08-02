@@ -150,6 +150,24 @@ class Snapshot(BaseModel):
     source_restore_transaction_id: Optional[str] = None
     continuation_kind: Optional[str] = None
 
+class FigureRequirement(BaseModel):
+    """A visual deliverable that must exist before a plan step is complete.
+
+    ``figure_type`` uses the same open vocabulary as ``PublicationFigure``.  It
+    intentionally remains a string: analysis methods evolve faster than the API,
+    and forcing every new plot family through a schema migration would make the
+    contract less useful rather than safer.
+    """
+
+    figure_type: str = "other"
+    description: str = ""
+    minimum_count: int = Field(default=1, ge=1, le=12)
+    # Explicit hand-off to one deterministic Stage 1 renderer. Empty means the
+    # autonomous executor owns the deliverable. The closed keys prevent a loose
+    # word such as "cluster" from misclassifying subclustering/comparison plots.
+    platform_baseline: Literal["", "annotation", "batch", "cluster", "markers"] = ""
+
+
 class PlanStep(BaseModel):
     """A single step in an analysis plan."""
     id: int
@@ -158,6 +176,15 @@ class PlanStep(BaseModel):
     input: str = ""
     expected_output: str = ""
     rationale: str = ""
+    figure_requirements: List[FigureRequirement] = Field(default_factory=list)
+    # Reserved for genuinely narrative/special tasks.  Ordinary analytical
+    # result steps should declare visual deliverables instead of using this as
+    # an escape hatch.
+    allow_text_only: bool = False
+    # Required whenever ``allow_text_only`` is true.  The deterministic figure
+    # contract ignores an unexplained exception and never lets it override an
+    # explicit ``figure_requirements`` entry.
+    text_only_reason: str = ""
     depends_on: List[int] = []
     status: str = "pending"  # pending | in_progress | completed | skipped
     executed_at: Optional[datetime] = None

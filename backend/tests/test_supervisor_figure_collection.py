@@ -1,13 +1,21 @@
 """Regression: supervisor _collect_figure_paths must resolve figures from
 results/<dir>/figures/ subdirectories via rglob (same bug as scai-data-5)."""
+import base64
+import hashlib
 from pathlib import Path
 
 from backend.agents.supervisor_agent import SupervisorAgent
+from backend.models.schemas import (
+    AnalysisState,
+    FigureReviewStatus,
+    PublicationFigure,
+)
+from backend.tests.figure_image_helpers import valid_image_bytes, write_valid_image
 
 
 def _png(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 16)
+    write_valid_image(path)
 
 
 def test_collect_figure_paths_finds_subdir_figure(tmp_path):
@@ -47,6 +55,40 @@ def test_collect_figure_paths_missing_file_skipped(tmp_path):
     figure_map = agent._collect_figure_paths(records, ws)
 
     assert "nonexistent.png" not in figure_map
+
+
+def test_supervision_filename_cannot_bypass_registered_render_hash(tmp_path):
+    ws = tmp_path / "workspace"
+    figures = ws / "figures"
+    figures.mkdir(parents=True)
+    path = figures / "reviewed.jpg"
+    original = write_valid_image(path, min_bytes=2200)
+    preview = valid_image_bytes("JPEG", color=(90, 40, 10))
+    figure = PublicationFigure(
+        name="reviewed",
+        description="Reviewed render",
+        figure_type="other",
+        png_path=str(path),
+        pdf_path="",
+        png_base64=base64.b64encode(preview).decode(),
+        render_sha256=hashlib.sha256(original).hexdigest(),
+        preview_sha256=hashlib.sha256(preview).hexdigest(),
+        review_status=FigureReviewStatus.APPROVED,
+    )
+    state = AnalysisState(user_id="test-user", publication_figures=[figure])
+
+    replacement = write_valid_image(
+        path, color=(220, 10, 10), min_bytes=2200
+    )
+    agent = SupervisorAgent.__new__(SupervisorAgent)
+    figure_map = agent._collect_figure_paths(
+        [{"saved_figure_filenames": ["reviewed.jpg"]}], ws, state=state
+    )
+
+    assert len(figure_map) == 1
+    resolved = next(iter(figure_map.values()))
+    assert resolved.read_bytes() == preview
+    assert resolved.read_bytes() != replacement
 
 
 def test_shared_helper_finds_deep_figure(tmp_path):

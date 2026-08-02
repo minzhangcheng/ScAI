@@ -5,6 +5,7 @@ contract drift: a PI prompt that cannot be built, a JSON shape the orchestrator
 does not read, or an executor result whose keys the merge step drops. Only the
 LLM and the kernel are stubbed.
 """
+import base64
 import json
 import pytest
 from types import SimpleNamespace
@@ -12,8 +13,14 @@ from unittest.mock import MagicMock
 
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
 from backend.agents.pi_agent import PIAgent
-from backend.models.schemas import AnalysisState, CodeExecution
+from backend.models.schemas import (
+    AnalysisState,
+    CodeExecution,
+    FigureReviewStatus,
+    PublicationFigure,
+)
 from backend.models.schema_parts.session import AnalysisPlan, PlanStep
+from backend.tests.figure_image_helpers import valid_image_bytes
 from backend.workflow.post_execution import PostExecutionReviewMixin
 
 _SIGNATURE = {
@@ -80,13 +87,17 @@ def _pi_agent(replies):
     return agent
 
 
-def _bio_agent(replies, exec_output="top regulons: A, B", exec_error=None):
+def _bio_agent(replies, exec_output="top regulons: A, B", exec_error=None, exec_figures=None):
     sandbox = MagicMock()
     executed = []
 
     async def _execute(code, **kwargs):
         executed.append(code)
-        return SimpleNamespace(output=exec_output, error=exec_error, figures=[])
+        return SimpleNamespace(
+            output=exec_output,
+            error=exec_error,
+            figures=list(exec_figures or []),
+        )
 
     sandbox.execute = _execute
     agent = BioinformaticsAgent(settings_provider=_provider(), sandbox=sandbox)
@@ -131,6 +142,22 @@ def _state_and_plan():
     state.code_history.append(
         CodeExecution(code="sc.tl.rank_genes_groups(adata, 'leiden')", round_number=2)
     )
+    # Marker detection is a result-bearing step and therefore needs a reviewed
+    # visual deliverable. Seed that completed evidence so this fixture isolates
+    # the genuinely missing pathway-activity computation in step 2.
+    state.publication_figures.append(PublicationFigure(
+        name="marker_result",
+        description="Marker result overview",
+        figure_type="dotplot",
+        png_path="/missing/marker_result.png",
+        pdf_path="/missing/marker_result.pdf",
+        png_base64=base64.b64encode(valid_image_bytes("PNG")).decode(),
+        review_status=FigureReviewStatus.APPROVED,
+        plan_step_id=1,
+        plan_id=state.current_plan.id,
+        purpose="result",
+        round_number=2,
+    ))
     return state
 
 
@@ -176,10 +203,13 @@ async def test_real_agents_complete_the_review_and_merge_back():
     assert findings[-1] == "[Supplementary] Regulon A is elevated in the compared group."
     assert [c.code for c in state.code_history][-1] == bio.executed_code[-1]
 
-    # Re-audit: the repair closes the gap the review was triggered by.
+    # Re-audit: the restricted pass closes the computational gap, but it cannot
+    # mint an unreviewed image. The remaining result-figure gap is deliberately
+    # returned to the main publication pipeline.
     reaudit = harness._audit_round_plan_execution(state, result)
-    assert reaudit["n_unmet"] == 0
-    assert [s.status for s in state.current_plan.steps] == ["completed", "completed"]
+    assert reaudit["n_unmet"] == 1
+    assert reaudit["unmet_figure_kinds"] == ["result"]
+    assert [s.status for s in state.current_plan.steps] == ["completed", "pending"]
 
 
 @pytest.mark.asyncio
@@ -203,6 +233,75 @@ async def test_denylisted_code_is_rejected_without_touching_the_kernel():
     assert merge["findings"] == []
     # The rejection is fed back to the model so it can correct itself.
     assert any("rejected" in p for p in bio.prompts_seen[1:])
+
+
+@pytest.mark.parametrize("code", [
+    "plt.savefig('unreviewed.png')",
+    "fig.savefig ('unreviewed.png')",
+    "from matplotlib.pyplot import savefig\nsavefig('unreviewed.png')",
+    "sc.pl.umap(adata, color='group', save='_unreviewed.png')",
+    "image.save('unreviewed.png')",
+    "fig.canvas.print_png('unreviewed.png')",
+    "open('unreviewed.png', 'wb').write(payload)",
+])
+def test_restricted_supplement_rejects_figure_file_writes(code):
+    """A disk image would be rediscovered as a legacy report artifact despite
+    having no PublicationFigure review record, so it must never reach the kernel."""
+    bio = _bio_agent([])
+
+    reason = bio._supplementary_code_is_safe(code, "adata")
+
+    assert reason and "disallowed" in reason
+
+
+def test_restricted_supplement_quarantines_an_image_written_indirectly(tmp_path):
+    """Runtime discovery is the backstop for a writer the static AST gate misses."""
+    bio = _bio_agent([])
+    bio.sandbox.working_dir = str(tmp_path)
+    state = _state_and_plan()
+    before = bio._supplementary_image_versions(tmp_path)
+
+    image = tmp_path / "supplementary_outputs" / "figures" / "indirect.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"not-a-reportable-render")
+
+    changed = bio._quarantine_supplementary_images(state, before)
+
+    assert changed == {"indirect"}
+    assert "indirect" in state.invalidated_artifact_stems
+
+
+def test_scanpy_save_false_is_not_mistaken_for_a_disk_write():
+    bio = _bio_agent([])
+    assert bio._supplementary_code_is_safe(
+        "sc.pl.umap(adata, color='group', save=False)", "adata"
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_incidental_inline_figures_are_discarded_from_evidence_and_result():
+    """Notebook capture is neither registered nor reviewed. It may happen when
+    the model ignores the prompt, but it cannot leak through CodeExecution or the
+    automatic supplementary result into the archival report."""
+    state = _state_and_plan()
+    bio = _bio_agent([
+        json.dumps({"code": "values = [1, 2, 3]\nplt.plot(values)"}),
+        json.dumps({"done": True, "result": {
+            "summary": "Computed values.",
+            "findings": ["The values increased (execution_id recorded above)."],
+        }}),
+    ], exec_output="values: 1, 2, 3", exec_figures=["raw-base64-image"])
+    bio._current_analysis_state = state
+
+    result = await bio.run_supplementary_tasks(
+        tasks=["Compute a compact quantitative summary"],
+        context_summary="", direction="d", max_iterations=3,
+        timeout_seconds=60, total_timeout_seconds=120,
+    )
+
+    assert result["figures"] == []
+    assert result["code_history"] and result["code_history"][0].figures == []
+    assert any("inline figure" in warning for warning in result["warnings"])
 
 
 @pytest.mark.asyncio

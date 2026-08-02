@@ -5,14 +5,25 @@ import base64
 import re as _re
 import shutil
 import logging
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from PIL import Image
 
 from backend.utils.files import resolve_figure_in_workspace
 from backend.services.report.artifacts import (
+    artifact_stems,
     eligible_artifacts,
     excluded_artifact_stems,
+    image_file_sha256,
+    publication_pdf_is_valid,
+    resolve_archival_pdf,
+    resolve_archival_render,
+)
+from backend.services.report.figure_discovery import (
+    discover_figures_in_workspace,
+    prepare_discovered_figures,
+    publication_figure_metadata,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,9 +36,9 @@ class FiguresMixin:
     _FIGURE_TYPE_PRIORITY = {
         "annotation": 0, "umap": 1, "clustering": 2, "heatmap": 3,
         "volcano": 4, "dotplot": 5, "marker_genes": 6, "violin": 7,
-        "bar_chart": 8, "feature_plot": 9, "pathway": 10,
+        "barplot": 8, "bar_chart": 8, "feature_plot": 9, "pathway": 10,
         "trajectory": 11, "velocity": 12, "scatter": 13,
-        "qc": 14, "overview": 15, "unknown": 16
+        "qc": 14, "overview": 15, "other": 16, "unknown": 16
     }
 
     def _load_image_for_vision(self, image_path: str, max_width: int = 600, quality: int = 70) -> Optional[str]:
@@ -150,65 +161,118 @@ class FiguresMixin:
             eligible_publication_figures,
             invalidated_stems=invalidated_stems,
         )
+        metadata_by_stem = publication_figure_metadata(
+            eligible_publication_figures, report_only=True,
+        )
+        records_by_stem: Dict[str, Any] = {}
+        for figure in eligible_publication_figures:
+            for stem in artifact_stems([figure]):
+                records_by_stem.setdefault(stem, figure)
 
         # Build filename-stem -> declared figure_type map from eligible metadata.
         declared_type_by_stem: Dict[str, str] = {}
         if eligible_publication_figures:
             for pf in eligible_publication_figures:
                 declared = getattr(pf, "figure_type", None)
-                png_path = getattr(pf, "png_path", None)
-                if not declared or not png_path:
+                if not declared:
                     continue
-                stem = os.path.splitext(os.path.basename(str(png_path)))[0]
-                if stem:
+                for stem in artifact_stems([pf]):
                     declared_type_by_stem[stem] = str(declared)
 
         if not self.workspace_dir or not self.workspace_dir.exists():
             return existing_figures
 
-        # Scan both workspace root and figures/ subdirectory
-        scan_dirs = [self.workspace_dir]
-        figures_subdir = self.workspace_dir / "figures"
-        if figures_subdir.exists():
-            scan_dirs.append(figures_subdir)
+        # Registered records are the authoritative tier. A restored session may
+        # have lost its old absolute path while retaining a valid record preview;
+        # resolve/materialize that preview before the generic workspace scan so
+        # this fallback generator obeys the same deliverability contract as the
+        # Supervisor report path.
+        for pf in eligible_publication_figures:
+            source = resolve_archival_render(pf, self.workspace_dir)
+            if source is None:
+                continue
+            stem = source.stem
+            if stem in excluded_publication_stems or stem in seen_filenames:
+                continue
+            seen_filenames.add(stem)
+            seen_filenames.update(artifact_stems([pf]))
+            dest_png = self.figures_dir / source.name
+            try:
+                if source.resolve() != dest_png.resolve():
+                    shutil.copy2(str(source), str(dest_png))
+            except Exception:
+                continue
 
-        for scan_dir in scan_dirs:
-            # Scan for both JPG and PNG (JPG preferred, PNG for backward compatibility)
-            image_files = sorted(scan_dir.glob("*.jpg")) + sorted(scan_dir.glob("*.png"))
-            for png_file in image_files:
-                if png_file.stem in excluded_publication_stems:
-                    continue
-                if png_file.stem in seen_filenames:
-                    continue  # Skip PNG if JPG already found for same stem
-                seen_filenames.add(png_file.stem)
-
-                # Copy to report figures directory for HTML embedding
-                dest_png = self.figures_dir / png_file.name
+            pdf_file = resolve_archival_pdf(pf, self.workspace_dir)
+            dest_pdf = self.figures_dir / pdf_file.name if pdf_file else None
+            if pdf_file:
                 try:
-                    shutil.copy2(str(png_file), str(dest_png))
-                except Exception as e:
-                    continue
-
-                # Also copy PDF if it exists
-                pdf_file = png_file.with_suffix('.pdf')
-                dest_pdf = self.figures_dir / pdf_file.name
-                if pdf_file.exists():
-                    try:
+                    if pdf_file.resolve() != dest_pdf.resolve():
                         shutil.copy2(str(pdf_file), str(dest_pdf))
-                    except Exception:
-                        pass
+                except Exception:
+                    dest_pdf = None
 
-                fig_info = {
-                    "filename": png_file.name,
-                    "name": png_file.stem.replace("_", " ").title(),
-                    "png_path": str(dest_png),
-                    "pdf_path": str(dest_pdf) if pdf_file.exists() else None,
-                    "inferred_type": self._infer_figure_type(
-                        png_file.stem,
-                        declared_type=declared_type_by_stem.get(png_file.stem),
-                    )
-                }
-                existing_figures.append(fig_info)
+            existing_figures.append({
+                "filename": source.name,
+                "name": getattr(pf, "name", "") or stem.replace("_", " ").title(),
+                "description": getattr(pf, "description", "") or "",
+                "png_path": str(dest_png),
+                "pdf_path": str(dest_pdf) if dest_pdf and dest_pdf.exists() else None,
+                "inferred_type": self._infer_figure_type(
+                    stem, declared_type=getattr(pf, "figure_type", None),
+                ),
+                "plan_step_id": getattr(pf, "plan_step_id", None),
+                "plan_id": getattr(pf, "plan_id", None),
+                "purpose": getattr(pf, "purpose", "result") or "result",
+            })
+
+        discovered = prepare_discovered_figures(
+            discover_figures_in_workspace(self.workspace_dir),
+            publication_figures,
+            invalidated_stems=invalidated_stems,
+            report_only=True,
+            allow_unregistered_diagnostics=False,
+        )
+        for candidate in discovered:
+            png_file = Path(candidate["path"])
+            if png_file.stem in excluded_publication_stems:
+                continue
+            if png_file.stem in seen_filenames:
+                continue
+            seen_filenames.add(png_file.stem)
+
+            dest_png = self.figures_dir / png_file.name
+            try:
+                shutil.copy2(str(png_file), str(dest_png))
+            except Exception:
+                continue
+
+            pdf_file = Path(candidate["pdf_path"]) if candidate.get("pdf_path") else None
+            dest_pdf = self.figures_dir / pdf_file.name if pdf_file else None
+            if pdf_file and publication_pdf_is_valid(pdf_file):
+                try:
+                    shutil.copy2(str(pdf_file), str(dest_pdf))
+                except Exception:
+                    dest_pdf = None
+            else:
+                dest_pdf = None
+
+            existing_figures.append({
+                "filename": png_file.name,
+                "name": candidate.get("publication_name")
+                        or png_file.stem.replace("_", " ").title(),
+                "description": candidate.get("description") or "",
+                "png_path": str(dest_png),
+                "pdf_path": str(dest_pdf) if dest_pdf and dest_pdf.exists() else None,
+                "inferred_type": self._infer_figure_type(
+                    png_file.stem,
+                    declared_type=(candidate.get("type")
+                                   or declared_type_by_stem.get(png_file.stem)),
+                ),
+                "plan_step_id": candidate.get("plan_step_id"),
+                "plan_id": candidate.get("plan_id"),
+                "purpose": candidate.get("purpose") or "result",
+            })
 
         if analysis_log:
             logged_basenames: List[str] = []
@@ -227,10 +291,41 @@ class FiguresMixin:
                         logged_basenames.append(base)
 
             for base in logged_basenames:
-                src = resolve_figure_in_workspace(base, self.workspace_dir, seen_filenames)
+                logged_stem = Path(base).stem
+                if logged_stem in seen_filenames:
+                    continue
+                registered = records_by_stem.get(logged_stem)
+                if registered is not None:
+                    src = resolve_archival_render(registered, self.workspace_dir)
+                else:
+                    src = resolve_figure_in_workspace(
+                        base, self.workspace_dir, seen_filenames
+                    )
+                    if src is not None and image_file_sha256(src, min_bytes=1) is None:
+                        src = None
                 if src is None:
                     continue
+                # A logged file in annotation_validation is archival only when
+                # an eligible publication record vouches for it. The annotation
+                # context report has a separate explicit diagnostic exception.
+                try:
+                    rel_parts = src.relative_to(self.workspace_dir).parts[:-1]
+                except ValueError:
+                    rel_parts = ()
+                metadata = (
+                    metadata_by_stem.get(logged_stem)
+                    or metadata_by_stem.get(src.stem)
+                )
+                if "annotation_validation" in rel_parts and metadata is None:
+                    continue
+                if (
+                    registered is None
+                    and any("supplement" in part.lower() for part in rel_parts)
+                ):
+                    continue
                 seen_filenames.add(src.stem)
+                if registered is not None:
+                    seen_filenames.update(artifact_stems([registered]))
 
                 dest_png = self.figures_dir / src.name
                 try:
@@ -238,23 +333,37 @@ class FiguresMixin:
                 except Exception:
                     continue
 
-                pdf_file = src.with_suffix(".pdf")
-                dest_pdf = self.figures_dir / pdf_file.name
-                if pdf_file.exists():
+                pdf_file = (
+                    resolve_archival_pdf(registered, self.workspace_dir)
+                    if registered is not None else src.with_suffix(".pdf")
+                )
+                pdf_valid = bool(
+                    pdf_file and publication_pdf_is_valid(pdf_file)
+                )
+                if not pdf_valid:
+                    pdf_file = None
+                dest_pdf = self.figures_dir / pdf_file.name if pdf_file else None
+                if pdf_file:
                     try:
                         shutil.copy2(str(pdf_file), str(dest_pdf))
                     except Exception:
-                        pass
+                        dest_pdf = None
 
                 existing_figures.append({
                     "filename": src.name,
-                    "name": src.stem.replace("_", " ").title(),
+                    "name": (metadata or {}).get("publication_name")
+                            or src.stem.replace("_", " ").title(),
+                    "description": (metadata or {}).get("description") or "",
                     "png_path": str(dest_png),
-                    "pdf_path": str(dest_pdf) if pdf_file.exists() else None,
+                    "pdf_path": str(dest_pdf) if dest_pdf and dest_pdf.exists() else None,
                     "inferred_type": self._infer_figure_type(
                         src.stem,
-                        declared_type=declared_type_by_stem.get(src.stem),
+                        declared_type=(metadata or {}).get("type")
+                                      or declared_type_by_stem.get(src.stem),
                     ),
+                    "plan_step_id": (metadata or {}).get("plan_step_id"),
+                    "plan_id": (metadata or {}).get("plan_id"),
+                    "purpose": (metadata or {}).get("purpose") or "result",
                 })
 
         return existing_figures

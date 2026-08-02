@@ -359,6 +359,7 @@ def record_representation_change(state: Any, code: str) -> int:
             state.publication_figures,
             round_number=int(state.current_round or 0),
             reason=reason,
+            lineage_id=(getattr(state, "restore_branch_id", None) or "main"),
         )
         + invalidate_current_artifacts(
             state.publication_tables,

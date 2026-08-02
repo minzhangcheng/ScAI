@@ -4,6 +4,7 @@ Moved verbatim out of backend/services/report/variants.py.
 """
 import html as html_module
 from datetime import datetime
+from pathlib import Path
 
 from backend.utils.report_html import (
     markdown_to_html,
@@ -12,7 +13,12 @@ from backend.utils.report_html import (
 )
 from backend.utils.image_utils import compress_image_to_base64
 from backend.services.report.score_section import build_score_definitions_section_html
+from backend.services.report.figure_discovery import (
+    discover_figures_in_workspace,
+    prepare_discovered_figures,
+)
 from backend.models.schemas import AnalysisState
+from .figure_records import resolved_record_figure_candidates
 
 logger = __import__('logging').getLogger(__name__)
 
@@ -76,21 +82,37 @@ def generate_exploration_report_html(
             fig_desc_map = _build_figure_description_map(state.analysis_log)
             figure_blocks = []
             seen_stems: set = set()
-            for scan_dir in [workspace_dir, workspace_dir / "figures"]:
-                if not scan_dir.exists():
+            # Resolve registered artifacts first. Disk discovery alone cannot
+            # recover a reviewed figure after its original png_path moved or was
+            # overwritten, while the record-owned preview still can.
+            discovered = resolved_record_figure_candidates(
+                state.publication_figures,
+                workspace_dir,
+                report_only=True,
+            )
+            discovered.extend(prepare_discovered_figures(
+                discover_figures_in_workspace(workspace_dir),
+                state.publication_figures,
+                invalidated_stems=state.invalidated_artifact_stems,
+                report_only=True,
+                allow_unregistered_diagnostics=False,
+            ))
+            for candidate in discovered:
+                img_file = Path(candidate["path"])
+                if img_file.stem in seen_stems:
                     continue
-                for img_file in sorted(scan_dir.glob("*.jpg")) + sorted(scan_dir.glob("*.png")):
-                    if img_file.stem in seen_stems:
-                        continue
-                    seen_stems.add(img_file.stem)
-                    try:
-                        b64 = compress_image_to_base64(str(img_file), max_width=1100, quality=85)
-                        caption = html_module.escape(
-                            fig_desc_map.get(img_file.stem, img_file.stem.replace("_", " ").title())
+                seen_stems.add(img_file.stem)
+                try:
+                    b64 = compress_image_to_base64(str(img_file), max_width=1100, quality=85)
+                    caption = html_module.escape(
+                        candidate.get("description")
+                        or fig_desc_map.get(
+                            img_file.stem, img_file.stem.replace("_", " ").title()
                         )
-                        figure_blocks.append(_make_figure_block(b64, caption))
-                    except Exception:
-                        logger.warning("Failed to embed figure in exploration report: %s", img_file, exc_info=True)
+                    )
+                    figure_blocks.append(_make_figure_block(b64, caption))
+                except Exception:
+                    logger.warning("Failed to embed figure in exploration report: %s", img_file, exc_info=True)
             if figure_blocks:
                 key_figures_html = f"""
         <div class="section">

@@ -10,13 +10,18 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 from backend.utils.report_html import markdown_to_html, _build_figure_description_map
-from backend.utils.image_utils import compress_image_to_base64, categorize_figures
+from backend.utils.image_utils import compress_image_to_base64
 from backend.services.report.artifacts import (
     artifact_stems,
     eligible_artifacts,
     excluded_artifact_stems,
 )
+from backend.services.report.figure_discovery import (
+    discover_figures_in_workspace,
+    prepare_discovered_figures,
+)
 from backend.models.schemas import AnalysisState
+from .figure_records import resolved_record_figure_candidates
 
 logger = __import__('logging').getLogger(__name__)
 
@@ -109,8 +114,6 @@ def generate_detailed_report_segment_html(
         from backend.config import get_session_workspace
         workspace_dir = get_session_workspace(state.id)
         if workspace_dir and workspace_dir.exists():
-            figures_subdir = workspace_dir / "figures"
-            categories = categorize_figures(figures_subdir if figures_subdir.exists() else workspace_dir)
             fig_desc_map = _build_figure_description_map(segment_steps)
             eligible_figures = eligible_artifacts(state.publication_figures)
             excluded_stems = excluded_artifact_stems(
@@ -128,30 +131,45 @@ def generate_detailed_report_segment_html(
                 if int(getattr(fig, "round_number", 0) or 0) in (0, segment_round)
             )
             allowed_stems = round_step_stems | eligible_round_stems
-            has_figures = any(figs for figs in categories.values())
-            if has_figures:
+            # Start from record-owned bytes so a reviewed figure remains
+            # reportable after its original path moved or was overwritten.
+            discovered = resolved_record_figure_candidates(
+                state.publication_figures,
+                workspace_dir,
+                report_only=True,
+                round_numbers={0, segment_round},
+            )
+            discovered.extend(prepare_discovered_figures(
+                discover_figures_in_workspace(workspace_dir),
+                state.publication_figures,
+                invalidated_stems=state.invalidated_artifact_stems,
+                report_only=True,
+                allow_unregistered_diagnostics=False,
+            ))
+            if discovered:
                 parts.append('<div class="segment-section"><h3>Generated Figures</h3>')
                 parts.append('<div class="figure-gallery">')
-                count = 0
-                for cat, figs in categories.items():
-                    for fig_info in figs[:5]:
-                        if count >= 20:
-                            break
-                        try:
-                            fig_name = fig_info.get("name", "")
-                            if fig_name in excluded_stems or fig_name not in allowed_stems:
-                                continue
-                            fig_path = fig_info.get("png_path") or fig_info.get("path", "")
-                            if not fig_path:
-                                continue
-                            b64 = compress_image_to_base64(fig_path, max_width=1000, quality=82)
-                            caption = fig_desc_map.get(fig_name, fig_name.replace("_", " ").title())
-                            key = html_module.escape(str(fig_name), quote=True)
-                            parts.append(f'<div class="figure-item" data-figure-key="{key}"><img src="{b64}" />'
-                                         f'<p class="caption">{html_module.escape(str(caption))}</p></div>')
-                            count += 1
-                        except Exception as e:
-                            logger.debug(f"Figure embedding failed for {fig_info.get('name', '?')}: {e}")
+                for fig_info in discovered:
+                    try:
+                        file_stem = fig_info.get("name", "")
+                        figure_key = fig_info.get("record_stem") or file_stem
+                        if figure_key in excluded_stems or figure_key not in allowed_stems:
+                            continue
+                        fig_path = fig_info.get("path", "")
+                        if not fig_path:
+                            continue
+                        b64 = compress_image_to_base64(fig_path, max_width=1000, quality=82)
+                        caption = (
+                            fig_info.get("description")
+                            or fig_desc_map.get(
+                                figure_key, figure_key.replace("_", " ").title()
+                            )
+                        )
+                        key = html_module.escape(str(figure_key), quote=True)
+                        parts.append(f'<div class="figure-item" data-figure-key="{key}"><img src="{b64}" />'
+                                     f'<p class="caption">{html_module.escape(str(caption))}</p></div>')
+                    except Exception as e:
+                        logger.debug(f"Figure embedding failed for {fig_info.get('name', '?')}: {e}")
                 parts.append('</div></div>')
     except Exception as e:
         logger.warning(f"Figure section generation failed: {e}")

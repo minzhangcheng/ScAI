@@ -26,6 +26,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from .artifacts import artifact_stems
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -127,13 +129,15 @@ def attribute_figures_to_rounds(
 
     # Source 2: publication figures promoted during a known round.
     for pf in getattr(state, "publication_figures", None) or []:
-        png = getattr(pf, "png_path", "") or ""
         rn = getattr(pf, "round_number", 0) or 0
-        if not png or rn <= 0:
+        if rn <= 0:
             continue
-        base = os.path.basename(png)
-        if base in wanted and base not in attributed:
-            attributed[base] = int(rn)
+        stems = artifact_stems([pf])
+        for candidate in names:
+            if candidate in attributed:
+                continue
+            if Path(candidate).stem in stems:
+                attributed[candidate] = int(rn)
 
     # Source 3: file mtime against round boundaries.
     missing = [n for n in names if n not in attributed]

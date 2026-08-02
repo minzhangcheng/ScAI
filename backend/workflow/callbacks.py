@@ -20,6 +20,46 @@ def parse_plan_revision_signal(response_text: str) -> bool:
     return False
 
 
+def compact_figure_event_payload(
+    figure: PublicationFigure,
+    *,
+    review_status: Optional[str] = None,
+    pi_feedback: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return the live-event figure record without its potentially huge preview.
+
+    Review events used to send only ``figure_id`` and ``figure_name`` at the top
+    level.  The Results gallery consumes a nested figure record, so a newly
+    rendered figure remained invisible until a later session reload or the
+    integrated-report event.  Keep the nested record compact, but carry the
+    approved-plan provenance needed to explain why the figure exists.
+    """
+    raw_status = review_status
+    if raw_status is None:
+        status = getattr(figure, "review_status", None)
+        raw_status = str(getattr(status, "value", status) or "pending")
+    return {
+        "id": figure.id,
+        "name": figure.name,
+        "description": figure.description,
+        "figure_type": figure.figure_type,
+        "png_path": figure.png_path,
+        "pdf_path": figure.pdf_path,
+        "review_status": raw_status,
+        "pi_feedback": (
+            pi_feedback if pi_feedback is not None
+            else getattr(figure, "pi_feedback", None)
+        ),
+        "revision_count": figure.revision_count,
+        "plan_step_id": getattr(figure, "plan_step_id", None),
+        "plan_id": getattr(figure, "plan_id", None),
+        "purpose": getattr(figure, "purpose", "result") or "result",
+        "round": getattr(figure, "round_number", 0) or None,
+        "diagnostic": bool(getattr(figure, "diagnostic", False)),
+        "created_at": figure.created_at.isoformat(),
+    }
+
+
 class CallbacksMixin:
     """Mixin providing callback methods invoked by sub-agents.
 
@@ -171,6 +211,27 @@ IMPORTANT: Respond in English only. Do not use any other language."""
             if self.supervisor_agent else False
         )
 
+        # This callback supplies a review opinion only.  The producer owns the
+        # final state because deterministic layout checks can legitimately
+        # overrule an approving reviewer.  Emit a pending event here so the UI
+        # can show that review started, then let ``FiguresMixin`` publish the
+        # authoritative approved/revision event after all gates have run.
+        await self._send_message(
+            "figure_review",
+            {
+                "figure_id": figure.id,
+                "figure_name": figure.name,
+                "figure_type": figure.figure_type,
+                "description": figure.description,
+                "revision_count": figure.revision_count,
+                "status": "reviewing",
+                "figure": compact_figure_event_payload(
+                    figure, review_status="pending"
+                ),
+            },
+            AgentType.PI,
+        )
+
         # 4.1: All models in the chain lack vision → skip image review
         if not pi_vision and not bio_vision and not sup_vision:
             logger.info(f"[{self.session_id}] All agents lack vision, auto-approving figure: {figure.name}")
@@ -181,19 +242,6 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                 "suggestions": [],
                 "must_fix": [],
             }
-            await self._send_message(
-                "figure_approved",
-                {
-                    "figure_id": figure.id,
-                    "figure_name": figure.name,
-                    "approved": True,
-                    "quality_score": 7,
-                    "feedback": review["feedback"],
-                    "suggestions": [],
-                    "must_fix": []
-                },
-                AgentType.PI
-            )
             return review
 
         # 4.3.2: PI has no vision
@@ -216,36 +264,10 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                     "must_fix": [],
                 }
 
-            await self._send_message(
-                "figure_approved" if review.get("approved") else "figure_revision",
-                {
-                    "figure_id": figure.id,
-                    "figure_name": figure.name,
-                    "approved": review.get("approved", False),
-                    "quality_score": review.get("quality_score", 5),
-                    "feedback": review.get("feedback", ""),
-                    "suggestions": review.get("suggestions", []),
-                    "must_fix": review.get("must_fix", [])
-                },
-                AgentType.BIOINFORMATICS if bio_vision else AgentType.SUPERVISOR
-            )
             return review
 
         # Default: PI reviews with vision (existing flow)
         logger.info(f"[{self.session_id}] PI reviewing figure: {figure.name}")
-
-        await self._send_message(
-            "figure_review",
-            {
-                "figure_id": figure.id,
-                "figure_name": figure.name,
-                "figure_type": figure.figure_type,
-                "description": figure.description,
-                "revision_count": figure.revision_count,
-                "status": "reviewing"
-            },
-            AgentType.PI
-        )
 
         if self._current_analysis_state is None:
             raise RuntimeError(
@@ -258,20 +280,6 @@ IMPORTANT: Respond in English only. Do not use any other language."""
             state,
             figure,
             figure.png_base64
-        )
-
-        await self._send_message(
-            "figure_approved" if review.get("approved") else "figure_revision",
-            {
-                "figure_id": figure.id,
-                "figure_name": figure.name,
-                "approved": review.get("approved", False),
-                "quality_score": review.get("quality_score", 5),
-                "feedback": review.get("feedback", ""),
-                "suggestions": review.get("suggestions", []),
-                "must_fix": review.get("must_fix", [])
-            },
-            AgentType.PI
         )
 
         return review

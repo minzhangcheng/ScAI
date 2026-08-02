@@ -94,6 +94,7 @@ class AnalysisStep(BaseModel):
     pub_figure_name: Optional[str] = None
     pub_figure_description: Optional[str] = None
     pub_figure_type: Optional[str] = None
+    pub_figure_plan_step_id: Optional[int] = None
     pub_figure_code: Optional[str] = None
     pub_figure_result: Optional[str] = None
 

@@ -301,11 +301,18 @@ def test_the_panel_renders_one_figure_and_passes_the_layout_gate():
     plt.close("all")
 
 
-def test_stage1_instruction_asks_for_the_panel_and_scopes_the_deferral():
+def test_stage1_instruction_requires_baselines_and_scopes_the_deferral():
     from backend.workflow.agent_nodes.shared import _STAGE1_INSTRUCTION
 
     text = textwrap.dedent(_STAGE1_INSTRUCTION)
     assert 'figure_type="qc"' in text
-    # The blanket deferral is what suppressed the figure for seven sessions.
+    # The blanket deferral suppressed Stage 1 evidence in earlier runs. Only
+    # downstream result figures belong behind the Stage 2 boundary.
     assert "Do NOT generate publication figures (save that for Stage 2)" not in text
-    assert "RESULTS" in text
+    assert "Do NOT generate publication figures of RESULTS" not in text
+    assert "STAGE 1 BASELINE FIGURES (REQUIRED)" in text
+    assert "Cell-type UMAP" in text
+    assert "Batch/sample UMAP" in text
+    assert "Cluster UMAP" in text
+    assert "Marker dotplot" in text
+    assert "Do NOT generate downstream result figures" in text

@@ -30,12 +30,20 @@ __all__ = [
     "OutlineSection",
     "build_report_outline",
     "GATE_SECTION_WORD_LIMIT",
+    "FIGURE_POLICY_PREFER",
+    "FIGURE_POLICY_TEXT_ONLY",
 ]
 
 # A gate section is a hinge between two directions, not a findings chapter.
 # Its conclusions are provisional — the rounds that follow may revise them — so
 # giving it chapter-sized prose invites readers to bank superseded results.
 GATE_SECTION_WORD_LIMIT = 200
+
+# Figure expectation is separate from round ownership. Integration sections can
+# own a round for ordering/provenance while remaining textual syntheses: an
+# integration round often produces no new plot, and that is not a report defect.
+FIGURE_POLICY_PREFER = "prefer"
+FIGURE_POLICY_TEXT_ONLY = "text_only"
 
 
 @dataclass(frozen=True)
@@ -50,6 +58,9 @@ class OutlineSection:
             the section owns no result figures at all.
         analysis_type: ``"general"`` or ``"specific"``, for the HTML badge.
         guidance: One-line description handed to the report model.
+        figure_policy: ``"prefer"`` for ordinary result sections, or
+            ``"text_only"`` for explicit synthesis/transition sections that do
+            not require a figure even when they own a workflow round.
     """
 
     id: str
@@ -58,10 +69,20 @@ class OutlineSection:
     rounds: Tuple[int, ...] = ()
     analysis_type: str = "general"
     guidance: str = ""
+    figure_policy: str = FIGURE_POLICY_PREFER
 
     @property
     def owns_figures(self) -> bool:
         return bool(self.rounds)
+
+    @property
+    def expects_figures(self) -> bool:
+        """Whether an empty section should be reported as a coverage gap."""
+        return self.owns_figures and self.figure_policy != FIGURE_POLICY_TEXT_ONLY
+
+    @property
+    def is_text_only(self) -> bool:
+        return self.figure_policy == FIGURE_POLICY_TEXT_ONLY
 
     @property
     def is_brief(self) -> bool:
@@ -209,6 +230,7 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
                 sections.append(OutlineSection(
                     f"integration_gate_{gate_index}", "integration_gate",
                     f"Integration Cycle {gate_index}", (rn,),
+                    figure_policy=FIGURE_POLICY_TEXT_ONLY,
                     guidance=(
                         f"Integration cycle {gate_index} (round {rn}) — a hinge between "
                         f"directions, not a findings chapter. Answer exactly two questions: "
@@ -223,6 +245,7 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
                 sections.append(OutlineSection(
                     "integrated_findings", "integration_final",
                     "Integrated Findings Across All Phases", (rn,), analysis_type="specific",
+                    figure_policy=FIGURE_POLICY_TEXT_ONLY,
                     guidance=(
                         "Closing cross-direction synthesis: how the directions converge, "
                         "which mechanisms they jointly support, where they remain in "
@@ -238,6 +261,7 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
         sections.append(OutlineSection(
             "integrated_findings", "integration_final",
             "Integrated Findings Across All Phases", (), analysis_type="specific",
+            figure_policy=FIGURE_POLICY_TEXT_ONLY,
             guidance=(
                 "Cross-phase synthesis: connections between the directions pursued, and "
                 "how the innovation findings validate or extend the exploration results"

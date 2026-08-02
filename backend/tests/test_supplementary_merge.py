@@ -131,3 +131,14 @@ def test_round_context_reaches_the_pi_for_the_round_checkpoint():
     assert 'elif context == "round":' in source, "the round checkpoint needs its own branch"
     assert "completed analysis round" in source
     assert "round_context" in source, "the round's own results must reach the prompt"
+
+
+def test_user_requested_supplementary_keeps_publication_figure_review_callback():
+    """Only the automatic restricted repair pass is figure-free. A user-requested
+    HITL supplement uses the main autonomous executor and must retain its blocking
+    publication-figure review callback."""
+    import inspect
+
+    source = inspect.getsource(SingleCellAnalysisWorkflow._run_supplementary_analysis)
+    assert "run_autonomous_analysis" in source
+    assert "figure_review_callback=self._figure_review_callback" in source

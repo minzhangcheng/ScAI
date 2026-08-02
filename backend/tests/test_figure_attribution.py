@@ -70,6 +70,23 @@ def test_publication_round_used_when_no_record(tmp_path):
     assert attr == {"b.png": 2}
 
 
+def test_publication_name_preserves_round_after_preview_materialization(tmp_path):
+    state = _state(
+        [_round(1, 10), _round(2, 20)],
+        pub=[SimpleNamespace(
+            name="restored_panel", png_path="", round_number=1,
+        )],
+    )
+    # Recovery writes the preview now, so mtime would incorrectly say round 2;
+    # the persisted PublicationFigure round must remain authoritative.
+    fig = _png(tmp_path / "restored_panel.jpg", _T0 + timedelta(minutes=15))
+    attr = attribute_figures_to_rounds(
+        ["restored_panel.jpg"], state=state, records=[],
+        figure_paths={"restored_panel.jpg": fig},
+    )
+    assert attr == {"restored_panel.jpg": 1}
+
+
 def test_mtime_covers_figures_no_record_mentions(tmp_path):
     """The real-world case: the supervision log captured nothing at all."""
     state = _state([_round(1, 10), _round(2, 20), _round(3, 30)])

@@ -8,8 +8,12 @@ earlier artifact, and 0.37.9 had just extended that blacklist to the publication
 tier of the report collector. Replaying one real 8-round session gave 10 figures before
 and 5 after.
 """
+import base64
 import hashlib
+import io
 from pathlib import Path
+
+from PIL import Image
 
 from backend.models.schemas import FigureReviewStatus, PublicationFigure
 from backend.services.report.artifacts import (
@@ -34,6 +38,27 @@ def _figure(name, status=FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS, **kwargs
         review_status=status,
         **kwargs,
     )
+
+
+def _valid_image_bytes(image_format: str) -> bytes:
+    buffer = io.BytesIO()
+    Image.effect_noise((256, 256), 100).convert("RGB").save(
+        buffer, format=image_format,
+    )
+    payload = buffer.getvalue()
+    assert len(payload) > 2000
+    return payload
+
+
+def _valid_reencoded_pair() -> tuple[bytes, bytes]:
+    image = Image.effect_noise((256, 256), 100).convert("RGB")
+    encoded = []
+    for image_format in ("JPEG", "PNG"):
+        buffer = io.BytesIO()
+        image.save(buffer, format=image_format)
+        encoded.append(buffer.getvalue())
+    assert all(len(payload) > 2000 for payload in encoded)
+    return encoded[0], encoded[1]
 
 
 # --- excluded_artifact_stems -------------------------------------------------
@@ -125,8 +150,8 @@ def test_workspace_scan_reclaims_the_stale_stem_too(tmp_path):
     report_figures = tmp_path / "report" / "figures"
     figures_dir.mkdir(parents=True)
     report_figures.mkdir(parents=True)
-    (figures_dir / "kept.jpg").write_bytes(b"kept")
-    (figures_dir / "superseded.jpg").write_bytes(b"superseded")
+    (figures_dir / "kept.jpg").write_bytes(_valid_image_bytes("JPEG"))
+    (figures_dir / "superseded.jpg").write_bytes(_valid_image_bytes("JPEG"))
 
     scanner = FiguresMixin()
     scanner.workspace_dir = workspace
@@ -238,7 +263,8 @@ def test_methods_owns_no_rounds_and_is_never_reported_as_figureless():
     report = enforce_figure_placement(
         sections, _outline(), {"panel.jpg": 1}, ["panel.jpg"],
     )
-    assert report.figureless_sections == []
+    assert "methods" not in report.figureless_sections
+    assert report.figureless_sections == ["direction_1"]
 
 
 def test_an_appended_figure_clears_the_figureless_flag():
@@ -258,7 +284,7 @@ def test_an_appended_figure_clears_the_figureless_flag():
 # --- content-hash deduplication ----------------------------------------------
 
 
-def _collect(tmp_path, files, publication):
+def _collect(tmp_path, files, publication, records=None):
     """Run the live collector over a synthetic workspace."""
     from backend.agents.supervisor import report_html
 
@@ -266,7 +292,9 @@ def _collect(tmp_path, files, publication):
     figures_dir = workspace / "figures"
     figures_dir.mkdir(parents=True)
     for rel, payload in files.items():
-        (workspace / rel).write_bytes(payload)
+        target = workspace / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
 
     mixin_cls = next(
         cls for cls in vars(report_html).values()
@@ -278,18 +306,20 @@ def _collect(tmp_path, files, publication):
         invalidated_artifact_stems: list = []
 
     return mixin_cls._collect_figure_paths(
-        mixin_cls.__new__(mixin_cls), [], workspace, state=_State(),
+        mixin_cls.__new__(mixin_cls), records or [], workspace, state=_State(),
     )
 
 
 def test_one_file_reached_under_two_names_is_embedded_once(tmp_path):
-    same = b"\xff\xd8identical-file-bytes"
+    same = _valid_image_bytes("JPEG")
+    unrelated = _valid_image_bytes("JPEG")
+    assert hashlib.sha256(unrelated).digest() != hashlib.sha256(same).digest()
     figure_map = _collect(
         tmp_path,
         {
             "figures/registered_panel.jpg": same,
             "loose_savefig_copy.jpg": same,
-            "unrelated.jpg": b"\xff\xd8something-else",
+            "unrelated.jpg": unrelated,
         },
         [_figure("registered_panel", png_path="registered_panel.jpg")],
     )
@@ -302,13 +332,41 @@ def test_one_file_reached_under_two_names_is_embedded_once(tmp_path):
 
 
 def test_the_registered_copy_wins_whichever_order_it_is_reached_in(tmp_path):
-    same = b"\xff\xd8identical-file-bytes"
+    same = _valid_image_bytes("JPEG")
     figure_map = _collect(
         tmp_path,
         {"aaa_loose.jpg": same, "figures/zzz_registered.jpg": same},
         [_figure("zzz_registered", png_path="zzz_registered.jpg")],
     )
     assert list(figure_map) == ["zzz_registered.jpg"]
+
+
+def test_missing_registered_path_is_recovered_from_record_preview(tmp_path):
+    payload = _valid_image_bytes("PNG")
+    restored = _figure(
+        "restored_panel",
+        png_path="/old/session/figures/restored_panel.png",
+        png_base64=base64.b64encode(payload).decode(),
+    )
+
+    figure_map = _collect(tmp_path, {}, [restored])
+
+    assert list(figure_map) == ["restored_panel.png"]
+    assert next(iter(figure_map.values())).read_bytes() == payload
+
+
+def test_base64_only_registered_figure_is_recovered_for_detailed_report(tmp_path):
+    payload = _valid_image_bytes("JPEG")
+    restored = _figure(
+        "record_only_panel",
+        png_path="",
+        png_base64=base64.b64encode(payload).decode(),
+    )
+
+    figure_map = _collect(tmp_path, {}, [restored])
+
+    assert list(figure_map) == ["record_only_panel.jpg"]
+    assert next(iter(figure_map.values())).read_bytes() == payload
 
 
 def test_one_drawing_re_encoded_twice_is_a_known_limit(tmp_path):
@@ -320,11 +378,12 @@ def test_one_drawing_re_encoded_twice_is_a_known_limit(tmp_path):
     profile this check does not have. Pinned so the limit is stated rather than
     discovered.
     """
+    jpeg, png = _valid_reencoded_pair()
     figure_map = _collect(
         tmp_path,
         {
-            "figures/same_drawing.jpg": b"\xff\xd8jpeg-encoding-of-one-picture",
-            "same_drawing_source.png": b"\x89PNGpng-encoding-of-one-picture",
+            "figures/same_drawing.jpg": jpeg,
+            "same_drawing_source.png": png,
         },
         [_figure("same_drawing", png_path="same_drawing.jpg")],
     )
@@ -333,7 +392,49 @@ def test_one_drawing_re_encoded_twice_is_a_known_limit(tmp_path):
 
 def test_an_unreadable_figure_does_not_abort_collection(tmp_path):
     figure_map = _collect(
-        tmp_path, {"figures/good.jpg": b"\xff\xd8fine"},
+        tmp_path, {"figures/good.jpg": _valid_image_bytes("JPEG")},
         [_figure("good", png_path="good.jpg")],
     )
     assert "good.jpg" in figure_map
+
+
+def test_archival_collector_reaches_eligible_nested_annotation_figure(tmp_path):
+    nested = tmp_path / "workspace" / "annotation_validation" / "marker_check.jpg"
+    figure_map = _collect(
+        tmp_path,
+        {"annotation_validation/marker_check.jpg": _valid_image_bytes("JPEG")},
+        [_figure("marker_check", png_path=str(nested))],
+    )
+    assert "marker_check.jpg" in figure_map
+
+
+def test_archival_collector_does_not_admit_unregistered_annotation_diagnostic(tmp_path):
+    figure_map = _collect(
+        tmp_path,
+        {"annotation_validation/marker_check.jpg": b"\xff\xd8unreviewed"},
+        [],
+    )
+    assert "marker_check.jpg" not in figure_map
+
+
+def test_logged_name_cannot_bypass_annotation_diagnostic_eligibility(tmp_path):
+    figure_map = _collect(
+        tmp_path,
+        {"annotation_validation/marker_check.jpg": b"\xff\xd8unreviewed"},
+        [],
+        records=[{"saved_figure_filenames": ["marker_check.jpg"]}],
+    )
+    assert "marker_check.jpg" not in figure_map
+
+
+def test_archival_collector_cannot_resurrect_rejected_nested_annotation_figure(tmp_path):
+    nested = tmp_path / "workspace" / "annotation_validation" / "marker_check.jpg"
+    figure_map = _collect(
+        tmp_path,
+        {"annotation_validation/marker_check.jpg": b"\xff\xd8rejected"},
+        [_figure(
+            "marker_check", FigureReviewStatus.REVISION_REQUESTED,
+            png_path=str(nested),
+        )],
+    )
+    assert "marker_check.jpg" not in figure_map

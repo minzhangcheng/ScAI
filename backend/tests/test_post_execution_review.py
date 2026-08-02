@@ -6,9 +6,18 @@ therefore pin each of the five outcomes -- especially the two exemptions
 (conditional wording, missing tooling) and the unverifiable case, which must
 never be counted as a gap.
 """
+import base64
 from datetime import datetime
 
-from backend.models.schemas import AnalysisPlan, AnalysisStep, CodeExecution, PlanStep
+from backend.models.schemas import (
+    AnalysisPlan,
+    AnalysisStep,
+    CodeExecution,
+    FigureReviewStatus,
+    PlanStep,
+    PublicationFigure,
+)
+from backend.tests.figure_image_helpers import valid_image_bytes
 from backend.workflow.post_execution_review import (
     PlanAudit,
     StepAudit,
@@ -25,6 +34,9 @@ from backend.workflow.post_execution_review import (
     step_is_conditional,
     unavailable_method_families,
 )
+
+
+_RENDER_PREVIEW = base64.b64encode(valid_image_bytes("PNG")).decode()
 
 
 def _audited_plan():
@@ -55,6 +67,29 @@ def _audited_history():
         CodeExecution(code="import sccoda", round_number=2,
                       error="ModuleNotFoundError: No module named 'sccoda'"),
     ]
+
+
+def _result_figure(plan: AnalysisPlan, step_id: int) -> PublicationFigure:
+    return PublicationFigure(
+        name=f"step_{step_id}_result",
+        description=f"Reviewed visual result for step {step_id}",
+        figure_type="other",
+        png_path=f"/missing/step_{step_id}_result.png",
+        pdf_path=f"/missing/step_{step_id}_result.pdf",
+        png_base64=_RENDER_PREVIEW,
+        review_status=FigureReviewStatus.APPROVED,
+        plan_step_id=step_id,
+        plan_id=plan.id,
+        purpose="result",
+        round_number=2,
+    )
+
+
+def _audited_figures(plan: AnalysisPlan):
+    # Step 1 ran and step 2 is unavailable after having produced its planned
+    # context view. Step 3 is explicitly conditional, step 4 remains unmet, and
+    # step 5 is prose-only legacy work.
+    return [_result_figure(plan, 1), _result_figure(plan, 2)]
 
 
 def _clean_audit():
@@ -225,7 +260,13 @@ def test_the_fallback_does_not_reach_past_the_import_lines():
 
 
 def test_audit_assigns_all_five_verdicts():
-    audit = audit_plan_execution(_audited_plan(), _audited_history(), round_number=2)
+    plan = _audited_plan()
+    audit = audit_plan_execution(
+        plan,
+        _audited_history(),
+        round_number=2,
+        publication_figures=_audited_figures(plan),
+    )
     by_id = {s.step_id: s for s in audit.steps}
 
     assert by_id[1].status == "completed"
@@ -250,7 +291,13 @@ def test_audit_assigns_all_five_verdicts():
 
 
 def test_audit_summary_counts_agree():
-    audit = audit_plan_execution(_audited_plan(), _audited_history(), round_number=2)
+    plan = _audited_plan()
+    audit = audit_plan_execution(
+        plan,
+        _audited_history(),
+        round_number=2,
+        publication_figures=_audited_figures(plan),
+    )
     summary = audit.summary()
     assert summary["n_steps"] == 5
     assert summary["n_completed"] == 1
@@ -270,8 +317,13 @@ def test_audit_accepts_structured_evidence():
         PlanStep(id=1, title="Signature scoring",
                  method="Compute a module score with sc.tl.score_genes")])
     assert audit_plan_execution(plan, [], round_number=2).steps[0].status == "pending"
-    vouched = audit_plan_execution(plan, [], round_number=2,
-                                   structured_families={"gene_scoring"})
+    vouched = audit_plan_execution(
+        plan,
+        [],
+        round_number=2,
+        structured_families={"gene_scoring"},
+        publication_figures=[_result_figure(plan, 1)],
+    )
     assert vouched.steps[0].status == "completed"
 
 
@@ -282,7 +334,12 @@ def test_audit_of_empty_plan_is_empty():
 
 def test_apply_audit_writes_status_and_stamps_only_completed():
     plan = _audited_plan()
-    audit = audit_plan_execution(plan, _audited_history(), round_number=2)
+    audit = audit_plan_execution(
+        plan,
+        _audited_history(),
+        round_number=2,
+        publication_figures=_audited_figures(plan),
+    )
     updated = apply_audit_to_plan(plan, audit, now=datetime(2026, 1, 1, 12, 0, 0))
 
     assert updated == 5
@@ -294,7 +351,12 @@ def test_apply_audit_writes_status_and_stamps_only_completed():
 
 def test_apply_audit_is_idempotent():
     plan = _audited_plan()
-    audit = audit_plan_execution(plan, _audited_history(), round_number=2)
+    audit = audit_plan_execution(
+        plan,
+        _audited_history(),
+        round_number=2,
+        publication_figures=_audited_figures(plan),
+    )
     first = datetime(2026, 1, 1, 12, 0, 0)
     apply_audit_to_plan(plan, audit, now=first)
 
@@ -444,8 +506,9 @@ def test_sanitize_review_result_bounds_lists_and_survives_non_dict():
     })
     assert len(out["summary"]) <= 4000
     assert len(out["findings"]) == 40
-    assert len(out["figures"]) == 12
+    assert out["figures"] == []
     assert len(out["warnings"]) == 12
+    assert any("discarded" in warning.lower() for warning in out["warnings"])
 
     bad = sanitize_review_result(None)
     assert bad["status"] == "failed"

@@ -4,6 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+import base64
 import json
 import pytest
 from datetime import datetime
@@ -25,6 +26,7 @@ from backend.models.schemas import (
     PublicationFigure,
     FigureReviewStatus,
 )
+from backend.tests.figure_image_helpers import valid_image_bytes
 
 
 class TestAnalysisStateApiDictRoundTrip:
@@ -174,11 +176,13 @@ class TestAnalysisStateApiDictRoundTrip:
         this payload alone, so the record's own values have to travel with it.
         """
         state = AnalysisState(user_id="test")
+        preview = base64.b64encode(valid_image_bytes("PNG")).decode()
         state.publication_figures = [
             PublicationFigure(
                 id="f-blocked", name="umap_clusters", description="d",
                 figure_type="umap", png_path="/x/umap.png", pdf_path="/x/umap.pdf",
                 review_status=FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS,
+                png_base64=preview,
                 round_number=3,
                 layout_violations=[{"kind": "text_over_text", "severity": "block"}],
             ),
@@ -186,6 +190,7 @@ class TestAnalysisStateApiDictRoundTrip:
                 id="f-diagnostic", name="qc_panel", description="d",
                 figure_type="qc", png_path="/x/qc.png", pdf_path="/x/qc.pdf",
                 diagnostic=True,
+                png_base64=preview,
                 # Advisory only: a warning is not a blocking defect.
                 layout_violations=[{"kind": "text_over_text", "severity": "warn"}],
             ),
@@ -201,6 +206,37 @@ class TestAnalysisStateApiDictRoundTrip:
         assert diagnostic["layout_blocking"] is False
         assert diagnostic["diagnostic"] is True
 
+    def test_publication_figure_without_render_or_preview_is_not_serialized(self):
+        state = AnalysisState(user_id="test")
+        state.publication_figures = [
+            PublicationFigure(
+                id="broken",
+                name="broken",
+                description="Missing physical render",
+                figure_type="other",
+                png_path="/definitely/missing/broken.png",
+                pdf_path="",
+                review_status=FigureReviewStatus.APPROVED,
+            )
+        ]
+        state.realtime_messages = [
+            WebSocketMessage(
+                type="figure_approved",
+                content={
+                    "figure": {
+                        "id": "broken",
+                        "name": "broken",
+                        "is_publication": True,
+                    }
+                },
+            ),
+        ]
+
+        api = state.to_api_dict()
+
+        assert api["publication_figures"] == []
+        assert api["messages"] == []
+
     def test_runtime_warning_is_serialized(self):
         """to_api_dict() must include runtime_restore_warning when set, default to None."""
         state = AnalysisState(user_id="test")
@@ -215,3 +251,47 @@ class TestAnalysisStateApiDictRoundTrip:
         state.runtime_restore_warning = None
         api = state.to_api_dict()
         assert api.get("runtime_restore_warning") is None
+
+    def test_invalidated_publication_figure_is_not_serialized(self):
+        state = AnalysisState(user_id="test")
+        state.publication_figures = [
+            PublicationFigure(
+                id="stale",
+                name="stale",
+                description="superseded",
+                figure_type="other",
+                png_path="/x/stale.jpg",
+                pdf_path="/x/stale.pdf",
+                is_current=False,
+                invalidated_at=datetime.now(),
+            )
+        ]
+        state.realtime_messages = [
+            WebSocketMessage(
+                type="figure_approved",
+                content={"figure": {"id": "stale", "name": "stale"}},
+            ),
+            WebSocketMessage(
+                type="integrated_report",
+                content={
+                    "report": "old highlight reel",
+                    "figures": [
+                        {"id": "stale", "name": "stale", "is_publication": True},
+                        {
+                            "id": "workspace",
+                            "name": "workspace_context",
+                            "is_publication": False,
+                        },
+                    ],
+                },
+            ),
+        ]
+
+        api = state.to_api_dict()
+        assert api["publication_figures"] == []
+        assert [message["type"] for message in api["messages"]] == [
+            "integrated_report"
+        ]
+        assert [
+            figure["name"] for figure in api["messages"][0]["content"]["figures"]
+        ] == ["workspace_context"]

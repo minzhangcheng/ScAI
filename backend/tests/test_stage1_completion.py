@@ -56,8 +56,9 @@ class TestStage1CompletionInjection:
             messages.append({
                 "role": "user",
                 "content": (
-                    "STAGE 1 COMPLETE. Cell annotation is done and confirmed by the user. "
-                    "You MUST now call report_findings immediately. "
+                    "STAGE 1 ANNOTATION COMPLETE. Cell annotation is done and confirmed by the user. "
+                    "The platform will now render and verify the supported baseline figures. "
+                    "Call report_findings now. "
                     "Do NOT run differential expression, pathway enrichment, "
                     "cell communication, trajectory analysis, or any other downstream analysis. "
                     "These will be done in Stage 2 after PI reviews your Stage 1 results "
@@ -67,7 +68,8 @@ class TestStage1CompletionInjection:
 
         assert len(messages) == 1
         assert messages[0]["role"] == "user"
-        assert "STAGE 1 COMPLETE" in messages[0]["content"]
+        assert "STAGE 1 ANNOTATION COMPLETE" in messages[0]["content"]
+        assert "platform" in messages[0]["content"]
         assert "report_findings" in messages[0]["content"]
 
     @pytest.mark.asyncio
@@ -78,7 +80,7 @@ class TestStage1CompletionInjection:
         messages = []
 
         if agent.planning_stage == "stage1":
-            messages.append({"role": "user", "content": "STAGE 1 COMPLETE..."})
+            messages.append({"role": "user", "content": "STAGE 1 ANNOTATION COMPLETE..."})
 
         assert len(messages) == 0
 
@@ -94,7 +96,8 @@ class TestAnnotationResultStageAware:
         if planning_stage == "stage1":
             result_lines.append(
                 "[NOTE: These annotations were already confirmed by the user. "
-                "No re-annotation needed. Stage 1 is complete — call report_findings now.]\n"
+                "No re-annotation needed. The platform will render the Stage 1 "
+                "baseline figures after this pass; call report_findings now.]\n"
             )
         else:
             result_lines.append(
@@ -103,7 +106,7 @@ class TestAnnotationResultStageAware:
             )
 
         assert "call report_findings now" in result_lines[0]
-        assert "Stage 1 is complete" in result_lines[0]
+        assert "platform will render" in result_lines[0]
 
     def test_full_mode_annotation_confirmed_message(self):
         """In full mode, already_confirmed annotation should say 'proceed to downstream analysis'."""
@@ -113,7 +116,8 @@ class TestAnnotationResultStageAware:
         if planning_stage == "stage1":
             result_lines.append(
                 "[NOTE: These annotations were already confirmed by the user. "
-                "No re-annotation needed. Stage 1 is complete — call report_findings now.]\n"
+                "No re-annotation needed. The platform will render the Stage 1 "
+                "baseline figures after this pass; call report_findings now.]\n"
             )
         else:
             result_lines.append(

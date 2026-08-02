@@ -8,11 +8,12 @@ import logging
 
 from ...utils.direction_evidence import build_fallback_direction_evidence
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
+from ...services.report.artifacts import archival_render_available, eligible_artifacts
 from ..prompt_blocks import build_integration_block
 
 # Configure logger
 logger = logging.getLogger(__name__)
-from ...models.schemas import AnalysisState, RoundResult, ExplorationReport, FigureReviewStatus
+from ...models.schemas import AnalysisState, RoundResult, ExplorationReport
 
 from .shared import (  # noqa: F401
     _CONTROL_SIGNAL_RESULTS,
@@ -65,12 +66,21 @@ class ReportsMixin:
         """
         logger.info(f"[{self.session_id}][PI] Generating integrated report")
 
-        # Collect approved figures
+        # The integrated narrative is an archival report. Do not offer the model
+        # stale, rejected, pending, or layout-blocked figures that downstream
+        # rendering would withhold; otherwise it can cite a panel readers cannot
+        # actually see.
         figures_info = []
-        for i, fig in enumerate(state.publication_figures):
-            status = "Approved" if fig.review_status == FigureReviewStatus.APPROVED else "Pending"
+        renderable_figures = [
+            fig for fig in eligible_artifacts(state.publication_figures)
+            if archival_render_available(fig)
+        ]
+        for i, fig in enumerate(renderable_figures):
+            raw_status = getattr(fig.review_status, "value", fig.review_status)
+            status = str(raw_status or "reportable").replace("_", " ").title()
             figures_info.append(
-                f"Figure {i+1}: {fig.name} ({fig.figure_type}) - {fig.description} [{status}]"
+                f"Figure {i+1}: {fig.name} (declared type: {fig.figure_type}) - "
+                f"{fig.description} [{status}]"
             )
 
         # Collect tables
@@ -118,6 +128,10 @@ class ReportsMixin:
 
 **Available Figures:**
 {chr(10).join(figures_info) if figures_info else "No figures generated"}
+
+The declared figure type and description above are authoritative. Do not infer
+a different plot type from a filename, and keep every caption consistent with
+the supplied metadata (for example, never describe a declared barplot as a UMAP).
 
 **Available Tables:**
 {chr(10).join(tables_info) if tables_info else "No tables generated"}

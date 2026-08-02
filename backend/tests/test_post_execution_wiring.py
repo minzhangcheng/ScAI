@@ -4,12 +4,22 @@ Covers the three contracts the round depends on: the plan audit is the writer of
 `PlanStep.status`, the supplementary pass is paid for at most once per execution,
 and neither can fail the round it reviews.
 """
+import base64
 import pytest
 from types import SimpleNamespace
 
-from backend.models.schemas import AnalysisStep, CodeExecution
+from backend.models.schemas import (
+    AnalysisStep,
+    CodeExecution,
+    FigureReviewStatus,
+    PublicationFigure,
+)
 from backend.models.schema_parts.session import AnalysisPlan, PlanStep
 from backend.workflow.post_execution import PostExecutionReviewMixin
+from backend.tests.figure_image_helpers import valid_image_bytes
+
+
+_RENDER_PREVIEW = base64.b64encode(valid_image_bytes("PNG")).decode()
 
 
 class _Harness(PostExecutionReviewMixin):
@@ -63,6 +73,30 @@ def _execution(code, error=None, round_number=2, exec_id=None):
     return CodeExecution(**kwargs)
 
 
+def _result_figure(
+    plan,
+    step_id,
+    *,
+    round_number=2,
+    name=None,
+    figure_type="other",
+):
+    name = name or f"step_{step_id}_result"
+    return PublicationFigure(
+        name=name,
+        description=f"Reviewed result for plan step {step_id}",
+        figure_type=figure_type,
+        png_path=f"/missing/{name}.png",
+        pdf_path=f"/missing/{name}.pdf",
+        png_base64=_RENDER_PREVIEW,
+        review_status=FigureReviewStatus.APPROVED,
+        plan_step_id=step_id,
+        plan_id=plan.id,
+        purpose="result",
+        round_number=round_number,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Feature A — the audit writes plan step status
 # ---------------------------------------------------------------------------
@@ -72,7 +106,11 @@ def test_audit_writes_step_status_and_stamps_only_completed():
         PlanStep(id=1, title="Cell communication", method="Run liana rank_aggregate"),
         PlanStep(id=2, title="Pathway activity", method="Run decoupler run_ulm"),
     ])
-    state = _state(plan, code_history=[_execution("import liana as li; li.mt.rank_aggregate(adata)")])
+    state = _state(
+        plan,
+        code_history=[_execution("import liana as li; li.mt.rank_aggregate(adata)")],
+        publication_figures=[_result_figure(plan, 1)],
+    )
 
     summary = _Harness()._audit_round_plan_execution(state, {})
 
@@ -82,6 +120,30 @@ def test_audit_writes_step_status_and_stamps_only_completed():
     by_id = {s.id: s for s in plan.steps}
     assert by_id[1].status == "completed" and by_id[1].executed_at is not None
     assert by_id[2].status == "pending" and by_id[2].executed_at is None
+
+
+def test_audit_wiring_passes_current_publication_figures():
+    plan = _plan([
+        PlanStep(id=1, title="Annotated embedding", method="Create a UMAP"),
+    ])
+    figure = PublicationFigure(
+        name="annotated_umap",
+        description="Annotated cell-type UMAP",
+        figure_type="umap",
+        png_path="/tmp/annotated_umap.png",
+        pdf_path="/tmp/annotated_umap.pdf",
+        png_base64=_RENDER_PREVIEW,
+        review_status=FigureReviewStatus.APPROVED,
+        round_number=2,
+    )
+    state = _state(plan, publication_figures=[figure])
+
+    summary = _Harness()._audit_round_plan_execution(state, {})
+
+    assert summary["n_figure_steps"] == 1
+    assert summary["n_figure_unmet"] == 0
+    assert summary["eligible_figures"] == ["annotated_umap"]
+    assert plan.steps[0].status == "completed"
 
 
 def test_audit_is_noop_without_a_plan():
@@ -149,7 +211,11 @@ def test_no_mechanism_programs_records_nothing():
 
 def test_registered_score_vouches_for_gene_scoring():
     plan = _plan([PlanStep(id=1, title="Module scores", method="Use score_genes for the panel")])
-    state = _state(plan, score_definitions=[SimpleNamespace(round_number=2)])
+    state = _state(
+        plan,
+        score_definitions=[SimpleNamespace(round_number=2)],
+        publication_figures=[_result_figure(plan, 1)],
+    )
 
     summary = _Harness()._audit_round_plan_execution(state, {})
 
@@ -444,7 +510,10 @@ async def test_fully_evidenced_round_does_not_run_the_pass():
     # Another direction is still queued, so this is not the batch's last one either.
     state = _state(plan, code_history=[_execution("li.mt.rank_aggregate(adata)")],
                    current_round_direction="D1",
-                   directions_queue=[{"direction": "D2"}])
+                   directions_queue=[{"direction": "D2"}],
+                   publication_figures=[_result_figure(
+                       plan, 1, name="communication_result"
+                   )])
     pi, bio = _PI(), _Bio()
     harness = _Harness(pi=pi, bio=bio)
 
@@ -479,9 +548,55 @@ async def test_unmet_step_triggers_pass_and_merges_back():
     # The raw result must carry the new execution so a re-audit can see it.
     assert result["findings"] == findings
 
-    # Re-audit now finds the step evidenced by the supplementary execution.
-    assert harness._audit_round_plan_execution(state, {})["n_unmet"] == 0
-    assert plan.steps[0].status == "completed"
+    # The computation is now evidenced, while its reviewed result figure remains
+    # a main-executor responsibility rather than something this restricted pass
+    # may fabricate.
+    reaudit = harness._audit_round_plan_execution(state, {})
+    assert reaudit["n_unmet"] == 1
+    assert reaudit["unmet_figure_kinds"] == ["result"]
+    assert plan.steps[0].status == "pending"
+
+
+def test_merge_discards_unreviewed_automatic_supplementary_figures():
+    """Defense in depth: old snapshots and test doubles may still carry the old
+    payload shape, but those images have no PublicationFigure review record."""
+    state = _state(_plan([]))
+    result = {"findings": ["main"], "figures": ["reviewed-main-figure"]}
+
+    findings, figures = _Harness()._merge_supplementary_into_round(
+        state,
+        result,
+        result["findings"],
+        result["figures"],
+        {"findings": ["repair"], "figures": ["raw-inline-base64"]},
+    )
+
+    assert findings == ["main", "[Supplementary] repair"]
+    assert figures == ["reviewed-main-figure"]
+    assert result["figures"] == ["reviewed-main-figure"]
+
+
+@pytest.mark.asyncio
+async def test_figure_only_gap_is_deferred_to_main_publication_pipeline():
+    plan = _plan([PlanStep(
+        id=1,
+        title="Show pathway activity",
+        method="Summarize the registered score",
+        figure_requirements=[{"figure_type": "heatmap"}],
+    )])
+    state = _state(plan, publication_figures=[])
+    pi, bio = _PI(), _Bio()
+    harness = _Harness(pi=pi, bio=bio)
+
+    audit_summary = harness._audit_round_plan_execution(state, {})
+    meta, merge = await harness._run_post_execution_review(
+        state, _unmet_result(), audit_summary, "full"
+    )
+
+    assert meta["review_status"] == "skipped"
+    assert "main bioinformatics figure/review pipeline" in meta["review_reason"]
+    assert merge == {}
+    assert pi.review_calls == 0 and bio.calls == 0
 
 
 @pytest.mark.asyncio
@@ -608,7 +723,10 @@ async def test_last_direction_triggers_on_an_otherwise_clean_round():
     state = _state(plan, current_round=3, max_rounds=3,
                    current_round_direction="D2",
                    directions_queue=[{"direction": "D2"}],
-                   code_history=[_execution("li.mt.rank_aggregate(adata)", round_number=3)])
+                   code_history=[_execution("li.mt.rank_aggregate(adata)", round_number=3)],
+                   publication_figures=[_result_figure(
+                       plan, 1, round_number=3, name="communication_result"
+                   )])
     pi, bio = _PI(), _Bio()
     harness = _Harness(pi=pi, bio=bio)
 

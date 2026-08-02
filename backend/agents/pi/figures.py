@@ -44,6 +44,42 @@ class FiguresMixin:
             return f"- Previous feedback: {figure.pi_feedback}"
         return ""
 
+    @staticmethod
+    def _figure_plan_requirement_text(
+        state: AnalysisState,
+        figure: PublicationFigure,
+    ) -> str:
+        """Show the reviewer the deliverable this render claims to satisfy."""
+        plan = getattr(state, "current_plan", None)
+        step_id = getattr(figure, "plan_step_id", None)
+        if plan is None or step_id is None:
+            return "- Plan deliverable: no approved plan-step link recorded"
+        step = next(
+            (
+                candidate for candidate in (getattr(plan, "steps", None) or [])
+                if int(getattr(candidate, "id", 0) or 0) == int(step_id)
+            ),
+            None,
+        )
+        if step is None:
+            return f"- Plan deliverable: linked step {step_id} is absent from the current plan"
+        requirements = []
+        for requirement in getattr(step, "figure_requirements", None) or []:
+            figure_type = str(getattr(requirement, "figure_type", "other") or "other")
+            description = str(getattr(requirement, "description", "") or "").strip()
+            count = int(getattr(requirement, "minimum_count", 1) or 1)
+            requirements.append(
+                f"{figure_type} x{count}"
+                + (f": {description}" if description else "")
+            )
+        required_text = "; ".join(requirements) or "legacy/inferred visual deliverable"
+        return (
+            f"- Linked plan: {getattr(plan, 'id', '')}\n"
+            f"- Linked step {step_id}: {getattr(step, 'title', '')}\n"
+            f"- Step method: {getattr(step, 'method', '')}\n"
+            f"- Required visual output: {required_text}"
+        )
+
     async def review_figure(
         self,
         state: AnalysisState,
@@ -85,6 +121,8 @@ cannot be read. List those in `must_fix` and do NOT approve the figure while
 they are present, regardless of revision count.
 """
 
+        plan_requirement_block = self._figure_plan_requirement_text(state, figure)
+
         prompt = f"""## Figure Review for Publication Quality
 
 You are reviewing a figure for publication in a high-impact scientific journal.
@@ -105,6 +143,7 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
 - Description: {figure.description}
 - Revision count: {figure.revision_count}
 {self._build_revision_history_text(figure)}
+{plan_requirement_block}
 {layout_block}
 **Review Criteria:**
 1. **Scientific Accuracy**: Does the figure accurately represent the data?
@@ -113,6 +152,7 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
 4. **Completeness**: Are all necessary elements present (legend, axis labels, scale bars, titles)?
 5. **Publication Quality**: Would this be acceptable in a high-impact journal (Nature, Cell, etc.)?
 6. **Data Fidelity**: Does the figure show ONLY the actual experimental groups listed above? Are there any fabricated or non-existent groups/conditions?
+7. **Plan Deliverable Fidelity**: Does the image actually answer the linked plan step and satisfy its required visual output? Do not approve a merely attractive plot of the wrong result.
 
 **Respond in JSON format:**
 ```json

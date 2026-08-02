@@ -27,3 +27,12 @@ class TestPIReviewStageScope:
         src = self._prompt_template().lower()
         assert "revise" in src
         assert "downstream" in src or "stage 2" in src
+
+    def test_prompt_reviews_visual_coverage_and_explicit_exceptions(self):
+        src = self._prompt_template().lower()
+        assert "visual coverage" in src
+        assert "figure_requirements" in src
+        assert "allow_text_only=true" in src
+        assert "text_only_reason" in src
+        assert "doublet" in src and "before/after" in src
+        assert "missing visual" in src and "revise" in src

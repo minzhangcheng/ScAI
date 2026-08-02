@@ -252,8 +252,10 @@ class EvaluationMixin:
                     escalation_msg = (
                         "Cell type annotation has been completed. "
                         "Please confirm the annotations are biologically reasonable. "
-                        "Stage 1 is now complete — the agent should call report_findings "
-                        "to finalize Stage 1 before Stage 2 downstream analysis begins."
+                        "The platform will render and verify the required Stage 1 baseline "
+                        "figures after this pass. The agent should call report_findings now; "
+                        "Stage 2 downstream analysis will not begin unless the baseline "
+                        "visual contract is satisfied."
                     )
                 else:
                     escalation_msg = (

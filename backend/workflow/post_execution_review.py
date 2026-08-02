@@ -23,9 +23,22 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+
+from backend.services.figure_contract import (
+    audit_figure_contract,
+    collect_plan_figure_requirements,
+    legacy_figure_opt_out,
+    valid_text_only_exception,
+)
+from backend.services.report.artifacts import (
+    archival_render_available,
+    is_report_eligible,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +178,58 @@ _IMPORT_LINE = re.compile(r"^\s*(?:import|from)\s+", re.M)
 _MAX_TEXT = 4000
 
 
+# ---------------------------------------------------------------------------
+# Planned figure detection
+#
+# Figure TYPE inference and matching belong to services.figure_contract. This
+# layer only adds two legacy plan semantics that contract intentionally does not
+# invent: explicit text/no-figure waivers, and a generic "make a plot" promise
+# whose geometry was never named. Keeping that boundary avoids a second figure
+# taxonomy beside the structured PlanStep.figure_requirements contract.
+# ---------------------------------------------------------------------------
+
+_FIGURE_GENERIC_RE = re.compile(
+    r"\b(?:publication[- ](?:quality|ready)\s+)?"
+    r"(?:figure|figures|plot|plots|plotted|plotting|visuali[sz]e|visuali[sz]ed|"
+    r"visuali[sz]ing|visuali[sz]ation|visuali[sz]ations|chart|charts|charting)\b",
+    re.I,
+)
+
+# These clauses are explicit waivers, not merely an absence of plotting words.
+# If a plan author says the deliverable is text/table only, or explicitly says
+# not to create a figure, the audit must not silently turn it back into one.
+_FIGURE_OPTOUT_PATTERNS: Tuple[Any, ...] = (
+    re.compile(r"\b(?:text|prose|narrative|table|tabular)[ -]?only\b", re.I),
+    re.compile(r"\bonly\s+(?:a\s+)?(?:text|prose|narrative|table|tabular)\b", re.I),
+    re.compile(r"\b(?:no|without)\s+(?:publication[- ](?:quality|ready)\s+)?"
+               r"(?:figure|figures|plot|plots|visuali[sz]ation|visuali[sz]ations|chart|charts)\b",
+               re.I),
+    re.compile(r"\bdo\s+not\s+(?:generate|create|produce|render|include|make|save|draw)"
+               r"\b.{0,60}\b(?:figure|figures|plot|plots|visuali[sz]ation|"
+               r"visuali[sz]ations|chart|charts)\b", re.I),
+    re.compile(r"\bdo\s+not\s+(?:plot|visuali[sz]e|chart)\b", re.I),
+)
+
+# Optionality is scoped to the artifact channel. In a mixed step such as
+# "run DE and optionally draw a volcano plot", the plot is waived but the DE
+# method is still audited below.
+_OPTIONAL_FIGURE_PATTERNS: Tuple[Any, ...] = (
+    re.compile(r"\boptional(?:ly)?\b.{0,60}\b(?:figure|figures|plot|plots|"
+               r"visuali[sz]ation|visuali[sz]ations|chart|charts)\b", re.I),
+    re.compile(r"\b(?:figure|figures|plot|plots|visuali[sz]ation|visuali[sz]ations|"
+               r"chart|charts)\b.{0,60}\boptional\b", re.I),
+    re.compile(r"\b(?:figure|figures|plot|plots|visuali[sz]ation|visuali[sz]ations|"
+               r"chart|charts)\b.{0,40}\bif\s+(?:useful|helpful|needed|warranted|"
+               r"informative|space permits|time permits)\b", re.I),
+)
+
+_OPTIONAL_QUALIFIER_RE = re.compile(
+    r"\b(?:optional(?:ly)?|if\s+(?:useful|helpful|needed|warranted|informative|"
+    r"space permits|time permits))\b",
+    re.I,
+)
+
+
 def _step_text(step: Any) -> str:
     """Searchable text of one plan step: title, method and expected output."""
     parts = [
@@ -176,10 +241,309 @@ def _step_text(step: Any) -> str:
     return " ".join(parts)[:_MAX_TEXT].lower()
 
 
+def _figure_step_text(step: Any) -> str:
+    """Plan text relevant to a deliverable, including its rationale."""
+    return (
+        _step_text(step) + " " + str(getattr(step, "rationale", "") or "").lower()
+    )[:_MAX_TEXT]
+
+
+def _step_figure_requirements(
+    step: Any,
+    stage: str = "",
+    plan_id: str = "",
+    plan_created_at: Any = None,
+    plan_revision_of: Optional[str] = None,
+    plan_phase: str = "",
+    inherited_plan_ids_by_step: Optional[Mapping[int, Sequence[str]]] = None,
+) -> List[Any]:
+    """Read structured or legacy-named requirements from the shared contract."""
+    return collect_plan_figure_requirements(SimpleNamespace(
+        id=plan_id,
+        created_at=plan_created_at,
+        revision_of=plan_revision_of,
+        steps=[step],
+        stage=stage,
+        phase=plan_phase,
+    ), inherited_plan_ids_by_step=inherited_plan_ids_by_step)
+
+
+def _figure_requirement_is_optional(step: Any, requirements: Sequence[Any]) -> bool:
+    text = _figure_step_text(step)
+    if any(pattern.search(text) for pattern in _OPTIONAL_FIGURE_PATTERNS):
+        return True
+    return bool(requirements and _OPTIONAL_QUALIFIER_RE.search(text))
+
+
+def _figure_requirement_is_waived(
+    step: Any,
+    requirements: Sequence[Any],
+    *,
+    plan_phase: str = "",
+) -> bool:
+    """Whether the plan explicitly makes its visual output unnecessary."""
+    # Structured deliverables are authoritative.  Neither a contradictory
+    # boolean nor stray prose such as "optional" may erase them.
+    if requirements:
+        return False
+    if valid_text_only_exception(step, plan_phase=plan_phase):
+        return True
+    # Prose opt-outs exist solely for persisted plans that predate the
+    # structured visual-policy fields. Keep that compatibility decision in the
+    # shared contract so execution and post-execution cannot diverge.
+    return legacy_figure_opt_out(step)
+
+
+def extract_planned_figure_kinds(step: Any) -> Set[str]:
+    """Return required figure types using the shared figure contract."""
+    requirements = _step_figure_requirements(step)
+    if _figure_requirement_is_waived(step, requirements):
+        return set()
+    if requirements:
+        return {str(requirement.figure_type) for requirement in requirements}
+    return {"figure"} if _FIGURE_GENERIC_RE.search(_figure_step_text(step)) else set()
+
+
+def _artifact_value(artifact: Any, name: str, default: Any = None) -> Any:
+    """Read a model field from both live Pydantic objects and legacy dicts."""
+    if isinstance(artifact, Mapping):
+        return artifact.get(name, default)
+    return getattr(artifact, name, default)
+
+
+def _artifact_for_eligibility(artifact: Any) -> Any:
+    """Give the shared report predicate attribute access to legacy dict state."""
+    if isinstance(artifact, Mapping):
+        return SimpleNamespace(**dict(artifact))
+    return artifact
+
+
+def _is_publication_figure_record(artifact: Any) -> bool:
+    """Distinguish figure records from report-eligible table-like artifacts."""
+    sentinel = object()
+    return all(
+        _artifact_value(artifact, field_name, sentinel) is not sentinel
+        for field_name in ("figure_type", "png_path", "pdf_path")
+    )
+
+
+def eligible_current_round_figures(
+    publication_figures: Optional[Sequence[Any]],
+    round_number: int,
+    *,
+    target_lineage_id: str = "main",
+) -> List[Any]:
+    """Current-round ``PublicationFigure`` records fit for a final report.
+
+    Round zero is not treated as a wildcard. Older sessions deserialize figures
+    without round provenance as zero; accepting those in a later round would let
+    a stale figure complete a new plan step. Dict-shaped legacy records remain
+    readable, but an unattributed record cannot prove current-round work.
+    """
+    current = int(round_number or 0)
+    target_lineage = str(target_lineage_id or "main")
+    eligible: List[Any] = []
+    for figure in publication_figures or []:
+        if not _is_publication_figure_record(figure):
+            continue
+        if str(_artifact_value(figure, "lineage_id", None) or "main") != target_lineage:
+            continue
+        try:
+            artifact_round = int(_artifact_value(figure, "round_number", 0) or 0)
+        except (TypeError, ValueError):
+            artifact_round = 0
+        if artifact_round != current:
+            continue
+        candidate = _artifact_for_eligibility(figure)
+        if is_report_eligible(candidate) and archival_render_available(candidate):
+            eligible.append(figure)
+    return eligible
+
+
+def _artifact_label(artifact: Any) -> str:
+    return str(
+        _artifact_value(artifact, "name", "")
+        or _artifact_value(artifact, "id", "")
+        or "unnamed figure"
+    )[:300]
+
+
+def _legacy_figure_not_older_than_plan(artifact: Any, plan_created_at: Any) -> bool:
+    """Apply the shared contract's bounded no-plan-id compatibility rule."""
+    artifact_created_at = _artifact_value(artifact, "created_at", None)
+    if not isinstance(plan_created_at, datetime) or not isinstance(
+        artifact_created_at, datetime
+    ):
+        return True
+    try:
+        return artifact_created_at >= plan_created_at
+    except TypeError:
+        return artifact_created_at.replace(tzinfo=None) >= plan_created_at.replace(
+            tzinfo=None
+        )
+
+
+def _generic_figure_evidences_step(
+    step: Any,
+    eligible_figures: Sequence[Any],
+    *,
+    plan_id: str = "",
+    plan_created_at: Any = None,
+    inherited_plan_ids: Sequence[str] = (),
+    allow_unattributed_legacy: bool = True,
+) -> bool:
+    """Match a geometry-free legacy promise without stealing another step's figure.
+
+    Once any current-round producer supplies ``plan_step_id``, attribution is an
+    available evidence channel and only an exact match counts. The permissive
+    any-figure fallback is retained solely for collections where every figure
+    predates that field.
+    """
+    accepted_plan_ids = {
+        str(value) for value in (plan_id, *inherited_plan_ids) if str(value or "")
+    }
+    result_figures = [
+        figure for figure in eligible_figures
+        if not bool(_artifact_value(figure, "diagnostic", False))
+        and str(_artifact_value(figure, "purpose", "result") or "result").lower()
+        not in {"baseline", "diagnostic"}
+        and str(_artifact_value(figure, "figure_type", "") or "").lower()
+        not in {"qc", "diagnostic", "baseline"}
+        and (
+            str(_artifact_value(figure, "plan_id", "") or "") in accepted_plan_ids
+            or (
+                not str(_artifact_value(figure, "plan_id", "") or "")
+                and allow_unattributed_legacy
+                and _legacy_figure_not_older_than_plan(figure, plan_created_at)
+            )
+        )
+    ]
+    attributed = [
+        figure for figure in eligible_figures
+        if _artifact_value(figure, "plan_step_id", None) is not None
+        and figure in result_figures
+    ]
+    if not attributed:
+        return bool(result_figures)
+    step_id = int(getattr(step, "id", 0) or 0)
+    for figure in attributed:
+        try:
+            if int(_artifact_value(figure, "plan_step_id")) == step_id:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _audit_step_figure_requirements(
+    step: Any,
+    eligible_figures: Sequence[Any],
+    round_number: int,
+    planning_stage: str = "",
+    plan_id: str = "",
+    plan_created_at: Any = None,
+    plan_revision_of: Optional[str] = None,
+    plan_phase: str = "",
+    inherited_plan_ids_by_step: Optional[Mapping[int, Sequence[str]]] = None,
+    target_lineage_id: str = "main",
+) -> Tuple[Set[str], List[str]]:
+    """Return (planned types, missing types) from the shared contract."""
+    requirements = _step_figure_requirements(
+        step,
+        planning_stage,
+        plan_id,
+        plan_created_at,
+        plan_revision_of,
+        plan_phase,
+        inherited_plan_ids_by_step,
+    )
+    if _figure_requirement_is_waived(
+        step, requirements, plan_phase=plan_phase
+    ):
+        return set(), []
+    if not requirements:
+        planned = {"figure"} if _FIGURE_GENERIC_RE.search(_figure_step_text(step)) else set()
+        step_id = int(getattr(step, "id", 0) or 0)
+        inherited = tuple((inherited_plan_ids_by_step or {}).get(step_id, ()))
+        evidenced = _generic_figure_evidences_step(
+            step,
+            eligible_figures,
+            plan_id=plan_id,
+            plan_created_at=plan_created_at,
+            inherited_plan_ids=inherited,
+            allow_unattributed_legacy=not bool(plan_revision_of),
+        )
+        return planned, ([] if not planned or evidenced else ["figure"])
+
+    # Dict-shaped restored figures are converted only for this read; live model
+    # objects and persisted state are untouched. The strict current-round/report
+    # filter above runs before the shared matcher, so its legacy round-zero
+    # compatibility cannot let an older artifact satisfy this round's plan.
+    state = SimpleNamespace(
+        current_round=int(round_number or 0),
+        publication_figures=[_artifact_for_eligibility(fig) for fig in eligible_figures],
+        restore_branch_id=str(target_lineage_id or "main"),
+    )
+    contract = audit_figure_contract(
+        state,
+        plan=SimpleNamespace(
+            id=plan_id,
+            created_at=plan_created_at,
+            revision_of=plan_revision_of,
+            steps=[step],
+            stage=planning_stage,
+            phase=plan_phase,
+        ),
+        include_stage_baseline=False,
+        inherited_plan_ids_by_step=inherited_plan_ids_by_step,
+    )
+    planned = {str(requirement.figure_type) for requirement in contract.requirements}
+    missing = sorted({
+        str(item.requirement.figure_type) for item in contract.missing
+    })
+    return planned, missing
+
+
 def step_is_conditional(step: Any) -> bool:
     """True when the step's own wording licenses skipping it."""
     text = _step_text(step)
     return any(marker in text for marker in _CONDITIONAL_MARKERS)
+
+
+def _method_requirement_is_conditional(step: Any, planned_families: Set[str]) -> bool:
+    """Apply optionality to methods only when it actually precedes a method.
+
+    ``step_is_conditional`` remains the broad public description of the whole
+    step. The audit needs a narrower answer because "run DE and optionally plot"
+    waives the artifact, not the DE computation.
+    """
+    text = _step_text(step)
+    non_optional_markers = (
+        marker for marker in _CONDITIONAL_MARKERS
+        if marker not in ("optional", "optionally")
+    )
+    if any(marker in text for marker in non_optional_markers):
+        return True
+    optional_matches = list(re.finditer(r"\boptional(?:ly)?\b", text, re.I))
+    if not optional_matches:
+        return False
+    if not _figure_requirement_is_optional(step, _step_figure_requirements(step)):
+        return True
+
+    # "Optionally run scCODA and plot ..." makes the computation optional too;
+    # "run scCODA and optionally plot ..." does not. Family signatures are the
+    # same exact identifiers used to establish the method requirement.
+    method_positions = [
+        text.find(token)
+        for family in planned_families
+        for token in METHOD_SIGNATURES.get(family, ())
+        if text.find(token) >= 0
+    ]
+    return any(
+        0 <= method_position - optional_match.end() <= 60
+        for optional_match in optional_matches
+        for method_position in method_positions
+    )
 
 
 def extract_planned_methods(step: Any) -> Set[str]:
@@ -274,6 +638,8 @@ class StepAudit:
     reason: str
     planned_families: List[str] = field(default_factory=list)
     missing_families: List[str] = field(default_factory=list)
+    planned_figure_kinds: List[str] = field(default_factory=list)
+    missing_figure_kinds: List[str] = field(default_factory=list)
     verifiable: bool = True
 
 
@@ -283,6 +649,7 @@ class PlanAudit:
     steps: List[StepAudit] = field(default_factory=list)
     executed_families: List[str] = field(default_factory=list)
     unavailable_families: List[str] = field(default_factory=list)
+    eligible_figures: List[str] = field(default_factory=list)
 
     @property
     def unmet(self) -> List[StepAudit]:
@@ -304,16 +671,26 @@ class PlanAudit:
         return [s for s in self.steps if not s.verifiable]
 
     def summary(self) -> Dict[str, Any]:
+        figure_steps = [s for s in self.steps if s.planned_figure_kinds]
+        figure_unmet = [
+            s for s in self.unmet if s.missing_figure_kinds
+        ]
         return {
             "n_steps": len(self.steps),
             "n_completed": len(self.completed),
             "n_skipped": len(self.skipped),
             "n_unmet": len(self.unmet),
             "n_unverifiable": len(self.unverifiable),
+            "n_figure_steps": len(figure_steps),
+            "n_figure_unmet": len(figure_unmet),
             "unmet_titles": [s.title for s in self.unmet][:20],
             "unmet_families": sorted({f for s in self.unmet for f in s.missing_families}),
+            "unmet_figure_kinds": sorted({
+                kind for s in figure_unmet for kind in s.missing_figure_kinds
+            }),
             "executed_families": sorted(self.executed_families),
             "unavailable_families": sorted(self.unavailable_families),
+            "eligible_figures": sorted(self.eligible_figures),
         }
 
 
@@ -322,12 +699,21 @@ def audit_plan_execution(
     code_history: Sequence[Any],
     round_number: int = 0,
     structured_families: Optional[Set[str]] = None,
+    publication_figures: Optional[Sequence[Any]] = None,
+    inherited_plan_ids_by_step: Optional[Mapping[int, Sequence[str]]] = None,
+    target_lineage_id: str = "main",
 ) -> PlanAudit:
     """Audit an approved plan against this round's execution evidence.
 
     `structured_families` lets the caller vouch for families from structured
     state instead of code text (e.g. a registered score proves `gene_scoring`),
     which is the more reliable channel where it exists.
+
+    `publication_figures` is the only evidence channel for visual deliverables.
+    Successful plotting code is not enough: the artifact must be a current-round
+    ``PublicationFigure`` accepted by the shared report-eligibility predicate.
+    The argument is optional for source compatibility with older callers; an
+    omitted collection is conservatively equivalent to no artifact evidence.
     """
     audit = PlanAudit()
     if plan is None or not getattr(plan, "steps", None):
@@ -336,28 +722,60 @@ def audit_plan_execution(
     executed = set(executed_method_families(code_history, round_number))
     executed |= set(structured_families or set())
     unavailable = unavailable_method_families(code_history)
+    eligible_figures = eligible_current_round_figures(
+        publication_figures,
+        round_number,
+        target_lineage_id=target_lineage_id,
+    )
+    planning_stage = str(getattr(plan, "stage", "") or "")
+    plan_id = str(getattr(plan, "id", "") or "")
+    plan_created_at = getattr(plan, "created_at", None)
+    plan_revision_of = getattr(plan, "revision_of", None)
+    plan_phase = str(getattr(plan, "phase", "") or "")
     audit.executed_families = sorted(executed)
     audit.unavailable_families = sorted(unavailable)
+    audit.eligible_figures = [_artifact_label(figure) for figure in eligible_figures]
 
     for step in plan.steps:
         planned = extract_planned_methods(step)
+        planned_figures, missing_figures = _audit_step_figure_requirements(
+            step,
+            eligible_figures,
+            round_number,
+            planning_stage,
+            plan_id,
+            plan_created_at,
+            plan_revision_of,
+            plan_phase,
+            inherited_plan_ids_by_step,
+            target_lineage_id,
+        )
         step_id = int(getattr(step, "id", 0) or 0)
         title = str(getattr(step, "title", "") or "")[:300]
 
-        if not planned:
+        if not planned and not planned_figures:
             audit.steps.append(StepAudit(
                 step_id=step_id, title=title, status=STATUS_PENDING,
-                reason="No machine-checkable method identifier in the step text.",
+                reason="No machine-checkable method or figure identifier in the step text.",
                 verifiable=False,
             ))
             continue
 
         missing = sorted(planned - executed)
-        if not missing:
+        if not missing and not missing_figures:
+            evidence: List[str] = []
+            if planned:
+                evidence.append("successful execution of: " + ", ".join(sorted(planned)))
+            if planned_figures:
+                evidence.append(
+                    "shared figure contract for current-round report-eligible "
+                    "PublicationFigure type(s): " + ", ".join(sorted(planned_figures))
+                )
             audit.steps.append(StepAudit(
                 step_id=step_id, title=title, status=STATUS_COMPLETED,
-                reason="Evidenced by a successful execution of: " + ", ".join(sorted(planned)),
+                reason="Evidenced by " + "; ".join(evidence),
                 planned_families=sorted(planned),
+                planned_figure_kinds=sorted(planned_figures),
             ))
             continue
 
@@ -367,22 +785,32 @@ def audit_plan_execution(
                 step_id=step_id, title=title, status=STATUS_SKIPPED,
                 reason="Required tooling unavailable in this kernel: " + ", ".join(blocked),
                 planned_families=sorted(planned), missing_families=missing,
+                planned_figure_kinds=sorted(planned_figures),
+                missing_figure_kinds=missing_figures,
             ))
             continue
 
-        if step_is_conditional(step):
+        if _method_requirement_is_conditional(step, planned):
+            absent = list(missing)
+            absent.extend(f"figure:{kind}" for kind in missing_figures)
             audit.steps.append(StepAudit(
                 step_id=step_id, title=title, status=STATUS_SKIPPED,
                 reason="Step is conditional in the approved plan; not evidenced: "
-                       + ", ".join(missing),
+                       + ", ".join(absent),
                 planned_families=sorted(planned), missing_families=missing,
+                planned_figure_kinds=sorted(planned_figures),
+                missing_figure_kinds=missing_figures,
             ))
             continue
 
+        absent = list(missing)
+        absent.extend(f"figure:{kind}" for kind in missing_figures)
         audit.steps.append(StepAudit(
             step_id=step_id, title=title, status=STATUS_PENDING,
-            reason="No successful execution evidences: " + ", ".join(missing),
+            reason="No current-round eligible evidence for: " + ", ".join(absent),
             planned_families=sorted(planned), missing_families=missing,
+            planned_figure_kinds=sorted(planned_figures),
+            missing_figure_kinds=missing_figures,
         ))
 
     return audit
@@ -689,9 +1117,11 @@ def should_run_post_execution_review(
     unmet = audit.unmet
     if unmet:
         families = sorted({f for s in unmet for f in s.missing_families})
+        figures = sorted({kind for s in unmet for kind in s.missing_figure_kinds})
+        absent = families + [f"figure:{kind}" for kind in figures]
         return (True,
-                f"{len(unmet)} approved step(s) show no execution evidence "
-                f"({', '.join(families[:6])}).")
+                f"{len(unmet)} approved step(s) show no eligible execution/artifact "
+                f"evidence ({', '.join(absent[:6])}).")
 
     if is_last_direction_of_batch:
         return (True,
@@ -749,9 +1179,6 @@ def sanitize_review_plan(plan: Any, max_tasks: int) -> Dict[str, Any]:
 
 
 _MAX_FINDINGS = 40
-_MAX_FIGURES = 12
-
-
 def sanitize_review_result(result: Any) -> Dict[str, Any]:
     """Bound a supplementary-execution result for storage and transport.
 
@@ -764,12 +1191,24 @@ def sanitize_review_result(result: Any) -> Dict[str, Any]:
     if not isinstance(result, dict):
         return {"status": "failed", "summary": "Supplementary pass returned no structured result.",
                 "findings": [], "figures": [], "warnings": ["non-dict result"]}
+    warnings = _clean_list(result.get("warnings"), _MAX_LIST, _MAX_GAP_LEN)
+    if result.get("figures"):
+        warnings = _clean_list(
+            [
+                "Unreviewed supplementary figures were discarded; publication "
+                "visuals must use the main figure/review pipeline."
+            ] + warnings,
+            _MAX_LIST,
+            _MAX_GAP_LEN,
+        )
     return {
         "status": str(result.get("status", "completed") or "completed"),
         "summary": str(result.get("summary", "") or "Supplementary analysis completed.")[:4000],
         "findings": _clean_list(result.get("findings"), _MAX_FINDINGS, _MAX_TASK_LEN),
-        "figures": [str(f) for f in list(result.get("figures") or [])[:_MAX_FIGURES]],
-        "warnings": _clean_list(result.get("warnings"), _MAX_LIST, _MAX_GAP_LEN),
+        # The automatic supplementary pass has no publication-figure review
+        # callback. Never serialize its raw notebook images into report state.
+        "figures": [],
+        "warnings": warnings,
     }
 
 

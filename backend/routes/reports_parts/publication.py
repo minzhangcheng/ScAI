@@ -17,10 +17,16 @@ from fastapi.responses import FileResponse
 from backend.config import WORKSPACE_DIR, UPLOAD_DIR, get_session_workspace
 from backend.models.schemas import AnalysisState, APIResponse, TaskStatus
 
-from backend.utils.files import validate_session_id
+from backend.utils.files import safe_filename, validate_path_within, validate_session_id
 from backend.utils.auth import require_session_ownership
 from ..serialization import serialize_round_results
 from backend.services.session_store import async_save_session, update_session_cache as _update_session_cache
+from backend.services.report.artifacts import (
+    archival_render_available,
+    archival_pdf_path_matches_record,
+    resolve_archival_pdf,
+    resolve_archival_render,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +65,14 @@ async def get_publication_figures(session_id: str, request: Request):
 
     figures = []
     approved = 0
+    target_lineage = getattr(state, "restore_branch_id", None) or "main"
     for fig in state.publication_figures:
+        if not getattr(fig, "is_current", True) or getattr(fig, "invalidated_at", None):
+            continue
+        if (getattr(fig, "lineage_id", None) or "main") != target_lineage:
+            continue
+        if not archival_render_available(fig):
+            continue
         review_status = fig.review_status.value
         if review_status == "approved":
             approved += 1
@@ -74,6 +87,12 @@ async def get_publication_figures(session_id: str, request: Request):
             "review_status": review_status,
             "pi_feedback": fig.pi_feedback,
             "revision_count": fig.revision_count,
+            "plan_step_id": fig.plan_step_id,
+            "plan_id": getattr(fig, "plan_id", None),
+            "purpose": fig.purpose,
+            "is_publication": True,
+            "round": fig.round_number or None,
+            "diagnostic": bool(fig.diagnostic),
             "created_at": fig.created_at.isoformat()
         })
 
@@ -116,13 +135,54 @@ def _find_workspace_figure(state: AnalysisState, session_id: str, figure_id: str
 
     Returns a dict with 'name' and optional 'pdf_path' if found, else None.
     """
+    validate_session_id(session_id)
+    workspace = get_session_workspace(session_id)
     for msg in state.realtime_messages:
         msg_type = msg.type if hasattr(msg, 'type') else (msg.get('type') if isinstance(msg, dict) else None)
         msg_content = msg.content if hasattr(msg, 'content') else (msg.get('content') if isinstance(msg, dict) else None)
         if msg_type == 'integrated_report' and isinstance(msg_content, dict):
             for fig_data in msg_content.get('figures', []):
-                if isinstance(fig_data, dict) and fig_data.get('id') == figure_id:
-                    return fig_data
+                if (
+                    isinstance(fig_data, dict)
+                    and fig_data.get('id') == figure_id
+                    # Registered entries are served only from the current state
+                    # record above.  A persisted highlight message must not
+                    # resurrect an invalidated publication artifact.
+                    and fig_data.get("is_publication") is False
+                ):
+                    # Workspace-only highlights have no authoritative state
+                    # record. Require an explicit, hash-bound render inside this
+                    # session's current workspace; a bare name or another
+                    # session's path is not a durable artifact identity.
+                    png_path = str(fig_data.get("png_path") or "")
+                    name = str(fig_data.get("name") or "")
+                    render_sha256 = str(
+                        fig_data.get("render_sha256") or ""
+                    ).strip()
+                    if (
+                        not png_path
+                        or not render_sha256
+                        or not name
+                        or safe_filename(name) != name
+                    ):
+                        continue
+                    try:
+                        safe_png = validate_path_within(Path(png_path), workspace)
+                    except Exception:
+                        continue
+                    safe = dict(fig_data)
+                    safe["png_path"] = str(safe_png)
+                    explicit_pdf = str(safe.get("pdf_path") or "")
+                    if explicit_pdf:
+                        try:
+                            safe["pdf_path"] = str(
+                                validate_path_within(Path(explicit_pdf), workspace)
+                            )
+                        except Exception:
+                            # Keep the safe image downloadable while forcing the
+                            # optional PDF endpoint to fail closed.
+                            safe["pdf_path"] = ""
+                    return safe
     return None
 
 @router.get("/{session_id}/figure/{figure_id}/pdf")
@@ -130,12 +190,23 @@ async def download_publication_figure_pdf(session_id: str, figure_id: str, state
     """Download a specific publication figure as PDF"""
     from backend.config import SESSION_DIR as _SESSION_DIR, REPORTS_DIR as _REPORTS_DIR
 
-    figure = next((f for f in state.publication_figures if f.id == figure_id), None)
+    figure = next(
+        (
+            f for f in state.publication_figures
+            if f.id == figure_id
+            and getattr(f, "is_current", True)
+            and not getattr(f, "invalidated_at", None)
+            and (getattr(f, "lineage_id", None) or "main")
+            == (getattr(state, "restore_branch_id", None) or "main")
+        ),
+        None,
+    )
+    workspace = get_session_workspace(session_id)
 
     if figure is not None:
-        if not figure.pdf_path:
+        pdf_path = resolve_archival_pdf(figure, workspace)
+        if pdf_path is None:
             raise HTTPException(status_code=404, detail="PDF not available for this figure")
-        pdf_path = Path(figure.pdf_path)
         fig_name = figure.name
     else:
         # Fallback: search workspace figures from integrated_report message
@@ -143,15 +214,23 @@ async def download_publication_figure_pdf(session_id: str, figure_id: str, state
         if fig_data is None:
             raise HTTPException(status_code=404, detail="Figure not found")
         fig_name = fig_data.get('name', '')
+        if not str(fig_data.get("pdf_sha256") or "").strip():
+            raise HTTPException(
+                status_code=404,
+                detail="PDF integrity metadata is unavailable for this workspace figure",
+            )
         # Try explicit pdf_path first, then derive from workspace directory
         explicit_pdf = fig_data.get('pdf_path', '')
         if explicit_pdf and Path(explicit_pdf).exists():
             pdf_path = Path(explicit_pdf)
         else:
-            pdf_path = get_session_workspace(session_id) / "figures" / f"{fig_name}.pdf"
+            pdf_path = workspace / "figures" / f"{fig_name}.pdf"
 
-    if not pdf_path.exists():
-        raise HTTPException(status_code=404, detail="PDF file not found on disk")
+        if not archival_pdf_path_matches_record(fig_data, pdf_path):
+            raise HTTPException(
+                status_code=404,
+                detail="PDF file is missing or failed integrity validation",
+            )
 
     # Validate path is within allowed directories
     resolved = pdf_path.resolve()
@@ -170,12 +249,23 @@ async def download_publication_figure_png(session_id: str, figure_id: str, state
     """Download a specific publication figure as PNG/JPG"""
     from backend.config import SESSION_DIR as _SESSION_DIR, REPORTS_DIR as _REPORTS_DIR
 
-    figure = next((f for f in state.publication_figures if f.id == figure_id), None)
+    figure = next(
+        (
+            f for f in state.publication_figures
+            if f.id == figure_id
+            and getattr(f, "is_current", True)
+            and not getattr(f, "invalidated_at", None)
+            and (getattr(f, "lineage_id", None) or "main")
+            == (getattr(state, "restore_branch_id", None) or "main")
+        ),
+        None,
+    )
+    workspace = get_session_workspace(session_id)
 
     if figure is not None:
-        if not figure.png_path:
+        img_path = resolve_archival_render(figure, workspace)
+        if img_path is None:
             raise HTTPException(status_code=404, detail="Image not available for this figure")
-        img_path = Path(figure.png_path)
         fig_name = figure.name
     else:
         # Fallback: search workspace figures from integrated_report message
@@ -183,21 +273,25 @@ async def download_publication_figure_png(session_id: str, figure_id: str, state
         if fig_data is None:
             raise HTTPException(status_code=404, detail="Figure not found")
         fig_name = fig_data.get('name', '')
-        explicit_path = fig_data.get('png_path', '')
-        if explicit_path and Path(explicit_path).exists():
-            img_path = Path(explicit_path)
-        else:
+        img_path = resolve_archival_render(fig_data, workspace)
+        if img_path is None:
             # Try JPG first, then PNG for backward compatibility
-            img_path = get_session_workspace(session_id) / "figures" / f"{fig_name}.jpg"
-            if not img_path.exists():
-                img_path = get_session_workspace(session_id) / "figures" / f"{fig_name}.png"
-            if not img_path.exists():
-                img_path = get_session_workspace(session_id) / f"{fig_name}.jpg"
-            if not img_path.exists():
-                img_path = get_session_workspace(session_id) / f"{fig_name}.png"
-
-    if not img_path.exists():
-        raise HTTPException(status_code=404, detail="Image file not found on disk")
+            for candidate in (
+                workspace / "figures" / f"{fig_name}.jpg",
+                workspace / "figures" / f"{fig_name}.png",
+                workspace / f"{fig_name}.jpg",
+                workspace / f"{fig_name}.png",
+            ):
+                candidate_record = dict(fig_data)
+                candidate_record["png_path"] = str(candidate)
+                img_path = resolve_archival_render(candidate_record, workspace)
+                if img_path is not None:
+                    break
+        if img_path is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Image file is missing or failed integrity validation",
+            )
 
     # Validate path is within allowed directories
     resolved = img_path.resolve()

@@ -156,8 +156,25 @@ TOOLS = [
                     },
                     "figure_type": {
                         "type": "string",
-                        "enum": ["umap", "heatmap", "violin", "dotplot", "barplot", "trajectory", "volcano", "qc", "other"],
-                        "description": "Type of figure being generated"
+                        "description": (
+                            "Type of figure being generated. Use the exact figure_type "
+                            "declared by the approved plan requirement (for example umap, "
+                            "heatmap, violin, dotplot, barplot, trajectory, volcano, "
+                            "network, venn, scatter, qc, or another accurate open-vocabulary "
+                            "label)."
+                        )
+                    },
+                    "plan_step_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "ID of the approved analysis-plan step whose visual "
+                            "deliverable this figure satisfies. This is required when "
+                            "fulfilling a planned figure requirement; omit it only for "
+                            "a genuinely out-of-plan, user-requested supplementary "
+                            "figure. Use the most directly related approved step for an "
+                            "additional supporting figure."
+                        )
                     }
                 },
                 "required": ["code", "figure_name", "description", "figure_type"]

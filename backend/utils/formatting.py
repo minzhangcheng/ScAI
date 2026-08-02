@@ -240,6 +240,9 @@ _PLAN_STEP_FIELDS = (
     ("Method", "method"),
     ("Input", "input"),
     ("Output", "expected_output"),
+    ("Required figures", "figure_requirements"),
+    ("Text-only exception", "allow_text_only"),
+    ("Text-only reason", "text_only_reason"),
     ("Rationale", "rationale"),
 )
 

@@ -102,7 +102,28 @@ def count_saved_figures(analysis_log) -> int:
             if isinstance(step, dict)
             else getattr(step, "pub_figure_name", None)
         )
-        if pub_name:
+        pub_result = (
+            step.get("pub_figure_result")
+            if isinstance(step, dict)
+            else getattr(step, "pub_figure_result", None)
+        )
+        # A tool-call name is an intention, not a saved file.  Older code added
+        # it even when validation failed, the render was blank, or the budget
+        # rejected the call.  Count it only when the handler returned evidence
+        # that a render reached disk.  ``saved_figure_filenames`` above remains
+        # the authoritative path for execute_code figures.
+        failed_markers = (
+            "code validation failed",
+            "generation failed",
+            "generation blocked",
+            "file was not created",
+            "appears to be blank",
+            "budget exhausted",
+            "skipped after",
+            "rejected",
+        )
+        result_text = str(pub_result or "").lower()
+        if pub_name and result_text and not any(marker in result_text for marker in failed_markers):
             saved_names.add(Path(str(pub_name)).stem)
     return len(saved_names)
 
@@ -159,12 +180,32 @@ def build_approved_plan_context(
     plan as one explicit message while its checkpointed tool history remains
     unchanged.
     """
-    steps = "\n".join(
-        f"  [{step.status}] Step {step.id}: "
-        f"{truncate_for_llm(str(step.title), max_chars=300)} — "
-        f"{truncate_for_llm(str(step.method), max_chars=700)}"
-        for step in plan.steps
-    ) or "  (No executable steps were provided.)"
+    def _render_step(step: Any) -> str:
+        requirements = []
+        for req in getattr(step, "figure_requirements", None) or []:
+            figure_type = getattr(req, "figure_type", None)
+            description = getattr(req, "description", None)
+            minimum = getattr(req, "minimum_count", 1)
+            requirements.append(
+                f"{figure_type or 'other'} x{minimum}: {description or 'result figure'}"
+            )
+        visual = ""
+        if requirements:
+            visual = " | required figures: " + "; ".join(requirements)
+        elif getattr(step, "allow_text_only", False):
+            reason = str(getattr(step, "text_only_reason", "") or "").strip()
+            visual = " | text-only exception"
+            if reason:
+                visual += f": {reason}"
+        return (
+            f"  [{step.status}] Step {step.id}: "
+            f"{truncate_for_llm(str(step.title), max_chars=300)} — "
+            f"{truncate_for_llm(str(step.method), max_chars=700)}"
+            f"{truncate_for_llm(visual, max_chars=1200)}"
+        )
+
+    steps = "\n".join(_render_step(step) for step in plan.steps) \
+        or "  (No executable steps were provided.)"
     steps = truncate_for_llm(steps, max_chars=24_000)
     decisions = truncate_for_llm(
         ", ".join(str(item) for item in plan.key_decision_points),
@@ -279,7 +320,13 @@ This is STAGE 1 of exploration. Plan ONLY these steps:
 7. Clustering (leiden/louvain)
 8. Cell type annotation (via marker genes + annotate_clusters tool)
 
-Do NOT plan a quality-control figure step — the platform renders that panel itself at the end of this stage, from the metrics the run actually computed.
+Do NOT duplicate the standard annotation, batch/sample, cluster, or marker
+baseline panels merely to satisfy visual coverage — the platform renders those
+itself at the end of this stage from the annotated object. Preserve explicit
+user requests and declare ``figure_requirements`` for additional decision views
+such as doublet diagnostics, filtering thresholds, resolution stability, or
+batch-correction before/after comparisons. Those additional views are genuine
+plan deliverables, not optional substitutes for the platform baseline.
 
 Do NOT include downstream analysis (DEG, GO/KEGG, cell communication, RNA velocity, trajectory/pseudotime, etc.) — those will be planned in Stage 2 after seeing clustering results.
 
@@ -344,5 +391,3 @@ def _get_marker_db():
 def marker_priors_write(organism: str, workspace_dir):
     """模块级间接层，便于测试 monkeypatch。"""
     return _get_marker_db().write_workspace_input(organism, workspace_dir)
-
-

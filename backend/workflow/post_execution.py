@@ -21,6 +21,7 @@ import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..models.schemas import AgentType
+from ..services.figure_contract import visual_plan_inheritance_for_plan
 from .post_execution_review import (
     apply_audit_to_plan,
     audit_plan_execution,
@@ -235,6 +236,13 @@ class PostExecutionReviewMixin:
                 getattr(analysis_state, "code_history", None) or [],
                 round_number=round_number,
                 structured_families=self._structured_method_families(analysis_state, round_number),
+                publication_figures=getattr(analysis_state, "publication_figures", None) or [],
+                inherited_plan_ids_by_step=visual_plan_inheritance_for_plan(
+                    analysis_state, plan
+                ),
+                target_lineage_id=(
+                    getattr(analysis_state, "restore_branch_id", None) or "main"
+                ),
             )
             updated = apply_audit_to_plan(plan, audit)
             summary = audit.summary()
@@ -338,6 +346,31 @@ class PostExecutionReviewMixin:
             from .post_execution_review import PlanAudit
             audit = PlanAudit()
 
+        # The restricted supplementary executor can add calculations, but it
+        # cannot create a registered, reviewed PublicationFigure.  Sending a
+        # figure-only gap through it wastes a pass and, worse, invites an inline
+        # notebook image to be described as if the contract were repaired.  Keep
+        # mixed method/figure gaps eligible for computational repair; the final
+        # contract below will then return the remaining visual deliverable to the
+        # main executor.
+        unmet = list(audit.unmet)
+        figure_only_gap = bool(unmet) and all(
+            step.missing_figure_kinds and not step.missing_families
+            for step in unmet
+        )
+        if figure_only_gap and not admissions:
+            kinds = sorted({
+                kind for step in unmet for kind in step.missing_figure_kinds
+            })
+            reason = (
+                "Required publication figure gap deferred to the main "
+                "bioinformatics figure/review pipeline"
+                + (f" ({', '.join(kinds)})" if kinds else "")
+                + "."
+            )
+            logger.info(f"[{self.session_id}] Post-execution review skipped: {reason}")
+            return _decline("skipped", reason)
+
         run, reason = should_run_post_execution_review(
             audit, admissions, result_status, is_terminal, has_runtime=has_runtime
         )
@@ -384,8 +417,8 @@ class PostExecutionReviewMixin:
             )
 
         # 4) Restricted execution. Its own bounded loop, its own timeout; it cannot
-        #    call report_findings, consult_pi or the figure pipeline, so it can
-        #    neither end the round nor spend the round's figure budget.
+        #    call report_findings, consult_pi or the publication-figure pipeline,
+        #    so required visual deliverables remain owned by the main executor.
         await self._send_message(
             "status",
             f"Bioinformatics agent is running {len(review_plan['supplementary_tasks'])} "
@@ -447,7 +480,9 @@ class PostExecutionReviewMixin:
 
         merge_payload = {
             "findings": supplementary.get("findings", []),
-            "figures": supplementary.get("figures", []),
+            # Restricted supplementary work repairs computational evidence only.
+            # Any visual gap is returned to the main reviewed figure pipeline.
+            "figures": [],
             "code_history": raw_result.get("code_history") or [],
             "analysis_log": raw_result.get("analysis_log") or [],
             "assessment_summary": meta["assessment"]["summary"],
@@ -484,7 +519,10 @@ class PostExecutionReviewMixin:
 
         tagged = [f"[Supplementary] {f}" for f in (merge_payload.get("findings") or [])]
         merged_findings = list(all_findings) + tagged
-        merged_figures = list(all_figures) + list(merge_payload.get("figures") or [])
+        # Defense in depth for old checkpoints or mocked executors carrying the
+        # pre-isolation payload shape: unreviewed supplementary images never join
+        # the round's archival figure collection.
+        merged_figures = list(all_figures)
 
         existing_code_ids = {c.id for c in analysis_state.code_history}
         added_executions = []

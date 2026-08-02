@@ -48,9 +48,127 @@ from backend.services.report.interaction_records import (
     build_direction_selection_history,
     write_interaction_record_files,
 )
+from backend.services.report.output_cleanup import reset_report_asset_directories
 from backend.workflow.direction_coverage import normalize_legacy_round_result
 
 logger = logging.getLogger(__name__)
+
+
+def report_completion_fields(
+    state: AnalysisState,
+    unreported_figures: Optional[List[str]] = None,
+) -> tuple[str, str]:
+    """Status fields for the non-Supervisor report path.
+
+    Partial-report approval is a property of the report being generated, not a
+    transient workflow notification.  Persist it in ``report.json`` so reloads
+    and exports cannot silently relabel it as complete.
+    """
+    if unreported_figures:
+        return (
+            "partial",
+            "Complete with unreported figures: " + ", ".join(unreported_figures),
+        )
+    if getattr(state, "allow_partial_report", False):
+        return "partial", "Partial report approved"
+    return "completed", "Complete"
+
+
+def report_partial_reason(
+    state: AnalysisState,
+    unreported_figures: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Return the stable machine-readable reason for a partial report."""
+    if unreported_figures:
+        return "figure_coverage"
+    if getattr(state, "allow_partial_report", False):
+        return "approved_partial"
+    return None
+
+
+def ensure_report_plan_figure_coverage(
+    report_plan: Dict[str, Any],
+    existing_figures: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Bind every scanned figure to a deterministic plan section.
+
+    This is deliberately run after both fresh planning and checkpoint restore.
+    An LLM omission or an older checkpoint must not decide whether a validated
+    analysis artifact reaches the report.
+    """
+    figures_by_name = {
+        str(figure.get("filename")): figure
+        for figure in existing_figures
+        if figure.get("filename")
+    }
+    if not figures_by_name:
+        return report_plan
+
+    sections = [dict(section) for section in report_plan.get("sections", [])]
+    assigned: set[str] = set()
+    for section in sections:
+        for reference in section.get("existing_figures", []) or []:
+            name = (
+                reference if isinstance(reference, str)
+                else reference.get("filename", "")
+            )
+            if name in figures_by_name:
+                assigned.add(name)
+
+    missing = [
+        name for name in figures_by_name
+        if name not in assigned
+    ]
+    if not missing:
+        return report_plan
+
+    # Always append a new recovery section. On checkpoint resume an existing
+    # ``additional_results`` section may already be counted as completed; adding
+    # new figures to that old section would make the loop skip them again.
+    existing_ids = {str(section.get("id") or "") for section in sections}
+    recovery_id = "additional_results"
+    suffix = 2
+    while recovery_id in existing_ids:
+        recovery_id = f"additional_results_{suffix}"
+        suffix += 1
+    sections.append({
+        "id": recovery_id,
+        "title": "Additional Analysis Results",
+        "description": (
+            "Validated analysis figures not assigned by the report plan"
+        ),
+        "analysis_type": "specific",
+        "existing_figures": [
+            dict(figures_by_name[name]) for name in missing
+        ],
+        "existing_tables": [],
+    })
+    recovered_plan = dict(report_plan)
+    recovered_plan["sections"] = sections
+    logger.warning(
+        "Deterministically recovered %d unassigned figure(s) into "
+        "additional_results",
+        len(missing),
+    )
+    return recovered_plan
+
+
+def unreported_figure_names(
+    existing_figures: List[Dict[str, Any]],
+    generated_figures: List[Dict[str, Any]],
+) -> List[str]:
+    """Return scanned figure filenames absent from the generated report."""
+    generated_names = {
+        os.path.basename(str(figure.get("png_path") or ""))
+        for figure in generated_figures
+        if figure.get("png_path")
+    }
+    return [
+        str(figure.get("filename"))
+        for figure in existing_figures
+        if figure.get("filename")
+        and str(figure.get("filename")) not in generated_names
+    ]
 
 
 def build_agent_models_appendix(state) -> dict:
@@ -109,6 +227,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         self.bio_model = bio_model
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        reset_report_asset_directories(self.output_dir)
         self.workspace_dir = Path(workspace_dir) if workspace_dir else None
         self.progress_callback = progress_callback
         self.vision_settings = vision_settings or {}
@@ -118,8 +237,6 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         # Create subdirectories
         self.figures_dir = self.output_dir / "figures"
         self.tables_dir = self.output_dir / "tables"
-        self.figures_dir.mkdir(exist_ok=True)
-        self.tables_dir.mkdir(exist_ok=True)
 
         # Track generated outputs
         self.generated_figures: List[Dict[str, Any]] = []
@@ -228,7 +345,11 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         language = "en"
 
         # Filter round_results to target lineage for branch isolation
-        report_state = build_lineage_report_state(state, self.target_lineage_id)
+        report_state = build_lineage_report_state(
+            state,
+            self.target_lineage_id,
+            workspace_path=self.workspace_dir,
+        )
 
         await self._report_progress(2, "Initializing report compilation...")
 
@@ -302,6 +423,13 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                 'analysis_summary': analysis_summary, 'report_plan': report_plan,
                 'language': language,
             })
+
+        # Reconcile even a restored plan against the figures scanned for this
+        # run. This closes the checkpoint path where an older plan predates a
+        # newly recovered archival figure.
+        report_plan = ensure_report_plan_figure_coverage(
+            report_plan, existing_figures
+        )
 
         # Step 5: Generate each section using existing figures + PI narrative (with vision + analysis context)
         # Restore already-completed sections from checkpoint
@@ -475,6 +603,13 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             "report_kind": "partial" if getattr(state, "allow_partial_report", False) else "complete",
         }
 
+        unreported_figures = unreported_figure_names(
+            existing_figures, self.generated_figures
+        )
+        report_status, report_current_step = report_completion_fields(
+            state, unreported_figures
+        )
+        partial_reason = report_partial_reason(state, unreported_figures)
         report = {
             "id": report_id,
             "session_id": report_state.id,
@@ -486,9 +621,12 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             "tables": self.generated_tables,
             "graphic_abstract_path": graphic_abstract_path,
             "generated_at": datetime.now().isoformat(),
-            "status": "completed",
+            "status": report_status,
             "progress": 100,
-            "current_step": "Complete",
+            "current_step": report_current_step,
+            "partial_reason": partial_reason,
+            "figureless_sections": [],
+            "unreported_figures": unreported_figures,
             "appendix": appendix_data,
             "analysis_log": self._build_full_analysis_log(report_state),
             "score_definitions": [sd.model_dump(mode="json") for sd in report_state.score_definitions] if report_state.score_definitions else []
@@ -540,7 +678,9 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         # Clear checkpoint on successful completion
         checkpoint_mgr.clear()
 
-        await self._report_progress(100, "Complete", "completed")
+        await self._report_progress(
+            100, report_current_step, report_status
+        )
 
         return report
 

@@ -20,7 +20,19 @@ logger = logging.getLogger(__name__)
 
 
 from ...models.schemas import AnalysisState
-from ...services.report.artifacts import eligible_artifacts, excluded_artifact_stems
+from ...services.report.artifacts import (
+    artifact_stems,
+    eligible_artifacts,
+    excluded_artifact_stems,
+    image_file_sha256,
+    MIN_ARCHIVAL_PREVIEW_HEIGHT,
+    MIN_ARCHIVAL_PREVIEW_WIDTH,
+    resolve_archival_render,
+)
+from ...services.report.figure_discovery import (
+    discover_figures_in_workspace,
+    prepare_discovered_figures,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +95,31 @@ class ReportHtmlMixin:
             except Exception as e:
                 logger.warning(f"Could not read figure {fig_path}: {e}")
 
+        # PDF paths in ``report_figures`` have already passed the artifact
+        # integrity checks in ReportContentMixin.  Keep that validated mapping
+        # authoritative here: a same-stem PDF beside a raster may have been
+        # overwritten after review and must never become downloadable merely
+        # because it happens to exist on disk.
+        validated_pdf_by_figure: Dict[str, Path] = {}
+        for figure in report_figures:
+            raw_pdf_path = figure.get("pdf_path")
+            if not raw_pdf_path:
+                continue
+            pdf_path = Path(raw_pdf_path)
+            if not pdf_path.is_file():
+                continue
+            for raw_name in (figure.get("filename"), figure.get("path")):
+                if raw_name:
+                    validated_pdf_by_figure.setdefault(
+                        os.path.basename(str(raw_name)), pdf_path
+                    )
+
+        def _validated_pdf_for(fig_name: str) -> Optional[Path]:
+            return (
+                validated_pdf_by_figure.get(fig_name)
+                or validated_pdf_by_figure.get(_alt_ext_name(fig_name))
+            )
+
         # Build TOC
         toc_items = []
         for sec in sections:
@@ -97,6 +134,7 @@ class ReportHtmlMixin:
 
         # Build publication figure description lookup
         pub_fig_descriptions: Dict[str, Dict[str, str]] = {}
+        pub_fig_descriptions_by_stem: Dict[str, Dict[str, str]] = {}
         analysis_state = report.get("_analysis_state")
         eligible_figures = eligible_artifacts(
             analysis_state.publication_figures if analysis_state else []
@@ -104,12 +142,20 @@ class ReportHtmlMixin:
         if eligible_figures:
             for pf in eligible_figures:
                 fname = os.path.basename(pf.png_path) if pf.png_path else ""
+                metadata = {
+                    "name": pf.name,
+                    "figure_type": pf.figure_type or "other",
+                    "description": pf.description or "",
+                    "interpretation": pf.interpretation or "",
+                }
                 if fname:
-                    pub_fig_descriptions[fname] = {
-                        "name": pf.name,
-                        "description": pf.description or "",
-                        "interpretation": pf.interpretation or "",
-                    }
+                    pub_fig_descriptions[fname] = metadata
+                # A restored record may have an empty or obsolete absolute path
+                # while ``resolve_archival_render`` materializes its preview under
+                # a new extension.  Match archival metadata by every record-owned
+                # stem as well as by the old exact basename.
+                for stem in artifact_stems([pf]):
+                    pub_fig_descriptions_by_stem.setdefault(stem, metadata)
 
         def _alt_ext_name(name: str) -> str:
             """Return filename with alternate image extension (.png↔.jpg/.jpeg)."""
@@ -134,11 +180,20 @@ class ReportHtmlMixin:
             # Determine MIME type from extension
             mime = "image/jpeg" if fig_name.lower().endswith((".jpg", ".jpeg")) else "image/png"
 
-            # Figure description: prefer LLM caption, fallback to publication figures
-            fig_desc = pub_fig_descriptions.get(fig_name, {})
+            # Registered metadata is authoritative. A model-written caption may
+            # add context only for an unregistered/legacy figure; otherwise it
+            # could relabel a declared barplot as a UMAP despite the record next
+            # to it saying exactly what was rendered.
+            fig_desc = (
+                pub_fig_descriptions.get(fig_name)
+                or pub_fig_descriptions_by_stem.get(Path(fig_name).stem)
+                or {}
+            )
             display_name = fig_desc.get("name", fig_name.replace("_", " ").rsplit(".", 1)[0].title())
             description = fig_desc.get("description", "")
-            interpretation = caption or fig_desc.get("interpretation", "")
+            interpretation = fig_desc.get("interpretation", "")
+            if not description and not interpretation:
+                interpretation = caption
 
             # Description paragraph
             desc_html = ""
@@ -157,20 +212,18 @@ class ReportHtmlMixin:
                 )
 
             # Download buttons — label matches actual file extension
-            fig_path = figure_map.get(fig_name) or figure_map.get(_alt_ext_name(fig_name))
             img_ext = os.path.splitext(fig_name)[1].lstrip('.').upper() or "PNG"
             img_btn = (
                 f'<a href="figures/{html_module.escape(fig_name)}" '
                 f'download class="download-btn png">Download {img_ext}</a>'
             )
             pdf_btn = ""
-            if fig_path:
-                pdf_p = fig_path.with_suffix(".pdf")
-                if pdf_p.exists():
-                    pdf_btn = (
-                        f'<a href="figures/{html_module.escape(pdf_p.name)}" '
-                        f'download class="download-btn pdf">Download PDF</a>'
-                    )
+            pdf_path = _validated_pdf_for(fig_name)
+            if pdf_path is not None:
+                pdf_btn = (
+                    f'<a href="figures/{html_module.escape(pdf_path.name)}" '
+                    f'download class="download-btn pdf">Download PDF</a>'
+                )
 
             return f'''
                 <div class="figure-container">
@@ -470,9 +523,10 @@ class ReportHtmlMixin:
         for fig_name, fig_path in figure_map.items():
             try:
                 shutil.copy2(fig_path, figures_out / fig_name)
-                # Copy PDF if exists
-                pdf_path = fig_path.with_suffix(".pdf")
-                if pdf_path.exists():
+                # Only package the PDF whose validated path was carried by the
+                # report entry. Never infer a companion from the raster stem.
+                pdf_path = _validated_pdf_for(fig_name)
+                if pdf_path is not None:
                     shutil.copy2(pdf_path, figures_out / pdf_path.name)
             except Exception as e:
                 logger.warning(f"Could not copy figure {fig_name}: {e}")
@@ -817,6 +871,19 @@ class ReportHtmlMixin:
         eligible_figures = eligible_artifacts(
             state.publication_figures if state else []
         )
+        report_target_lineage = str(
+            ((getattr(state, "sandbox_state", None) or {}).get(
+                "_report_target_lineage_id", "main"
+            ))
+            or "main"
+        )
+        strict_lineage = report_target_lineage != "main"
+        eligible_figure_stems = artifact_stems(eligible_figures)
+        eligible_records_by_stem: Dict[str, Any] = {}
+        for figure in eligible_figures:
+            for stem in artifact_stems([figure]):
+                eligible_records_by_stem.setdefault(stem, figure)
+        included_record_ids: set[int] = set()
         excluded_stems = excluded_artifact_stems(
             state.publication_figures if state else [],
             eligible_figures,
@@ -827,14 +894,64 @@ class ReportHtmlMixin:
 
         for rec in records:
             for fname in rec.get("saved_figure_filenames", []):
-                if Path(fname).stem in excluded_stems:
+                requested_stem = Path(fname).stem
+                if requested_stem in excluded_stems:
                     continue
                 if fname in figure_map:
                     continue
-                resolved = resolve_figure_in_workspace(fname, workspace_path, seen_stems)
+                registered = eligible_records_by_stem.get(requested_stem)
+                if registered is not None:
+                    # A supervision record proves that a filename was emitted,
+                    # not that bytes currently stored under that name are the
+                    # reviewed bytes. Resolve through the registered artifact so
+                    # a later same-name save cannot bypass its render hash.
+                    resolved = resolve_archival_render(registered, workspace_path)
+                else:
+                    if strict_lineage:
+                        # AnalysisStep/SupervisorRecord entries persisted before
+                        # lineage tracking carry no ownership. Main reports keep
+                        # that legacy fallback; a branch may only use a figure
+                        # backed by one of its filtered PublicationFigure records.
+                        continue
+                    resolved = resolve_figure_in_workspace(
+                        fname, workspace_path, seen_stems
+                    )
+                    if (
+                        resolved is not None
+                        and image_file_sha256(
+                            resolved,
+                            min_bytes=1,
+                            min_width=MIN_ARCHIVAL_PREVIEW_WIDTH,
+                            min_height=MIN_ARCHIVAL_PREVIEW_HEIGHT,
+                        ) is None
+                    ):
+                        resolved = None
                 if resolved is not None:
+                    try:
+                        rel_dirs = resolved.relative_to(workspace_path).parts[:-1]
+                    except ValueError:
+                        rel_dirs = ()
+                    if (
+                        "annotation_validation" in rel_dirs
+                        and resolved.stem not in eligible_figure_stems
+                    ):
+                        continue
+                    if (
+                        registered is None
+                        and any("supplement" in part.lower() for part in rel_dirs)
+                    ):
+                        # Historical restricted supplementary executors could
+                        # leave images on disk and in saved_figure_filenames.
+                        # A log entry is not publication review; registered
+                        # user-requested supplementary figures remain allowed.
+                        continue
                     seen_stems.add(resolved.stem)
-                    figure_map[fname] = resolved
+                    if registered is not None:
+                        included_record_ids.add(id(registered))
+                        seen_stems.update(artifact_stems([registered]))
+                        figure_map[resolved.name] = resolved
+                    else:
+                        figure_map[fname] = resolved
 
         # Also include publication figures (PI-reviewed, may not be in supervision
         # records). The excluded_stems check applies here too, and all three tiers
@@ -843,51 +960,42 @@ class ReportHtmlMixin:
         # says the figure is current.
         if eligible_figures:
             for pf in eligible_figures:
-                if not pf.png_path:
+                if id(pf) in included_record_ids:
                     continue
-                fname = os.path.basename(pf.png_path)
+                declared_path = str(getattr(pf, "png_path", "") or "")
+                fname = os.path.basename(declared_path) or f"{pf.name}.png"
                 if Path(fname).stem in excluded_stems:
                     continue
                 if fname in figure_map:
                     continue
-                fig_path = Path(pf.png_path)
-                if not fig_path.exists():
-                    fig_path = workspace_path / "figures" / fname
-                if fig_path.exists():
+                fig_path = resolve_archival_render(pf, workspace_path)
+                if fig_path is not None:
+                    fname = fig_path.name
                     figure_map[fname] = fig_path
 
-        # Fallback: scan workspace directory for any figures not already collected.
-        scan_dirs = [workspace_path]
-        figures_subdir = workspace_path / "figures"
-        if figures_subdir.exists():
-            scan_dirs.append(figures_subdir)
-
+        # Fallback: use the shared bounded recursive discovery. This reaches
+        # nested agent output consistently, including eligible registered
+        # annotation-validation figures, without letting a stale/rejected record
+        # return through its on-disk file. Unregistered validation diagnostics
+        # remain annotation-context-only rather than entering this archival report.
+        discovered = prepare_discovered_figures(
+            discover_figures_in_workspace(workspace_path),
+            state.publication_figures if state else [],
+            invalidated_stems=(
+                getattr(state, "invalidated_artifact_stems", None) if state else None
+            ),
+            report_only=True,
+            allow_unregistered_diagnostics=False,
+        )
         seen_stems = {Path(f).stem for f in figure_map}
-        for scan_dir in scan_dirs:
-            for img_file in sorted(scan_dir.glob("*.jpg")) + sorted(scan_dir.glob("*.png")):
-                if img_file.stem in excluded_stems:
-                    continue
-                if img_file.stem in seen_stems:
-                    continue
-                seen_stems.add(img_file.stem)
-                figure_map[img_file.name] = img_file
-
-        # Deduplicate versioned figures: when both base and _v2/_v3/_final/_revised
-        # exist, keep only the highest version and remove the base figure.
-        _version_re = re.compile(r'^(.+?)_(v(\d+)|final|revised)$')
-        base_to_versioned: Dict[str, List[str]] = {}
-        for stem in list(seen_stems):
-            m = _version_re.match(stem)
-            if m:
-                base_to_versioned.setdefault(m.group(1), []).append(stem)
-        for base, versions in base_to_versioned.items():
-            if base in seen_stems:
-                # Remove the base version from figure_map, keep the versioned one(s)
-                for fname in list(figure_map.keys()):
-                    if Path(fname).stem == base:
-                        del figure_map[fname]
-                        logger.debug(f"Removed base figure {fname} in favor of versioned: {versions}")
-                        break
+        for candidate in discovered:
+            if strict_lineage and not candidate.get("is_publication", False):
+                continue
+            img_file = Path(candidate["path"])
+            if img_file.stem in excluded_stems or img_file.stem in seen_stems:
+                continue
+            seen_stems.add(img_file.stem)
+            figure_map[img_file.name] = img_file
 
         # Two names can hold the same file. The analysis saves a figure with
         # savefig and later re-registers it as a publication figure under a
@@ -904,10 +1012,7 @@ class ReportHtmlMixin:
         # three bytes of their creation timestamp. Deciding *pictures* are equal
         # needs a perceptual comparison, which is a different tool with a different
         # false-positive profile; this one is exact and cannot be wrong.
-        registered_stems = {
-            Path(os.path.basename(str(pf.png_path))).stem
-            for pf in eligible_figures if getattr(pf, "png_path", None)
-        }
+        registered_stems = artifact_stems(eligible_figures)
         by_digest: Dict[str, str] = {}
         for fname in list(figure_map):
             try:

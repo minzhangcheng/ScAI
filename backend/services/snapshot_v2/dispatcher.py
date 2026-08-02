@@ -299,7 +299,32 @@ class ContinuationDispatcher:
                 f"Cannot activate unknown capsule kind: {staged.kind!r}",
             )
 
-        # Always set branch identity
+        # Always set branch identity. Preserve source-lineage evidence and add a
+        # branch-local inherited view, mirroring the round-result lineage model.
+        source_lineage_id = (
+            getattr(analysis_state, "restore_branch_id", None) or "main"
+        )
+        target_lineage_id = staged.branch_id or "main"
+        if target_lineage_id != source_lineage_id:
+            from backend.workflow.direction_coverage import (
+                clone_round_results_for_branch,
+            )
+            from backend.services.report.lineage import (
+                clone_publication_figures_for_branch,
+            )
+
+            analysis_state.round_results = clone_round_results_for_branch(
+                list(getattr(analysis_state, "round_results", None) or []),
+                branch_id=target_lineage_id,
+                branch_label=staged.branch_label,
+                source_snapshot_id=staged.parent_snapshot_id or "",
+                source_lineage_id=source_lineage_id,
+            )
+            analysis_state.publication_figures = clone_publication_figures_for_branch(
+                getattr(analysis_state, "publication_figures", None) or [],
+                branch_id=target_lineage_id,
+                source_lineage_id=source_lineage_id,
+            )
         analysis_state.restore_branch_id = staged.branch_id
         analysis_state.restore_branch_label = staged.branch_label
         analysis_state.last_restored_snapshot_id = staged.parent_snapshot_id

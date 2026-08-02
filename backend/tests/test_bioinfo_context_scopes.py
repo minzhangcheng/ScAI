@@ -6,6 +6,7 @@ import pytest
 
 from backend.agents.bioinformatics_agent import (
     BioinformaticsAgent,
+    _resume_budget_after_plan_revision,
     build_approved_plan_context,
     inject_revised_plan_context,
 )
@@ -188,6 +189,62 @@ def test_fresh_approved_plan_context_is_not_a_resume_instruction():
     text = build_approved_plan_context(_plan(plan_id="initial"))
     assert "APPROVED ANALYSIS PLAN" in text
     assert "Resume from the existing checkpoint" not in text
+
+
+def test_exhausted_checkpoint_gets_one_bounded_window_for_a_new_plan():
+    checkpoint = {
+        "step_number": 200,
+        "total_steps": 200,
+        "active_plan_id": "old-plan",
+        "budget_exhausted": True,
+    }
+
+    assert _resume_budget_after_plan_revision(
+        checkpoint,
+        checkpoint_valid=True,
+        step_count=200,
+        max_steps=200,
+        active_plan_id="new-plan",
+    ) == 230
+    assert _resume_budget_after_plan_revision(
+        checkpoint,
+        checkpoint_valid=True,
+        step_count=200,
+        max_steps=200,
+        active_plan_id="old-plan",
+    ) == 200
+
+
+def test_non_exhausted_checkpoint_cannot_mint_extra_executor_budget():
+    checkpoint = {
+        "active_plan_id": "old-plan",
+        "budget_exhausted": False,
+    }
+    assert _resume_budget_after_plan_revision(
+        checkpoint,
+        checkpoint_valid=True,
+        step_count=200,
+        max_steps=200,
+        active_plan_id="new-plan",
+    ) == 200
+
+
+def test_revised_plan_cannot_mint_a_second_repair_window():
+    checkpoint = {
+        "step_number": 230,
+        "total_steps": 230,
+        "active_plan_id": "plan-v2",
+        "budget_exhausted": True,
+        "plan_revision_repair_windows_used": 1,
+    }
+
+    assert _resume_budget_after_plan_revision(
+        checkpoint,
+        checkpoint_valid=True,
+        step_count=230,
+        max_steps=230,
+        active_plan_id="plan-v3",
+    ) == 230
 
 
 @pytest.mark.asyncio

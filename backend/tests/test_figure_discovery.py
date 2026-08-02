@@ -1,12 +1,19 @@
 """Tests for the Results brief-gallery figure discovery helper."""
+import base64
+import hashlib
+import io
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 from backend.services.report.figure_discovery import (
     discover_workspace_figures,
     infer_figure_type,
+    prepare_discovered_figures,
+    publication_figure_metadata,
 )
 
 
@@ -15,6 +22,20 @@ def _touch(path: Path, mtime: float | None = None) -> Path:
     path.write_bytes(b"x")
     if mtime is not None:
         os.utime(path, (mtime, mtime))
+    return path
+
+
+def _image_bytes(noise: float = 100) -> bytes:
+    buffer = io.BytesIO()
+    Image.effect_noise((256, 256), noise).convert("RGB").save(buffer, format="PNG")
+    payload = buffer.getvalue()
+    assert len(payload) > 2000
+    return payload
+
+
+def _render(path: Path, payload: bytes | None = None) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload or _image_bytes())
     return path
 
 
@@ -123,6 +144,31 @@ def test_dedup_newest_wins_within_same_priority(monkeypatch, tmp_path):
     assert dup[0]["source"] == "b_outputs/figures"
 
 
+def test_restricted_supplementary_never_shadows_same_stem_normal_output(
+    monkeypatch, tmp_path,
+):
+    """A quarantined repair image cannot consume a legitimate result stem.
+
+    The named ``*_outputs/figures`` scan has higher priority than the recursive
+    custom-directory tier.  Without the restriction-first comparison below, a
+    newer/higher-priority automatic-supplement file won de-duplication and was
+    then removed by archival filtering, taking the normal image with it.
+    """
+    ws = _make_workspace(monkeypatch, tmp_path)
+    _touch(
+        ws / "supplementary_outputs" / "figures" / "shared_result.png",
+        mtime=9000.0,
+    )
+    _touch(ws / "analysis_results" / "shared_result.png", mtime=1000.0)
+
+    figs = discover_workspace_figures("sess-restricted-shadow")
+    shared = [f for f in figs if f["name"] == "shared_result"]
+
+    assert len(shared) == 1
+    assert shared[0]["source"] == "analysis_results"
+    assert shared[0]["restricted_supplementary"] is False
+
+
 def test_ordering_by_priority_then_newest_first(monkeypatch, tmp_path):
     """Newest first within a source tier, because callers cap by head-slicing.
 
@@ -206,6 +252,156 @@ def test_annotation_validation_is_discovered_but_tagged_diagnostic(monkeypatch, 
     assert by_name["result"]["diagnostic"] is False
     # Diagnostics sort last, so a candidate cap sheds them before results.
     assert [f["name"] for f in ordered] == ["result", "check"]
+
+
+def _publication_figure(name, *, status="approved", figure_type="barplot",
+                        description="authoritative description", **overrides):
+    return SimpleNamespace(
+        name=name,
+        png_path=overrides.pop("png_path", f"/workspace/figures/{name}.png"),
+        png_base64=overrides.pop("png_base64", None),
+        render_sha256=overrides.pop("render_sha256", None),
+        preview_sha256=overrides.pop("preview_sha256", None),
+        csv_path=None,
+        figure_type=figure_type,
+        description=description,
+        interpretation="",
+        diagnostic=False,
+        round_number=1,
+        review_status=status,
+        is_current=True,
+        invalidated_at=None,
+        layout_violations=[],
+        **overrides,
+    )
+
+
+def test_registered_metadata_overrides_deceptive_filename_inference(tmp_path):
+    path = _render(tmp_path / "cell_state_umap.png")
+    raw = [{
+        "name": "cell_state_umap", "type": "umap", "path": str(path),
+        "pdf_path": None, "mtime": 1.0, "source": "figures",
+        "rel_path": "figures/cell_state_umap.png", "diagnostic": False,
+    }]
+    registered = _publication_figure(
+        "cell_state_umap", figure_type="barplot",
+        description="Bar plots of annotated cell-type proportions.",
+        png_path=str(path),
+    )
+
+    prepared = prepare_discovered_figures(raw, [registered])
+
+    assert prepared[0]["type"] == "barplot"
+    assert prepared[0]["description"].startswith("Bar plots")
+    assert prepared[0]["is_publication"] is True
+
+
+def test_unrenderable_registered_stem_cannot_reenter_as_workspace_figure(tmp_path):
+    candidate = _render(tmp_path / "ghost.png")
+    registered = _publication_figure(
+        "ghost", png_path=str(tmp_path / "missing.png"),
+    )
+    raw = [{
+        "name": "ghost", "type": "other", "path": str(candidate),
+        "pdf_path": None, "mtime": 1.0, "source": "figures",
+        "rel_path": "figures/ghost.png", "diagnostic": False,
+    }]
+
+    assert prepare_discovered_figures(raw, [registered]) == []
+
+
+def test_same_stem_overwrite_must_match_registered_render_hash(tmp_path):
+    original = _image_bytes()
+    original_hash = hashlib.sha256(original).hexdigest()
+    path = _render(tmp_path / "bound.png", original)
+    registered = _publication_figure(
+        "bound",
+        png_path=str(path),
+        png_base64=base64.b64encode(original).decode(),
+        render_sha256=original_hash,
+        preview_sha256=original_hash,
+    )
+    # A later generic save uses the reviewed stem for different bytes.
+    replacement = _image_bytes(noise=20)
+    assert hashlib.sha256(replacement).hexdigest() != original_hash
+    path.write_bytes(replacement)
+    raw = [{
+        "name": "bound", "type": "other", "path": str(path),
+        "pdf_path": None, "mtime": 2.0, "source": "figures",
+        "rel_path": "figures/bound.png", "diagnostic": False,
+    }]
+
+    assert prepare_discovered_figures(raw, [registered]) == []
+
+
+def test_registered_metadata_retains_plan_provenance(tmp_path):
+    path = _render(tmp_path / "planned_panel.png")
+    registered = _publication_figure("planned_panel", png_path=str(path))
+    registered.plan_step_id = 6
+    registered.plan_id = "plan-v2"
+    registered.purpose = "result"
+
+    metadata = publication_figure_metadata([registered])["planned_panel"]
+
+    assert metadata["plan_step_id"] == 6
+    assert metadata["plan_id"] == "plan-v2"
+    assert metadata["purpose"] == "result"
+
+
+def test_annotation_diagnostic_exception_is_context_only(tmp_path):
+    path = _render(tmp_path / "annotation_validation" / "marker_check.png")
+    raw = [{
+        "name": "marker_check", "type": "other", "path": str(path),
+        "pdf_path": None, "mtime": 1.0, "source": "annotation_validation",
+        "rel_path": "annotation_validation/marker_check.png", "diagnostic": True,
+    }]
+
+    assert prepare_discovered_figures(raw, []) == []
+    assert [f["name"] for f in prepare_discovered_figures(
+        raw, [], allow_unregistered_diagnostics=True,
+    )] == ["marker_check"]
+
+
+def test_unregistered_report_candidate_requires_complete_image_decode(tmp_path):
+    corrupt = tmp_path / "looks_like_png.png"
+    corrupt.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 3000)
+    tiny = tmp_path / "one_pixel.png"
+    Image.new("RGB", (1, 1), "white").save(tiny)
+    valid = _render(tmp_path / "valid.png")
+    raw = [
+        {
+            "name": "looks_like_png", "type": "other", "path": str(corrupt),
+            "pdf_path": None, "mtime": 1.0, "source": "figures",
+            "rel_path": "figures/looks_like_png.png", "diagnostic": False,
+        },
+        {
+            "name": "one_pixel", "type": "other", "path": str(tiny),
+            "pdf_path": None, "mtime": 1.5, "source": "figures",
+            "rel_path": "figures/one_pixel.png", "diagnostic": False,
+        },
+        {
+            "name": "valid", "type": "other", "path": str(valid),
+            "pdf_path": None, "mtime": 2.0, "source": "figures",
+            "rel_path": "figures/valid.png", "diagnostic": False,
+        },
+    ]
+
+    assert [item["name"] for item in prepare_discovered_figures(raw, [])] == [
+        "valid"
+    ]
+
+
+def test_ineligible_registered_validation_figure_cannot_reenter_from_disk():
+    raw = [{
+        "name": "marker_check", "type": "other", "path": "/w/annotation_validation/marker_check.png",
+        "pdf_path": None, "mtime": 1.0, "source": "annotation_validation",
+        "rel_path": "annotation_validation/marker_check.png", "diagnostic": True,
+    }]
+    rejected = _publication_figure("marker_check", status="revision_requested")
+
+    assert prepare_discovered_figures(
+        raw, [rejected], allow_unregistered_diagnostics=True,
+    ) == []
 
 
 @pytest.mark.parametrize(

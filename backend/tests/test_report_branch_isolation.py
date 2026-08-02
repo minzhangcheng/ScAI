@@ -27,7 +27,15 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from backend.models.schemas import AnalysisPhase, AnalysisState, AnalysisStep, RoundResult, TaskStatus
+from backend.models.schemas import (
+    AnalysisPhase,
+    AnalysisState,
+    AnalysisStep,
+    FigureReviewStatus,
+    PublicationFigure,
+    RoundResult,
+    TaskStatus,
+)
 from backend.tests.split_facade import setattr_facade
 from backend.workflow.reporting import ReportingMixin
 
@@ -40,6 +48,26 @@ def _mixed_lineage_state() -> AnalysisState:
         analysis_phase=AnalysisPhase.INNOVATION,
         restore_branch_id="branch-a",
         analysis_log=[AnalysisStep(step_number=1, step_type="execute_code")],
+        publication_figures=[
+            PublicationFigure(
+                id="main-figure",
+                name="main_panel",
+                description="main",
+                figure_type="heatmap",
+                png_path="/tmp/main.jpg",
+                pdf_path="/tmp/main.pdf",
+                lineage_id="main",
+            ),
+            PublicationFigure(
+                id="branch-figure",
+                name="branch_panel",
+                description="branch",
+                figure_type="heatmap",
+                png_path="/tmp/branch.jpg",
+                pdf_path="/tmp/branch.pdf",
+                lineage_id="branch-a",
+            ),
+        ],
         round_results=[
             RoundResult(
                 round_number=2,
@@ -74,7 +102,155 @@ def test_build_lineage_report_state_filters_round_results_for_supervisor_path():
 
     assert [r.pi_summary for r in branch_state.round_results] == ["branch summary"]
     assert [r.pi_summary for r in main_state.round_results] == ["main summary"]
+    assert [f.name for f in branch_state.publication_figures] == ["branch_panel"]
+    assert [f.name for f in main_state.publication_figures] == ["main_panel"]
     assert [r.pi_summary for r in state.round_results] == ["main summary", "branch summary"]
+
+
+def test_branch_report_rejects_unowned_log_and_workspace_figures(tmp_path):
+    from backend.agents.supervisor.report_html import ReportHtmlMixin
+    from backend.services.report.lineage import build_lineage_report_state
+    from backend.tests.figure_image_helpers import write_valid_image
+
+    figures_dir = tmp_path / "figures"
+    figures_dir.mkdir()
+    branch_path = figures_dir / "branch_owned.png"
+    main_path = figures_dir / "main_only.png"
+    orphan_path = figures_dir / "legacy_unowned.png"
+    scan_only_path = figures_dir / "scan_only_legacy.png"
+    deep_unlogged_path = tmp_path / "a" / "b" / "c" / "d" / "deep_unlogged.png"
+    deep_unlogged_path.parent.mkdir(parents=True)
+    write_valid_image(branch_path, min_bytes=2500)
+    write_valid_image(main_path, min_bytes=2500)
+    write_valid_image(orphan_path, min_bytes=2500)
+    write_valid_image(scan_only_path, min_bytes=2500)
+    write_valid_image(deep_unlogged_path, min_bytes=2500)
+
+    state = AnalysisState(
+        id="s",
+        user_id="u",
+        analysis_log=[AnalysisStep(
+            step_number=1,
+            step_type="execute_code",
+            saved_figure_filenames=[
+                branch_path.name,
+                main_path.name,
+                orphan_path.name,
+            ],
+        )],
+        publication_figures=[
+            PublicationFigure(
+                id="main",
+                name="main_only",
+                description="main lineage",
+                figure_type="heatmap",
+                png_path=str(main_path),
+                pdf_path=str(main_path.with_suffix(".pdf")),
+                lineage_id="main",
+                review_status=FigureReviewStatus.APPROVED,
+            ),
+            PublicationFigure(
+                id="branch",
+                name="branch_owned",
+                description="branch lineage",
+                figure_type="heatmap",
+                png_path=str(branch_path),
+                pdf_path=str(branch_path.with_suffix(".pdf")),
+                lineage_id="branch-a",
+                review_status=FigureReviewStatus.APPROVED,
+            ),
+        ],
+    )
+
+    branch_state = build_lineage_report_state(
+        state, "branch-a", workspace_path=tmp_path
+    )
+    # Exercise the full Supervisor collector with the original mixed log. Its
+    # direct saved-filename tier and its recursive workspace tier must both obey
+    # the branch-local exclusion set carried by the report snapshot.
+    figure_map = ReportHtmlMixin._collect_figure_paths(
+        object(),
+        [{"saved_figure_filenames": [
+            *state.analysis_log[0].saved_figure_filenames,
+            deep_unlogged_path.name,
+        ]}],
+        tmp_path,
+        state=branch_state,
+    )
+
+    assert set(figure_map) == {branch_path.name}
+    assert branch_state.analysis_log[0].saved_figure_filenames == [branch_path.name]
+    assert {main_path.stem, orphan_path.stem}.issubset(
+        set(branch_state.invalidated_artifact_stems)
+    )
+    # This depth exceeds bounded workspace discovery and the filename was not in
+    # AnalysisState.analysis_log. Only the collector's strict lineage rule can
+    # stop the Supervisor's independent record tier from finding it via rglob.
+    assert deep_unlogged_path.stem not in branch_state.invalidated_artifact_stems
+
+    # Exercise the recursive discovery guard without precomputing workspace
+    # invalidations: an unregistered scan-only image is still not branch-owned.
+    branch_without_scan = build_lineage_report_state(state, "branch-a")
+    scan_map = ReportHtmlMixin._collect_figure_paths(
+        object(), [], tmp_path, state=branch_without_scan
+    )
+    assert set(scan_map) == {branch_path.name}
+    # Main keeps the pre-lineage legacy fallback for persisted sessions.
+    main_state = build_lineage_report_state(state, "main", workspace_path=tmp_path)
+    assert main_state.analysis_log[0].saved_figure_filenames == [
+        branch_path.name,
+        main_path.name,
+        orphan_path.name,
+    ]
+
+
+def test_inherited_publication_figures_are_cloned_without_destroying_source():
+    from backend.services.report.lineage import clone_publication_figures_for_branch
+
+    original = PublicationFigure(
+        id="fig-main",
+        name="shared_result",
+        description="shared ancestor",
+        figure_type="heatmap",
+        png_path="/tmp/shared.jpg",
+        pdf_path="/tmp/shared.pdf",
+        lineage_id="main",
+    )
+
+    cloned = clone_publication_figures_for_branch(
+        [original], branch_id="branch-a", source_lineage_id="main"
+    )
+
+    assert [(item.lineage_id, item.name) for item in cloned] == [
+        ("main", "shared_result"),
+        ("branch-a", "shared_result"),
+    ]
+    assert cloned[0].id == "fig-main"
+    assert cloned[1].id != cloned[0].id
+
+
+def test_branch_invalidation_does_not_expire_source_lineage_figure():
+    from backend.services.report.artifacts import invalidate_current_artifacts
+
+    figures = [
+        PublicationFigure(
+            id=f"fig-{lineage}", name="shared", description=lineage,
+            figure_type="heatmap", png_path="", pdf_path="",
+            lineage_id=lineage, round_number=2,
+        )
+        for lineage in ("main", "branch-a")
+    ]
+
+    invalidated = invalidate_current_artifacts(
+        figures,
+        round_number=2,
+        reason="branch representation changed",
+        lineage_id="branch-a",
+    )
+
+    assert invalidated == 1
+    assert figures[0].is_current is True
+    assert figures[1].is_current is False
 
 
 class _SettingsProvider:

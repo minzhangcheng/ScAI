@@ -9,9 +9,15 @@ the caller can cite their ``CodeExecution`` ids as evidence provenance.
 """
 from typing import Any, Dict, List, Optional, Set
 import asyncio
+import ast
 import json
 import logging
 import time
+from datetime import datetime
+from pathlib import Path
+
+from backend.services.report.artifacts import artifact_stems
+from backend.services.report.figure_discovery import discover_figures_in_workspace
 
 from .shared import (
     AnalysisStep,
@@ -22,10 +28,6 @@ from .shared import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Matches the caller's sanitize_review_result() figure cap: base64 payloads beyond
-# what will survive sanitizing are held in memory for nothing.
-_MAX_CARRIED_FIGURES = 12
 
 _VALID_STATUSES = ("completed", "partial", "failed")
 
@@ -54,6 +56,66 @@ class SupplementaryMixin:
         ".write(", ".write_h5ad",
     )
 
+    # This executor repairs computational evidence only.  Any result figure must
+    # return to the main autonomous loop, where it receives a PublicationFigure
+    # record, layout lint, PI review and plan attribution.  These calls cover the
+    # normal ways Python plotting libraries write images; AST matching also catches
+    # arbitrary whitespace and aliases such as ``fig.savefig`` that a substring
+    # denylist would miss.
+    _SUPPLEMENTARY_FILE_WRITE_CALLS = frozenset({
+        "save", "savefig", "imsave", "imwrite", "write_image",
+        "print_png", "print_jpg", "print_jpeg", "print_figure",
+        "write_bytes", "write_text",
+    })
+
+    @staticmethod
+    def _supplementary_image_versions(working_dir: Any) -> Dict[str, tuple[str, int]]:
+        """Snapshot every image path the archival scanner could later discover."""
+        if not working_dir:
+            return {}
+        versions: Dict[str, tuple[str, int]] = {}
+        for candidate in discover_figures_in_workspace(Path(working_dir)):
+            path = Path(str(candidate.get("path") or ""))
+            try:
+                versions[str(path)] = (path.stem, path.stat().st_mtime_ns)
+            except OSError:
+                continue
+        return versions
+
+    def _quarantine_supplementary_images(
+        self,
+        state: Any,
+        before: Dict[str, tuple[str, int]],
+    ) -> Set[str]:
+        """Withhold images created/overwritten outside the reviewed figure tool."""
+        sandbox = getattr(self, "sandbox", None)
+        after = self._supplementary_image_versions(getattr(sandbox, "working_dir", None))
+        changed = {
+            stem for path, (stem, version) in after.items()
+            if path not in before or before[path][1] != version
+        }
+        if not changed or state is None:
+            return changed
+        state.invalidated_artifact_stems = sorted(
+            set(getattr(state, "invalidated_artifact_stems", None) or []) | changed
+        )
+        reason = (
+            "Image bytes were written by the restricted computational supplementary "
+            "executor without publication-figure review."
+        )
+        for figure in getattr(state, "publication_figures", None) or []:
+            if (
+                (getattr(figure, "lineage_id", None) or "main")
+                != (getattr(state, "restore_branch_id", None) or "main")
+            ):
+                continue
+            if not (artifact_stems([figure]) & changed):
+                continue
+            figure.is_current = False
+            figure.invalidated_at = datetime.now()
+            figure.invalidation_reason = reason
+        return changed
+
     # Signature keys whose movement means the round's evidence no longer describes
     # the object it was computed on. Deliberately narrower than
     # MAIN_OBJECT_SIGNATURE_KEYS: `obs_columns`, `layers`, `layers_fingerprint`,
@@ -65,7 +127,61 @@ class SupplementaryMixin:
 
     def _supplementary_code_is_safe(self, code: str, main_var: str) -> Optional[str]:
         """Return a reason string if a supplementary cell is statically unsafe, else None."""
-        return code_is_statically_unsafe(code, main_var, self._SUPPLEMENTARY_DENYLIST)
+        unsafe = code_is_statically_unsafe(code, main_var, self._SUPPLEMENTARY_DENYLIST)
+        if unsafe:
+            return unsafe
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            # The sandbox will return the syntax error through the normal execution
+            # record.  Static safety is not a second Python parser.
+            return None
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if isinstance(func, ast.Name) and func.id.lower() in self._SUPPLEMENTARY_FILE_WRITE_CALLS:
+                return f"disallowed file-writing call '{func.id.lower()}'"
+            if isinstance(func, ast.Attribute):
+                call_name = func.attr.lower()
+                if call_name in self._SUPPLEMENTARY_FILE_WRITE_CALLS:
+                    return f"disallowed file-writing call '{call_name}'"
+
+                # Scanpy plots write to sc.settings.figdir when ``save`` is any
+                # value other than False/None.  A bare substring check is both too
+                # weak (multiline calls) and too strong (save=False).
+                dotted: List[str] = [func.attr]
+                value = func.value
+                while isinstance(value, ast.Attribute):
+                    dotted.append(value.attr)
+                    value = value.value
+                if isinstance(value, ast.Name):
+                    dotted.append(value.id)
+                qualified = ".".join(reversed(dotted)).lower()
+                if qualified.startswith("sc.pl."):
+                    for keyword in node.keywords:
+                        if keyword.arg != "save":
+                            continue
+                        if isinstance(keyword.value, ast.Constant) and keyword.value.value in (
+                            False, None,
+                        ):
+                            continue
+                        return "disallowed Scanpy figure write via 'save='"
+
+            # A direct ``open(path, 'wb')`` can otherwise manufacture a PNG that
+            # recursive report discovery would mistake for an archival artifact.
+            if isinstance(func, ast.Name) and func.id == "open":
+                mode = None
+                if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
+                    mode = node.args[1].value
+                for keyword in node.keywords:
+                    if keyword.arg == "mode" and isinstance(keyword.value, ast.Constant):
+                        mode = keyword.value.value
+                if isinstance(mode, str) and any(flag in mode for flag in "wax+"):
+                    return "disallowed file-writing call 'open'"
+        return None
 
     def _supplementary_fatal_signature_changes(self, changed: List[str]) -> List[str]:
         """Destructive subset of a signature diff from `signatures_match`.
@@ -93,9 +209,10 @@ class SupplementaryMixin:
         """Execute PI-proposed supplementary tasks on the LIVE analysis object.
 
         Restricted to code execution: no tool loop, no literature, no PI
-        consultation, no publication-figure pipeline (a supplement must not consume
-        the round's figure budget). Never raises — every failure path returns a
-        status.
+        consultation. Publication deliverables are routed back to the main executor,
+        because only that path can register, review and contract-check them. Any
+        incidental inline render is discarded rather than entering report state.
+        Never raises — every failure path returns a status.
 
         Two independent budgets, because one shared ceiling cannot serve both:
         `timeout_seconds` bounds ONE step (its code generation, its execution and
@@ -113,6 +230,7 @@ class SupplementaryMixin:
         # package __init__ pulls in the workflow core, which imports the agents.
         from ...workflow.annotation_validation import signatures_match
 
+        state = getattr(self, "_current_analysis_state", None)
         max_iterations = max(1, min(int(max_iterations), 8))
         step_timeout = max(1, int(timeout_seconds))
         total_timeout = int(total_timeout_seconds or 0)
@@ -129,15 +247,27 @@ class SupplementaryMixin:
         # timeout would orphan cells that are already in the notebook.
         produced: List[CodeExecution] = []
         analysis_log: List[AnalysisStep] = []
-        figures: List[str] = []
         warnings: List[str] = []
+        image_versions_before = self._supplementary_image_versions(
+            getattr(self.sandbox, "working_dir", None)
+        )
+        quarantined_images: Set[str] = set()
 
         def _envelope(status: str, summary: str, extra_warnings: List[str]) -> Dict[str, Any]:
+            newly_quarantined = self._quarantine_supplementary_images(
+                state, image_versions_before
+            ) - quarantined_images
+            if newly_quarantined:
+                quarantined_images.update(newly_quarantined)
+                warnings.append(
+                    "Withheld unreviewed image file(s) written during restricted "
+                    "supplementary execution: " + ", ".join(sorted(newly_quarantined))
+                )
             return {
                 "status": status,
                 "summary": summary,
                 "findings": [],
-                "figures": list(figures),
+                "figures": [],
                 "warnings": warnings + list(extra_warnings),
                 "code_history": list(produced),
                 "analysis_log": list(analysis_log),
@@ -227,7 +357,10 @@ class SupplementaryMixin:
                     code=code,
                     output=output,
                     error=error,
-                    figures=exec_figures,
+                    # Restricted repair cells do not own archival visuals. Keeping
+                    # base64 here would make the report analysis log treat an
+                    # unreviewed notebook render as a result figure.
+                    figures=[],
                     execution_time=execution_time,
                     round_number=round_number,
                 )
@@ -241,12 +374,14 @@ class SupplementaryMixin:
                     code_description=f"Supplementary execution {len(produced)}",
                     code_step_type="technical", round_number=round_number,
                 ))
-                # Figures are carried through as captured. The publication-figure
-                # pipeline is deliberately not invoked: a supplement must not spend
-                # the round's figure budget.
-                for figure in exec_figures:
-                    if len(figures) < _MAX_CARRIED_FIGURES:
-                        figures.append(figure)
+                if exec_figures and not any(
+                    "incidental inline figure" in warning for warning in warnings
+                ):
+                    warnings.append(
+                        "Discarded an incidental inline figure from the restricted "
+                        "supplementary pass; publication visuals must use the main "
+                        "figure/review pipeline."
+                    )
 
                 # The execution id is shown so the model can cite the exact cell a
                 # finding came from, which is what makes the findings auditable.
@@ -505,6 +640,9 @@ analysis tools, literature search, PI consultation, or autonomous re-planning.
 - Do NOT re-run QC filtering, normalization, scaling, clustering, the neighbourhood
   graph, or embeddings, and do NOT write data files. Those would invalidate results
   this round has already reported.
+- Do NOT render, display, or save plots or images. This pass repairs quantitative
+  evidence only. Any visual result belongs in the main publication-figure pipeline,
+  which registers, reviews and contract-checks it.
 - Statistical analysis is expected and allowed: differential expression, module or
   signature scoring, pathway activity, enrichment, composition testing.
 - Address ONE task per reply, in the order listed. Do not batch tasks into one cell.
@@ -522,8 +660,9 @@ analysis tools, literature search, PI consultation, or autonomous re-planning.
 - Never print raw matrices, full .X, full .obs, or gene-by-cell tables.
 - Print compact quantitative summaries: effect sizes, test statistics, adjusted
   p-values, group means, detection fractions, capped top-N tables.
-- Figures are optional. When you make one, ALSO print the quantitative values behind
-  it so the finding stands on its text alone.
+- Report compact quantitative values in text; do not substitute an inline plot. Any
+  incidental inline render is discarded and cannot enter the archival report or
+  close a required publication-figure gap.
 
 ## Prior execution transcript (recent)
 {transcript_tail or '(none yet)'}

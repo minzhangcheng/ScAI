@@ -25,3 +25,25 @@ def test_stage2_genuine_completion():
 def test_full_genuine_completion():
     """full mode finished without revision → normal completion."""
     assert decide_bioinfo_post_execution("full", plan_revision_requested=False) == "complete"
+
+
+@pytest.mark.parametrize("status", ["error", "forced_stop", "max_steps_reached", "completed_with_fallback"])
+def test_incomplete_execution_never_advances(status):
+    assert decide_bioinfo_post_execution(
+        "stage1", plan_revision_requested=False, result_status=status
+    ) == "incomplete"
+
+
+def test_explicit_partial_result_can_advance_with_visible_degradation():
+    assert decide_bioinfo_post_execution(
+        "stage1", plan_revision_requested=False, result_status="partial"
+    ) == "stage1_complete"
+
+
+def test_missing_required_figure_never_advances():
+    assert decide_bioinfo_post_execution(
+        "stage2",
+        plan_revision_requested=False,
+        result_status="completed",
+        figure_contract_passed=False,
+    ) == "incomplete"

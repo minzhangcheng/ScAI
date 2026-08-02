@@ -8,6 +8,7 @@ import pytest
 from unittest.mock import AsyncMock
 
 from backend.models.schemas import AnalysisState, AnalysisPlan, PlanStep, TaskStatus
+from backend.services.figure_contract import visual_plan_inheritance_for_plan
 
 
 def _make_workflow():
@@ -77,6 +78,35 @@ class TestApprovePlanStatus:
         await wf._approve_plan(state_dict, plan, analysis_state, "approved")
         assert state_dict["plan_revision_resume"] is True
         assert state_dict["plan_revision_needed"] is False
+
+    @pytest.mark.asyncio
+    async def test_approve_revision_records_unchanged_completed_step_figure_lineage(
+        self, wf, analysis_state, state_dict
+    ):
+        parent = AnalysisPlan(
+            id="parent-plan",
+            phase="innovation",
+            steps=[PlanStep(
+                id=3,
+                title="Differential expression",
+                method="pydeseq2",
+                figure_requirements=[{"figure_type": "volcano"}],
+                status="completed",
+            )],
+        )
+        await wf._approve_plan(state_dict, parent, analysis_state, "approved")
+
+        revised = AnalysisPlan(
+            id="revised-plan",
+            revision_of=parent.id,
+            phase="innovation",
+            steps=[parent.steps[0].model_copy(deep=True)],
+        )
+        await wf._approve_plan(state_dict, revised, analysis_state, "approved")
+
+        assert visual_plan_inheritance_for_plan(analysis_state, revised) == {
+            3: (parent.id,),
+        }
 
     @pytest.mark.asyncio
     async def test_approve_plan_state_sync_before_plan_approved_message(self, wf, plan, analysis_state, state_dict):

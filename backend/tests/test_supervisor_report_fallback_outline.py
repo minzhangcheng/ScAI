@@ -10,9 +10,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from PIL import Image
 
 from backend.agents.supervisor_agent import SupervisorAgent
-from backend.models.schemas import AnalysisState, RoundResult
+from backend.models.schemas import (
+    AnalysisState,
+    FigureReviewStatus,
+    PublicationFigure,
+    RoundResult,
+)
 
 _T0 = datetime(2026, 1, 1, 12, 0, 0)
 
@@ -54,6 +60,25 @@ def _agent(chat_side_effect):
     return agent, client
 
 
+def _state_with_complete_visual_coverage(tmp_path):
+    state = _state_with_rounds()
+    for name, round_number in (("exploration_panel", 1), ("direction_panel", 2)):
+        path = tmp_path / "workspace" / "figures" / f"{name}.jpg"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.effect_noise((256, 256), 100).convert("RGB").save(path)
+        assert path.stat().st_size > 2000
+        state.publication_figures.append(PublicationFigure(
+            name=name,
+            description=f"{name} description",
+            figure_type="heatmap",
+            png_path=str(path),
+            pdf_path="",
+            review_status=FigureReviewStatus.APPROVED,
+            round_number=round_number,
+        ))
+    return state
+
+
 @pytest.mark.asyncio
 async def test_fallback_report_keeps_its_own_section_order(tmp_path):
     agent, client = _agent(RuntimeError("model down"))
@@ -72,6 +97,15 @@ async def test_fallback_report_keeps_its_own_section_order(tmp_path):
     assert ids == ["analysis_overview"]
     assert report["abstract"]
     assert report["conclusions"]
+    assert report["status"] == "partial"
+    assert report["partial_reason"] == "degraded_fallback"
+    assert report["unreported_figures"] == []
+    assert report["figureless_sections"] == [
+        "exploration_findings", "direction_1",
+    ]
+    assert "integrated_findings" not in report["figureless_sections"]
+    assert report["current_step"].startswith("Degraded fallback report")
+    assert "figure coverage gaps" in report["current_step"]
 
 
 @pytest.mark.asyncio
@@ -96,3 +130,75 @@ async def test_successful_report_is_aligned_to_the_round_outline(tmp_path):
     # Emitted conclusions-first; the outline puts methods before the direction
     # and abstract/conclusions are extracted, so what remains is in plan order.
     assert ids == ["methods", "direction_1"]
+    assert report["figureless_sections"] == [
+        "exploration_findings", "direction_1",
+    ]
+    assert report["status"] == "partial"
+    assert report["partial_reason"] == "figure_coverage"
+    assert report["unreported_figures"] == []
+    assert "figure coverage gaps" in report["current_step"]
+    assert "direction_1" in report["current_step"]
+
+
+@pytest.mark.asyncio
+async def test_text_only_integration_does_not_downgrade_report_status(tmp_path):
+    body = (
+        "## [abstract] Summary\nsummary text\n\n"
+        "## [methods] How it was done\nprocedure\n\n"
+        "## [integrated_findings] Cross-direction synthesis\ncombined interpretation\n\n"
+        "## [conclusions] Wrap up\nend matter\n"
+    )
+    agent, client = _agent([SimpleNamespace(content=body)])
+    out = tmp_path / "reports"
+    ws = tmp_path / "workspace"
+    (ws / "figures").mkdir(parents=True, exist_ok=True)
+
+    state = _state_with_complete_visual_coverage(tmp_path)
+
+    report = await agent.generate_detailed_report(
+        state, "model-x", str(out), workspace_dir=str(ws),
+        report_llm_client=client,
+    )
+
+    assert report["figureless_sections"] == []
+    assert report["status"] == "completed"
+    assert report["partial_reason"] is None
+    assert report["unreported_figures"] == []
+    assert report["current_step"] == "Complete"
+
+
+@pytest.mark.asyncio
+async def test_explicit_partial_report_flag_is_preserved_in_status(tmp_path):
+    body = (
+        "## [abstract] Summary\nsummary text\n\n"
+        "## [methods] How it was done\nprocedure\n\n"
+        "## [integrated_findings] Cross-direction synthesis\ncombined interpretation\n\n"
+        "## [conclusions] Wrap up\nend matter\n"
+    )
+    agent, client = _agent([SimpleNamespace(content=body)])
+    out = tmp_path / "reports"
+    ws = tmp_path / "workspace"
+    (ws / "figures").mkdir(parents=True, exist_ok=True)
+    state = _state_with_complete_visual_coverage(tmp_path)
+    state.allow_partial_report = True
+    progress_events = []
+
+    async def progress_callback(payload):
+        progress_events.append(payload)
+
+    report = await agent.generate_detailed_report(
+        state, "model-x", str(out), workspace_dir=str(ws),
+        report_llm_client=client,
+        progress_callback=progress_callback,
+    )
+
+    assert report["figureless_sections"] == []
+    assert report["status"] == "partial"
+    assert report["partial_reason"] == "approved_partial"
+    assert report["unreported_figures"] == []
+    assert report["current_step"] == "Partial report approved"
+    assert progress_events[-1] == {
+        "progress": 100,
+        "step": "Partial report approved",
+        "status": "partial",
+    }

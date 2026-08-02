@@ -113,6 +113,28 @@ def _gate_samples_per_group(state) -> Dict[str, int]:
 # Configure logger
 logger = logging.getLogger(__name__)
 
+_PLAN_REVISION_REPAIR_STEPS = 30
+
+
+def _resume_budget_after_plan_revision(
+    checkpoint: Optional[Dict[str, Any]],
+    *,
+    checkpoint_valid: bool,
+    step_count: int,
+    max_steps: int,
+    active_plan_id: Optional[str],
+) -> int:
+    """Return a bounded new cap for a revised plan after genuine exhaustion."""
+    if not checkpoint or not checkpoint_valid:
+        return max_steps
+    if not bool(checkpoint.get("budget_exhausted")) or step_count < max_steps:
+        return max_steps
+    if int(checkpoint.get("plan_revision_repair_windows_used", 0) or 0) >= 1:
+        return max_steps
+    if not active_plan_id or active_plan_id == checkpoint.get("active_plan_id"):
+        return max_steps
+    return step_count + _PLAN_REVISION_REPAIR_STEPS
+
 # Re-exported so `backend.agents.bioinformatics_agent.<name>` keeps resolving
 # for existing importers and for tests that patch these by name.
 from .bioinformatics.shared import (  # noqa: F401
@@ -1268,10 +1290,38 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                 return str(plan.id)
             return None
 
+        # A run that exhausted its original executor budget can be routed back
+        # through planning when a completion contract is still open (including a
+        # missing publication figure).  Resuming at ``step_count == max_steps``
+        # would otherwise make the loop a no-op forever.  Grant one bounded repair
+        # window only when the checkpoint explicitly records exhaustion *and* the
+        # approved plan has changed.  The next checkpoint carries the new plan id,
+        # so an ordinary retry cannot mint another window.
+        revised_max_steps = _resume_budget_after_plan_revision(
+            checkpoint,
+            checkpoint_valid=checkpoint_valid,
+            step_count=step_count,
+            max_steps=max_steps,
+            active_plan_id=_active_plan_id(),
+        )
+        plan_revision_repair_windows_used = int(
+            (checkpoint or {}).get("plan_revision_repair_windows_used", 0) or 0
+        )
+        if revised_max_steps > max_steps:
+            max_steps = revised_max_steps
+            plan_revision_repair_windows_used += 1
+            logger.info(
+                "[Bioinformatics] Approved plan changed after executor budget "
+                "exhaustion; granting %s bounded repair steps (new cap=%s)",
+                _PLAN_REVISION_REPAIR_STEPS,
+                max_steps,
+            )
+
         async def _save_executor_checkpoint(
             step_name: str,
             *,
             save_sandbox: bool = False,
+            budget_exhausted: bool = False,
         ) -> None:
             """Persist the executor transcript independently of planning history."""
             checkpoint_data = {
@@ -1288,6 +1338,10 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                 'code_history': [ce.model_dump(mode="json") for ce in self.code_history],
                 'analysis_log': [step.model_dump(mode="json") for step in analysis_log],
                 'analysis_context': self.analysis_context,
+                'budget_exhausted': budget_exhausted,
+                'plan_revision_repair_windows_used': (
+                    plan_revision_repair_windows_used
+                ),
                 'completed': False,
             }
             await checkpoint_mgr.save(checkpoint_data)
@@ -1368,13 +1422,12 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         empty_response_count = 0
         MAX_EMPTY_RESPONSES = 3  # transient upstream truncation → bounded retry
         figure_iteration_count = 0
-        MAX_FIGURE_ITERATIONS = 5  # Max figure-only iterations excluded from step count
-        # Counted separately from the iteration budget above, and only when the
-        # figure list actually grew. The two diverge whenever a figure fails, is
-        # skipped, or replaces one of the same name -- and the refusal message
-        # quotes a figure count, so quoting the iteration counter there states a
-        # number that can simply be false.
-        figures_produced = 0
+        # The first few successful figure-only turns are free so visualization
+        # does not steal analysis budget.  This is not a hard figure ceiling:
+        # additional figures simply consume normal steps, so required/result
+        # plots can never be forbidden while the executor is still running.
+        MAX_FREE_FIGURE_ITERATIONS = 5
+        figures_rendered = 0
         consecutive_errors = 0
         MAX_CONSECUTIVE_ERRORS = 5  # Force report_findings after this many consecutive code errors
         total_errors = 0
@@ -2303,7 +2356,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             if planning_stage == "stage1":
                                 result_lines.append(
                                     "[NOTE: These annotations were already confirmed by the user. "
-                                    "No re-annotation needed. Stage 1 is complete — call report_findings now.]\n"
+                                    "No re-annotation needed. The platform will render the Stage 1 "
+                                    "baseline figures after this pass; call report_findings now.]\n"
                                 )
                             else:
                                 result_lines.append(
@@ -2394,13 +2448,16 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         annotation_completed = True
                         annotation_retry_required = False
                         annotation_retry_attempts = 0
-                        # In stage1, explicitly instruct agent that stage is complete
+                        # The workflow renders and verifies baseline figures
+                        # immediately after this autonomous pass.
                         if planning_stage == "stage1":
                             messages.append({
                                 "role": "user",
                                 "content": (
-                                    "STAGE 1 COMPLETE. Cell annotation is done and confirmed by the user. "
-                                    "You MUST now call report_findings immediately. "
+                                    "STAGE 1 ANNOTATION COMPLETE. Cell annotation is done and confirmed by the user. "
+                                    "The platform will now render and verify the cell-type, cluster, batch/sample, "
+                                    "and marker baseline figures supported by the annotated object. "
+                                    "Call report_findings now. "
                                     "Do NOT run differential expression, pathway enrichment, "
                                     "cell communication, trajectory analysis, or any other downstream analysis. "
                                     "These will be done in Stage 2 after PI reviews your Stage 1 results "
@@ -2428,6 +2485,49 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 step_number=step_count, step_type="report_findings",
                                 agent_reasoning=agent_reasoning,
                                 findings=[], findings_summary="REJECTED: annotate_clusters not completed",
+                            ))
+                            continue
+
+                        # A result is not complete while an approved plan's
+                        # required visual deliverables are absent, stale, or
+                        # held back by review/layout gates.  Integration and
+                        # genuinely narrative work opt out explicitly on the
+                        # plan step; ordinary analytical results do not.
+                        from ..services.figure_contract import (
+                            audit_figure_contract,
+                            format_missing_figure_feedback,
+                        )
+                        _figure_contract = audit_figure_contract(
+                            state,
+                            plan=state.current_plan,
+                            planning_stage=planning_stage,
+                            include_stage_baseline=False,
+                            defer_platform_baseline=True,
+                        )
+                        if not _figure_contract.passed:
+                            missing_text = format_missing_figure_feedback(_figure_contract)
+                            logger.warning(
+                                "[Bioinformatics] report_findings rejected: %d required "
+                                "figure deliverable(s) missing",
+                                len(_figure_contract.missing),
+                            )
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": (
+                                    "[REJECTED] Required result figures are incomplete. "
+                                    "Generate or repair the following publication figures, "
+                                    "ensure they pass review/layout checks, and cite the "
+                                    "approved plan_step_id when applicable:\n"
+                                    f"{missing_text}"
+                                ),
+                            })
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count,
+                                step_type="report_findings",
+                                agent_reasoning=agent_reasoning,
+                                findings=[],
+                                findings_summary="REJECTED: required result figures incomplete",
                             ))
                             continue
 
@@ -3470,37 +3570,59 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         figure_name = args.get("figure_name", f"figure_{len(state.publication_figures) + 1}")
                         description = args.get("description", "")
                         figure_type = args.get("figure_type", "other")
-
-                        # Track figure generation attempts to prevent infinite retry loops
-                        if "_figure_attempts" not in self.analysis_context:
-                            self.analysis_context["_figure_attempts"] = {}
-                        fig_attempts = self.analysis_context["_figure_attempts"]
-                        fig_attempts[figure_name] = fig_attempts.get(figure_name, 0) + 1
-
-                        if fig_attempts[figure_name] > 3:
-                            logger.warning(f"[Bioinformatics] Skipping figure {figure_name}: exceeded 3 attempts")
-                            tool_result = (
-                                f"Figure {figure_name} has been skipped after {fig_attempts[figure_name]-1} failed attempts. "
-                                "Please move on to the next analysis step or generate a different figure."
+                        raw_plan_step_id = args.get("plan_step_id")
+                        malformed_plan_step = False
+                        try:
+                            plan_step_id = (
+                                int(raw_plan_step_id)
+                                if raw_plan_step_id is not None
+                                and str(raw_plan_step_id).strip()
+                                else None
                             )
-                        elif figure_iteration_count >= MAX_FIGURE_ITERATIONS:
-                            # Budget exhausted: refuse figure generation, redirect to
-                            # analysis. `has_figure_work` stays false — nothing was
-                            # rendered, so charging the budget for the refusal would
-                            # let a refused call push the counter further past its
-                            # own limit.
-                            logger.warning(f"[Bioinformatics] Figure budget exhausted, rejecting {figure_name}")
+                        except (TypeError, ValueError):
+                            plan_step_id = None
+                            malformed_plan_step = True
+
+                        approved_step_ids = {
+                            int(step.id)
+                            for step in (getattr(state.current_plan, "steps", None) or [])
+                        }
+                        invalid_plan_step = bool(
+                            malformed_plan_step
+                            or (
+                                plan_step_id is not None
+                                and plan_step_id not in approved_step_ids
+                            )
+                        )
+                        rendered = False
+                        current_figure = None
+                        safe_fig_name = "".join(
+                            c if c.isalnum() or c == '_' else '_'
+                            for c in figure_name
+                        )
+
+                        if invalid_plan_step:
                             tool_result = (
-                                f"Figure generation budget exhausted after {figure_iteration_count} "
-                                f"figure iteration(s); {figures_produced} figure(s) accepted so far. "
-                                "Do NOT generate any more figures. Focus on completing the remaining analysis steps "
-                                "(differential expression, pathway enrichment, etc.) and then call report_findings."
+                                "[REJECTED] plan_step_id must identify an approved plan "
+                                f"step. Received {raw_plan_step_id!r}; available IDs: "
+                                f"{sorted(approved_step_ids)}. The figure was not generated."
                             )
                         else:
-                            has_figure_work = True
-                            await self._notify("status", f"Generating publication figure: {figure_name} (attempt {fig_attempts[figure_name]})")
+                            await self._notify(
+                                "status", f"Generating publication figure: {figure_name}"
+                            )
 
-                            figures_before = len(state.publication_figures)
+                            active_lineage = getattr(state, "restore_branch_id", None) or "main"
+                            previous_figure = next(
+                                (
+                                    fig for fig in state.publication_figures
+                                    if fig.name == safe_fig_name
+                                    and (getattr(fig, "lineage_id", None) or "main")
+                                    == active_lineage
+                                ),
+                                None,
+                            )
+                            previous_figure_id = getattr(previous_figure, "id", None)
                             # Generate the figure with PI review
                             tool_result = await self._handle_generate_publication_figure(
                                 code=code,
@@ -3508,17 +3630,31 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 description=description,
                                 figure_type=figure_type,
                                 state=state,
-                                review_callback=review_callback
+                                review_callback=review_callback,
+                                plan_step_id=plan_step_id,
                             )
-                            if len(state.publication_figures) > figures_before:
-                                figures_produced += 1
+                            current_figure = next(
+                                (
+                                    fig for fig in state.publication_figures
+                                    if fig.name == safe_fig_name
+                                    and (getattr(fig, "lineage_id", None) or "main")
+                                    == active_lineage
+                                ),
+                                None,
+                            )
+                            rendered = bool(
+                                current_figure is not None
+                                and getattr(current_figure, "id", None) != previous_figure_id
+                            )
+                            if rendered:
+                                has_figure_work = True
+                                figures_rendered += 1
 
-                        # Pass publication figure to supervisor for vision review
-                        safe_fig_name = "".join(c if c.isalnum() or c == '_' else '_' for c in figure_name)
-                        for pub_fig in state.publication_figures:
-                            if pub_fig.name == safe_fig_name and pub_fig.png_base64:
-                                _step_figures.append(pub_fig.png_base64)
-                                break
+                        # Only the bytes rendered by this successful tool call
+                        # belong to this Supervisor step.  A malformed/rejected
+                        # redraw must never fall back to an older same-name image.
+                        if rendered and current_figure and current_figure.png_base64:
+                            _step_figures.append(current_figure.png_base64)
 
                         messages.append({
                             "role": "tool",
@@ -3531,7 +3667,9 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             step_number=step_count, step_type="generate_publication_figure",
                             agent_reasoning=agent_reasoning,
                             pub_figure_name=figure_name, pub_figure_description=description,
-                            pub_figure_type=figure_type, pub_figure_code=code,
+                            pub_figure_type=figure_type,
+                            pub_figure_plan_step_id=plan_step_id,
+                            pub_figure_code=code,
                             pub_figure_result=(tool_result or "")[:2000],
                         ))
 
@@ -3664,6 +3802,10 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         "on a repeated error despite mandatory-skip instructions and "
                         "PI guidance. Results below are partial."
                     )
+                # A forced stop is not a clean completion.  Reuse the existing
+                # degraded-evidence channel so the workflow cannot advance a
+                # stage or report the round as fully verified.
+                evidence_gate_degraded = True
                 completed = True
                 break
 
@@ -3698,15 +3840,23 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                 break
 
             # Metadata-only iterations (no substantive work) don't count toward step budget.
-            # When both figure and register_score are present, use the figure budget cap.
+            # When both figure and register_score are present, the figure allowance
+            # takes precedence; beyond the free allowance it consumes a normal step.
             if not has_substantive_work and response.has_tool_calls:
                 if has_figure_work:
                     figure_iteration_count += 1
-                    if figure_iteration_count <= MAX_FIGURE_ITERATIONS:
+                    if figure_iteration_count <= MAX_FREE_FIGURE_ITERATIONS:
                         step_count -= 1
-                        logger.debug(f"[Bioinformatics] Metadata-only step excluded ({figure_iteration_count}/{MAX_FIGURE_ITERATIONS} figure iterations, {figures_produced} accepted), step_count={step_count}")
+                        logger.debug(
+                            f"[Bioinformatics] Successful figure-only step excluded "
+                            f"({figure_iteration_count}/{MAX_FREE_FIGURE_ITERATIONS} free, "
+                            f"{figures_rendered} rendered), step_count={step_count}"
+                        )
                     else:
-                        logger.warning(f"[Bioinformatics] Figure iteration budget ({MAX_FIGURE_ITERATIONS}) exhausted, accepting last version and moving on")
+                        logger.debug(
+                            "[Bioinformatics] Free figure allowance exhausted; "
+                            "this successful figure consumes a normal analysis step"
+                        )
                 elif has_register_score:
                     step_count -= 1
                     logger.debug(f"[Bioinformatics] register_score-only step excluded, step_count={step_count}")
@@ -3738,6 +3888,28 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                 status = "completed_with_fallback"
                 logger.info("[Bioinformatics] Extracted findings from last text response (fallback)")
 
+        if status in ("max_steps_reached", "completed_with_fallback"):
+            try:
+                await _save_executor_checkpoint(
+                    f"step_{step_count}_budget_exhausted",
+                    budget_exhausted=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[Bioinformatics] Could not persist exhausted executor budget "
+                    "at step %s: %s",
+                    step_count,
+                    e,
+                )
+
+        from ..services.figure_contract import audit_figure_contract
+        _final_figure_contract = audit_figure_contract(
+            state,
+            plan=state.current_plan,
+            planning_stage=planning_stage,
+            include_stage_baseline=False,
+            defer_platform_baseline=True,
+        )
         _saved_fig_count = count_saved_figures(analysis_log)
         logger.info(f"[Bioinformatics] Analysis {status}: {step_count} steps executed, {len(all_findings)} findings, {len(all_figures)} inline figures, {_saved_fig_count} saved figures")
 
@@ -3757,6 +3929,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             "mechanism_programs": mechanism_programs,
             "evidence_verified": bool(reported_evidence_ids) and not evidence_gate_degraded,
             "evidence_execution_ids": reported_evidence_ids,
+            "figure_contract": _final_figure_contract.summary(),
+            "forced_stop": bool(force_break),
             **({"error": llm_error} if llm_error else {}),
             "plan_revision_needed": _plan_revision_needed,
             "plan_revision_context": _plan_revision_context if _plan_revision_needed else {},
@@ -3800,6 +3974,3 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         - Do NOT wrap the output in markdown code fences (no ``` lines).
         - Output ONLY the diagram — no prose explanation before or after.
     """).strip()
-
-
-

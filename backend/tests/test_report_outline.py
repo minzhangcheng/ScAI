@@ -57,6 +57,9 @@ def test_mid_run_integration_is_a_gate_final_one_closes():
     assert gate.kind == "integration_gate" and gate.is_brief
     assert final.kind == "integration_final" and not final.is_brief
     assert gate.rounds == (4,) and final.rounds == (6,)
+    assert gate.is_text_only and not gate.expects_figures
+    assert final.is_text_only and not final.expects_figures
+    assert next(s for s in outline if s.id == "direction_1").expects_figures
 
 
 def test_every_round_owns_exactly_one_section():

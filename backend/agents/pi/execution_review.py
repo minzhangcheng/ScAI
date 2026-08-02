@@ -111,6 +111,11 @@ A supplementary task is handed to a restricted code generator that runs against 
 ALREADY LOADED IN THIS SESSION'S KERNEL, in this round, with no new inputs of any kind.
 Only work satisfiable that way may enter `supplementary_tasks`.
 
+This restricted pass cannot register or PI-review a PublicationFigure. A missing
+publication-figure deliverable must NOT become a supplementary task: leave that gap open
+for the main bioinformatics executor, which owns the publication-figure and review
+pipeline. An inline diagnostic plot cannot close such a gap.
+
 Anything requiring new laboratory measurement, additional sequencing or profiling, new
 imaging or histology, a new sample or cohort, or any external or public dataset CANNOT be
 executed here. Put those in `out_of_scope`, each with a one-line reason. That list is not
@@ -197,6 +202,9 @@ Research direction this round: {direction or "N/A"}
 Rules:
 - A gap is resolved only when the pass produced a concrete result that addresses it. A
   task that errored, was skipped, or returned nothing leaves its gap open.
+- An inline notebook plot is not a registered or PI-reviewed PublicationFigure and cannot
+  resolve a required publication-figure gap. Leave that gap in `remaining_gaps` for the
+  main executor.
 - Judge the evidence produced here; do not restate the round's earlier conclusions and do
   not raise a claim's confidence beyond what this pass actually shows.
 - If the pass produced nothing usable, say so plainly. "unresolved" with the gaps intact
@@ -295,6 +303,7 @@ Reply with STRICT JSON only:
             lines.append(unmet)
         for label, key in (
             ("Methods the plan named that nothing ran", "unmet_families"),
+            ("Required publication figure types still missing", "unmet_figure_kinds"),
             ("Methods evidenced by a successful execution", "executed_families"),
             ("Methods this kernel cannot run (import failure observed)", "unavailable_families"),
         ):

@@ -8,6 +8,7 @@ tests pin the repaired behaviour: a measured collision is not something either
 exit may override, and a regression is rolled back rather than shipped.
 """
 import json
+import base64
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +16,10 @@ import pytest
 
 from backend.agents.bioinformatics.figures import FiguresMixin
 from backend.models.schemas import AnalysisState, FigureReviewStatus
+from backend.models.schemas import PublicationFigure
 from backend.services.figure_layout import LAYOUT_LINT_SENTINEL, blocking_violations
+from backend.services.report.artifacts import publication_pdf_is_valid
+from backend.tests.figure_image_helpers import valid_image_bytes, valid_pdf_bytes
 
 BLOCKING = [{
     "kind": "text_over_text", "severity": "block", "text": "Con FXR/bile",
@@ -53,10 +57,29 @@ class _FakeSandbox:
             out.append("[Auto-save] No figures found — skipping save")
         else:
             size = int(step.get("size", 4000))
-            # distinct bytes per execution so a rollback is detectable
-            (figures / "f.jpg").write_bytes(b"J" * size + bytes([self.executions]) * 100)
-            (figures / "f.pdf").write_bytes(b"P" * 3000 + bytes([self.executions]) * 100)
+            if step.get("corrupt_image") or size < 2000:
+                jpg = b"not-an-image"[:size].ljust(size, b"x")
+            else:
+                # Real, decodable JPEG plus a distinct trailer so a rollback is
+                # observable without relying on fake magic bytes.
+                jpg = valid_image_bytes(
+                    "JPEG",
+                    color=(self.executions, 34, 56),
+                    min_bytes=size,
+                    trailing=bytes([self.executions]) * 100,
+                )
+            (figures / "f.jpg").write_bytes(jpg)
+            if step.get("corrupt_pdf"):
+                (figures / "f.pdf").write_bytes(b"%PDF-corrupt" + b"x" * 1000)
+            elif not step.get("missing_pdf"):
+                (figures / "f.pdf").write_bytes(
+                    valid_pdf_bytes(color=(self.executions, 34, 56))
+                )
             out.append("Saved JPG")
+            if step.get("missing_pdf"):
+                out.append("[Auto-save] Warning: could not save PDF: test failure")
+            else:
+                out.append("Saved PDF: f.pdf")
         violations = step.get("violations", CLEAN)
         if violations is not None:
             out.append(LAYOUT_LINT_SENTINEL + json.dumps(violations))
@@ -68,15 +91,16 @@ class _Agent(FiguresMixin):
         self.sandbox = sandbox
         self.technique_agent = None
         self.revision_calls = []
+        self.notifications = []
 
     def _validate_code(self, code):
         return True, ""
 
-    async def _notify(self, *args, **kwargs):
-        return None
+    async def _notify(self, message_type, content):
+        self.notifications.append((message_type, content))
 
     def _compress_image_to_base64(self, image_path, max_width=800):
-        return f"b64:{Path(image_path).stat().st_size}"
+        return base64.b64encode(Path(image_path).read_bytes()).decode()
 
     async def _revise_figure_code(self, original_code, feedback, suggestions,
                                   must_fix, figure_type, state=None,
@@ -107,6 +131,27 @@ def _review(approved=False, score=6, **extra):
     }
     payload.update(extra)
     return payload
+
+
+def test_upsert_replaces_only_within_the_same_lineage(tmp_path):
+    agent = _Agent(_FakeSandbox(tmp_path, [CLEAN]))
+    state = AnalysisState(user_id="u")
+    main = PublicationFigure(
+        id="main-id", name="same", description="main", figure_type="other",
+        png_path="", pdf_path="", lineage_id="main",
+    )
+    branch = PublicationFigure(
+        id="branch-id", name="same", description="branch", figure_type="other",
+        png_path="", pdf_path="", lineage_id="branch-a",
+    )
+    state.publication_figures = [main]
+
+    agent._upsert_publication_figure(state, branch)
+
+    assert [(item.lineage_id, item.id) for item in state.publication_figures] == [
+        ("main", "main-id"),
+        ("branch-a", "branch-id"),
+    ]
 
 
 async def _run(tmp_path, verdicts, reviews):
@@ -159,6 +204,44 @@ async def test_reviewer_approval_does_not_override_the_renderer(tmp_path):
     assert agent.revision_calls, "approval with a blocking defect must trigger a redraw"
     assert figure.review_status == FigureReviewStatus.APPROVED
     assert not figure.layout_violations
+
+
+@pytest.mark.asyncio
+async def test_pending_record_precedes_review_and_final_event_follows_layout_gate(tmp_path):
+    agent = _Agent(_FakeSandbox(tmp_path, [BLOCKING, CLEAN]))
+    state = AnalysisState(user_id="u")
+    callback_observations = []
+    reviews = [_review(approved=True, score=9), _review(approved=True, score=9)]
+
+    async def callback(figure):
+        stored = next((item for item in state.publication_figures if item.id == figure.id), None)
+        callback_observations.append(stored.review_status if stored else None)
+        return reviews.pop(0)
+
+    await agent._handle_generate_publication_figure(
+        code="plot()",
+        figure_name="f",
+        description="d",
+        figure_type="heatmap",
+        state=state,
+        review_callback=callback,
+    )
+
+    assert callback_observations == [
+        FigureReviewStatus.PENDING,
+        FigureReviewStatus.PENDING,
+    ]
+    lifecycle = [
+        (kind, payload["figure"]["review_status"])
+        for kind, payload in agent.notifications
+        if kind in {"figure_approved", "figure_revision"}
+    ]
+    # The first reviewer approval was overruled by a measured collision.  The
+    # producer reports revision, then reports the clean replacement as approved.
+    assert lifecycle == [
+        ("figure_revision", "revision_requested"),
+        ("figure_approved", "approved"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -273,6 +356,86 @@ async def test_a_revision_that_produces_no_figure_is_not_credited(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_an_initial_no_figure_execution_cannot_register_stale_same_name_bytes(tmp_path):
+    figures = tmp_path / "figures"
+    figures.mkdir()
+    (figures / "f.jpg").write_bytes(b"old" * 2000)
+    (figures / "f.pdf").write_bytes(b"old" * 1000)
+    agent = _Agent(_FakeSandbox(tmp_path, [{"no_figure": True, "violations": None}]))
+    state = AnalysisState(user_id="u")
+
+    result = await agent._handle_generate_publication_figure(
+        code="print('no result to draw')",
+        figure_name="f",
+        description="new round result",
+        figure_type="heatmap",
+        state=state,
+        review_callback=_reviews(_review(approved=True, score=9)),
+        plan_step_id=3,
+    )
+
+    assert "no new JPG render" in result
+    assert state.publication_figures == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("step", "message"),
+    [
+        ({"corrupt_image": True, "size": 4000}, "cannot be decoded"),
+        ({"missing_pdf": True}, "did not produce a new publication PDF"),
+        ({"corrupt_pdf": True}, "Publication PDF is missing or invalid"),
+    ],
+)
+async def test_initial_render_requires_decodable_jpg_and_valid_pdf(
+    tmp_path, step, message
+):
+    agent = _Agent(_FakeSandbox(tmp_path, [step]))
+    state = AnalysisState(user_id="u")
+
+    result = await agent._handle_generate_publication_figure(
+        code="plot()", figure_name="f", description="d", figure_type="heatmap",
+        state=state, review_callback=None,
+    )
+
+    assert message in result
+    assert state.publication_figures == []
+
+
+@pytest.mark.asyncio
+async def test_generated_record_carries_render_and_preview_hashes(tmp_path):
+    agent = _Agent(_FakeSandbox(tmp_path, [CLEAN]))
+    state = AnalysisState(user_id="u")
+
+    await agent._handle_generate_publication_figure(
+        code="plot()", figure_name="f", description="d", figure_type="heatmap",
+        state=state, review_callback=None,
+    )
+
+    figure = state.publication_figures[0]
+    assert len(figure.render_sha256 or "") == 64
+    assert len(figure.preview_sha256 or "") == 64
+
+
+@pytest.mark.asyncio
+async def test_generated_record_inherits_current_plan_id(tmp_path):
+    agent = _Agent(_FakeSandbox(tmp_path, [CLEAN]))
+    state = AnalysisState(
+        user_id="u",
+        current_plan={"id": "approved-plan", "phase": "innovation"},
+    )
+
+    await agent._handle_generate_publication_figure(
+        code="plot()", figure_name="f", description="d", figure_type="heatmap",
+        state=state, review_callback=None, plan_step_id=7,
+    )
+
+    figure = state.publication_figures[0]
+    assert figure.plan_id == "approved-plan"
+    assert figure.plan_step_id == 7
+
+
+@pytest.mark.asyncio
 async def test_a_blank_revision_restores_the_previous_render(tmp_path):
     """The wrapper saves in a finally block, so a blank revision has already
     replaced the good file before the loop can object."""
@@ -282,6 +445,19 @@ async def test_a_blank_revision_restores_the_previous_render(tmp_path):
     restored = (tmp_path / "figures" / "f.jpg").read_bytes()
     assert len(restored) > 2000, "the good render is back on disk"
     assert restored.endswith(b"\x01" * 100)
+
+
+@pytest.mark.asyncio
+async def test_a_revision_missing_its_pdf_restores_the_previous_pair(tmp_path):
+    agent, state, _ = await _run(
+        tmp_path, [CLEAN, {"missing_pdf": True}],
+        [_review(score=6), _review(score=7)],
+    )
+
+    restored = (tmp_path / "figures" / "f.jpg").read_bytes()
+    assert restored.endswith(b"\x01" * 100)
+    assert publication_pdf_is_valid(tmp_path / "figures" / "f.pdf")
+    assert state.publication_figures[0].render_sha256
 
 
 @pytest.mark.asyncio

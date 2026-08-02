@@ -1,6 +1,17 @@
+import base64
+import hashlib
+from datetime import datetime
+
 from backend.models.schemas import FigureReviewStatus, PublicationFigure
-from backend.services.report.artifacts import eligible_artifacts, is_report_eligible
+from backend.services.report.artifacts import (
+    archival_render_available,
+    eligible_artifacts,
+    is_report_eligible,
+    materialize_archival_preview,
+    resolve_archival_render,
+)
 from backend.services.report.figures import FiguresMixin
+from backend.tests.figure_image_helpers import valid_image_bytes, write_valid_image
 
 
 def _figure(name, status, **kwargs):
@@ -33,8 +44,8 @@ def test_workspace_scan_cannot_reintroduce_ineligible_publication_figure(tmp_pat
     report_figures = tmp_path / "report" / "figures"
     figures.mkdir(parents=True)
     report_figures.mkdir(parents=True)
-    (figures / "approved.jpg").write_bytes(b"approved")
-    (figures / "revision.jpg").write_bytes(b"revision")
+    write_valid_image(figures / "approved.jpg", min_bytes=2200)
+    write_valid_image(figures / "revision.jpg", color=(90, 30, 20), min_bytes=2200)
 
     scanner = FiguresMixin()
     scanner.workspace_dir = workspace
@@ -46,6 +57,40 @@ def test_workspace_scan_cannot_reintroduce_ineligible_publication_figure(tmp_pat
                 png_path=str(figures / "revision.jpg")),
     ])
     assert {item["filename"] for item in found} == {"approved.jpg"}
+
+
+def test_recursive_scan_admits_only_registered_eligible_annotation_diagnostic(tmp_path):
+    workspace = tmp_path / "workspace"
+    validation = workspace / "annotation_validation"
+    report_figures = tmp_path / "report" / "figures"
+    validation.mkdir(parents=True)
+    report_figures.mkdir(parents=True)
+    eligible_path = validation / "eligible.jpg"
+    loose_path = validation / "loose.jpg"
+    write_valid_image(eligible_path, min_bytes=2200)
+    write_valid_image(loose_path, color=(90, 30, 20), min_bytes=2200)
+
+    scanner = FiguresMixin()
+    scanner.workspace_dir = workspace
+    scanner.figures_dir = report_figures
+    figure = _figure(
+        "eligible", FigureReviewStatus.APPROVED,
+        png_path=str(eligible_path),
+    )
+    figure.figure_type = "barplot"
+    figure.description = "Authoritative cell-type proportions."
+    figure.plan_step_id = 4
+    figure.plan_id = "plan-v2"
+    figure.purpose = "result"
+
+    found = scanner._scan_existing_figures(publication_figures=[figure])
+
+    assert {item["filename"] for item in found} == {"eligible.jpg"}
+    assert found[0]["inferred_type"] == "barplot"
+    assert found[0]["description"] == "Authoritative cell-type proportions."
+    assert found[0]["plan_step_id"] == 4
+    assert found[0]["plan_id"] == "plan-v2"
+    assert found[0]["purpose"] == "result"
 
 
 # ------------------------------- the diagnostic waiver rests on a measurement
@@ -78,3 +123,110 @@ def test_an_unmeasured_layout_does_not_withhold_a_reviewed_figure():
     reviewed = _figure("umap", FigureReviewStatus.APPROVED,
                        layout_violations=[_unverified()])
     assert is_report_eligible(reviewed) is True
+
+
+def test_archival_render_requires_file_or_valid_record_preview(tmp_path):
+    missing = _figure(
+        "missing", FigureReviewStatus.APPROVED,
+        png_path=str(tmp_path / "old" / "missing.png"),
+    )
+    assert archival_render_available(missing) is False
+
+    payload = valid_image_bytes("PNG")
+    assert len(payload) < 2000, "a compact valid preview must not inherit the JPG floor"
+    missing.png_base64 = base64.b64encode(payload).decode()
+    assert archival_render_available(missing) is True
+
+
+def test_record_preview_is_materialized_only_inside_workspace(tmp_path):
+    payload = valid_image_bytes("JPEG")
+    figure = _figure(
+        "restored", FigureReviewStatus.APPROVED,
+        png_path="/untrusted/old/location/restored.png",
+        png_base64=base64.b64encode(payload).decode(),
+    )
+
+    recovered = materialize_archival_preview(figure, tmp_path)
+
+    assert recovered == tmp_path / "figures" / "restored.jpg"
+    assert recovered.read_bytes() == payload
+
+
+def test_materialized_preview_restores_record_creation_mtime(tmp_path):
+    payload = valid_image_bytes("PNG")
+    created_at = datetime(2025, 1, 2, 3, 4, 5)
+    figure = _figure(
+        "round_owned", FigureReviewStatus.APPROVED,
+        png_path="/old/workspace/round_owned.png",
+        png_base64=base64.b64encode(payload).decode(),
+        created_at=created_at,
+    )
+
+    recovered = materialize_archival_preview(figure, tmp_path)
+
+    assert recovered is not None
+    assert abs(recovered.stat().st_mtime - created_at.timestamp()) < 1.0
+
+
+def test_magic_bytes_without_a_decodable_image_are_rejected(tmp_path):
+    corrupt = b"\x89PNG\r\n\x1a\n" + b"x" * 2200
+    figure = _figure(
+        "corrupt", FigureReviewStatus.APPROVED,
+        png_path=str(tmp_path / "missing.png"),
+        png_base64=base64.b64encode(corrupt).decode(),
+    )
+
+    assert archival_render_available(figure) is False
+    assert materialize_archival_preview(figure, tmp_path) is None
+
+
+def test_decodable_one_pixel_placeholder_is_not_an_archival_preview(tmp_path):
+    from io import BytesIO
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (1, 1), (255, 255, 255)).save(buffer, "PNG")
+    figure = _figure(
+        "placeholder", FigureReviewStatus.APPROVED,
+        png_path=str(tmp_path / "missing.png"),
+        png_base64=base64.b64encode(buffer.getvalue()).decode(),
+    )
+
+    assert archival_render_available(figure) is False
+    assert materialize_archival_preview(figure, tmp_path) is None
+
+
+def test_record_hash_rejects_a_later_same_name_overwrite(tmp_path):
+    workspace = tmp_path / "workspace"
+    figures = workspace / "figures"
+    figures.mkdir(parents=True)
+    path = figures / "reviewed.jpg"
+    original = write_valid_image(path, min_bytes=2200)
+    preview = valid_image_bytes("JPEG")
+    figure = _figure(
+        "reviewed", FigureReviewStatus.APPROVED,
+        png_path=str(path),
+        png_base64=base64.b64encode(preview).decode(),
+        render_sha256=hashlib.sha256(original).hexdigest(),
+        preview_sha256=hashlib.sha256(preview).hexdigest(),
+    )
+
+    write_valid_image(path, color=(220, 10, 10), min_bytes=2200)
+    resolved = resolve_archival_render(figure, workspace)
+
+    assert resolved is not None
+    assert resolved.read_bytes() == preview
+    assert resolved != path
+
+
+def test_hash_mismatch_without_record_preview_is_not_available(tmp_path):
+    path = tmp_path / "reviewed.jpg"
+    original = write_valid_image(path, min_bytes=2200)
+    figure = _figure(
+        "reviewed", FigureReviewStatus.APPROVED,
+        png_path=str(path),
+        render_sha256=hashlib.sha256(original).hexdigest(),
+    )
+    write_valid_image(path, color=(220, 10, 10), min_bytes=2200)
+
+    assert archival_render_available(figure) is False

@@ -59,6 +59,19 @@ from .shared import (  # noqa: F401
 logger = logging.getLogger(__name__)
 
 
+def detailed_report_event_payload(report: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the terminal report event without rewriting a partial status."""
+    return {
+        "status": report.get("status", "completed"),
+        "current_step": report.get("current_step", "Complete"),
+        "report_id": report.get("id", ""),
+        "title": report.get("title", ""),
+        "sections_count": len(report.get("sections", [])),
+        "figures_count": len(report.get("figures", [])),
+        "tables_count": len(report.get("tables", [])),
+    }
+
+
 class FinalReportMixin:
     """Final report and detailed report generation nodes."""
 
@@ -235,7 +248,12 @@ class FinalReportMixin:
         output_dir = str(resolve_report_output_dir(self.session_id, branch_id))
         os.makedirs(output_dir, exist_ok=True)
 
-        report_state = build_lineage_report_state(analysis_state, target_lineage_id)
+        workspace_dir = str(get_session_workspace(self.session_id))
+        report_state = build_lineage_report_state(
+            analysis_state,
+            target_lineage_id,
+            workspace_path=workspace_dir,
+        )
 
         async def progress_callback(data: dict):
             await self._send_message(
@@ -247,8 +265,6 @@ class FinalReportMixin:
                 },
                 AgentType.PI,
             )
-
-        workspace_dir = str(get_session_workspace(self.session_id))
 
         # === LLM call with retry + user intervention ===
         while True:
@@ -285,14 +301,7 @@ class FinalReportMixin:
 
                 await self._send_message(
                     "detailed_report",
-                    {
-                        "status": "completed",
-                        "report_id": report.get("id", ""),
-                        "title": report.get("title", ""),
-                        "sections_count": len(report.get("sections", [])),
-                        "figures_count": len(report.get("figures", [])),
-                        "tables_count": len(report.get("tables", [])),
-                    },
+                    detailed_report_event_payload(report),
                     AgentType.PI,
                 )
 

@@ -69,6 +69,36 @@ async def test_generate_plan_retry_on_empty_steps():
 
 
 @pytest.mark.asyncio
+async def test_stage1_plan_preserves_nonbaseline_figure_requirement():
+    agent = _make_agent()
+    state = _make_state()
+    agent.chat_without_history = AsyncMock(return_value='''{
+        "overview": "stage 1 decision views",
+        "steps": [{
+            "id": 1,
+            "title": "Doublet assessment",
+            "method": "scrublet",
+            "figure_requirements": [{
+                "figure_type": "histogram",
+                "description": "Doublet-score threshold decision"
+            }],
+            "depends_on": []
+        }]
+    }''')
+
+    plan = await agent.generate_analysis_plan(
+        state=state,
+        pi_tasks=["Assess doublets and show the threshold decision"],
+        overview="Stage 1",
+        phase="exploration",
+        planning_stage="stage1",
+    )
+
+    assert plan.steps[0].figure_requirements[0].figure_type == "histogram"
+    assert "Doublet" in plan.steps[0].figure_requirements[0].description
+
+
+@pytest.mark.asyncio
 async def test_generate_plan_retry_fallback(caplog):
     agent = _make_agent()
     state = _make_state()
@@ -150,6 +180,41 @@ async def test_revise_empty_steps_retries_then_preserves_current_plan():
     assert revised.steps[0].title == "Load"
     assert revised.overview == "stage1 plan"
     assert revised.stage == "stage1"
+
+
+@pytest.mark.asyncio
+async def test_stage1_revision_preserves_revised_figure_requirement_and_reason():
+    agent = _make_agent()
+    state = _make_state()
+    agent.chat_without_history = AsyncMock(return_value='''{
+        "overview": "revised",
+        "steps": [{
+            "id": 1,
+            "title": "Batch correction comparison",
+            "method": "harmony",
+            "figure_requirements": [{
+                "figure_type": "umap",
+                "description": "Before versus after batch correction"
+            }],
+            "allow_text_only": false,
+            "text_only_reason": "",
+            "depends_on": []
+        }]
+    }''')
+    current_plan = AnalysisPlan(
+        phase="exploration",
+        stage="stage1",
+        steps=[PlanStep(id=1, title="Batch assessment", method="harmony")],
+    )
+
+    revised = await agent.revise_plan_incrementally(
+        state=state,
+        current_plan=current_plan,
+        pi_feedback="Add a before/after comparison",
+    )
+
+    assert revised.steps[0].figure_requirements[0].figure_type == "umap"
+    assert "Before" in revised.steps[0].figure_requirements[0].description
 
 
 @pytest.mark.asyncio

@@ -58,13 +58,28 @@ decision you made cannot be read off those distributions (an unusual filter, a b
 effect you corrected, a doublet call you overrode) — and if you do, call
 generate_publication_figure with figure_type="qc".
 
+STAGE 1 BASELINE FIGURES (REQUIRED): These panels are platform-owned. After annotation is accepted, Stage 1 must
+leave a visual baseline that makes the annotation auditable before downstream analysis
+begins. Preserve the required UMAP, labels, cluster assignments and marker results on the
+live AnnData object; the platform deterministically renders the available panels below
+after this pass. Do not spend autonomous publication-figure calls duplicating them:
+- `stage1_cell_type_umap`: Cell-type UMAP colored by the accepted `cell_type` labels
+  (always, when those labels and UMAP coordinates exist)
+- `stage1_batch_umap`: Batch/sample UMAP when a multi-level batch, sample, library, or
+  donor field exists
+- `stage1_cluster_umap`: Cluster UMAP when Leiden/Louvain labels exist
+- `stage1_marker_dotplot`: Marker dotplot when `rank_genes_groups` results exist
+Missing optional fields are a reason to omit only the corresponding panel, not the
+remaining baseline figures. These baseline figures are Stage 1 evidence, not downstream
+result figures; do not suppress or replace them with condition-level analyses.
+
 WHAT NOT TO DO (these will be done in Stage 2):
 - Do NOT run condition-level differential expression (DEG)
 - Do NOT run GO/KEGG pathway enrichment
 - Do NOT run cell-cell communication analysis (liana)
-- Do NOT generate publication figures of RESULTS (save those for Stage 2). Step 11 is the
-  single exception: the quality-control panel belongs to this stage, because Stage 2 is
-  forbidden from re-running the quality control it would have to describe
+- Do NOT generate downstream result figures for condition-level DEG, enrichment,
+  communication, trajectory, or other Stage 2 analyses. The quality-control and Stage 1
+  baseline figures above are explicitly required and are not covered by this restriction
 - Do NOT run trajectory/velocity analysis
 
 IMPORTANT: After completing steps 1-10, call report_findings with a summary of:

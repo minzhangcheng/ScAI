@@ -43,6 +43,12 @@ from ...services.figure_layout import (
     parse_layout_violations,
     summarize_violations,
 )
+from ...services.report.artifacts import (
+    image_file_sha256,
+    pdf_file_sha256,
+    preview_render_sha256,
+    publication_pdf_is_valid,
+)
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -61,12 +67,54 @@ _NO_FIGURE_MARKER = "No figures found"
 # None while the file on disk is the previous render — same stale-bytes problem
 # from the other direction.
 _SAVE_FAILED_MARKER = "could not save JPG"
+_PDF_SAVE_FAILED_MARKER = "could not save PDF"
+_JPG_SAVED_MARKER = "Saved JPG"
+_PDF_SAVED_MARKER = "Saved PDF"
 
 
 def _render_landed(output: str | None) -> bool:
     """Whether this execution actually replaced the figure on disk."""
     text = output or ""
-    return _NO_FIGURE_MARKER not in text and _SAVE_FAILED_MARKER not in text
+    return (
+        _JPG_SAVED_MARKER in text
+        and _NO_FIGURE_MARKER not in text
+        and _SAVE_FAILED_MARKER not in text
+    )
+
+
+def _publication_output_error(
+    jpg_path: Path, pdf_path: Path, output: str | None
+) -> str | None:
+    """Explain why a promised JPG+PDF render is not publication-ready."""
+    if not _render_landed(output):
+        return (
+            "Figure generation produced no new JPG render; an older file with "
+            "the same name, if present, was not re-registered."
+        )
+    if not jpg_path.exists():
+        return f"JPG file was not created: {jpg_path}"
+    try:
+        jpg_size = jpg_path.stat().st_size
+    except OSError:
+        jpg_size = 0
+    if jpg_size < 2000:
+        return (
+            f"Figure appears to be blank (file size: {jpg_size} bytes). "
+            "The plotting code may not have generated visible content."
+        )
+    if image_file_sha256(jpg_path) is None:
+        return f"JPG render is corrupt or cannot be decoded: {jpg_path}"
+    if (
+        _PDF_SAVE_FAILED_MARKER in (output or "")
+        or _PDF_SAVED_MARKER not in (output or "")
+    ):
+        return (
+            "Figure generation did not produce a new publication PDF; an older "
+            "same-name PDF, if present, was not re-registered."
+        )
+    if not publication_pdf_is_valid(pdf_path):
+        return f"Publication PDF is missing or invalid: {pdf_path}"
+    return None
 
 
 def _layout_unverified_marker() -> Dict[str, Any]:
@@ -251,6 +299,8 @@ class FiguresMixin:
         state: AnalysisState,
         review_callback: Optional[Callable[[PublicationFigure], Awaitable[Dict[str, Any]]]] = None,
         diagnostic: bool = False,
+        plan_step_id: Optional[int] = None,
+        purpose: Optional[str] = None,
     ) -> str:
         """
         Handle generate_publication_figure tool call.
@@ -266,6 +316,8 @@ class FiguresMixin:
             diagnostic: Platform-rendered diagnostic rather than a result figure.
                 Recorded on the figure so report eligibility does not depend on a
                 review that, for this kind of figure, never happens.
+            plan_step_id: Approved plan step this figure fulfils, when known.
+            purpose: Semantic role of the figure (result, baseline, diagnostic).
 
         Returns:
             Tool result message
@@ -333,17 +385,10 @@ class FiguresMixin:
                 stale_stems, invalidated_count
             )
 
-        # Check if files were created
-        if not jpg_path.exists():
-            error_msg = f"JPG file was not created: {jpg_path}"
-            logger.error(f"[Bioinformatics] {error_msg}")
-            return error_msg
-
-        # Detect blank figures (empty white JPG with bbox_inches='tight' is typically <2KB)
-        if jpg_path.stat().st_size < 2000:
-            error_msg = f"Figure appears to be blank (file size: {jpg_path.stat().st_size} bytes). The plotting code may not have generated visible content."
-            logger.warning(f"[Bioinformatics] {error_msg}")
-            return error_msg
+        output_error = _publication_output_error(jpg_path, pdf_path, result.output)
+        if output_error:
+            logger.warning("[Bioinformatics] %s", output_error)
+            return output_error
 
         # Ask the rendering engine where the text actually landed. This is the
         # deterministic half of the figure gate: the vision reviewer can say a
@@ -373,6 +418,8 @@ class FiguresMixin:
 
         # Create PublicationFigure object (png_path field stores JPG path for web display)
         sandbox_state = state.sandbox_state or {}
+        current_plan = getattr(state, "current_plan", None)
+        current_plan_id = str(getattr(current_plan, "id", "") or "").strip() or None
         figure = PublicationFigure(
             id=str(uuid.uuid4()),
             name=safe_name,
@@ -384,12 +431,23 @@ class FiguresMixin:
             layout_violations=layout_violations,
             review_status=FigureReviewStatus.PENDING,
             diagnostic=diagnostic,
+            plan_step_id=plan_step_id,
+            plan_id=current_plan_id,
+            purpose=purpose or ("diagnostic" if diagnostic else "result"),
+            lineage_id=(getattr(state, "restore_branch_id", None) or "main"),
             round_number=int(state.current_round or 0),
             analysis_generation=int(sandbox_state.get("analysis_generation", 0) or 0),
             expression_provenance=dict(
                 sandbox_state.get("expression_contract_v1") or {}
             ),
         )
+        self._refresh_figure_integrity_hashes(figure)
+
+        # Register the pending render before asking any reviewer to inspect it.
+        # Review events intentionally omit the large preview and the frontend
+        # fetches it through the figure API; without this upsert that request
+        # races the review callback and returns 404 (or shows an older revision).
+        self._upsert_publication_figure(state, figure)
 
         # Send figure to frontend for display
         await self._notify("figure", png_b64)
@@ -466,6 +524,8 @@ class FiguresMixin:
                 return True
 
             while revision_count <= 3:
+                figure.review_status = FigureReviewStatus.PENDING
+                self._upsert_publication_figure(state, figure)
                 logger.info(f"[Bioinformatics] Submitting figure for PI review (attempt {revision_count + 1})")
                 await self._notify("status", f"PI reviewing figure: {figure_name}...")
 
@@ -517,8 +577,12 @@ class FiguresMixin:
                         figure.review_status = FigureReviewStatus.APPROVED
                         logger.info(f"[Bioinformatics] Figure {figure_name} approved by PI")
                     figure.revision_history = revision_history
+                    figure.pi_feedback = review.get('feedback', '') or None
                     _record_unresolved(_violation_must_fix_items(blocking))
                     self._upsert_publication_figure(state, figure)
+                    await self._emit_figure_record(
+                        "figure_approved", figure, review=review
+                    )
                     await self._notify("status", f"Figure {figure_name} approved by PI")
                     layout_note = (
                         f"\nUnresolved layout defects: {summarize_violations(blocking)}. "
@@ -549,6 +613,9 @@ class FiguresMixin:
                         list(must_fix) + _violation_must_fix_items(blocking)
                     )
                     self._upsert_publication_figure(state, figure)
+                    await self._emit_figure_record(
+                        "figure_revision", figure, review=review
+                    )
                     # A data-level objection exits before the revision loop, so
                     # any layout feedback from the same review would otherwise
                     # be discarded with it. Carry the measured defects forward
@@ -580,6 +647,11 @@ class FiguresMixin:
 
                 figure.pi_feedback = feedback
                 figure.revision_history = revision_history
+                figure.review_status = FigureReviewStatus.REVISION_REQUESTED
+                self._upsert_publication_figure(state, figure)
+                await self._emit_figure_record(
+                    "figure_revision", figure, review=review
+                )
 
                 if revision_count >= 3:
                     # Out of revision budget
@@ -622,6 +694,9 @@ class FiguresMixin:
                         figure.review_status = FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
                         _record_unresolved(must_fix)
                         self._upsert_publication_figure(state, figure)
+                        await self._emit_figure_record(
+                            "figure_approved", figure, review=review
+                        )
                         await self._notify("status", f"Figure {figure_name} accepted (revision stalled)")
                         rollback_note = (
                             f"\nThe last revision scored lower than the previous one, so the "
@@ -664,34 +739,29 @@ class FiguresMixin:
                     logger.warning(f"[Bioinformatics] Revised code failed validation: {error_msg}")
                     break
 
+                # A physically bad redraw may already have overwritten both
+                # files before the wrapper reports the problem. Keep the
+                # immediately previous render for integrity rollback even when
+                # it has a blocking layout defect and therefore is not eligible
+                # for the separate "best quality" snapshot.
+                pre_revision_snapshot = _take_snapshot(quality_score)
+
                 # Re-execute with revised code (rebuild wrapper instead of str.replace to avoid corruption)
                 revised_wrapped = _build_publication_figure_wrapper(revised_code, figures_dir, jpg_path, pdf_path)
                 result = await self.sandbox.execute(
                     revised_wrapped, skip_safety_check=True
                 )
 
-                if not result.error and jpg_path.exists():
-                    # Detect blank revised figure. The wrapper saves in a
-                    # finally block, so the blank render has already replaced
-                    # the good file on disk — restore it rather than leave the
-                    # session holding a blank image with a good base64.
-                    if jpg_path.stat().st_size < 2000:
-                        logger.warning(f"[Bioinformatics] Revised figure appears blank (size: {jpg_path.stat().st_size} bytes)")
-                        _restore_snapshot(best_snapshot)
-                        break
-                    # Revised code that raises no error but creates no figure --
-                    # `if len(sig): plot() else: print(...)` is the common shape
-                    # -- leaves the PREVIOUS file untouched, so jpg_path.exists()
-                    # and the size check both pass on stale bytes. Without this
-                    # the loop would credit the old render to the new code.
-                    if not _render_landed(result.output):
-                        logger.warning(
-                            f"[Bioinformatics] Figure {figure_name}: revision did not "
-                            f"replace the rendered figure, keeping the previous version"
-                        )
-                        break
+                physical_error = (
+                    None if result.error else
+                    _publication_output_error(jpg_path, pdf_path, result.output)
+                )
+                if not result.error and not physical_error:
                     # Update figure with new image and re-measure its layout
                     figure.png_base64 = self._compress_image_to_base64(jpg_path, max_width=800)
+                    self._refresh_figure_integrity_hashes(figure)
+                    figure.review_status = FigureReviewStatus.PENDING
+                    self._upsert_publication_figure(state, figure)
                     if lint_ran(result.output):
                         figure.layout_violations = parse_layout_violations(result.output)
                         logger.info(
@@ -711,6 +781,14 @@ class FiguresMixin:
                         )
                     await self._notify("figure", figure.png_base64)
                     current_code = revised_code
+                elif physical_error:
+                    logger.warning(
+                        "[Bioinformatics] Figure %s revision rejected: %s",
+                        figure_name,
+                        physical_error,
+                    )
+                    _restore_snapshot(pre_revision_snapshot or best_snapshot)
+                    break
                 else:
                     result.error = strip_ansi(result.error) if result.error else result.error
                     logger.warning(f"[Bioinformatics] Revision failed: {result.error}")
@@ -747,25 +825,33 @@ class FiguresMixin:
                             retry_result = await self.sandbox.execute(
                                 retry_wrapped, skip_safety_check=True
                             )
-                            if (
-                                not retry_result.error
-                                and jpg_path.exists()
-                                and jpg_path.stat().st_size >= 2000
-                                and _render_landed(retry_result.output)
-                            ):
+                            retry_physical_error = (
+                                None if retry_result.error else
+                                _publication_output_error(
+                                    jpg_path, pdf_path, retry_result.output
+                                )
+                            )
+                            if not retry_result.error and not retry_physical_error:
                                 logger.info(f"[Bioinformatics] Auto-retry succeeded for {figure_name}")
                                 figure.png_base64 = self._compress_image_to_base64(jpg_path, max_width=800)
+                                self._refresh_figure_integrity_hashes(figure)
+                                figure.review_status = FigureReviewStatus.PENDING
+                                self._upsert_publication_figure(state, figure)
                                 if lint_ran(retry_result.output):
                                     figure.layout_violations = parse_layout_violations(retry_result.output)
                                 await self._notify("figure", figure.png_base64)
                                 current_code = retry_code
                                 continue  # Back to review loop
                             else:
-                                logger.warning(f"[Bioinformatics] Auto-retry also failed: {retry_result.error}")
+                                logger.warning(
+                                    "[Bioinformatics] Auto-retry also failed: %s",
+                                    retry_result.error or retry_physical_error,
+                                )
                     except UpstreamExhaustedError:
                         raise
                     except Exception as retry_err:
                         logger.warning(f"[Bioinformatics] Auto-retry exception: {retry_err}")
+                    _restore_snapshot(pre_revision_snapshot or best_snapshot)
                     break  # Both attempts failed
 
             # After 3 attempts, save with revision_requested status
@@ -775,6 +861,9 @@ class FiguresMixin:
                 list(must_fix or []) + _violation_must_fix_items(remaining_blocking)
             )
             self._upsert_publication_figure(state, figure)
+            await self._emit_figure_record(
+                "figure_revision", figure, review=review
+            )
             logger.warning(f"[Bioinformatics] Figure {figure_name} not fully approved after {revision_count} revisions")
             layout_note = (
                 f"\nUnresolved layout defects: {summarize_violations(remaining_blocking)}."
@@ -789,14 +878,75 @@ class FiguresMixin:
 
         # No review callback, just save the figure
         self._upsert_publication_figure(state, figure)
+        await self._emit_figure_record("figure_review", figure)
         return (
             f"Figure {figure_name} has been generated and saved.\n"
             f"JPG: {jpg_path}\nPDF: {pdf_path}"
             + (f"\n{staleness_note}" if staleness_note else "")
         )
 
+    @staticmethod
+    def _refresh_figure_integrity_hashes(figure) -> None:
+        """Bind a record to its full render and compact persisted preview."""
+        figure.render_sha256 = image_file_sha256(figure.png_path)
+        figure.preview_sha256 = preview_render_sha256(figure.png_base64)
+        figure.pdf_sha256 = pdf_file_sha256(figure.pdf_path)
+
+    async def _emit_figure_record(
+        self,
+        event_type: str,
+        figure,
+        *,
+        review: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Publish the producer's authoritative post-gate figure state.
+
+        Reviewer callbacks report an opinion.  Only this producer knows whether
+        renderer measurements overruled it, whether a rollback happened, and
+        which revision bytes are current.  Keep the event compact; the record is
+        already upserted, so the image endpoint can serve the bound render.
+        """
+        review = review or {}
+        status = getattr(figure.review_status, "value", figure.review_status)
+        await self._notify(
+            event_type,
+            {
+                "figure_id": figure.id,
+                "figure_name": figure.name,
+                "approved": status in {
+                    FigureReviewStatus.APPROVED.value,
+                    FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS.value,
+                },
+                "quality_score": review.get("quality_score"),
+                "feedback": figure.pi_feedback or review.get("feedback", ""),
+                "suggestions": review.get("suggestions", []),
+                "must_fix": review.get("must_fix", []),
+                "figure": {
+                    "id": figure.id,
+                    "name": figure.name,
+                    "description": figure.description,
+                    "figure_type": figure.figure_type,
+                    "png_path": figure.png_path,
+                    "pdf_path": figure.pdf_path,
+                    "review_status": status,
+                    "pi_feedback": figure.pi_feedback,
+                    "revision_count": figure.revision_count,
+                    "plan_step_id": getattr(figure, "plan_step_id", None),
+                    "plan_id": getattr(figure, "plan_id", None),
+                    "purpose": getattr(figure, "purpose", "result") or "result",
+                    "round": getattr(figure, "round_number", 0) or None,
+                    "diagnostic": bool(getattr(figure, "diagnostic", False)),
+                    "layout_blocking": bool(
+                        blocking_violations(figure.layout_violations)
+                    ),
+                    "created_at": figure.created_at.isoformat(),
+                },
+            },
+        )
+
     def _upsert_publication_figure(self, state, figure):
         """Replace existing figure with same name, or append if new."""
+        self._refresh_figure_integrity_hashes(figure)
         refreshed_stems = {
             Path(str(figure.name)).stem,
             Path(str(figure.png_path)).stem,
@@ -806,7 +956,12 @@ class FiguresMixin:
             if stem not in refreshed_stems
         ]
         existing_idx = next(
-            (i for i, f in enumerate(state.publication_figures) if f.name == figure.name),
+            (
+                i for i, f in enumerate(state.publication_figures)
+                if f.name == figure.name
+                and (getattr(f, "lineage_id", None) or "main")
+                == (getattr(figure, "lineage_id", None) or "main")
+            ),
             None
         )
         if existing_idx is not None:

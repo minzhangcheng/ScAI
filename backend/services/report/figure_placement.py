@@ -104,6 +104,7 @@ def enforce_figure_placement(
     attribution: Dict[str, int],
     known_figures: Iterable[str],
     figure_order: Optional[Dict[str, float]] = None,
+    figure_captions: Optional[Dict[str, str]] = None,
 ) -> FigurePlacementReport:
     """Rewrite ``sections`` in place so every figure sits in its round's section.
 
@@ -114,12 +115,16 @@ def enforce_figure_placement(
         known_figures: Filenames that actually exist on disk.
         figure_order: Optional sort key per figure (e.g. mtime) used to order
             relocated and appended figures within a section.
+        figure_captions: Optional authoritative caption by exact filename.
+            Registered publication metadata should be supplied here so a model
+            cannot relabel a bar plot as a UMAP from filename guesswork.
 
     Returns:
         A :class:`FigurePlacementReport` describing the corrections applied.
     """
     report = FigurePlacementReport()
     known = {name for name in known_figures if name}
+    authoritative_captions = figure_captions or {}
     if not sections:
         report.unplaced = sorted(known)
         return report
@@ -186,6 +191,8 @@ def enforce_figure_placement(
             if fig in placed:
                 report.duplicates_removed.append((fig, sid))
                 return ""
+            authoritative_caption = authoritative_captions.get(fig) or ""
+            caption = authoritative_caption or caption
             target = _target_for(fig)
             if target is None or target == sid:
                 # Correctly placed, or unattributable — leave it where the model
@@ -193,7 +200,7 @@ def enforce_figure_placement(
                 placed.add(fig)
                 # Rewrite only if the name had to be resolved, so a marker the
                 # model wrote correctly keeps its exact original text.
-                return (match.group(0) if fig == written
+                return (match.group(0) if fig == written and not authoritative_caption
                         else _inline_marker(fig, caption))
             placed.add(fig)
             pending.setdefault(target, []).append((fig, caption))
@@ -210,7 +217,9 @@ def enforce_figure_placement(
         if target is None:
             report.unplaced.append(fig)
             continue
-        pending.setdefault(target, []).append((fig, ""))
+        pending.setdefault(target, []).append(
+            (fig, authoritative_captions.get(fig, ""))
+        )
         report.appended.append((fig, target))
 
     order = figure_order or {}
@@ -221,17 +230,31 @@ def enforce_figure_placement(
             _marker(fig, caption) for fig, caption in items
         )
 
-    # A chapter that owns a round but shows nothing from it is the failure mode
+    # A chapter that expects a result figure but shows nothing from its round is
+    # the failure mode
     # that hides best: the prose reads as complete, and the gap is visible only by
     # counting. One shipped report carried a 3,700-character quality-control
     # chapter, full of the exact numbers a panel would have plotted, with zero
     # figures and zero tables, and nothing anywhere said so. Sections the outline
-    # gives no rounds (Methods) are excluded -- they own no figures by design.
+    # gives no rounds (Methods), plus sections explicitly marked text-only
+    # (integration gates/final syntheses), are excluded. Those sections may own a
+    # workflow round for ordering without claiming that the round produced a new
+    # visual result.
     for osec in outline:
         sid = osec.id
-        if not getattr(osec, "rounds", ()) or sid not in by_id:
+        expects_figures = getattr(osec, "expects_figures", None)
+        if expects_figures is None:
+            expects_figures = bool(getattr(osec, "rounds", ()))
+        if not expects_figures:
             continue
-        if not _FIGURE_MARKER.search(by_id[sid].get("content", "") or ""):
+        section = by_id.get(sid)
+        # Absence is a stronger coverage gap than an existing prose-only
+        # chapter.  Previously the ``sid not in by_id`` guard silently waived
+        # exactly this case, allowing a report that omitted an ordinary Results
+        # chapter wholesale to remain ``completed``.
+        if section is None or not _FIGURE_MARKER.search(
+            section.get("content", "") or ""
+        ):
             report.figureless_sections.append(sid)
     if report.figureless_sections:
         logger.warning(

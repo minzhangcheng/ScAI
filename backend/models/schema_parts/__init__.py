@@ -37,6 +37,7 @@ from .session import (  # noqa: F401
     AgentRoundCache,
     DetailedReportSegment,
     Snapshot,
+    FigureRequirement,
     PlanStep,
     AnalysisPlan,
     SpeciesTissueQualification,

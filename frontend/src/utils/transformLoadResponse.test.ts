@@ -75,7 +75,8 @@ describe('transformLoadResponse', () => {
         id: 'f1', name: 'Fig 1', description: 'A figure',
         figure_type: 'umap', png_path: '/fig.png', pdf_path: '/fig.pdf',
         review_status: 'approved', pi_feedback: 'good',
-        revision_count: 1, created_at: '2026-01-01',
+        revision_count: 1, plan_step_id: 4, plan_id: 'plan-v2', purpose: 'result',
+        created_at: '2026-01-01',
       }],
       publication_tables: [{
         id: 't1', name: 'Table 1', description: 'A table',
@@ -88,6 +89,9 @@ describe('transformLoadResponse', () => {
     expect(result.sessionUpdates.publicationFigures).toHaveLength(1)
     expect(result.sessionUpdates.publicationFigures![0].figureType).toBe('umap')
     expect(result.sessionUpdates.publicationFigures![0].reviewStatus).toBe('approved')
+    expect(result.sessionUpdates.publicationFigures![0].planStepId).toBe(4)
+    expect(result.sessionUpdates.publicationFigures![0].planId).toBe('plan-v2')
+    expect(result.sessionUpdates.publicationFigures![0].purpose).toBe('result')
     expect(result.sessionUpdates.publicationTables).toHaveLength(1)
     expect(result.sessionUpdates.publicationTables![0].columns).toEqual(['col1', 'col2'])
   })

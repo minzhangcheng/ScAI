@@ -20,15 +20,24 @@ from openai import APIConnectionError
 from ...models.schemas import AnalysisState, AnalysisStep
 from ...utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
 from ...services.report.interaction_records import write_interaction_record_files
-from ...services.report.artifacts import eligible_artifacts, excluded_artifact_stems
+from ...services.report.artifacts import (
+    artifact_stems,
+    eligible_artifacts,
+    excluded_artifact_stems,
+    publication_pdf_is_valid,
+    resolve_archival_pdf,
+    resolve_archival_render,
+)
 from ...services.report.figure_attribution import attribute_figures_to_rounds
 from ...services.report.figure_placement import enforce_figure_placement
+from ...services.report.figure_discovery import publication_figure_metadata
 from ...services.report.report_outline import (
     GATE_SECTION_WORD_LIMIT,
     OutlineSection,
     align_sections_to_outline,
     build_report_outline,
 )
+from ...services.report.output_cleanup import reset_report_asset_directories
 from ..prompt_blocks import build_integration_block
 
 
@@ -88,13 +97,22 @@ class ReportContentMixin:
         self.refresh_runtime_config_if_needed()
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
+        reset_report_asset_directories(output_path)
         workspace_path = Path(workspace_dir) if workspace_dir else None
 
         language = "en"
 
-        async def _progress(pct: float, step: str):
+        async def _progress(
+            pct: float,
+            step: str,
+            status: str = "generating",
+        ):
             if progress_callback:
-                await progress_callback({"progress": pct, "step": step, "status": "generating"})
+                await progress_callback({
+                    "progress": pct,
+                    "step": step,
+                    "status": status,
+                })
 
         await _progress(5, "Preparing analysis records...")
 
@@ -107,6 +125,9 @@ class ReportContentMixin:
 
         # Collect figure paths from workspace and publication figures
         figure_map = self._collect_figure_paths(all_records, workspace_path, state=analysis_state)
+        figure_metadata_by_stem = publication_figure_metadata(
+            analysis_state.publication_figures, report_only=True,
+        )
 
         # Collect table paths from workspace
         table_list = self._collect_table_paths(
@@ -135,6 +156,7 @@ class ReportContentMixin:
         report_prompt = self._build_report_prompt(
             narrative, stats, analysis_state, figure_map, language,
             table_list=table_list, outline=outline, attribution=attribution,
+            figure_metadata_by_stem=figure_metadata_by_stem,
         )
 
         used_fallback = False
@@ -207,9 +229,13 @@ class ReportContentMixin:
         # Parse the LLM output into sections
         sections = self._parse_report_sections(report_content, language, outline=outline)
 
-        # Stays empty when the outline pass is skipped: the degraded fallback body
-        # has its own fixed sections and was never written against the outline, so
-        # it has no figure-owning sections to be missing figures from.
+        # For a normal report this is populated by the placement pass below. A
+        # degraded fallback keeps its fixed three-section body, but that must not
+        # make visual coverage disappear from the report semantics: every
+        # ordinary result section in the intended outline is absent from that
+        # fallback body and therefore has no in-section figure. Explicit
+        # text-only sections (integration gates and closing syntheses) are not
+        # included.
         figureless_sections: List[str] = []
 
         # The fallback body is a degraded step summary with its own fixed
@@ -242,6 +268,14 @@ class ReportContentMixin:
             placement = enforce_figure_placement(
                 sections, outline, attribution, figure_map.keys(),
                 figure_order=figure_order,
+                figure_captions={
+                    name: (
+                        figure_metadata_by_stem.get(Path(name).stem, {}).get("description")
+                        or figure_metadata_by_stem.get(Path(name).stem, {}).get("interpretation")
+                        or ""
+                    )
+                    for name in figure_map
+                },
             )
             if placement.unplaced:
                 logger.info(
@@ -249,6 +283,10 @@ class ReportContentMixin:
                     f"owning section and fall through to Supplementary Figures"
                 )
             figureless_sections = list(placement.figureless_sections)
+        else:
+            figureless_sections = [
+                section.id for section in outline if section.expects_figures
+            ]
 
         # Build chat sections if chat_messages provided
         if chat_messages:
@@ -285,17 +323,61 @@ class ReportContentMixin:
 
         # Build figures list for report
         report_figures = []
+        eligible_records = eligible_artifacts(analysis_state.publication_figures)
+        records_by_stem: Dict[str, Any] = {}
+        for record in eligible_records:
+            stems = set(artifact_stems([record]))
+            resolved_record_path = (
+                resolve_archival_render(record, workspace_path)
+                if workspace_path is not None else None
+            )
+            if resolved_record_path is not None:
+                stems.add(resolved_record_path.stem)
+            for stem in stems:
+                records_by_stem.setdefault(stem, record)
         for fig_name, fig_path in figure_map.items():
+            stem = Path(fig_name).stem
+            record = records_by_stem.get(stem) or records_by_stem.get(fig_path.stem)
+            metadata = figure_metadata_by_stem.get(stem, {})
+            if record is not None:
+                metadata = {
+                    **metadata,
+                    "publication_name": getattr(record, "name", "") or "",
+                    "type": getattr(record, "figure_type", "") or "other",
+                    "description": getattr(record, "description", "") or "",
+                    "interpretation": getattr(record, "interpretation", "") or "",
+                    "plan_step_id": getattr(record, "plan_step_id", None),
+                    "plan_id": getattr(record, "plan_id", None),
+                    "purpose": getattr(record, "purpose", "result") or "result",
+                }
             fig_entry = {
                 "filename": fig_name,
                 "path": str(fig_path),
-                "category": self._categorize_figure(fig_name),
+                "category": metadata.get("type") or self._categorize_figure(fig_name),
+                "name": metadata.get("publication_name") or Path(fig_name).stem,
+                "description": metadata.get("description") or "",
+                "interpretation": metadata.get("interpretation") or "",
+                "plan_step_id": metadata.get("plan_step_id"),
+                "plan_id": metadata.get("plan_id"),
+                "purpose": metadata.get("purpose") or "result",
             }
-            # Add PDF path if exists
-            pdf_path = fig_path.with_suffix(".pdf")
-            if pdf_path.exists():
+            # A same-name PDF can be overwritten independently of the raster.
+            # Registered figures resolve through their review-time digest;
+            # unregistered legacy figures at least need a structurally valid PDF.
+            pdf_path = (
+                resolve_archival_pdf(record, workspace_path)
+                if record is not None else fig_path.with_suffix(".pdf")
+            )
+            if pdf_path is not None and publication_pdf_is_valid(pdf_path):
                 fig_entry["pdf_path"] = str(pdf_path)
             report_figures.append(fig_entry)
+
+        reported_figure_names = {
+            str(figure.get("filename") or "") for figure in report_figures
+        }
+        unreported_figures = sorted(
+            name for name in figure_map if name not in reported_figure_names
+        )
 
         await _progress(80, "Building report...")
 
@@ -314,6 +396,48 @@ class ReportContentMixin:
         except Exception:
             logger.exception("Failed to save graphic abstract")
 
+        # A report can be structurally complete while still missing a visual for
+        # an ordinary findings section. Preserve the report, but do not label it
+        # fully complete: callers and the UI need a machine-readable signal that
+        # figure coverage is incomplete. Explicit text-only sections (for
+        # example integration gates/syntheses) never enter this list.
+        if used_fallback:
+            report_status = "partial"
+            partial_reason = "degraded_fallback"
+            report_current_step = "Degraded fallback report"
+            if figureless_sections:
+                report_current_step += (
+                    " with figure coverage gaps: "
+                    + ", ".join(figureless_sections)
+                )
+            if unreported_figures:
+                report_current_step += (
+                    "; unreported figures: " + ", ".join(unreported_figures)
+                )
+        elif figureless_sections or unreported_figures:
+            report_status = "partial"
+            partial_reason = "figure_coverage"
+            coverage_details = []
+            if figureless_sections:
+                coverage_details.append(
+                    "figureless sections: " + ", ".join(figureless_sections)
+                )
+            if unreported_figures:
+                coverage_details.append(
+                    "unreported figures: " + ", ".join(unreported_figures)
+                )
+            report_current_step = "Complete with figure coverage gaps: " + "; ".join(
+                coverage_details
+            )
+        elif getattr(analysis_state, "allow_partial_report", False):
+            report_status = "partial"
+            partial_reason = "approved_partial"
+            report_current_step = "Partial report approved"
+        else:
+            report_status = "completed"
+            partial_reason = None
+            report_current_step = "Complete"
+
         report = {
             "id": report_id,
             "session_id": analysis_state.id,
@@ -325,13 +449,15 @@ class ReportContentMixin:
             "tables": table_list,
             "graphic_abstract_path": ga_path,  # Path for zip download
             "generated_at": datetime.now().isoformat(),
-            "status": "completed",
+            "status": report_status,
             "progress": 100,
-            "current_step": "Complete",
+            "current_step": report_current_step,
             "appendix": appendix_data,
             # Recorded so an incomplete report is a reportable condition rather
             # than something an operator has to notice by eye.
             "figureless_sections": figureless_sections,
+            "unreported_figures": unreported_figures,
+            "partial_reason": partial_reason,
             "analysis_log": all_records,
             "score_definitions": [sd.model_dump(mode="json") for sd in analysis_state.score_definitions] if analysis_state.score_definitions else [],
         }
@@ -359,7 +485,7 @@ class ReportContentMixin:
         report.pop("_analysis_state", None)
         report["html_path"] = str(html_path)
 
-        await _progress(100, "Complete")
+        await _progress(100, report_current_step, report_status)
         return report
 
     @staticmethod
@@ -404,7 +530,11 @@ class ReportContentMixin:
         for sec in outline:
             names = per_section.get(sec.id) or []
             rounds_text = ", ".join(str(r) for r in sec.rounds)
-            if not sec.rounds:
+            if getattr(sec, "is_text_only", False) and not names:
+                lines.append(
+                    f"[{sec.id}] — text-only synthesis/transition; no figure required"
+                )
+            elif not sec.rounds:
                 lines.append(f"[{sec.id}] — no figures (this section carries no result figures)")
             elif names:
                 lines.append(f"[{sec.id}] — round(s) {rounds_text}:")
@@ -437,14 +567,25 @@ class ReportContentMixin:
         table_list: Optional[List[Dict]] = None,
         outline: Optional[Sequence["OutlineSection"]] = None,
         attribution: Optional[Dict[str, int]] = None,
+        figure_metadata_by_stem: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> str:
         """Build the prompt for the report-writing LLM."""
         attribution = attribution or {}
-        figure_list = "\n".join(
-            f"- {name} ({self._categorize_figure(name)})"
-            + (f" [round {attribution[name]}]" if name in attribution else "")
-            for name in figure_map.keys()
-        ) or ("None")
+        figure_metadata_by_stem = figure_metadata_by_stem or publication_figure_metadata(
+            state.publication_figures, report_only=True,
+        )
+        figure_lines = []
+        for name in figure_map:
+            metadata = figure_metadata_by_stem.get(Path(name).stem, {})
+            figure_type = metadata.get("type") or self._categorize_figure(name)
+            line = f"- {name} (type: {figure_type})"
+            if name in attribution:
+                line += f" [round {attribution[name]}]"
+            description = str(metadata.get("description") or "").strip()
+            if description:
+                line += f" — authoritative description: {description[:600]}"
+            figure_lines.append(line)
+        figure_list = "\n".join(figure_lines) or "None"
 
         # Collect per-round findings with phase labels. The section list no
         # longer derives from this loop — build_report_outline() reads the rounds
@@ -582,6 +723,10 @@ class ReportContentMixin:
 ## Available Figures
 {figure_list}
 
+For registered publication figures, the declared type and authoritative
+description above outrank any inference from the filename. Captions MUST stay
+consistent with them; for example, never call a declared barplot a UMAP.
+
 ## Figure Allocation (BINDING)
 Every figure belongs to the round that produced it, and each section below owns
 the figures of its round. Place each figure ONLY in the section listed here.
@@ -632,6 +777,7 @@ IMPORTANT:
 - Innovation phase sections are CRITICAL — they contain the novel research findings and MUST be written in detail.
 - Reference specific figures, genes, pathways, cell types, statistical results, and quantitative findings.
 - Include ALL available figures, each in the section assigned to it by the Figure Allocation above, using [FIGURE: filename] markers.
+- Explicit text-only synthesis/transition sections require no figure when none was produced.
 - Include ALL available tables — assign each table to the most relevant section using [TABLE: filename.csv] markers.
 - Every [FIGURE:] and [TABLE:] marker MUST be followed by its corresponding [FIGURE_CAPTION:] or [TABLE_CAPTION:] marker on the next line.
 {gate_note}"""

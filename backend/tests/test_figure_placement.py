@@ -192,6 +192,41 @@ def test_empty_section_list_reports_everything_unplaced():
     assert report.unplaced == ["a.png"]
 
 
+def test_text_only_integration_section_is_not_reported_figureless():
+    outline = _outline()
+    sections = _sections(outline)
+    report = enforce_figure_placement(
+        sections,
+        outline,
+        {"explore.png": 1, "a.png": 2, "b.png": 3},
+        ["explore.png", "a.png", "b.png"],
+    )
+
+    assert report.figureless_sections == []
+    integration = next(s for s in outline if s.kind == "integration_final")
+    assert integration.is_text_only
+
+
+def test_missing_ordinary_section_is_reported_figureless():
+    outline = _outline()
+    sections = _sections(outline)
+    sections = [
+        section for section in sections
+        if section["id"] != "direction_1"
+    ]
+
+    report = enforce_figure_placement(
+        sections,
+        outline,
+        {"explore.png": 1, "b.png": 3},
+        ["explore.png", "b.png"],
+    )
+
+    assert "direction_1" in report.figureless_sections
+    integration = next(s for s in outline if s.kind == "integration_final")
+    assert integration.id not in report.figureless_sections
+
+
 # ------------------------------------ when the outline does not partition rounds
 
 def _legacy_outline():
@@ -255,6 +290,30 @@ def test_a_marker_written_with_the_other_extension_keeps_its_caption():
     assert "[FIGURE_CAPTION: UMAP by cell type.]" in body
     # Still where the model put it, not appended after the closing sentence.
     assert body.index("[FIGURE:") < body.index("The panel above")
+
+
+def test_registered_description_replaces_model_guessed_caption():
+    outline = _outline()
+    sections = _sections(outline)
+    by_id = _by_id(sections)
+    by_id["direction_1"]["content"] += (
+        "\n[FIGURE: composition.jpg]\n"
+        "[FIGURE_CAPTION: UMAP projection of annotated cells]\n"
+    )
+
+    enforce_figure_placement(
+        sections,
+        outline,
+        {"composition.jpg": 2},
+        ["composition.jpg"],
+        figure_captions={
+            "composition.jpg": "Bar plots of annotated cell-type proportions."
+        },
+    )
+
+    content = by_id["direction_1"]["content"]
+    assert "Bar plots of annotated cell-type proportions." in content
+    assert "UMAP projection" not in content
 
 
 def test_a_duplicated_section_id_does_not_capture_the_figures():

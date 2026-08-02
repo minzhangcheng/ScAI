@@ -15,6 +15,7 @@ from ..services.interaction_record_capture import (
     find_open_pi_decide_record,
     get_or_open_direction_record,
 )
+from ..services.figure_contract import record_plan_figure_inheritance
 from ..utils.llm_client import UpstreamExhaustedError
 from ..utils.formatting import truncate_for_llm
 from .direction_coverage import (
@@ -53,6 +54,12 @@ def _plan_semantic_text(plan: Optional[AnalysisPlan]) -> str:
                 "method": step.method,
                 "input": step.input,
                 "expected_output": step.expected_output,
+                "figure_requirements": [
+                    requirement.model_dump(mode="json")
+                    for requirement in step.figure_requirements
+                ],
+                "allow_text_only": step.allow_text_only,
+                "text_only_reason": step.text_only_reason,
                 "rationale": step.rationale,
                 "depends_on": sorted(step.depends_on),
             }
@@ -1081,6 +1088,10 @@ class PlanningMixin:
         populate_plan_scope(plan, analysis_state)
         plan.status = "approved"
         plan.approved_at = datetime.now()
+        # Preserve reviewed figures for completed steps carried unchanged into a
+        # revision. The lineage lives beside runtime state; artifact.plan_id keeps
+        # naming the plan that actually rendered and reviewed the bytes.
+        record_plan_figure_inheritance(analysis_state, plan)
         analysis_state.current_plan = plan
         self._set_status(analysis_state, TaskStatus.RUNNING)
         await self._send_state_sync(analysis_state, "plan_approved")

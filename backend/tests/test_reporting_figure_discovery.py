@@ -1,10 +1,17 @@
 """Integration: nested candidates reach PI selection; failed PI selection is bounded."""
 import types
+import base64
+import hashlib
 
 import pytest
 
 import backend.workflow.reporting as reporting_mod
 from backend.tests.split_facade import setattr_facade
+from backend.tests.figure_image_helpers import (
+    valid_image_bytes,
+    valid_pdf_bytes,
+    write_valid_image,
+)
 
 
 def _pub_fig(name, png_path=None, status="approved"):
@@ -14,7 +21,7 @@ def _pub_fig(name, png_path=None, status="approved"):
         name=name,
         description="",
         figure_type="umap",
-        png_base64="AAA",
+        png_base64=base64.b64encode(valid_image_bytes("JPEG")).decode(),
         png_path=png_path,
         pdf_path=None,
         review_status=types.SimpleNamespace(value=status),
@@ -45,6 +52,7 @@ class _CaptureReporter(reporting_mod.ReportingMixin):
 
         class _State:
             initial_instruction = "obj"
+            restore_branch_id = None
         self.analysis_state = _State()
         self.analysis_state.publication_figures = publication_figures
         self.analysis_state.publication_tables = []
@@ -131,7 +139,7 @@ async def test_a_blank_on_disk_render_is_not_offered_for_download(monkeypatch, t
     blank = tmp_path / "abandoned.jpg"
     blank.write_bytes(b"\xff\xd8" + b"\x00" * 700)      # under the blank floor
     revised = tmp_path / "revised.jpg"
-    revised.write_bytes(b"\xff\xd8" + b"\x00" * 8000)
+    write_valid_image(revised, min_bytes=8000)
 
     # discovery also sees the blank file: dropping the record must drop its stem
     # from the workspace tier too, or the same bytes come back unbadged.
@@ -192,3 +200,78 @@ async def test_invalid_selection_names_self_heal_to_publication(monkeypatch, tmp
     # Bogus names dropped; publication fallback surfaces the real pub figure.
     assert names == {"pub_one"}
     assert payload["total_figures"] == 1
+
+
+@pytest.mark.asyncio
+async def test_integrated_report_payload_marks_and_binds_registered_figure(
+    monkeypatch, tmp_path,
+):
+    preview = valid_image_bytes("JPEG")
+    figure = _pub_fig("registered")
+    figure.preview_sha256 = hashlib.sha256(preview).hexdigest()
+    figure.render_sha256 = "a" * 64
+    figure.pdf_sha256 = "b" * 64
+    setattr_facade(
+        monkeypatch,
+        "backend.workflow.reporting",
+        "discover_workspace_figures",
+        lambda _sid: [],
+    )
+    reporter = _CaptureReporter(
+        "sess-registered-payload",
+        [],
+        publication_figures=[figure],
+        pi_return=["registered"],
+    )
+
+    await reporter._assemble_brief_figures(
+        reporter.analysis_state, {"summary": "s"},
+    )
+
+    emitted = reporter.sent["integrated_report"]["figures"][0]
+    assert emitted["is_publication"] is True
+    assert emitted["render_sha256"] == "a" * 64
+    assert emitted["preview_sha256"] == hashlib.sha256(preview).hexdigest()
+    assert emitted["pdf_sha256"] == "b" * 64
+
+
+@pytest.mark.asyncio
+async def test_integrated_report_workspace_payload_carries_download_digests(
+    monkeypatch, tmp_path,
+):
+    image_path = tmp_path / "workspace" / "figures" / "workspace_only.jpg"
+    image_path.parent.mkdir(parents=True)
+    image_payload = write_valid_image(image_path, min_bytes=2200)
+    pdf_path = image_path.with_suffix(".pdf")
+    pdf_payload = valid_pdf_bytes()
+    pdf_path.write_bytes(pdf_payload)
+    discovered = [{
+        "name": "workspace_only",
+        "type": "heatmap",
+        "path": str(image_path),
+        "pdf_path": str(pdf_path),
+        "mtime": 1.0,
+        "source": "figures",
+    }]
+    setattr_facade(
+        monkeypatch,
+        "backend.workflow.reporting",
+        "discover_workspace_figures",
+        lambda _sid: discovered,
+    )
+    reporter = _CaptureReporter(
+        "sess-workspace-payload",
+        discovered,
+        publication_figures=[],
+        pi_return=["workspace_only"],
+    )
+
+    await reporter._assemble_brief_figures(
+        reporter.analysis_state, {"summary": "s"},
+    )
+
+    emitted = reporter.sent["integrated_report"]["figures"][0]
+    assert emitted["is_publication"] is False
+    assert emitted["render_sha256"] == hashlib.sha256(image_payload).hexdigest()
+    assert emitted["pdf_sha256"] == hashlib.sha256(pdf_payload).hexdigest()
+    assert len(emitted["preview_sha256"]) == 64

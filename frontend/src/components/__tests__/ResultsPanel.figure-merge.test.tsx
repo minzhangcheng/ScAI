@@ -13,7 +13,7 @@
  */
 import { render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ResultsPanel } from '../ResultsPanel'
+import { ResultsPanel, mergeFigureMetadata } from '../ResultsPanel'
 import { useAppStore, type Session, type PublicationFigure } from '../../stores/appStore'
 
 vi.mock('../../hooks/useApi', () => ({
@@ -92,7 +92,10 @@ describe('ResultsPanel — the curated list adds to the gallery, it does not rep
       currentSession: makeSession([figure('from_session')]),
       // Workspace-scanned figures reach the client only through this message.
       messages: [integratedReportMessage([
-        { id: 'id-scanned', name: 'from_workspace', figure_type: 'heatmap', review_status: 'pending' },
+        {
+          id: 'id-scanned', name: 'from_workspace', figure_type: 'heatmap',
+          review_status: 'pending', is_publication: false,
+        },
       ])],
     } as any)
 
@@ -128,5 +131,113 @@ describe('ResultsPanel — the curated list adds to the gallery, it does not rep
     render(<ResultsPanel />)
 
     expect(screen.getAllByText('shared')).toHaveLength(1)
+  })
+
+  it('keeps plan provenance when a compact report payload updates a figure', () => {
+    const existing = figure('planned', { planStepId: 7, planId: 'plan-v2', purpose: 'result' })
+    const compact = figure('planned', {
+      pngBase64: undefined,
+      planStepId: undefined,
+      planId: undefined,
+      purpose: undefined,
+    })
+
+    expect(mergeFigureMetadata(compact, existing)).toMatchObject({
+      pngBase64: 'AAA',
+      planStepId: 7,
+      planId: 'plan-v2',
+      purpose: 'result',
+    })
+  })
+
+  it('drops stale base64 when a same-name event replaces the figure id', () => {
+    const existing = figure('replaced', { id: 'old-id', pngBase64: 'OLD' })
+    const incoming = figure('replaced', {
+      id: 'new-id',
+      pngBase64: undefined,
+    })
+
+    expect(mergeFigureMetadata(incoming, existing).pngBase64).toBeUndefined()
+  })
+
+  it('drops stale base64 when a new revision omits its preview bytes', () => {
+    const existing = figure('revised', {
+      id: 'stable-id',
+      revisionCount: 1,
+      pngBase64: 'OLD',
+    })
+    const incoming = figure('revised', {
+      id: 'stable-id',
+      revisionCount: 2,
+      pngBase64: undefined,
+    })
+
+    expect(mergeFigureMetadata(incoming, existing).pngBase64).toBeUndefined()
+  })
+
+  it('keeps base64 for a compact event describing the same render', () => {
+    const existing = figure('same-render', {
+      id: 'stable-id',
+      revisionCount: 2,
+      pngBase64: 'CURRENT',
+    })
+    const incoming = figure('same-render', {
+      id: 'stable-id',
+      revisionCount: 2,
+      pngBase64: undefined,
+    })
+
+    expect(mergeFigureMetadata(incoming, existing).pngBase64).toBe('CURRENT')
+  })
+
+  it('adds a figure immediately from a revision event', () => {
+    useAppStore.setState({
+      currentSession: makeSession([]),
+      messages: [{
+        id: 'msg-revision',
+        type: 'figure_revision',
+        agent: 'pi',
+        timestamp: '2026-07-31T13:39:00Z',
+        content: {
+          figure: {
+            id: 'id-live',
+            name: 'live_revision',
+            description: 'Needs another pass',
+            figure_type: 'heatmap',
+            png_path: '/w/figures/live_revision.jpg',
+            pdf_path: '/w/figures/live_revision.pdf',
+            review_status: 'revision_requested',
+            revision_count: 1,
+            plan_step_id: 8,
+            plan_id: 'plan-v3',
+            purpose: 'result',
+          },
+        },
+      }],
+    } as any)
+
+    render(<ResultsPanel />)
+
+    expect(screen.getByText('live_revision')).toBeInTheDocument()
+    expect(screen.getByText('Revision Requested')).toBeInTheDocument()
+    expect(screen.getByText('Plan step 8')).toBeInTheDocument()
+    expect(screen.queryByText('Final')).not.toBeInTheDocument()
+  })
+
+  it('does not resurrect an invalidated registered figure from a persisted report message', () => {
+    useAppStore.setState({
+      currentSession: makeSession([figure('current')]),
+      messages: [integratedReportMessage([
+        {
+          id: 'id-stale', name: 'stale', figure_type: 'heatmap',
+          review_status: 'approved', is_publication: true,
+        },
+      ])],
+    } as any)
+
+    render(<ResultsPanel />)
+
+    expect(screen.getByText('current')).toBeInTheDocument()
+    expect(screen.queryByText('stale')).not.toBeInTheDocument()
   })
 })

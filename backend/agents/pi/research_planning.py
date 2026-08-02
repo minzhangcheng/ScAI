@@ -95,7 +95,17 @@ This plan is for **Stage 2**. Stage 2 covers downstream analyses (DEG, GO/KEGG, 
 3. **Completeness**: Are any critical steps missing for THIS stage?
 4. **Logical order**: Do dependencies make sense? Are steps correctly ordered?
 5. **Redundancy**: Are there unnecessary or duplicate steps?
-6. **Risk**: Are there steps likely to fail or produce unreliable results?
+6. **Visual coverage**: Does every result-bearing analytical step declare useful
+   ``figure_requirements``? In Stage 1 the platform itself renders the standard
+   annotation, batch, cluster and marker baselines, so do not request duplicate
+   copies; preserve additional decision plots such as doublet diagnostics or
+   batch-correction before/after comparisons. Complementary views are preferred
+   when they reveal different aspects of a result. An empty list is appropriate
+   only for a non-result setup step or a genuinely narrative/special task. The
+   latter exception requires ``allow_text_only=true``, an empty requirements
+   list, and a concrete ``text_only_reason``. Missing visual coverage or contradictory
+   fields require **revise**.
+7. **Risk**: Are there steps likely to fail or produce unreliable results?
 
 ## Decision Options
 - **approved**: Plan is in-scope and scientifically sound, no changes needed
@@ -206,7 +216,11 @@ Respond ONLY with JSON in this schema:
     "overview": "Short summary of the plan",
     "steps": [
         {{"id": 1, "title": "...", "method": "...", "input": "...",
-          "expected_output": "...", "rationale": "...", "depends_on": []}},
+          "expected_output": "...",
+          "figure_requirements": [{{"figure_type": "umap", "description": "...", "minimum_count": 1, "platform_baseline": ""}}],
+          "allow_text_only": false,
+          "text_only_reason": "",
+          "rationale": "...", "depends_on": []}},
         ...
     ],
     "key_decision_points": ["...", "..."],
@@ -227,6 +241,9 @@ Respond ONLY with JSON in this schema:
                     method=s.get("method", ""),
                     input=s.get("input", ""),
                     expected_output=s.get("expected_output", ""),
+                    figure_requirements=s.get("figure_requirements", []) or [],
+                    allow_text_only=s.get("allow_text_only", False),
+                    text_only_reason=s.get("text_only_reason", ""),
                     rationale=s.get("rationale", ""),
                     depends_on=s.get("depends_on", []) or [],
                 ))

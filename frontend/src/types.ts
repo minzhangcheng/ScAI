@@ -213,6 +213,13 @@ export interface RawPublicationFigure {
   piFeedback?: string
   revision_count?: number
   revisionCount?: number
+  plan_step_id?: number
+  planStepId?: number
+  plan_id?: string
+  planId?: string
+  purpose?: string
+  is_publication?: boolean
+  isPublication?: boolean
   created_at?: string
   createdAt?: string
 }

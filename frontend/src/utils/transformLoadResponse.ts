@@ -109,6 +109,10 @@ function transformPublicationFigures(raw: (RawPublicationFigure & RawFigureBadge
     round: f.round ?? f.round_number ?? undefined,
     layoutBlocking: f.layout_blocking ?? f.layoutBlocking ?? false,
     diagnostic: f.diagnostic ?? false,
+    planStepId: f.plan_step_id ?? f.planStepId ?? undefined,
+    planId: f.plan_id ?? f.planId ?? undefined,
+    purpose: f.purpose ?? undefined,
+    isPublication: f.is_publication ?? f.isPublication ?? true,
   }))
 }
 

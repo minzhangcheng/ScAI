@@ -26,6 +26,9 @@ from ...services.report.artifacts import (
     excluded_artifact_stems,
     gallery_artifacts,
     has_blocking_layout_defects,
+    image_file_sha256,
+    pdf_file_sha256,
+    preview_render_sha256,
     render_is_intact,
 )
 from ...services.report.figure_attribution import attribute_figures_to_rounds  # noqa: F401
@@ -161,6 +164,8 @@ class GraphicAbstractMixin:
         publication_figures = [
             fig for fig in gallery_artifacts(analysis_state.publication_figures)
             if render_is_intact(fig)
+            and (getattr(fig, "lineage_id", None) or "main")
+            == current_lineage_id(analysis_state)
         ]
         pub_figure_names = {fig.name for fig in publication_figures}
         excluded_stems = excluded_artifact_stems(
@@ -246,15 +251,23 @@ class GraphicAbstractMixin:
                     "description": fig.description,
                     "figure_type": fig.figure_type,
                     "png_base64": fig.png_base64,
+                    "png_path": fig.png_path,
                     "pdf_path": fig.pdf_path,
+                    "render_sha256": getattr(fig, "render_sha256", None),
+                    "preview_sha256": getattr(fig, "preview_sha256", None),
+                    "pdf_sha256": getattr(fig, "pdf_sha256", None),
                     "review_status": fig.review_status.value,
                     "revision_count": fig.revision_count,
+                    "plan_step_id": getattr(fig, "plan_step_id", None),
+                    "plan_id": getattr(fig, "plan_id", None),
+                    "purpose": getattr(fig, "purpose", "result") or "result",
                     "round": round_by_stem.get(fig.name),
                     # A figure the loop gave up on is shown, but the renderer's
                     # verdict on whether its text is legible travels with it —
                     # "Final" over an illegible figure would be a lie.
                     "layout_blocking": has_blocking_layout_defects(fig),
                     "diagnostic": bool(getattr(fig, "diagnostic", False)),
+                    "is_publication": True,
                 })
 
         for wf in all_workspace_figs:
@@ -272,11 +285,23 @@ class GraphicAbstractMixin:
                     "png_base64": b64,
                     "png_path": wf["path"],
                     "pdf_path": wf["pdf_path"],
+                    # Workspace-only entries have no PublicationFigure record,
+                    # so the persisted integrated-report payload owns the bytes
+                    # needed by the download routes.  Bind those routes to the
+                    # exact image/PDF selected here rather than trusting a later
+                    # same-name file in the workspace.
+                    "render_sha256": image_file_sha256(wf["path"]),
+                    "preview_sha256": preview_render_sha256(b64),
+                    "pdf_sha256": pdf_file_sha256(wf["pdf_path"]),
                     "review_status": "pending",
                     "revision_count": 0,
+                    "plan_step_id": wf.get("plan_step_id"),
+                    "plan_id": wf.get("plan_id"),
+                    "purpose": wf.get("purpose"),
                     "round": round_by_stem.get(wf["name"]),
                     "layout_blocking": False,
                     "diagnostic": bool(wf.get("diagnostic")),
+                    "is_publication": False,
                 })
 
         logger.info(

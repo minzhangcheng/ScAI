@@ -13,6 +13,10 @@ from ..agents.bioinformatics_agent import count_saved_figures
 from ..agents.bioinformatics.exploration_diagnostics import (
     ensure_exploration_diagnostic_figure,
 )
+from ..agents.bioinformatics.stage1_baseline_figures import (
+    ensure_stage1_baseline_figures,
+)
+from ..services.figure_contract import audit_figure_contract
 from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, prepend_species, safe_pi_brief, STAGE1_KEYWORDS
 from ..utils.blob_store import BLOB_REF_PREFIX
 from .retry import with_retry
@@ -390,28 +394,24 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         if len(analysis_state.analysis_log) > _MAX_ANALYSIS_LOG:
             analysis_state.analysis_log = analysis_state.analysis_log[-_MAX_ANALYSIS_LOG:]
 
-        # Dedup publication_figures by name to handle node retries
+        # Dedup publication_figures by lineage + name to handle node retries
+        # without deleting the source copy retained for snapshot branches.
         seen_fig_names = {}
         for i, fig in enumerate(analysis_state.publication_figures):
-            seen_fig_names[fig.name] = i  # later index wins (keeps latest)
+            seen_fig_names[
+                ((getattr(fig, "lineage_id", None) or "main"), fig.name)
+            ] = i  # later index wins (keeps latest within one lineage)
         if len(seen_fig_names) < len(analysis_state.publication_figures):
             analysis_state.publication_figures = [
                 analysis_state.publication_figures[i]
                 for i in sorted(seen_fig_names.values())
             ]
 
-        # Step 2a: the exploration round's quality-control panel, rendered by the
-        # platform rather than requested from the model. Measured over seven real
-        # sessions the agent ran a full QC pass every time and plotted it zero
-        # times, and the audit below cannot see that gap: METHOD_SIGNATURES holds
-        # tool families and no plotting token, so a step promising a plot is
-        # unverifiable and by design never counted as unmet. The instruction now
-        # asks for the figure and this guarantees it, because a prompt-only figure
-        # rule has already failed once in this codebase. Unconditional for the
-        # exploration round: quality control is the evidence every later claim
-        # rests on, and "the agent drew something else" is not a reason to leave it
-        # unillustrated. Upserted by name, so a node retry replaces rather than
-        # duplicates. Cannot fail the round.
+        # Step 2a: platform-owned exploration visuals. QC, annotation, cluster,
+        # batch/sample and marker baselines must not depend on the model remembering
+        # to draw them. Stable names make both renderers idempotent and let a node
+        # retry replace rather than duplicate an artifact. Missing optional fields
+        # suppress only the panel that needs them.
         # Both stages of the exploration round, not just the first. Stage 1 and
         # Stage 2 re-enter this node with the same round number, and every
         # successful Stage-2 cell that mutates the expression representation calls
@@ -420,9 +420,8 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         # before `diagnostic` is ever consulted (that check is downstream of
         # is_current in is_report_eligible). Observed in session 86a9255a, where a
         # Stage-2 normalization cell invalidated the round's only round-1 figure.
-        # Rendering again after Stage 2 also means the panel describes the
-        # representation the round actually ended on. Upserted by name, so the
-        # second render replaces the first rather than duplicating it.
+        # Rendering again after Stage 2 also means every baseline describes the
+        # representation the round actually ended on.
         if (
             planning_stage in ("stage1", "stage2", "full")
             and int(analysis_state.current_round or 0) <= 1
@@ -431,9 +430,17 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
                 await ensure_exploration_diagnostic_figure(
                     self.bioinformatics_agent, analysis_state
                 )
-            except Exception as diag_err:
+            except Exception as qc_diag_err:
                 logger.warning(
-                    f"[{self.session_id}] QC diagnostic panel skipped: {diag_err!r}"
+                    f"[{self.session_id}] QC diagnostic rendering skipped: {qc_diag_err!r}"
+                )
+            try:
+                await ensure_stage1_baseline_figures(
+                    self.bioinformatics_agent, analysis_state
+                )
+            except Exception as baseline_err:
+                logger.warning(
+                    f"[{self.session_id}] Stage 1 baseline rendering skipped: {baseline_err!r}"
                 )
 
         # Step 2b: audit the approved plan against what actually ran, then — only
@@ -454,6 +461,17 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             audit_summary = self._audit_round_plan_execution(analysis_state, result)
             review_meta["plan_audit"] = audit_summary
 
+        # Re-evaluate after deterministic baselines and any supplementary work.
+        # The executor's own audit was taken before these workflow-owned repair
+        # paths ran, so carrying it forward would mark a figure missing even
+        # after the platform generated it successfully.
+        figure_contract = audit_figure_contract(
+            analysis_state,
+            plan=analysis_state.current_plan,
+            planning_stage=planning_stage,
+        )
+        result["figure_contract"] = figure_contract.summary()
+
         # Step 3: PI summarizes results
         await self._send_message("status", "PI is reviewing analysis results...", AgentType.PI)
 
@@ -462,12 +480,16 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             [{"findings": all_findings, "figures": all_figures}]
         )
 
+        effective_status = result.get("status", "completed")
+        if not figure_contract.passed and effective_status == "completed":
+            effective_status = "partial"
+
         final_result = {
             "findings": all_findings,
             "figures": all_figures,
             "summary": summary,
             "steps_executed": result.get("steps_executed", 0),
-            "status": result.get("status", "completed"),
+            "status": effective_status,
             "mechanism_programs": result.get("mechanism_programs", []),
             # Evidence binding must survive this dict. It is read by three
             # consumers that all fail silently without it: the completeness gate in
@@ -485,6 +507,7 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             "agent_suggestions": self._collect_agent_suggestions(result),
             "plan_audit": audit_summary,
             "post_execution_review": review_meta,
+            "figure_contract": figure_contract.summary(),
         }
 
         _saved_fig_count = count_saved_figures(result.get("analysis_log", []))
@@ -512,7 +535,12 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         # the agent stopped partway through the current plan — NOT a stage
         # completion — so the stage must not advance here.
         plan_revision_requested = bool(result.get("plan_revision_needed"))
-        action = decide_bioinfo_post_execution(planning_stage, plan_revision_requested)
+        action = decide_bioinfo_post_execution(
+            planning_stage,
+            plan_revision_requested,
+            result_status=("forced_stop" if result.get("forced_stop") else effective_status),
+            figure_contract_passed=figure_contract.passed,
+        )
 
         # One-shot: the recompute prompt has now been delivered and acted on.
         analysis_state.runtime_recompute_pending = False
@@ -523,19 +551,27 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             "bioinformatics_result": final_result
         }
 
-        if action == "revision":
+        if action in ("revision", "incomplete"):
             # Stay in the current stage and keep current_plan intact: after the
             # revision is approved the agent resumes this same plan from its
             # checkpoint (e.g. stage1's remaining annotation steps). Do NOT cache
             # the partial result and do NOT advance the stage.
             result_state["plan_revision_needed"] = True
-            result_state["plan_revision_context"] = result.get("plan_revision_context", {})
             # P0-8: invalidate cache so post-revision re-execution actually runs
             # instead of returning the stale (pre-revision) cached result.
             cache_invalidate(analysis_state, AgentType.BIOINFORMATICS)
+            if action == "revision":
+                revision_context = result.get("plan_revision_context", {})
+            else:
+                revision_context = {
+                    "reason": "Bioinformatics execution did not satisfy the completion contract.",
+                    "result_status": effective_status,
+                    "figure_contract": figure_contract.summary(),
+                }
+            result_state["plan_revision_context"] = revision_context
             logger.info(
-                f"[{self.session_id}] Mid-execution plan revision triggered in stage "
-                f"'{planning_stage}'; staying in stage, bioinfo cache invalidated"
+                f"[{self.session_id}] Execution revision triggered in stage "
+                f"'{planning_stage}' ({action}); staying in stage, bioinfo cache invalidated"
             )
             # Required boundary: plan_revision semantic gate (pre_major_revision).
             # Fail closed via capture_required_snapshot → RequiredSnapshotBlocked.

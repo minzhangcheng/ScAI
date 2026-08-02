@@ -13,6 +13,13 @@ import { useCountdownTimer } from '../hooks/useCountdownTimer'
 import { useTranslation } from '../i18n/translations'
 import { useAppStore } from '../stores/appStore'
 
+interface FigureRequirement {
+  figure_type: string
+  description: string
+  minimum_count: number
+  platform_baseline?: '' | 'annotation' | 'batch' | 'cluster' | 'markers'
+}
+
 interface PlanStep {
   id: number
   title: string
@@ -20,6 +27,9 @@ interface PlanStep {
   input: string
   expected_output: string
   rationale: string
+  figure_requirements?: FigureRequirement[]
+  allow_text_only?: boolean
+  text_only_reason?: string
   depends_on: number[]
   status: string
 }
@@ -279,6 +289,27 @@ export function PlanReviewDialog({
                           <div>
                             <span className="text-gray-500">{t('planReviewExpectedOutput')}</span>
                             <span className="text-gray-900">{step.expected_output}</span>
+                          </div>
+                        )}
+                        {step.figure_requirements && step.figure_requirements.length > 0 && (
+                          <div>
+                            <span className="text-gray-500">{t('planReviewRequiredFigures')}</span>
+                            <span className="text-gray-900">
+                              {step.figure_requirements.map((requirement) => (
+                                `${requirement.figure_type} ×${requirement.minimum_count}` +
+                                (requirement.description ? ` — ${requirement.description}` : '') +
+                                (requirement.platform_baseline ? ` [platform: ${requirement.platform_baseline}]` : '')
+                              )).join('; ')}
+                            </span>
+                          </div>
+                        )}
+                        {step.allow_text_only && (
+                          <div>
+                            <span className="text-gray-500">{t('planReviewVisualPolicy')}</span>
+                            <span className="text-gray-900">
+                              {t('planReviewTextOnlyException')}
+                              {step.text_only_reason ? ` — ${step.text_only_reason}` : ''}
+                            </span>
                           </div>
                         )}
                         {step.rationale && (

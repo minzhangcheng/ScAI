@@ -97,6 +97,13 @@ class PublicationFigure(BaseModel):
     png_path: str  # Path to PNG thumbnail
     pdf_path: str  # Path to high-res PDF
     png_base64: Optional[str] = None  # Base64 encoded PNG for preview (compressed)
+    # Digests bind the reviewed record to the bytes that were actually rendered.
+    # They prevent a later plain ``savefig`` using the same filename from being
+    # mistaken for the reviewed publication artifact.  Optional preserves
+    # compatibility with sessions persisted before integrity tracking existed.
+    render_sha256: Optional[str] = None
+    preview_sha256: Optional[str] = None
+    pdf_sha256: Optional[str] = None
     interpretation: Optional[str] = None  # Scientific interpretation of the figure
     review_status: FigureReviewStatus = FigureReviewStatus.PENDING
     pi_feedback: Optional[str] = None
@@ -116,6 +123,21 @@ class PublicationFigure(BaseModel):
     # asked to give. Defaults False, so sessions written before this field
     # deserialize unchanged.
     diagnostic: bool = False
+    # Link the render back to the approved plan when the producer knows it.
+    # Older sessions and platform diagnostics legitimately have no step id.
+    plan_step_id: Optional[int] = None
+    # Stable plan-level provenance prevents a render from an earlier plan that
+    # reused the same numeric step id from closing a revised visual contract.
+    # None preserves deserialization of pre-provenance session records.
+    plan_id: Optional[str] = None
+    # ``result`` is the default.  Platform baselines use ``baseline`` and QC
+    # diagnostics use ``diagnostic`` so completeness checks can distinguish
+    # scientific deliverables from supporting visual context.
+    purpose: str = "result"
+    # Snapshot/branch lineage that owns this render.  Report generation filters
+    # on this field just as it filters RoundResult; otherwise equal round numbers
+    # from two restore branches can leak figures across reports.
+    lineage_id: str = "main"
     round_number: int = 0
     analysis_generation: int = 0
     expression_provenance: Dict[str, Any] = Field(default_factory=dict)

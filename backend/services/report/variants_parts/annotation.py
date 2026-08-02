@@ -18,6 +18,11 @@ from backend.services.report.artifacts import (
     artifact_stems,
     eligible_artifacts,
     excluded_artifact_stems,
+    resolve_archival_render,
+)
+from backend.services.report.figure_discovery import (
+    discover_figures_in_workspace,
+    prepare_discovered_figures,
 )
 from backend.models.schemas import AnalysisState
 
@@ -78,14 +83,45 @@ def generate_annotation_context_report_html(
         invalidated_stems=state.invalidated_artifact_stems,
     )
     workspace_dir = get_session_workspace(state.id) if state.id else None
+    discovered_figures = []
+    if workspace_dir and workspace_dir.exists():
+        discovered_figures = prepare_discovered_figures(
+            discover_figures_in_workspace(workspace_dir),
+            state.publication_figures,
+            invalidated_stems=state.invalidated_artifact_stems,
+            report_only=True,
+            # This report is the review context for annotation validation, not
+            # an archival publication surface. Its own unregistered diagnostic
+            # figures are useful here; registered ineligible figures were already
+            # removed by prepare_discovered_figures.
+            allow_unregistered_diagnostics=True,
+        )
+    discovered_by_name = {
+        Path(candidate["path"]).name: candidate for candidate in discovered_figures
+    }
+    discovered_by_stem = {
+        candidate["name"]: candidate for candidate in discovered_figures
+    }
+    eligible_records_by_stem = {}
+    for figure in eligible_figures:
+        for stem in artifact_stems([figure]):
+            eligible_records_by_stem.setdefault(stem, figure)
 
     def _resolve_fig_path(fname: str) -> Optional[Path]:
-        """Find figure file in workspace or figures subdirectory."""
+        """Resolve through the shared bounded recursive discovery index."""
         if not workspace_dir:
             return None
-        for candidate in [workspace_dir / fname, workspace_dir / "figures" / fname]:
-            if candidate.exists():
-                return candidate
+        record = eligible_records_by_stem.get(Path(fname).stem)
+        if record is not None:
+            # A step log records only a filename. If that stem belongs to a
+            # reviewed artifact, resolve the record-owned render/preview so an
+            # overwritten same-name workspace file cannot inherit its approval.
+            return resolve_archival_render(record, workspace_dir)
+        candidate = discovered_by_name.get(Path(fname).name)
+        if candidate is None:
+            candidate = discovered_by_stem.get(Path(fname).stem)
+        if candidate is not None:
+            return Path(candidate["path"])
         return None
 
     # --- Integrated bioinformatics steps + figures ---
@@ -155,38 +191,45 @@ def generate_annotation_context_report_html(
     orphan_blocks = []
     seen_stems: set = set(linked_stems)
 
-    if workspace_dir and workspace_dir.exists():
-        scan_dirs = [workspace_dir]
-        figures_subdir = workspace_dir / "figures"
-        if figures_subdir.exists():
-            scan_dirs.append(figures_subdir)
-
-        for scan_dir in scan_dirs:
-            for img_file in sorted(scan_dir.glob("*.jpg")) + sorted(scan_dir.glob("*.png")):
-                if img_file.stem in excluded_figure_stems:
-                    continue
-                if img_file.stem in seen_stems:
-                    continue
-                seen_stems.add(img_file.stem)
-                try:
-                    b64 = compress_image_to_base64(str(img_file), max_width=1100, quality=85)
-                    caption = html_module.escape(
-                        figure_desc_map.get(img_file.stem, img_file.stem.replace("_", " ").title())
-                    )
-                    orphan_blocks.append(_make_figure_block(b64, caption))
-                except Exception:
-                    logger.warning("Failed to embed figure in HTML: %s", img_file, exc_info=True)
+    for candidate in discovered_figures:
+        img_file = Path(candidate["path"])
+        if img_file.stem in excluded_figure_stems or img_file.stem in seen_stems:
+            continue
+        seen_stems.add(img_file.stem)
+        try:
+            b64 = compress_image_to_base64(str(img_file), max_width=1100, quality=85)
+            caption = html_module.escape(
+                candidate.get("description")
+                or figure_desc_map.get(
+                    img_file.stem, img_file.stem.replace("_", " ").title()
+                )
+            )
+            orphan_blocks.append(_make_figure_block(b64, caption))
+        except Exception:
+            logger.warning("Failed to embed figure in HTML: %s", img_file, exc_info=True)
 
     # From publication_figures
     for pf in eligible_figures:
         pf_name = getattr(pf, 'name', '') or 'Figure'
-        b64_data = getattr(pf, 'png_base64', None)
         pf_stems = artifact_stems([pf])
-        if b64_data and not (pf_stems & seen_stems):
+        if not (pf_stems & seen_stems) and workspace_dir:
+            fig_path = resolve_archival_render(pf, workspace_dir)
+        else:
+            fig_path = None
+        if fig_path is not None:
             seen_stems.update(pf_stems)
             title = html_module.escape(pf_name)
-            fmt = "png" if b64_data[:5] == "iVBOR" else "jpeg"
-            orphan_blocks.append(_make_figure_block(f"data:image/{fmt};base64,{b64_data}", title))
+            try:
+                b64_data = compress_image_to_base64(
+                    str(fig_path), max_width=1100, quality=85
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to embed publication figure: %s", fig_path,
+                    exc_info=True,
+                )
+            else:
+                orphan_blocks.append(_make_figure_block(b64_data, title))
 
     if orphan_blocks:
         section_num = "5" if bio_steps_html else "4"

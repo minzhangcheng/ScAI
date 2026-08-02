@@ -35,6 +35,32 @@ interface IntegratedReportContent {
 // the id alone duplicates them when a report is regenerated.
 const figureKey = (f: PublicationFigure) => f.name || f.id
 
+// Review and integrated-report messages may carry a compact figure payload.
+// Keep provenance already loaded from the authoritative session inventory when
+// such a message updates the same figure without repeating those fields.
+export const mergeFigureMetadata = (
+  incoming: PublicationFigure,
+  existing?: PublicationFigure,
+): PublicationFigure => {
+  const renderIdentityChanged = !!existing && (
+    incoming.id !== existing.id
+    || (incoming.revisionCount ?? 0) > (existing.revisionCount ?? 0)
+  )
+  return {
+    ...incoming,
+    // Compact events often omit image bytes. They may inherit the preview only
+    // while they still describe the same render. A replacement id or a higher
+    // revision count means the old base64 is stale even when the display name
+    // is unchanged; let the id-based PNG endpoint load the new bytes instead.
+    pngBase64: incoming.pngBase64
+      ?? (renderIdentityChanged ? undefined : existing?.pngBase64),
+    planStepId: incoming.planStepId ?? existing?.planStepId,
+    planId: incoming.planId ?? existing?.planId,
+    purpose: incoming.purpose ?? existing?.purpose,
+    isPublication: incoming.isPublication ?? existing?.isPublication,
+  }
+}
+
 export function ResultsPanel() {
   const { currentSession, messages, language } = useAppStore()
   const { getReport } = useSession()
@@ -101,18 +127,31 @@ export function ResultsPanel() {
       round: f.round ?? f.round_number ?? undefined,
       layoutBlocking: f.layout_blocking ?? f.layoutBlocking ?? false,
       diagnostic: f.diagnostic ?? false,
+      planStepId: f.plan_step_id ?? f.planStepId ?? undefined,
+      planId: f.plan_id ?? f.planId ?? undefined,
+      purpose: f.purpose ?? undefined,
+      isPublication: f.is_publication ?? f.isPublication ?? true,
     })
 
     // Process messages for real-time updates
     for (const msg of messages) {
-      if (msg.type === 'figure_review' || msg.type === 'figure_approved') {
+      if (
+        msg.type === 'figure_review'
+        || msg.type === 'figure_approved'
+        || msg.type === 'figure_revision'
+      ) {
         const content = msg.content as FigureReviewContent
         if (content?.figure) {
           const fig = transformFigure(content.figure)
           setPublicationFigures(prev => {
-            const existing = prev.find((f: PublicationFigure) => f.id === fig.id)
+            const incomingKey = figureKey(fig)
+            const existing = prev.find(
+              (f: PublicationFigure) => figureKey(f) === incomingKey
+            )
             if (existing) {
-              return prev.map((f: PublicationFigure) => f.id === fig.id ? fig : f)
+              return prev.map((f: PublicationFigure) =>
+                figureKey(f) === incomingKey ? mergeFigureMetadata(fig, f) : f
+              )
             }
             return [...prev, fig]
           })
@@ -126,7 +165,23 @@ export function ResultsPanel() {
         // An empty array is truthy. Guarding on length keeps an integrated_report
         // that curated nothing from emptying a gallery the session had populated.
         if (Array.isArray(content?.figures) && content.figures.length > 0) {
-          const curated = content.figures.map(transformFigure)
+          const inventoryIds = new Set(
+            (currentSession?.publicationFigures || []).map(fig => fig.id)
+          )
+          const inventoryNames = new Set(
+            (currentSession?.publicationFigures || []).map(fig => fig.name)
+          )
+          // A persisted integrated-report message is a highlight reel, not an
+          // authoritative inventory. Registered entries survive only when the
+          // current session still owns them; workspace-only context is marked
+          // explicitly and remains eligible. Unknown legacy entries default to
+          // registered so an invalidated old figure cannot reappear on reload.
+          const curated = content.figures
+            .map(transformFigure)
+            .filter(fig => (
+              fig.isPublication === false
+              || (fig.id ? inventoryIds.has(fig.id) : inventoryNames.has(fig.name))
+            ))
           setPublicationFigures(prev => {
             // Union, not replacement. The curated list is the PI's highlight
             // reel, not an inventory — replacing dropped every figure the
@@ -136,12 +191,7 @@ export function ResultsPanel() {
               // Preserve pngBase64 from existing figures (the integrated_report
               // message may have been stripped of base64 by persistence)
               const existing = prev.find(f => figureKey(f) === figureKey(fig))
-              merged.set(
-                figureKey(fig),
-                existing?.pngBase64 && !fig.pngBase64
-                  ? { ...fig, pngBase64: existing.pngBase64 }
-                  : fig
-              )
+              merged.set(figureKey(fig), mergeFigureMetadata(fig, existing))
             }
             for (const fig of prev) {
               if (!merged.has(figureKey(fig))) merged.set(figureKey(fig), fig)

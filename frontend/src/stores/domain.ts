@@ -59,6 +59,14 @@ export interface PublicationFigure {
   layoutBlocking?: boolean
   /** Platform-written validation output rather than a result. */
   diagnostic?: boolean
+  /** Approved analysis-plan step that requested this figure, when applicable. */
+  planStepId?: number
+  /** Approved plan revision that owns the linked step, when recorded. */
+  planId?: string
+  /** Figure role recorded by the producer (for example result or baseline). */
+  purpose?: string
+  /** True for a registered publication artifact; false for workspace-only context. */
+  isPublication?: boolean
 }
 
 export interface PublicationTable {

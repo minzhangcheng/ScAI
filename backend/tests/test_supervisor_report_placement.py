@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from backend.agents.supervisor_agent import SupervisorAgent
+from backend.models.schemas import AnalysisState, FigureReviewStatus, PublicationFigure
 from backend.services.report.report_outline import build_report_outline
 
 _T0 = datetime(2026, 1, 1, 12, 0, 0)
@@ -57,6 +58,12 @@ def test_allocation_marks_figureless_sections_explicitly(tmp_path):
     for sid in ("abstract", "methods", "conclusions"):
         line = next(l for l in text.splitlines() if l.startswith(f"[{sid}]"))
         assert "no figures" in line
+
+    integration = next(s for s in _outline() if s.kind == "integration_final")
+    line = next(l for l in text.splitlines() if l.startswith(f"[{integration.id}]"))
+    assert "text-only" in line
+    assert "no figure required" in line
+    assert "no figures were produced" not in line
 
 
 def test_allocation_flags_unattributed_figures(tmp_path):
@@ -152,3 +159,123 @@ def test_html_embeds_a_repeated_figure_only_once(tmp_path):
     assert html.count('alt="dup.png"') == 1
     assert html.count("CAPTIONALPHA") == 1
     assert "CAPTIONBETA" not in html
+
+
+def test_html_matches_registered_metadata_by_stem_when_record_path_is_empty(tmp_path):
+    agent = _agent()
+    agent.session_id = "s"
+    fig = _png(tmp_path / "workspace" / "figures" / "planned_result.png")
+    state = AnalysisState(id="s", user_id="u", name="T")
+    state.publication_figures = [PublicationFigure(
+        name="planned_result",
+        description="Authoritative planned-result description.",
+        figure_type="heatmap",
+        png_path="",
+        pdf_path="",
+        review_status=FigureReviewStatus.APPROVED,
+    )]
+    sections = [{
+        "id": "direction_1",
+        "title": "Direction",
+        "analysis_type": "specific",
+        "content": "[FIGURE: planned_result.png]",
+        "figures": [],
+        "tables": [],
+    }]
+    out = tmp_path / "reports"
+    out.mkdir(parents=True, exist_ok=True)
+
+    html_path = agent._generate_html_report(
+        {"title": "T", "figures": [], "tables": [], "_analysis_state": state},
+        sections,
+        "abstract",
+        "conclusions",
+        [{"filename": "planned_result.png", "path": str(fig), "category": "heatmap"}],
+        {"planned_result.png": fig},
+        {"total_steps_monitored": 0, "steps_with_technical_issues": 0,
+         "pi_escalations": 0},
+        "en",
+        out,
+        tmp_path / "workspace",
+    )
+
+    html = Path(html_path).read_text(encoding="utf-8")
+    assert "Authoritative planned-result description." in html
+
+
+def test_html_does_not_guess_same_stem_pdf_for_download_or_package(tmp_path):
+    agent = _agent()
+    agent.session_id = "s"
+    fig = _png(tmp_path / "workspace" / "figures" / "result.png")
+    sibling_pdf = fig.with_suffix(".pdf")
+    sibling_pdf.write_bytes(b"%PDF-1.4\nunreviewed replacement")
+    out = tmp_path / "reports"
+    out.mkdir(parents=True)
+    sections = [{
+        "id": "results",
+        "title": "Results",
+        "analysis_type": "specific",
+        "content": "[FIGURE: result.png]",
+        "figures": [],
+        "tables": [],
+    }]
+
+    html_path = agent._generate_html_report(
+        {"title": "T", "figures": [], "tables": []},
+        sections,
+        "abstract",
+        "conclusions",
+        [{"filename": "result.png", "path": str(fig), "category": "other"}],
+        {"result.png": fig},
+        {"total_steps_monitored": 0, "steps_with_technical_issues": 0,
+         "pi_escalations": 0},
+        "en",
+        out,
+        tmp_path / "workspace",
+    )
+
+    html = Path(html_path).read_text(encoding="utf-8")
+    assert "Download PDF" not in html
+    assert not (out / "figures" / sibling_pdf.name).exists()
+
+
+def test_html_uses_only_validated_report_figure_pdf_path(tmp_path):
+    agent = _agent()
+    agent.session_id = "s"
+    fig = _png(tmp_path / "workspace" / "figures" / "result.png")
+    validated_pdf = tmp_path / "validated" / "reviewed-result.pdf"
+    validated_pdf.parent.mkdir()
+    validated_pdf.write_bytes(b"%PDF-1.4\nvalidated")
+    out = tmp_path / "reports"
+    out.mkdir(parents=True)
+    sections = [{
+        "id": "results",
+        "title": "Results",
+        "analysis_type": "specific",
+        "content": "[FIGURE: result.png]",
+        "figures": [],
+        "tables": [],
+    }]
+
+    html_path = agent._generate_html_report(
+        {"title": "T", "figures": [], "tables": []},
+        sections,
+        "abstract",
+        "conclusions",
+        [{
+            "filename": "result.png",
+            "path": str(fig),
+            "pdf_path": str(validated_pdf),
+            "category": "other",
+        }],
+        {"result.png": fig},
+        {"total_steps_monitored": 0, "steps_with_technical_issues": 0,
+         "pi_escalations": 0},
+        "en",
+        out,
+        tmp_path / "workspace",
+    )
+
+    html = Path(html_path).read_text(encoding="utf-8")
+    assert 'figures/reviewed-result.pdf' in html
+    assert (out / "figures" / "reviewed-result.pdf").read_bytes() == validated_pdf.read_bytes()
