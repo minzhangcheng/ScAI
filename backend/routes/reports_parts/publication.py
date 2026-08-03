@@ -40,6 +40,7 @@ from backend.services.session_lifecycle import (
 from backend.state import sessions, state_lock, touch_access_time
 from backend.utils.asyncio_tasks import (
     await_with_deferred_cancellation,
+    run_in_owned_bulk_thread,
     run_in_owned_thread,
 )
 from backend.services.report.artifacts import (
@@ -47,11 +48,8 @@ from backend.services.report.artifacts import (
     gallery_artifact_by_id,
     gallery_artifacts,
     has_blocking_layout_defects,
-    resolve_legacy_artifact_pdf,
-    resolve_legacy_artifact_render,
-    resolve_archival_pdf,
-    resolve_archival_render,
-    verified_artifact_bytes,
+    resolve_verified_archival_artifact,
+    resolve_verified_legacy_artifact,
 )
 from backend.services.report.figure_discovery import ensure_legacy_artifact_inventory
 
@@ -105,7 +103,7 @@ async def _ensure_frozen_artifact_inventory(
             )
             return
 
-        await run_in_owned_thread(
+        await run_in_owned_bulk_thread(
             _scan_and_freeze_legacy_inventory,
             session_id,
             generation,
@@ -322,6 +320,7 @@ def _immutable_download_response(
 
 
 def _prepare_publication_download_sync(
+    session_id: str,
     state: AnalysisState,
     figure_id: str,
     workspace: Path,
@@ -331,6 +330,27 @@ def _prepare_publication_download_sync(
 ) -> tuple[bytes, Path, str]:
     """Resolve and verify one immutable response body off the event loop."""
     from backend.config import REPORTS_DIR as _REPORTS_DIR, SESSION_DIR as _SESSION_DIR
+
+    allowed_roots = tuple(dict.fromkeys(
+        root.resolve()
+        for root in (
+            Path(workspace),
+            _SESSION_DIR / session_id,
+            Path(WORKSPACE_DIR) / session_id,
+            Path(UPLOAD_DIR) / session_id,
+            _REPORTS_DIR / session_id,
+        )
+    ))
+
+    def path_is_session_owned(candidate: Path) -> bool:
+        try:
+            resolved_candidate = Path(candidate).resolve()
+        except (OSError, RuntimeError):
+            return False
+        return any(
+            resolved_candidate == root or resolved_candidate.is_relative_to(root)
+            for root in allowed_roots
+        )
 
     figure = gallery_artifact_by_id(
         state.publication_figures,
@@ -343,19 +363,20 @@ def _prepare_publication_download_sync(
     )
 
     if figure is not None:
-        artifact_record = figure
         fig_name = figure.name
-        artifact_path = (
-            resolve_archival_pdf(figure, workspace)
-            if kind == "pdf"
-            else resolve_archival_render(figure, workspace)
+        resolved_artifact = resolve_verified_archival_artifact(
+            figure,
+            workspace,
+            kind=kind,
+            path_authorizer=path_is_session_owned,
         )
-        if artifact_path is None:
+        if resolved_artifact is None:
             label = "PDF" if kind == "pdf" else "Image"
             raise HTTPException(
                 status_code=404,
                 detail=f"{label} not available for this figure",
             )
+        payload, artifact_path = resolved_artifact
     else:
         if registered_id:
             raise HTTPException(
@@ -373,14 +394,11 @@ def _prepare_publication_download_sync(
             )
         if legacy is None:
             raise HTTPException(status_code=404, detail="Figure not found")
-        artifact_record = legacy
         fig_name = legacy.name
-        artifact_path = (
-            resolve_legacy_artifact_pdf(legacy, workspace)
-            if kind == "pdf"
-            else resolve_legacy_artifact_render(legacy, workspace)
+        resolved_artifact = resolve_verified_legacy_artifact(
+            legacy, workspace, kind=kind,
         )
-        if artifact_path is None:
+        if resolved_artifact is None:
             label = "PDF" if kind == "pdf" else "Image"
             raise HTTPException(
                 status_code=404,
@@ -389,32 +407,14 @@ def _prepare_publication_download_sync(
                     "validation"
                 ),
             )
+        payload, artifact_path = resolved_artifact
 
-    resolved = artifact_path.resolve()
-    allowed_parents = [
-        _SESSION_DIR.resolve(),
-        _REPORTS_DIR.resolve(),
-        Path(WORKSPACE_DIR).resolve(),
-        Path(UPLOAD_DIR).resolve(),
-    ]
-    if not any(
-        resolved == parent or resolved.is_relative_to(parent)
-        for parent in allowed_parents
-    ):
+    if not path_is_session_owned(artifact_path):
         raise HTTPException(
             status_code=403,
-            detail="Access denied: file outside allowed directories",
+            detail="Access denied: artifact does not belong to this session",
         )
 
-    payload = verified_artifact_bytes(
-        artifact_path, artifact_record, kind=kind,
-    )
-    if payload is None:
-        label = "PDF" if kind == "pdf" else "Image"
-        raise HTTPException(
-            status_code=404,
-            detail=f"{label} file changed or failed record-bound validation",
-        )
     return payload, artifact_path, fig_name
 
 
@@ -427,17 +427,21 @@ def _prepare_generation_bound_download_sync(
     target_lineage: str,
     kind: str,
 ) -> tuple[bytes, Path, str]:
-    return _with_generation_file_barrier(
+    # Validate the generation on both sides of the expensive immutable-byte
+    # read.  The lifecycle flock is held only for each check, not for image
+    # decoding/hashing; a concurrent delete or replacement makes the second
+    # check fail and the already-read bytes are discarded.
+    _with_generation_file_barrier(session_id, generation, lambda: None)
+    result = _prepare_publication_download_sync(
         session_id,
-        generation,
-        lambda: _prepare_publication_download_sync(
-            state,
-            figure_id,
-            workspace,
-            target_lineage,
-            kind=kind,
-        ),
+        state,
+        figure_id,
+        workspace,
+        target_lineage,
+        kind=kind,
     )
+    _with_generation_file_barrier(session_id, generation, lambda: None)
+    return result
 
 
 async def _prepare_generation_bound_download(
@@ -451,17 +455,16 @@ async def _prepare_generation_bound_download(
 ) -> tuple[bytes, Path, str]:
     generation = int(getattr(state, "lifecycle_generation", 0) or 0)
     try:
-        async with get_lifecycle_lock(session_id):
-            return await run_in_owned_thread(
-                _prepare_generation_bound_download_sync,
-                session_id,
-                generation,
-                state,
-                figure_id,
-                workspace,
-                target_lineage,
-                kind,
-            )
+        return await run_in_owned_bulk_thread(
+            _prepare_generation_bound_download_sync,
+            session_id,
+            generation,
+            state,
+            figure_id,
+            workspace,
+            target_lineage,
+            kind,
+        )
     except SessionGoneError as exc:
         raise HTTPException(status_code=404, detail="Session no longer exists") from exc
     except SessionGenerationError as exc:

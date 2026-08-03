@@ -13,6 +13,7 @@ from jose import JWTError, jwt
 from fastapi import Depends, HTTPException, Request, WebSocket, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
+from backend.models.user import USER_ACCESSIBLE_STATUSES
 from backend.utils.db import AppDB
 from backend.config import APP_DB_PATH
 
@@ -213,13 +214,13 @@ async def require_admin(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(_bearer),
 ) -> str:
-    """Return user_id for admin operations. Requires user.role=='admin'."""
+    """Return user_id for admin operations from a usable admin account."""
     user_id = await require_auth(request, credentials)
     db = await get_db()
     user = await db.get_user_by_id(user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    if user.role != "admin":
+    if user.role != "admin" or user.status not in USER_ACCESSIBLE_STATUSES:
         raise HTTPException(status_code=403, detail="Admin required")
     return user_id
 
@@ -285,8 +286,16 @@ async def ws_require_auth(websocket: WebSocket) -> Optional[str]:
     token = parts[1]
     user_id = await authenticate_token(token)
     if user_id:
-        await websocket.accept(subprotocol=WS_AUTH_SUBPROTOCOL)
-        return user_id
+        db = await get_db()
+        user = await db.get_user_by_id(user_id)
+        if user is not None and user.status in USER_ACCESSIBLE_STATUSES:
+            await websocket.accept(subprotocol=WS_AUTH_SUBPROTOCOL)
+            return user_id
+        await websocket.close(
+            code=WS_AUTH_FAILED_CODE,
+            reason="Account unavailable",
+        )
+        return None
 
     await websocket.close(code=WS_AUTH_FAILED_CODE, reason="Invalid token")
     return None

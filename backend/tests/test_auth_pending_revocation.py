@@ -9,12 +9,12 @@ from starlette.responses import PlainTextResponse
 from backend.middleware import auth as auth_middleware
 
 
-def _install_pending_user(monkeypatch):
+def _install_user(monkeypatch, *, status: str):
     async def authenticate(_token):
-        return "pending-user"
+        return f"{status}-user"
 
     async def get_user_by_id(_user_id):
-        return SimpleNamespace(id="pending-user", status="pending", role="user")
+        return SimpleNamespace(id=f"{status}-user", status=status, role="user")
 
     async def get_db():
         return SimpleNamespace(get_user_by_id=get_user_by_id)
@@ -43,7 +43,7 @@ async def _call_next(_request):
 
 @pytest.mark.asyncio
 async def test_pending_status_revokes_an_existing_jwt(monkeypatch):
-    _install_pending_user(monkeypatch)
+    _install_user(monkeypatch, status="pending")
     middleware = auth_middleware.AuthMiddleware(_call_next)
 
     response = await middleware.dispatch(
@@ -57,7 +57,34 @@ async def test_pending_status_revokes_an_existing_jwt(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_pending_status_still_allows_logout(monkeypatch):
-    _install_pending_user(monkeypatch)
+    _install_user(monkeypatch, status="pending")
+    middleware = auth_middleware.AuthMiddleware(_call_next)
+
+    response = await middleware.dispatch(
+        _request("/api/auth/logout", method="POST"),
+        _call_next,
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_deleting_status_revokes_existing_jwt_for_session_routes(monkeypatch):
+    _install_user(monkeypatch, status="deleting")
+    middleware = auth_middleware.AuthMiddleware(_call_next)
+
+    response = await middleware.dispatch(
+        _request("/api/session/existing-session"),
+        _call_next,
+    )
+
+    assert response.status_code == 403
+    assert b"Account deletion is in progress." in response.body
+
+
+@pytest.mark.asyncio
+async def test_deleting_status_still_allows_logout(monkeypatch):
+    _install_user(monkeypatch, status="deleting")
     middleware = auth_middleware.AuthMiddleware(_call_next)
 
     response = await middleware.dispatch(

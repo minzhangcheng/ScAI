@@ -16,9 +16,12 @@ T = TypeVar("T")
 
 
 _OWNED_THREAD_MAX_WORKERS = 8
+_OWNED_BULK_THREAD_MAX_WORKERS = 4
 _OWNED_THREAD_DRAIN_POLL_SECONDS = 0.05
 _owned_thread_executor: ThreadPoolExecutor | None = None
 _owned_thread_executor_pid = 0
+_owned_bulk_thread_executor: ThreadPoolExecutor | None = None
+_owned_bulk_thread_executor_pid = 0
 _owned_thread_executor_lock = threading.Lock()
 
 
@@ -40,6 +43,24 @@ def _get_owned_thread_executor() -> ThreadPoolExecutor:
             )
             _owned_thread_executor_pid = pid
         return _owned_thread_executor
+
+
+def _get_owned_bulk_thread_executor() -> ThreadPoolExecutor:
+    """Return the pool reserved for long report/archive filesystem work."""
+    global _owned_bulk_thread_executor, _owned_bulk_thread_executor_pid
+
+    pid = os.getpid()
+    with _owned_thread_executor_lock:
+        if (
+            _owned_bulk_thread_executor is None
+            or _owned_bulk_thread_executor_pid != pid
+        ):
+            _owned_bulk_thread_executor = ThreadPoolExecutor(
+                max_workers=_OWNED_BULK_THREAD_MAX_WORKERS,
+                thread_name_prefix="scai-owned-bulk",
+            )
+            _owned_bulk_thread_executor_pid = pid
+        return _owned_bulk_thread_executor
 
 
 def consume_current_cancellation_request() -> bool:
@@ -101,9 +122,32 @@ async def run_in_owned_thread(
     propagating cancellation. The pool is process-local and reused, so upload
     chunk loops do not create and join one OS thread per MiB.
     """
+    return await _run_in_owned_executor(
+        _get_owned_thread_executor(), func, *args, **kwargs
+    )
+
+
+async def run_in_owned_bulk_thread(
+    func: Callable[P, T],
+    /,
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> T:
+    """Run long bulk I/O without occupying latency-sensitive owned workers."""
+    return await _run_in_owned_executor(
+        _get_owned_bulk_thread_executor(), func, *args, **kwargs
+    )
+
+
+async def _run_in_owned_executor(
+    executor: ThreadPoolExecutor,
+    func: Callable[P, T],
+    /,
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> T:
     loop = asyncio.get_running_loop()
     context = contextvars.copy_context()
     call = functools.partial(context.run, func, *args, **kwargs)
-    executor = _get_owned_thread_executor()
     future = loop.run_in_executor(executor, call)
     return await await_with_deferred_cancellation(future)

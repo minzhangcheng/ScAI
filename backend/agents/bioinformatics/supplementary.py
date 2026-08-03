@@ -10,6 +10,7 @@ the caller can cite their ``CodeExecution`` ids as evidence provenance.
 from typing import Any, Dict, List, Optional, Set
 import asyncio
 import ast
+import hashlib
 import json
 import logging
 import time
@@ -68,17 +69,34 @@ class SupplementaryMixin:
         "print_png", "print_jpg", "print_jpeg", "print_figure",
         "write_bytes", "write_text",
     })
+    _SUPPLEMENTARY_EXACT_WRITE_CALLS = frozenset({
+        "os.open", "os.write", "os.pwrite", "os.truncate", "os.ftruncate",
+        "os.rename", "os.replace", "os.remove", "os.unlink", "os.link",
+        "os.symlink", "os.mkdir", "os.makedirs", "os.rmdir",
+        "os.removedirs", "os.utime", "shutil.copy", "shutil.copy2",
+        "shutil.copyfile", "shutil.copytree", "shutil.move",
+    })
 
     @staticmethod
-    def _supplementary_image_versions(working_dir: Any) -> Dict[str, tuple[str, int]]:
-        """Snapshot every image path the archival scanner could later discover."""
+    def _supplementary_image_versions(
+        working_dir: Any,
+    ) -> Dict[str, tuple[str, int, int, str]]:
+        """Snapshot image content identity, not only attacker-restorable mtime."""
         if not working_dir:
             return {}
-        versions: Dict[str, tuple[str, int]] = {}
+        versions: Dict[str, tuple[str, int, int, str]] = {}
         for candidate in discover_figures_in_workspace(Path(working_dir)):
             path = Path(str(candidate.get("path") or ""))
             try:
-                versions[str(path)] = (path.stem, path.stat().st_mtime_ns)
+                metadata = path.stat()
+                with path.open("rb") as handle:
+                    digest = hashlib.file_digest(handle, "sha256").hexdigest()
+                versions[str(path)] = (
+                    path.stem,
+                    metadata.st_size,
+                    metadata.st_mtime_ns,
+                    digest,
+                )
             except OSError:
                 continue
         return versions
@@ -86,14 +104,14 @@ class SupplementaryMixin:
     def _quarantine_supplementary_images(
         self,
         state: Any,
-        before: Dict[str, tuple[str, int]],
+        before: Dict[str, tuple[str, int, int, str]],
     ) -> Set[str]:
         """Withhold images created/overwritten outside the reviewed figure tool."""
         sandbox = getattr(self, "sandbox", None)
         after = self._supplementary_image_versions(getattr(sandbox, "working_dir", None))
         changed = {
-            stem for path, (stem, version) in after.items()
-            if path not in before or before[path][1] != version
+            identity[0] for path, identity in after.items()
+            if path not in before or before[path][1:] != identity[1:]
         }
         if not changed or state is None:
             return changed
@@ -145,12 +163,51 @@ class SupplementaryMixin:
             # record.  Static safety is not a second Python parser.
             return None
 
+        module_aliases: Dict[str, str] = {}
+        symbol_aliases: Dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for item in node.names:
+                    root = item.name.split(".")[0]
+                    local = item.asname or root
+                    # ``import package.submodule`` binds only ``package``;
+                    # an explicit alias binds the full dotted module.
+                    module_aliases[local] = item.name if item.asname else root
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                for item in node.names:
+                    if item.name == "*":
+                        continue
+                    local = item.asname or item.name
+                    symbol_aliases[local] = f"{node.module}.{item.name}"
+
+        def qualified_call_name(func: ast.expr) -> str:
+            if isinstance(func, ast.Name):
+                return symbol_aliases.get(func.id, func.id).lower()
+            if not isinstance(func, ast.Attribute):
+                return ""
+            parts: List[str] = [func.attr]
+            value = func.value
+            while isinstance(value, ast.Attribute):
+                parts.append(value.attr)
+                value = value.value
+            if isinstance(value, ast.Name):
+                root = module_aliases.get(value.id, value.id)
+                parts.append(root)
+            return ".".join(reversed(parts)).lower()
+
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
+            qualified = qualified_call_name(func)
+            if qualified in self._SUPPLEMENTARY_EXACT_WRITE_CALLS:
+                return f"disallowed file-writing call '{qualified}'"
             if isinstance(func, ast.Name) and func.id.lower() in self._SUPPLEMENTARY_FILE_WRITE_CALLS:
                 return f"disallowed file-writing call '{func.id.lower()}'"
+            if isinstance(func, ast.Name):
+                canonical_tail = qualified.rsplit(".", 1)[-1]
+                if canonical_tail in self._SUPPLEMENTARY_FILE_WRITE_CALLS:
+                    return f"disallowed file-writing call '{qualified}'"
             if isinstance(func, ast.Attribute):
                 call_name = func.attr.lower()
                 if call_name in self._SUPPLEMENTARY_FILE_WRITE_CALLS:
@@ -159,15 +216,7 @@ class SupplementaryMixin:
                 # Scanpy plots write to sc.settings.figdir when ``save`` is any
                 # value other than False/None.  A bare substring check is both too
                 # weak (multiline calls) and too strong (save=False).
-                dotted: List[str] = [func.attr]
-                value = func.value
-                while isinstance(value, ast.Attribute):
-                    dotted.append(value.attr)
-                    value = value.value
-                if isinstance(value, ast.Name):
-                    dotted.append(value.id)
-                qualified = ".".join(reversed(dotted)).lower()
-                if qualified.startswith("sc.pl."):
+                if qualified.startswith(("sc.pl.", "scanpy.pl.")):
                     for keyword in node.keywords:
                         if keyword.arg != "save":
                             continue
@@ -179,7 +228,16 @@ class SupplementaryMixin:
 
             # A direct ``open(path, 'wb')`` can otherwise manufacture a PNG that
             # recursive report discovery would mistake for an archival artifact.
-            is_builtin_open = isinstance(func, ast.Name) and func.id == "open"
+            is_builtin_open = (
+                isinstance(func, ast.Name)
+                and (
+                    func.id == "open"
+                    or qualified in {
+                        "builtins.open", "io.open", "codecs.open",
+                        "gzip.open", "bz2.open", "lzma.open",
+                    }
+                )
+            )
             is_attribute_open = (
                 isinstance(func, ast.Attribute) and func.attr.lower() == "open"
             )
@@ -197,14 +255,6 @@ class SupplementaryMixin:
                         mode_node = node.args[1]
                         mode_was_supplied = True
                     elif is_attribute_open:
-                        dotted: List[str] = [func.attr]
-                        value = func.value
-                        while isinstance(value, ast.Attribute):
-                            dotted.append(value.attr)
-                            value = value.value
-                        if isinstance(value, ast.Name):
-                            dotted.append(value.id)
-                        qualified = ".".join(reversed(dotted)).lower()
                         module_open = qualified in {
                             "builtins.open", "io.open", "codecs.open",
                             "gzip.open", "bz2.open", "lzma.open",

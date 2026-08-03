@@ -30,7 +30,7 @@ from backend.utils.files import (
     temp_file_on_error,
 )
 from backend.utils.auth import require_session_ownership
-from backend.utils.asyncio_tasks import run_in_owned_thread
+from backend.utils.asyncio_tasks import run_in_owned_bulk_thread
 from backend.services.report.paths import (
     resolve_published_report_dir,
     resolve_report_output_dir,
@@ -158,7 +158,7 @@ async def _disk_zip_response(
 
     async with temp_file_on_error(str(tmp_path)):
         try:
-            await run_in_owned_thread(
+            await run_in_owned_bulk_thread(
                 _build_disk_zip,
                 source_dir,
                 tmp_path,
@@ -359,7 +359,7 @@ async def download_report_archive(
     tmp.close()
     async with temp_file_on_error(str(staged_archive)):
         try:
-            await run_in_owned_thread(
+            await run_in_owned_bulk_thread(
                 _copy_validated_archive,
                 resolved_archive,
                 staged_archive,

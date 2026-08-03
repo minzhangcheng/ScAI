@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.config import (
     UPLOAD_CHUNK_SIZE, MAX_UPLOAD_SIZE, get_session_uploads,
@@ -23,6 +23,7 @@ from backend.services.session_lifecycle import (
     assert_generation_writable,
     get_lifecycle_lock,
 )
+from backend.services.upload import read_chunk_with_limit
 from backend.utils.auth import require_session_ownership
 from backend.utils.files import fsync_directory, safe_filename, validate_path_within
 from backend.utils.asyncio_tasks import (
@@ -251,34 +252,20 @@ async def _publish_upload_staging(
         raise
 
 
-async def _read_chunk_with_limit(
-    upload_file,
-    *,
-    max_bytes: int,
-    read_size: int = 1024 * 1024,
-) -> bytes:
-    """Read one request chunk without allowing an unbounded body allocation."""
-    payload = bytearray()
-    while True:
-        chunk = await upload_file.read(min(read_size, max_bytes + 1))
-        if not chunk:
-            return bytes(payload)
-        payload.extend(chunk)
-        if len(payload) > max_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Chunk exceeds maximum size ({max_bytes} bytes)",
-            )
-
-
 class InitChunkedUploadRequest(BaseModel):
-    """Request to initialize a chunked upload"""
+    """Request to initialize a legacy web chunked upload."""
     filename: str
     total_size: int
     total_chunks: int
     file_type: str  # 'snrna_seq', 'loom', 'pathology', 'biochemistry'
     group: Optional[str] = None  # 'control' or 'treatment' for seq data
-    expected_sha256: str
+    expected_sha256: str = Field(
+        description=(
+            "Required SHA-256 digest of the complete file as 64 hexadecimal "
+            "characters. Clients predating ScAI 0.38.11 must compute and send "
+            "this field before initializing an upload."
+        ),
+    )
 
 
 # ============== Upload Endpoints ==============
@@ -550,7 +537,7 @@ async def upload_generic_file(
 
 @router.post("/session/{session_id}/upload/init-chunked")
 async def init_chunked_upload(session_id: str, request: Request, body: InitChunkedUploadRequest):
-    """Initialize a chunked upload for large files"""
+    """Initialize a chunked upload whose final bytes must match the required digest."""
     # Import here to avoid circular import
     from backend.services.upload import upload_manager
 
@@ -625,7 +612,7 @@ async def upload_chunk(
     # Import here to avoid circular import
     from backend.services.upload import upload_manager
 
-    chunk_data = await _read_chunk_with_limit(
+    chunk_data = await read_chunk_with_limit(
         file, max_bytes=UPLOAD_CHUNK_SIZE,
     )
 

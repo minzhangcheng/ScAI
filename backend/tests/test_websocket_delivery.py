@@ -191,6 +191,109 @@ async def test_send_deadline_releases_replacement_delivery(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_send_deadline_is_hard_when_transport_suppresses_cancellation(
+    monkeypatch,
+):
+    from backend.utils import websocket_delivery
+
+    monkeypatch.setattr(
+        websocket_delivery, "_WEBSOCKET_SEND_TIMEOUT_SECONDS", 0.01,
+    )
+
+    class CancellationResistantSocket(_Socket):
+        async def send_json(self, payload):
+            self.send_started.set()
+            try:
+                await self.release_send.wait()
+            except asyncio.CancelledError:
+                await self.release_send.wait()
+            self.sent.append(payload)
+
+    old_socket = CancellationResistantSocket()
+    old = await register_analysis_websocket("hard-send-timeout", old_socket)
+    old_send = asyncio.create_task(
+        send_connection_json(old, {"generation": "old"})
+    )
+    await old_socket.send_started.wait()
+    new_socket = _Socket()
+    new = await register_analysis_websocket("hard-send-timeout", new_socket)
+
+    assert await asyncio.wait_for(old_send, timeout=0.2) is False
+    assert await asyncio.wait_for(
+        send_connection_json(new, {"generation": "new"}), timeout=0.2
+    ) is True
+    assert new_socket.sent == [{"generation": "new"}]
+    assert websocket_delivery.abandoned_transport_task_count() == 1
+
+    old_socket.release_send.set()
+    for _ in range(50):
+        if websocket_delivery.abandoned_transport_task_count() == 0:
+            break
+        await asyncio.sleep(0.001)
+    assert websocket_delivery.abandoned_transport_task_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_abandoned_transport_failure_is_logged(monkeypatch, caplog):
+    from backend.utils import websocket_delivery
+
+    monkeypatch.setattr(
+        websocket_delivery, "_WEBSOCKET_SEND_TIMEOUT_SECONDS", 0.01,
+    )
+    release = asyncio.Event()
+
+    class LateFailureSocket(_Socket):
+        async def send_json(self, _payload):
+            self.send_started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                await release.wait()
+            raise RuntimeError("late transport failure")
+
+    socket = LateFailureSocket()
+    connection = await register_analysis_websocket("late-failure", socket)
+
+    with caplog.at_level("WARNING"):
+        assert await send_connection_json(connection, {"late": True}) is False
+        assert websocket_delivery.abandoned_transport_task_count() == 1
+        release.set()
+        for _ in range(50):
+            if websocket_delivery.abandoned_transport_task_count() == 0:
+                break
+            await asyncio.sleep(0.001)
+
+    assert websocket_delivery.abandoned_transport_task_count() == 0
+    assert "Background WebSocket task failed" in caplog.text
+    assert "late transport failure" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_retire_timeout_closes_socket_before_dropping_owner_slot(monkeypatch):
+    from backend.utils import websocket_delivery
+
+    monkeypatch.setattr(
+        websocket_delivery, "_WEBSOCKET_RETIRE_LOCK_TIMEOUT_SECONDS", 0.01,
+    )
+    old_socket = _Socket()
+    old = await register_analysis_websocket("retire-timeout", old_socket)
+    await old.lock.acquire()
+    try:
+        new_socket = _Socket()
+        new = await register_analysis_websocket("retire-timeout", new_socket)
+        for _ in range(100):
+            if old.socket_closed:
+                break
+            await asyncio.sleep(0.001)
+
+        assert old.socket_closed is True
+        assert old_socket.closed == [1000]
+        assert await send_connection_json(new, {"generation": "new"}) is True
+    finally:
+        old.lock.release()
+
+
+@pytest.mark.asyncio
 async def test_replacement_close_deadline_does_not_block_registration(monkeypatch):
     from backend.utils import websocket_delivery
 
@@ -215,13 +318,174 @@ async def test_replacement_close_deadline_does_not_block_registration(monkeypatc
 
     await asyncio.wait_for(close_started.wait(), timeout=0.2)
     for _ in range(50):
-        if old.socket_closed:
+        if old.transport_close_abandoned:
             break
         await asyncio.sleep(0.001)
 
-    assert old.socket_closed is True
+    assert old.transport_close_started is True
+    assert old.transport_close_abandoned is True
+    assert old.socket_closed is False
     assert websockets["close-timeout"] is new_socket
     assert await send_connection_json(new, {"generation": "new"}) is True
+
+
+@pytest.mark.asyncio
+async def test_cancellation_resistant_close_is_attempted_only_once(monkeypatch):
+    from backend.utils import websocket_delivery
+
+    monkeypatch.setattr(
+        websocket_delivery, "_WEBSOCKET_CLOSE_TIMEOUT_SECONDS", 0.01,
+    )
+    release = asyncio.Event()
+
+    class CancellationResistantCloseSocket(_Socket):
+        def __init__(self):
+            super().__init__()
+            self.close_calls = 0
+
+        async def close(self, code=1000):
+            self.close_calls += 1
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                await release.wait()
+
+    socket = CancellationResistantCloseSocket()
+    connection = await register_analysis_websocket("one-close-attempt", socket)
+
+    await websocket_delivery._close_socket_locked(connection, code=1011)
+    await websocket_delivery._close_socket_locked(connection, code=1000)
+
+    assert socket.close_calls == 1
+    assert connection.transport_close_started is True
+    assert connection.transport_close_abandoned is True
+    assert connection.socket_closed is False
+    release.set()
+    for _ in range(50):
+        if connection.socket_closed:
+            break
+        await asyncio.sleep(0.001)
+    assert connection.socket_closed is True
+    assert websocket_delivery.abandoned_transport_task_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_unregister_removes_registry_and_observes_late_close(
+    monkeypatch,
+):
+    from backend.utils import websocket_delivery
+
+    monkeypatch.setattr(
+        websocket_delivery, "_WEBSOCKET_CLOSE_TIMEOUT_SECONDS", 0.01,
+    )
+    close_started = asyncio.Event()
+    release = asyncio.Event()
+
+    class CancellationResistantCloseSocket(_Socket):
+        async def close(self, code=1000):
+            self.closed.append(code)
+            close_started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                await release.wait()
+
+    socket = CancellationResistantCloseSocket()
+    connection = await register_analysis_websocket("cancel-close", socket)
+    unregister = asyncio.create_task(
+        unregister_websocket(connection, close=True, code=4001)
+    )
+    await close_started.wait()
+    unregister.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await unregister
+
+    assert connection.closed is True
+    assert "cancel-close" not in websockets
+    assert await send_connection_json(connection, {"late": True}) is False
+    assert websocket_delivery.abandoned_transport_task_count() == 1
+
+    release.set()
+    for _ in range(50):
+        if connection.socket_closed:
+            break
+        await asyncio.sleep(0.001)
+    assert connection.socket_closed is True
+    assert websocket_delivery.abandoned_transport_task_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_unregister_waiting_for_lock_still_closes_transport():
+    close_started = asyncio.Event()
+
+    class CloseTrackingSocket(_Socket):
+        async def close(self, code=1000):
+            self.closed.append(code)
+            close_started.set()
+
+    socket = CloseTrackingSocket()
+    connection = await register_analysis_websocket("cancel-before-lock", socket)
+    await connection.lock.acquire()
+    unregister = asyncio.create_task(
+        unregister_websocket(connection, close=True, code=4001)
+    )
+    await asyncio.sleep(0)
+    assert connection.closed is True
+    assert connection.transport_close_started is False
+    assert socket.closed == []
+
+    unregister.cancel()
+    await asyncio.sleep(0)
+    assert not unregister.done(), "caller cancellation abandoned owned close"
+
+    connection.lock.release()
+    with pytest.raises(asyncio.CancelledError):
+        await unregister
+
+    assert close_started.is_set()
+    assert socket.closed == [4001]
+    assert connection.socket_closed is True
+    assert "cancel-before-lock" not in websockets
+    assert await close_analysis_websocket(
+        "cancel-before-lock", code=4001
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drain_retries_abandoned_transport_cancellation(monkeypatch):
+    from backend.utils import websocket_delivery
+
+    monkeypatch.setattr(
+        websocket_delivery, "_WEBSOCKET_SEND_TIMEOUT_SECONDS", 0.01,
+    )
+    release = asyncio.Event()
+
+    class RepeatedlyCancellationResistantSocket(_Socket):
+        async def send_json(self, _payload):
+            self.send_started.set()
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    continue
+
+    socket = RepeatedlyCancellationResistantSocket()
+    connection = await register_analysis_websocket("shutdown-drain", socket)
+    assert await send_connection_json(connection, {"pending": True}) is False
+    assert websocket_delivery.abandoned_transport_task_count() == 1
+
+    try:
+        assert await websocket_delivery.drain_abandoned_transport_tasks(
+            timeout=0.01
+        ) == 1
+    finally:
+        release.set()
+    for _ in range(50):
+        if websocket_delivery.abandoned_transport_task_count() == 0:
+            break
+        await asyncio.sleep(0.001)
+    assert websocket_delivery.abandoned_transport_task_count() == 0
 
 
 @pytest.mark.asyncio

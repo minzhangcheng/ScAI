@@ -501,7 +501,8 @@ Then create sections in this EXACT order.
         section_plan: Dict[str, Any],
         findings: Dict[str, Any],
         language: str,
-        analysis_summary: Optional[Dict[str, Any]] = None
+        analysis_summary: Optional[Dict[str, Any]] = None,
+        force_fallback: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate a report section using EXISTING figures and tables from the analysis phase.
@@ -685,17 +686,20 @@ Generate a comprehensive scientific narrative for this section. Your response mu
 """
 
         # Use vision API if we have figure images (fallback chain handled internally), otherwise text-only
-        try:
-            if section_images:
-                response = await self._chat_with_vision_fallback(
-                    text_prompt=prompt, images=section_images[:6],
-                    temperature=0.3, max_tokens=32768, request_timeout=600.0,
-                )
-            else:
-                response = await self._pi_chat(prompt, temperature=0.3)
-        except Exception as e:
-            logger.warning(f"Report section '{section_title}' generation failed: {e}")
+        if force_fallback:
             response = ""
+        else:
+            try:
+                if section_images:
+                    response = await self._chat_with_vision_fallback(
+                        text_prompt=prompt, images=section_images[:6],
+                        temperature=0.3, max_tokens=32768, request_timeout=600.0,
+                    )
+                else:
+                    response = await self._pi_chat(prompt, temperature=0.3)
+            except Exception as e:
+                logger.warning(f"Report section '{section_title}' generation failed: {e}")
+                response = ""
 
         # Parse the response
         try:

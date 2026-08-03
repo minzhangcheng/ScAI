@@ -13,10 +13,18 @@ from backend.utils.auth import require_session_ownership
 from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import validate_path_within
 from backend.services.config_io import apply_config_to_session, export_session_to_config
-from backend.services.upload import init_upload, upload_chunk, complete_upload, cleanup_session_uploads
+from backend.services.upload import (
+    cleanup_session_uploads,
+    complete_upload,
+    init_upload,
+    read_chunk_with_limit,
+    upload_chunk,
+)
 from backend.services.report.paths import resolve_published_report_dir
 from backend.config import (
-    get_session_dir, ensure_session_dirs,
+    UPLOAD_CHUNK_SIZE,
+    ensure_session_dirs,
+    get_session_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,7 +120,10 @@ async def upload_chunk_endpoint(
     user_id = getattr(request.state, "user_id", "")
     await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    chunk_data = await file.read()
+    chunk_data = await read_chunk_with_limit(
+        file,
+        max_bytes=UPLOAD_CHUNK_SIZE,
+    )
     return await upload_chunk(session_id, upload_id, chunk_index, chunk_data)
 
 

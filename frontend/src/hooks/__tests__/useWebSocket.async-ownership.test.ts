@@ -87,6 +87,59 @@ describe('WebSocket async response ownership', () => {
     expect(useAppStore.getState().chatMessages).toEqual([])
   })
 
+  it('drops old-session chat terminal events before the new socket connects', () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    useAppStore.setState({
+      chatLoading: true,
+      chatDelegationActive: true,
+      chatDelegationPlan: 'old-session work',
+      chatAbortController: controller,
+    })
+    const { result } = renderHook(() => useWebSocket())
+    act(() => result.current.connect())
+    const old = SocketMock.instances[0]
+
+    act(() => useAppStore.getState().setCurrentSession(session('new')))
+    // Deliberately do not call connect(): this is the ownership gap that the
+    // previous test skipped by retiring the old socket immediately.
+    act(() => {
+      old.onmessage?.({ data: JSON.stringify({ type: 'chat_result' }) } as MessageEvent)
+      old.onmessage?.({ data: JSON.stringify({ type: 'chat_cancelled' }) } as MessageEvent)
+      old.onmessage?.({
+        data: JSON.stringify({ type: 'chat_error', content: { error: 'from old' } }),
+      } as MessageEvent)
+    })
+
+    const store = useAppStore.getState()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(store.chatLoading).toBe(true)
+    expect(store.chatDelegationActive).toBe(true)
+    expect(store.chatDelegationPlan).toBe('old-session work')
+    expect(store.chatAbortController).toBe(controller)
+    expect(store.chatMessages).toEqual([])
+  })
+
+  it('drops every old-session websocket event before reconnect', () => {
+    const { result } = renderHook(() => useWebSocket())
+    act(() => result.current.connect())
+    const old = SocketMock.instances[0]
+    act(() => useAppStore.getState().setCurrentSession(session('new')))
+
+    act(() => old.onmessage?.({
+      data: JSON.stringify({
+        type: 'completed',
+        content: { final_summary: 'old summary' },
+      }),
+    } as MessageEvent))
+
+    const store = useAppStore.getState()
+    expect(store.currentSession?.id).toBe('new')
+    expect(store.currentSession?.status).toBe('running')
+    expect(store.messages).toEqual([])
+  })
+
   it('drops a same-session conflict reload from an older generation', async () => {
     let resolveOld!: (response: Response) => void
     vi.stubGlobal('fetch', vi.fn().mockReturnValue(

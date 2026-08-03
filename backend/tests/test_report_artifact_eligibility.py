@@ -8,10 +8,12 @@ from backend.services.report.artifacts import (
     archival_render_available,
     eligible_artifacts,
     gallery_artifacts,
+    has_frozen_publication_pair,
     is_gallery_eligible,
     is_report_eligible,
     materialize_archival_preview,
     resolve_archival_render,
+    resolve_verified_archival_artifact,
 )
 from backend.services.report.figures import FiguresMixin
 from backend.tests.figure_image_helpers import valid_image_bytes, write_valid_image
@@ -52,6 +54,23 @@ def test_only_current_approved_artifacts_are_reportable():
     assert [f.name for f in eligible_artifacts([approved, reserved, pending, revision, stale])] == [
         "approved", "reserved"
     ]
+
+
+def test_valid_preview_digest_survives_malformed_render_digest():
+    payload = valid_image_bytes("JPEG")
+    figure = _figure(
+        "preview-fallback",
+        FigureReviewStatus.APPROVED,
+        png_path="/missing/preview-fallback.jpg",
+        png_base64=base64.b64encode(payload).decode(),
+        render_sha256="malformed-but-nonempty",
+        preview_sha256=hashlib.sha256(payload).hexdigest(),
+        pdf_sha256="2" * 64,
+    )
+
+    assert has_frozen_publication_pair(figure) is True
+    assert archival_render_available(figure) is True
+    assert is_report_eligible(figure) is True
 
 
 def test_gallery_keeps_report_blocked_renders_as_badged_output():
@@ -205,6 +224,41 @@ def test_record_preview_is_materialized_only_inside_workspace(tmp_path):
 
     assert recovered == tmp_path / "figures" / "restored.jpg"
     assert recovered.read_bytes() == payload
+
+
+def test_verified_preview_recovery_reuses_record_bound_bytes(monkeypatch, tmp_path):
+    from backend.services.report import artifacts
+
+    payload = valid_image_bytes("JPEG")
+    figure = _figure(
+        "single-read",
+        FigureReviewStatus.APPROVED,
+        png_path=str(tmp_path / "missing" / "single-read.jpg"),
+        png_base64=base64.b64encode(payload).decode(),
+        render_sha256=None,
+    )
+    verified_paths = []
+    original_verify = artifacts.verified_artifact_bytes
+
+    def counted_verify(path, *args, **kwargs):
+        verified_paths.append(Path(path))
+        return original_verify(path, *args, **kwargs)
+
+    monkeypatch.setattr(artifacts, "verified_artifact_bytes", counted_verify)
+
+    resolved = resolve_verified_archival_artifact(
+        figure,
+        tmp_path,
+        kind="image",
+    )
+
+    assert resolved is not None
+    returned, recovered = resolved
+    assert returned == payload
+    assert recovered.read_bytes() == payload
+    # The destination was probed once before creation and never re-read after
+    # the already-verified preview bytes were written.
+    assert verified_paths.count(recovered) == 1
 
 
 def test_materialized_preview_restores_record_creation_mtime(tmp_path):

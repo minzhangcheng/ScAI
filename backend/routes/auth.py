@@ -3,7 +3,13 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
 
-from backend.models.user import UsernameStr, PasswordStr
+from backend.models.user import (
+    PasswordStr,
+    USER_ACCESSIBLE_STATUSES,
+    USER_STATUS_DELETING,
+    USER_STATUS_PENDING,
+    UsernameStr,
+)
 from backend.models.schemas import APIResponse
 from backend.utils.db import AppDB
 from backend.utils.auth import (
@@ -121,8 +127,17 @@ async def login(req: LoginRequest, request: Request):
     if user is None or not verify_password(req.password, user.password_hash):
         _login_rate_limiter.record_failure(rl_key)
         raise HTTPException(status_code=401, detail="Invalid credentials", headers={"WWW-Authenticate": "Bearer"})
-    if user.status == "pending":
-        raise HTTPException(status_code=403, detail="Account is pending approval. Please contact the administrator to activate your account.")
+    if user.status not in USER_ACCESSIBLE_STATUSES:
+        if user.status == USER_STATUS_PENDING:
+            detail = (
+                "Account is pending approval. Please contact the administrator "
+                "to activate your account."
+            )
+        elif user.status == USER_STATUS_DELETING:
+            detail = "Account deletion is in progress."
+        else:
+            detail = "Account is unavailable."
+        raise HTTPException(status_code=403, detail=detail)
     _login_rate_limiter.reset(rl_key)
     token = create_access_token(user.id, user.username)
     return TokenResponse(
@@ -164,7 +179,22 @@ async def update_password(req: ChangePasswordRequest, user_id: str = Depends(req
     if not verify_password(req.current_password, user.password_hash):
         raise HTTPException(status_code=400, detail="Invalid old password")
     pw_hash = hash_password(req.new_password)
-    await db.update_user_password(user_id, pw_hash)
+    updated = await db.compare_and_swap_user_password(
+        user_id,
+        user.password_hash,
+        pw_hash,
+        allowed_statuses=tuple(sorted(USER_ACCESSIBLE_STATUSES)),
+    )
+    if not updated:
+        current = await db.get_user_by_id(user_id)
+        if current is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        if current.status not in USER_ACCESSIBLE_STATUSES:
+            raise HTTPException(status_code=403, detail="Account is unavailable")
+        raise HTTPException(
+            status_code=409,
+            detail="Password changed concurrently; verify the current password again",
+        )
     return {"message": "Password updated successfully"}
 
 

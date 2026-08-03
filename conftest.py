@@ -59,14 +59,6 @@ def _ensure_writable_data_dir() -> None:
 _ensure_writable_data_dir()
 
 
-def pytest_configure(config):
-    config.addinivalue_line(
-        "markers",
-        "requires_snapshot_v2: certifies Snapshot V2-enabled behaviour; pins the "
-        "operator gate on for the duration of the test",
-    )
-
-
 @pytest.fixture(autouse=True)
 def _pin_snapshot_v2_gate(request, monkeypatch):
     """Pin the Snapshot V2 operator gate on for tests that certify it enabled.

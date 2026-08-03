@@ -75,6 +75,7 @@ from .utils.auth import (
     ws_require_auth,
 )
 from .utils.files import safe_filename, validate_session_id, validate_path_within
+from .services.report.output_generation import ReportGenerationError
 from .state import (
     sessions, workflows, _run_tasks,
     state_lock,
@@ -245,6 +246,11 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await _cancel_and_await(cleanup_task, ttl_task)
+        from backend.utils.websocket_delivery import (
+            drain_abandoned_transport_tasks,
+        )
+
+        await drain_abandoned_transport_tasks()
 
 
 async def _cancel_and_await(*tasks: asyncio.Task) -> None:
@@ -300,6 +306,31 @@ async def session_generation_exception_handler(
                 "message": (
                     "The session generation changed while this request was in progress. "
                     "Reload the session before retrying."
+                ),
+            }
+        },
+    )
+
+
+@app.exception_handler(ReportGenerationError)
+async def report_generation_exception_handler(
+    request: Request,
+    exc: ReportGenerationError,
+) -> JSONResponse:
+    """Expose an inconsistent report store as a stable conflict, not a 500."""
+    logger.warning(
+        "Rejected inconsistent report generation path=%s: %s",
+        request.scope.get("path", ""),
+        exc,
+    )
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": {
+                "code": "REPORT_GENERATION_INVALID",
+                "message": (
+                    "The published report is incomplete or inconsistent. "
+                    "Regenerate the report before retrying this request."
                 ),
             }
         },

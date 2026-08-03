@@ -13,6 +13,12 @@ def _max_72_bytes(v: str) -> str:
 UsernameStr = Annotated[str, Field(min_length=3, max_length=64, pattern=r'^[a-zA-Z0-9_-]+$')]
 PasswordStr = Annotated[str, Field(min_length=8, max_length=128), AfterValidator(_max_72_bytes)]
 
+USER_STATUS_PENDING = "pending"
+USER_STATUS_ACTIVE = "active"
+USER_STATUS_READONLY = "readonly"
+USER_STATUS_DELETING = "deleting"
+USER_ACCESSIBLE_STATUSES = frozenset({USER_STATUS_ACTIVE, USER_STATUS_READONLY})
+
 
 class User(BaseModel):
     id: str
@@ -21,7 +27,7 @@ class User(BaseModel):
     password_hash: str = ""
     created_at: str = ""
     role: str = "user"
-    status: str = "pending"
+    status: str = USER_STATUS_PENDING
 
 
 class ApiKey(BaseModel):

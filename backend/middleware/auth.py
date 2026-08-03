@@ -5,7 +5,8 @@ Enforces JWT/API-Key authentication and role/status-based access control.
 Access rules:
 - admin role: only /api/admin/*, /api/auth/profile/*, /api/auth/me, /api/auth/logout,
   /api/config, /api/user/
-- readonly status (pending/active but not user+active): non-GET blocked except
+- pending/deleting status: all protected access blocked except /api/auth/logout
+- readonly status: non-GET blocked except
   /api/auth/logout, /api/auth/profile/password
 
 All protected paths require authentication; user is loaded from DB per request.
@@ -16,6 +17,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from backend.models.user import USER_STATUS_DELETING, USER_STATUS_PENDING
 from backend.utils.auth import authenticate_token, get_db
 
 # Paths that do NOT require authentication
@@ -203,17 +205,21 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        # A pending account has no active access. This also forms the immediate
-        # revocation boundary for account deletion: changing an active user to
-        # pending invalidates already-issued JWTs on their next request while
-        # the physical session cleanup remains retryable.
-        if user.status == "pending":
+        # Pending accounts have no active access, and deleting is the durable
+        # immediate-revocation boundary while physical cleanup remains retryable.
+        # Logout stays reachable so clients can discard an already-issued JWT.
+        if user.status in (USER_STATUS_PENDING, USER_STATUS_DELETING):
             if path == "/api/auth/logout":
                 request.state.user_id = user_id
                 return await call_next(request)
+            detail = (
+                "Account deletion is in progress."
+                if user.status == USER_STATUS_DELETING
+                else "Account is pending approval"
+            )
             return JSONResponse(
                 status_code=403,
-                content={"detail": "Account is pending approval"},
+                content={"detail": detail},
             )
 
         # Admin role: full access (management paths + analysis paths).

@@ -40,7 +40,7 @@ _MIN_SAVE_INTERVAL = 5.0
 _FORCE_SAVE_STATUSES = frozenset({
     TaskStatus.COMPLETED, TaskStatus.FAILED,
     TaskStatus.WAITING_INPUT, TaskStatus.WAITING_ANNOTATION,
-    TaskStatus.GENERATING_REPORT,
+    TaskStatus.GENERATING_REPORT, TaskStatus.PAUSED,
 })
 
 # Session-level recovery block when AnalysisState cannot be loaded for display.
@@ -523,6 +523,7 @@ def _recover_publication_transactions_under_file_lock(
         recover_figure_publish_transactions,
     )
     from backend.services.report.figure_discovery import (
+        backfill_legacy_publication_integrity,
         ensure_legacy_artifact_inventory,
     )
     from backend.services.session_lifecycle import (
@@ -554,6 +555,9 @@ def _recover_publication_transactions_under_file_lock(
             recovery_state, "artifact_registry_version", None
         )
         legacy_count_before = len(recovery_state.legacy_artifacts or [])
+        backfill_legacy_publication_integrity(
+            recovery_state, get_session_workspace(session_id)
+        )
         ensure_legacy_artifact_inventory(
             recovery_state, get_session_workspace(session_id)
         )

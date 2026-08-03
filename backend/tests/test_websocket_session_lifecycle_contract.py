@@ -16,7 +16,7 @@ from backend.services.session_lifecycle import (
     SessionGenerationError,
     SessionGoneError,
 )
-from backend.utils.auth import ws_authenticate_and_load
+from backend.utils.auth import ws_authenticate_and_load, ws_require_auth
 
 
 def _version_tuple(distribution: str) -> tuple[int, ...]:
@@ -37,6 +37,10 @@ def lifecycle_ws_client(monkeypatch):
         return "request-owner"
 
     monkeypatch.setattr("backend.utils.auth.authenticate_token", authenticate)
+    db = SimpleNamespace(
+        get_user_by_id=AsyncMock(return_value=SimpleNamespace(status="active"))
+    )
+    monkeypatch.setattr("backend.utils.auth.get_db", AsyncMock(return_value=db))
     app = FastAPI()
     app.include_router(router)
     return TestClient(app)
@@ -91,6 +95,10 @@ async def test_websocket_lifecycle_helper_contract(
         raise SessionGoneError(session_id, "request-owner", 3)
 
     monkeypatch.setattr("backend.utils.auth.authenticate_token", authenticate)
+    db = SimpleNamespace(
+        get_user_by_id=AsyncMock(return_value=SimpleNamespace(status="active"))
+    )
+    monkeypatch.setattr("backend.utils.auth.get_db", AsyncMock(return_value=db))
     monkeypatch.setattr(
         "backend.services.session_store.ensure_session_loaded",
         ensure_loaded,
@@ -103,6 +111,24 @@ async def test_websocket_lifecycle_helper_contract(
     assert websocket.events[1][1]["code"] == expected_code
     assert websocket.events[1][1]["session_id"] == session_id
     assert websocket.events[2] == ("close", expected_close, expected_code)
+
+
+@pytest.mark.asyncio
+async def test_websocket_auth_rejects_deleting_user_before_accept(monkeypatch):
+    async def authenticate(_token: str):
+        return "deleting-owner"
+
+    db = SimpleNamespace(
+        get_user_by_id=AsyncMock(
+            return_value=SimpleNamespace(status="deleting")
+        )
+    )
+    monkeypatch.setattr("backend.utils.auth.authenticate_token", authenticate)
+    monkeypatch.setattr("backend.utils.auth.get_db", AsyncMock(return_value=db))
+    websocket = _RecordingWebSocket()
+
+    assert await ws_require_auth(websocket) is None
+    assert websocket.events == [("close", 4401, "Account unavailable")]
 
 
 @pytest.mark.asyncio

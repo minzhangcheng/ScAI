@@ -207,8 +207,8 @@ The release helper always builds both the selected tag and `latest`:
 ```
 
 ```bash
-./build.sh --version 0.38.11
-./build.sh --version 0.38.11 --push
+./build.sh --version 0.38.12
+./build.sh --version 0.38.12 --push
 ```
 
 Without `--version`, the helper uses the newest Git tag returned by `git describe --tags --abbrev=0`, or `latest` if none exists. `--push` pushes both tags to `ghcr.io/minzhangcheng/scai`; authenticate Docker to that registry before using it. The helper does not accept registry, image-name, platform, or build-argument flags.
@@ -217,9 +217,11 @@ Without `--version`, the helper uses the newest Git tag returned by `git describ
 
 On first access, create the initial administrator through the setup screen. The backend permits this operation only until initialization is recorded. Usernames and optional email addresses must be unique.
 
-Administrators can create active ordinary users, list users, reset passwords, change roles, change account status, and delete users. Self-service registration creates a `pending` account that cannot log in until an administrator activates it. Status values are `pending`, `readonly`, and `active`; roles are `admin` and `user`. Administrators cannot alter their own role/status or delete themselves, and ScAI prevents removal or demotion of the last administrator.
+Administrators can create active ordinary users, list users, reset passwords, change roles, change account status, and delete users. Self-service registration creates a `pending` account that cannot log in until an administrator activates it. Administrator-selectable status values are `pending`, `readonly`, and `active`; `deleting` is a server-owned, non-approvable state that means account cleanup must finish or be retried. Roles are `admin` and `user`. Administrators cannot alter their own role/status or delete themselves, cannot change the status, role, or password of a `deleting` account, and ScAI prevents removal or demotion of the last administrator.
 
 **Warning:** before deleting a user, stop every analysis owned by that user and back up required data. User deletion evicts cached sessions and removes persisted session directories, legacy state files, API keys, encrypted user configuration, and database records, but it does not itself stop active workflow/task objects. After deletion, verify that no workflow or worker remains for the user's session IDs and that the expected files and database/session listings are gone.
+
+**Upgrade note for installations predating 0.38.11:** an interrupted deletion created by older code may still be stored as `pending`, which is indistinguishable in the database from a genuine account awaiting approval. ScAI therefore does not migrate these rows automatically. Before approving historical `pending` accounts, reconcile them against deletion/cleanup logs and retained session or import-job records. For an account confirmed to be an interrupted deletion, retry Delete so the server records `deleting` and resumes cleanup; do not approve it or bulk-convert all `pending` rows.
 
 Configure the global model API key, model base URL, and optional proxy in the administration UI. Saving configuration persists it but does **not** validate the credentials. Run the explicit validation action separately. Analysis startup checks that required configuration is present; provider authentication, selected-model availability, quota, and network failures may not become visible until the first model request. Active users may store per-user model configuration, which takes precedence according to server configuration resolution.
 

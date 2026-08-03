@@ -33,7 +33,8 @@ class TestSHA256Rollback:
 
         uid = await app_db.create_upload_session(
             session_id="sid1", filename="test.h5ad", expected_sha256="wrong_sha256",
-            total_chunks=1, chunk_size=1024, expires_at_iso="2025-12-01T00:00:00",
+            total_size=len(content), total_chunks=1, chunk_size=1024,
+            expires_at_iso="2025-12-01T00:00:00",
             placeholder_file_id="pf1",
         )
         chunk_path = tmp_path / f"{uid}.chunk.0"
@@ -69,7 +70,8 @@ class TestSHA256Rollback:
 
         uid = await app_db.create_upload_session(
             session_id="sid1", filename="test.h5ad", expected_sha256=expected,
-            total_chunks=1, chunk_size=1024, expires_at_iso="2025-12-01T00:00:00",
+            total_size=len(content), total_chunks=1, chunk_size=1024,
+            expires_at_iso="2025-12-01T00:00:00",
             placeholder_file_id="pf1",
         )
         chunk_path = tmp_path / f"{uid}.chunk.0"
@@ -97,6 +99,38 @@ class TestSHA256Rollback:
         sessions.pop("sid1", None)
 
     @pytest.mark.asyncio
+    async def test_complete_rejects_chunk_tampered_after_acceptance(
+        self, tmp_path, app_db
+    ):
+        content = b"hello"
+        uid = await app_db.create_upload_session(
+            session_id="sid1",
+            filename="test.h5ad",
+            expected_sha256=hashlib.sha256(content).hexdigest(),
+            total_size=len(content),
+            total_chunks=1,
+            chunk_size=1024,
+            expires_at_iso="2025-12-01T00:00:00",
+            placeholder_file_id="pf1",
+        )
+        chunk_path = tmp_path / f"{uid}.chunk.0"
+        chunk_path.write_bytes(content + b"tampered")
+        await app_db.mark_chunk_received(uid, 0)
+        sessions["sid1"] = _make_state()
+        upload_dir = tmp_path / "uploads"
+        upload_dir.mkdir()
+
+        with patch("backend.services.upload.get_db", return_value=app_db), \
+             patch("backend.services.upload.get_session_uploads", return_value=upload_dir), \
+             patch("backend.services.upload.UPLOAD_TEMP_DIR", tmp_path):
+            with pytest.raises(Exception) as exc_info:
+                await complete_upload("sid1", uid)
+
+        assert "expected 5" in str(exc_info.value.detail)
+        assert not (upload_dir / "test.h5ad").exists()
+        sessions.pop("sid1", None)
+
+    @pytest.mark.asyncio
     async def test_idempotent_complete_returns_stored_path(self, tmp_path, app_db):
         """Calling complete twice returns the stored path from first call."""
         content = b"hello world"
@@ -104,7 +138,8 @@ class TestSHA256Rollback:
 
         uid = await app_db.create_upload_session(
             session_id="sid1", filename="test.h5ad", expected_sha256=expected,
-            total_chunks=1, chunk_size=1024, expires_at_iso="2025-12-01T00:00:00",
+            total_size=len(content), total_chunks=1, chunk_size=1024,
+            expires_at_iso="2025-12-01T00:00:00",
             placeholder_file_id="pf1",
         )
         chunk_path = tmp_path / f"{uid}.chunk.0"
@@ -132,7 +167,8 @@ class TestMarkChunkIdempotency:
     async def test_duplicate_chunk_returns_false(self, app_db):
         uid = await app_db.create_upload_session(
             session_id="sid1", filename="f.h5ad", expected_sha256="abc",
-            total_chunks=3, chunk_size=1024, expires_at_iso="2025-12-01T00:00:00",
+            total_size=3072, total_chunks=3, chunk_size=1024,
+            expires_at_iso="2025-12-01T00:00:00",
             placeholder_file_id="pf1",
         )
 
@@ -150,7 +186,8 @@ class TestMarkChunkIdempotency:
     async def test_concurrent_mark_chunk_no_double_count(self, app_db):
         uid = await app_db.create_upload_session(
             session_id="sid1", filename="f.h5ad", expected_sha256="abc",
-            total_chunks=3, chunk_size=1024, expires_at_iso="2025-12-01T00:00:00",
+            total_size=3072, total_chunks=3, chunk_size=1024,
+            expires_at_iso="2025-12-01T00:00:00",
             placeholder_file_id="pf1",
         )
 
@@ -172,7 +209,8 @@ class TestCleanupSessionUploads:
     async def test_cleanup_deletes_chunks_and_db(self, tmp_path, app_db):
         uid = await app_db.create_upload_session(
             session_id="sid1", filename="f.h5ad", expected_sha256="abc",
-            total_chunks=2, chunk_size=1024, expires_at_iso="2025-12-01T00:00:00",
+            total_size=2048, total_chunks=2, chunk_size=1024,
+            expires_at_iso="2025-12-01T00:00:00",
             placeholder_file_id="pf1",
         )
 

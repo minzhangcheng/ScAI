@@ -1,5 +1,6 @@
 """Tests for V1 API endpoints and upload service logic."""
 import os
+import sqlite3
 
 import hashlib
 import pytest
@@ -29,23 +30,58 @@ def config_dict():
 
 class TestUploadDB:
     @pytest.mark.asyncio
+    async def test_init_migrates_legacy_upload_table_without_inventing_size(
+        self, tmp_path
+    ):
+        from backend.utils.db import AppDB
+
+        path = tmp_path / "legacy.db"
+        with sqlite3.connect(path) as db:
+            db.execute(
+                """CREATE TABLE upload_sessions (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                filename TEXT NOT NULL, expected_sha256 TEXT NOT NULL,
+                total_chunks INTEGER NOT NULL, chunk_size INTEGER NOT NULL,
+                received_chunks INTEGER NOT NULL DEFAULT 0,
+                received_mask TEXT NOT NULL DEFAULT '',
+                placeholder_file_id TEXT, created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0
+                )"""
+            )
+            db.execute(
+                """INSERT INTO upload_sessions VALUES
+                ('legacy','s','f','abc',1,10,0,'','p','now','later',0)"""
+            )
+
+        app_db = AppDB(path)
+        await app_db.init()
+
+        upload = await app_db.get_upload_session("legacy")
+        assert upload is not None
+        assert "total_size" in upload
+        assert upload["total_size"] is None
+
+    @pytest.mark.asyncio
     async def test_create_upload_session(self, app_db):
         uid = await app_db.create_upload_session(
             session_id="sid1", filename="test.h5ad", expected_sha256="abc",
-            total_chunks=2, chunk_size=1024, expires_at_iso="2025-01-01T00:00:00",
+            total_size=2048, total_chunks=2, chunk_size=1024,
+            expires_at_iso="2025-01-01T00:00:00",
             placeholder_file_id="pf1",
         )
         upload = await app_db.get_upload_session(uid)
         assert upload is not None
         assert upload["session_id"] == "sid1"
         assert upload["filename"] == "test.h5ad"
+        assert upload["total_size"] == 2048
         assert upload["received_chunks"] == 0
 
     @pytest.mark.asyncio
     async def test_mark_chunk_received(self, app_db):
         uid = await app_db.create_upload_session(
             session_id="sid1", filename="f.h5ad", expected_sha256="abc",
-            total_chunks=3, chunk_size=1024, expires_at_iso="2025-01-01T00:00:00",
+            total_size=3072, total_chunks=3, chunk_size=1024,
+            expires_at_iso="2025-01-01T00:00:00",
             placeholder_file_id="pf1",
         )
         r1 = await app_db.mark_chunk_received(uid, 0)
@@ -63,7 +99,8 @@ class TestUploadDB:
     async def test_complete_upload_session(self, app_db):
         uid = await app_db.create_upload_session(
             session_id="sid1", filename="f.h5ad", expected_sha256="abc",
-            total_chunks=1, chunk_size=1024, expires_at_iso="2025-01-01T00:00:00",
+            total_size=1024, total_chunks=1, chunk_size=1024,
+            expires_at_iso="2025-01-01T00:00:00",
             placeholder_file_id="pf1",
         )
         await app_db.complete_upload_session(uid)
@@ -75,7 +112,8 @@ class TestUploadDB:
         # Create an expired upload
         uid = await app_db.create_upload_session(
             session_id="sid1", filename="f.h5ad", expected_sha256="abc",
-            total_chunks=1, chunk_size=1024, expires_at_iso="2020-01-01T00:00:00",
+            total_size=1024, total_chunks=1, chunk_size=1024,
+            expires_at_iso="2020-01-01T00:00:00",
             placeholder_file_id="pf1",
         )
         expired = await app_db.list_expired_uploads("2025-01-01T00:00:00")
@@ -87,7 +125,8 @@ class TestUploadDB:
         """delete_session_record cleans up uploads for a session."""
         await app_db.create_upload_session(
             session_id="sid1", filename="f.h5ad", expected_sha256="abc",
-            total_chunks=1, chunk_size=1024, expires_at_iso="2025-01-01T00:00:00",
+            total_size=1024, total_chunks=1, chunk_size=1024,
+            expires_at_iso="2025-01-01T00:00:00",
             placeholder_file_id="pf1",
         )
         uploads_before = await app_db.list_uploads_for_session("sid1")
@@ -105,6 +144,37 @@ class TestUploadDB:
 
 class TestUploadService:
     @pytest.mark.asyncio
+    async def test_v1_chunk_route_bounds_multipart_read_before_service_validation(
+        self, monkeypatch
+    ):
+        from fastapi import HTTPException
+        from backend.routes import v1
+
+        class OversizedUpload:
+            def __init__(self):
+                self.read_sizes = []
+
+            async def read(self, size):
+                self.read_sizes.append(size)
+                return b"x" * size
+
+        upload = OversizedUpload()
+        service_upload = AsyncMock()
+        monkeypatch.setattr(v1, "UPLOAD_CHUNK_SIZE", 8)
+        monkeypatch.setattr(v1, "require_session_ownership", AsyncMock())
+        monkeypatch.setattr(v1, "upload_chunk", service_upload)
+        request = SimpleNamespace(state=SimpleNamespace(user_id="u1"))
+
+        with pytest.raises(HTTPException) as caught:
+            await v1.upload_chunk_endpoint(
+                "sid1", "upload1", 0, request, upload,
+            )
+
+        assert caught.value.status_code == 413
+        assert upload.read_sizes == [9]
+        service_upload.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_upload_chunk_writes_file(self, tmp_path):
         """upload_chunk writes data atomically and marks received."""
         from backend.services.upload import upload_chunk
@@ -118,8 +188,9 @@ class TestUploadService:
             "session_id": "sid1",
             "filename": "test.h5ad",
             "expected_sha256": "abc",
+            "total_size": 10,
             "total_chunks": 2,
-            "chunk_size": 1024,
+            "chunk_size": 5,
             "received_chunks": 0,
             "completed": 0,
         }

@@ -5,6 +5,7 @@ which figures are shown; PI curation happens in
 ``PIAgent.select_brief_figures``. Keep it generic: no dataset-, disease-,
 tissue-, species-, or project-specific file names.
 """
+import hashlib
 import logging
 import uuid
 from pathlib import Path
@@ -20,13 +21,16 @@ from backend.services.report.artifacts import (
     gallery_artifacts,
     image_file_sha256,
     pdf_file_sha256,
+    preview_render_sha256,
     resolve_archival_pdf,
     resolve_archival_render,
     resolve_legacy_artifact_pdf,
     resolve_legacy_artifact_render,
     MIN_ARCHIVAL_PREVIEW_HEIGHT,
     MIN_ARCHIVAL_PREVIEW_WIDTH,
+    MIN_RENDERED_FIGURE_BYTES,
     ARTIFACT_REGISTRY_VERSION,
+    verified_artifact_bytes,
 )
 from backend.models.schemas import LegacyArtifactRecord
 from backend.utils.files import validate_path_within, validate_session_id
@@ -66,6 +70,79 @@ _DIAGNOSTIC_DIRS = frozenset({"annotation_validation"})
 # against that admitted only two levels, excluding the very tier the corpus said
 # was needed.
 _MAX_SCAN_DEPTH = 3
+
+
+def _legacy_record_path_candidates(
+    declared: Any,
+    workspace: Path,
+) -> list[Path]:
+    """Resolve historical record paths without leaving the session workspace."""
+    raw = Path(str(declared or ""))
+    if not raw.name:
+        return []
+    workspace = Path(workspace).resolve()
+    candidates = [raw, workspace / "figures" / raw.name]
+    resolved: list[Path] = []
+    for candidate in candidates:
+        try:
+            if not candidate.is_absolute():
+                candidate = workspace / candidate
+            safe = validate_path_within(candidate, workspace)
+        except Exception:
+            continue
+        if safe not in resolved:
+            resolved.append(safe)
+    return resolved
+
+
+def backfill_legacy_publication_integrity(state: Any, workspace: Path) -> int:
+    """Recover only identities provable from a legacy record's frozen preview.
+
+    ``artifact_registry_version is None`` is the durable legacy marker.  Once
+    the registry migration completes, missing hashes fail closed and are never
+    inferred from mutable workspace paths.  The persisted preview is the only
+    historical byte identity in a pre-registry ``PublicationFigure``.  A raster
+    path may inherit that identity only when its exact bytes equal the preview;
+    no historical field can bind a mutable PDF path to the reviewed render, so
+    a missing PDF digest is deliberately never backfilled.
+    """
+    if getattr(state, "artifact_registry_version", None) is not None:
+        return 0
+
+    changed = 0
+    for figure in list(getattr(state, "publication_figures", None) or []):
+        if str(getattr(figure, "producer_status", "published") or "published") != "published":
+            continue
+        figure_changed = False
+        preview_digest = str(
+            getattr(figure, "preview_sha256", "") or ""
+        ).strip().lower()
+        if not preview_digest:
+            preview_digest = str(
+                preview_render_sha256(getattr(figure, "png_base64", None)) or ""
+            )
+            if preview_digest:
+                figure.preview_sha256 = preview_digest
+                figure_changed = True
+        if not str(getattr(figure, "render_sha256", "") or "").strip():
+            for candidate in _legacy_record_path_candidates(
+                getattr(figure, "png_path", ""), Path(workspace)
+            ):
+                payload = verified_artifact_bytes(
+                    candidate, kind="image",
+                )
+                if (
+                    payload is not None
+                    and len(payload) >= MIN_RENDERED_FIGURE_BYTES
+                    and preview_digest
+                    and hashlib.sha256(payload).hexdigest() == preview_digest
+                ):
+                    figure.render_sha256 = preview_digest
+                    figure_changed = True
+                    break
+        if figure_changed:
+            changed += 1
+    return changed
 
 
 def infer_figure_type(stem: str) -> str:

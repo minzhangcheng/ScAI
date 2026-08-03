@@ -28,7 +28,8 @@ class SectionsMixin:
         sections: List[Dict],
         findings: Dict[str, Any],
         language: str,
-        analysis_summary: Optional[Dict[str, Any]] = None
+        analysis_summary: Optional[Dict[str, Any]] = None,
+        force_fallback: bool = False,
     ) -> str:
         """PI Agent generates the report abstract"""
         import re
@@ -79,6 +80,18 @@ Objective: {state.initial_instruction}
 {abstract_instruction}
 """
 
+        if force_fallback:
+            summary = str(findings.get("summary") or "").strip()
+            retained = summary[:1200] if summary else (
+                "The retained analysis state contains the section-level results "
+                "and artifacts listed below."
+            )
+            return (
+                "This partial report was assembled deterministically because the "
+                "report-writing model was unavailable. The analysis objective was: "
+                f"{state.initial_instruction}. {retained}"
+            )
+
         abstract = await self._pi_chat(prompt, temperature=0.3)
         # Strip redundant leading title that LLM may have added
         abstract = re.sub(r'^\*{0,2}Abstract\*{0,2}\s*\n*', '', abstract, flags=re.IGNORECASE).strip()
@@ -91,7 +104,8 @@ Objective: {state.initial_instruction}
         sections: List[Dict],
         findings: Dict[str, Any],
         language: str,
-        analysis_summary: Optional[Dict[str, Any]] = None
+        analysis_summary: Optional[Dict[str, Any]] = None,
+        force_fallback: bool = False,
     ) -> str:
         """PI Agent generates the final conclusions"""
         import re
@@ -134,6 +148,18 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
 
 {conclusions_instruction}
 """
+
+        if force_fallback:
+            summary = str(findings.get("summary") or "").strip()
+            body = summary[:1800] if summary else (
+                "No synthesized final summary was retained. Consult the report "
+                "sections, figures, tables, and analysis-log appendix."
+            )
+            return (
+                "**Degraded report.** The report-writing model was unavailable; "
+                "these conclusions reproduce retained workflow evidence without "
+                f"new model interpretation. {body}"
+            )
 
         conclusions = await self._pi_chat(prompt, temperature=0.3)
         # Strip redundant leading title that LLM may have added

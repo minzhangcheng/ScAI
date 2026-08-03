@@ -6,6 +6,8 @@ callback injection for session persistence.
 import hashlib
 import asyncio
 import logging
+import math
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,6 +35,27 @@ logger = logging.getLogger(__name__)
 _complete_locks: Dict[str, asyncio.Lock] = {}
 _complete_lock_refs: Dict[str, int] = {}
 _registry_lock = asyncio.Lock()
+
+
+async def read_chunk_with_limit(
+    upload_file,
+    *,
+    max_bytes: int = UPLOAD_CHUNK_SIZE,
+    read_size: int = 1024 * 1024,
+) -> bytes:
+    """Read one multipart chunk with a sentinel byte and a hard memory bound."""
+    payload = bytearray()
+    while True:
+        remaining_with_sentinel = max_bytes + 1 - len(payload)
+        chunk = await upload_file.read(min(read_size, remaining_with_sentinel))
+        if not chunk:
+            return bytes(payload)
+        payload.extend(chunk)
+        if len(payload) > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Chunk exceeds maximum size ({max_bytes} bytes)",
+            )
 
 
 async def _acquire_complete_lock(upload_id: str):
@@ -73,17 +96,36 @@ async def init_upload(session_id: str, request: Request) -> dict:
     """
     body = await request.json()
     raw_filename = body.get("filename", "")
-    expected_sha256 = body.get("expected_sha256", "")
-    total_chunks = body.get("total_chunks", 0)
-    chunk_size = body.get("chunk_size", UPLOAD_CHUNK_SIZE)
-    total_size = body.get("total_size", 0) or 0
+    expected_sha256 = str(body.get("expected_sha256", "") or "").strip().lower()
+    try:
+        total_chunks = int(body.get("total_chunks", 0) or 0)
+        chunk_size = int(body.get("chunk_size", UPLOAD_CHUNK_SIZE))
+        total_size = int(body.get("total_size", 0) or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="invalid upload dimensions")
 
     if total_size <= 0 or total_size > MAX_UPLOAD_SIZE:
         raise HTTPException(status_code=413, detail="total_size out of allowed range")
+    if chunk_size <= 0 or chunk_size > UPLOAD_CHUNK_SIZE:
+        raise HTTPException(status_code=400, detail="chunk_size out of allowed range")
+    expected_chunks = math.ceil(total_size / chunk_size)
+    if total_chunks <= 0 or total_chunks != expected_chunks:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "total_chunks does not match total_size and chunk_size: "
+                f"expected {expected_chunks}"
+            ),
+        )
 
     filename = safe_filename(raw_filename)
     if not filename or not expected_sha256:
         raise HTTPException(status_code=400, detail="filename and expected_sha256 required")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise HTTPException(
+            status_code=400,
+            detail="expected_sha256 must be a 64-character hex digest",
+        )
 
     state = sessions.get(session_id)
     if state is None:
@@ -110,6 +152,7 @@ async def init_upload(session_id: str, request: Request) -> dict:
             session_id=session_id,
             filename=filename,
             expected_sha256=expected_sha256,
+            total_size=total_size,
             total_chunks=total_chunks,
             chunk_size=chunk_size,
             expires_at_iso=expires_at,
@@ -146,9 +189,6 @@ async def upload_chunk(
         if upload["completed"]:
             raise HTTPException(status_code=400, detail="Upload already completed")
 
-        if len(chunk_data) > upload["chunk_size"] * 2:
-            raise HTTPException(status_code=400, detail="Chunk too large")
-
         total_chunks = upload.get("total_chunks", 0) or 0
         if chunk_index < 0 or chunk_index >= total_chunks:
             raise HTTPException(
@@ -156,6 +196,26 @@ async def upload_chunk(
                 detail=(
                     f"chunk_index {chunk_index} out of range "
                     f"[0,{total_chunks})"
+                ),
+            )
+        total_size = upload.get("total_size")
+        if not isinstance(total_size, int) or total_size <= 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Upload session predates size-bound uploads; restart upload",
+            )
+        chunk_size = int(upload.get("chunk_size", 0) or 0)
+        expected_length = (
+            chunk_size
+            if chunk_index < total_chunks - 1
+            else total_size - chunk_size * (total_chunks - 1)
+        )
+        if expected_length <= 0 or len(chunk_data) != expected_length:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Chunk {chunk_index} has {len(chunk_data)} bytes; "
+                    f"expected {expected_length}"
                 ),
             )
 
@@ -211,6 +271,19 @@ async def complete_upload(session_id: str, upload_id: str) -> dict:
                     status_code=400,
                     detail=f"Missing chunks: {upload['received_chunks']}/{upload['total_chunks']}",
                 )
+            total_size = upload.get("total_size")
+            if not isinstance(total_size, int) or total_size <= 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Upload session predates size-bound uploads; restart upload"
+                    ),
+                )
+            if total_size > MAX_UPLOAD_SIZE:
+                raise HTTPException(
+                    status_code=413,
+                    detail="Upload exceeds the configured size limit",
+                )
 
             upload_dir = get_session_uploads(session_id)
             upload_dir.mkdir(parents=True, exist_ok=True)
@@ -220,6 +293,7 @@ async def complete_upload(session_id: str, upload_id: str) -> dict:
             final_path = upload_dir / safe_name
             final_path = validate_path_within(final_path, upload_dir)
             sha256 = hashlib.sha256()
+            assembled_size = 0
 
             # Assembly with rollback on failure
             try:
@@ -230,6 +304,27 @@ async def complete_upload(session_id: str, upload_id: str) -> dict:
                             data = chunk_path.read_bytes()
                         except FileNotFoundError:
                             raise HTTPException(status_code=400, detail=f"Chunk {i} missing")
+                        expected_length = (
+                            upload["chunk_size"]
+                            if i < upload["total_chunks"] - 1
+                            else total_size - upload["chunk_size"] * (
+                                upload["total_chunks"] - 1
+                            )
+                        )
+                        if expected_length <= 0 or len(data) != expected_length:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=(
+                                    f"Chunk {i} has {len(data)} bytes; "
+                                    f"expected {expected_length}"
+                                ),
+                            )
+                        assembled_size += len(data)
+                        if assembled_size > total_size:
+                            raise HTTPException(
+                                status_code=413,
+                                detail="Upload exceeds initialized total_size",
+                            )
                         f.write(data)
                         sha256.update(data)
             except HTTPException:
@@ -244,6 +339,19 @@ async def complete_upload(session_id: str, upload_id: str) -> dict:
                 except OSError:
                     pass
                 raise HTTPException(status_code=500, detail=f"Assembly failed: {e}")
+
+            if assembled_size != total_size:
+                try:
+                    final_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"File size check failed for {upload['filename']}: "
+                        f"expected {total_size}, got {assembled_size}"
+                    ),
+                )
 
             # SHA256 integrity check with consistent rollback
             actual_sha256 = sha256.hexdigest()

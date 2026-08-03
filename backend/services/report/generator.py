@@ -394,8 +394,9 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         self,
         state: AnalysisState,
         resume_from_checkpoint: bool = True,
+        force_fallback: bool = False,
     ) -> Dict[str, Any]:
-        """Generate privately and atomically publish one complete report tree."""
+        """Generate and publish a report, optionally without any LLM calls."""
         output_root = self._output_root
         transaction = ReportGenerationTransaction(output_root)
         self.output_dir = transaction.staging_dir
@@ -403,9 +404,16 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         self.tables_dir = self.output_dir / "tables"
         reset_report_asset_directories(self.output_dir)
         try:
+            staged_kwargs = {
+                "resume_from_checkpoint": (
+                    resume_from_checkpoint and not force_fallback
+                )
+            }
+            if force_fallback:
+                staged_kwargs["force_fallback"] = True
             report = await self._generate_report_staged(
                 state,
-                resume_from_checkpoint=resume_from_checkpoint,
+                **staged_kwargs,
             )
             published_dir = await run_in_owned_thread(
                 transaction.commit_report,
@@ -439,6 +447,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         self,
         state: AnalysisState,
         resume_from_checkpoint: bool = True,
+        force_fallback: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate a detailed research report by compiling existing analysis results.
@@ -539,7 +548,14 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         self._extract_cluster_annotations_from_state(report_state)
 
         # Step 3.5: PI reviews actual analysis code, figures, and tables (expensive LLM call)
-        if last_step >= 4 and checkpoint:
+        if force_fallback:
+            analysis_summary = self._empty_analysis_summary()
+            analysis_summary["methodology_overview"] = (
+                "This partial report was assembled deterministically from the "
+                "retained analysis state after the report-writing model became "
+                "unavailable."
+            )
+        elif last_step >= 4 and checkpoint:
             analysis_summary = checkpoint.get('analysis_summary', {})
             logger.info("Restored analysis_summary from checkpoint")
         else:
@@ -557,7 +573,11 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             })
 
         # Step 4: PI plans report structure based on analysis record + analysis summary (expensive LLM call)
-        if last_step >= 5 and checkpoint:
+        if force_fallback:
+            report_plan = self._create_fallback_plan_with_existing_figures(
+                report_state, existing_figures
+            )
+        elif last_step >= 5 and checkpoint:
             report_plan = checkpoint.get('report_plan', {})
             logger.info("Restored report_plan from checkpoint")
         else:
@@ -622,7 +642,8 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                 section_plan,
                 findings,
                 language,
-                analysis_summary=analysis_summary
+                analysis_summary=analysis_summary,
+                force_fallback=force_fallback,
             )
             sections.append(section)
 
@@ -639,12 +660,24 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         self.figure_images_cache.clear()
 
         # Step 6: PI writes abstract and conclusions (expensive LLM calls)
-        if last_step >= 7 and checkpoint:
+        if force_fallback:
+            abstract = await self._generate_abstract(
+                report_state,
+                sections,
+                findings,
+                language,
+                analysis_summary=analysis_summary,
+                force_fallback=True,
+            )
+        elif last_step >= 7 and checkpoint:
             abstract = checkpoint.get('abstract', '')
             logger.info("Restored abstract from checkpoint")
         else:
             await self._report_progress(85, "Writing abstract...")
-            abstract = await self._generate_abstract(report_state, sections, findings, language, analysis_summary=analysis_summary)
+            abstract = await self._generate_abstract(
+                report_state, sections, findings, language,
+                analysis_summary=analysis_summary,
+            )
             await checkpoint_mgr.save({
                 'report_id': report_id, 'last_step': 7, 'step_name': 'abstract',
                 'analysis_summary': analysis_summary, 'report_plan': report_plan,
@@ -653,12 +686,24 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                 'language': language, 'cluster_annotations': self.cluster_annotations,
             })
 
-        if last_step >= 8 and checkpoint:
+        if force_fallback:
+            conclusions = await self._generate_conclusions(
+                report_state,
+                sections,
+                findings,
+                language,
+                analysis_summary=analysis_summary,
+                force_fallback=True,
+            )
+        elif last_step >= 8 and checkpoint:
             conclusions = checkpoint.get('conclusions', '')
             logger.info("Restored conclusions from checkpoint")
         else:
             await self._report_progress(92, "Writing conclusions...")
-            conclusions = await self._generate_conclusions(report_state, sections, findings, language, analysis_summary=analysis_summary)
+            conclusions = await self._generate_conclusions(
+                report_state, sections, findings, language,
+                analysis_summary=analysis_summary,
+            )
             await checkpoint_mgr.save({
                 'report_id': report_id, 'last_step': 8, 'step_name': 'conclusions',
                 'analysis_summary': analysis_summary, 'report_plan': report_plan,
@@ -766,6 +811,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             figureless_sections=figureless_sections,
             approved_partial=bool(getattr(state, "allow_partial_report", False)),
             quality_disclosures=quality_disclosures,
+            degraded_fallback=force_fallback,
         )
         appendix_data["report_kind"] = report_status
         appendix_data["partial_reason"] = partial_reason
@@ -789,6 +835,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             "figureless_sections": figureless_sections,
             "unreported_figures": unreported_figures,
             "quality_disclosures": quality_disclosures,
+            "degraded_fallback": force_fallback,
             "appendix": appendix_data,
             "analysis_log": self._build_full_analysis_log(report_state),
             "score_definitions": [sd.model_dump(mode="json") for sd in report_state.score_definitions] if report_state.score_definitions else []

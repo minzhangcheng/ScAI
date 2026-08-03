@@ -203,6 +203,33 @@ async def test_report_skip_uses_fallback_instead_of_dropping_the_report(
 
 
 @pytest.mark.asyncio
+async def test_report_skip_without_supervisor_uses_generator_fallback_once(
+    monkeypatch, tmp_path
+):
+    _patch_report_paths(monkeypatch, tmp_path)
+    generator = MagicMock()
+    generator.generate_report = AsyncMock(
+        side_effect=[_upstream_error(), _report("partial")]
+    )
+    generator_factory = MagicMock(return_value=generator)
+    monkeypatch.setattr(
+        final_report_module, "DetailedReportGenerator", generator_factory
+    )
+    harness = _Harness(None)
+    harness._wait_for_llm_intervention = AsyncMock(
+        return_value=LlmFailureAction.SKIP
+    )
+
+    result = await harness._generate_detailed_report(_state())
+
+    calls = generator.generate_report.await_args_list
+    assert [call.kwargs["force_fallback"] for call in calls] == [False, True]
+    harness._wait_for_llm_intervention.assert_awaited_once()
+    assert result["analysis_state"].status == TaskStatus.COMPLETED
+    assert result["analysis_state"].detailed_report_fallback_pending is False
+
+
+@pytest.mark.asyncio
 async def test_report_terminate_keeps_terminate_contract(monkeypatch, tmp_path):
     _patch_report_paths(monkeypatch, tmp_path)
     supervisor = MagicMock()

@@ -11,7 +11,7 @@ import stat
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from collections.abc import Mapping
 
 from PIL import Image
@@ -377,6 +377,61 @@ def resolve_archival_pdf(artifact: Any, workspace_path: Any) -> Path | None:
     return None
 
 
+def resolve_verified_archival_artifact(
+    artifact: Any,
+    workspace_path: Any,
+    *,
+    kind: str,
+    path_authorizer: Callable[[Path], bool] | None = None,
+) -> tuple[bytes, Path] | None:
+    """Resolve and verify a publication artifact with one read per candidate."""
+    workspace = Path(workspace_path)
+    if kind == "pdf":
+        declared = str(_artifact_value(artifact, "pdf_path") or "")
+        candidates = []
+        if declared:
+            candidates.extend((
+                Path(declared),
+                workspace / "figures" / os.path.basename(declared),
+            ))
+        for candidate in dict.fromkeys(candidates):
+            if path_authorizer is not None and not path_authorizer(candidate):
+                continue
+            payload = verified_artifact_bytes(candidate, artifact, kind="pdf")
+            if payload is not None:
+                return payload, candidate
+        return None
+    if kind != "image":
+        raise ValueError(f"unsupported artifact kind: {kind}")
+
+    declared = str(_artifact_value(artifact, "png_path") or "")
+    candidates = []
+    if declared:
+        candidates.extend((
+            Path(declared),
+            workspace / "figures" / os.path.basename(declared),
+        ))
+    checked_candidates = list(dict.fromkeys(candidates))
+    for index, candidate in enumerate(checked_candidates):
+        if path_authorizer is not None and not path_authorizer(candidate):
+            continue
+        payload = verified_artifact_bytes(candidate, artifact, kind="image")
+        if payload is None:
+            continue
+        if index == 0 and len(payload) < MIN_RENDERED_FIGURE_BYTES:
+            continue
+        if index > 0:
+            _restore_artifact_mtime(candidate, artifact)
+        return payload, candidate
+
+    return _materialize_archival_preview_payload(
+        artifact,
+        workspace,
+        check_declared_path=False,
+        checked_paths=set(checked_candidates),
+    )
+
+
 def _legacy_relative_path(record: Any, field: str, workspace_path: Any) -> Path | None:
     relative = str(_artifact_value(record, field) or "").strip()
     if not relative:
@@ -419,6 +474,21 @@ def resolve_legacy_artifact_pdf(record: Any, workspace_path: Any) -> Path | None
     if not expected or candidate is None:
         return None
     return candidate if pdf_file_sha256(candidate) == expected else None
+
+
+def resolve_verified_legacy_artifact(
+    record: Any,
+    workspace_path: Any,
+    *,
+    kind: str,
+) -> tuple[bytes, Path] | None:
+    """Resolve frozen legacy inventory bytes with one record-bound read."""
+    field = "pdf_relative_path" if kind == "pdf" else "relative_path"
+    candidate = _legacy_relative_path(record, field, workspace_path)
+    if candidate is None:
+        return None
+    payload = verified_artifact_bytes(candidate, record, kind=kind)
+    return (payload, candidate) if payload is not None else None
 
 
 def _decode_preview_bytes(encoded: Any) -> bytes:
@@ -495,13 +565,18 @@ def _record_path_is_usable(
 def has_frozen_publication_pair(artifact: Any) -> bool:
     """Whether a publication record carries immutable raster and PDF IDs."""
     render = str(_artifact_value(artifact, "render_sha256", "") or "").lower()
+    preview = str(_artifact_value(artifact, "preview_sha256", "") or "").lower()
     pdf = str(_artifact_value(artifact, "pdf_sha256", "") or "").lower()
-    return bool(
-        len(render) == 64
-        and len(pdf) == 64
-        and all(char in "0123456789abcdef" for char in render)
-        and all(char in "0123456789abcdef" for char in pdf)
-    )
+
+    def valid_digest(value: str) -> bool:
+        return bool(
+            len(value) == 64
+            and all(char in "0123456789abcdef" for char in value)
+        )
+
+    # A damaged legacy render identity must not hide a valid record-owned
+    # preview. Availability and eligibility must agree on the same fallback.
+    return valid_digest(pdf) and (valid_digest(render) or valid_digest(preview))
 
 
 def archival_path_matches_record(artifact: Any, path: Any) -> bool:
@@ -528,17 +603,57 @@ def archival_render_available(artifact: Any) -> bool:
     return bool(_preview_bytes(artifact))
 
 
-def materialize_archival_preview(artifact: Any, workspace_path: Any) -> Path | None:
-    """Recover a missing record image under ``workspace/figures``.
+def _write_preview_noclobber(destination: Path, payload: bytes) -> bool:
+    """Create one preview without following or replacing an existing entry."""
+    descriptor: int | None = None
+    created = False
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(
+            destination,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        created = True
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short archival preview write")
+            view = view[written:]
+        os.fsync(descriptor)
+        return True
+    except (FileExistsError, OSError):
+        return False
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if created and destination.exists():
+            try:
+                if destination.stat().st_size != len(payload):
+                    destination.unlink()
+            except OSError:
+                pass
 
-    The persisted path is used only for its basename; recovery never writes to
-    an arbitrary absolute path from session state.
-    """
+
+def _materialize_archival_preview_payload(
+    artifact: Any,
+    workspace_path: Any,
+    *,
+    check_declared_path: bool,
+    checked_paths: set[Path] | None = None,
+) -> tuple[bytes, Path] | None:
+    """Recover and return the already-verified record preview bytes and path."""
     path = _artifact_value(artifact, "png_path")
-    if path:
+    if check_declared_path and path:
         candidate = Path(str(path))
-        if _record_path_is_usable(artifact, candidate):
-            return candidate
+        payload = verified_artifact_bytes(candidate, artifact, kind="image")
+        if payload is not None and len(payload) >= MIN_RENDERED_FIGURE_BYTES:
+            return payload, candidate
 
     payload = _preview_bytes(artifact)
     if not payload:
@@ -548,30 +663,53 @@ def materialize_archival_preview(artifact: Any, workspace_path: Any) -> Path | N
     stem = Path(original_name).stem if original_name else str(
         _artifact_value(artifact, "name", "figure")
     )
-    safe_stem = "".join(char if char.isalnum() or char in "-_." else "_" for char in stem).strip("._")
-    destination = Path(workspace_path) / "figures" / f"{safe_stem or 'figure'}{extension}"
-    # Never overwrite a different same-name image merely to recover the bytes
-    # bound to an older record. Keep both and let the record resolve to its own
-    # hash-qualified archival copy.
-    if destination.exists() and not _record_path_is_usable(
-        artifact, destination, allow_small_preview=True
-    ):
+    safe_stem = "".join(
+        char if char.isalnum() or char in "-_." else "_" for char in stem
+    ).strip("._")
+    destination = (
+        Path(workspace_path) / "figures" / f"{safe_stem or 'figure'}{extension}"
+    )
+
+    checked_paths = checked_paths or set()
+    existing = (
+        None
+        if destination in checked_paths
+        else verified_artifact_bytes(destination, artifact, kind="image")
+    )
+    if existing is not None:
+        _restore_artifact_mtime(destination, artifact)
+        return existing, destination
+    if destination.exists():
+        digest = hashlib.sha256(payload).hexdigest()[:16]
         destination = destination.with_name(
-            f"{destination.stem}_record_preview{destination.suffix}"
+            f"{destination.stem}_record_preview_{digest}{destination.suffix}"
         )
-    try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(payload)
-    except OSError:
-        return None
-    if not _record_path_is_usable(artifact, destination, allow_small_preview=True):
-        try:
-            destination.unlink()
-        except OSError:
-            pass
+        existing = verified_artifact_bytes(destination, artifact, kind="image")
+        if existing is not None:
+            _restore_artifact_mtime(destination, artifact)
+            return existing, destination
+        if destination.exists():
+            return None
+
+    if not _write_preview_noclobber(destination, payload):
         return None
     _restore_artifact_mtime(destination, artifact)
-    return destination
+    return payload, destination
+
+
+def materialize_archival_preview(artifact: Any, workspace_path: Any) -> Path | None:
+    """Recover a missing record image under ``workspace/figures``.
+
+    The persisted path is used only for its basename; recovery never writes to
+    an arbitrary absolute path from session state.
+    """
+    recovered = _materialize_archival_preview_payload(
+        artifact,
+        workspace_path,
+        check_declared_path=True,
+        checked_paths=None,
+    )
+    return recovered[1] if recovered is not None else None
 
 
 def resolve_archival_render(artifact: Any, workspace_path: Any) -> Path | None:

@@ -6,6 +6,7 @@ import logging
 from types import SimpleNamespace
 from typing import Any
 
+from backend.models.user import USER_STATUS_DELETING
 from backend.services.session_lifecycle import (
     list_lifecycle_records,
     request_import_generation_cancellation,
@@ -20,6 +21,7 @@ from backend.state import (
     users_pending_deletion,
 )
 from backend.utils.auth import get_db
+from backend.utils.asyncio_tasks import await_with_deferred_cancellation
 
 
 logger = logging.getLogger(__name__)
@@ -130,6 +132,22 @@ def _count_cleanup_stats(totals: dict[str, int], stats: dict[str, int]) -> None:
     )
 
 
+async def _close_user_websockets(session_ids: set[str]) -> None:
+    """Revoke every live transport before producer cleanup can become pending."""
+    from backend.utils.websocket_delivery import close_websocket
+
+    for session_id in sorted(session_ids):
+        for channel in ("analysis", "report"):
+            try:
+                await close_websocket(channel, session_id, code=4001)
+            except Exception:
+                logger.exception(
+                    "Failed to close %s WebSocket during account revocation for %s",
+                    channel,
+                    session_id,
+                )
+
+
 async def delete_user_data(user_id: str) -> dict:
     """Revoke an account and delete every generation it owns.
 
@@ -150,7 +168,7 @@ async def delete_user_data(user_id: str) -> dict:
 
     try:
         db = await get_db()
-        status_changed = await db.set_user_status(user_id, "pending")
+        status_changed = await db.set_user_status(user_id, USER_STATUS_DELETING)
     except BaseException:
         # No durable revocation was established, so do not leave a process-local
         # marker that would permanently reject imports for a nonexistent or
@@ -165,12 +183,28 @@ async def delete_user_data(user_id: str) -> dict:
         raise ValueError(f"user {user_id} does not exist")
     await db.delete_api_keys_by_user(user_id)
 
+    # Closing transports is part of the durable account-revocation boundary,
+    # not a side effect of successful physical session cleanup. A resistant
+    # producer may keep the tombstone pending, but it must lose its socket first.
+    lifecycle_records = await asyncio.to_thread(_owned_lifecycle_records, user_id)
+    async with state_lock:
+        socket_session_ids = {
+            sid
+            for sid, state in sessions.items()
+            if getattr(state, "user_id", None) == user_id
+        }
+    socket_session_ids.update(lifecycle_records)
+    websocket_revocation = asyncio.create_task(
+        _close_user_websockets(socket_session_ids),
+        name=f"user-websocket-revocation:{user_id}",
+    )
+    await await_with_deferred_cancellation(websocket_revocation)
+
     await _cancel_user_import_jobs(user_id)
 
     # Capture lifecycle inventory directly. list_saved_sessions intentionally
     # hides importing and deleted records and therefore cannot be the source of
     # truth for account erasure.
-    lifecycle_records = await asyncio.to_thread(_owned_lifecycle_records, user_id)
     initially_importing = {
         sid
         for sid, record in lifecycle_records.items()

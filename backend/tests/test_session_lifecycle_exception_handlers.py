@@ -6,6 +6,7 @@ import pytest
 from starlette.requests import Request
 
 from backend.main import (
+    report_generation_exception_handler,
     session_generation_exception_handler,
     session_gone_exception_handler,
 )
@@ -13,6 +14,7 @@ from backend.services.session_lifecycle import (
     SessionGenerationError,
     SessionGoneError,
 )
+from backend.services.report.output_generation import ReportGenerationError
 
 
 def _request(user_id: str | None) -> Request:
@@ -56,3 +58,16 @@ async def test_session_generation_handler_returns_reloadable_conflict():
 
     assert response.status_code == 409
     assert json.loads(response.body)["detail"]["code"] == "SESSION_GENERATION_CHANGED"
+
+
+@pytest.mark.asyncio
+async def test_report_generation_handler_returns_stable_conflict_without_path_leak():
+    response = await report_generation_exception_handler(
+        _request("owner"),
+        ReportGenerationError("unsafe path: /private/session/report"),
+    )
+
+    body = json.loads(response.body)
+    assert response.status_code == 409
+    assert body["detail"]["code"] == "REPORT_GENERATION_INVALID"
+    assert "/private/session/report" not in body["detail"]["message"]

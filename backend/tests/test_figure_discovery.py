@@ -10,6 +10,7 @@ import pytest
 from PIL import Image
 
 from backend.services.report.figure_discovery import (
+    backfill_legacy_publication_integrity,
     discover_figures_in_workspace,
     discover_workspace_figures,
     ensure_legacy_artifact_inventory,
@@ -18,8 +19,13 @@ from backend.services.report.figure_discovery import (
     publication_figure_metadata,
     resolve_state_figure_candidates,
 )
-from backend.models.schemas import AnalysisState
-from backend.services.report.artifacts import ARTIFACT_REGISTRY_VERSION
+from backend.models.schemas import AnalysisState, FigureReviewStatus, PublicationFigure
+from backend.services.report.artifacts import (
+    ARTIFACT_REGISTRY_VERSION,
+    archival_render_available,
+    is_report_eligible,
+    resolve_verified_archival_artifact,
+)
 from backend.tests.figure_image_helpers import valid_pdf_bytes
 
 
@@ -438,6 +444,131 @@ def test_missing_registry_version_creates_explicit_legacy_inventory(tmp_path):
     assert candidates[0]["is_legacy"] is True
     assert candidates[0]["legacy_artifact_id"] == inventory[0].id
     assert candidates[0]["provenance_kind"] == "legacy_unregistered"
+
+
+def test_legacy_publication_backfill_trusts_only_record_preview(tmp_path):
+    workspace = tmp_path / "workspace"
+    image = _render(workspace / "figures" / "reviewed.png")
+    pdf = image.with_suffix(".pdf")
+    pdf.write_bytes(valid_pdf_bytes())
+    preview = base64.b64encode(image.read_bytes()).decode()
+    figure = PublicationFigure(
+        name="reviewed",
+        description="Historical reviewed figure",
+        figure_type="other",
+        png_path=str(image),
+        pdf_path=str(pdf),
+        png_base64=preview,
+        review_status=FigureReviewStatus.APPROVED,
+    )
+    state = AnalysisState(
+        id="legacy-publication-session",
+        user_id="u",
+        publication_figures=[figure],
+    )
+
+    assert backfill_legacy_publication_integrity(state, workspace) == 1
+    ensure_legacy_artifact_inventory(state, workspace)
+
+    assert figure.render_sha256 == hashlib.sha256(image.read_bytes()).hexdigest()
+    assert figure.preview_sha256 == hashlib.sha256(image.read_bytes()).hexdigest()
+    assert figure.pdf_sha256 is None
+    assert not is_report_eligible(figure)
+    assert archival_render_available(figure)
+
+
+def test_legacy_publication_backfill_rejects_replaced_raster_and_pdf(tmp_path):
+    workspace = tmp_path / "workspace"
+    image = _render(
+        workspace / "figures" / "reviewed.png",
+        _image_bytes(noise=25),
+    )
+    reviewed_preview = image.read_bytes()
+    pdf = image.with_suffix(".pdf")
+    pdf.write_bytes(valid_pdf_bytes())
+    figure = PublicationFigure(
+        name="reviewed",
+        description="Historical reviewed figure",
+        figure_type="other",
+        png_path=str(image),
+        pdf_path=str(pdf),
+        png_base64=base64.b64encode(reviewed_preview).decode(),
+        review_status=FigureReviewStatus.APPROVED,
+    )
+    state = AnalysisState(
+        id="legacy-replaced-publication",
+        user_id="u",
+        publication_figures=[figure],
+    )
+
+    image.write_bytes(_image_bytes(noise=180))
+    pdf.write_bytes(valid_pdf_bytes() + b"replacement")
+
+    assert backfill_legacy_publication_integrity(state, workspace) == 1
+    assert figure.preview_sha256 == hashlib.sha256(reviewed_preview).hexdigest()
+    assert figure.render_sha256 is None
+    assert figure.pdf_sha256 is None
+    assert not is_report_eligible(figure)
+    inventory = ensure_legacy_artifact_inventory(state, workspace)
+    assert all(item.name != "reviewed" for item in inventory)
+
+    resolved = resolve_verified_archival_artifact(
+        figure,
+        workspace,
+        kind="image",
+    )
+    assert resolved is not None
+    assert resolved[0] == reviewed_preview
+    assert resolved[0] != image.read_bytes()
+
+
+def test_legacy_publication_backfill_does_not_trust_paths_without_preview(tmp_path):
+    workspace = tmp_path / "workspace"
+    image = _render(workspace / "figures" / "path-only.png")
+    pdf = image.with_suffix(".pdf")
+    pdf.write_bytes(valid_pdf_bytes())
+    figure = PublicationFigure(
+        name="path-only",
+        description="No frozen record bytes",
+        figure_type="other",
+        png_path=str(image),
+        pdf_path=str(pdf),
+        review_status=FigureReviewStatus.APPROVED,
+    )
+    state = AnalysisState(
+        id="legacy-path-only-publication",
+        user_id="u",
+        publication_figures=[figure],
+    )
+
+    assert backfill_legacy_publication_integrity(state, workspace) == 0
+    assert figure.render_sha256 is None
+    assert figure.preview_sha256 is None
+    assert figure.pdf_sha256 is None
+    assert not is_report_eligible(figure)
+
+
+def test_strict_registry_never_adopts_missing_publication_hashes(tmp_path):
+    workspace = tmp_path / "workspace"
+    image = _render(workspace / "figures" / "unbound.png")
+    figure = PublicationFigure(
+        name="unbound",
+        description="Strict record without provenance",
+        figure_type="other",
+        png_path=str(image),
+        pdf_path=str(image.with_suffix(".pdf")),
+        review_status=FigureReviewStatus.APPROVED,
+    )
+    state = AnalysisState(
+        id="strict-publication-session",
+        user_id="u",
+        publication_figures=[figure],
+        artifact_registry_version=ARTIFACT_REGISTRY_VERSION,
+    )
+
+    assert backfill_legacy_publication_integrity(state, workspace) == 0
+    assert figure.render_sha256 is None
+    assert not is_report_eligible(figure)
 
 
 def test_legacy_inventory_is_frozen_after_first_migration_scan(tmp_path):

@@ -11,7 +11,7 @@ interface AdminUser {
   username: string
   email?: string
   role: 'admin' | 'user'
-  status: 'active' | 'pending' | 'readonly'
+  status: 'active' | 'pending' | 'readonly' | 'deleting'
   created_at: string
 }
 
@@ -275,15 +275,15 @@ function CreateUserPrompt({ open, onClose, onConfirm }: CreateUserPromptProps) {
   )
 }
 
-// Editable enum cell: a read-only badge for the current user's own row, an
-// inline <select> for everyone else.
-function EnumCell({ isSelf, value, options, onChange }: {
-  isSelf: boolean
+// Editable enum cell: a read-only badge for protected rows, an inline
+// <select> for ordinary mutable rows.
+function EnumCell({ readOnly, value, options, onChange }: {
+  readOnly: boolean
   value: string
   options: string[]
   onChange: (value: string) => void
 }) {
-  if (isSelf) {
+  if (readOnly) {
     return (
       <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
         {value}
@@ -356,11 +356,17 @@ export function Admin() {
 
   const handleDeleteUser = async () => {
     if (!deleteTarget) return
-    await apiFetch(`/admin/users/${deleteTarget.id}`, {
-      method: 'DELETE',
-    })
+    let deletionError = ''
+    try {
+      await apiFetch(`/admin/users/${deleteTarget.id}`, {
+        method: 'DELETE',
+      })
+    } catch (e: any) {
+      deletionError = e.message || (zh ? '删除清理尚未完成' : 'Deletion cleanup is not complete')
+    }
     setDeleteTarget(null)
     await fetchUsers()
+    if (deletionError) setError(deletionError)
   }
 
   const handleStatusChange = async (userId: string, newStatus: string) => {
@@ -493,6 +499,7 @@ export function Admin() {
               ) : (
                 users.map((user) => {
                   const isSelf = user.id === authUser?.id
+                  const isDeleting = user.status === 'deleting'
                   return (
                     <tr key={user.id} className="hover:bg-surface-50 transition-colors">
                       <td className="px-6 py-4">
@@ -505,7 +512,7 @@ export function Admin() {
                       </td>
                       <td className="px-6 py-4">
                         <EnumCell
-                          isSelf={isSelf}
+                          readOnly={isSelf || isDeleting}
                           value={user.role}
                           options={['user', 'admin']}
                           onChange={(role) => handleRoleChange(user.id, role)}
@@ -513,7 +520,7 @@ export function Admin() {
                       </td>
                       <td className="px-6 py-4">
                         <EnumCell
-                          isSelf={isSelf}
+                          readOnly={isSelf || isDeleting}
                           value={user.status}
                           options={user.role === 'admin' ? ['readonly', 'active'] : ['pending', 'readonly', 'active']}
                           onChange={(status) => handleStatusChange(user.id, status)}
@@ -527,6 +534,18 @@ export function Admin() {
                           <span className="text-xs text-surface-400 italic">
                             {zh ? '本人' : 'You'}
                           </span>
+                        ) : isDeleting ? (
+                          <div className="flex items-center gap-4">
+                            <span className="text-xs text-amber-700">
+                              {zh ? '删除清理中' : 'Deletion in progress'}
+                            </span>
+                            <button
+                              onClick={() => setDeleteTarget(user)}
+                              className="text-sm text-red-600 hover:text-red-700 font-medium transition-colors"
+                            >
+                              {zh ? '重试清理' : 'Retry cleanup'}
+                            </button>
+                          </div>
                         ) : (
                           <div className="flex items-center gap-4">
                             <button

@@ -1,7 +1,9 @@
 """Tests for session_store: save/load round-trip + list discovery."""
 import asyncio
+import base64
 import json
 import os
+import time
 
 import pytest
 import pytest_asyncio
@@ -12,9 +14,15 @@ from backend.services.session_store import (
     save_session_to_disk, load_session_from_disk,
     async_save_session, ensure_session_loaded, list_saved_sessions,
 )
-from backend.models.schemas import AnalysisState
-from backend.state import sessions
-from backend.config import ensure_session_dirs
+from backend.models.schemas import (
+    AnalysisState,
+    FigureReviewStatus,
+    PublicationFigure,
+)
+from backend.models.schemas import TaskStatus
+from backend.state import last_save_times, sessions
+from backend.config import ensure_session_dirs, get_session_workspace
+from backend.tests.figure_image_helpers import valid_image_bytes, valid_pdf_bytes
 
 
 def _make_state(session_id: str, user_id: str = "u-1") -> AnalysisState:
@@ -98,3 +106,62 @@ def test_list_saved_sessions_sees_new_structure():
     save_session_to_disk(sid, _make_state(sid))
     found = [s for s in list_saved_sessions() if s["id"] == sid]
     assert found and found[0]["user_id"] == "u-1"
+
+
+@pytest.mark.asyncio
+async def test_paused_state_bypasses_recent_save_throttle():
+    sid = "sess-paused-force-save"
+    ensure_session_dirs(sid)
+    state = _make_state(sid)
+    state.status = TaskStatus.RUNNING
+    save_session_to_disk(sid, state)
+    last_save_times[sid] = time.monotonic()
+
+    state.status = TaskStatus.PAUSED
+    await async_save_session(sid, state)
+
+    loaded = load_session_from_disk(sid)
+    assert loaded is not None
+    assert loaded.status == TaskStatus.PAUSED
+
+
+@pytest.mark.asyncio
+async def test_loading_legacy_session_persists_publication_hash_backfill():
+    sid = "sess-legacy-publication-backfill"
+    ensure_session_dirs(sid)
+    workspace = get_session_workspace(sid)
+    figure_path = workspace / "figures" / "historical.png"
+    figure_path.parent.mkdir(parents=True, exist_ok=True)
+    image = valid_image_bytes("PNG", min_bytes=2200)
+    figure_path.write_bytes(image)
+    pdf_path = figure_path.with_suffix(".pdf")
+    pdf_path.write_bytes(valid_pdf_bytes())
+    state = _make_state(sid)
+    state.publication_figures = [
+        PublicationFigure(
+            name="historical",
+            description="Reviewed before integrity tracking",
+            figure_type="other",
+            png_path=str(figure_path),
+            pdf_path=str(pdf_path),
+            png_base64=base64.b64encode(image).decode(),
+            review_status=FigureReviewStatus.APPROVED,
+        )
+    ]
+    state.artifact_registry_version = None
+    save_session_to_disk(sid, state)
+    sessions.pop(sid, None)
+
+    loaded = await ensure_session_loaded(sid)
+
+    figure = loaded.publication_figures[0]
+    assert figure.render_sha256
+    assert figure.preview_sha256
+    assert figure.pdf_sha256 is None
+    sessions.pop(sid, None)
+    persisted = load_session_from_disk(sid)
+    assert persisted is not None
+    persisted_figure = persisted.publication_figures[0]
+    assert persisted_figure.render_sha256 == figure.render_sha256
+    assert persisted_figure.preview_sha256 == figure.preview_sha256
+    assert persisted_figure.pdf_sha256 is None

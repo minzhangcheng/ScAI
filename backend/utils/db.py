@@ -4,7 +4,7 @@ import aiosqlite
 import uuid
 import time
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Sequence
 from datetime import datetime, timezone
 
 from backend.models.user import User, ApiKey
@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
     session_id TEXT NOT NULL,
     filename TEXT NOT NULL,
     expected_sha256 TEXT NOT NULL,
+    total_size INTEGER NOT NULL,
     total_chunks INTEGER NOT NULL,
     chunk_size INTEGER NOT NULL,
     received_chunks INTEGER NOT NULL DEFAULT 0,
@@ -87,19 +88,61 @@ class AppDB:
             await db.execute("PRAGMA synchronous=NORMAL")
             await db.execute("PRAGMA foreign_keys = ON")
             await db.executescript(SCHEMA)
+            columns = {
+                row[1]
+                for row in await (
+                    await db.execute("PRAGMA table_info(upload_sessions)")
+                ).fetchall()
+            }
+            if "total_size" not in columns:
+                # Active sessions created before this migration cannot be
+                # safely completed because their accepted byte budget was not
+                # persisted.  NULL keeps them distinguishable and fail-closed.
+                await db.execute(
+                    "ALTER TABLE upload_sessions ADD COLUMN total_size INTEGER"
+                )
             await db.commit()
 
     # ── Users ──────────────────────────────────────────────────────────
 
-    async def create_user(self, username: str, password_hash: str, email: Optional[str] = None, role: str = "user", status: str = "pending") -> str:
+    async def create_user(
+        self,
+        username: str,
+        password_hash: str,
+        email: Optional[str] = None,
+        role: str = "user",
+        status: str = "pending",
+        *,
+        required_admin_id: Optional[str] = None,
+    ) -> Optional[str]:
         uid = str(uuid.uuid4())
         async with aiosqlite.connect(self.path, timeout=30) as db:
-            await db.execute(
-                "INSERT INTO users(id,email,username,password_hash,created_at,role,status) VALUES(?,?,?,?,?,?,?)",
-                (uid, email, username, password_hash, datetime.now(timezone.utc).isoformat(), role, status),
+            values = (
+                uid,
+                email,
+                username,
+                password_hash,
+                datetime.now(timezone.utc).isoformat(),
+                role,
+                status,
             )
+            if required_admin_id is None:
+                cur = await db.execute(
+                    "INSERT INTO users(id,email,username,password_hash,created_at,role,status) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    values,
+                )
+            else:
+                cur = await db.execute(
+                    "INSERT INTO users(id,email,username,password_hash,created_at,role,status) "
+                    "SELECT ?,?,?,?,?,?,? WHERE EXISTS ("
+                    "SELECT 1 FROM users AS actor WHERE actor.id=? "
+                    "AND actor.role='admin' "
+                    "AND actor.status IN ('active','readonly'))",
+                    (*values, required_admin_id),
+                )
             await db.commit()
-        return uid
+        return uid if cur.rowcount > 0 else None
 
     async def get_user_by_email(self, email: str) -> Optional[User]:
         async with aiosqlite.connect(self.path, timeout=30) as db:
@@ -158,11 +201,53 @@ class AppDB:
                 for r in rows
             ]
 
-    async def update_user_password(self, uid: str, password_hash: str) -> bool:
+    async def update_user_password(
+        self,
+        uid: str,
+        password_hash: str,
+        *,
+        unless_current_status: Optional[str] = None,
+        required_admin_id: Optional[str] = None,
+    ) -> bool:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            clauses = ["id=?"]
+            params: list[str] = [password_hash, uid]
+            if unless_current_status is not None:
+                clauses.append("status<>?")
+                params.append(unless_current_status)
+            if required_admin_id is not None:
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM users AS actor WHERE actor.id=? "
+                    "AND actor.role='admin' "
+                    "AND actor.status IN ('active','readonly'))"
+                )
+                params.append(required_admin_id)
+            cur = await db.execute(
+                "UPDATE users SET password_hash=? WHERE " + " AND ".join(clauses),
+                tuple(params),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def compare_and_swap_user_password(
+        self,
+        uid: str,
+        expected_hash: str,
+        password_hash: str,
+        *,
+        allowed_statuses: Sequence[str],
+    ) -> bool:
+        """Replace a password only while the verified credential still owns it."""
+        statuses = tuple(str(status) for status in allowed_statuses)
+        if not statuses:
+            return False
+        placeholders = ",".join("?" for _ in statuses)
         async with aiosqlite.connect(self.path, timeout=30) as db:
             cur = await db.execute(
-                "UPDATE users SET password_hash=? WHERE id=?",
-                (password_hash, uid),
+                "UPDATE users SET password_hash=? "
+                "WHERE id=? AND password_hash=? "
+                f"AND status IN ({placeholders})",
+                (password_hash, uid, expected_hash, *statuses),
             )
             await db.commit()
             return cur.rowcount > 0
@@ -176,29 +261,140 @@ class AppDB:
             await db.commit()
             return cur.rowcount > 0
 
-    async def set_user_status(self, uid: str, status: str) -> bool:
+    async def set_user_status(
+        self,
+        uid: str,
+        status: str,
+        *,
+        unless_current_status: Optional[str] = None,
+        forbid_current_role: Optional[str] = None,
+        required_admin_id: Optional[str] = None,
+    ) -> bool:
         async with aiosqlite.connect(self.path, timeout=30) as db:
+            clauses = ["id=?"]
+            params: list[str] = [status, uid]
+            if unless_current_status is not None:
+                clauses.append("status<>?")
+                params.append(unless_current_status)
+            if forbid_current_role is not None:
+                clauses.append("role<>?")
+                params.append(forbid_current_role)
+            if required_admin_id is not None:
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM users AS actor WHERE actor.id=? "
+                    "AND actor.role='admin' "
+                    "AND actor.status IN ('active','readonly'))"
+                )
+                params.append(required_admin_id)
             cur = await db.execute(
-                "UPDATE users SET status=? WHERE id=?",
-                (status, uid),
+                "UPDATE users SET status=? WHERE " + " AND ".join(clauses),
+                tuple(params),
             )
             await db.commit()
             return cur.rowcount > 0
 
-    async def set_user_role(self, uid: str, role: str, *, status: Optional[str] = None) -> bool:
+    async def set_user_role(
+        self,
+        uid: str,
+        role: str,
+        *,
+        status: Optional[str] = None,
+        unless_current_status: Optional[str] = None,
+        activate_pending_admin: bool = False,
+        required_admin_id: Optional[str] = None,
+    ) -> bool:
         async with aiosqlite.connect(self.path, timeout=30) as db:
+            clauses = ["id=?"]
+            where_params: list[str] = [uid]
+            if unless_current_status is not None:
+                clauses.append("status<>?")
+                where_params.append(unless_current_status)
+            if required_admin_id is not None:
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM users AS actor WHERE actor.id=? "
+                    "AND actor.role='admin' "
+                    "AND actor.status IN ('active','readonly'))"
+                )
+                where_params.append(required_admin_id)
             if status is not None:
-                cur = await db.execute(
-                    "UPDATE users SET role=?, status=? WHERE id=?",
-                    (role, status, uid),
+                statement = "UPDATE users SET role=?, status=? WHERE "
+                params = [role, status, *where_params]
+            elif activate_pending_admin:
+                statement = (
+                    "UPDATE users SET role=?, "
+                    "status=CASE WHEN ?='admin' AND status='pending' "
+                    "THEN 'active' ELSE status END WHERE "
                 )
+                params = [role, role, *where_params]
             else:
-                cur = await db.execute(
-                    "UPDATE users SET role=? WHERE id=?",
-                    (role, uid),
-                )
+                statement = "UPDATE users SET role=? WHERE "
+                params = [role, *where_params]
+            cur = await db.execute(
+                statement + " AND ".join(clauses),
+                tuple(params),
+            )
             await db.commit()
             return cur.rowcount > 0
+
+    async def mark_user_deleting_if_not_last_admin(
+        self,
+        uid: str,
+        *,
+        required_admin_id: Optional[str] = None,
+    ) -> str:
+        """Atomically revoke one user without removing the last usable admin.
+
+        Returns ``updated``, ``not_found``, ``last_admin``, or ``forbidden``.
+        ``BEGIN IMMEDIATE`` serializes competing admin revocation/deletion
+        before either request evaluates the authorization and last-admin
+        invariants.
+        """
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                if required_admin_id is not None:
+                    actor = await (
+                        await db.execute(
+                            "SELECT 1 FROM users WHERE id=? AND role='admin' "
+                            "AND status IN ('active','readonly')",
+                            (required_admin_id,),
+                        )
+                    ).fetchone()
+                    if actor is None:
+                        await db.rollback()
+                        return "forbidden"
+                row = await (
+                    await db.execute(
+                        "SELECT role, status FROM users WHERE id=?", (uid,)
+                    )
+                ).fetchone()
+                if row is None:
+                    await db.rollback()
+                    return "not_found"
+                if row["status"] == "deleting":
+                    await db.commit()
+                    return "updated"
+                if row["role"] == "admin" and row["status"] in (
+                    "active", "readonly",
+                ):
+                    count_row = await (
+                        await db.execute(
+                            "SELECT COUNT(*) FROM users WHERE role='admin' "
+                            "AND status IN ('active','readonly')"
+                        )
+                    ).fetchone()
+                    if int(count_row[0] if count_row else 0) <= 1:
+                        await db.rollback()
+                        return "last_admin"
+                await db.execute(
+                    "UPDATE users SET status='deleting' WHERE id=?", (uid,)
+                )
+                await db.commit()
+                return "updated"
+            except BaseException:
+                await db.rollback()
+                raise
 
     async def delete_user(self, uid: str) -> bool:
         async with aiosqlite.connect(self.path, timeout=30) as db:
@@ -212,22 +408,57 @@ class AppDB:
             await db.execute("DELETE FROM api_keys WHERE user_id=?", (uid,))
             await db.commit()
 
-    async def demote_admin_if_not_last(self, uid: str, new_role: str) -> bool:
+    async def demote_admin_if_not_last(
+        self,
+        uid: str,
+        new_role: str,
+        *,
+        unless_current_status: Optional[str] = None,
+        required_admin_id: Optional[str] = None,
+    ) -> bool:
         async with aiosqlite.connect(self.path, timeout=30) as db:
+            clauses = [
+                "id=?",
+                "role='admin'",
+                "(status NOT IN ('active','readonly') OR "
+                "(SELECT COUNT(*) FROM users WHERE role='admin' "
+                "AND status IN ('active','readonly')) > 1)",
+            ]
+            params: list[str] = [new_role, uid]
+            if unless_current_status is not None:
+                clauses.append("status<>?")
+                params.append(unless_current_status)
+            if required_admin_id is not None:
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM users AS actor WHERE actor.id=? "
+                    "AND actor.role='admin' "
+                    "AND actor.status IN ('active','readonly'))"
+                )
+                params.append(required_admin_id)
             cur = await db.execute(
-                "UPDATE users SET role=? "
-                "WHERE id=? AND role='admin' "
-                "AND (SELECT COUNT(*) FROM users WHERE role='admin') > 1",
-                (new_role, uid),
+                "UPDATE users SET role=? WHERE " + " AND ".join(clauses),
+                tuple(params),
             )
             await db.commit()
             return cur.rowcount > 0
+
+    async def is_usable_admin(self, uid: str) -> bool:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            row = await (
+                await db.execute(
+                    "SELECT 1 FROM users WHERE id=? AND role='admin' "
+                    "AND status IN ('active','readonly')",
+                    (uid,),
+                )
+            ).fetchone()
+            return row is not None
 
     async def count_admins(self) -> int:
         async with aiosqlite.connect(self.path, timeout=30) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                "SELECT COUNT(*) as cnt FROM users WHERE role='admin'"
+                "SELECT COUNT(*) as cnt FROM users WHERE role='admin' "
+                "AND status IN ('active','readonly')"
             )
             row = await cur.fetchone()
             return row["cnt"] if row else 0
@@ -404,18 +635,18 @@ class AppDB:
 
     async def create_upload_session(
         self, session_id: str, filename: str, expected_sha256: str,
-        total_chunks: int, chunk_size: int, expires_at_iso: str,
+        total_size: int, total_chunks: int, chunk_size: int, expires_at_iso: str,
         placeholder_file_id: str,
     ) -> str:
         uid = str(uuid.uuid4())
         async with aiosqlite.connect(self.path, timeout=30) as db:
             await db.execute(
                 """INSERT INTO upload_sessions
-                (id, session_id, filename, expected_sha256, total_chunks,
+                (id, session_id, filename, expected_sha256, total_size, total_chunks,
                  chunk_size, received_chunks, received_mask, placeholder_file_id,
                  created_at, expires_at, completed)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (uid, session_id, filename, expected_sha256, total_chunks,
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (uid, session_id, filename, expected_sha256, total_size, total_chunks,
                  chunk_size, 0, "", placeholder_file_id,
                  datetime.now(timezone.utc).isoformat(), expires_at_iso, 0),
             )

@@ -84,3 +84,47 @@ async def test_owned_thread_still_defers_cancellation_until_worker_finishes():
         if not owner.done():
             owner.cancel()
         await asyncio.gather(owner, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_bulk_workers_cannot_starve_latency_sensitive_owned_work():
+    from backend.utils import asyncio_tasks
+
+    release = threading.Event()
+    bulk_executor = asyncio_tasks._get_owned_bulk_thread_executor()
+    entered = [
+        threading.Event()
+        for _ in range(asyncio_tasks._OWNED_BULK_THREAD_MAX_WORKERS)
+    ]
+
+    def bulk_work(index: int) -> None:
+        entered[index].set()
+        assert release.wait(timeout=2)
+
+    bulk_tasks = [
+        asyncio.create_task(
+            asyncio_tasks.run_in_owned_bulk_thread(bulk_work, index)
+        )
+        for index in range(asyncio_tasks._OWNED_BULK_THREAD_MAX_WORKERS)
+    ]
+    try:
+        for _ in range(200):
+            if all(event.is_set() for event in entered):
+                break
+            await asyncio.sleep(0.005)
+        assert all(event.is_set() for event in entered)
+        result = await asyncio.wait_for(
+            asyncio_tasks.run_in_owned_thread(lambda: "responsive"),
+            timeout=0.5,
+        )
+        assert result == "responsive"
+        assert (
+            asyncio_tasks._get_owned_bulk_thread_executor()
+            is not asyncio_tasks._get_owned_thread_executor()
+        )
+    finally:
+        release.set()
+        await asyncio.gather(*bulk_tasks, return_exceptions=True)
+        bulk_executor.shutdown(wait=True)
+        asyncio_tasks._owned_bulk_thread_executor = None
+        asyncio_tasks._owned_bulk_thread_executor_pid = 0

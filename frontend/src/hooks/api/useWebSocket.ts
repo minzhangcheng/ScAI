@@ -118,6 +118,10 @@ export function useWebSocket() {
     const isCurrentAttempt = () => (
       connectionAttemptRef.current === attempt && wsRef.current === ws
     )
+    const ownsSocketSession = () => (
+      isCurrentAttempt()
+      && useAppStore.getState().currentSession?.id === session.id
+    )
     const clearCurrentConnectTimeout = () => {
       if (!isCurrentAttempt()) return
       if (connectTimeoutRef.current) {
@@ -139,6 +143,12 @@ export function useWebSocket() {
 
     ws.onopen = async () => {
       if (!isCurrentAttempt()) return
+      if (!ownsSocketSession()) {
+        clearCurrentConnectTimeout()
+        wsRef.current = null
+        ws.close()
+        return
+      }
       clearCurrentConnectTimeout()
       setConnected(true)
       setWsConnected(true)
@@ -235,7 +245,10 @@ export function useWebSocket() {
     }
     
     ws.onmessage = (event) => {
-      if (!isCurrentAttempt()) return
+      // A store selection can move from A to B before B creates its socket.
+      // Socket-attempt ownership alone still regards A as current in that
+      // window, so every global-store mutation must also remain session-owned.
+      if (!ownsSocketSession()) return
       try {
         const data = JSON.parse(event.data)
 
@@ -655,7 +668,7 @@ export function useWebSocket() {
     }
     
     ws.onerror = (error) => {
-      if (!isCurrentAttempt()) return
+      if (!ownsSocketSession()) return
       clearCurrentConnectTimeout()
       console.error('WebSocket: Error:', error)
     }
@@ -667,6 +680,10 @@ export function useWebSocket() {
       setWsConnected(false)
       wsRef.current = null
       devLog('WebSocket: Disconnected, code:', event.code, 'reason:', event.reason)
+
+      // The selected session may have changed before this old socket closed.
+      // Do not let A schedule a reconnect whose fresh connect() targets B.
+      if (useAppStore.getState().currentSession?.id !== session.id) return
 
       if (event.code === 4404 || event.code === 4410) {
         const store = useAppStore.getState()

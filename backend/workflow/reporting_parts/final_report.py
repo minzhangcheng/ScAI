@@ -330,7 +330,10 @@ class FinalReportMixin:
                         supervisor_model=supervisor_model,
                         target_lineage_id=target_lineage_id,
                     )
-                    report = await generator.generate_report(report_state)
+                    report = await generator.generate_report(
+                        report_state,
+                        force_fallback=force_fallback,
+                    )
 
                 await self._send_message(
                     "detailed_report",

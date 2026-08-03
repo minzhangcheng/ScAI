@@ -3,7 +3,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 
-from backend.models.user import UsernameStr, PasswordStr
+from backend.models.user import (
+    PasswordStr,
+    USER_STATUS_DELETING,
+    UsernameStr,
+)
 from backend.utils.db import AppDB
 from backend.utils.auth import get_db, hash_password, require_admin, check_user_uniqueness
 from backend.services.user_cleanup import UserCleanupPendingError, delete_user_data
@@ -42,6 +46,25 @@ class SetPasswordRequest(BaseModel):
 
 # ── Routes ────────────────────────────────────────────────────────────────
 
+def _reject_deleting_user(target) -> None:
+    if target.status == USER_STATUS_DELETING:
+        raise HTTPException(status_code=409, detail="User deletion is in progress")
+
+
+async def _raise_guarded_user_update_failure(
+    db: AppDB,
+    uid: str,
+    admin_id: str,
+) -> None:
+    """Distinguish deletion races from a user disappearing mid-update."""
+    if not await db.is_usable_admin(admin_id):
+        raise HTTPException(status_code=403, detail="Admin authorization was revoked")
+    current = await db.get_user_by_id(uid)
+    if current is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    _reject_deleting_user(current)
+    raise HTTPException(status_code=409, detail="User changed during the update")
+
 @router.get("/users", response_model=list[AdminUserResponse])
 async def list_users(_: str = Depends(require_admin)):
     """List all users (password_hash excluded). Requires admin."""
@@ -57,7 +80,10 @@ async def list_users(_: str = Depends(require_admin)):
 
 
 @router.post("/users", response_model=AdminUserResponse, status_code=status.HTTP_201_CREATED)
-async def create_user(req: CreateUserRequest, _: str = Depends(require_admin)):
+async def create_user(
+    req: CreateUserRequest,
+    admin_id: str = Depends(require_admin),
+):
     """Create a new user with status='active'. Requires admin."""
     db: AppDB = await get_db()
     await check_user_uniqueness(db, req.username, req.email)
@@ -68,7 +94,10 @@ async def create_user(req: CreateUserRequest, _: str = Depends(require_admin)):
         email=req.email,
         role="user",  # Always 'user' — admin creation not allowed via this endpoint
         status="active",
+        required_admin_id=admin_id,
     )
+    if uid is None:
+        raise HTTPException(status_code=403, detail="Admin authorization was revoked")
     user = await db.get_user_by_id(uid)
     if user is None:
         raise HTTPException(status_code=500, detail="User creation failed")
@@ -93,11 +122,18 @@ async def set_user_status(
     target = await db.get_user_by_id(uid)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
+    _reject_deleting_user(target)
     if target.role == "admin" and req.status == "pending":
         raise HTTPException(status_code=400, detail="Admin users cannot be set to pending")
-    success = await db.set_user_status(uid, req.status)
+    success = await db.set_user_status(
+        uid,
+        req.status,
+        unless_current_status=USER_STATUS_DELETING,
+        forbid_current_role="admin" if req.status == "pending" else None,
+        required_admin_id=admin_id,
+    )
     if not success:
-        raise HTTPException(status_code=404, detail="User not found")
+        await _raise_guarded_user_update_failure(db, uid, admin_id)
     return {"message": f"User status updated to {req.status}"}
 
 
@@ -116,8 +152,23 @@ async def set_user_role(
     target = await db.get_user_by_id(uid)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
+    _reject_deleting_user(target)
     if req.role != "admin" and target.role == "admin":
-        if not await db.demote_admin_if_not_last(uid, req.role):
+        if not await db.demote_admin_if_not_last(
+            uid,
+            req.role,
+            unless_current_status=USER_STATUS_DELETING,
+            required_admin_id=admin_id,
+        ):
+            if not await db.is_usable_admin(admin_id):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Admin authorization was revoked",
+                )
+            current = await db.get_user_by_id(uid)
+            if current is None:
+                raise HTTPException(status_code=404, detail="User not found")
+            _reject_deleting_user(current)
             raise HTTPException(
                 status_code=409,
                 detail="Cannot demote the last remaining admin",
@@ -126,9 +177,16 @@ async def set_user_role(
         new_status = None
         if req.role == "admin" and target.status == "pending":
             new_status = "active"
-        success = await db.set_user_role(uid, req.role, status=new_status)
+        success = await db.set_user_role(
+            uid,
+            req.role,
+            status=new_status,
+            unless_current_status=USER_STATUS_DELETING,
+            activate_pending_admin=req.role == "admin" and new_status is None,
+            required_admin_id=admin_id,
+        )
         if not success:
-            raise HTTPException(status_code=404, detail="User not found")
+            await _raise_guarded_user_update_failure(db, uid, admin_id)
     return {"message": f"User role updated to {req.role}"}
 
 
@@ -136,15 +194,23 @@ async def set_user_role(
 async def set_user_password(
     uid: str,
     req: SetPasswordRequest,
-    _: str = Depends(require_admin),
+    admin_id: str = Depends(require_admin),
 ):
     """Change any user's password. Requires admin."""
     db: AppDB = await get_db()
     target = await db.get_user_by_id(uid)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
+    _reject_deleting_user(target)
     pw_hash = hash_password(req.new_password)
-    await db.update_user_password(uid, pw_hash)
+    success = await db.update_user_password(
+        uid,
+        pw_hash,
+        unless_current_status=USER_STATUS_DELETING,
+        required_admin_id=admin_id,
+    )
+    if not success:
+        await _raise_guarded_user_update_failure(db, uid, admin_id)
     return {"message": "Password updated successfully"}
 
 
@@ -160,10 +226,15 @@ async def delete_user(
     if uid == admin_id:
         raise HTTPException(status_code=403, detail="Cannot delete yourself")
     db: AppDB = await get_db()
-    target = await db.get_user_by_id(uid)
-    if target is None:
+    deletion_state = await db.mark_user_deleting_if_not_last_admin(
+        uid,
+        required_admin_id=admin_id,
+    )
+    if deletion_state == "forbidden":
+        raise HTTPException(status_code=403, detail="Admin authorization was revoked")
+    if deletion_state == "not_found":
         raise HTTPException(status_code=404, detail="User not found")
-    if target.role == "admin" and await db.count_admins() <= 1:
+    if deletion_state == "last_admin":
         raise HTTPException(
             status_code=409,
             detail="Cannot delete the last remaining admin",

@@ -218,6 +218,69 @@ def _configure_download_paths(monkeypatch, tmp_path):
     return workspace
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["image", "pdf"])
+async def test_registered_download_rejects_other_session_before_file_read(
+    tmp_path, monkeypatch, kind,
+):
+    workspace = _configure_download_paths(monkeypatch, tmp_path)
+    foreign = (
+        tmp_path
+        / "sessions"
+        / "other-session"
+        / "workspace"
+        / "figures"
+        / ("foreign.pdf" if kind == "pdf" else "foreign.jpg")
+    )
+    foreign.parent.mkdir(parents=True)
+    if kind == "pdf":
+        payload = valid_pdf_bytes()
+        foreign.write_bytes(payload)
+        figure = PublicationFigure(
+            id="foreign",
+            name="foreign",
+            description="",
+            figure_type="other",
+            png_path="",
+            pdf_path=str(foreign),
+            pdf_sha256=hashlib.sha256(payload).hexdigest(),
+            render_sha256="1" * 64,
+            review_status=FigureReviewStatus.APPROVED,
+        )
+        downloader = download_publication_figure_pdf
+    else:
+        payload = write_valid_image(foreign, min_bytes=2200)
+        figure = PublicationFigure(
+            id="foreign",
+            name="foreign",
+            description="",
+            figure_type="other",
+            png_path=str(foreign),
+            pdf_path="",
+            render_sha256=hashlib.sha256(payload).hexdigest(),
+            review_status=FigureReviewStatus.APPROVED,
+        )
+        downloader = download_publication_figure_png
+
+    state = _download_state(figure)
+    state.artifact_registry_version = 1
+    reads = []
+    original_read = artifacts._read_regular_file_nofollow
+
+    def record_read(path):
+        reads.append(Path(path))
+        return original_read(path)
+
+    monkeypatch.setattr(artifacts, "_read_regular_file_nofollow", record_read)
+
+    with pytest.raises(HTTPException) as exc:
+        await downloader("session-download", figure.id, state=state)
+
+    assert exc.value.status_code == 404
+    assert foreign not in reads
+    assert all(path.is_relative_to(workspace) for path in reads)
+
+
 def test_verified_artifact_reader_has_an_exact_size_boundary(
     tmp_path, monkeypatch,
 ):
@@ -388,14 +451,16 @@ async def test_png_download_keeps_event_loop_responsive_during_image_validation(
     state.artifact_registry_version = 1
     entered = threading.Event()
     release = threading.Event()
-    real_resolve = publication_routes.resolve_archival_render
+    real_resolve = publication_routes.resolve_verified_archival_artifact
 
     def slow_resolve(*args, **kwargs):
         entered.set()
         release.wait(timeout=1.5)
         return real_resolve(*args, **kwargs)
 
-    monkeypatch.setattr(publication_routes, "resolve_archival_render", slow_resolve)
+    monkeypatch.setattr(
+        publication_routes, "resolve_verified_archival_artifact", slow_resolve
+    )
     loop = asyncio.get_running_loop()
     started = loop.time()
     task = asyncio.create_task(download_publication_figure_png(
@@ -404,6 +469,10 @@ async def test_png_download_keeps_event_loop_responsive_during_image_validation(
     while not entered.is_set() and loop.time() - started < 0.5:
         await asyncio.sleep(0.005)
     responsive = entered.is_set() and loop.time() - started < 0.5
+    from backend.services.session_lifecycle import get_lifecycle_lock
+    lifecycle_lock = get_lifecycle_lock("session-download")
+    await asyncio.wait_for(lifecycle_lock.acquire(), timeout=0.2)
+    lifecycle_lock.release()
     release.set()
     response = await task
 
@@ -433,14 +502,16 @@ async def test_pdf_download_verification_runs_in_owned_worker(
     state.artifact_registry_version = 1
     event_loop_thread = threading.get_ident()
     verifier_threads = set()
-    real_verify = publication_routes.verified_artifact_bytes
+    real_resolve = publication_routes.resolve_verified_archival_artifact
 
-    def observed_verify(*args, **kwargs):
+    def observed_resolve(*args, **kwargs):
         verifier_threads.add(threading.get_ident())
-        return real_verify(*args, **kwargs)
+        return real_resolve(*args, **kwargs)
 
     monkeypatch.setattr(
-        publication_routes, "verified_artifact_bytes", observed_verify,
+        publication_routes,
+        "resolve_verified_archival_artifact",
+        observed_resolve,
     )
     response = await download_publication_figure_pdf(
         "session-download", figure.id, state=state,
@@ -448,6 +519,43 @@ async def test_pdf_download_verification_runs_in_owned_worker(
 
     assert response.body == payload
     assert verifier_threads and event_loop_thread not in verifier_threads
+
+
+@pytest.mark.asyncio
+async def test_png_download_reads_and_decodes_the_selected_file_once(
+    tmp_path, monkeypatch,
+):
+    workspace = _configure_download_paths(monkeypatch, tmp_path)
+    path = workspace / "figures" / "single-pass.jpg"
+    path.parent.mkdir()
+    payload = write_valid_image(path, min_bytes=2200)
+    figure = PublicationFigure(
+        name="single-pass",
+        description="Bound render",
+        figure_type="other",
+        png_path=str(path),
+        pdf_path="",
+        render_sha256=hashlib.sha256(payload).hexdigest(),
+        review_status=FigureReviewStatus.APPROVED,
+    )
+    state = _download_state(figure)
+    state.artifact_registry_version = 1
+    reads = 0
+    real_read = artifacts._read_regular_file_nofollow
+
+    def observed_read(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(artifacts, "_read_regular_file_nofollow", observed_read)
+
+    response = await download_publication_figure_png(
+        "session-download", figure.id, state=state,
+    )
+
+    assert response.body == payload
+    assert reads == 1
 
 
 @pytest.mark.asyncio

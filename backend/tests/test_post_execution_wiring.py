@@ -5,6 +5,7 @@ Covers the three contracts the round depends on: the plan audit is the writer of
 and neither can fail the round it reviews.
 """
 import base64
+import hashlib
 import pytest
 from types import SimpleNamespace
 
@@ -20,6 +21,10 @@ from backend.tests.figure_image_helpers import valid_image_bytes
 
 
 _RENDER_PREVIEW = base64.b64encode(valid_image_bytes("PNG")).decode()
+_RENDER_PREVIEW_SHA256 = hashlib.sha256(
+    base64.b64decode(_RENDER_PREVIEW)
+).hexdigest()
+_PDF_SHA256 = "0" * 64
 
 
 class _Harness(PostExecutionReviewMixin):
@@ -89,6 +94,8 @@ def _result_figure(
         png_path=f"/missing/{name}.png",
         pdf_path=f"/missing/{name}.pdf",
         png_base64=_RENDER_PREVIEW,
+        preview_sha256=_RENDER_PREVIEW_SHA256,
+        pdf_sha256=_PDF_SHA256,
         review_status=FigureReviewStatus.APPROVED,
         plan_step_id=step_id,
         plan_id=plan.id,
@@ -133,6 +140,8 @@ def test_audit_wiring_passes_current_publication_figures():
         png_path="/tmp/annotated_umap.png",
         pdf_path="/tmp/annotated_umap.pdf",
         png_base64=_RENDER_PREVIEW,
+        preview_sha256=_RENDER_PREVIEW_SHA256,
+        pdf_sha256=_PDF_SHA256,
         review_status=FigureReviewStatus.APPROVED,
         round_number=2,
     )

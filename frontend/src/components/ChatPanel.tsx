@@ -21,6 +21,12 @@ interface SelectedFileWithAgent {
   dataType?: string
 }
 
+interface ChatRequestOwner {
+  sessionId: string
+  requestId: number
+  controller: AbortController
+}
+
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.svg'])
 
 function isImageFile(filename: string): boolean {
@@ -49,9 +55,38 @@ export function ChatPanel() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const loadedSessionRef = useRef<string | null>(null)
   const historyGenerationRef = useRef(0)
+  const activeChatSessionRef = useRef<string | null>(currentSession?.id || null)
+  const sendRequestSequenceRef = useRef(0)
+  const sendOwnerRef = useRef<ChatRequestOwner | null>(null)
   const [textareaHeight, setTextareaHeight] = useState(MIN_TEXTAREA_HEIGHT)
   const resizingRef = useRef(false)
   const resizeStartRef = useRef({ y: 0, height: 0 })
+
+  // Retire all request-owned state before a different session can use it.
+  useEffect(() => {
+    const sessionId = currentSession?.id || null
+    if (activeChatSessionRef.current === sessionId) return
+    activeChatSessionRef.current = sessionId
+
+    const owner = sendOwnerRef.current
+    if (owner) {
+      owner.controller.abort()
+      sendOwnerRef.current = null
+      if (useAppStore.getState().chatAbortController === owner.controller) {
+        setChatAbortController(null)
+      }
+    }
+    setChatLoading(false)
+    setChatDelegationActive(false)
+    setChatDelegationPlan(null)
+    setError(null)
+  }, [
+    currentSession?.id,
+    setChatAbortController,
+    setChatDelegationActive,
+    setChatDelegationPlan,
+    setChatLoading,
+  ])
 
   // Load chat history when session changes
   useEffect(() => {
@@ -91,11 +126,24 @@ export function ChatPanel() {
   // Poll backend during loading as fallback (covers both delegation and slow figure generation)
   useEffect(() => {
     if (!chatLoading || !currentSession?.id) return
+    const sessionId = currentSession.id
+    let active = true
+    const controllers = new Set<AbortController>()
     const interval = setInterval(async () => {
+      const controller = new AbortController()
+      controllers.add(controller)
+      const ownsResponse = () => (
+        active
+        && !controller.signal.aborted
+        && useAppStore.getState().currentSession?.id === sessionId
+      )
       try {
         const data = await apiFetch<{ messages: typeof chatMessages }>(
-          `/session/${currentSession.id}/chat`
+          `/session/${sessionId}/chat`,
+          { signal: controller.signal },
+          ownsResponse,
         )
+        if (!ownsResponse()) return
         const msgs = data.messages || []
         // Check if backend has more messages than frontend (new response arrived)
         // Read latest messages from store to avoid stale closure
@@ -114,9 +162,18 @@ export function ChatPanel() {
             setChatDelegationPlan(null)
           }
         }
-      } catch (e) { console.debug('Chat poll failed:', e) }
+      } catch (e) {
+        if (ownsResponse()) console.debug('Chat poll failed:', e)
+      } finally {
+        controllers.delete(controller)
+      }
     }, 5000)
-    return () => clearInterval(interval)
+    return () => {
+      active = false
+      clearInterval(interval)
+      controllers.forEach(controller => controller.abort())
+      controllers.clear()
+    }
   }, [chatLoading, currentSession?.id, setChatMessages, setChatLoading, setChatDelegationActive, setChatDelegationPlan])
 
   // Auto-scroll to bottom when messages change
@@ -238,6 +295,23 @@ export function ChatPanel() {
 
     // Create AbortController for this request
     const abortController = new AbortController()
+    const requestId = sendRequestSequenceRef.current + 1
+    sendRequestSequenceRef.current = requestId
+    sendOwnerRef.current = {
+      sessionId: sendSessionId,
+      requestId,
+      controller: abortController,
+    }
+    const ownsRequest = () => {
+      const owner = sendOwnerRef.current
+      return Boolean(
+        owner
+        && owner.sessionId === sendSessionId
+        && owner.requestId === requestId
+        && owner.controller === abortController
+        && useAppStore.getState().currentSession?.id === sendSessionId
+      )
+    }
     setChatAbortController(abortController)
 
     // Optimistic: add user message immediately
@@ -264,14 +338,14 @@ export function ChatPanel() {
       formData.append('file_types', JSON.stringify(filesToSend.map((sf) => sf.dataType || null)))
       filesToSend.forEach((sf) => formData.append('files', sf.file))
 
-      const data = await apiFetch<any>(`/session/${currentSession.id}/chat`, {
+      const data = await apiFetch<any>(`/session/${sendSessionId}/chat`, {
         method: 'POST',
         body: formData,
         signal: abortController.signal,
-      })
+      }, ownsRequest)
 
       // Guard: discard response if user switched session during the request
-      if (useAppStore.getState().currentSession?.id !== sendSessionId) {
+      if (!ownsRequest()) {
         console.warn('ChatPanel: Session changed during request, discarding response')
         return
       }
@@ -295,6 +369,7 @@ export function ChatPanel() {
         figures: data.figures,
       })
     } catch (e: any) {
+      if (!ownsRequest()) return
       if (e.name === 'AbortError') {
         addChatMessage({
           role: 'assistant',
@@ -305,8 +380,13 @@ export function ChatPanel() {
         setError(t('chatError'))
       }
     } finally {
-      setChatAbortController(null)
-      if (!useAppStore.getState().chatDelegationActive) {
+      if (!ownsRequest()) return
+      sendOwnerRef.current = null
+      const latest = useAppStore.getState()
+      if (latest.chatAbortController === abortController) {
+        setChatAbortController(null)
+      }
+      if (!latest.chatDelegationActive) {
         setChatLoading(false)
       }
     }
@@ -315,12 +395,24 @@ export function ChatPanel() {
   const handleStop = async () => {
     if (!currentSession?.id) return
 
+    const stopSessionId = currentSession.id
+    const stopRequestSequence = sendRequestSequenceRef.current
+    const stoppedOwner = sendOwnerRef.current
     const { chatAbortController: controller, chatDelegationActive: isDelegation } = useAppStore.getState()
+    const ownsStop = () => {
+      const latest = useAppStore.getState()
+      return Boolean(
+        latest.currentSession?.id === stopSessionId
+        && sendRequestSequenceRef.current === stopRequestSequence
+        && sendOwnerRef.current === stoppedOwner
+        && latest.chatAbortController === controller
+      )
+    }
 
     if (isDelegation) {
       // Cancel delegation via backend endpoint
       try {
-        await apiFetch(`/session/${currentSession.id}/chat/cancel`, { method: 'POST' })
+        await apiFetch(`/session/${stopSessionId}/chat/cancel`, { method: 'POST' })
       } catch (e) {
         console.error('Failed to cancel chat delegation:', e)
       }
@@ -329,8 +421,12 @@ export function ChatPanel() {
       controller.abort()
     }
 
+    if (!ownsStop()) return
+
     // Immediate UI feedback
-    setChatAbortController(null)
+    if (useAppStore.getState().chatAbortController === controller) {
+      setChatAbortController(null)
+    }
     setChatLoading(false)
     setChatDelegationActive(false)
     setChatDelegationPlan(null)

@@ -15,7 +15,7 @@ export interface AuthUser {
   username: string
   email?: string
   role?: 'admin' | 'user'
-  status?: 'active' | 'pending' | 'readonly'
+  status?: 'active' | 'pending' | 'readonly' | 'deleting'
 }
 
 

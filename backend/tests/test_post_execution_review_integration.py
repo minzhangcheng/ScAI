@@ -282,6 +282,32 @@ def test_restricted_supplement_rejects_figure_file_writes(code):
     assert reason and "disallowed" in reason
 
 
+def test_restricted_supplement_resolves_imported_write_aliases():
+    bio = _bio_agent([])
+    code = (
+        "from os import open as o, write as w, utime as u\n"
+        "fd = o('unreviewed.png', 65)\n"
+        "w(fd, payload)\n"
+        "u('unreviewed.png', ns=(original, original))"
+    )
+
+    reason = bio._supplementary_code_is_safe(code, "adata")
+
+    assert reason and "os.open" in reason
+
+
+def test_restricted_supplement_resolves_dotted_import_without_duplicate_parts():
+    bio = _bio_agent([])
+    code = (
+        "import scanpy.pl\n"
+        "scanpy.pl.umap(adata, color='group', save='_unreviewed.png')"
+    )
+
+    reason = bio._supplementary_code_is_safe(code, "adata")
+
+    assert reason and "Scanpy" in reason
+
+
 def test_restricted_supplement_quarantines_an_image_written_indirectly(tmp_path):
     """Runtime discovery is the backstop for a writer the static AST gate misses."""
     bio = _bio_agent([])
@@ -297,6 +323,31 @@ def test_restricted_supplement_quarantines_an_image_written_indirectly(tmp_path)
 
     assert changed == {"indirect"}
     assert "indirect" in state.invalidated_artifact_stems
+
+
+def test_supplementary_quarantine_detects_content_change_with_restored_mtime(
+    tmp_path,
+):
+    from backend.tests.figure_image_helpers import valid_image_bytes
+
+    bio = _bio_agent([])
+    bio.sandbox.working_dir = str(tmp_path)
+    state = _state_and_plan()
+    image = tmp_path / "figures" / "restored_time.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(valid_image_bytes("PNG", color=(10, 20, 30)))
+    original = image.stat().st_mtime_ns
+    before = bio._supplementary_image_versions(tmp_path)
+
+    image.write_bytes(valid_image_bytes("PNG", color=(200, 30, 20)))
+    image.touch()
+    import os
+    os.utime(image, ns=(original, original))
+
+    changed = bio._quarantine_supplementary_images(state, before)
+
+    assert changed == {"restored_time"}
+    assert "restored_time" in state.invalidated_artifact_stems
 
 
 def test_supplementary_quarantine_only_invalidates_current_round_once(tmp_path):

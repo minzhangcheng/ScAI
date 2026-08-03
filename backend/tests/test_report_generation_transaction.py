@@ -657,6 +657,168 @@ async def test_fallback_generator_publishes_through_same_generation_pointer(
     assert cleared == [True, True]
 
 
+@pytest.mark.asyncio
+async def test_force_fallback_is_forwarded_without_checkpoint_resume(
+    monkeypatch, tmp_path,
+):
+    generator = DetailedReportGenerator(
+        llm_client=object(),
+        pi_model="pi",
+        bio_model="bio",
+        output_dir=str(tmp_path),
+    )
+    state = AnalysisState(id="forced-fallback-generation", user_id="owner")
+    received = []
+
+    async def generate_staged(
+        _state, *, resume_from_checkpoint=True, force_fallback=False
+    ):
+        received.append((resume_from_checkpoint, force_fallback))
+        (generator.output_dir / "figures").mkdir(exist_ok=True)
+        (generator.output_dir / "tables").mkdir(exist_ok=True)
+        (generator.output_dir / "report.html").write_text(
+            "<html>partial</html>", encoding="utf-8",
+        )
+        return {"id": "partial", "status": "partial"}
+
+    class Checkpoint:
+        def __init__(self, **_kwargs):
+            pass
+
+        def clear(self):
+            pass
+
+    monkeypatch.setattr(generator, "_generate_report_staged", generate_staged)
+    monkeypatch.setattr(
+        "backend.services.report.generator.CheckpointManager", Checkpoint,
+    )
+
+    await generator.generate_report(state, force_fallback=True)
+
+    assert received == [(False, True)]
+
+
+@pytest.mark.asyncio
+async def test_forced_fallback_staged_pipeline_never_calls_an_llm(
+    monkeypatch, tmp_path,
+):
+    generator = DetailedReportGenerator(
+        llm_client=object(),
+        pi_model="pi",
+        bio_model="bio",
+        output_dir=str(tmp_path / "report"),
+        workspace_dir=str(tmp_path / "workspace"),
+    )
+    state = AnalysisState(
+        id="deterministic-fallback",
+        user_id="owner",
+        name="Retained analysis",
+        initial_instruction="Summarize retained evidence.",
+    )
+    (tmp_path / "workspace").mkdir()
+
+    class Checkpoint:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def load(self):
+            raise AssertionError("forced fallback must not load an LLM checkpoint")
+
+        async def save(self, _payload):
+            pass
+
+    monkeypatch.setattr(
+        "backend.services.report.generator.CheckpointManager", Checkpoint,
+    )
+    monkeypatch.setattr(generator, "_report_progress", AsyncMock())
+    monkeypatch.setattr(
+        generator,
+        "_pi_chat",
+        AsyncMock(side_effect=AssertionError("LLM call in deterministic fallback")),
+    )
+    monkeypatch.setattr(
+        generator,
+        "_chat_with_vision_fallback",
+        AsyncMock(side_effect=AssertionError("vision call in deterministic fallback")),
+    )
+    monkeypatch.setattr(generator, "_scan_existing_figures", lambda **_kwargs: [])
+    monkeypatch.setattr(generator, "_scan_existing_tables", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        generator,
+        "_build_analysis_record",
+        lambda _state: {
+            "total_code_cells": 0,
+            "analysis_steps": [],
+            "total_rounds": 0,
+        },
+    )
+    monkeypatch.setattr(
+        generator,
+        "_extract_findings",
+        lambda _state: {
+            "bioinformatics": [],
+            "pathology": [],
+            "biochemistry": [],
+            "literature": [],
+            "summary": "Retained workflow evidence only.",
+            "cluster_annotations": "Not available",
+        },
+    )
+    monkeypatch.setattr(
+        generator, "_extract_cluster_annotations_from_state", lambda _state: None,
+    )
+    monkeypatch.setattr(
+        generator,
+        "_create_fallback_plan_with_existing_figures",
+        lambda _state, _figures: {
+            "title": "Partial retained-evidence report",
+            "sections": [{
+                "id": "retained",
+                "title": "Retained evidence",
+                "description": "Evidence retained before provider failure.",
+                "analysis_type": "general",
+                "existing_figures": [],
+                "existing_tables": [],
+            }],
+        },
+    )
+    monkeypatch.setattr(generator, "_build_full_analysis_log", lambda _state: [])
+    monkeypatch.setattr(
+        generator, "_maybe_generate_reproducibility_bundle", lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "backend.services.report.generator.write_interaction_record_files",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "backend.services.report.generator.write_literature_report",
+        lambda *_args, **_kwargs: None,
+    )
+
+    async def write_html(_report, _language, state=None):
+        path = generator.output_dir / "report.html"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("<html>partial</html>", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(generator, "_generate_html_report", write_html)
+    generator.output_dir.mkdir(parents=True, exist_ok=True)
+    generator.figures_dir.mkdir(exist_ok=True)
+    generator.tables_dir.mkdir(exist_ok=True)
+
+    report = await generator._generate_report_staged(
+        state,
+        resume_from_checkpoint=False,
+        force_fallback=True,
+    )
+
+    assert report["status"] == "partial"
+    assert report["degraded_fallback"] is True
+    assert "deterministically" in report["abstract"]
+    generator._pi_chat.assert_not_awaited()
+    generator._chat_with_vision_fallback.assert_not_awaited()
+
+
 def test_main_and_branch_pointers_resolve_independently(monkeypatch, tmp_path):
     monkeypatch.setattr(
         report_paths,
