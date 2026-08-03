@@ -33,6 +33,27 @@ async def test_context_and_focused_hints_with_abstract():
 
 
 @pytest.mark.asyncio
+async def test_database_priors_reach_the_actual_pi_matching_prompt():
+    pi = _FakePI()
+    priors = {"8": [{
+        "cell_type": "pDC", "p_adj": 3.4e-4,
+        "overlap": ["IRF8", "SIGLECH"],
+        "marker_source": "provided_cluster_markers",
+    }]}
+
+    await pi.annotate_clusters_from_literature(
+        cluster_markers={"8": ["Irf8", "Siglech"]},
+        organism="mouse", tissue="liver", literature_report="REVIEW",
+        database_priors=priors,
+    )
+
+    prompt = pi.captured["prompt"]
+    assert "=== DATABASE PRIORS" in prompt
+    assert "Cluster 8" in prompt and "pDC" in prompt
+    assert "IRF8" in prompt and "SIGLECH" in prompt
+
+
+@pytest.mark.asyncio
 async def test_contradictory_hint_differs_by_bucket():
     pi = _FakePI()
     triage = {"rare_unresolved": [{"cluster_id": "5", "candidate_celltype": "fibroblast"}],

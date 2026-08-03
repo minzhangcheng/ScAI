@@ -53,7 +53,8 @@ def _tissue_relevance(tissues, target):
 
 
 def compute_ora_priors(adata, db_path, cluster_key, rank_key,
-                       top_n=50, min_overlap=2, top_k=3, tissue=""):
+                       top_n=50, min_overlap=2, top_k=3, tissue="",
+                       cluster_markers=None):
     db = pd.read_csv(db_path, sep="\t", comment="#")
     db["gene_symbol"] = db["gene_symbol"].astype(str).str.upper()
     target_tissue = str(tissue or "").strip().lower()
@@ -69,10 +70,36 @@ def compute_ora_priors(adata, db_path, cluster_key, rank_key,
         db = db[db["gene_symbol"].isin(universe)]
         N = int(adata.n_vars)
 
+    cluster_series = adata.obs[cluster_key]
+    categories = (cluster_series.cat.categories
+                  if hasattr(cluster_series, "cat")
+                  else pd.unique(cluster_series))
     cluster_top = {}
-    for cl in adata.obs[cluster_key].cat.categories:
-        df = sc.get.rank_genes_groups_df(adata, group=str(cl), key=rank_key)
-        cluster_top[str(cl)] = set(df.head(top_n)["names"].astype(str).str.upper())
+    marker_source = "rank_genes_groups"
+    try:
+        for cl in categories:
+            df = sc.get.rank_genes_groups_df(adata, group=str(cl), key=rank_key)
+            cluster_top[str(cl)] = set(
+                df.head(top_n)["names"].astype(str).str.upper())
+    except Exception:
+        # ``annotate_clusters`` may legitimately proceed with validated,
+        # explicitly supplied descriptive markers when the formal Scanpy rank
+        # key is unavailable. Database matching must follow the same evidence
+        # that the annotation uses instead of silently disappearing.
+        observed = {str(cl) for cl in categories}
+        cluster_top = {
+            str(cl): {
+                str(gene).strip().upper()
+                for gene in list(genes or [])[:top_n]
+                if str(gene).strip()
+            }
+            for cl, genes in (cluster_markers or {}).items()
+            if str(cl) in observed and isinstance(genes, (list, tuple))
+        }
+        cluster_top = {cl: genes for cl, genes in cluster_top.items() if genes}
+        if not cluster_top:
+            raise
+        marker_source = "provided_cluster_markers"
 
     if universe is None:
         universe = set().union(*cluster_top.values()) if cluster_top else set()
@@ -110,7 +137,8 @@ def compute_ora_priors(adata, db_path, cluster_key, rank_key,
             x = len(overlap)
             p = float(hypergeom.sf(x - 1, N, K, n_drawn))
             rec = {"cluster": cl, "cell_type": ct, "overlap": overlap,
-                   "p_value": p, "source": celltype_source.get(ct, "")}
+                   "p_value": p, "source": celltype_source.get(ct, ""),
+                   "marker_source": marker_source}
             rec.update(_tissue_relevance(celltype_tissues.get(ct, set()),
                                          target_tissue))
             records.append(rec)

@@ -46,6 +46,7 @@ def test_pdc_cluster_hits_pdc_with_overlap_and_padj(tmp_path):
     assert set(top["overlap"]) >= {"IRF8", "SIGLECH"}
     assert "p_adj" in top and top["p_adj"] <= 1.0
     assert top["universe_source"] == "adata.var_names"
+    assert top["marker_source"] == "rank_genes_groups"
 
 
 def test_min_overlap_filters_single_gene_hits(tmp_path):
@@ -57,6 +58,35 @@ def test_min_overlap_filters_single_gene_hits(tmp_path):
     for hits in res.values():
         for h in hits:
             assert len(h["overlap"]) >= 2
+
+
+def test_explicit_markers_fallback_when_rank_key_is_missing(tmp_path):
+    adata, db_path = _toy_adata(tmp_path)
+    del adata.uns["rank_genes_groups"]
+
+    res = compute_ora_priors(
+        adata, str(db_path), cluster_key="leiden",
+        rank_key="rank_genes_groups", top_n=50, min_overlap=2, top_k=3,
+        cluster_markers={
+            "0": ["Irf8", "Siglech", "Tcf4"],
+            "1": ["Alb"],
+            "not_observed": ["Irf8", "Siglech"],
+        },
+    )
+
+    assert res["0"][0]["cell_type"] == "pDC"
+    assert res["0"][0]["marker_source"] == "provided_cluster_markers"
+    assert "not_observed" not in res
+
+
+def test_missing_rank_key_without_explicit_markers_is_not_silenced(tmp_path):
+    adata, db_path = _toy_adata(tmp_path)
+    del adata.uns["rank_genes_groups"]
+
+    with pytest.raises(KeyError):
+        compute_ora_priors(
+            adata, str(db_path), cluster_key="leiden",
+            rank_key="rank_genes_groups", cluster_markers={})
 
 
 def _toy_db_with_tissue(tmp_path):

@@ -17,6 +17,7 @@ import textwrap
 import time
 from pathlib import Path
 from datetime import datetime
+from dataclasses import dataclass
 
 import aiofiles
 
@@ -114,6 +115,46 @@ def _gate_samples_per_group(state) -> Dict[str, int]:
 logger = logging.getLogger(__name__)
 
 _PLAN_REVISION_REPAIR_STEPS = 30
+
+
+@dataclass(frozen=True)
+class DatabasePriorResult:
+    """Outcome of the optional offline marker-database evidence path."""
+
+    status: str
+    priors: Dict[str, List[Dict[str, Any]]]
+    detail: str = ""
+    marker_source: str = ""
+
+    def summary(self, total_clusters: int) -> str:
+        if self.status == "used":
+            matched = summarize_database_priors(self.priors, total_clusters)
+            source = f"; marker source: {self.marker_source}" if self.marker_source else ""
+            return f"used: {matched or 'database priors available'}{source}"
+        return f"{self.status}: {self.detail or 'no additional detail'}"
+
+    def realtime_message(self, total_clusters: int) -> str:
+        if self.status == "used":
+            return "Marker database priors used: " + self.summary(total_clusters)[len("used: "):]
+        if self.status == "empty":
+            return (
+                "Marker database priors computed but no eligible matches were found; "
+                "continuing with literature evidence."
+            )
+        if self.status == "failed":
+            return (
+                f"Marker database prior computation failed: {self.detail}; "
+                "continuing with literature evidence."
+            )
+        return (
+            f"Marker database priors skipped: {self.detail}; "
+            "continuing with literature evidence."
+        )
+
+
+def _compact_database_prior_error(value: Any, limit: int = 500) -> str:
+    text = " ".join(str(value or "unknown error").split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 def _evidence_gate_record(
@@ -1047,32 +1088,80 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 
 
 
-    async def _compute_database_priors(self, adata_var, cluster_key, rank_key,
-                                       organism, workspace_dir, tissue="") -> dict:
-        """sandbox 内算 ORA 先验。任何失败返回 {}（绝不抛、绝不阻断注释）。
+    async def _compute_database_priors(
+        self, adata_var, cluster_key, rank_key, organism, workspace_dir,
+        tissue="", cluster_markers=None,
+    ) -> DatabasePriorResult:
+        """Compute offline marker priors without making annotation depend on them.
 
-        ``tissue`` 只用于给每条先验标注"是否在本次分析的组织中被注释过"，不做过滤：
-        两侧组织名都是自由文本，匹配不上绝不能丢掉一条正确命中。
+        The Scanpy rank key remains the primary marker source. When that key is
+        unavailable, the kernel falls back to the sanitized marker mapping that
+        ``annotate_clusters`` is actually using. Every outcome is explicit so a
+        database failure cannot be mistaken for a successful literature-only
+        decision.
         """
         try:
             if not marker_priors_write(organism, workspace_dir):
-                return {}
+                return DatabasePriorResult(
+                    "skipped", {},
+                    f"marker database has no entries for organism {organism!r}",
+                )
             src = _ORA_KERNEL_SRC
+            markers_json = _json.dumps(cluster_markers or {}, ensure_ascii=False)
             call = (
-                f"\n_priors = compute_ora_priors({adata_var}, "
+                f"\n_provided_cluster_markers = json.loads({_json.dumps(markers_json)})\n"
+                f"_priors = compute_ora_priors({adata_var}, "
                 f"'tables/marker_priors_input.tsv', {cluster_key!r}, {rank_key!r}, "
-                f"tissue={str(tissue or '')!r})\n"
+                f"tissue={str(tissue or '')!r}, "
+                f"cluster_markers=_provided_cluster_markers)\n"
                 f"import json as __j; print(__j.dumps(_priors))\n"
             )
             result = await self.sandbox.execute(src + call, save_to_history=False,
                                                 skip_safety_check=True)
+            if not getattr(result, "success", False):
+                raw_error = (
+                    getattr(result, "error", None)
+                    or getattr(result, "output", None)
+                    or "unknown sandbox execution error"
+                )
+                detail = _compact_database_prior_error(raw_error)
+                logger.warning(
+                    f"[{self.session_id}] DB priors sandbox execution failed: {raw_error}")
+                return DatabasePriorResult("failed", {}, detail)
             out = getattr(result, "output", "") or ""
             line = next((ln for ln in out.strip().splitlines()[::-1]
                          if ln.strip().startswith("{")), None)
-            return _json.loads(line) if line else {}
+            if line is None:
+                detail = "sandbox returned no JSON result"
+                logger.warning(f"[{self.session_id}] DB priors computation failed: {detail}")
+                return DatabasePriorResult("failed", {}, detail)
+            try:
+                priors = _json.loads(line)
+            except (TypeError, ValueError) as e:
+                detail = _compact_database_prior_error(f"invalid JSON result: {e}")
+                logger.warning(f"[{self.session_id}] DB priors computation failed: {detail}")
+                return DatabasePriorResult("failed", {}, detail)
+            if not isinstance(priors, dict):
+                detail = f"sandbox returned {type(priors).__name__}, expected object"
+                logger.warning(f"[{self.session_id}] DB priors computation failed: {detail}")
+                return DatabasePriorResult("failed", {}, detail)
+            if not priors:
+                return DatabasePriorResult(
+                    "empty", {}, "no eligible marker-database overlaps passed the ORA threshold")
+            marker_sources = {
+                str(hit.get("marker_source") or "")
+                for hits in priors.values() if isinstance(hits, list)
+                for hit in hits if isinstance(hit, dict)
+            }
+            marker_sources.discard("")
+            return DatabasePriorResult(
+                "used", priors, marker_source="+".join(sorted(marker_sources)))
         except Exception as e:
-            logger.warning(f"[{self.session_id}] DB priors computation skipped: {e}")
-            return {}
+            detail = _compact_database_prior_error(e)
+            logger.warning(
+                f"[{self.session_id}] DB priors computation failed: {detail}",
+                exc_info=True)
+            return DatabasePriorResult("failed", {}, detail)
 
     async def _bind_gene_set(self, set_id: str, genes: List[str], label: str) -> Optional[str]:
         """Bind a fetched panel into the kernel; returns its variable name or None.
@@ -2470,10 +2559,17 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             annotation_retry_attempts += 1
                             continue
 
-                        await self._notify("status", f"Annotating {n_clusters} clusters using literature evidence ({organism} {tissue})...")
+                        await self._notify(
+                            "status",
+                            f"Preparing marker-database and literature evidence for "
+                            f"{n_clusters} clusters ({organism} {tissue})...",
+                        )
 
                         # marker DB 不可用（缺文件 / 陈旧 revision）时的 HITL 门控
                         # （必须在算 priors 之前）
+                        database_prior_result = DatabasePriorResult(
+                            "skipped", {}, "marker database is unavailable")
+                        marker_db_skipped = False
                         if not _get_marker_db().usable() and self.marker_db_intervention_callback:
                             from backend.constants import LlmFailureAction as _LFA
                             from backend.workflow.helpers import WorkflowTerminatedError
@@ -2482,6 +2578,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 raise WorkflowTerminatedError("Analysis terminated by user at marker DB gate")
                             if action == _LFA.RETRY:
                                 _get_marker_db().reload()  # clear stale empty cache after fetch
+                            elif action == _LFA.SKIP:
+                                marker_db_skipped = True
                         else:
                             # Usable, but a source whose download failed leaves
                             # the DB narrower than the revision intends and
@@ -2492,11 +2590,24 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                     _mp.top_up_missing_tables, _get_marker_db()):
                                 _get_marker_db().reload()
                         workspace_dir = getattr(self.sandbox, "working_dir", None)
-                        database_priors = {}
-                        if workspace_dir is not None:
-                            database_priors = await self._compute_database_priors(
+                        if marker_db_skipped:
+                            database_prior_result = DatabasePriorResult(
+                                "skipped", {}, "user chose literature-only annotation")
+                        elif not _get_marker_db().usable():
+                            database_prior_result = DatabasePriorResult(
+                                "skipped", {}, "marker database remained unavailable")
+                        elif workspace_dir is None:
+                            database_prior_result = DatabasePriorResult(
+                                "skipped", {}, "sandbox workspace is unavailable")
+                        else:
+                            database_prior_result = await self._compute_database_priors(
                                 adata_var, cluster_key, rank_key_hint, organism,
-                                workspace_dir, tissue=tissue)
+                                workspace_dir, tissue=tissue,
+                                cluster_markers=cluster_markers)
+
+                        database_priors = database_prior_result.priors
+                        await self._notify(
+                            "status", database_prior_result.realtime_message(n_clusters))
 
                         annotation_result: Dict[str, Any] = {}
                         if self.annotate_clusters_callback:
@@ -2534,6 +2645,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 step_number=step_count, step_type="annotate_clusters",
                                 agent_reasoning=agent_reasoning,
                                 annotation_result_summary=tool_result,
+                                annotation_database_priors_summary=(
+                                    database_prior_result.summary(len(cluster_markers))),
                             ))
                             continue
 
@@ -2633,8 +2746,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             agent_reasoning=agent_reasoning,
                             cluster_markers_summary=markers_summary, annotation_tissue=tissue,
                             annotation_organism=organism, annotation_result_summary=(tool_result or ""),
-                            annotation_database_priors_summary=summarize_database_priors(
-                                database_priors, len(cluster_markers)),
+                            annotation_database_priors_summary=database_prior_result.summary(
+                                len(cluster_markers)),
                         ))
                         annotation_completed = True
                         annotation_retry_required = False
