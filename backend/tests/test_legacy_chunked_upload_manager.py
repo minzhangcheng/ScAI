@@ -1,6 +1,7 @@
 """Security and cancellation contracts for the legacy chunked uploader."""
 
 import asyncio
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -184,6 +185,60 @@ async def test_unknown_and_invalid_chunks_leave_no_artifacts_or_lock_slots(tmp_p
     assert manager._upload_lock_users == {}
 
     await manager.cancel_upload(upload_id, session_id="session-a")
+
+
+@pytest.mark.asyncio
+async def test_completion_rejects_chunks_with_wrong_per_index_lengths(tmp_path):
+    manager = ChunkedUploadManager(tmp_path / "chunks", chunk_size=4)
+    upload_id = await manager.init_upload(
+        "session-a", "data.bin", 6, 2, "file",
+    )
+
+    assert (await manager.save_chunk(
+        upload_id, 0, b"ab", session_id="session-a",
+    ))["success"]
+    assert (await manager.save_chunk(
+        upload_id, 1, b"cdef", session_id="session-a",
+    ))["success"]
+
+    result = await manager.complete_upload(
+        upload_id,
+        tmp_path / "result" / "data.bin",
+        session_id="session-a",
+    )
+
+    assert result["success"] is False
+    assert "chunk size" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_completion_verifies_init_bound_whole_file_sha256(tmp_path):
+    manager = ChunkedUploadManager(tmp_path / "chunks", chunk_size=4)
+    payload = b"abcdef"
+    upload_id = await manager.init_upload(
+        "session-a",
+        "data.bin",
+        len(payload),
+        2,
+        "file",
+        expected_sha256=hashlib.sha256(b"different").hexdigest(),
+    )
+    assert (await manager.save_chunk(
+        upload_id, 0, payload[:4], session_id="session-a",
+    ))["success"]
+    assert (await manager.save_chunk(
+        upload_id, 1, payload[4:], session_id="session-a",
+    ))["success"]
+
+    result = await manager.complete_upload(
+        upload_id,
+        tmp_path / "result" / "data.bin",
+        session_id="session-a",
+    )
+
+    assert result["success"] is False
+    assert result["integrity_mismatch"] is True
+    assert not (tmp_path / "result" / "data.bin").exists()
 
 
 @pytest.mark.asyncio

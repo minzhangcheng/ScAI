@@ -38,6 +38,7 @@ class _StatusOnlyService:
         *,
         job_transaction_id=None,
         status_callback=None,
+        expected_lifecycle_generation=None,
     ):
         from backend.services.snapshot_v2.models import SnapshotTransactionRecord
 
@@ -309,6 +310,139 @@ class TestRestoreJobLifecycle:
             _recovery_blocked_sessions.discard(session_id)
 
     @pytest.mark.asyncio
+    async def test_activate_failure_after_apply_enters_recovery_block(
+        self, v2_paths, tmp_path, monkeypatch,
+    ):
+        """A post-apply dispatcher error is a partial restore failure."""
+        from types import SimpleNamespace
+
+        from backend.models.schemas import AnalysisState, TaskStatus
+        from backend.services.session_store import _recovery_blocked_sessions
+        from backend.services.snapshot_v2.models import SnapshotRestoreRequest
+        from backend.services.snapshot_v2.service import SnapshotService
+        from backend.state import sessions, workflows
+
+        session_id = "sess-activate-after-apply"
+        session_root = tmp_path / "sessions" / session_id
+        workspace = session_root / "workspace"
+        states = session_root / "states"
+        for path in (session_root, workspace, states):
+            path.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setattr(
+            "backend.config._config.get_session_dir",
+            lambda _sid: session_root,
+        )
+        monkeypatch.setattr(
+            "backend.config._config.get_session_workspace",
+            lambda _sid: workspace,
+        )
+        monkeypatch.setattr(
+            "backend.config._config.get_session_states",
+            lambda _sid: states,
+        )
+
+        live_state = AnalysisState(
+            id=session_id,
+            user_id="owner",
+            name="pre-restore",
+            status=TaskStatus.RUNNING,
+        )
+        target_state = AnalysisState(
+            id=session_id,
+            user_id="owner",
+            name="restored-on-disk",
+            status=TaskStatus.PAUSED,
+        )
+        sessions[session_id] = live_state
+        workflow = MagicMock()
+        workflow._db_conn = None
+        workflow.sandbox = None
+        workflow.get_snapshot_workflow_state.return_value = {
+            "current_round": 0,
+            "kernel_present": False,
+        }
+        workflows[session_id] = workflow
+
+        coordinator = MagicMock()
+        coordinator.stage = AsyncMock(return_value=SimpleNamespace(
+            staged_checkpoint=None,
+        ))
+
+        async def _apply(*_args, **_kwargs):
+            (session_root / "session.json").write_text(
+                target_state.model_dump_json(), encoding="utf-8",
+            )
+            return SimpleNamespace(
+                runtime_restore_status=None,
+                runtime_warning=None,
+            )
+
+        coordinator.apply = AsyncMock(side_effect=_apply)
+        coordinator.cleanup = AsyncMock()
+        coordinator.commit = AsyncMock()
+
+        pre_restore = MagicMock()
+        pre_restore.capture_locked = AsyncMock(return_value=SimpleNamespace(
+            failure=None,
+            snapshot_id="pre-restore-snapshot",
+        ))
+        dispatcher = MagicMock()
+        dispatcher.stage_checkpoint.return_value = MagicMock()
+        dispatcher.activate.side_effect = RuntimeError("activation exploded")
+
+        service = SnapshotService(
+            session_id,
+            v2_paths,
+            restore_coordinator=coordinator,
+            pre_restore_capture=pre_restore,
+            continuation_dispatcher=dispatcher,
+        )
+        service.manifest_store = MagicMock()
+        service.manifest_store.load.return_value = SimpleNamespace(
+            continuation=SimpleNamespace(kind="idle"),
+        )
+
+        ready = SimpleNamespace(
+            status="ready",
+            capsule={"kind": "idle"},
+            compatibility_errors=[],
+        )
+        preflight = MagicMock()
+        preflight.run.return_value = ready
+        monkeypatch.setattr(
+            "backend.services.snapshot_v2.preflight.RestorePreflight",
+            MagicMock(return_value=preflight),
+        )
+
+        try:
+            result = await service.restore_snapshot(
+                SnapshotRestoreRequest(
+                    snapshot_id="target-snapshot",
+                    runtime_choice="reset",
+                    current_state_choice="abort",
+                ),
+                transaction_id="restore-activate-failure",
+            )
+
+            assert coordinator.apply.await_count == 1
+            assert result.status == "failed"
+            assert result.failure is not None
+            assert result.failure["code"] == "ACTIVATION_FAILED"
+            assert result.failure["recovery_required"] is True
+            assert sessions[session_id] is live_state
+            assert live_state.recovery_blocked is True
+            assert live_state.status == TaskStatus.PAUSED
+            assert json.loads(
+                (session_root / "session.json").read_text(encoding="utf-8")
+            )["name"] == "restored-on-disk"
+            coordinator.commit.assert_not_awaited()
+        finally:
+            sessions.pop(session_id, None)
+            workflows.pop(session_id, None)
+            _recovery_blocked_sessions.discard(session_id)
+
+    @pytest.mark.asyncio
     async def test_enqueue_returns_transaction(self, v2_paths, preflight_result, restore_request):
         """Enqueue creates a SnapshotTransactionRecord with queued status."""
         mgr = make_mgr(v2_paths)
@@ -399,6 +533,7 @@ class TestRestoreJobLifecycle:
                 *,
                 job_transaction_id=None,
                 status_callback=None,
+                expected_lifecycle_generation=None,
             ):
                 self.seen_apply_transaction_id = transaction_id
                 self.seen_job_transaction_id = job_transaction_id
@@ -566,6 +701,7 @@ class TestRestoreJobLifecycle:
             async def restore_snapshot(
                 self, request, transaction_id, cancel_event, *,
                 job_transaction_id=None, status_callback=None,
+                expected_lifecycle_generation=None,
             ):
                 applying = SnapshotTransactionRecord(
                     transaction_id=transaction_id,

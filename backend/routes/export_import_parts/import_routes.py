@@ -32,12 +32,14 @@ from backend.services.session_store import (
     update_session_cache as _update_session_cache,
 )
 from backend.state import (
+    import_generation_tasks,
     import_jobs as _import_jobs,
     import_jobs_lock as _import_jobs_lock,
     prepared_exports as _prepared_exports,
     prepared_exports_lock as _prepared_exports_lock,
+    users_pending_deletion,
 )
-from backend.utils.auth import require_session_ownership
+from backend.utils.auth import require_active_user, require_session_ownership
 from backend.utils.blob_store import inline_blobs
 from backend.utils.files import slugify_session_name, validate_path_within, validate_session_id, temp_file_on_error
 from backend.utils.secret_redaction import strip_analysis_state_secrets
@@ -170,7 +172,10 @@ async def import_v2(
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
-@router.post("/api/session/import")
+@router.post(
+    "/api/session/import",
+    dependencies=[Depends(require_active_user)],
+)
 async def import_state(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -241,6 +246,11 @@ async def import_state(
         # ---- tar.gz: stream body directly to disk, then extract in background ----
         import_job_id = import_id or str(uuid.uuid4())
         async with _import_jobs_lock:
+            if user_id in users_pending_deletion:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Account deletion is in progress",
+                )
             # X-Import-Id is client-chosen so the frontend can keep polling
             # across a lost response. That also means one client can name
             # another client's live job; refuse rather than overwrite its
@@ -345,6 +355,12 @@ async def import_state(
         buf.extend(chunk)
     content = bytes(buf)
 
+    if user_id in users_pending_deletion:
+        raise HTTPException(
+            status_code=409,
+            detail="Account deletion is in progress",
+        )
+
     if lowered.endswith('.zip'):
         state = _import_zip(content, user_id, trust=trust)
     elif lowered.endswith('.json'):
@@ -416,6 +432,9 @@ async def import_state(
     # Forced: for the inline .json/.zip paths this is the ONLY session.json
     # write, so losing it to the save throttle would leave a session that exists
     # as files and in the cache but has no metadata document at all.
+    producer_task = asyncio.current_task()
+    if producer_task is not None:
+        import_generation_tasks[state.id] = producer_task
     try:
         await async_save_session(state.id, state, force=True)
         await _update_session_cache(state.id, state)
@@ -425,6 +444,9 @@ async def import_state(
     except BaseException:
         _cleanup_partial_session(state.id)
         raise
+    finally:
+        if import_generation_tasks.get(state.id) is producer_task:
+            import_generation_tasks.pop(state.id, None)
 
     return APIResponse(
         success=True,

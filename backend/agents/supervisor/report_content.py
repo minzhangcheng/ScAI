@@ -39,6 +39,11 @@ from ...services.report.report_outline import (
     build_report_outline,
 )
 from ...services.report.output_cleanup import reset_report_asset_directories
+from ...services.report.output_generation import (
+    ReportGenerationError,
+    ReportGenerationTransaction,
+)
+from ...utils.asyncio_tasks import run_in_owned_thread
 from ...services.report.quality import (
     build_report_partial_fields,
     build_quality_disclosures,
@@ -78,6 +83,37 @@ class ReportContentMixin:
         progress_callback: Optional[Callable] = None,
         report_llm_client: Optional["OpenAICompatibleClient"] = None,
         chat_messages: Optional[List[Dict]] = None,
+        force_fallback: bool = False,
+    ) -> Dict[str, Any]:
+        """Generate privately and atomically publish one complete report tree."""
+        transaction = ReportGenerationTransaction(output_dir)
+        try:
+            report = await self._generate_detailed_report_staged(
+                analysis_state=analysis_state,
+                report_model=report_model,
+                output_dir=str(transaction.staging_dir),
+                workspace_dir=workspace_dir,
+                progress_callback=progress_callback,
+                report_llm_client=report_llm_client,
+                chat_messages=chat_messages,
+                force_fallback=force_fallback,
+            )
+            await run_in_owned_thread(transaction.commit_report, report)
+            return report
+        except BaseException:
+            await run_in_owned_thread(transaction.abort)
+            raise
+
+    async def _generate_detailed_report_staged(
+        self,
+        analysis_state: AnalysisState,
+        report_model: str,
+        output_dir: str,
+        workspace_dir: str = None,
+        progress_callback: Optional[Callable] = None,
+        report_llm_client: Optional["OpenAICompatibleClient"] = None,
+        chat_messages: Optional[List[Dict]] = None,
+        force_fallback: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate a detailed report from the supervisor's accumulated analysis records.
@@ -95,6 +131,9 @@ class ReportContentMixin:
             report_llm_client: LLM client matching report_model's endpoint.
                 If None, falls back to supervisor's own llm_client.
             chat_messages: Optional chat messages to build chat sections from.
+            force_fallback: Bypass the report LLM and build the deterministic
+                degraded report. Used after the bounded workflow intervention
+                expires or is skipped, including after process restart.
 
         Returns:
             Report dict compatible with existing frontend expectations.
@@ -170,42 +209,50 @@ class ReportContentMixin:
             # falling back to supervisor's own client if not provided.
             client = report_llm_client or self.llm_client
             client.set_context(self.session_id, "report_generator")
-            for attempt in range(2):  # Single retry on connection error
-                try:
-                    response = await client.chat(
-                        model=report_model,
-                        messages=[
-                            {"role": "system", "content": self._get_report_system_prompt(language)},
-                            {"role": "user", "content": report_prompt},
-                        ],
-                        temperature=0.3,
-                        max_tokens=32768,
-                        timeout=900.0,  # 15 min — large narratives need long generation time
-                    )
-                    report_content = response.content or ""
-                    break
-                except UpstreamExhaustedError:
-                    raise  # propagate to caller for retry/user-intervention
-                except APIConnectionError:
-                    if attempt == 0:
-                        logger.warning(
-                            f"[{self.session_id}] Report generation connection error, "
-                            f"retrying in 5s"
+            if force_fallback:
+                logger.warning(
+                    "[%s] Building deterministic detailed-report fallback",
+                    self.session_id,
+                )
+                report_content = self._fallback_report(narrative, stats, language)
+                used_fallback = True
+            else:
+                for attempt in range(2):  # Single retry on connection error
+                    try:
+                        response = await client.chat(
+                            model=report_model,
+                            messages=[
+                                {"role": "system", "content": self._get_report_system_prompt(language)},
+                                {"role": "user", "content": report_prompt},
+                            ],
+                            temperature=0.3,
+                            max_tokens=32768,
+                            timeout=900.0,  # 15 min — large narratives need long generation time
                         )
-                        await asyncio.sleep(5)
-                        continue
-                    logger.exception(
-                        f"[{self.session_id}] Report generation failed after retry"
-                    )
-                    report_content = self._fallback_report(narrative, stats, language)
-                    used_fallback = True
-                except Exception:
-                    logger.exception(
-                        f"[{self.session_id}] Report generation LLM call failed"
-                    )
-                    report_content = self._fallback_report(narrative, stats, language)
-                    used_fallback = True
-                    break
+                        report_content = response.content or ""
+                        break
+                    except UpstreamExhaustedError:
+                        raise  # propagate to caller for retry/user-intervention
+                    except APIConnectionError:
+                        if attempt == 0:
+                            logger.warning(
+                                f"[{self.session_id}] Report generation connection error, "
+                                f"retrying in 5s"
+                            )
+                            await asyncio.sleep(5)
+                            continue
+                        logger.exception(
+                            f"[{self.session_id}] Report generation failed after retry"
+                        )
+                        report_content = self._fallback_report(narrative, stats, language)
+                        used_fallback = True
+                    except Exception:
+                        logger.exception(
+                            f"[{self.session_id}] Report generation LLM call failed"
+                        )
+                        report_content = self._fallback_report(narrative, stats, language)
+                        used_fallback = True
+                        break
         finally:
             # Restore supervisor context in case of subsequent LLM calls
             self._set_llm_context()
@@ -460,6 +507,7 @@ class ReportContentMixin:
         report = {
             "id": report_id,
             "session_id": analysis_state.id,
+            "branch_id": getattr(analysis_state, "restore_branch_id", None),
             "title": analysis_state.name,
             "abstract": abstract,
             "sections": filtered_sections,
@@ -486,11 +534,6 @@ class ReportContentMixin:
         # Sanitize NaN/Infinity
         report = self._sanitize(report)
 
-        # Save JSON
-        report_path = output_path / "report.json"
-        with open(report_path, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
-
         await _progress(90, "Generating HTML report...")
 
         # Temporarily attach analysis_state for HTML generation. It is NOT
@@ -505,6 +548,57 @@ class ReportContentMixin:
         )
         report.pop("_analysis_state", None)
         report["html_path"] = str(html_path)
+
+        # Persist only paths to the copied generation-owned bytes.  Workspace
+        # files remain mutable after publication and therefore cannot be the
+        # provenance carried by report.json.
+        serialized_figures = list(report.get("figures") or [])
+        serialized_tables = list(report.get("tables") or [])
+        for section in report.get("sections") or []:
+            if isinstance(section, dict):
+                serialized_figures.extend(section.get("figures") or [])
+                serialized_tables.extend(section.get("tables") or [])
+
+        for figure in serialized_figures:
+            if not isinstance(figure, dict):
+                continue
+            filename = Path(
+                str(figure.get("filename") or figure.get("path") or "")
+            ).name
+            staged_png = output_path / "figures" / filename
+            if not filename or not staged_png.is_file():
+                raise ReportGenerationError(
+                    f"report figure was not copied into staging: {filename}"
+                )
+            figure["path"] = str(staged_png)
+            figure["png_path"] = str(staged_png)
+            raw_pdf = figure.get("pdf_path")
+            if raw_pdf:
+                staged_pdf = output_path / "figures" / Path(str(raw_pdf)).name
+                if not staged_pdf.is_file():
+                    raise ReportGenerationError(
+                        f"report figure PDF was not copied into staging: {raw_pdf}"
+                    )
+                figure["pdf_path"] = str(staged_pdf)
+
+        for table in serialized_tables:
+            if not isinstance(table, dict):
+                continue
+            filename = Path(
+                str(
+                    table.get("filename")
+                    or table.get("csv_path")
+                    or table.get("path")
+                    or ""
+                )
+            ).name
+            staged_csv = output_path / "tables" / filename
+            if not filename or not staged_csv.is_file():
+                raise ReportGenerationError(
+                    f"report table was not copied into staging: {filename}"
+                )
+            table["path"] = str(staged_csv)
+            table["csv_path"] = str(staged_csv)
 
         await _progress(100, report_current_step, report_status)
         return report

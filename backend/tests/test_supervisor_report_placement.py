@@ -1,4 +1,5 @@
 """Supervisor report generation wiring for round-bound figure placement."""
+import hashlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -172,6 +173,8 @@ def test_html_matches_registered_metadata_by_stem_when_record_path_is_empty(tmp_
         figure_type="heatmap",
         png_path="",
         pdf_path="",
+        render_sha256=hashlib.sha256(fig.read_bytes()).hexdigest(),
+        pdf_sha256="2" * 64,
         review_status=FigureReviewStatus.APPROVED,
     )]
     sections = [{

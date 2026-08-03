@@ -17,7 +17,7 @@ from ..agents.bioinformatics.stage1_baseline_figures import (
     ensure_stage1_baseline_figures,
 )
 from ..services.figure_contract import audit_figure_contract
-from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, prepend_species, safe_pi_brief, STAGE1_KEYWORDS
+from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, prepend_species, safe_pi_brief, STAGE1_KEYWORDS, WorkflowSupersededError
 from ..utils.blob_store import BLOB_REF_PREFIX
 from .retry import with_retry
 
@@ -365,6 +365,10 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
 
                     raise WorkflowTerminatedError(
                         "User terminated after runtime persistence failure"
+                    )
+                if action == "discard":
+                    raise WorkflowSupersededError(
+                        "runtime owner was superseded while persistence was blocked"
                     )
                 # Retry re-enters from the executor checkpoint after the exact
                 # live namespace is committed. Recompute/reduce likewise

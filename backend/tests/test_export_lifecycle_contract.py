@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import time
 from pathlib import Path
@@ -303,6 +304,63 @@ def test_orphan_sweep_preserves_live_generation_and_near_prefix(
     assert live_generation.exists()
     assert near_prefix.exists()
     assert unowned_lookalike.exists()
+
+
+def test_orphan_sweep_migrates_legacy_unmarked_archives_safely(
+    monkeypatch, tmp_path,
+):
+    """Pre-marker archives are reclaimed without following unsafe paths."""
+    from backend.tasks import session_cleanup
+
+    old_legacy = tmp_path / "prepared_export_abcdefgh.tar.gz"
+    old_interrupted = tmp_path / "export_stream_session-1.g2.ijklmnop.tar.gz"
+    old_snapshot = (
+        tmp_path / "v2-export-exp-0123456789abcdef-qrstuvwx.tar.gz"
+    )
+    young_legacy = tmp_path / "prepared_export_qrstuvwx.tar.gz"
+    protected_legacy = tmp_path / "export_stream_yz012345.tar.gz"
+    invalid_shape = tmp_path / "prepared_export_not-a-temp-name.tar.gz"
+    outside = tmp_path / "outside.tar.gz"
+    unsafe_link = tmp_path / "prepared_export_87654321.tar.gz"
+    for path in (
+        old_legacy,
+        old_interrupted,
+        old_snapshot,
+        young_legacy,
+        protected_legacy,
+        invalid_shape,
+        outside,
+    ):
+        path.write_bytes(b"archive")
+    unsafe_link.symlink_to(outside)
+
+    now = time.time()
+    old_timestamp = now - 1000
+    for path in (
+        old_legacy,
+        old_interrupted,
+        old_snapshot,
+        protected_legacy,
+        invalid_shape,
+    ):
+        os.utime(path, (old_timestamp, old_timestamp))
+
+    monkeypatch.setattr(session_cleanup, "UPLOAD_TEMP_DIR", tmp_path)
+    removed = session_cleanup._unlink_orphaned_export_archives(
+        100,
+        frozenset({str(protected_legacy)}),
+    )
+
+    assert removed == 3
+    assert not old_legacy.exists()
+    assert not old_interrupted.exists()
+    assert not old_snapshot.exists()
+    assert young_legacy.exists()
+    assert protected_legacy.exists()
+    assert invalid_shape.exists()
+    assert unsafe_link.is_symlink()
+    assert outside.read_bytes() == b"archive"
+    assert list(tmp_path.glob("*.scai-export-owner")) == []
 
 
 @pytest.mark.asyncio

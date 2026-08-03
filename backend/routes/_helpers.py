@@ -41,16 +41,46 @@ async def teardown_running_workflow(
             if workflows.get(session_id) is workflow:
                 workflows.pop(session_id, None)
 
-    task = _run_tasks.get(session_id)
+    async with state_lock:
+        task = _run_tasks.get(session_id)
     if task and not task.done():
         task.cancel()
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
-            pass
-    _run_tasks.pop(session_id, None)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[%s] Run task ignored cancellation; retaining its owner handle",
+                session_id,
+            )
+            return False
+        except asyncio.CancelledError:
+            # A task that accepted our cancellation is terminal. If it is not,
+            # this was cancellation of the teardown caller and must propagate.
+            if not task.done():
+                raise
+        except Exception:
+            # The producer failed while draining, which is still a terminal
+            # state. Keep going only after proving it cannot write again.
+            if not task.done():
+                logger.exception(
+                    "[%s] Run task drain failed before reaching a terminal state",
+                    session_id,
+                )
+                return False
+    if task is not None and not task.done():
+        return False
+    async with state_lock:
+        current_task = _run_tasks.get(session_id)
+        if current_task is not task:
+            logger.warning(
+                "[%s] A replacement run task appeared during teardown",
+                session_id,
+            )
+            return False
+        _run_tasks.pop(session_id, None)
 
-    monitor = _monitor_tasks.pop(session_id, None)
+    async with state_lock:
+        monitor = _monitor_tasks.pop(session_id, None)
     if monitor and not monitor.done():
         monitor.cancel()
 

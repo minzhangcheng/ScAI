@@ -1,11 +1,14 @@
 import base64
 import hashlib
 from datetime import datetime
+from pathlib import Path
 
 from backend.models.schemas import FigureReviewStatus, PublicationFigure
 from backend.services.report.artifacts import (
     archival_render_available,
     eligible_artifacts,
+    gallery_artifacts,
+    is_gallery_eligible,
     is_report_eligible,
     materialize_archival_preview,
     resolve_archival_render,
@@ -17,6 +20,19 @@ from backend.tests.figure_image_helpers import valid_image_bytes, write_valid_im
 def _figure(name, status, **kwargs):
     png_path = kwargs.pop("png_path", f"{name}.jpg")
     pdf_path = kwargs.pop("pdf_path", f"{name}.pdf")
+    png_base64 = kwargs.get("png_base64")
+    candidate = Path(png_path)
+    if "render_sha256" not in kwargs:
+        kwargs["render_sha256"] = (
+            hashlib.sha256(candidate.read_bytes()).hexdigest()
+            if candidate.is_file() else "1" * 64
+        )
+    if "pdf_sha256" not in kwargs:
+        kwargs["pdf_sha256"] = "2" * 64
+    if "preview_sha256" not in kwargs and png_base64:
+        kwargs["preview_sha256"] = hashlib.sha256(
+            base64.b64decode(png_base64)
+        ).hexdigest()
     return PublicationFigure(
         name=name, description="", figure_type="other",
         png_path=png_path, pdf_path=pdf_path,
@@ -36,6 +52,44 @@ def test_only_current_approved_artifacts_are_reportable():
     assert [f.name for f in eligible_artifacts([approved, reserved, pending, revision, stale])] == [
         "approved", "reserved"
     ]
+
+
+def test_gallery_keeps_report_blocked_renders_as_badged_output():
+    pending = _figure("pending", FigureReviewStatus.PENDING)
+    rejected = _figure("rejected", FigureReviewStatus.REVISION_REQUESTED)
+    layout_blocked = _figure(
+        "layout-blocked",
+        FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS,
+        layout_violations=[{"kind": "text_over_text", "severity": "block"}],
+    )
+    failed = _figure(
+        "failed", FigureReviewStatus.PENDING, producer_status="failed",
+    )
+    invalidated = _figure(
+        "invalidated", FigureReviewStatus.APPROVED, is_current=False,
+    )
+
+    assert is_gallery_eligible(pending)
+    assert [item.name for item in gallery_artifacts([
+        pending, rejected, layout_blocked, failed, invalidated,
+    ])] == ["pending", "rejected", "layout-blocked"]
+    assert eligible_artifacts([
+        pending, rejected, layout_blocked, failed, invalidated,
+    ]) == []
+
+
+def test_hashless_legacy_publication_review_is_not_report_eligible():
+    legacy = PublicationFigure(
+        name="legacy",
+        description="Review predates integrity binding",
+        figure_type="other",
+        png_path="legacy.jpg",
+        pdf_path="legacy.pdf",
+        review_status=FigureReviewStatus.APPROVED,
+    )
+
+    assert is_report_eligible(legacy) is False
+    assert eligible_artifacts([legacy]) == []
 
 
 def test_workspace_scan_cannot_reintroduce_ineligible_publication_figure(tmp_path):
@@ -135,6 +189,7 @@ def test_archival_render_requires_file_or_valid_record_preview(tmp_path):
     payload = valid_image_bytes("PNG")
     assert len(payload) < 2000, "a compact valid preview must not inherit the JPG floor"
     missing.png_base64 = base64.b64encode(payload).decode()
+    missing.preview_sha256 = hashlib.sha256(payload).hexdigest()
     assert archival_render_available(missing) is True
 
 

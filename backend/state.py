@@ -141,6 +141,17 @@ prepared_exports_lock: asyncio.Lock = asyncio.Lock()
 import_jobs: Dict[str, dict] = {}
 import_jobs_lock: asyncio.Lock = asyncio.Lock()
 
+# Inline ZIP/JSON imports block the event loop while extracting, then register
+# their request task here before the first persistence await. Account cleanup
+# uses the handle only to distinguish a live producer from a crash leftover;
+# cooperative lifecycle cancellation remains the actual stop mechanism.
+import_generation_tasks: Dict[str, asyncio.Task] = {}
+
+# Account deletion is a one-way revocation boundary. Import routes consult this
+# before claiming a new lifecycle generation so a request authenticated just
+# before revocation cannot publish an orphan after the final inventory scan.
+users_pending_deletion: set[str] = set()
+
 # Chat delegation tracking: session_id → background delegation task
 chat_tasks: Dict[str, asyncio.Task] = {}
 

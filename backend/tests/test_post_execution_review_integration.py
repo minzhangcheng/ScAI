@@ -6,8 +6,12 @@ does not read, or an executor result whose keys the merge step drops. Only the
 LLM and the kernel are stubbed.
 """
 import base64
+import hashlib
+import itertools
 import json
 import pytest
+from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -20,7 +24,7 @@ from backend.models.schemas import (
     PublicationFigure,
 )
 from backend.models.schema_parts.session import AnalysisPlan, PlanStep
-from backend.tests.figure_image_helpers import valid_image_bytes
+from backend.tests.figure_image_helpers import valid_image_bytes, valid_pdf_bytes
 from backend.workflow.post_execution import PostExecutionReviewMixin
 
 _SIGNATURE = {
@@ -29,6 +33,17 @@ _SIGNATURE = {
     "x_sum": 12345.0, "x_nnz": 999, "obs_hash": "oh", "var_hash": "vh",
     "layers_fingerprint": "lf",
 }
+
+_ARTIFACT_ROOT: Path | None = None
+_ARTIFACT_SEQUENCE = itertools.count()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _frozen_figure_artifact_root(tmp_path_factory):
+    global _ARTIFACT_ROOT
+    _ARTIFACT_ROOT = tmp_path_factory.mktemp("post-execution-integration-artifacts")
+    yield
+    _ARTIFACT_ROOT = None
 
 _REVIEW_JSON = json.dumps({
     "gaps": ["The approved pathway-activity step produced no result."],
@@ -145,13 +160,24 @@ def _state_and_plan():
     # Marker detection is a result-bearing step and therefore needs a reviewed
     # visual deliverable. Seed that completed evidence so this fixture isolates
     # the genuinely missing pathway-activity computation in step 2.
+    assert _ARTIFACT_ROOT is not None
+    artifact_id = next(_ARTIFACT_SEQUENCE)
+    png_path = _ARTIFACT_ROOT / f"{artifact_id}-marker-result.png"
+    pdf_path = _ARTIFACT_ROOT / f"{artifact_id}-marker-result.pdf"
+    render = valid_image_bytes("PNG", min_bytes=2200)
+    pdf = valid_pdf_bytes()
+    png_path.write_bytes(render)
+    pdf_path.write_bytes(pdf)
     state.publication_figures.append(PublicationFigure(
         name="marker_result",
         description="Marker result overview",
         figure_type="dotplot",
-        png_path="/missing/marker_result.png",
-        pdf_path="/missing/marker_result.pdf",
-        png_base64=base64.b64encode(valid_image_bytes("PNG")).decode(),
+        png_path=str(png_path),
+        pdf_path=str(pdf_path),
+        png_base64=base64.b64encode(render).decode(),
+        render_sha256=hashlib.sha256(render).hexdigest(),
+        preview_sha256=hashlib.sha256(render).hexdigest(),
+        pdf_sha256=hashlib.sha256(pdf).hexdigest(),
         review_status=FigureReviewStatus.APPROVED,
         plan_step_id=1,
         plan_id=state.current_plan.id,
@@ -243,6 +269,8 @@ async def test_denylisted_code_is_rejected_without_touching_the_kernel():
     "image.save('unreviewed.png')",
     "fig.canvas.print_png('unreviewed.png')",
     "open('unreviewed.png', 'wb').write(payload)",
+    "mode = 'wb'\nopen('unreviewed.png', mode).write(payload)",
+    "mode = choose_mode()\nopen('result.txt', mode=mode)",
 ])
 def test_restricted_supplement_rejects_figure_file_writes(code):
     """A disk image would be rediscovered as a legacy report artifact despite
@@ -271,11 +299,59 @@ def test_restricted_supplement_quarantines_an_image_written_indirectly(tmp_path)
     assert "indirect" in state.invalidated_artifact_stems
 
 
+def test_supplementary_quarantine_only_invalidates_current_round_once(tmp_path):
+    bio = _bio_agent([])
+    bio.sandbox.working_dir = str(tmp_path)
+    state = _state_and_plan()
+    old_round = PublicationFigure(
+        name="indirect",
+        description="old round",
+        figure_type="other",
+        png_path=str(tmp_path / "indirect.png"),
+        pdf_path=str(tmp_path / "indirect.pdf"),
+        round_number=1,
+    )
+    current_round = old_round.model_copy(
+        update={"id": "current-round", "round_number": state.current_round}
+    )
+    invalidated_at = datetime(2020, 1, 1)
+    already_invalid = old_round.model_copy(
+        update={
+            "id": "already-invalid",
+            "round_number": state.current_round,
+            "is_current": False,
+            "invalidated_at": invalidated_at,
+            "invalidation_reason": "original reason",
+        }
+    )
+    state.publication_figures = [old_round, current_round, already_invalid]
+    before = bio._supplementary_image_versions(tmp_path)
+    (tmp_path / "indirect.png").write_bytes(b"changed")
+
+    bio._quarantine_supplementary_images(state, before)
+
+    assert old_round.is_current is True
+    assert current_round.is_current is False
+    assert current_round.invalidated_at is not None
+    assert already_invalid.invalidated_at == invalidated_at
+    assert already_invalid.invalidation_reason == "original reason"
+
+
 def test_scanpy_save_false_is_not_mistaken_for_a_disk_write():
     bio = _bio_agent([])
     assert bio._supplementary_code_is_safe(
         "sc.pl.umap(adata, color='group', save=False)", "adata"
     ) is None
+
+
+@pytest.mark.parametrize("code", [
+    "open('input.txt')",
+    "open('input.txt', 'rb')",
+    "Path('input.txt').open(mode='r')",
+])
+def test_restricted_supplement_allows_statically_read_only_open(code):
+    bio = _bio_agent([])
+    assert bio._supplementary_code_is_safe(code, "adata") is None
 
 
 @pytest.mark.asyncio

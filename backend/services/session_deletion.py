@@ -653,9 +653,17 @@ def cleanup_failed_import_generation(session_id: str) -> bool:
             f"failed import cleanup is already in progress for {session_id}"
         )
     try:
-        if not abandon_import_generation(session_id):
-            return False
         record = read_lifecycle_record(session_id)
+        if record is None or record.get("status") == "importing":
+            if not abandon_import_generation(session_id):
+                return False
+            record = read_lifecycle_record(session_id)
+        elif not (
+            record.get("status") == "deleted"
+            and record.get("import_failed") is True
+            and record.get("cleanup_complete") is not True
+        ):
+            return False
         if not record or record.get("status") != "deleted":
             raise RuntimeError(
                 f"failed import {session_id} has no durable tombstone"
@@ -677,6 +685,13 @@ def cleanup_failed_import_generation(session_id: str) -> bool:
             if session_dir.exists():
                 raise OSError(
                     f"partial import directory still exists: {session_dir}"
+                )
+            integrity_dir = INTEGRITY_DIR / session_id
+            if integrity_dir.is_dir():
+                shutil.rmtree(integrity_dir)
+            if integrity_dir.exists():
+                raise OSError(
+                    f"partial import integrity data still exists: {integrity_dir}"
                 )
 
         # No import generation is published to a workflow. The only mutable

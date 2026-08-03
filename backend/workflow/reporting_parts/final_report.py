@@ -58,6 +58,11 @@ from .shared import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+# The common wait helper adds its standard 60-second delivery buffer, making
+# this a five-minute operator window. All non-report LLM gates keep their
+# existing unbounded default.
+DETAILED_REPORT_INTERVENTION_WAIT_SECONDS = 240
+
 
 def detailed_report_event_payload(report: Dict[str, Any]) -> Dict[str, Any]:
     """Build the terminal report event without rewriting a partial status."""
@@ -268,6 +273,19 @@ class FinalReportMixin:
             workspace_path=workspace_dir,
         )
 
+        force_fallback = bool(
+            analysis_state.detailed_report_fallback_pending
+        )
+        if force_fallback:
+            # A prior process persisted the fallback handoff before it stopped.
+            # Re-enter report generation without touching the failed upstream.
+            analysis_state.wait_input_reason = None
+            analysis_state.llm_failure_info = None
+            self._set_status(analysis_state, TaskStatus.GENERATING_REPORT)
+            await self._send_state_sync(
+                analysis_state, "detailed_report_fallback_resume"
+            )
+
         async def progress_callback(data: dict):
             await self._send_message(
                 "progress",
@@ -296,6 +314,7 @@ class FinalReportMixin:
                         progress_callback=progress_callback,
                         report_llm_client=llm_client,
                         chat_messages=None,
+                        force_fallback=force_fallback,
                     )
                 else:
                     supervisor_model = self._settings_provider.get_model("supervisor")
@@ -323,23 +342,46 @@ class FinalReportMixin:
                 break  # success
 
             except UpstreamExhaustedError as e:
+                # Persist the recovery decision together with the WAITING_INPUT
+                # gate. If the process exits while nobody is present, a resumed
+                # workflow will bypass the same exhausted upstream.
+                analysis_state.detailed_report_fallback_pending = True
                 action = await self._wait_for_llm_intervention(
-                    e, "generate_detailed_report", analysis_state
+                    e,
+                    "generate_detailed_report",
+                    analysis_state,
+                    wait_seconds=DETAILED_REPORT_INTERVENTION_WAIT_SECONDS,
                 )
                 if action == LlmFailureAction.RETRY:
+                    analysis_state.detailed_report_fallback_pending = False
+                    force_fallback = False
+                    self._set_status(analysis_state, TaskStatus.GENERATING_REPORT)
+                    await self._send_state_sync(
+                        analysis_state, "detailed_report_retry"
+                    )
                     continue
                 if action == LlmFailureAction.TERMINATE:
+                    analysis_state.detailed_report_fallback_pending = False
+                    self._set_status(analysis_state, TaskStatus.STOPPED)
+                    await self._send_state_sync(
+                        analysis_state, "detailed_report_terminated"
+                    )
                     from ..core import WorkflowTerminatedError
                     raise WorkflowTerminatedError(
                         "User terminated workflow during detailed report generation"
                     )
+                force_fallback = True
+                self._set_status(analysis_state, TaskStatus.GENERATING_REPORT)
                 await self._send_message(
-                    "error",
-                    "Detailed report generation skipped due to LLM failure. "
-                    "Analysis is still complete.",
+                    "status",
+                    "Detailed report LLM generation was skipped or timed out; "
+                    "building a deterministic fallback report.",
                     AgentType.PI,
                 )
-                break
+                await self._send_state_sync(
+                    analysis_state, "detailed_report_fallback"
+                )
+                continue
 
             except Exception as e:
                 logger.exception(f"[{self.session_id}] Failed to generate detailed report")
@@ -352,6 +394,15 @@ class FinalReportMixin:
                 break
 
         # === POST-PROCESSING: ALWAYS RUNS (even on Error) ===
+        if analysis_state.detailed_report_fallback_pending and report is None:
+            # Keep the durable marker retryable if local fallback assembly (for
+            # example a disk write) failed. Do not publish a false COMPLETED.
+            self._set_status(analysis_state, TaskStatus.PAUSED)
+            await self._send_state_sync(
+                analysis_state, "detailed_report_fallback_failed"
+            )
+            return {**state, "analysis_state": analysis_state}
+
         await self._capture_post_report_if_enabled(
             analysis_state,
             report_generation_id,
@@ -361,6 +412,7 @@ class FinalReportMixin:
         # intentionally disabled. If capture failed, RequiredSnapshotBlocked is
         # raised before this point and the run remains in its failure gate.
         if analysis_state.pending_required_snapshot is None:
+            analysis_state.detailed_report_fallback_pending = False
             self._set_status(analysis_state, TaskStatus.COMPLETED)
             await self._send_message(
                 "completed", analysis_completion_message(report), AgentType.PI

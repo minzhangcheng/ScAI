@@ -48,27 +48,44 @@ export function ChatPanel() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const loadedSessionRef = useRef<string | null>(null)
+  const historyGenerationRef = useRef(0)
   const [textareaHeight, setTextareaHeight] = useState(MIN_TEXTAREA_HEIGHT)
   const resizingRef = useRef(false)
   const resizeStartRef = useRef({ y: 0, height: 0 })
 
   // Load chat history when session changes
   useEffect(() => {
+    const generation = historyGenerationRef.current + 1
+    historyGenerationRef.current = generation
+
     if (!currentSession?.id) {
       setChatMessages([])
       loadedSessionRef.current = null
       return
     }
     if (loadedSessionRef.current === currentSession.id) return
-    loadedSessionRef.current = currentSession.id
+    const sessionId = currentSession.id
+    loadedSessionRef.current = sessionId
+    const controller = new AbortController()
+    const ownsResponse = () => (
+      historyGenerationRef.current === generation
+      && !controller.signal.aborted
+      && useAppStore.getState().currentSession?.id === sessionId
+    )
 
-    apiFetch<{ messages: typeof chatMessages }>(`/session/${currentSession.id}/chat`)
+    apiFetch<{ messages: typeof chatMessages }>(
+      `/session/${sessionId}/chat`,
+      { signal: controller.signal },
+      ownsResponse,
+    )
       .then((data) => {
-        setChatMessages(data.messages || [])
+        if (ownsResponse()) setChatMessages(data.messages || [])
       })
       .catch(() => {
-        setChatMessages([])
+        if (ownsResponse()) setChatMessages([])
       })
+
+    return () => controller.abort()
   }, [currentSession?.id, setChatMessages])
 
   // Poll backend during loading as fallback (covers both delegation and slow figure generation)

@@ -23,6 +23,13 @@ from backend.config import (
 )
 from backend.models.schemas import AnalysisState, APIResponse
 from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
+from backend.services.report.output_generation import (
+    CURRENT_GENERATION_POINTER,
+    GENERATION_MODE_SENTINEL,
+    GENERATIONS_DIR_NAME,
+    report_publication_lock,
+    resolve_current_report_dir,
+)
 from backend.services.snapshot_v2.feature_gate import (
     is_snapshot_v2_enabled,
     require_snapshot_v2_enabled,
@@ -163,6 +170,82 @@ def _add_tree_to_tar(tf, root: Path, arc_prefix: str) -> None:
     for file_path in _contained_files(root):
         rel = file_path.relative_to(root)
         _safe_add_file(tf, file_path, f"{arc_prefix}/{rel.as_posix()}")
+
+
+def _add_report_output_to_tar(
+    tf,
+    output_root: Path,
+    arc_prefix: str,
+    *,
+    include_root_variants: bool,
+) -> None:
+    """Capture one lineage while holding the same lock as pointer publication."""
+    with report_publication_lock(output_root):
+        published = resolve_current_report_dir(output_root)
+        generation_mode = published.parent.name == GENERATIONS_DIR_NAME
+
+        if generation_mode:
+            pointer = output_root / CURRENT_GENERATION_POINTER
+            _safe_add_file(tf, pointer, f"{arc_prefix}/{CURRENT_GENERATION_POINTER}")
+            sentinel = output_root / GENERATION_MODE_SENTINEL
+            if sentinel.is_file() and not sentinel.is_symlink():
+                _safe_add_file(tf, sentinel, f"{arc_prefix}/{GENERATION_MODE_SENTINEL}")
+            _add_tree_to_tar(
+                tf,
+                published,
+                f"{arc_prefix}/{GENERATIONS_DIR_NAME}/{published.name}",
+            )
+        else:
+            for file_path in _contained_files(output_root):
+                relative = file_path.relative_to(output_root)
+                if relative.parts and relative.parts[0] == "branches":
+                    continue
+                if any(part.startswith(".report-") for part in relative.parts):
+                    continue
+                _safe_add_file(tf, file_path, f"{arc_prefix}/{relative.as_posix()}")
+
+        if not include_root_variants or not generation_mode:
+            return
+        # Variant reports are still legacy root-owned files. Detailed-report
+        # JSON/HTML/assets come exclusively from the selected generation.
+        for file_path in _contained_files(output_root):
+            relative = file_path.relative_to(output_root)
+            if not relative.parts:
+                continue
+            if relative.parts[0] in {
+                "branches",
+                "figures",
+                "tables",
+                GENERATIONS_DIR_NAME,
+            }:
+                continue
+            if any(part.startswith(".report-") for part in relative.parts):
+                continue
+            if relative.name in {"report.json", "report.html"}:
+                continue
+            _safe_add_file(tf, file_path, f"{arc_prefix}/{relative.as_posix()}")
+
+
+def _add_reports_to_tar(tf, reports_root: Path, arc_prefix: str) -> None:
+    """Export current main/branch generations without stale or staging trees."""
+    _add_report_output_to_tar(
+        tf,
+        reports_root,
+        arc_prefix,
+        include_root_variants=True,
+    )
+    branches = reports_root / "branches"
+    if not branches.is_dir() or branches.is_symlink():
+        return
+    for branch_root in sorted(branches.iterdir()):
+        if branch_root.is_symlink() or not branch_root.is_dir():
+            continue
+        _add_report_output_to_tar(
+            tf,
+            branch_root,
+            f"{arc_prefix}/branches/{branch_root.name}",
+            include_root_variants=False,
+        )
 
 
 def _add_json_bytes(tf, arcname: str, payload: dict) -> None:

@@ -1435,6 +1435,7 @@ class TestConcurrencySerialize:
                 *,
                 job_transaction_id=None,
                 status_callback=None,
+                expected_lifecycle_generation=None,
             ):
                 nonlocal applying_count, max_applying
                 from backend.services.snapshot_v2.models import SnapshotTransactionRecord

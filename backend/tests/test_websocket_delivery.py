@@ -128,7 +128,7 @@ async def test_cancelled_send_releases_current_registry_slot():
 
 
 @pytest.mark.asyncio
-async def test_replacement_waits_for_inflight_send_then_old_cannot_send_again():
+async def test_replacement_publishes_without_waiting_for_inflight_old_send():
     old_socket = _Socket(block=True)
     new_socket = _Socket()
     old = await register_analysis_websocket("session", old_socket)
@@ -140,24 +140,88 @@ async def test_replacement_waits_for_inflight_send_then_old_cannot_send_again():
     replacement = asyncio.create_task(
         register_analysis_websocket("session", new_socket)
     )
-    await asyncio.sleep(0)
+    new = await asyncio.wait_for(replacement, timeout=0.2)
+    assert websockets["session"] is new_socket
 
-    assert not replacement.done()
-    assert websockets["session"] is old_socket
+    new_send = asyncio.create_task(
+        send_connection_json(new, {"generation": "new"})
+    )
+    await asyncio.sleep(0)
+    assert not new_send.done(), "new delivery overtook the old generation"
 
     old_socket.release_send.set()
-    assert await old_send is True
-    new = await replacement
+    assert await old_send is False
+    assert await new_send is True
     assert old_socket.closed == [1000]
     assert websockets["session"] is new_socket
 
-    assert await send_connection_json(old, {"generation": "stale"}) is True
+    assert await send_connection_json(old, {"generation": "stale"}) is False
     assert old_socket.sent == [{"generation": "old-before-replace"}]
+    assert new_socket.sent == [{"generation": "new"}]
+
+
+@pytest.mark.asyncio
+async def test_send_deadline_releases_replacement_delivery(monkeypatch):
+    from backend.utils import websocket_delivery
+
+    monkeypatch.setattr(
+        websocket_delivery, "_WEBSOCKET_SEND_TIMEOUT_SECONDS", 0.01,
+    )
+    old_socket = _Socket(block=True)
+    old = await register_analysis_websocket("send-timeout", old_socket)
+    old_send = asyncio.create_task(
+        send_connection_json(old, {"generation": "old"})
+    )
+    await old_socket.send_started.wait()
+
+    new_socket = _Socket()
+    new = await asyncio.wait_for(
+        register_analysis_websocket("send-timeout", new_socket),
+        timeout=0.2,
+    )
+    new_send = asyncio.create_task(
+        send_connection_json(new, {"generation": "new"})
+    )
+
+    assert await asyncio.wait_for(old_send, timeout=0.2) is False
+    assert await asyncio.wait_for(new_send, timeout=0.2) is True
+    assert old_socket.sent == []
+    assert old_socket.closed == [1011]
+    assert new_socket.sent == [{"generation": "new"}]
+
+
+@pytest.mark.asyncio
+async def test_replacement_close_deadline_does_not_block_registration(monkeypatch):
+    from backend.utils import websocket_delivery
+
+    monkeypatch.setattr(
+        websocket_delivery, "_WEBSOCKET_CLOSE_TIMEOUT_SECONDS", 0.01,
+    )
+    close_started = asyncio.Event()
+
+    class BlockingCloseSocket(_Socket):
+        async def close(self, code=1000):
+            close_started.set()
+            await asyncio.Event().wait()
+
+    old = await register_analysis_websocket(
+        "close-timeout", BlockingCloseSocket(),
+    )
+    new_socket = _Socket()
+    new = await asyncio.wait_for(
+        register_analysis_websocket("close-timeout", new_socket),
+        timeout=0.2,
+    )
+
+    await asyncio.wait_for(close_started.wait(), timeout=0.2)
+    for _ in range(50):
+        if old.socket_closed:
+            break
+        await asyncio.sleep(0.001)
+
+    assert old.socket_closed is True
+    assert websockets["close-timeout"] is new_socket
     assert await send_connection_json(new, {"generation": "new"}) is True
-    assert new_socket.sent == [
-        {"generation": "stale"},
-        {"generation": "new"},
-    ]
 
 
 @pytest.mark.asyncio
@@ -360,10 +424,9 @@ def test_cross_loop_replacement_orders_delivery_and_releases_lease(old_fails):
     assert events.index(expected_old_terminal) < events.index("new-send")
 
 
-def test_old_loop_workflow_send_routes_to_new_connection_owner_loop():
+def test_old_loop_workflow_send_does_not_route_to_new_connection_owner_loop():
     old_registered = threading.Event()
     replacement_registered = threading.Event()
-    delivered = threading.Event()
     old_finished = threading.Event()
     results: dict[str, object] = {}
 
@@ -383,7 +446,6 @@ def test_old_loop_workflow_send_routes_to_new_connection_owner_loop():
 
         async def send_json(self, payload):
             self.sent.append(payload)
-            delivered.set()
 
         async def close(self, code=1000):
             pass
@@ -411,7 +473,6 @@ def test_old_loop_workflow_send_routes_to_new_connection_owner_loop():
         async def run():
             await register_analysis_websocket("owner-route", new_socket)
             replacement_registered.set()
-            await wait_for(delivered)
             await wait_for(old_finished)
 
         asyncio.run(run())
@@ -426,6 +487,6 @@ def test_old_loop_workflow_send_routes_to_new_connection_owner_loop():
 
     assert not old_thread.is_alive()
     assert not new_thread.is_alive()
-    assert results == {"sent": True}
+    assert results == {"sent": False}
     assert old_socket.closed == [1000]
-    assert new_socket.sent == [{"generation": "replacement"}]
+    assert new_socket.sent == []

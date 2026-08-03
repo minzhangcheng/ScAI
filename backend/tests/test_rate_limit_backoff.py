@@ -7,6 +7,8 @@ from openai import RateLimitError, InternalServerError
 
 from backend.utils import llm_client
 from backend.utils.llm_client import (
+    DEFAULT_REQUEST_TIMEOUT,
+    OpenAICompatibleClient,
     retry_with_backoff,
     compute_rate_limit_delay,
     RATE_LIMIT_DELAYS,
@@ -79,3 +81,45 @@ async def test_pure_429_stream_walks_table(captured_sleeps):
         await retry_with_backoff(func, max_retries=4, agent_name="t")
     # budget == min(4, 4) == 4 → walks the full table in order
     assert captured_sleeps == [float(d) for d in RATE_LIMIT_DELAYS]
+
+
+@pytest.mark.asyncio
+async def test_429_budget_survives_zero_ordinary_retries(captured_sleeps):
+    attempts = 0
+
+    async def func():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RateLimitError(
+                "Rate limit reached, slow down",
+                response=_resp(429),
+                body=None,
+            )
+        return "ok"
+
+    result = await retry_with_backoff(
+        func,
+        max_retries=0,
+        rate_limit_retries=len(RATE_LIMIT_DELAYS),
+        agent_name="deep-research",
+    )
+
+    assert result == "ok"
+    assert attempts == 2
+    assert captured_sleeps == [float(RATE_LIMIT_DELAYS[0])]
+
+
+def test_long_timeout_disables_ordinary_retries_but_keeps_429_budget():
+    client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
+    client.agent_name = "literature"
+    client.base_url = "https://example.invalid/v1"
+    client.on_retry = None
+
+    kwargs = client._build_retry_kwargs(
+        "deep-research",
+        request_timeout=DEFAULT_REQUEST_TIMEOUT + 1,
+    )
+
+    assert kwargs["max_retries"] == 0
+    assert kwargs["rate_limit_retries"] == len(RATE_LIMIT_DELAYS)

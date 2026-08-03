@@ -161,6 +161,7 @@ class ClientChatMixin:
         timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
         _truncation_retried: bool = False,
+        _reasoning_only_retried: bool = False,
         _empty_retry_count: int = 0,
         _allow_empty_retry: bool = True,
         non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
@@ -230,6 +231,59 @@ class ClientChatMixin:
                 return await self._chat_inline(
                     model, messages, temperature, bumped, stream, timeout, max_retries,
                     _truncation_retried=True,
+                    _reasoning_only_retried=_reasoning_only_retried,
+                    non_retryable_predicate=non_retryable_predicate,
+                    max_retries_override=max_retries_override,
+                )
+
+            # Some OpenAI-compatible reasoning providers return HTTP 200 and
+            # place every generated token in a private reasoning field while
+            # leaving the public answer channel empty. Never expose that field
+            # as answer text. Instead, make one explicit corrective request for
+            # a public final answer; a second reasoning-only reply is an
+            # exhausted upstream response, not a successful empty answer.
+            reasoning_only = (
+                self._answer_content_empty(response)
+                and self._response_has_private_reasoning(response)
+            )
+            if reasoning_only:
+                if _reasoning_only_retried:
+                    raise UpstreamExhaustedError(
+                        "LLM returned private reasoning without a public answer "
+                        "after a corrective retry",
+                        agent_name=self.agent_name,
+                        model=model,
+                        llm_server=self.base_url,
+                    )
+                logger.warning(
+                    f"[{self.agent_name}] Provider returned private reasoning without "
+                    "a public answer; retrying once with an explicit answer-channel request"
+                )
+                await self._emit_log_response(
+                    interaction=interaction,
+                    response_content=content,
+                    usage=self._extract_usage(response),
+                    duration_ms=(time.time() - start_time) * 1000,
+                )
+                corrective_messages = list(messages) + [{
+                    "role": "user",
+                    "content": (
+                        "Return the final answer in the public response content field. "
+                        "Do not return only private reasoning or thinking metadata."
+                    ),
+                }]
+                return await self._chat_inline(
+                    model,
+                    corrective_messages,
+                    temperature,
+                    max_tokens,
+                    stream,
+                    timeout,
+                    max_retries,
+                    _truncation_retried=_truncation_retried,
+                    _reasoning_only_retried=True,
+                    _empty_retry_count=_empty_retry_count,
+                    _allow_empty_retry=_allow_empty_retry,
                     non_retryable_predicate=non_retryable_predicate,
                     max_retries_override=max_retries_override,
                 )
@@ -270,6 +324,7 @@ class ClientChatMixin:
                         model, messages, temperature, max_tokens, stream, timeout,
                         max_retries,
                         _truncation_retried=_truncation_retried,
+                        _reasoning_only_retried=_reasoning_only_retried,
                         _empty_retry_count=_empty_retry_count + 1,
                         _allow_empty_retry=_allow_empty_retry,
                         non_retryable_predicate=non_retryable_predicate,

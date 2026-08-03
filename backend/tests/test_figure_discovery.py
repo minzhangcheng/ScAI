@@ -262,12 +262,17 @@ def test_annotation_validation_is_discovered_but_tagged_diagnostic(monkeypatch, 
 
 def _publication_figure(name, *, status="approved", figure_type="barplot",
                         description="authoritative description", **overrides):
+    png_path = overrides.pop("png_path", f"/workspace/figures/{name}.png")
+    render_sha256 = overrides.pop("render_sha256", None)
+    if render_sha256 is None and Path(png_path).is_file():
+        render_sha256 = hashlib.sha256(Path(png_path).read_bytes()).hexdigest()
     return SimpleNamespace(
         name=name,
-        png_path=overrides.pop("png_path", f"/workspace/figures/{name}.png"),
+        png_path=png_path,
         png_base64=overrides.pop("png_base64", None),
-        render_sha256=overrides.pop("render_sha256", None),
+        render_sha256=render_sha256,
         preview_sha256=overrides.pop("preview_sha256", None),
+        pdf_sha256=overrides.pop("pdf_sha256", "2" * 64),
         csv_path=None,
         figure_type=figure_type,
         description=description,

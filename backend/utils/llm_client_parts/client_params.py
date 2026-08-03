@@ -256,7 +256,11 @@ class ClientParamsMixin:
         if max_retries_override is not None:
             kwargs["max_retries"] = max_retries_override
         elif request_timeout is not None and request_timeout > DEFAULT_REQUEST_TIMEOUT:
+            # A long per-attempt deadline disables ordinary retries to avoid
+            # paying for the same long generation twice. Transient 429s do not
+            # start a generation, so retain their independent backoff budget.
             kwargs["max_retries"] = 0
+            kwargs["rate_limit_retries"] = len(RATE_LIMIT_DELAYS)
         if self.on_retry is not None:
             kwargs["on_retry"] = self.on_retry
         if non_retryable_predicate is not None:

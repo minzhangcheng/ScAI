@@ -49,6 +49,8 @@ from backend.services.report.interaction_records import (
     write_interaction_record_files,
 )
 from backend.services.report.output_cleanup import reset_report_asset_directories
+from backend.services.report.output_generation import ReportGenerationTransaction
+from backend.utils.asyncio_tasks import run_in_owned_thread
 from backend.workflow.direction_coverage import normalize_legacy_round_result
 from backend.services.report.quality import (
     build_report_partial_fields,
@@ -206,6 +208,62 @@ def unreported_figure_names(
     ]
 
 
+def rebind_checkpoint_asset_paths(
+    value: Any,
+    *,
+    figures_dir: Path,
+    tables_dir: Path,
+) -> Any:
+    """Rebase checkpoint asset paths into the current private generation.
+
+    Report checkpoints outlive an interrupted staging directory.  Resuming a
+    later generation must not retain absolute paths into that deleted tree.
+    The current scan has already copied every still-eligible asset into the new
+    staging directories, so path fields can be rebound by their immutable
+    filename.  Missing files are cleared instead of publishing dangling paths.
+    """
+    if isinstance(value, dict):
+        rebound = {
+            key: rebind_checkpoint_asset_paths(
+                item,
+                figures_dir=figures_dir,
+                tables_dir=tables_dir,
+            )
+            for key, item in value.items()
+        }
+        for key, directory in (
+            ("png_path", figures_dir),
+            ("pdf_path", figures_dir),
+            ("csv_path", tables_dir),
+        ):
+            raw_path = value.get(key)
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                continue
+            filename = Path(raw_path).name
+            candidate = directory / filename
+            rebound[key] = str(candidate) if candidate.is_file() else None
+        return rebound
+    if isinstance(value, list):
+        return [
+            rebind_checkpoint_asset_paths(
+                item,
+                figures_dir=figures_dir,
+                tables_dir=tables_dir,
+            )
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            rebind_checkpoint_asset_paths(
+                item,
+                figures_dir=figures_dir,
+                tables_dir=tables_dir,
+            )
+            for item in value
+        )
+    return value
+
+
 def build_agent_models_appendix(state) -> dict:
     """Agent->model map saved into the report appendix. Overrides the literature
     entry with the actually-used model label (DR vs PubMed) when recorded."""
@@ -260,9 +318,9 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         self.llm_client = llm_client
         self.pi_model = pi_model
         self.bio_model = bio_model
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        reset_report_asset_directories(self.output_dir)
+        self._output_root = Path(output_dir)
+        self._output_root.mkdir(parents=True, exist_ok=True)
+        self.output_dir = self._output_root
         self.workspace_dir = Path(workspace_dir) if workspace_dir else None
         self.progress_callback = progress_callback
         self.vision_settings = vision_settings or {}
@@ -333,6 +391,51 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             return None
 
     async def generate_report(
+        self,
+        state: AnalysisState,
+        resume_from_checkpoint: bool = True,
+    ) -> Dict[str, Any]:
+        """Generate privately and atomically publish one complete report tree."""
+        output_root = self._output_root
+        transaction = ReportGenerationTransaction(output_root)
+        self.output_dir = transaction.staging_dir
+        self.figures_dir = self.output_dir / "figures"
+        self.tables_dir = self.output_dir / "tables"
+        reset_report_asset_directories(self.output_dir)
+        try:
+            report = await self._generate_report_staged(
+                state,
+                resume_from_checkpoint=resume_from_checkpoint,
+            )
+            published_dir = await run_in_owned_thread(
+                transaction.commit_report,
+                report,
+            )
+            self.output_dir = published_dir
+            self.figures_dir = published_dir / "figures"
+            self.tables_dir = published_dir / "tables"
+            try:
+                CheckpointManager(
+                    session_id=state.id,
+                    state_dir=str(get_session_states(state.id)),
+                    prefix="report",
+                ).clear()
+            except OSError:
+                logger.warning(
+                    "Published report but could not clear its checkpoint",
+                    exc_info=True,
+                )
+            return report
+        except BaseException:
+            try:
+                await run_in_owned_thread(transaction.abort)
+            finally:
+                self.output_dir = output_root
+                self.figures_dir = output_root / "figures"
+                self.tables_dir = output_root / "tables"
+            raise
+
+    async def _generate_report_staged(
         self,
         state: AnalysisState,
         resume_from_checkpoint: bool = True,
@@ -420,6 +523,12 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                 ),
             )
         )
+        if checkpoint:
+            checkpoint = rebind_checkpoint_asset_paths(
+                checkpoint,
+                figures_dir=self.figures_dir,
+                tables_dir=self.tables_dir,
+            )
         logger.info(f"Collected {len(existing_figures)} figures and {len(existing_tables)} tables for report")
 
         # Step 3: Extract findings from round results
@@ -697,11 +806,6 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             return obj
         report = _sanitize(report)
 
-        # Save report metadata
-        report_path = self.output_dir / "report.json"
-        with open(report_path, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
-
         # Copy notebook to report directory for download
         import shutil as _shutil
         from backend.utils.live_paths import live_notebook_path
@@ -727,9 +831,6 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         await self._report_progress(95, "Generating HTML report...")
         html_path = await self._generate_html_report(report, language, state=report_state)
         report["html_path"] = str(html_path)
-
-        # Clear checkpoint on successful completion
-        checkpoint_mgr.clear()
 
         await self._report_progress(
             100, report_current_step, report_status

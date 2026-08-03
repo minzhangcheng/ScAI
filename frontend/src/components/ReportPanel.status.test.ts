@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   partialReportNotice,
+  reportBranchQuery,
   reportCompletionContent,
   type DetailedReport,
 } from './ReportPanel'
@@ -25,6 +26,11 @@ function report(overrides: Partial<DetailedReport> = {}): DetailedReport {
 }
 
 describe('ReportPanel partial report status', () => {
+  it('encodes the restored lineage in every report endpoint query', () => {
+    expect(reportBranchQuery('branch/A B')).toBe('?branch_id=branch%2FA%20B')
+    expect(reportBranchQuery()).toBe('')
+  })
+
   it('preserves a partial terminal status in the websocket message', () => {
     expect(reportCompletionContent(report(), 'en')).toEqual({
       status: 'partial',

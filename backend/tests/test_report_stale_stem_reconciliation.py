@@ -29,11 +29,23 @@ from backend.services.report.report_outline import OutlineSection
 
 
 def _figure(name, status=FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS, **kwargs):
+    png_path = kwargs.pop("png_path", f"{name}.jpg")
+    png_base64 = kwargs.get("png_base64")
+    if "render_sha256" not in kwargs:
+        kwargs["render_sha256"] = (
+            hashlib.sha256(Path(png_path).read_bytes()).hexdigest()
+            if Path(png_path).is_file() else "1" * 64
+        )
+    if "preview_sha256" not in kwargs and png_base64:
+        kwargs["preview_sha256"] = hashlib.sha256(
+            base64.b64decode(png_base64)
+        ).hexdigest()
+    kwargs.setdefault("pdf_sha256", "2" * 64)
     return PublicationFigure(
         name=name,
         description="",
         figure_type=kwargs.pop("figure_type", "other"),
-        png_path=kwargs.pop("png_path", f"{name}.jpg"),
+        png_path=png_path,
         pdf_path=kwargs.pop("pdf_path", f"{name}.pdf"),
         review_status=status,
         **kwargs,
@@ -100,13 +112,13 @@ def test_review_status_still_withholds_independently_of_the_stem_set():
     assert "rejected" in stems
 
 
-def test_gallery_excludes_a_revision_requested_non_head():
-    """Audit-only redraws cannot re-enter through filename reconciliation."""
+def test_gallery_keeps_a_completed_revision_requested_render():
+    """Review failure is a badge, not a reason to hide produced work."""
     revised = _figure("revised", FigureReviewStatus.REVISION_REQUESTED)
     stems = excluded_artifact_stems(
         [revised], gallery_artifacts([revised]), invalidated_stems=["revised"],
     )
-    assert stems == {"revised"}
+    assert stems == set()
 
 
 def test_no_invalidated_stems_is_the_plain_eligibility_difference():
@@ -295,6 +307,19 @@ def _collect(tmp_path, files, publication, records=None):
         target = workspace / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(payload)
+    for figure in publication:
+        if getattr(figure, "render_sha256", None) != "1" * 64:
+            continue
+        declared_name = Path(str(getattr(figure, "png_path", "") or "")).name
+        match = next(
+            (
+                payload for rel, payload in files.items()
+                if Path(rel).name == declared_name
+            ),
+            None,
+        )
+        if match is not None:
+            figure.render_sha256 = hashlib.sha256(match).hexdigest()
 
     mixin_cls = next(
         cls for cls in vars(report_html).values()

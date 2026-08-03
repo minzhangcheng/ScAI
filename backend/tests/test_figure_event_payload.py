@@ -23,6 +23,7 @@ def test_compact_figure_event_payload_keeps_provenance_without_preview():
         purpose="result",
         round_number=4,
         diagnostic=False,
+        layout_violations=[{"severity": "block", "kind": "text_over_text"}],
         created_at=datetime(2026, 8, 2, 10, 0, 0),
     )
 
@@ -39,4 +40,5 @@ def test_compact_figure_event_payload_keeps_provenance_without_preview():
     assert payload["purpose"] == "result"
     assert payload["round"] == 4
     assert payload["pi_feedback"] == "Increase label size."
+    assert payload["layout_blocking"] is True
     assert "png_base64" not in payload

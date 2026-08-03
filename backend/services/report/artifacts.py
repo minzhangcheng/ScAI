@@ -220,6 +220,8 @@ def verified_artifact_bytes(
         expected = {expected_digest} if expected_digest else set()
     else:
         raise ValueError(f"unsupported artifact kind: {kind}")
+    if artifact is not None and not expected:
+        return None
     if expected and digest not in expected:
         return None
     return payload
@@ -285,7 +287,10 @@ def _record_hashes(artifact: Any) -> set[str]:
 
 def _bytes_match_record(payload: bytes, artifact: Any) -> bool:
     expected = _record_hashes(artifact)
-    return not expected or hashlib.sha256(payload).hexdigest() in expected
+    # A missing digest is missing provenance, not a legacy wildcard. Freezing
+    # whatever happens to occupy a mutable path today would let replacement
+    # bytes inherit the record's historical review decision.
+    return bool(expected) and hashlib.sha256(payload).hexdigest() in expected
 
 
 def image_file_sha256(
@@ -349,12 +354,12 @@ def pdf_file_sha256(path: Any) -> str | None:
 
 
 def archival_pdf_path_matches_record(artifact: Any, path: Any) -> bool:
-    """Validate a PDF and, when recorded, bind it to the reviewed bytes."""
+    """Validate a PDF and bind it to the exact reviewed bytes."""
     digest = pdf_file_sha256(path)
     if digest is None:
         return False
     expected = str(_artifact_value(artifact, "pdf_sha256") or "").strip().lower()
-    return not expected or digest == expected
+    return bool(expected) and digest == expected
 
 
 def resolve_archival_pdf(artifact: Any, workspace_path: Any) -> Path | None:
@@ -484,9 +489,19 @@ def _record_path_is_usable(
     if digest is None:
         return False
     expected = _record_hashes(artifact)
-    if expected and digest not in expected:
-        return False
-    return True
+    return bool(expected) and digest in expected
+
+
+def has_frozen_publication_pair(artifact: Any) -> bool:
+    """Whether a publication record carries immutable raster and PDF IDs."""
+    render = str(_artifact_value(artifact, "render_sha256", "") or "").lower()
+    pdf = str(_artifact_value(artifact, "pdf_sha256", "") or "").lower()
+    return bool(
+        len(render) == 64
+        and len(pdf) == 64
+        and all(char in "0123456789abcdef" for char in render)
+        and all(char in "0123456789abcdef" for char in pdf)
+    )
 
 
 def archival_path_matches_record(artifact: Any, path: Any) -> bool:
@@ -659,6 +674,13 @@ def is_report_eligible(artifact: Any) -> bool:
         return False
     if _artifact_value(artifact, "invalidated_at", None):
         return False
+    is_figure = (
+        "figure_type" in artifact or "png_path" in artifact
+        if isinstance(artifact, Mapping)
+        else hasattr(artifact, "figure_type") or hasattr(artifact, "png_path")
+    )
+    if is_figure and not has_frozen_publication_pair(artifact):
+        return False
     if has_blocking_layout_defects(artifact):
         return False
     # A platform-rendered diagnostic has no reviewer by construction, so a review
@@ -757,18 +779,51 @@ def eligible_artifact_by_id(
 
 
 def is_gallery_eligible(artifact: Any) -> bool:
-    """Whether a record may participate in the logical gallery-head resolver.
+    """Whether a completed current render belongs on browsing surfaces.
 
-    Browsing and archival surfaces intentionally share this record predicate.
-    Pending, failed, abandoned, reviewer-rejected, superseded, invalidated, or
-    layout-blocked attempts remain available in the audit state but cannot be
-    presented as a current figure merely because their files exist.
+    A gallery answers what the run produced, not what is fit for a report.
+    Review status and layout findings travel as badges; only incomplete
+    producers and figures invalidated by newer analysis data are withheld.
     """
-    return is_report_eligible(artifact)
+    return bool(
+        str(
+            _artifact_value(artifact, "producer_status", "published")
+            or "published"
+        )
+        == "published"
+        and _artifact_value(artifact, "is_current", True)
+        and not _artifact_value(artifact, "invalidated_at", None)
+    )
 
 
 def gallery_artifacts(artifacts: Iterable[Any] | None) -> list[Any]:
-    return published_head_artifacts(artifacts)
+    """Return every completed, current render for operator browsing."""
+    return [
+        artifact
+        for artifact in (artifacts or [])
+        if is_gallery_eligible(artifact)
+    ]
+
+
+def gallery_artifact_by_id(
+    artifacts: Iterable[Any] | None,
+    artifact_id: str,
+    *,
+    lineage_id: str | None = None,
+) -> Any | None:
+    """Resolve a download ID through the browsing predicate and lineage."""
+    target = str(artifact_id or "")
+    lineage = str(lineage_id or "main")
+    return next(
+        (
+            artifact
+            for artifact in gallery_artifacts(artifacts)
+            if str(_artifact_value(artifact, "id", "")) == target
+            and str(_artifact_value(artifact, "lineage_id", None) or "main")
+            == lineage
+        ),
+        None,
+    )
 
 
 def artifact_stems(artifacts: Iterable[Any] | None) -> set[str]:

@@ -1,7 +1,12 @@
 """Artifact-completeness checks for approved plan visualization deliverables."""
 
 import base64
+import hashlib
+import itertools
 from datetime import timedelta
+from pathlib import Path
+
+import pytest
 
 from backend.models.schemas import (
     AnalysisPlan,
@@ -18,10 +23,19 @@ from backend.workflow.post_execution_review import (
     extract_planned_figure_kinds,
     should_run_post_execution_review,
 )
-from backend.tests.figure_image_helpers import valid_image_bytes
+from backend.tests.figure_image_helpers import valid_image_bytes, valid_pdf_bytes
 
 
-_RENDER_PREVIEW = base64.b64encode(valid_image_bytes("PNG")).decode()
+_ARTIFACT_ROOT: Path | None = None
+_ARTIFACT_SEQUENCE = itertools.count()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _frozen_figure_artifact_root(tmp_path_factory):
+    global _ARTIFACT_ROOT
+    _ARTIFACT_ROOT = tmp_path_factory.mktemp("post-execution-figure-artifacts")
+    yield
+    _ARTIFACT_ROOT = None
 
 
 def _figure(
@@ -32,13 +46,24 @@ def _figure(
     status: FigureReviewStatus = FigureReviewStatus.APPROVED,
     **overrides,
 ) -> PublicationFigure:
+    assert _ARTIFACT_ROOT is not None
+    artifact_id = next(_ARTIFACT_SEQUENCE)
+    png_path = _ARTIFACT_ROOT / f"{artifact_id}-{name}.png"
+    pdf_path = _ARTIFACT_ROOT / f"{artifact_id}-{name}.pdf"
+    render = valid_image_bytes("PNG", min_bytes=2200)
+    pdf = valid_pdf_bytes()
+    png_path.write_bytes(render)
+    pdf_path.write_bytes(pdf)
     values = {
         "name": name,
         "description": f"Publication-ready {figure_type} result",
         "figure_type": figure_type,
-        "png_path": f"/tmp/{name}.png",
-        "pdf_path": f"/tmp/{name}.pdf",
-        "png_base64": _RENDER_PREVIEW,
+        "png_path": str(png_path),
+        "pdf_path": str(pdf_path),
+        "png_base64": base64.b64encode(render).decode(),
+        "render_sha256": hashlib.sha256(render).hexdigest(),
+        "preview_sha256": hashlib.sha256(render).hexdigest(),
+        "pdf_sha256": hashlib.sha256(pdf).hexdigest(),
         "round_number": round_number,
         "review_status": status,
     }
@@ -203,14 +228,18 @@ def test_report_eligible_tables_cannot_satisfy_a_figure_requirement():
 
 def test_legacy_dict_figures_are_supported_but_round_zero_is_not_a_wildcard():
     plan = _plan(PlanStep(id=1, title="Result display", method="Create a heatmap"))
+    frozen = _figure("legacy_heatmap", "heatmap")
     legacy_current = {
         "id": "legacy-current",
-        "name": "legacy_heatmap",
+        "name": frozen.name,
         "description": "Result heat map",
         "figure_type": "heatmap",
-        "png_path": "/tmp/legacy_heatmap.png",
-        "pdf_path": "/tmp/legacy_heatmap.pdf",
-        "png_base64": _RENDER_PREVIEW,
+        "png_path": frozen.png_path,
+        "pdf_path": frozen.pdf_path,
+        "png_base64": frozen.png_base64,
+        "render_sha256": frozen.render_sha256,
+        "preview_sha256": frozen.preview_sha256,
+        "pdf_sha256": frozen.pdf_sha256,
         "review_status": "approved",
         "round_number": 2,
     }
@@ -400,7 +429,6 @@ def test_legacy_snapshot_opt_out_waives_unstructured_result_figures_too():
     assert extract_planned_figure_kinds(steps[2]) == set()
     assert extract_planned_figure_kinds(steps[3]) == set()
     assert extract_planned_figure_kinds(steps[4]) == set()
-
     audit = audit_plan_execution(
         _plan(*steps),
         [CodeExecution(code="sc.tl.rank_genes_groups(adata)", round_number=2)],
@@ -420,6 +448,15 @@ def test_legacy_snapshot_opt_out_waives_unstructured_result_figures_too():
     ).steps[0]
     assert missing_method.status == "pending"
     assert missing_method.missing_families == ["marker_de"]
+
+
+def test_optional_qualifier_cannot_cross_a_sentence_boundary():
+    step = PlanStep(
+        id=1,
+        title="Embedding visualization",
+        method="Plot the UMAP. If useful, also run pseudotime.",
+    )
+    assert extract_planned_figure_kinds(step) == {"umap"}
 
 
 def test_new_plan_cannot_reintroduce_the_legacy_no_figure_prose_escape():

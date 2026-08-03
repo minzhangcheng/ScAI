@@ -16,6 +16,14 @@ import { WS_CONNECT_TIMEOUT_MS, ApiError, apiFetch, applyStoreUpdates, generateI
 const SNAPSHOT_CLEANUP_THRESHOLD = 20
 const SNAPSHOT_REMINDER_INTERVAL = 5
 const MAX_RESTORE_COMMIT_REFRESH_KEYS = 64
+const RECONNECTABLE_SESSION_STATUSES = new Set<Session['status']>([
+  'running',
+  'waiting_input',
+  'waiting_annotation',
+  'waiting_plan_review',
+  'waiting_species_input',
+  'generating_report',
+])
 
 /**
  * Refetch `/session/{id}/load` and apply it to the store.
@@ -680,7 +688,7 @@ export function useWebSocket() {
       // Auto-reconnect if session is still running (not manually disconnected)
       const latestSession = useAppStore.getState().currentSession
       if (latestSession &&
-          (latestSession.status === 'running' || latestSession.status === 'waiting_input' || latestSession.status === 'waiting_annotation' || latestSession.status === 'waiting_plan_review') &&
+          RECONNECTABLE_SESSION_STATUSES.has(latestSession.status) &&
           event.code !== 1000) {  // Not a normal close
         if (reconnectCountRef.current < 5) {  // Max 5 reconnect attempts
           const delay = Math.min(1000 * Math.pow(2, reconnectCountRef.current - 1), 10000)  // Exponential backoff, max 10s

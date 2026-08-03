@@ -110,6 +110,12 @@ class SupplementaryMixin:
                 != (getattr(state, "restore_branch_id", None) or "main")
             ):
                 continue
+            if int(getattr(figure, "round_number", 0) or 0) != int(
+                getattr(state, "current_round", 0) or 0
+            ):
+                continue
+            if not bool(getattr(figure, "is_current", True)):
+                continue
             if not (artifact_stems([figure]) & changed):
                 continue
             figure.is_current = False
@@ -173,15 +179,52 @@ class SupplementaryMixin:
 
             # A direct ``open(path, 'wb')`` can otherwise manufacture a PNG that
             # recursive report discovery would mistake for an archival artifact.
-            if isinstance(func, ast.Name) and func.id == "open":
-                mode = None
-                if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
-                    mode = node.args[1].value
+            is_builtin_open = isinstance(func, ast.Name) and func.id == "open"
+            is_attribute_open = (
+                isinstance(func, ast.Attribute) and func.attr.lower() == "open"
+            )
+            if is_builtin_open or is_attribute_open:
+                mode_node = None
+                mode_was_supplied = False
                 for keyword in node.keywords:
-                    if keyword.arg == "mode" and isinstance(keyword.value, ast.Constant):
-                        mode = keyword.value.value
-                if isinstance(mode, str) and any(flag in mode for flag in "wax+"):
-                    return "disallowed file-writing call 'open'"
+                    if keyword.arg == "mode":
+                        mode_node = keyword.value
+                        mode_was_supplied = True
+                        break
+
+                if not mode_was_supplied:
+                    if is_builtin_open and len(node.args) >= 2:
+                        mode_node = node.args[1]
+                        mode_was_supplied = True
+                    elif is_attribute_open:
+                        dotted: List[str] = [func.attr]
+                        value = func.value
+                        while isinstance(value, ast.Attribute):
+                            dotted.append(value.attr)
+                            value = value.value
+                        if isinstance(value, ast.Name):
+                            dotted.append(value.id)
+                        qualified = ".".join(reversed(dotted)).lower()
+                        module_open = qualified in {
+                            "builtins.open", "io.open", "codecs.open",
+                            "gzip.open", "bz2.open", "lzma.open",
+                        }
+                        mode_index = 1 if module_open else 0
+                        if len(node.args) > mode_index:
+                            mode_node = node.args[mode_index]
+                            mode_was_supplied = True
+
+                if mode_was_supplied:
+                    if not (
+                        isinstance(mode_node, ast.Constant)
+                        and isinstance(mode_node.value, str)
+                    ):
+                        return (
+                            "disallowed file-writing call 'open': mode is not "
+                            "statically proven read-only"
+                        )
+                    if any(flag in mode_node.value for flag in "wax+"):
+                        return "disallowed file-writing call 'open'"
         return None
 
     def _supplementary_fatal_signature_changes(self, changed: List[str]) -> List[str]:

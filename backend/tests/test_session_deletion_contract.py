@@ -14,6 +14,7 @@ from backend.services.session_lifecycle import (
     abandon_import_generation,
     claim_import_generation,
     complete_tombstone_cleanup,
+    request_import_generation_cancellation,
     read_lifecycle_record,
     register_new_generation,
     tombstone_generation,
@@ -1384,3 +1385,39 @@ async def test_failed_import_cleanup_holds_shared_lease_until_completion(
         release.set()
         await asyncio.gather(cleanup, return_exceptions=True)
         sessions.pop(session_id, None)
+
+
+def test_failed_import_producer_cleans_account_cancel_marker(monkeypatch, tmp_path):
+    """Import cleanup owns a generation cancelled by account deletion."""
+    session_id = "account-tombstoned-import"
+    session_root = tmp_path / "sessions"
+    session_dir = session_root / session_id
+    monkeypatch.setattr(session_lifecycle, "SESSION_DIR", session_root)
+    monkeypatch.setattr(session_deletion, "SESSION_DIR", session_root)
+    integrity_dir = tmp_path / "integrity" / session_id
+    monkeypatch.setattr(session_deletion, "INTEGRITY_DIR", tmp_path / "integrity")
+    monkeypatch.setattr(
+        session_deletion, "get_session_dir", lambda _sid: session_dir,
+    )
+    session_lifecycle.reset_lifecycle_locks()
+    assert claim_import_generation(session_id, "owner", session_dir) == 1
+    (session_dir / "partial.txt").write_text("partial", encoding="utf-8")
+    integrity_dir.mkdir(parents=True)
+    (integrity_dir / "live.pkl.sig").write_text("partial", encoding="utf-8")
+
+    assert request_import_generation_cancellation(session_id, "owner") == 1
+    before = read_lifecycle_record(session_id)
+    assert before is not None
+    assert before["status"] == "importing"
+    assert before["import_cancel_requested"] is True
+
+    state = AnalysisState(id=session_id, user_id="owner")
+    session_lifecycle.bind_import_generation(state)
+    with pytest.raises(session_lifecycle.SessionGenerationError):
+        session_lifecycle.commit_import_generation(state)
+
+    assert session_deletion.cleanup_failed_import_generation(session_id) is True
+    after = read_lifecycle_record(session_id)
+    assert after is not None and after["cleanup_complete"] is True
+    assert not session_dir.exists()
+    assert not integrity_dir.exists()

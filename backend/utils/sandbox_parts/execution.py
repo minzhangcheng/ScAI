@@ -89,6 +89,35 @@ from .shared import (  # noqa: F401
 )
 
 
+IOPUB_INTERRUPT_DRAIN_TIMEOUT = 5.0
+
+
+async def _drain_iopub_until_idle(
+    kernel_client: Any,
+    timeout_seconds: float = IOPUB_INTERRUPT_DRAIN_TIMEOUT,
+    *,
+    monotonic=time.monotonic,
+) -> bool:
+    """Drain an interrupted execution under one wall-clock deadline."""
+    deadline = monotonic() + max(0.0, float(timeout_seconds))
+    while True:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            message = await _to_thread_drained(
+                kernel_client.get_iopub_msg,
+                timeout=min(1.0, remaining),
+            )
+        except QueueEmpty:
+            return False
+        if (
+            message.get("msg_type") == "status"
+            and message.get("content", {}).get("execution_state") == "idle"
+        ):
+            return True
+
+
 class ExecutionMixin:
     """Code execution against the kernel and figure collection."""
 
@@ -302,17 +331,17 @@ class ExecutionMixin:
                             logger.warning(f"Kernel interrupted after timeout for session {self.session_id}")
                             # Wait briefly for kernel to acknowledge interrupt
                             await asyncio.sleep(0.5)
-                            # Drain any remaining messages to clear the queue
-                            try:
-                                while True:
-                                    drain_msg = await _to_thread_drained(
-                                        self.kc.get_iopub_msg, timeout=1.0
-                                    )
-                                    if drain_msg['msg_type'] == 'status' and drain_msg['content']['execution_state'] == 'idle':
-                                        break
-                            except QueueEmpty:
-                                # Kernel may be in bad state, restart it
-                                logger.warning(f"Kernel did not return to idle after interrupt for session {self.session_id}")
+                            # Continuous output without an idle status is as
+                            # unhealthy as a silent kernel, so the entire drain
+                            # has one wall-clock budget.
+                            returned_idle = await _drain_iopub_until_idle(self.kc)
+                            if not returned_idle:
+                                logger.warning(
+                                    "Kernel did not return to idle within %.1fs "
+                                    "after interrupt for session %s",
+                                    IOPUB_INTERRUPT_DRAIN_TIMEOUT,
+                                    self.session_id,
+                                )
                                 await self._restart_kernel()
                         except Exception as interrupt_error:
                             logger.error(f"Failed to interrupt kernel: {interrupt_error}")

@@ -9,7 +9,6 @@ agent decision summary, and a manifest.
 Environment capture uses subprocess.run in the backend process — no Jupyter
 sandbox dependency.  The backend Python environment IS the analysis environment.
 """
-import io
 import json
 import hashlib
 import logging
@@ -18,10 +17,11 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, BinaryIO, Dict, List
 
 from backend.models.schemas import RoundResult
 
@@ -346,21 +346,28 @@ class ReproducibilityBundle:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def create_zip_bytes(source_dir: str) -> io.BytesIO:
-        """Create an in-memory zip of the reproducibility directory."""
-        buf = io.BytesIO()
+    def create_zip_bytes(source_dir: str) -> BinaryIO:
+        """Create a seekable ZIP stream that rolls large bundles to disk.
+
+        The historical method name is kept for callers, but its backing store
+        is no longer an unbounded ``BytesIO``.
+        """
+        buf = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b")
         source = Path(source_dir)
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in sorted(source.iterdir()):
-                if f.is_file():
+                if f.is_file() and not f.is_symlink():
                     zf.write(str(f), f.name)
         buf.seek(0)
         return buf
 
     def _create_zip(self, source_dir: str, zip_path: str) -> None:
         """Create a zip archive on disk of the reproducibility directory."""
-        buf = self.create_zip_bytes(source_dir)
-        Path(zip_path).write_bytes(buf.read())
+        source = Path(source_dir)
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for artifact in sorted(source.iterdir()):
+                if artifact.is_file() and not artifact.is_symlink():
+                    zf.write(artifact, artifact.name)
 
     # ------------------------------------------------------------------
     # Utilities

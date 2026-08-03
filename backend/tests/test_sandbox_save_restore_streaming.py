@@ -182,6 +182,52 @@ async def test_save_targets_tracked_dependencies_without_anndata_sweep(tmp_path,
     assert "__SCAI_ALIAS__" in captured["code"]
     assert "SCAI_ZSTD_DILL_V1" in captured["code"]
     assert "ZstdCompressor" in captured["code"]
+    assert "SpooledTemporaryFile" in captured["code"]
+    assert "_scai_stream_safe" not in captured["code"]
+
+
+@pytest.mark.asyncio
+async def test_optional_unpicklable_value_does_not_abort_later_frames(
+    tmp_path, monkeypatch,
+):
+    import contextlib
+
+    from backend.utils.sandbox import CodeExecutionResult, LocalJupyterSandbox
+
+    sb = LocalJupyterSandbox(
+        session_id="optional-save-skip",
+        state_dir=str(tmp_path / "states"),
+        working_dir=str(tmp_path / "workspace"),
+    )
+
+    async def _execute_generated(code, **_kwargs):
+        namespace = {
+            "a_good_before": {"value": 1},
+            "b_bad_optional": _make_unpicklable(),
+            "c_good_after": [2, 3],
+        }
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output):
+                exec(code, namespace, namespace)
+        except Exception as exc:
+            return CodeExecutionResult(
+                success=False,
+                output=output.getvalue(),
+                error=str(exc),
+            )
+        return CodeExecutionResult(success=True, output=output.getvalue())
+
+    monkeypatch.setattr(sb, "_execute_unlocked", _execute_generated)
+
+    assert await sb.save_session() is True
+    assert [item["name"] for item in sb._last_save_skipped] == [
+        "b_bad_optional"
+    ]
+    restored = _read_stream(Path(sb.notebook_state.session_path))
+    assert restored["a_good_before"] == {"value": 1}
+    assert restored["c_good_after"] == [2, 3]
+    assert "b_bad_optional" not in restored
 
 
 @pytest.mark.asyncio

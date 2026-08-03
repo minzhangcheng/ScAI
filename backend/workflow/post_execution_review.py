@@ -198,7 +198,7 @@ _FIGURE_GENERIC_RE = re.compile(
 # These clauses are explicit waivers, not merely an absence of plotting words.
 # If a plan author says the deliverable is text/table only, or explicitly says
 # not to create a figure, the audit must not silently turn it back into one.
-_FIGURE_OPTOUT_PATTERNS: Tuple[Any, ...] = (
+_FIGURE_OPTOUT_PATTERNS: Tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:text|prose|narrative|table|tabular)[ -]?only\b", re.I),
     re.compile(r"\bonly\s+(?:a\s+)?(?:text|prose|narrative|table|tabular)\b", re.I),
     re.compile(r"\b(?:no|without)\s+(?:publication[- ](?:quality|ready)\s+)?"
@@ -213,13 +213,13 @@ _FIGURE_OPTOUT_PATTERNS: Tuple[Any, ...] = (
 # Optionality is scoped to the artifact channel. In a mixed step such as
 # "run DE and optionally draw a volcano plot", the plot is waived but the DE
 # method is still audited below.
-_OPTIONAL_FIGURE_PATTERNS: Tuple[Any, ...] = (
-    re.compile(r"\boptional(?:ly)?\b.{0,60}\b(?:figure|figures|plot|plots|"
+_OPTIONAL_FIGURE_PATTERNS: Tuple[re.Pattern[str], ...] = (
+    re.compile(r"\boptional(?:ly)?\b[^.!?;\n]{0,60}\b(?:figure|figures|plot|plots|"
                r"visuali[sz]ation|visuali[sz]ations|chart|charts)\b", re.I),
     re.compile(r"\b(?:figure|figures|plot|plots|visuali[sz]ation|visuali[sz]ations|"
-               r"chart|charts)\b.{0,60}\boptional\b", re.I),
+               r"chart|charts)\b[^.!?;\n]{0,60}\boptional\b", re.I),
     re.compile(r"\b(?:figure|figures|plot|plots|visuali[sz]ation|visuali[sz]ations|"
-               r"chart|charts)\b.{0,40}\bif\s+(?:useful|helpful|needed|warranted|"
+               r"chart|charts)\b[^.!?;\n]{0,40}\bif\s+(?:useful|helpful|needed|warranted|"
                r"informative|space permits|time permits)\b", re.I),
 )
 
@@ -527,21 +527,33 @@ def _method_requirement_is_conditional(step: Any, planned_families: Set[str]) ->
     optional_matches = list(re.finditer(r"\boptional(?:ly)?\b", text, re.I))
     if not optional_matches:
         return False
-    if not _figure_requirement_is_optional(step, _step_figure_requirements(step)):
-        return True
-
     # "Optionally run scCODA and plot ..." makes the computation optional too;
     # "run scCODA and optionally plot ..." does not. Family signatures are the
     # same exact identifiers used to establish the method requirement.
     method_positions = [
-        text.find(token)
+        match.start()
         for family in planned_families
         for token in METHOD_SIGNATURES.get(family, ())
-        if text.find(token) >= 0
+        for match in re.finditer(re.escape(token), text)
     ]
-    return any(
-        0 <= method_position - optional_match.end() <= 60
-        for optional_match in optional_matches
+
+    def _governs(optional_match: re.Match[str], method_position: int) -> bool:
+        if not 0 <= method_position - optional_match.end() <= 60:
+            return False
+        between = text[optional_match.end():method_position]
+        if re.search(r"[.!?;\n]", between):
+            return False
+        return not re.search(
+            r"\b(?:then|but|however|afterwards?|subsequently)\b",
+            between,
+            re.I,
+        )
+
+    return bool(method_positions) and all(
+        any(
+            _governs(optional_match, method_position)
+            for optional_match in optional_matches
+        )
         for method_position in method_positions
     )
 

@@ -78,6 +78,7 @@ from .tar_builders import (
     _add_reproducibility_to_tar,
     _add_session_blobs_to_tar,
     _add_session_logs_to_tar,
+    _add_reports_to_tar,
     _add_snapshots_to_tar,
     _add_states_to_tar,
     _add_tree_to_tar,
@@ -151,7 +152,7 @@ def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = F
         reports_dir = get_session_reports(session_id)
         if not reports_dir.exists():
             reports_dir = REPORTS_DIR / session_id
-        _add_tree_to_tar(tf, reports_dir, f"{session_id}/reports/{session_id}")
+        _add_reports_to_tar(tf, reports_dir, f"{session_id}/reports/{session_id}")
 
         # 6. reproducibility bundle
         _add_reproducibility_to_tar(tf, session_id)

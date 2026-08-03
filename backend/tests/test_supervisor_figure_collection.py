@@ -91,6 +91,7 @@ def test_supervision_filename_cannot_bypass_registered_render_hash(tmp_path):
         png_base64=base64.b64encode(preview).decode(),
         render_sha256=hashlib.sha256(original).hexdigest(),
         preview_sha256=hashlib.sha256(preview).hexdigest(),
+        pdf_sha256="2" * 64,
         review_status=FigureReviewStatus.APPROVED,
     )
     state = AnalysisState(user_id="test-user", publication_figures=[figure])

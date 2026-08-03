@@ -5,12 +5,41 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import functools
+import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, ParamSpec, TypeVar
 
 
 P = ParamSpec("P")
 T = TypeVar("T")
+
+
+_OWNED_THREAD_MAX_WORKERS = 8
+_OWNED_THREAD_DRAIN_POLL_SECONDS = 0.05
+_owned_thread_executor: ThreadPoolExecutor | None = None
+_owned_thread_executor_pid = 0
+_owned_thread_executor_lock = threading.Lock()
+
+
+def _get_owned_thread_executor() -> ThreadPoolExecutor:
+    """Return the bounded, process-local executor for owned blocking calls."""
+    global _owned_thread_executor, _owned_thread_executor_pid
+
+    pid = os.getpid()
+    with _owned_thread_executor_lock:
+        if (
+            _owned_thread_executor is None
+            or _owned_thread_executor_pid != pid
+        ):
+            # Never reuse a pool inherited across fork: its worker threads do
+            # not exist in the child even though the Python object does.
+            _owned_thread_executor = ThreadPoolExecutor(
+                max_workers=_OWNED_THREAD_MAX_WORKERS,
+                thread_name_prefix="scai-owned",
+            )
+            _owned_thread_executor_pid = pid
+        return _owned_thread_executor
 
 
 def consume_current_cancellation_request() -> bool:
@@ -25,18 +54,21 @@ def consume_current_cancellation_request() -> bool:
 async def await_with_deferred_cancellation(task: asyncio.Future[T]) -> T:
     """Await an owned task to completion, then preserve caller cancellation.
 
-    Drain by cooperative polling from the start instead of relying on a direct
-    cross-thread completion wakeup.  This avoids a CPython 3.13 edge where an
-    executor or worker-thread future can finish without waking its direct
-    asyncio waiter.  The timer is an independent wakeup source and also absorbs
-    later caller cancellation requests before the first one is re-raised.
+    ``asyncio.wait`` wakes immediately on ordinary completion, while its timeout
+    remains an independent backstop for a CPython 3.13 edge where an executor
+    future can finish without waking a direct waiter. Repeated caller
+    cancellation is absorbed until the owned operation is terminal.
     """
     cancellation: asyncio.CancelledError | None = None
     current = asyncio.current_task()
 
     while not task.done():
         try:
-            await asyncio.sleep(0.01)
+            await asyncio.wait(
+                (task,),
+                timeout=_OWNED_THREAD_DRAIN_POLL_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
         except asyncio.CancelledError as exc:
             if current is None or current.cancelling() <= 0:
                 raise
@@ -59,24 +91,19 @@ async def run_in_owned_thread(
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> T:
-    """Run blocking work in a one-call executor that is always joined.
+    """Run blocking work in a bounded reusable executor and drain the call.
 
     ``asyncio.to_thread`` uses the loop's shared default executor.  On CPython
     3.13, cancelling a task that shields such work can leave the default
     executor's completion waiter unwoken during ``asyncio.run()`` shutdown even
-    after the worker returned.  Critical filesystem/kernel operations need a
-    stronger ownership boundary: submit to a dedicated executor, drain the
-    future, then join that executor before propagating cancellation.
+    after the worker returned. Critical filesystem/kernel operations use a
+    separate bounded pool and always drain their own submitted future before
+    propagating cancellation. The pool is process-local and reused, so upload
+    chunk loops do not create and join one OS thread per MiB.
     """
     loop = asyncio.get_running_loop()
     context = contextvars.copy_context()
     call = functools.partial(context.run, func, *args, **kwargs)
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scai-owned")
+    executor = _get_owned_thread_executor()
     future = loop.run_in_executor(executor, call)
-    try:
-        return await await_with_deferred_cancellation(future)
-    finally:
-        # Polling above observes a terminal asyncio wrapper before every normal
-        # or deferred-cancellation exit.  Joining here also proves the native
-        # worker cannot outlive the caller's lifecycle record.
-        executor.shutdown(wait=True, cancel_futures=False)
+    return await await_with_deferred_cancellation(future)

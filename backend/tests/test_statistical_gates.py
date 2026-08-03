@@ -154,6 +154,15 @@ def test_unknown_sample_counts_do_not_trigger_the_gate():
     assert check_permutation_at_small_n(findings, scores, None) == []
 
 
+def test_partially_unknown_sample_counts_do_not_raise():
+    scores = [_score("enrich_a", method="gseapy.prerank")]
+    findings = ["enrich_a reached FDR 0.045"]
+    out = check_permutation_at_small_n(
+        findings, scores, {"A": None, "B": 3},
+    )
+    assert len(out) == 1
+
+
 # --------------------------------------------------------------- design
 
 def test_single_sample_per_condition_blocks_an_inferential_claim():

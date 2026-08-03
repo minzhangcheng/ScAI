@@ -5,6 +5,7 @@ whose ids belong to the single-pass template. Forcing that through a
 round-derived outline would drop or reshuffle it, so the outline passes are
 skipped and its figures fall through to the supplementary section.
 """
+import hashlib
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -20,6 +21,7 @@ from backend.models.schemas import (
     PublicationFigure,
     RoundResult,
 )
+from backend.services.report.output_generation import resolve_current_report_dir
 
 _T0 = datetime(2026, 1, 1, 12, 0, 0)
 
@@ -65,15 +67,20 @@ def _state_with_complete_visual_coverage(tmp_path):
     state = _state_with_rounds()
     for name, round_number in (("exploration_panel", 1), ("direction_panel", 2)):
         path = tmp_path / "workspace" / "figures" / f"{name}.jpg"
+        pdf_path = path.with_suffix(".pdf")
         path.parent.mkdir(parents=True, exist_ok=True)
-        Image.effect_noise((256, 256), 100).convert("RGB").save(path)
+        image = Image.effect_noise((256, 256), 100).convert("RGB")
+        image.save(path)
+        image.save(pdf_path, "PDF")
         assert path.stat().st_size > 2000
         state.publication_figures.append(PublicationFigure(
             name=name,
             description=f"{name} description",
             figure_type="heatmap",
             png_path=str(path),
-            pdf_path="",
+            pdf_path=str(pdf_path),
+            render_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            pdf_sha256=hashlib.sha256(pdf_path.read_bytes()).hexdigest(),
             review_status=FigureReviewStatus.APPROVED,
             round_number=round_number,
         ))
@@ -107,6 +114,30 @@ async def test_fallback_report_keeps_its_own_section_order(tmp_path):
     assert "integrated_findings" not in report["figureless_sections"]
     assert report["current_step"].startswith("Degraded fallback report")
     assert "figure coverage gaps" in report["current_step"]
+
+
+@pytest.mark.asyncio
+async def test_forced_fallback_never_calls_the_report_llm(tmp_path):
+    agent, client = _agent(AssertionError("report LLM must not be called"))
+    out = tmp_path / "reports"
+    ws = tmp_path / "workspace"
+    (ws / "figures").mkdir(parents=True, exist_ok=True)
+
+    report = await agent.generate_detailed_report(
+        _state_with_rounds(),
+        "model-x",
+        str(out),
+        workspace_dir=str(ws),
+        report_llm_client=client,
+        force_fallback=True,
+    )
+
+    client.chat.assert_not_awaited()
+    assert report["status"] == "partial"
+    assert report["partial_reason"] == "degraded_fallback"
+    published = resolve_current_report_dir(out)
+    assert (published / "report.json").is_file()
+    assert (published / "report.html").is_file()
 
 
 @pytest.mark.asyncio

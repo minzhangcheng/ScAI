@@ -54,8 +54,13 @@ class Job:
             st = s.get("status", "unknown")
             if st == "completed":
                 return s
-            if st == "failed":
-                raise JobFailed(self.job_id, s.get("error", "unknown"))
+            if st in {"failed", "stopped"}:
+                raise JobFailed(
+                    self.job_id,
+                    s.get("error")
+                    or s.get("termination_reason")
+                    or st,
+                )
             if timeout and (time.time() - start) > timeout:
                 raise TimeoutError(
                     f"Job {self.job_id} did not complete within {timeout}s"

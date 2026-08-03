@@ -16,6 +16,7 @@ from enum import Enum
 import uuid
 import asyncio
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,46 @@ DATA_TYPE_BULK_RNASEQ = "bulk RNA-seq"
 
 # Module-level lock for async-safe state version increments
 _version_lock = asyncio.Lock()
+
+_RUNTIME_GATE_TOKEN_RE = re.compile(r"^runtime-(\d+)-[0-9a-f]{32}$")
+
+
+def _sanitize_snapshot_failure(payload: Dict[str, Any]) -> Any:
+    """Sanitize diagnostics without destroying a runtime-gate nonce.
+
+    ``gate_token`` is normally a credential-shaped key, but the runtime
+    persistence failure payload uses it as a public, single-generation nonce.
+    Keep only the strictly generated nonce already present in the independent
+    ``runtime_persistence`` record.  This also repairs states written by
+    0.38.10 where the diagnostic copy was persisted as ``<redacted-secret>``.
+    """
+    from backend.utils.error_parsing import sanitize_error_payload
+
+    failure = sanitize_error_payload(payload.get("snapshot_failure"), max_chars=3000)
+    if not isinstance(failure, dict):
+        return failure
+    if not str(failure.get("code") or "").startswith("runtime_persistence_"):
+        return failure
+
+    persistence = payload.get("runtime_persistence")
+    if not isinstance(persistence, dict):
+        return failure
+    token = str(persistence.get("gate_token") or "")
+    match = _RUNTIME_GATE_TOKEN_RE.fullmatch(token)
+    generation = int(persistence.get("gate_generation") or 0)
+    if match is None or int(match.group(1)) != generation:
+        return failure
+
+    details = dict(failure.get("details") or {})
+    details["gate_token"] = token
+    details["gate_generation"] = generation
+    retry_context = dict(failure.get("retry_context") or {})
+    retry_context["gate_token"] = token
+    retry_context["generation"] = generation
+    failure = dict(failure)
+    failure["details"] = details
+    failure["retry_context"] = retry_context
+    return failure
 
 
 # Implementations live in ./schema_parts/; re-exported here so existing
@@ -170,14 +211,11 @@ class AnalysisState(BaseModel):
         """Decrypt credentials emitted by the matching state serializer."""
         if isinstance(value, dict):
             from backend.utils.secret_redaction import open_analysis_state_payload
-            from backend.utils.error_parsing import sanitize_error_payload
 
             payload = open_analysis_state_payload(value)
             if payload.get("snapshot_failure") is not None:
                 payload = dict(payload)
-                payload["snapshot_failure"] = sanitize_error_payload(
-                    payload["snapshot_failure"], max_chars=3000
-                )
+                payload["snapshot_failure"] = _sanitize_snapshot_failure(payload)
             return payload
         return value
 
@@ -185,14 +223,11 @@ class AnalysisState(BaseModel):
     def _seal_persisted_secrets(self, handler):
         """Ensure model_dump/checkpoint/snapshot payloads never contain raw keys."""
         from backend.utils.secret_redaction import seal_analysis_state_payload
-        from backend.utils.error_parsing import sanitize_error_payload
 
         payload = seal_analysis_state_payload(handler(self))
         if payload.get("snapshot_failure") is not None:
             payload = dict(payload)
-            payload["snapshot_failure"] = sanitize_error_payload(
-                payload["snapshot_failure"], max_chars=3000
-            )
+            payload["snapshot_failure"] = _sanitize_snapshot_failure(payload)
         return payload
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -322,6 +357,10 @@ class AnalysisState(BaseModel):
     # Post-report snapshot idempotency (Task 6)
     report_generation_id: Optional[str] = None
     pending_required_snapshot: Optional[Dict[str, Any]] = None
+    # Durable handoff from a bounded detailed-report LLM intervention. Once
+    # armed, a restarted workflow must bypass the failed upstream and finish
+    # with the deterministic report-content fallback.
+    detailed_report_fallback_pending: bool = False
 
     # Collaborative analysis planning
     current_plan: Optional[AnalysisPlan] = None
@@ -541,6 +580,7 @@ class AnalysisState(BaseModel):
         "snapshot_failure": "snapshot_failure",
         "snapshot_transaction": "snapshot_transaction",
         "pending_required_snapshot": "pending_required_snapshot",
+        "detailed_report_fallback_pending": "detailed_report_fallback_pending",
     }
 
     # --- Data helper methods ---
@@ -860,7 +900,7 @@ class AnalysisState(BaseModel):
         from backend.services.figure_layout import blocking_violations
         from backend.services.report.artifacts import (
             archival_render_available,
-            eligible_artifacts,
+            gallery_artifacts,
         )
 
         # round / layout_blocking / diagnostic are the gallery's badges. The
@@ -872,7 +912,7 @@ class AnalysisState(BaseModel):
         # which is set for every promoted figure; 0 means unattributed and is
         # reported as such rather than as round zero.
         target = lineage_id or "main"
-        current_heads = eligible_artifacts([
+        gallery_figures = gallery_artifacts([
             figure for figure in figures
             if (figure.get("lineage_id") or "main") == target
         ])
@@ -896,7 +936,7 @@ class AnalysisState(BaseModel):
              "layout_blocking": bool(blocking_violations(f.get("layout_violations"))),
              "diagnostic": bool(f.get("diagnostic")),
              "created_at": f["created_at"]}
-            for f in current_heads
+            for f in gallery_figures
             if archival_render_available(f)
         ]
 

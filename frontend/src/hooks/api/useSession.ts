@@ -1,7 +1,7 @@
 // Session lifecycle: create/load/list/delete, groups, uploads, analysis control.
 // Split out of frontend/src/hooks/useApi.ts verbatim.
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useAppStore, Session } from '../../stores/appStore'
 import { transformRawMessage, restoreAgentErrors } from '../../utils/messageTransform'
 import { transformLoadResponse } from '../../utils/transformLoadResponse'
@@ -16,6 +16,20 @@ export function useSession() {
   const { currentSession, setCurrentSession, updateSession, setMessages, clearMessages } = useAppStore()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const loadGenerationRef = useRef(0)
+  const activeLoadRef = useRef<{
+    generation: number
+    controller: AbortController
+  } | null>(null)
+
+  useEffect(() => () => {
+    const activeLoad = activeLoadRef.current
+    if (!activeLoad) return
+    activeLoadRef.current = null
+    loadGenerationRef.current += 1
+    activeLoad.controller.abort()
+    useAppStore.getState().setSessionLoading(false)
+  }, [])
   
   const createSession = useCallback(async (instruction: string, name?: string, roundWaitSeconds?: number) => {
     setLoading(true)
@@ -58,12 +72,42 @@ export function useSession() {
   }, [setCurrentSession, clearMessages])
   
   const loadSession = useCallback(async (sessionId: string) => {
+    activeLoadRef.current?.controller.abort()
+    const generation = loadGenerationRef.current + 1
+    loadGenerationRef.current = generation
+    const controller = new AbortController()
+    activeLoadRef.current = { generation, controller }
+    const previousSessionId = useAppStore.getState().currentSession?.id ?? null
+    const ownsRequest = () => {
+      const activeLoad = activeLoadRef.current
+      return (
+        activeLoad?.generation === generation
+        && activeLoad.controller === controller
+        && !controller.signal.aborted
+      )
+    }
+    const ownsResponse = () => {
+      const selectedSessionId = useAppStore.getState().currentSession?.id ?? null
+      return (
+        ownsRequest()
+        && (selectedSessionId === previousSessionId || selectedSessionId === sessionId)
+      )
+    }
+
     setLoading(true)
     useAppStore.getState().setSessionLoading(true)
     setError(null)
 
     try {
-      const data = await apiFetch<SessionLoadResponse>(`/session/${sessionId}/load`)
+      const data = await apiFetch<SessionLoadResponse>(
+        `/session/${sessionId}/load`,
+        { signal: controller.signal },
+        ownsResponse,
+      )
+
+      if (!ownsResponse()) {
+        throw new DOMException('Session load was superseded', 'AbortError')
+      }
 
       const { sessionUpdates, storeUpdates } = transformLoadResponse(data)
 
@@ -97,11 +141,16 @@ export function useSession() {
       
       return session
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load session')
+      if (ownsResponse()) {
+        setError(e instanceof Error ? e.message : 'Failed to load session')
+      }
       throw e
     } finally {
-      setLoading(false)
-      useAppStore.getState().setSessionLoading(false)
+      if (ownsRequest()) {
+        activeLoadRef.current = null
+        setLoading(false)
+        useAppStore.getState().setSessionLoading(false)
+      }
     }
   }, [setCurrentSession, setMessages, clearMessages])
   

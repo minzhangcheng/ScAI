@@ -176,7 +176,11 @@ def test_spa_testclient_and_websocket_route_contract(tmp_path, monkeypatch):
 
 
 def test_spa_file_resolution_rejects_escape(tmp_path, monkeypatch):
-    from backend.routes.root import frontend_file_response
+    from backend.routes.root import (
+        _open_regular_beneath,
+        _safe_relative_parts,
+        frontend_file_response,
+    )
 
     dist = tmp_path / "dist"
     dist.mkdir()
@@ -188,6 +192,24 @@ def test_spa_file_resolution_rejects_escape(tmp_path, monkeypatch):
 
     assert frontend_file_response("../outside.txt") is None
     assert frontend_file_response("escape.txt") is None
+    assert _safe_relative_parts("assets/bad\x00.js") is None
+    assert _open_regular_beneath(dist, ("bad\x00.js",)) is None
+
+
+@pytest.mark.asyncio
+async def test_public_spa_route_returns_404_for_nul_path(tmp_path, monkeypatch):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("index", encoding="utf-8")
+    monkeypatch.setenv("SCAI_FRONTEND_DIST", str(dist))
+
+    transport = httpx.ASGITransport(app=_contract_app())
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test",
+    ) as client:
+        response = await client.get("/%00")
+
+    assert response.status_code == 404
 
 
 async def _consume_asgi_response(response, method: str = "GET"):

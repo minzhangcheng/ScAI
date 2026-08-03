@@ -2,9 +2,13 @@
 # Moved verbatim out of backend/routes/chat.py.
 """Chat routes for PI Agent free-form chat with analysis sessions."""
 import asyncio
+import base64
+import io
 import json
 import logging
+import os
 import re
+import stat
 import time
 import uuid
 from datetime import datetime
@@ -16,15 +20,37 @@ from fastapi.responses import JSONResponse
 
 from backend.config import get_session_workspace, get_session_reports, get_session_uploads, get_session_states, PI_AGENT_NAME
 from backend.models.schemas import WebSocketMessage, AgentType, DataFile, AnalysisState
-from backend.services.session_store import ensure_session_loaded, async_save_session, update_session_cache
+from backend.services.session_lifecycle import (
+    assert_generation_writable,
+    get_lifecycle_lock,
+)
+from backend.services.session_store import (
+    _async_save_session_under_lifecycle,
+    ensure_session_loaded,
+    async_save_session,
+    update_session_cache,
+)
 from backend.state import (
     chat_tasks, chat_task_lock, chat_sandboxes,
     websockets, workflows, state_lock,
 )
 from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.auth import require_session_ownership
-from backend.utils.files import safe_filename, validate_session_id
-from backend.utils.upload import stream_save_file
+from backend.utils.asyncio_tasks import (
+    await_with_deferred_cancellation,
+    run_in_owned_thread,
+)
+from backend.utils.files import (
+    safe_filename,
+    validate_path_within,
+    validate_session_id,
+)
+from backend.routes.upload import (
+    _cleanup_upload_transaction_safely,
+    _publish_upload_staging,
+    _stream_generic_upload,
+    _upload_staging_path,
+)
 from backend.utils.settings_provider import AgentSettingsProvider
 from backend.utils.sandbox import _TPL_NOOP_INSTALL
 
@@ -36,6 +62,443 @@ from .snapshots import _create_chat_snapshot
 
 
 logger = logging.getLogger(__name__)
+
+_CHAT_UPLOAD_MAX_FILES = 10
+_CHAT_UPLOAD_MAX_FILE_BYTES = 20 * 1024 * 1024
+_CHAT_UPLOAD_MAX_REQUEST_BYTES = 50 * 1024 * 1024
+_CHAT_IMAGE_EXTENSIONS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif",
+    ".webp", ".svg",
+})
+_CHAT_TEXT_PREVIEW_EXTENSIONS = frozenset({".csv", ".tsv", ".txt", ".json"})
+_CHAT_TEXT_PREVIEW_BYTES = 20 * 1024
+_CHAT_TEXT_PREVIEW_CHARS = 5000
+
+
+def _chat_upload_error(detail: str) -> HTTPException:
+    return HTTPException(status_code=413, detail=detail)
+
+
+def _preflight_chat_upload_limits(files: List[UploadFile]) -> None:
+    if len(files) > _CHAT_UPLOAD_MAX_FILES:
+        raise _chat_upload_error(
+            f"A chat message may attach at most {_CHAT_UPLOAD_MAX_FILES} files"
+        )
+    declared_total = 0
+    for upload_file in files:
+        declared_size = getattr(upload_file, "size", None)
+        if not isinstance(declared_size, int) or declared_size < 0:
+            continue
+        if declared_size > _CHAT_UPLOAD_MAX_FILE_BYTES:
+            raise _chat_upload_error(
+                "Chat attachment exceeds the per-file size limit "
+                f"({_CHAT_UPLOAD_MAX_FILE_BYTES // (1024 * 1024)}MB)"
+            )
+        declared_total += declared_size
+        if declared_total > _CHAT_UPLOAD_MAX_REQUEST_BYTES:
+            raise _chat_upload_error(
+                "Chat attachments exceed the request size limit "
+                f"({_CHAT_UPLOAD_MAX_REQUEST_BYTES // (1024 * 1024)}MB)"
+            )
+
+
+def _next_chat_upload_path(
+    upload_dir: Path,
+    filename: str,
+    reserved_names: set[str],
+) -> Path:
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    for counter in range(10_001):
+        candidate_name = filename if counter == 0 else f"{stem}_{counter}{suffix}"
+        if candidate_name in reserved_names:
+            continue
+        candidate = upload_dir / candidate_name
+        if os.path.lexists(candidate):
+            continue
+        validate_path_within(candidate, upload_dir)
+        reserved_names.add(candidate_name)
+        return candidate
+    raise HTTPException(status_code=409, detail="Could not allocate an upload filename")
+
+
+def _open_chat_attachment(path: Path) -> tuple[int, int]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    metadata = os.fstat(fd)
+    if not stat.S_ISREG(metadata.st_mode):
+        os.close(fd)
+        raise OSError(f"chat attachment is not a regular file: {path}")
+    return fd, int(metadata.st_size)
+
+
+def _encode_chat_image(path: Path) -> str:
+    """Encode one bounded image without allocating a second full raw copy."""
+    fd, size = _open_chat_attachment(path)
+    if size > _CHAT_UPLOAD_MAX_FILE_BYTES:
+        os.close(fd)
+        raise _chat_upload_error("Chat image exceeds the configured size limit")
+    output = io.StringIO()
+    carry = b""
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            while True:
+                chunk = handle.read(192 * 1024)
+                if not chunk:
+                    break
+                chunk = carry + chunk
+                complete = len(chunk) - (len(chunk) % 3)
+                if complete:
+                    output.write(
+                        base64.b64encode(chunk[:complete]).decode("ascii")
+                    )
+                carry = chunk[complete:]
+            if carry:
+                output.write(base64.b64encode(carry).decode("ascii"))
+        return output.getvalue()
+    finally:
+        output.close()
+
+
+def _read_chat_text_preview(path: Path) -> str:
+    fd, _size = _open_chat_attachment(path)
+    with os.fdopen(fd, "rb") as handle:
+        payload = handle.read(_CHAT_TEXT_PREVIEW_BYTES)
+    return payload.decode("utf-8", errors="replace")[:_CHAT_TEXT_PREVIEW_CHARS]
+
+
+def _remove_identity(items: list, target: Any) -> None:
+    for index, item in enumerate(items):
+        if item is target:
+            items.pop(index)
+            return
+
+
+async def _commit_chat_uploads(
+    session_id: str,
+    state: AnalysisState,
+    files: List[UploadFile],
+    *,
+    per_file_agents: list,
+    per_file_groups: list,
+    per_file_samples: list,
+    per_file_types: list,
+    message: str,
+) -> tuple[List[Dict[str, Any]], List[str], List[str]]:
+    """Atomically publish one generation-bound group of chat attachments."""
+    _preflight_chat_upload_limits(files)
+    saved_files: List[Dict[str, Any]] = []
+    image_b64_list: List[str] = []
+    data_file_contents: List[str] = []
+    data_file_records: List[DataFile] = []
+    transactions: list[dict[str, Any]] = []
+    user_message_record: dict[str, Any] | None = None
+    save_committed = False
+
+    async with get_lifecycle_lock(session_id):
+        assert_generation_writable(session_id, state)
+        session_uploads = get_session_uploads(session_id)
+        chat_upload_dir = session_uploads / "chat"
+        validate_path_within(chat_upload_dir, session_uploads)
+        chat_upload_dir.mkdir(parents=True, exist_ok=True)
+        reserved_names: set[str] = set()
+        total_size = 0
+
+        try:
+            for idx, upload_file in enumerate(files):
+                filename = safe_filename(upload_file.filename or "file")
+                if not filename:
+                    raise HTTPException(status_code=400, detail="Invalid filename")
+                final_path = _next_chat_upload_path(
+                    chat_upload_dir, filename, reserved_names,
+                )
+                staging_path = _upload_staging_path(final_path)
+                transaction = {
+                    "staging": staging_path,
+                    "final": final_path,
+                    "published": False,
+                }
+                transactions.append(transaction)
+
+                request_remaining = _CHAT_UPLOAD_MAX_REQUEST_BYTES - total_size
+                if request_remaining < 0:
+                    raise _chat_upload_error(
+                        "Chat attachments exceed the request size limit"
+                    )
+                stream_limit = min(
+                    _CHAT_UPLOAD_MAX_FILE_BYTES,
+                    request_remaining,
+                )
+                try:
+                    await _stream_generic_upload(
+                        upload_file,
+                        staging_path,
+                        max_bytes=stream_limit,
+                    )
+                except HTTPException as exc:
+                    if exc.status_code != 413:
+                        raise
+                    if request_remaining < _CHAT_UPLOAD_MAX_FILE_BYTES:
+                        raise _chat_upload_error(
+                            "Chat attachments exceed the request size limit "
+                            f"({_CHAT_UPLOAD_MAX_REQUEST_BYTES // (1024 * 1024)}MB)"
+                        ) from exc
+                    raise _chat_upload_error(
+                        "Chat attachment exceeds the per-file size limit "
+                        f"({_CHAT_UPLOAD_MAX_FILE_BYTES // (1024 * 1024)}MB)"
+                    ) from exc
+
+                file_size = staging_path.stat().st_size
+                total_size += file_size
+                await _publish_upload_staging(staging_path, final_path)
+                transaction["published"] = True
+
+                extension = final_path.suffix.lower()
+                is_image = extension in _CHAT_IMAGE_EXTENSIONS
+                file_type = "image" if is_image else "file"
+                file_agent = (
+                    per_file_agents[idx]
+                    if idx < len(per_file_agents)
+                    else PI_AGENT_NAME
+                )
+                file_group = (
+                    per_file_groups[idx]
+                    if idx < len(per_file_groups)
+                    else None
+                )
+                file_sample = (
+                    per_file_samples[idx]
+                    if idx < len(per_file_samples)
+                    else None
+                )
+                file_dtype = (
+                    per_file_types[idx]
+                    if idx < len(per_file_types)
+                    else None
+                )
+                saved_file = {
+                    "filename": final_path.name,
+                    "type": file_dtype or file_type,
+                    "path": str(final_path),
+                    "target_agent": file_agent,
+                    "group_id": file_group,
+                    "sample_number": file_sample,
+                }
+                saved_files.append(saved_file)
+
+                if is_image:
+                    image_b64_list.append(
+                        await run_in_owned_thread(
+                            _encode_chat_image, staging_path,
+                        )
+                    )
+                elif extension in _CHAT_TEXT_PREVIEW_EXTENSIONS:
+                    try:
+                        preview = await run_in_owned_thread(
+                            _read_chat_text_preview, staging_path,
+                        )
+                        data_file_contents.append(
+                            f"--- {final_path.name} ---\n{preview}"
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to read chat attachment preview for %s",
+                            final_path,
+                            exc_info=True,
+                        )
+
+                section = {
+                    "pathology": "pathology",
+                    "bioinformatics": "sequencing",
+                    "biochemistry": "biochemistry",
+                }.get(file_agent)
+                if section:
+                    data_file_records.append(DataFile(
+                        filename=final_path.name,
+                        file_path=str(final_path),
+                        section=section,
+                        data_type=file_dtype or "uploaded_via_chat",
+                        group_id=file_group,
+                        sample_number=file_sample,
+                        description="Uploaded via chat",
+                    ))
+
+            state.data_files.extend(data_file_records)
+            user_message_record = {
+                "role": "user",
+                "content": message,
+                "timestamp": datetime.now().isoformat(),
+                "files": saved_files,
+            }
+            state.chat_messages.append(user_message_record)
+
+            save_task = asyncio.create_task(
+                _async_save_session_under_lifecycle(
+                    session_id, state, force=True,
+                ),
+                name=f"chat-upload-state-save:{session_id}",
+            )
+            try:
+                await await_with_deferred_cancellation(save_task)
+                save_committed = True
+            except asyncio.CancelledError:
+                if save_task.done() and not save_task.cancelled():
+                    try:
+                        save_task.result()
+                    except BaseException:
+                        pass
+                    else:
+                        save_committed = True
+                raise
+
+            for transaction in transactions:
+                await _cleanup_upload_transaction_safely(
+                    transaction["staging"]
+                )
+        except BaseException:
+            if save_committed:
+                for transaction in transactions:
+                    await _cleanup_upload_transaction_safely(
+                        transaction["staging"]
+                    )
+            else:
+                if user_message_record is not None:
+                    _remove_identity(state.chat_messages, user_message_record)
+                for data_file in data_file_records:
+                    _remove_identity(state.data_files, data_file)
+                for transaction in reversed(transactions):
+                    await _cleanup_upload_transaction_safely(
+                        transaction["staging"],
+                        transaction["final"]
+                        if transaction["published"] else None,
+                    )
+            raise
+
+    return saved_files, image_b64_list, data_file_contents
+
+
+async def _run_owned_chat_delegation(
+    session_id: str,
+    start_event: asyncio.Event,
+    state: AnalysisState,
+    delegation: Dict[str, Any],
+    user_content: str,
+    image_b64_list: List[str],
+    saved_files: List[Dict[str, Any]],
+) -> None:
+    """Run only after durable publication and retire only this exact owner."""
+    owner = asyncio.current_task()
+    try:
+        await start_event.wait()
+        await _run_chat_delegation(
+            session_id,
+            state,
+            delegation,
+            user_content,
+            image_b64_list,
+            saved_files,
+        )
+    finally:
+        async with chat_task_lock:
+            if chat_tasks.get(session_id) is owner:
+                chat_tasks.pop(session_id, None)
+
+
+async def _publish_chat_delegation(
+    session_id: str,
+    state: AnalysisState,
+    delegation: Dict[str, Any],
+    user_content: str,
+    image_b64_list: List[str],
+    saved_files: List[Dict[str, Any]],
+) -> asyncio.Task:
+    """Atomically reserve, persist, and release one generation-bound task."""
+    start_event = asyncio.Event()
+    placeholder = {
+        "role": "assistant",
+        "content": (
+            "Working on it: "
+            f"{delegation.get('plan', 'Coordinating agents...')}"
+        ),
+        "timestamp": datetime.now().isoformat(),
+        "delegation_active": True,
+    }
+    task: asyncio.Task | None = None
+    publication_committed = False
+
+    try:
+        async with get_lifecycle_lock(session_id):
+            assert_generation_writable(session_id, state)
+            async with chat_task_lock:
+                existing = chat_tasks.get(session_id)
+                if existing is not None and not existing.done():
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Chat analysis already in progress for this session"
+                        ),
+                    )
+                if existing is not None:
+                    chat_tasks.pop(session_id, None)
+
+                task = asyncio.create_task(
+                    _run_owned_chat_delegation(
+                        session_id,
+                        start_event,
+                        state,
+                        delegation,
+                        user_content,
+                        image_b64_list,
+                        saved_files,
+                    ),
+                    name=f"chat-delegation:{session_id}",
+                )
+                chat_tasks[session_id] = task
+                state.chat_messages.append(placeholder)
+
+                save_task = asyncio.create_task(
+                    _async_save_session_under_lifecycle(
+                        session_id, state, force=True,
+                    ),
+                    name=f"chat-delegation-state-save:{session_id}",
+                )
+                try:
+                    await await_with_deferred_cancellation(save_task)
+                    publication_committed = True
+                except asyncio.CancelledError:
+                    if save_task.done() and not save_task.cancelled():
+                        try:
+                            save_task.result()
+                        except BaseException:
+                            pass
+                        else:
+                            publication_committed = True
+                    if publication_committed:
+                        start_event.set()
+                    else:
+                        _remove_identity(state.chat_messages, placeholder)
+                        if chat_tasks.get(session_id) is task:
+                            chat_tasks.pop(session_id, None)
+                        task.cancel()
+                    raise
+                except BaseException:
+                    _remove_identity(state.chat_messages, placeholder)
+                    if chat_tasks.get(session_id) is task:
+                        chat_tasks.pop(session_id, None)
+                    task.cancel()
+                    raise
+
+                start_event.set()
+    except BaseException:
+        if task is not None and not publication_committed:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        raise
+
+    assert task is not None
+    return task
 
 
 @router.post("/{session_id}/chat")
@@ -52,7 +515,6 @@ async def chat_with_pi(
     """Chat with PI Agent using analysis context. Supports file uploads with per-file agent targeting."""
     from backend.utils.agent_llm import get_agent_llm_client
     from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
-    import base64
 
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
@@ -84,76 +546,30 @@ async def chat_with_pi(
     per_file_samples = _parse_json_list(file_samples)
     per_file_types = _parse_json_list(file_types)
 
-    # --- Save uploaded files ---
-    saved_files: List[Dict[str, str]] = []
-    image_b64_list: List[str] = []
-    data_file_contents: List[str] = []
-    IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.svg'}
-
-    chat_upload_dir = get_session_uploads(session_id) / "chat"
-    chat_upload_dir.mkdir(parents=True, exist_ok=True)
-
-    for idx, upload_file in enumerate(files):
-        fname = safe_filename(upload_file.filename or "file")
-        if not fname:
-            continue
-        dest = chat_upload_dir / fname
-        # Deduplicate filenames
-        counter = 1
-        while dest.exists():
-            stem = Path(fname).stem
-            suffix = Path(fname).suffix
-            dest = chat_upload_dir / f"{stem}_{counter}{suffix}"
-            counter += 1
-
-        await stream_save_file(upload_file, dest)
-        ext = dest.suffix.lower()
-        is_image = ext in IMAGE_EXTS
-        file_type = "image" if is_image else "file"
-        file_agent = per_file_agents[idx] if idx < len(per_file_agents) else PI_AGENT_NAME
-
-        file_group = per_file_groups[idx] if idx < len(per_file_groups) else None
-        file_sample = per_file_samples[idx] if idx < len(per_file_samples) else None
-        file_dtype = per_file_types[idx] if idx < len(per_file_types) else None
-
-        saved_files.append({
-            "filename": dest.name,
-            "type": file_dtype or file_type,
-            "path": str(dest),
-            "target_agent": file_agent,
-            "group_id": file_group,
-            "sample_number": file_sample,
+    # --- Commit uploaded files and their state projection as one generation ---
+    if files:
+        saved_files, image_b64_list, data_file_contents = (
+            await _commit_chat_uploads(
+                session_id,
+                state,
+                files,
+                per_file_agents=per_file_agents,
+                per_file_groups=per_file_groups,
+                per_file_samples=per_file_samples,
+                per_file_types=per_file_types,
+                message=message,
+            )
+        )
+    else:
+        saved_files = []
+        image_b64_list = []
+        data_file_contents = []
+        state.chat_messages.append({
+            "role": "user",
+            "content": message,
+            "timestamp": datetime.now().isoformat(),
+            "files": [],
         })
-
-        # Load image as base64 for vision API
-        if is_image:
-            with open(dest, "rb") as f:
-                image_b64_list.append(base64.b64encode(f.read()).decode("utf-8"))
-
-        # Read data file content (first 5000 chars) for text inclusion
-        if not is_image and ext in {'.csv', '.tsv', '.txt', '.json'}:
-            try:
-                with open(dest, "r", encoding="utf-8", errors="replace") as f:
-                    content_preview = f.read(5000)
-                data_file_contents.append(f"--- {dest.name} ---\n{content_preview}")
-            except Exception as e:
-                logger.warning(f"Failed to read file preview for {dest}: {e}", exc_info=True)
-
-    # --- Register files to target agent state (per-file) ---
-    _agent_section_map = {"pathology": "pathology", "bioinformatics": "sequencing", "biochemistry": "biochemistry"}
-    for sf in saved_files:
-        agent = sf["target_agent"]
-        section = _agent_section_map.get(agent)
-        if section:
-            state.data_files.append(DataFile(
-                filename=sf["filename"],
-                file_path=sf["path"],
-                section=section,
-                data_type=sf.get("type") or "uploaded_via_chat",
-                group_id=sf.get("group_id"),
-                sample_number=sf.get("sample_number"),
-                description="Uploaded via chat",
-            ))
 
     # --- Build context & prompt ---
     context, figure_inventory = _build_chat_context(state)
@@ -219,7 +635,7 @@ async def chat_with_pi(
 
     # Build messages: system + history + new message
     chat_messages_list = [{"role": "system", "content": system_prompt}]
-    for msg in state.chat_messages[-20:]:
+    for msg in state.chat_messages[-21:-1]:
         chat_messages_list.append({
             "role": msg.get("role", "user"),
             "content": msg.get("content", "")
@@ -241,14 +657,6 @@ async def chat_with_pi(
         user_content += "\n\n" + "\n\n".join(data_file_contents)
 
     chat_messages_list.append({"role": "user", "content": user_content})
-
-    # Store user message
-    state.chat_messages.append({
-        "role": "user",
-        "content": message,
-        "timestamp": datetime.now().isoformat(),
-        "files": saved_files,
-    })
 
     # --- Call LLM ---
     try:
@@ -287,29 +695,14 @@ async def chat_with_pi(
     if delegation:
         logger.info(f"Chat delegation detected for {session_id}: {delegation.get('plan', '')}")
 
-        # Concurrency guard
-        async with chat_task_lock:
-            if session_id in chat_tasks and not chat_tasks[session_id].done():
-                raise HTTPException(status_code=409, detail="Chat analysis already in progress for this session")
-
-        # Add placeholder assistant message
-        state.chat_messages.append({
-            "role": "assistant",
-            "content": f"Working on it: {delegation.get('plan', 'Coordinating agents...')}",
-            "timestamp": datetime.now().isoformat(),
-            "delegation_active": True,
-        })
-        await async_save_session(session_id, state)
-
-        # Launch background task
-        task = asyncio.create_task(
-            _run_chat_delegation(
-                session_id, state, delegation, user_content,
-                image_b64_list, saved_files
-            )
+        await _publish_chat_delegation(
+            session_id,
+            state,
+            delegation,
+            user_content,
+            image_b64_list,
+            saved_files,
         )
-        async with chat_task_lock:
-            chat_tasks[session_id] = task
 
         return {"status": "processing", "plan": delegation.get("plan", "")}
 

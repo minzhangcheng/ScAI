@@ -19,6 +19,7 @@ from backend.models.schemas import AnalysisState
 from backend.services.report.artifacts import (
     artifact_stems,
     eligible_artifacts,
+    has_frozen_publication_pair,
     resolve_archival_pdf,
     resolve_archival_render,
 )
@@ -349,6 +350,7 @@ def clone_publication_figures_for_branch(
     source_heads = [
         figure for figure in eligible_artifacts(output)
         if (getattr(figure, "lineage_id", None) or "main") == source
+        and has_frozen_publication_pair(figure)
     ]
     if source_heads and workspace_path is None:
         raise ValueError(

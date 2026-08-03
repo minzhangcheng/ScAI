@@ -209,7 +209,8 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
                     model=self.model,
                     text_prompt=prompt,
                     images=[image_base64],
-                    temperature=0.3
+                    temperature=0.3,
+                    system_prompt=self.system_prompt,
                 )
                 response_text = response.content if response and response.content else ""
             except Exception as e:
@@ -352,7 +353,8 @@ Objective: {state.initial_instruction[:500] if state.initial_instruction else 'B
                 model=self.model,
                 text_prompt=prompt,
                 images=[image_base64],
-                temperature=0.3
+                temperature=0.3,
+                system_prompt=self.system_prompt,
             )
             response_text = response.content if response and response.content else ""
         except Exception as e:
@@ -459,7 +461,8 @@ Consider:
                 model=self.model,
                 text_prompt=prompt,
                 images=candidates,
-                temperature=0.2
+                temperature=0.2,
+                system_prompt=self.system_prompt,
             )
             response_text = response.content if response and response.content else ""
         except Exception as e:

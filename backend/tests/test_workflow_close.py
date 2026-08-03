@@ -675,6 +675,44 @@ async def test_teardown_false_retains_owner_tasks_and_checkpoint(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_teardown_timeout_retains_live_run_owner_and_checkpoint(monkeypatch):
+    from backend.routes import _helpers
+    from backend.state import _monitor_tasks, _run_tasks, workflows
+
+    session_id = "teardown-run-timeout"
+    release = asyncio.Event()
+
+    async def ignore_first_cancellation():
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    run_task = asyncio.create_task(ignore_first_cancellation())
+    workflows.pop(session_id, None)
+    _run_tasks[session_id] = run_task
+    manager = MagicMock()
+    monkeypatch.setattr("backend.utils.snapshot.SnapshotManager", manager)
+
+    async def immediate_timeout(awaitable, *, timeout):
+        assert timeout == 5.0
+        awaitable.cancel()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(_helpers.asyncio, "wait_for", immediate_timeout)
+    try:
+        assert await _helpers.teardown_running_workflow(session_id) is False
+        assert _run_tasks.get(session_id) is run_task
+        assert not run_task.done()
+        manager.assert_not_called()
+    finally:
+        release.set()
+        await asyncio.gather(run_task, return_exceptions=True)
+        _run_tasks.pop(session_id, None)
+        _monitor_tasks.pop(session_id, None)
+
+
+@pytest.mark.asyncio
 async def test_report_only_close_temporarily_registers_its_live_failure_gate():
     from backend.models.schemas import AnalysisState, TaskStatus
     from backend.state import sessions, workflows

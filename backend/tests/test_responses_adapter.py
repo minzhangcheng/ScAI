@@ -609,8 +609,12 @@ async def test_complete_vision_deep_research_no_background():
     adapter = _ResponsesAdapter(client, agent_name="t", base_url="https://api.x/v1")
     await adapter.complete_vision(
         model="o4-mini-deep-research", text_prompt="x", images=[],
-        temperature=0.5, max_tokens=None)
-    assert "background" not in client.responses.create.call_args.kwargs
+        temperature=0.5, max_tokens=None,
+        system_prompt="BIOCHEMISTRY ROLE")
+    kwargs = client.responses.create.call_args.kwargs
+    assert "background" not in kwargs
+    assert "BIOCHEMISTRY ROLE" in kwargs["instructions"]
+    assert "respond exclusively in English" in kwargs["instructions"]
 
 
 def _mk_resp(status, resp_id="resp_1", dump=None, error=None):

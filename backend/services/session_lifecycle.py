@@ -95,14 +95,16 @@ async def establish_snapshot_operation(
     reserve: Callable[[], Awaitable[_T]],
     *,
     validate: Callable[[], Any | Awaitable[Any]] | None = None,
+    publish: Callable[[_T, int], Any] | None = None,
 ) -> _T:
     """Establish one pending/acquired safe point at the producer barrier.
 
     The critical section is intentionally narrow: generation validation,
-    optional owner validation, and the non-blocking SafePointManager mutation
-    only.  It must never contain acknowledgement waits, capture work, session
-    persistence, or release.  Producers take the same lifecycle lock while
-    checking ``snapshot_operation_active`` and publishing their task handle.
+    optional owner validation, the non-blocking SafePointManager mutation, and
+    (when supplied) synchronous publication of the operation's owner handle.
+    It must never contain acknowledgement waits, capture work, general session
+    persistence, or release. Producers and deletion take the same lifecycle
+    lock, so ``publish`` closes the reservation-to-registry visibility gap.
     """
     async with get_lifecycle_lock(session_id):
         assert_session_generation_active(session_id)
@@ -110,7 +112,20 @@ async def establish_snapshot_operation(
             checked = validate()
             if inspect.isawaitable(checked):
                 await checked
-        return await reserve()
+        reservation = await reserve()
+        if (
+            publish is not None
+            and reservation is not None
+            and reservation is not False
+        ):
+            record = read_lifecycle_record(session_id)
+            generation = int((record or {}).get("generation") or 0)
+            published = publish(reservation, generation)
+            if inspect.isawaitable(published):
+                raise TypeError(
+                    "snapshot operation publication must be synchronous"
+                )
+        return reservation
 
 
 def reset_lifecycle_locks() -> None:
@@ -328,6 +343,10 @@ def commit_import_generation(state) -> int:
             raise SessionGenerationError(
                 f"session {state.id} has no import generation to commit"
             )
+        if record.get("import_cancel_requested") is True:
+            raise SessionGenerationError(
+                f"session {state.id} import generation was cancelled"
+            )
         generation = int(record.get("generation") or 0)
         if str(record.get("owner_id") or "") != state.user_id:
             raise SessionGenerationError(
@@ -343,6 +362,35 @@ def commit_import_generation(state) -> int:
         })
         _write_record(active)
         return generation
+
+
+def request_import_generation_cancellation(
+    session_id: str,
+    owner_id: str,
+) -> int | None:
+    """Durably prevent one importing generation from being committed.
+
+    The record deliberately remains ``importing`` until its producer exits and
+    calls ``cleanup_failed_import_generation`` under the cleanup lease. Turning
+    it into an ordinary tombstone here would let the background sweeper delete
+    its directory while extraction is still writing to it.
+    """
+    validate_session_id(session_id)
+    with lifecycle_file_lock(session_id):
+        record = read_lifecycle_record(session_id)
+        if record is None or record.get("status") != "importing":
+            return None
+        if str(record.get("owner_id") or "") != owner_id:
+            raise SessionGenerationError(
+                "import owner does not match lifecycle owner"
+            )
+        cancelled = dict(record)
+        cancelled.update({
+            "import_cancel_requested": True,
+            "import_cancel_requested_at": datetime.now(timezone.utc).isoformat(),
+        })
+        _write_record(cancelled)
+        return int(cancelled.get("generation") or 0)
 
 
 def abandon_import_generation(session_id: str) -> bool:
@@ -593,8 +641,18 @@ def complete_tombstone_cleanup(
         return True
 
 
-def assert_session_generation_active(session_id: str) -> None:
-    """Reject runtime/file commits after a stable tombstone is visible."""
+def assert_session_generation_active(
+    session_id: str,
+    *,
+    expected_generation: int | None = None,
+) -> None:
+    """Reject commits after tombstone or lifecycle-generation replacement.
+
+    ``expected_generation`` binds a long-running producer to the generation it
+    observed when its owner handle was published. Generation ``0`` denotes the
+    legacy/no-record state and remains valid only while no lifecycle record has
+    appeared; it must not silently adopt a later same-ID generation.
+    """
     with lifecycle_file_lock(session_id):
         record = read_lifecycle_record(session_id)
         if record and record.get("status") == "deleted":
@@ -602,6 +660,20 @@ def assert_session_generation_active(session_id: str) -> None:
                 session_id,
                 str(record.get("owner_id") or ""),
                 int(record.get("generation") or 0),
+            )
+        if expected_generation is None:
+            return
+        current_generation = int((record or {}).get("generation") or 0)
+        if current_generation != int(expected_generation or 0):
+            if int(expected_generation or 0) in _deleted_generations(record):
+                raise SessionGoneError(
+                    session_id,
+                    str((record or {}).get("owner_id") or ""),
+                    int(expected_generation or 0),
+                )
+            raise SessionGenerationError(
+                f"session {session_id} lifecycle generation changed from "
+                f"{int(expected_generation or 0)} to {current_generation}"
             )
 
 

@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 from .error_signals import _inject_web_search_if_needed, _is_unknown_web_search_tool_error, _is_unsupported_background_error, _swap_web_search_tool_name
 from .google import _DR_BACKGROUND_MAX_POLL_ERRORS, _DR_BACKGROUND_MAX_WAIT, _DR_BACKGROUND_POLL_INTERVAL, _DR_BACKGROUND_TERMINAL_FAILED
-from .media import ENGLISH_ENFORCEMENT, _detect_image_mime_type
+from .media import _detect_image_mime_type, _inject_english_enforcement
 from .model_traits import _WEB_SEARCH_TOOL_NAMES, _get_effective_temperature, _is_deep_research_model
 from .protocol import _NO_BACKGROUND_ENDPOINT, _anthropic_messages_translate, _anthropic_restore_thinking, _anthropic_translate_tool_choice, _anthropic_translate_tools, _parse_anthropic_dump, _parse_responses_dump, _responses_messages_to_input, _responses_translate_tool_choice, _responses_translate_tools
 from .responses import LLMResponse, LLMToolResponse, _tool_calls_to_raw_assistant
@@ -96,16 +96,18 @@ class _AnthropicAdapter:
         return self._to_tool_response(resp, model)
 
     async def complete_vision(self, model, text_prompt, images, temperature,
-                              max_tokens, timeout=None, skip_temperature=False) -> LLMResponse:
+                              max_tokens, timeout=None, skip_temperature=False,
+                              system_prompt=None) -> LLMResponse:
         content = [{"type": "text", "text": text_prompt}]
         for img_b64 in images:
             mime = _detect_image_mime_type(img_b64)
             content.append({"type": "image", "source": {
                 "type": "base64", "media_type": mime, "data": img_b64}})
-        messages = [
-            {"role": "system", "content": ENGLISH_ENFORCEMENT},
-            {"role": "user", "content": content},
-        ]
+        messages = _inject_english_enforcement(
+            ([{"role": "system", "content": system_prompt}]
+             if system_prompt else [])
+            + [{"role": "user", "content": content}]
+        )
         params = self._build_params(model, messages, temperature, max_tokens, skip_temperature=skip_temperature)
         if timeout is not None:
             params["timeout"] = timeout
@@ -299,15 +301,17 @@ class _ResponsesAdapter:
                                raw_response=resp, raw_assistant_message=raw_assistant)
 
     async def complete_vision(self, model, text_prompt, images, temperature,
-                              max_tokens, timeout=None, skip_temperature=False) -> LLMResponse:
+                              max_tokens, timeout=None, skip_temperature=False,
+                              system_prompt=None) -> LLMResponse:
         content = [{"type": "input_text", "text": text_prompt}]
         for img_b64 in images:
             mime = _detect_image_mime_type(img_b64)
             content.append({"type": "input_image", "image_url": f"data:{mime};base64,{img_b64}"})
-        messages = [
-            {"role": "system", "content": ENGLISH_ENFORCEMENT},
-            {"role": "user", "content": content},
-        ]
+        messages = _inject_english_enforcement(
+            ([{"role": "system", "content": system_prompt}]
+             if system_prompt else [])
+            + [{"role": "user", "content": content}]
+        )
         params = self._build_params(model, messages, temperature, max_tokens, timeout=timeout, skip_temperature=skip_temperature)
         resp = await self._create_responses_with_fallback(params)
         resp = await self._await_completion(resp)

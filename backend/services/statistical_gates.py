@@ -760,7 +760,11 @@ def check_permutation_at_small_n(findings, score_definitions, samples_per_group)
     """
     if not samples_per_group:
         return []
-    smallest = min(samples_per_group.values()) if samples_per_group else None
+    numeric_sizes = [
+        value for value in samples_per_group.values()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    smallest = min(numeric_sizes) if numeric_sizes else None
     if smallest is None or smallest >= MIN_SAMPLES_PER_GROUP_FOR_PERMUTATION:
         return []
 

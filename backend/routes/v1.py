@@ -14,6 +14,7 @@ from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import validate_path_within
 from backend.services.config_io import apply_config_to_session, export_session_to_config
 from backend.services.upload import init_upload, upload_chunk, complete_upload, cleanup_session_uploads
+from backend.services.report.paths import resolve_published_report_dir
 from backend.config import (
     get_session_dir, ensure_session_dirs,
 )
@@ -21,6 +22,15 @@ from backend.config import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["v1"])
+
+
+def _v1_report_artifact_is_public(relative_path: Path) -> bool:
+    """Hide publication metadata, staging trees, and sibling lineages."""
+    return bool(
+        relative_path.parts
+        and relative_path.parts[0] != "branches"
+        and not any(part.startswith(".") for part in relative_path.parts)
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -200,13 +210,21 @@ async def get_analysis(session_id: str, request: Request):
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    reports_dir = (get_session_dir(session_id) / "reports")
+    reports_dir = resolve_published_report_dir(
+        session_id,
+        getattr(state, "restore_branch_id", None),
+    )
     artifacts: List[Dict[str, Any]] = []
     if reports_dir.exists():
         for f in sorted(reports_dir.rglob("*")):
-            if f.is_file():
+            relative = f.relative_to(reports_dir)
+            if (
+                f.is_file()
+                and not f.is_symlink()
+                and _v1_report_artifact_is_public(relative)
+            ):
                 artifacts.append({
-                    "name": str(f.relative_to(reports_dir)),
+                    "name": str(relative),
                     "size": f.stat().st_size,
                 })
 
@@ -228,12 +246,18 @@ async def download_artifact(session_id: str, name: str, request: Request):
     from fastapi.responses import FileResponse
 
     user_id = getattr(request.state, "user_id", "")
-    await require_session_ownership(session_id=session_id, user_id=user_id)
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    reports_dir = (get_session_dir(session_id) / "reports")
+    reports_dir = resolve_published_report_dir(
+        session_id,
+        getattr(state, "restore_branch_id", None),
+    )
+    relative = Path(name)
+    if not _v1_report_artifact_is_public(relative):
+        raise HTTPException(status_code=404, detail="Artifact not found")
     file_path = validate_path_within(reports_dir / name, reports_dir)
 
-    if not file_path.exists() or not file_path.is_file():
+    if file_path.is_symlink() or not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="Artifact not found")
 
     return FileResponse(file_path, filename=file_path.name)

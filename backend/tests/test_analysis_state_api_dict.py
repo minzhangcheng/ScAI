@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import base64
+import hashlib
 import json
 import pytest
 from datetime import datetime
@@ -89,6 +90,7 @@ class TestAnalysisStateApiDictRoundTrip:
             "snapshot_failure",
             "snapshot_transaction",
             "pending_required_snapshot",
+            "detailed_report_fallback_pending",
             # Promoted onto the api dict in ver 0.34.7 and consumed by the
             # frontend (utils/transformLoadResponse.ts, hooks/api/useWebSocket.ts).
             "wait_input_reason",
@@ -172,19 +174,21 @@ class TestAnalysisStateApiDictRoundTrip:
         assert api["messages"][0]["content"] == "stripped this"
 
     def test_publication_figures_carry_gallery_badge_fields(self):
-        """Eligible Results gallery badges must survive a reload.
+        """Results gallery badges must survive a reload.
 
-        A reload rebuilds the gallery from this payload alone. Blocking renders
-        are deliberately absent rather than reintroduced as gallery entries.
+        A reload rebuilds the gallery from this payload alone. Report-blocking
+        renders remain visible with an explicit badge.
         """
         state = AnalysisState(user_id="test")
         preview = base64.b64encode(valid_image_bytes("PNG")).decode()
+        preview_sha256 = hashlib.sha256(base64.b64decode(preview)).hexdigest()
         state.publication_figures = [
             PublicationFigure(
                 id="f-blocked", name="umap_clusters", description="d",
                 figure_type="umap", png_path="/x/umap.png", pdf_path="/x/umap.pdf",
                 review_status=FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS,
                 png_base64=preview,
+                preview_sha256=preview_sha256,
                 round_number=3,
                 layout_violations=[{"kind": "text_over_text", "severity": "block"}],
             ),
@@ -193,6 +197,7 @@ class TestAnalysisStateApiDictRoundTrip:
                 figure_type="qc", png_path="/x/qc.png", pdf_path="/x/qc.pdf",
                 diagnostic=True,
                 png_base64=preview,
+                preview_sha256=preview_sha256,
                 # Advisory only: a warning is not a blocking defect.
                 layout_violations=[{"kind": "text_over_text", "severity": "warn"}],
             ),
@@ -200,9 +205,11 @@ class TestAnalysisStateApiDictRoundTrip:
         api = state.to_api_dict()
         json.dumps(api)
         assert [figure["id"] for figure in api["publication_figures"]] == [
-            "f-diagnostic"
+            "f-blocked", "f-diagnostic",
         ]
-        diagnostic = api["publication_figures"][0]
+        blocked, diagnostic = api["publication_figures"]
+        assert blocked["round"] == 3
+        assert blocked["layout_blocking"] is True
         # An unattributed figure reports no round rather than "round 0".
         assert diagnostic["round"] is None
         assert diagnostic["layout_blocking"] is False

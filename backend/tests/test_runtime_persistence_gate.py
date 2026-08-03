@@ -59,6 +59,26 @@ def test_runtime_gate_payload_is_safe_and_actionable():
     assert "must-not-leak" not in str(failure)
 
 
+def test_runtime_gate_identity_survives_state_json_roundtrip():
+    state = AnalysisState(id="runtime-roundtrip", user_id="owner")
+    enter_runtime_persistence_gate(state, _failed_persistence())
+    token, generation = runtime_persistence_gate_identity(state)
+
+    restored = AnalysisState.model_validate_json(state.model_dump_json())
+
+    assert runtime_persistence_gate_identity(restored) == (token, generation)
+    assert restored.snapshot_failure["details"]["gate_token"] == token
+    assert restored.snapshot_failure["retry_context"]["gate_token"] == token
+    result = validate_runtime_persistence_action(
+        restored,
+        "manage",
+        gate_token=token,
+        generation=generation,
+        active=True,
+    )
+    assert result.outcome is RuntimePersistenceActionOutcome.ACCEPTED
+
+
 def test_runtime_gate_redacts_raw_names_paths_and_errors_before_bounding():
     secret = "synthetic-runtime-secret-value"
     failure = build_runtime_persistence_failure(
@@ -195,6 +215,33 @@ async def test_live_retry_uses_same_kernel_and_clears_gate():
     assert state.snapshot_failure is None
     assert state.wait_input_reason is None
     assert state.status == TaskStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_pause_persistence_recovery_requests_durable_transitions():
+    from backend.workflow.core import SingleCellAnalysisWorkflow
+
+    state = AnalysisState(
+        id="runtime-pause-durable",
+        user_id="owner",
+        status=TaskStatus.WAITING_INPUT,
+    )
+    workflow = object.__new__(SingleCellAnalysisWorkflow)
+    workflow.session_id = state.id
+    workflow._runtime_persistence_pause_task = object()
+    workflow._wait_for_runtime_persistence_intervention = AsyncMock(
+        return_value="retry"
+    )
+
+    await workflow._recover_failed_pause_persistence(state.id, state)
+
+    workflow._wait_for_runtime_persistence_intervention.assert_awaited_once_with(
+        state,
+        successful_status=TaskStatus.PAUSED,
+        persist_transitions=True,
+    )
+    assert state.status is TaskStatus.PAUSED
+    assert workflow._runtime_persistence_pause_task is None
 
 
 @pytest.mark.asyncio

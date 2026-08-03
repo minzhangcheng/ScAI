@@ -7,7 +7,12 @@ therefore pin each of the five outcomes -- especially the two exemptions
 never be counted as a gap.
 """
 import base64
+import hashlib
+import itertools
 from datetime import datetime
+from pathlib import Path
+
+import pytest
 
 from backend.models.schemas import (
     AnalysisPlan,
@@ -17,7 +22,7 @@ from backend.models.schemas import (
     PlanStep,
     PublicationFigure,
 )
-from backend.tests.figure_image_helpers import valid_image_bytes
+from backend.tests.figure_image_helpers import valid_image_bytes, valid_pdf_bytes
 from backend.workflow.post_execution_review import (
     PlanAudit,
     StepAudit,
@@ -36,7 +41,16 @@ from backend.workflow.post_execution_review import (
 )
 
 
-_RENDER_PREVIEW = base64.b64encode(valid_image_bytes("PNG")).decode()
+_ARTIFACT_ROOT: Path | None = None
+_ARTIFACT_SEQUENCE = itertools.count()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _frozen_figure_artifact_root(tmp_path_factory):
+    global _ARTIFACT_ROOT
+    _ARTIFACT_ROOT = tmp_path_factory.mktemp("post-execution-review-artifacts")
+    yield
+    _ARTIFACT_ROOT = None
 
 
 def _audited_plan():
@@ -70,13 +84,24 @@ def _audited_history():
 
 
 def _result_figure(plan: AnalysisPlan, step_id: int) -> PublicationFigure:
+    assert _ARTIFACT_ROOT is not None
+    artifact_id = next(_ARTIFACT_SEQUENCE)
+    png_path = _ARTIFACT_ROOT / f"{artifact_id}-step-{step_id}.png"
+    pdf_path = _ARTIFACT_ROOT / f"{artifact_id}-step-{step_id}.pdf"
+    render = valid_image_bytes("PNG", min_bytes=2200)
+    pdf = valid_pdf_bytes()
+    png_path.write_bytes(render)
+    pdf_path.write_bytes(pdf)
     return PublicationFigure(
         name=f"step_{step_id}_result",
         description=f"Reviewed visual result for step {step_id}",
         figure_type="other",
-        png_path=f"/missing/step_{step_id}_result.png",
-        pdf_path=f"/missing/step_{step_id}_result.pdf",
-        png_base64=_RENDER_PREVIEW,
+        png_path=str(png_path),
+        pdf_path=str(pdf_path),
+        png_base64=base64.b64encode(render).decode(),
+        render_sha256=hashlib.sha256(render).hexdigest(),
+        preview_sha256=hashlib.sha256(render).hexdigest(),
+        pdf_sha256=hashlib.sha256(pdf).hexdigest(),
         review_status=FigureReviewStatus.APPROVED,
         plan_step_id=step_id,
         plan_id=plan.id,
@@ -148,6 +173,22 @@ def test_planned_methods_and_conditional_wording():
     # The hedge lives in `expected_output` too, not only in `method`.
     assert step_is_conditional(PlanStep(id=4, title="t", method="Run scCODA",
                                         expected_output="proportions, if available")) is True
+
+
+def test_later_required_method_occurrence_is_not_hidden_by_optional_first_use():
+    step = PlanStep(
+        id=5,
+        title="Differential expression",
+        method="Optionally run limma for QC, then run limma for DE.",
+    )
+    audit = audit_plan_execution(
+        AnalysisPlan(phase="innovation", steps=[step]),
+        [],
+        round_number=2,
+    )
+    assert audit.steps[0].planned_families == ["bulk_de"]
+    assert audit.steps[0].status == "pending"
+    assert audit.steps[0].missing_families == ["bulk_de"]
 
 
 def test_ordinary_plan_prose_commits_the_plan_to_nothing():

@@ -27,6 +27,7 @@ def _report_state(session_id: str):
     state.status.value = "completed"
     state.round_results = []
     state.chat_messages = []
+    state.restore_branch_id = None
     html_views.sessions[session_id] = state
     _CREATED_SESSION_IDS.add(session_id)
     return state
@@ -399,6 +400,69 @@ async def test_report_passes_matching_pi_client_to_supervisor(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
+async def test_standalone_report_targets_restored_branch(monkeypatch, tmp_path):
+    config = MagicMock()
+    config.api.api_key = "global-key"
+    config.api.llm_base_url = "https://global.example/v1"
+    config.api.proxy_url = ""
+    _patch_report_prelude(monkeypatch, tmp_path, config=config)
+    monkeypatch.setattr(
+        "backend.config.get_session_workspace",
+        lambda session_id: tmp_path,
+    )
+
+    resolved_branches = []
+    built_lineages = []
+    monkeypatch.setattr(
+        html_views,
+        "resolve_report_target_lineage",
+        lambda branch_id: resolved_branches.append(branch_id)
+        or (branch_id or "main"),
+    )
+    monkeypatch.setattr(
+        html_views,
+        "resolve_report_output_dir",
+        lambda session_id, branch_id: tmp_path / (branch_id or "main"),
+    )
+    monkeypatch.setattr(
+        html_views,
+        "build_lineage_report_state",
+        lambda state, lineage: built_lineages.append(lineage) or state,
+    )
+
+    global_client = MagicMock()
+    global_client.close = AsyncMock()
+    provider = MagicMock()
+    provider.get_llm_client.return_value = MagicMock()
+    provider.get_model.return_value = "pi-model"
+    provider.cleanup = AsyncMock()
+    supervisor = MagicMock()
+    supervisor.generate_detailed_report = AsyncMock(return_value={"ok": True})
+    monkeypatch.setattr(
+        html_views,
+        "OpenAICompatibleClient",
+        MagicMock(return_value=global_client),
+    )
+    monkeypatch.setattr(
+        html_views,
+        "AgentSettingsProvider",
+        MagicMock(return_value=provider),
+    )
+    monkeypatch.setattr(
+        "backend.agents.supervisor_agent.SupervisorAgent",
+        MagicMock(return_value=supervisor),
+    )
+
+    state = _report_state("restored-branch-report")
+    state.restore_branch_id = "branch-a"
+    await html_views._generate_report_task(state.id, state)
+
+    assert resolved_branches == ["branch-a"]
+    assert built_lineages == ["branch-a"]
+    assert (tmp_path / "branch-a").is_dir()
+
+
+@pytest.mark.asyncio
 async def test_report_retry_refreshes_pi_model_and_client_as_one_pair(
     monkeypatch,
     tmp_path,
@@ -479,6 +543,40 @@ async def test_report_resource_cleanup_retries_each_owner_independently():
 
     assert provider.cleanup.await_count == 2
     assert llm_client.close.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_report_resource_cleanup_timeout_retires_report_owner(
+    monkeypatch,
+):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _ignores_cancellation_until_released():
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    provider = MagicMock()
+    provider.cleanup = _ignores_cancellation_until_released
+    llm_client = MagicMock()
+    llm_client.close = AsyncMock()
+    monkeypatch.setattr(
+        html_views, "_REPORT_RESOURCE_CLEANUP_TIMEOUT_SECONDS", 0.01,
+    )
+
+    try:
+        await asyncio.wait_for(
+            html_views._cleanup_report_llm_resources(provider, llm_client),
+            timeout=0.5,
+        )
+        assert entered.is_set()
+        llm_client.close.assert_awaited_once_with()
+    finally:
+        release.set()
+        await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio

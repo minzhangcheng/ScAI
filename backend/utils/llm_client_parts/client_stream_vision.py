@@ -268,14 +268,16 @@ class ClientStreamVisionMixin:
         request_timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
         non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
+        system_prompt: Optional[str] = None,
     ) -> LLMResponse:
-        messages = [
-            {"role": "system", "content": ENGLISH_ENFORCEMENT},
-            {"role": "user", "content": [{"type": "text", "text": text_prompt}] + [
+        messages = _inject_english_enforcement(
+            ([{"role": "system", "content": system_prompt}]
+             if system_prompt else [])
+            + [{"role": "user", "content": [{"type": "text", "text": text_prompt}] + [
                 {"type": "image_url", "image_url": {"url": f"data:{_detect_image_mime_type(img_b64)};base64,{img_b64}"}}
                 for img_b64 in images
-            ]},
-        ]
+            ]}]
+        )
 
         # Create log record (without the actual image data to save space)
         interaction = self.llm_logger.log_request(
@@ -347,7 +349,8 @@ class ClientStreamVisionMixin:
         images: List[str],  # Base64 encoded images
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
-        request_timeout: Optional[float] = None
+        request_timeout: Optional[float] = None,
+        system_prompt: Optional[str] = None,
     ) -> LLMResponse:
         """
         Send chat request with images to OpenAI-compatible API with automatic retry on timeout.
@@ -372,17 +375,21 @@ class ClientStreamVisionMixin:
             make_anthropic_adapter_call=lambda adapter, skip_temperature: adapter.complete_vision(
                 model=model, text_prompt=text_prompt, images=images,
                 temperature=temperature, max_tokens=max_tokens,
-                timeout=request_timeout, skip_temperature=skip_temperature),
+                timeout=request_timeout, skip_temperature=skip_temperature,
+                system_prompt=system_prompt),
             make_responses_adapter_call=lambda adapter, skip_temperature: adapter.complete_vision(
                 model=model, text_prompt=text_prompt, images=images,
                 temperature=temperature, max_tokens=max_tokens,
-                timeout=request_timeout, skip_temperature=skip_temperature),
+                timeout=request_timeout, skip_temperature=skip_temperature,
+                system_prompt=system_prompt),
             make_inline_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_vision_inline(
                 model, text_prompt, images, temperature, max_tokens, request_timeout,
-                non_retryable_predicate=non_retryable_predicate),
+                non_retryable_predicate=non_retryable_predicate,
+                system_prompt=system_prompt),
             make_probe_fallback_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_vision_inline(
                 model, text_prompt, images, temperature, max_tokens, probe_timeout, max_retries=0,
-                non_retryable_predicate=non_retryable_predicate),
+                non_retryable_predicate=non_retryable_predicate,
+                system_prompt=system_prompt),
             temperature=temperature,
             max_tokens=max_tokens,
             request_timeout=request_timeout,

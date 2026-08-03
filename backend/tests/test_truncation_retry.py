@@ -96,6 +96,50 @@ async def test_non_truncated_empty_content_does_not_retry(client):
 
 
 @pytest.mark.asyncio
+async def test_reasoning_only_stop_retries_for_public_answer_without_exposing_reasoning(
+    client,
+):
+    reasoning_only = _resp(
+        None,
+        finish_reason="stop",
+        reasoning="private chain of thought",
+    )
+    recovered = _resp("Public final answer", finish_reason="stop")
+    call = AsyncMock(side_effect=[reasoning_only, recovered])
+    with patch.object(client, "_call_with_temp_fallback", call), \
+         patch_facade("backend.utils.llm_client", "logger"):
+        result = await client._chat_inline(
+            "mimo-v2.5",
+            [{"role": "user", "content": "x"}],
+            max_tokens=512,
+        )
+
+    assert result.content == "Public final answer"
+    assert call.await_count == 2
+    assert "private chain of thought" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_repeated_reasoning_only_stop_is_upstream_exhaustion(client):
+    reasoning_only = _resp(
+        None,
+        finish_reason="stop",
+        reasoning="private chain of thought",
+    )
+    call = AsyncMock(side_effect=[reasoning_only, reasoning_only])
+    with patch.object(client, "_call_with_temp_fallback", call), \
+         patch_facade("backend.utils.llm_client", "logger"):
+        with pytest.raises(UpstreamExhaustedError, match="without a public answer"):
+            await client._chat_inline(
+                "mimo-v2.5",
+                [{"role": "user", "content": "x"}],
+                max_tokens=512,
+            )
+
+    assert call.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_truncation_retry_capped_to_single_attempt(client):
     # Even if the retry is also truncated, we must not loop forever.
     truncated = _resp(None, finish_reason="length")

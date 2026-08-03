@@ -169,6 +169,7 @@ export interface Session {
   explorationReportUrl?: string
   integrationReportUrl?: string
   multiDirectionCorrelation?: string
+  restoreBranchId?: string
   stateVersion?: number
   // Species inference state
   species?: string

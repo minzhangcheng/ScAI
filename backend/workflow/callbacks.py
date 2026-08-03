@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from ..constants import PLAN_REVISION_NEEDED_TAG, REASONING_MODEL_MIN_TOKENS, StateSyncChangeType, WaitInputReason
 from ..models.schemas import AgentType, AnalysisState, ClusterAnnotation, PublicationFigure, TaskStatus
 from ..utils.formatting import safe_parse_json
+from ..services.report.artifacts import has_blocking_layout_defects
 from .helpers import wait_with_skip_time
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ def compact_figure_event_payload(
         "purpose": getattr(figure, "purpose", "result") or "result",
         "round": getattr(figure, "round_number", 0) or None,
         "diagnostic": bool(getattr(figure, "diagnostic", False)),
+        "layout_blocking": has_blocking_layout_defects(figure),
         "created_at": figure.created_at.isoformat(),
     }
 

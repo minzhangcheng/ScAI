@@ -12,7 +12,10 @@ from starlette.websockets import WebSocketDisconnect
 
 from backend.models.schemas import AnalysisState, TaskStatus
 from backend.routes.websockets import router
-from backend.services.session_lifecycle import SessionGoneError
+from backend.services.session_lifecycle import (
+    SessionGenerationError,
+    SessionGoneError,
+)
 from backend.utils.auth import ws_authenticate_and_load
 
 
@@ -100,6 +103,53 @@ async def test_websocket_lifecycle_helper_contract(
     assert websocket.events[1][1]["code"] == expected_code
     assert websocket.events[1][1]["session_id"] == session_id
     assert websocket.events[2] == ("close", expected_close, expected_code)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint_name", ["analysis", "report"])
+@pytest.mark.parametrize(
+    ("error_kind", "expected_close", "expected_reason"),
+    [
+        ("gone", 4410, "SESSION_GONE"),
+        ("generation", 4404, "SESSION_NOT_FOUND"),
+    ],
+)
+async def test_registration_lifecycle_race_uses_frontend_close_codes(
+    monkeypatch, endpoint_name, error_kind, expected_close, expected_reason,
+):
+    from backend.routes import websockets as websocket_routes
+
+    session_id = str(uuid4())
+    state = AnalysisState(id=session_id, user_id="request-owner")
+    websocket = _RecordingWebSocket()
+    monkeypatch.setattr(
+        websocket_routes,
+        "ws_authenticate_and_load",
+        AsyncMock(return_value=("request-owner", state)),
+    )
+    monkeypatch.setattr(
+        websocket_routes,
+        "resolve_config_for_user",
+        AsyncMock(return_value=object()),
+    )
+
+    def fail_generation_guard(_session_id, _state):
+        if error_kind == "gone":
+            raise SessionGoneError(session_id, "request-owner", 3)
+        raise SessionGenerationError("session generation changed")
+
+    monkeypatch.setattr(
+        websocket_routes, "assert_generation_writable", fail_generation_guard,
+    )
+    endpoint = (
+        websocket_routes.websocket_endpoint
+        if endpoint_name == "analysis"
+        else websocket_routes.report_websocket
+    )
+
+    await endpoint(websocket, session_id)
+
+    assert websocket.events == [("close", expected_close, expected_reason)]
 
 
 @pytest.mark.asyncio

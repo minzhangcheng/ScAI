@@ -1,6 +1,8 @@
 """Periodic in-memory cache eviction for idle sessions + stale import jobs."""
 import asyncio
 import logging
+import re
+import stat
 import time
 from typing import Any, Dict
 
@@ -14,6 +16,8 @@ from backend.services.session_store import _async_save_session_under_lifecycle
 from backend.services.export_lifecycle import (
     EXPORT_OWNERSHIP_MARKER_SUFFIX,
     cleanup_export_record,
+    create_export_ownership_marker,
+    export_ownership_marker_path,
     export_ownership_marker_matches,
     unlink_export_archive_and_marker,
 )
@@ -29,6 +33,29 @@ from backend.state import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+_TEMPFILE_RANDOM = r"[a-z0-9_]{8}"
+_SESSION_ID = r"[A-Za-z0-9_-]{1,128}"
+_LEGACY_OR_INTERRUPTED_EXPORT_NAMES = tuple(
+    re.compile(pattern)
+    for pattern in (
+        rf"(?:prepared_export_|export_stream_){_TEMPFILE_RANDOM}\.tar\.gz",
+        rf"(?:prepared_export_|export_stream_){_SESSION_ID}\.g[1-9][0-9]*\."
+        rf"{_TEMPFILE_RANDOM}\.tar\.gz",
+        rf"v2-export-exp-[0-9a-f]{{16}}-{_TEMPFILE_RANDOM}\.tar\.gz",
+        rf"v2-export-{_SESSION_ID}\.g[1-9][0-9]*\."
+        rf"[A-Za-z0-9_-]{{12}}\.tar\.gz",
+    )
+)
+
+
+def _is_migratable_unmarked_export(name: str) -> bool:
+    """Recognize exact archive shapes emitted before/during marker creation."""
+    return any(
+        pattern.fullmatch(name)
+        for pattern in _LEGACY_OR_INTERRUPTED_EXPORT_NAMES
+    )
 
 
 async def _collect_sessions_to_evict(current_time: float) -> list[str]:
@@ -216,28 +243,77 @@ def _unlink_orphaned_export_archives(
     except OSError:
         return 0
     now = time.time()
-    for marker in entries:
-        if not marker.name.endswith(EXPORT_OWNERSHIP_MARKER_SUFFIX):
+    for path in entries:
+        if path.name.endswith(EXPORT_OWNERSHIP_MARKER_SUFFIX):
             continue
-        archive_name = marker.name[:-len(EXPORT_OWNERSHIP_MARKER_SUFFIX)]
-        if not archive_name.startswith(EXPORT_TEMP_PREFIXES):
+        if not path.name.startswith(EXPORT_TEMP_PREFIXES):
             continue
-        path = marker.with_name(archive_name)
         if str(path) in protected_paths:
             continue
+        marker = export_ownership_marker_path(path)
         try:
-            if not export_ownership_marker_matches(path):
+            marker.lstat()
+            marker_present = True
+        except FileNotFoundError:
+            marker_present = False
+        except OSError:
+            continue
+        marker_created = False
+        unlink_attempted = False
+        try:
+            metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
                 continue
-            if max_age_s is not None and now - path.stat().st_mtime <= max_age_s:
+            if max_age_s is not None and now - metadata.st_mtime <= max_age_s:
                 continue
+
+            if marker_present:
+                if not export_ownership_marker_matches(path):
+                    continue
+            else:
+                # Compatibility/migration path. Prefix alone is not enough:
+                # accept only the exact tempfile shapes emitted by pre-marker
+                # releases or by a current producer interrupted between file
+                # creation and marker publication. Bind the current inode to a
+                # marker before unlinking so a symlink or replacement cannot be
+                # followed or mistaken for the inspected file.
+                if not _is_migratable_unmarked_export(path.name):
+                    continue
+                create_export_ownership_marker(path)
+                marker_created = True
+                if not export_ownership_marker_matches(path):
+                    continue
+                current = path.lstat()
+                if not stat.S_ISREG(current.st_mode):
+                    continue
+                if max_age_s is not None and now - current.st_mtime <= max_age_s:
+                    marker.unlink(missing_ok=True)
+                    marker_created = False
+                    continue
+
+            unlink_attempted = True
             unlink_export_archive_and_marker(
                 path,
                 require_marker=True,
                 remove_marker=True,
             )
+            marker_created = False
             removed += 1
         except OSError as exc:
-            logger.warning("Failed to delete orphaned export archive %s: %s", path, exc)
+            logger.warning(
+                "Failed to delete orphaned export archive %s: %s", path, exc,
+            )
+        finally:
+            # If migration proved the candidate ineligible after binding it,
+            # remove only the marker created by this sweep. On unlink failure,
+            # retain the marker so the next sweep can safely retry the inode.
+            if marker_created and (
+                not unlink_attempted or not path.exists()
+            ):
+                try:
+                    marker.unlink(missing_ok=True)
+                except OSError:
+                    pass
     if removed:
         logger.info("Cleaned up %d orphaned export archives", removed)
     return removed

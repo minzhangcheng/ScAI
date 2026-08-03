@@ -6,7 +6,7 @@ from typing import Optional
 from backend.models.user import UsernameStr, PasswordStr
 from backend.utils.db import AppDB
 from backend.utils.auth import get_db, hash_password, require_admin, check_user_uniqueness
-from backend.services.user_cleanup import delete_user_data
+from backend.services.user_cleanup import UserCleanupPendingError, delete_user_data
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -168,5 +168,8 @@ async def delete_user(
             status_code=409,
             detail="Cannot delete the last remaining admin",
         )
-    await delete_user_data(uid)
+    try:
+        await delete_user_data(uid)
+    except UserCleanupPendingError as exc:
+        raise HTTPException(status_code=409, detail=exc.as_detail()) from exc
     return None

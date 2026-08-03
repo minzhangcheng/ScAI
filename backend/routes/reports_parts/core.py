@@ -21,6 +21,7 @@ from fastapi import APIRouter
 
 from backend.state import detailed_reports
 from backend.services.report.paths import resolve_report_target_lineage
+from backend.services.report.output_generation import resolve_current_report_dir
 
 logger = logging.getLogger(__name__)
 
@@ -135,13 +136,14 @@ def _create_report_archive(reports_dir: Path, version: int) -> Path:
     """
     archive_path = reports_dir / f"{REPORT_ARCHIVE_PREFIX}{version}.zip"
     tmp_path = archive_path.with_suffix(".zip.tmp")
+    published_dir = resolve_current_report_dir(reports_dir)
     
     with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_STORED) as zf:
-        for file_path in reports_dir.rglob("*"):
+        for file_path in published_dir.rglob("*"):
             if file_path.is_file():
                 if _should_skip_in_report_zip(file_path):
                     continue
-                arcname = file_path.relative_to(reports_dir)
+                arcname = file_path.relative_to(published_dir)
                 zf.write(file_path, arcname)
     
     os.replace(tmp_path, archive_path)

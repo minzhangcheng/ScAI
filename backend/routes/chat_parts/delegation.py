@@ -18,7 +18,7 @@ from backend.config import get_session_workspace, get_session_reports, get_sessi
 from backend.models.schemas import WebSocketMessage, AgentType, DataFile, AnalysisState
 from backend.services.session_store import ensure_session_loaded, async_save_session, update_session_cache
 from backend.state import (
-    chat_tasks, chat_task_lock, chat_sandboxes,
+    chat_sandboxes,
     workflows, state_lock,
 )
 from backend.utils.config_resolver import resolve_config_for_user
@@ -129,7 +129,7 @@ async def _execute_chat_agent(
     instruction: str,
     llm_client: Any,
     message_callback,
-    saved_files: List[Dict[str, str]],
+    saved_files: List[Dict[str, Any]],
 ) -> Tuple[Dict[str, Any], List[Any]]:
     """Execute a single agent in chat delegation context."""
     from backend.utils.sandbox import LocalJupyterSandbox
@@ -322,7 +322,7 @@ async def _run_chat_delegation(
     delegation: Dict[str, Any],
     user_message: str,
     image_b64_list: List[str],
-    saved_files: List[Dict[str, str]],
+    saved_files: List[Dict[str, Any]],
 ):
     """Background task: orchestrate delegated agent work, then PI synthesizes results."""
     import traceback
@@ -655,8 +655,6 @@ async def _run_chat_delegation(
         await async_save_session(session_id, state)
 
     finally:
-        async with chat_task_lock:
-            chat_tasks.pop(session_id, None)
         active_sandbox = chat_sandboxes.get(session_id)
         if active_sandbox is not None and getattr(active_sandbox, "km", None) is None:
             chat_sandboxes.pop(session_id, None)

@@ -334,6 +334,7 @@ If you see tables, extract all rows and columns.
                     images=[image_data],
                     temperature=0.2,
                     max_tokens=32768,
+                    system_prompt=self.system_prompt,
                 )
 
                 content = response.content if response else ""

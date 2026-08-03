@@ -19,7 +19,11 @@ from backend.state import (
     sessions as _sessions,
     get_session_lock,
 )
-from backend.utils.auth import ws_authenticate_and_load
+from backend.utils.auth import (
+    WS_SESSION_GONE_CODE,
+    WS_SESSION_NOT_FOUND_CODE,
+    ws_authenticate_and_load,
+)
 from backend.utils.asyncio_tasks import consume_current_cancellation_request
 from backend.utils.websocket_delivery import (
     WebSocketConnection,
@@ -485,10 +489,21 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             connection_ref = await register_analysis_websocket(
                 session_id, websocket,
             )
-    except (SessionGoneError, SessionGenerationError):
+    except SessionGoneError:
         if claimed_initializing:
             await _discard_captured_initializing()
-        await websocket.close(code=4004)
+        await websocket.close(
+            code=WS_SESSION_GONE_CODE,
+            reason="SESSION_GONE",
+        )
+        return
+    except SessionGenerationError:
+        if claimed_initializing:
+            await _discard_captured_initializing()
+        await websocket.close(
+            code=WS_SESSION_NOT_FOUND_CODE,
+            reason="SESSION_NOT_FOUND",
+        )
         return
     except BaseException:
         if claimed_initializing:
@@ -1018,8 +1033,17 @@ async def report_websocket(websocket: WebSocket, session_id: str):
             connection_ref = await register_report_websocket(
                 session_id, websocket,
             )
-    except (SessionGoneError, SessionGenerationError):
-        await websocket.close(code=4004)
+    except SessionGoneError:
+        await websocket.close(
+            code=WS_SESSION_GONE_CODE,
+            reason="SESSION_GONE",
+        )
+        return
+    except SessionGenerationError:
+        await websocket.close(
+            code=WS_SESSION_NOT_FOUND_CODE,
+            reason="SESSION_NOT_FOUND",
+        )
         return
 
     try:

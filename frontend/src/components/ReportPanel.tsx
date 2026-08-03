@@ -163,6 +163,10 @@ export function partialReportNotice(
     : 'The report was generated but is marked as partial.'
 }
 
+export function reportBranchQuery(branchId?: string): string {
+  return branchId ? `?branch_id=${encodeURIComponent(branchId)}` : ''
+}
+
 export function ReportPanel() {
   const { currentSession, language, addMessage, setReportGenerated, authUser, showConfigPanel } = useAppStore()
   const { t } = useTranslation(language)
@@ -179,6 +183,7 @@ export function ReportPanel() {
   const [downloadError, setDownloadError] = useSelfClearingError()
   const wsRef = useRef<WebSocket | null>(null)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const branchQuery = reportBranchQuery(currentSession?.restoreBranchId)
 
   // API validation state
   const [validating, setValidating] = useState(false)
@@ -196,7 +201,7 @@ export function ReportPanel() {
         clearTimeout(retryTimerRef.current)
       }
     }
-  }, [currentSession?.id, currentSession?.status])
+  }, [currentSession?.id, currentSession?.status, currentSession?.restoreBranchId])
 
   // Retry loading if report is null after initial load (handles race condition)
   useEffect(() => {
@@ -323,7 +328,7 @@ export function ReportPanel() {
     setError(null)
 
     try {
-      const data = await apiFetch<any>(`/session/${currentSession.id}/detailed-report`)
+      const data = await apiFetch<any>(`/session/${currentSession.id}/detailed-report${branchQuery}`)
       if (data?.report) {
         setReport(data.report)
         // A partial report is a finished, downloadable artifact with an
@@ -345,7 +350,7 @@ export function ReportPanel() {
     if (!currentSession?.id) return
 
     try {
-      const data = await apiFetch<any>(`/session/${currentSession.id}/report/preview`)
+      const data = await apiFetch<any>(`/session/${currentSession.id}/report/preview${branchQuery}`)
       if (data) {
         setPreview(data)
       }
@@ -357,14 +362,14 @@ export function ReportPanel() {
   const fetchArchives = useCallback(async () => {
     if (!currentSession?.id) return
     try {
-      const data = await apiFetch<any>(`/session/${currentSession.id}/report/archives`)
+      const data = await apiFetch<any>(`/session/${currentSession.id}/report/archives${branchQuery}`)
       if (data) {
         setReportArchives(data)
       }
     } catch {
       setReportArchives([])
     }
-  }, [currentSession?.id])
+  }, [currentSession?.id, currentSession?.restoreBranchId])
 
   const doGenerateReport = async () => {
     if (!currentSession?.id) return
@@ -461,7 +466,7 @@ export function ReportPanel() {
   const downloadReportArtifact = async (endpoint: ReportDownloadEndpoint, label: string) => {
     if (!report || !currentSession) return
     await safeDownload(
-      `${API_BASE}/session/${currentSession.id}/report/${endpoint}`,
+      `${API_BASE}/session/${currentSession.id}/report/${endpoint}${branchQuery}`,
       `${currentSession.name}_${label}.zip`,
       { method: 'POST' }
     )
@@ -469,7 +474,7 @@ export function ReportPanel() {
 
   const openHtmlInNewTab = () => {
     if (!currentSession?.id) return
-    window.open(`${API_BASE}/session/${currentSession.id}/report/html`, '_blank')
+    window.open(`${API_BASE}/session/${currentSession.id}/report/html${branchQuery}`, '_blank')
   }
 
   if (!currentSession) {

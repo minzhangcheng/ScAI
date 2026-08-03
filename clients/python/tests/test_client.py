@@ -85,3 +85,22 @@ def test_job_wait_failed():
         with patch.object(c._http, "get", return_value=mock_resp):
             with pytest.raises(JobFailed):
                 job.wait(interval=1)
+
+
+def test_job_wait_stopped_raises_job_failed():
+    """A durable stopped job must not poll forever when timeout is omitted."""
+    with Client(base_url="http://localhost:8000", api_key="scai_test") as c:
+        job = Job(c._http, "test-job-id")
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "stopped",
+            "error": "User terminated analysis",
+        }
+
+        with patch.object(c._http, "get", return_value=mock_resp):
+            with patch("time.sleep", side_effect=AssertionError("must not poll")):
+                with pytest.raises(JobFailed):
+                    job.wait(interval=1)

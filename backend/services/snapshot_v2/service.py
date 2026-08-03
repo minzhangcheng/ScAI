@@ -232,6 +232,7 @@ class SnapshotService(
         *,
         job_transaction_id: str | None = None,
         status_callback: Any = None,
+        expected_lifecycle_generation: int | None = None,
     ) -> SnapshotTransactionRecord:
         """Sole orchestration method for restore jobs.
 
@@ -258,6 +259,11 @@ class SnapshotService(
         )
         from backend.services.snapshot_v2.pre_restore import RestoreCaptureContext
         from backend.services.snapshot_v2.preflight import RestorePreflight
+        from backend.services.session_lifecycle import (
+            SessionGenerationError,
+            SessionGoneError,
+            assert_session_generation_active,
+        )
         from backend.state import report_workflows, sessions, workflows
 
         def _status(status: str, **kw: Any) -> SnapshotTransactionRecord:
@@ -277,6 +283,21 @@ class SnapshotService(
 
         if _cancelled():
             return _status("cancelled")
+
+        if expected_lifecycle_generation is not None:
+            try:
+                assert_session_generation_active(
+                    self.session_id,
+                    expected_generation=expected_lifecycle_generation,
+                )
+            except (SessionGoneError, SessionGenerationError) as exc:
+                return _status(
+                    "failed",
+                    failure={
+                        "code": "SESSION_GENERATION_STALE",
+                        "message": str(exc),
+                    },
+                )
 
         # Authoritative preflight (recheck before mutation).
         preflight = RestorePreflight(self.paths).run(request.snapshot_id, request)
@@ -568,10 +589,7 @@ class SnapshotService(
                         workflow.sandbox = None
 
             try:
-                from backend.services.session_lifecycle import (
-                    assert_session_generation_active,
-                    lifecycle_file_lock,
-                )
+                from backend.services.session_lifecycle import lifecycle_file_lock
 
                 # Snapshot apply mutates the same live runtime/notebook/state
                 # surfaces as regular persistence. The coordinator contains no
@@ -579,7 +597,10 @@ class SnapshotService(
                 # for its complete journaled mutation and revalidate before it
                 # publishes any bytes.
                 with lifecycle_file_lock(self.session_id):
-                    assert_session_generation_active(self.session_id)
+                    assert_session_generation_active(
+                        self.session_id,
+                        expected_generation=expected_lifecycle_generation,
+                    )
                     applied_result = await self.restore_coordinator.apply(
                         staged,
                         self.paths,
@@ -591,7 +612,10 @@ class SnapshotService(
                         states_root=states_root,
                         runtime_choice=request.runtime_choice,
                     )
-                    assert_session_generation_active(self.session_id)
+                    assert_session_generation_active(
+                        self.session_id,
+                        expected_generation=expected_lifecycle_generation,
+                    )
                 applied = True
             except Exception as exc:
                 # After APPLYING, cancellation/failure → recovery path (not pretend clean).
@@ -655,6 +679,11 @@ class SnapshotService(
                     ),
                 )
 
+            if expected_lifecycle_generation is not None:
+                restored_state.lifecycle_generation = (
+                    expected_lifecycle_generation
+                )
+
             from backend.utils.secret_redaction import preserve_runtime_secrets
             preserve_runtime_secrets(analysis_state, restored_state)
 
@@ -686,11 +715,20 @@ class SnapshotService(
             # graph_node: seed exact next-node via activate
             # terminal: do not instantiate/run a workflow
             # idle: load content without starting analysis
-            self.continuation_dispatcher.activate(
-                restored_state,
-                staged_ckpt,
-                workspace_path=Path(workspace_root or session_dir),
-            )
+            try:
+                self.continuation_dispatcher.activate(
+                    restored_state,
+                    staged_ckpt,
+                    workspace_path=Path(workspace_root or session_dir),
+                )
+            except Exception as exc:
+                return _status(
+                    "failed",
+                    recovery_mode=recovery_mode,
+                    failure=self._partial_apply_failure(
+                        "ACTIVATION_FAILED", str(exc),
+                    ),
+                )
 
             if getattr(applied_result, "runtime_restore_status", None):
                 restored_state.runtime_restore_status = applied_result.runtime_restore_status
@@ -699,6 +737,10 @@ class SnapshotService(
 
             # Persist state and branch. Journal remains APPLYING until live verify.
             try:
+                assert_session_generation_active(
+                    self.session_id,
+                    expected_generation=expected_lifecycle_generation,
+                )
                 await self._persist_restored_state(restored_state)
             except Exception as exc:
                 failure = {
@@ -735,19 +777,22 @@ class SnapshotService(
 
             # Only after live verification: HMAC-signed COMMITTED with proof.
             try:
-                from backend.services.session_lifecycle import (
-                    assert_session_generation_active,
-                    lifecycle_file_lock,
-                )
+                from backend.services.session_lifecycle import lifecycle_file_lock
 
                 with lifecycle_file_lock(self.session_id):
-                    assert_session_generation_active(self.session_id)
+                    assert_session_generation_active(
+                        self.session_id,
+                        expected_generation=expected_lifecycle_generation,
+                    )
                     await self.restore_coordinator.commit(
                         transaction_id,
                         self.paths,
                         verification_proof=verification_proof,
                     )
-                    assert_session_generation_active(self.session_id)
+                    assert_session_generation_active(
+                        self.session_id,
+                        expected_generation=expected_lifecycle_generation,
+                    )
             except Exception as exc:
                 failure = {
                     "code": "COMMIT_FAILED",

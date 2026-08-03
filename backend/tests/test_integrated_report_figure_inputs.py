@@ -1,5 +1,8 @@
 """The PI integrated-report prompt sees only figures the report can render."""
 
+import hashlib
+from pathlib import Path
+
 import pytest
 from PIL import Image
 
@@ -20,12 +23,19 @@ def _render(path):
 
 def _figure(name, status, *, png_path="", figure_type="barplot",
             description="bar-plot metadata", layout_violations=None):
+    resolved_path = png_path or f"/tmp/{name}.jpg"
+    render_sha256 = (
+        hashlib.sha256(Path(resolved_path).read_bytes()).hexdigest()
+        if Path(resolved_path).is_file() else "1" * 64
+    )
     return PublicationFigure(
         name=name,
         description=description,
         figure_type=figure_type,
-        png_path=png_path or f"/tmp/{name}.jpg",
+        png_path=resolved_path,
         pdf_path=f"/tmp/{name}.pdf",
+        render_sha256=render_sha256,
+        pdf_sha256="2" * 64,
         review_status=status,
         layout_violations=layout_violations or [],
     )

@@ -33,6 +33,14 @@ describe('transformLoadResponse', () => {
     expect(result.sessionUpdates.publicationTables).toEqual([])
   })
 
+  it('preserves the restored report lineage', () => {
+    const result = transformLoadResponse({
+      ...MINIMAL_RESPONSE,
+      restore_branch_id: 'branch/A',
+    })
+    expect(result.sessionUpdates.restoreBranchId).toBe('branch/A')
+  })
+
   it('does not include keys for missing fields', () => {
     const { round_results: _rr, data_files: _df, publication_figures: _pf, publication_tables: _pt, graphic_abstract: _ga, final_summary: _fs, integrated_report: _ir, ...rest } = MINIMAL_RESPONSE
     const result = transformLoadResponse(rest)

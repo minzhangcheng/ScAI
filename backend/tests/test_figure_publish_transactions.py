@@ -623,6 +623,87 @@ def test_two_stale_workers_merge_two_transactions_from_latest_session(
     ]
 
 
+def test_disk_transaction_recovery_preserves_live_unsaved_invalidation(
+    tmp_path, monkeypatch,
+):
+    """Recovery patches transaction fields without replacing live records."""
+    from backend.config import _config
+    from backend.services import session_lifecycle, session_store
+
+    session_root = tmp_path / "sessions"
+    monkeypatch.setattr(_config, "SESSION_DIR", session_root)
+    monkeypatch.setattr(session_lifecycle, "SESSION_DIR", session_root)
+    monkeypatch.setattr(session_lifecycle, "UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(session_lifecycle, "WORKSPACE_DIR", tmp_path / "workspace")
+    monkeypatch.setattr(session_lifecycle, "REPORTS_DIR", tmp_path / "reports")
+    monkeypatch.setattr(session_lifecycle, "STATE_DIR", tmp_path / "states")
+    session_lifecycle._locks.clear()
+
+    workspace = _config.get_session_workspace("session-tx")
+    case = _setup_attempt(workspace, "attempt-invalidation", "stale-input")
+    tx._release_publish_locks(case["new"].render_attempt_id or "")
+    session_store.save_session_to_disk(case["state"].id, case["state"])
+
+    live = case["state"].model_copy(deep=True)
+    live_old = next(item for item in live.publication_figures if item.id == case["old"].id)
+    live_old.is_current = False
+    live_old.invalidated_at = live_old.created_at
+    live_old.invalidation_reason = "expression representation changed"
+    monkeypatch.setattr(tx, "_PROCESS_TOKEN", "restarted-worker")
+
+    assert session_store._recover_publication_transactions_under_file_lock(
+        live.id, live
+    )
+
+    recovered_old = next(
+        item for item in live.publication_figures if item.id == case["old"].id
+    )
+    recovered_attempt = next(
+        item for item in live.publication_figures if item.id == case["new"].id
+    )
+    assert recovered_old.is_current is False
+    assert recovered_old.invalidated_at == live_old.invalidated_at
+    assert recovered_old.invalidation_reason == "expression representation changed"
+    assert recovered_attempt.producer_status == "abandoned"
+    assert recovered_attempt.png_path == ""
+
+    persisted = session_store.load_session_from_disk(live.id)
+    assert persisted is not None
+    persisted_attempt = next(
+        item for item in persisted.publication_figures if item.id == case["new"].id
+    )
+    assert persisted_attempt.producer_status == "abandoned"
+
+
+def test_publication_recovery_merge_does_not_restore_unchanged_disk_only_record(
+    tmp_path,
+):
+    """Only records created by recovery may be appended to the live list."""
+    from backend.services.session_store import _merge_publication_recovery
+
+    jpg = tmp_path / "figure.jpg"
+    pdf = tmp_path / "figure.pdf"
+    _write_pair(jpg, pdf, color=(10, 20, 30))
+    disk_only = _record(
+        record_id="removed-live-record",
+        jpg=jpg,
+        pdf=pdf,
+        producer_status="published",
+        head=True,
+    )
+    before = AnalysisState(
+        id="session-tx",
+        user_id="user",
+        publication_figures=[disk_only],
+    )
+    recovered = before.model_copy(deep=True)
+    live = AnalysisState(id="session-tx", user_id="user")
+
+    _merge_publication_recovery(live, before, recovered)
+
+    assert live.publication_figures == []
+
+
 @pytest.mark.parametrize("hidden_root", ["quarantine", "attempts", "locks"])
 def test_hidden_root_symlinks_are_never_followed_by_transaction_gc(
     tmp_path, monkeypatch, hidden_root,

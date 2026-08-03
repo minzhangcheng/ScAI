@@ -51,6 +51,70 @@ _TERMINAL_STATUSES = frozenset({
     TaskStatus.COMPLETED,
 })
 
+_PUBLICATION_RECOVERY_FIELDS = frozenset({
+    "png_path",
+    "pdf_path",
+    "png_base64",
+    "render_sha256",
+    "preview_sha256",
+    "pdf_sha256",
+    "producer_status",
+    "is_published_head",
+    "supersedes_id",
+    "revision_of_id",
+})
+
+
+def _merge_publication_recovery(
+    live_state: AnalysisState,
+    before_recovery: AnalysisState,
+    recovered_state: AnalysisState,
+) -> None:
+    """Apply only transaction-owned changes to an existing live state.
+
+    The disk copy is the authority for crash journals, but not for unrelated
+    in-memory edits made since its last throttled save. In particular,
+    ``is_current`` and invalidation metadata must never be rolled back here.
+    """
+    before_by_id = {
+        str(item.id): item for item in before_recovery.publication_figures
+    }
+    live_by_id = {str(item.id): item for item in live_state.publication_figures}
+    for recovered in recovered_state.publication_figures:
+        record_id = str(recovered.id)
+        live = live_by_id.get(record_id)
+        before = before_by_id.get(record_id)
+        if live is None:
+            # Only a record reconstructed by recovery is itself part of the
+            # transaction delta.  An unchanged disk-only record must not
+            # repopulate a live list that deliberately no longer contains it.
+            if before is not None:
+                continue
+            copied = recovered.model_copy(deep=True)
+            live_state.publication_figures.append(copied)
+            live_by_id[record_id] = copied
+            continue
+        for field in _PUBLICATION_RECOVERY_FIELDS:
+            recovered_value = getattr(recovered, field, None)
+            if before is not None and getattr(before, field, None) == recovered_value:
+                continue
+            setattr(live, field, recovered_value)
+
+    live_legacy_ids = {
+        str(item.id) for item in (live_state.legacy_artifacts or [])
+    }
+    for recovered in recovered_state.legacy_artifacts or []:
+        if str(recovered.id) in live_legacy_ids:
+            continue
+        live_state.legacy_artifacts.append(recovered.model_copy(deep=True))
+        live_legacy_ids.add(str(recovered.id))
+    recovered_version = recovered_state.artifact_registry_version
+    if recovered_version is not None:
+        live_version = live_state.artifact_registry_version
+        live_state.artifact_registry_version = max(
+            int(live_version or 0), int(recovered_version)
+        )
+
 
 def mark_recovery_blocked(
     session_id: str,
@@ -478,6 +542,7 @@ def _recover_publication_transactions_under_file_lock(
             )
         latest = load_session_from_disk(session_id)
         recovery_state = latest if latest is not None else state.model_copy(deep=True)
+        before_recovery = recovery_state.model_copy(deep=True)
         assert_generation_writable(session_id, recovery_state)
         applied_transaction_ids: set[str] = set()
         mutated = recover_figure_publish_transactions(
@@ -505,17 +570,7 @@ def _recover_publication_transactions_under_file_lock(
                 get_session_workspace(session_id) / "figures",
                 applied_transaction_ids,
             )
-        # The caller may itself be a stale cache object.  Publication recovery is
-        # the only state owned by this boundary, so merge those canonical fields
-        # back without replacing unrelated in-memory workflow state.
-        state.publication_figures = [
-            item.model_copy(deep=True)
-            for item in recovery_state.publication_figures
-        ]
-        state.legacy_artifacts = [
-            item.model_copy(deep=True) for item in recovery_state.legacy_artifacts
-        ]
-        state.artifact_registry_version = recovery_state.artifact_registry_version
+        _merge_publication_recovery(state, before_recovery, recovery_state)
         return mutated or inventory_migrated
 
 

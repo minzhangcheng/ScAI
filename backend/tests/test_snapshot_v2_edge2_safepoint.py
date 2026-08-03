@@ -86,6 +86,7 @@ class _StatusOnlyService:
         *,
         job_transaction_id=None,
         status_callback=None,
+        expected_lifecycle_generation=None,
     ):
         from backend.services.snapshot_v2.models import SnapshotTransactionRecord
 

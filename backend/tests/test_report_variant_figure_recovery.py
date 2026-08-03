@@ -33,6 +33,7 @@ def _state_with_overwritten_record(tmp_path: Path, session_id: str):
         png_base64=base64.b64encode(preview).decode(),
         render_sha256=hashlib.sha256(original).hexdigest(),
         preview_sha256=hashlib.sha256(preview).hexdigest(),
+        pdf_sha256="2" * 64,
         review_status=FigureReviewStatus.APPROVED,
         round_number=1,
     )

@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Form, HTTPException, Request, UploadFile, File
 from fastapi.responses import JSONResponse
 
-from backend.config import get_session_workspace, get_session_reports, get_session_uploads, get_session_states, PI_AGENT_NAME
+from backend.config import get_session_workspace, get_session_uploads, get_session_states, PI_AGENT_NAME
 from backend.models.schemas import WebSocketMessage, AgentType, DataFile, AnalysisState
 from backend.services.session_store import ensure_session_loaded, async_save_session, update_session_cache
 from backend.state import (
@@ -27,6 +27,7 @@ from backend.utils.files import safe_filename, validate_session_id
 from backend.utils.upload import stream_save_file
 from backend.utils.settings_provider import AgentSettingsProvider
 from backend.utils.sandbox import _TPL_NOOP_INSTALL
+from backend.services.report.paths import resolve_published_report_dir
 
 
 logger = logging.getLogger(__name__)
@@ -98,7 +99,12 @@ def _build_chat_context(state: Any) -> tuple:
 
     _add_pngs(get_session_workspace(state.id))
     _add_pngs(get_session_workspace(state.id) / "figures")
-    _add_pngs(get_session_reports(state.id) / "figures")
+    _add_pngs(
+        resolve_published_report_dir(
+            state.id,
+            getattr(state, "restore_branch_id", None),
+        ) / "figures"
+    )
 
     if figure_inventory:
         parts.append(f"\nAvailable Figures ({len(figure_inventory)} on disk):")

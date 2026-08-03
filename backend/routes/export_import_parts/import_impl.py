@@ -23,6 +23,9 @@ from backend.config import (
 )
 from backend.models.schemas import AnalysisState, APIResponse
 from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
+from backend.services.report.output_generation import (
+    validate_and_rebind_imported_reports,
+)
 from backend.services.snapshot_v2.checkpoint_paths import (
     CHECKPOINT_SQLITE_FILENAME,
     checkpoint_sqlite_path,
@@ -827,6 +830,14 @@ def _import_tar_gz(
         if outcome is not None:
             outcome["session_id"] = session_id
             outcome["archive_session_id"] = archive_session_id
+        if import_job_id:
+            job = _import_jobs.get(import_job_id)
+            if job is not None:
+                # Publish ownership as soon as the lifecycle generation is
+                # claimed. Account cleanup can then cancel the producer and
+                # report the exact pending generation instead of overlooking
+                # an import that is not listable yet.
+                job["session_id"] = session_id
 
     _check_disk_space()
 
@@ -1006,10 +1017,11 @@ def _import_tar_gz(
     # tests for them below.
     imported_live_runtime = wrote_sandbox_pkl or wrote_runtime_h5ad_manifest
     if session_id:
-        if wrote_sandbox_pkl:
-            _resign_imported_live_pkl(session_id)
         if not imported_live_runtime:
             _drop_kernelless_checkpoints(session_id, notify=_note_skip)
+        validate_and_rebind_imported_reports(get_session_reports(session_id))
+        if wrote_sandbox_pkl:
+            _resign_imported_live_pkl(session_id)
 
     if state_json_data is None:
         if skipped["snapshot_v2"]:
@@ -1170,7 +1182,6 @@ def _import_zip(content: bytes, user_id: str, trust: bool = False) -> AnalysisSt
                 if trust:
                     logger.warning(f"Restoring sandbox pickle from zip (trust=true): {pkl_path}")
                     (states_dir / f"{session_id}_session.pkl").write_bytes(zf.read(pkl_path))
-                    _resign_imported_live_pkl(session_id)
                     wrote_sandbox_pkl = True
                 else:
                     logger.warning(f"Skipping sandbox pickle from imported zip (untrusted): {pkl_path}")
@@ -1187,6 +1198,10 @@ def _import_zip(content: bytes, user_id: str, trust: bool = False) -> AnalysisSt
             _extract_tree(f"{archive_session_id}/uploads/", get_session_uploads(session_id))
             _extract_tree(f"{archive_session_id}/reports/", get_session_reports(session_id))
             _extract_tree(f"{archive_session_id}/blobs/", session_dir / "blobs")
+
+        validate_and_rebind_imported_reports(get_session_reports(session_id))
+        if wrote_sandbox_pkl:
+            _resign_imported_live_pkl(session_id)
 
         state = AnalysisState(**inline_blobs(state_data, get_session_dir(session_id) / "blobs"))
         _finalize_imported_state(state, imported_runtime=wrote_sandbox_pkl)

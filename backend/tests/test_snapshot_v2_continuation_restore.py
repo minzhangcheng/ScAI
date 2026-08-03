@@ -431,6 +431,47 @@ class TestActivate:
         assert analysis_state.restore_branch_id == "restore-tx-abc"
         assert analysis_state.restore_branch_label == "branch-snap-1"
 
+    def test_activate_failure_leaves_entire_analysis_state_unchanged(
+        self, v2_paths, monkeypatch,
+    ):
+        """Fallible branch cloning must complete before state publication."""
+        from backend.services.snapshot_v2.dispatcher import (
+            ContinuationDispatcher,
+            StagedCheckpoint,
+        )
+        from backend.services.snapshot_v2.object_store import ObjectStore
+
+        dispatcher = ContinuationDispatcher(ObjectStore(v2_paths))
+        analysis_state = _make_analysis_state(
+            restore_resume_kind="graph_node",
+            restore_resume_node="pi_synthesis",
+            restore_branch_id=None,
+            restore_branch_label=None,
+            last_restored_snapshot_id="old-snapshot",
+            sandbox_state={"planning_stage": "full"},
+        )
+        before = analysis_state.model_dump(mode="python")
+        staged = StagedCheckpoint(
+            kind="idle",
+            branch_id="restore-tx-atomic",
+            branch_label="branch-snap-atomic",
+            parent_snapshot_id="snap-atomic",
+            transaction_id="tx-atomic",
+        )
+
+        def _fail_figure_clone(*_args, **_kwargs):
+            raise RuntimeError("figure archive failed")
+
+        monkeypatch.setattr(
+            "backend.services.report.lineage.clone_publication_figures_for_branch",
+            _fail_figure_clone,
+        )
+
+        with pytest.raises(RuntimeError, match="figure archive failed"):
+            dispatcher.activate(analysis_state, staged)
+
+        assert analysis_state.model_dump(mode="python") == before
+
     def test_activate_semantic_gate_sets_fields(self, v2_paths):
         from backend.services.snapshot_v2.object_store import ObjectStore
         from backend.services.snapshot_v2.dispatcher import ContinuationDispatcher

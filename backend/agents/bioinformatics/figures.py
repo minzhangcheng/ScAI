@@ -659,7 +659,9 @@ class FiguresMixin:
         # Review events intentionally omit the large preview and the frontend
         # fetches it through the figure API; without this upsert that request
         # races the review callback and returns 404 (or shows an older revision).
-        self._upsert_publication_figure(state, figure)
+        self._upsert_publication_figure(
+            state, figure, refresh_integrity=False,
+        )
         try:
             await self._persist_figure_record_boundary(state, figures_dir)
         except Exception as exc:
@@ -1513,9 +1515,12 @@ class FiguresMixin:
             },
         )
 
-    def _upsert_publication_figure(self, state, figure):
+    def _upsert_publication_figure(
+        self, state, figure, *, refresh_integrity: bool = True,
+    ):
         """Update one attempt and advance its published head only when eligible."""
-        self._refresh_figure_integrity_hashes(figure)
+        if refresh_integrity:
+            self._refresh_figure_integrity_hashes(figure)
         existing_idx = next(
             (
                 i for i, f in enumerate(state.publication_figures)
@@ -1748,7 +1753,8 @@ Return only the Python code:"""
                     text_prompt=prompt,
                     images=[image_base64],
                     temperature=revision_temp,
-                    max_tokens=32768
+                    max_tokens=32768,
+                    system_prompt=self.system_prompt,
                 )
             except Exception as vision_err:
                 _is_vision_unsupported = (

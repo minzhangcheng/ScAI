@@ -106,8 +106,15 @@ class _OpenedFrontendFileResponse(FileResponse):
 
 
 def _safe_relative_parts(relative: str) -> tuple[str, ...] | None:
-    parts = tuple(Path(relative).parts)
-    if not parts or any(part in {"", ".", ".."} for part in parts):
+    if "\x00" in relative:
+        return None
+    try:
+        parts = tuple(Path(relative).parts)
+    except (ValueError, OSError):
+        return None
+    if not parts or any(
+        part in {"", ".", ".."} or "\x00" in part for part in parts
+    ):
         return None
     return parts
 
@@ -156,7 +163,7 @@ def _open_regular_beneath(
         opened_fd = file_fd
         file_fd = None
         return opened_fd, stat_result
-    except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
+    except (OSError, ValueError):
         return None
     finally:
         if file_fd is not None:

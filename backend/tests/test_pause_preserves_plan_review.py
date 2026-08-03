@@ -36,7 +36,7 @@ async def test_pause_keeps_plan_review_action(monkeypatch, tmp_path):
     monkeypatch.setattr(SingleCellAnalysisWorkflow, "ensure_agent_ready", lambda self, agent_name: None)
     monkeypatch.setattr(SingleCellAnalysisWorkflow, "_build_graph", lambda self: None)
 
-    from backend.models.schemas import AnalysisState
+    from backend.models.schemas import AnalysisState, TaskStatus
 
     workflow = SingleCellAnalysisWorkflow(config=SystemConfig(), session_id="test-pause-session")
 
@@ -60,6 +60,13 @@ async def test_pause_keeps_plan_review_action(monkeypatch, tmp_path):
     await workflow.initialize()
 
     workflow._plan_review_action = {"action": "approve"}
-    await workflow.pause(thread_id="test-thread")
+    workflow.sandbox = None
+    state.status = TaskStatus.RUNNING
+    result = await workflow.pause(
+        thread_id="test-thread", analysis_state=state,
+    )
 
     assert workflow._plan_review_action == {"action": "approve"}
+    assert result["success"] is True
+    assert result["status"] == TaskStatus.PAUSED.value
+    assert state.status is TaskStatus.PAUSED

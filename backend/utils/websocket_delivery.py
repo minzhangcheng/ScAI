@@ -20,6 +20,13 @@ from backend.utils.asyncio_tasks import consume_current_cancellation_request
 logger = logging.getLogger(__name__)
 Channel = Literal["analysis", "report"]
 
+# Network backpressure must not hold a connection lock forever. Registration
+# publishes a replacement without waiting for this deadline, while delivery
+# ordering lets the replacement wait only for this bounded old-generation send.
+_WEBSOCKET_SEND_TIMEOUT_SECONDS = 10.0
+_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 2.0
+_WEBSOCKET_RETIRE_LOCK_TIMEOUT_SECONDS = 12.0
+
 
 @dataclass(eq=False)
 class WebSocketConnection:
@@ -31,6 +38,7 @@ class WebSocketConnection:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     closed: bool = False
     socket_closed: bool = False
+    replacement_close_code: int | None = None
 
 
 _LOOP_SLOTS_ATTR = "_scai_websocket_delivery_slots"
@@ -102,6 +110,7 @@ def _install_current_connection(
         _current_connections[key] = connection
         if outgoing is not None:
             outgoing.closed = True
+            outgoing.replacement_close_code = 1000
         _legacy_registry(key[0])[key[1]] = websocket
         return connection, outgoing
 
@@ -174,61 +183,48 @@ async def _delivery_turn(key: tuple[Channel, str]):
 async def register_websocket(
     channel: Channel, session_id: str, websocket: Any
 ) -> WebSocketConnection:
-    """Install a new generation and safely retire the previous connection.
+    """Publish a new generation without waiting on old network I/O.
 
-    Registration takes the outgoing connection's lock before replacing the
-    registry slot.  ``send_connection_json`` takes that same lock before its
-    current-generation check and holds it through ``send_json``.  Consequently
-    an old send either finishes before the replacement becomes visible or sees
-    that it is stale and does not send; it cannot pass the check, be replaced,
-    and then write to the old socket.
+    ``_install_current_connection`` marks the displaced generation closed in
+    the same atomic registry section that publishes the replacement. Sends
+    which have not acquired the old connection lock therefore fail their
+    current-generation check. A send already in flight may finish only on its
+    own old socket; the channel-wide delivery turn prevents the new socket from
+    overtaking it, and the send deadline bounds that handoff. Retirement is
+    best-effort on the displaced connection's owner loop and is never awaited
+    by a registrar that may hold a session lifecycle lock.
     """
     key = (channel, session_id)
     slots = _slots_for_running_loop()
     owner_loop = asyncio.get_running_loop()
-    while True:
-        async with _registry_lock_for_running_loop():
-            outgoing = slots.get(key)
+    async with _registry_lock_for_running_loop():
+        connection, displaced = _install_current_connection(
+            key, websocket, owner_loop
+        )
+        slots[key] = connection
 
-        if outgoing is None:
-            connection, displaced = _install_current_connection(
-                key, websocket, owner_loop
+    if displaced is not None:
+        displaced_loop = displaced.owner_loop()
+        if displaced_loop is owner_loop:
+            retire_task = asyncio.create_task(
+                _retire_connection_on_owner(displaced),
+                name=(
+                    f"websocket-retire:{channel}:{session_id}:"
+                    f"{displaced.generation}"
+                ),
             )
-            async with _registry_lock_for_running_loop():
-                slots[key] = connection
-            if displaced is not None:
-                displaced_loop = displaced.owner_loop()
-                if displaced_loop is owner_loop:
-                    await _retire_connection_on_owner(displaced)
-                elif displaced_loop is not None and displaced_loop.is_running():
-                    coroutine = _retire_connection_on_owner(displaced)
-                    try:
-                        future = asyncio.run_coroutine_threadsafe(
-                            coroutine, displaced_loop
-                        )
-                    except RuntimeError:
-                        coroutine.close()
-                    else:
-                        future.add_done_callback(_consume_thread_future)
-            return connection
-
-        async with outgoing.lock:
-            async with _registry_lock_for_running_loop():
-                if slots.get(key) is not outgoing:
-                    # Another registrar or the outgoing handler won the race.
-                    # Re-resolve the current generation instead of acting on a
-                    # stale token.
-                    continue
-                if not _is_globally_current(outgoing):
-                    slots.pop(key, None)
-                    continue
-                connection, displaced = _install_current_connection(
-                    key, websocket, owner_loop
+            retire_task.add_done_callback(_consume_thread_future)
+        elif displaced_loop is not None and displaced_loop.is_running():
+            coroutine = _retire_connection_on_owner(displaced)
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    coroutine, displaced_loop
                 )
-                slots[key] = connection
-
-            await _close_socket_locked(displaced or outgoing, code=1000)
-            return connection
+            except RuntimeError:
+                coroutine.close()
+            else:
+                future.add_done_callback(_consume_thread_future)
+    return connection
 
 
 def _consume_thread_future(future: Future[Any]) -> None:
@@ -251,7 +247,17 @@ async def _close_socket_locked(
     if connection.socket_closed:
         return
     try:
-        await connection.websocket.close(code=code)
+        await asyncio.wait_for(
+            connection.websocket.close(code=code),
+            timeout=_WEBSOCKET_CLOSE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "WebSocket close timed out channel=%s session=%s generation=%s",
+            connection.channel,
+            connection.session_id,
+            connection.generation,
+        )
     except (WebSocketDisconnect, RuntimeError):
         pass
     except Exception as exc:
@@ -268,14 +274,33 @@ async def _close_socket_locked(
 async def _retire_connection_on_owner(connection: WebSocketConnection) -> None:
     """Close a displaced socket on the event loop that owns its lock."""
     key = (connection.channel, connection.session_id)
-    async with connection.lock:
-        connection.closed = True
+    connection.closed = True
+    acquired = False
+    try:
+        try:
+            await asyncio.wait_for(
+                connection.lock.acquire(),
+                timeout=_WEBSOCKET_RETIRE_LOCK_TIMEOUT_SECONDS,
+            )
+            acquired = True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "WebSocket retirement timed out channel=%s session=%s "
+                "generation=%s",
+                connection.channel,
+                connection.session_id,
+                connection.generation,
+            )
+            return
         await _close_socket_locked(connection, code=1000)
-    owner_loop = connection.owner_loop()
-    if owner_loop is asyncio.get_running_loop():
-        slots = getattr(owner_loop, _LOOP_SLOTS_ATTR, None)
-        if isinstance(slots, dict) and slots.get(key) is connection:
-            slots.pop(key, None)
+    finally:
+        if acquired:
+            connection.lock.release()
+        owner_loop = connection.owner_loop()
+        if owner_loop is asyncio.get_running_loop():
+            slots = getattr(owner_loop, _LOOP_SLOTS_ATTR, None)
+            if isinstance(slots, dict) and slots.get(key) is connection:
+                slots.pop(key, None)
 
 
 async def _remove_if_current(connection: WebSocketConnection) -> None:
@@ -327,7 +352,10 @@ async def unregister_websocket(
         return
     async with connection.lock:
         if close:
-            await _close_socket_locked(connection, code=code)
+            await _close_socket_locked(
+                connection,
+                code=connection.replacement_close_code or code,
+            )
         connection.closed = True
     await _remove_if_current(connection)
 
@@ -338,17 +366,15 @@ async def send_connection_json(
     """Send through one exact generation, serialized with its close operation."""
     if connection is None:
         return False
-    key = (connection.channel, connection.session_id)
-    target = _globally_current_connection(key)
-    if target is None:
+    if connection.closed or not _is_globally_current(connection):
         return False
-    owner_loop = target.owner_loop()
+    owner_loop = connection.owner_loop()
     if owner_loop is None or owner_loop.is_closed():
         return False
     if owner_loop is not asyncio.get_running_loop():
         if not owner_loop.is_running():
             return False
-        coroutine = _send_current_connection_json(target, payload)
+        coroutine = _send_current_connection_json(connection, payload)
         try:
             concurrent = asyncio.run_coroutine_threadsafe(coroutine, owner_loop)
         except RuntimeError:
@@ -362,7 +388,7 @@ async def send_connection_json(
             # a payload already handed to the current connection.
             concurrent.add_done_callback(_consume_thread_future)
             raise
-    return await _send_current_connection_json(target, payload)
+    return await _send_current_connection_json(connection, payload)
 
 
 async def _send_current_connection_json(
@@ -376,7 +402,10 @@ async def _send_current_connection_json(
             if connection.closed or not _is_globally_current(connection):
                 return False
             try:
-                await connection.websocket.send_json(payload)
+                await asyncio.wait_for(
+                    connection.websocket.send_json(payload),
+                    timeout=_WEBSOCKET_SEND_TIMEOUT_SECONDS,
+                )
                 # A cross-loop replacement can become current while the socket
                 # send is suspended. The lease keeps every new-generation send
                 # behind this one; report False because this generation no
@@ -386,6 +415,15 @@ async def _send_current_connection_json(
                     connection.closed = True
                     await _close_socket_locked(connection, code=1000)
                 return delivered_current
+            except asyncio.TimeoutError:
+                connection.closed = True
+                logger.warning(
+                    "WebSocket send timed out channel=%s session=%s generation=%s",
+                    connection.channel,
+                    connection.session_id,
+                    connection.generation,
+                )
+                await _close_socket_locked(connection, code=1011)
             except asyncio.CancelledError as exc:
                 connection.closed = True
                 cancellation = exc

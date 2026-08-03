@@ -250,17 +250,33 @@ class ChunkedUploadManager:
         final_path: Path,
     ) -> tuple[int, str]:
         """Assemble one upload in a worker that its caller always joins."""
+        meta = json.loads(
+            self._get_upload_meta_path(upload_id).read_text(encoding="utf-8")
+        )
+        total_size = int(meta.get("total_size") or 0)
         digest = hashlib.sha256()
         with final_path.open("wb") as out_f:
             for index in range(total_chunks):
                 chunk_path = self._get_chunk_path(upload_id, index)
+                expected_size = (
+                    self.chunk_size
+                    if index < total_chunks - 1
+                    else total_size - self.chunk_size * (total_chunks - 1)
+                )
+                chunk_bytes = 0
                 with chunk_path.open("rb") as chunk_f:
                     while True:
                         data = chunk_f.read(1024 * 1024)
                         if not data:
                             break
+                        chunk_bytes += len(data)
                         digest.update(data)
                         out_f.write(data)
+                if chunk_bytes != expected_size:
+                    raise ValueError(
+                        f"Chunk size mismatch at index {index}: expected "
+                        f"{expected_size}, got {chunk_bytes}"
+                    )
         return final_path.stat().st_size, digest.hexdigest()
 
     @staticmethod
@@ -289,7 +305,8 @@ class ChunkedUploadManager:
         total_size: int,
         total_chunks: int,
         file_type: str,
-        group: Optional[str] = None
+        group: Optional[str] = None,
+        expected_sha256: Optional[str] = None,
     ) -> str:
         """
         Initialize a chunked upload and return upload_id.
@@ -311,6 +328,10 @@ class ChunkedUploadManager:
             raise ValueError("Unsupported file_type")
         if group not in self.ALLOWED_GROUPS:
             raise ValueError("Unsupported upload group")
+        if expected_sha256 is not None:
+            expected_sha256 = str(expected_sha256).strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+                raise ValueError("expected_sha256 must be a 64-character hex digest")
         expected_chunks = (total_size + self.chunk_size - 1) // self.chunk_size
         if total_chunks != expected_chunks:
             raise ValueError(
@@ -340,6 +361,7 @@ class ChunkedUploadManager:
                 "total_chunks": total_chunks,
                 "file_type": file_type,
                 "group": group,
+                "expected_sha256": expected_sha256,
                 "received_chunks": [],
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat(),
@@ -666,6 +688,24 @@ class ChunkedUploadManager:
                     meta["staged_sha256"] = staged_sha256
                     meta["staged_at"] = datetime.now().isoformat()
                     await self._write_upload_meta_locked(upload_id, meta)
+
+            expected_sha256 = str(
+                meta.get("expected_sha256") or ""
+            ).strip().lower()
+            if expected_sha256 and staged_sha256 != expected_sha256:
+                logger.error(
+                    "SHA-256 mismatch for upload %s: expected %s, got %s",
+                    upload_id,
+                    expected_sha256,
+                    staged_sha256,
+                )
+                staging_path.unlink(missing_ok=True)
+                await self._cleanup_loaded_upload_locked(upload_id, meta)
+                return {
+                    "success": False,
+                    "error": "Whole-file SHA-256 mismatch",
+                    "integrity_mismatch": True,
+                }
 
             try:
                 await run_in_owned_thread(

@@ -102,6 +102,7 @@ async def retry_with_backoff(
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
     on_retry: Optional[Callable[[int, int, float, str, str], Awaitable[None]]] = None,
     non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
+    rate_limit_retries: Optional[int] = None,
 ):
     """
     Execute an async function with exponential backoff retry on timeout/connection errors
@@ -131,16 +132,32 @@ async def retry_with_backoff(
 
     json_error_count = 0
     rate_limit_attempt = 0  # independent 429 counter (see compute_rate_limit_delay)
+    rate_limit_budget = min(
+        max_retries if rate_limit_retries is None else max(0, rate_limit_retries),
+        len(RATE_LIMIT_DELAYS),
+    )
 
-    async def _notify_retry(attempt: int, delay: float, error_type: str):
+    async def _notify_retry(
+        attempt: int,
+        delay: float,
+        error_type: str,
+        callback_budget: Optional[int] = None,
+    ):
         """Fire the on_retry callback if provided, swallowing errors."""
         if on_retry is not None:
             try:
-                await on_retry(attempt, max_retries, delay, error_type, agent_name)
+                await on_retry(
+                    attempt,
+                    max_retries if callback_budget is None else callback_budget,
+                    delay,
+                    error_type,
+                    agent_name,
+                )
             except Exception:
                 pass  # Never let notification failure break retry logic
 
-    for attempt in range(effective_max + 1):
+    attempt = 0
+    while attempt <= effective_max:
         try:
             return await asyncio.wait_for(func(), timeout=request_timeout)
         except json.JSONDecodeError as e:
@@ -183,19 +200,28 @@ async def retry_with_backoff(
                     f"[{agent_name}] Hard quota exhausted (not retrying): {str(e)[:200]}"
                 )
                 break
-            delay = compute_rate_limit_delay(rate_limit_attempt, max_retries)
+            delay = compute_rate_limit_delay(
+                rate_limit_attempt, rate_limit_budget
+            )
             if delay is not None:
-                budget = min(max_retries, len(RATE_LIMIT_DELAYS))
                 logger.warning(
-                    f"[{agent_name}] Rate limited (429 retry {rate_limit_attempt + 1}/{budget}). "
+                    f"[{agent_name}] Rate limited (429 retry {rate_limit_attempt + 1}/{rate_limit_budget}). "
                     f"Retrying in {delay}s..."
                 )
-                await _notify_retry(attempt, delay, "RateLimitError")
+                await _notify_retry(
+                    rate_limit_attempt,
+                    delay,
+                    "RateLimitError",
+                    rate_limit_budget,
+                )
                 await asyncio.sleep(delay)
                 rate_limit_attempt += 1
+                continue
             else:
-                budget = min(max_retries, len(RATE_LIMIT_DELAYS))
-                logger.error(f"[{agent_name}] Rate limit exceeded after {budget} retries")
+                logger.error(
+                    f"[{agent_name}] Rate limit exceeded after "
+                    f"{rate_limit_budget} retries"
+                )
                 break  # stop spinning; fall through to UpstreamExhaustedError
         except Exception as e:
             # An already-exhausted upstream error (e.g. raised by a nested
@@ -235,10 +261,13 @@ async def retry_with_backoff(
                 )
                 await _notify_retry(attempt, delay, error_label)
                 await asyncio.sleep(delay)
+                attempt += 1
+                continue
             else:
                 logger.error(
                     f"[{agent_name}] Request failed after {current_max + 1} attempts: {type(e).__name__}: {str(e)}"
                 )
+                break
 
     raise UpstreamExhaustedError(
         f"[{agent_name}] Upstream LLM exhausted after {effective_max + 1} attempts. "

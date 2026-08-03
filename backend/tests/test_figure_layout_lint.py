@@ -426,6 +426,7 @@ def _figure(name, status=FigureReviewStatus.APPROVED, **kwargs):
     return PublicationFigure(
         name=name, description="", figure_type="other",
         png_path=f"{name}.jpg", pdf_path=f"{name}.pdf",
+        render_sha256="1" * 64, pdf_sha256="2" * 64,
         review_status=status, **kwargs,
     )
 

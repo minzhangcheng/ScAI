@@ -85,6 +85,7 @@ export interface SessionLoadResponse {
   integration_report_url?: string
   annotation_report_url?: string
   detailed_report_url?: string
+  restore_branch_id?: string | null
   annotation_state?: RawAnnotationState | null
   state_version?: number
   round_wait_seconds?: number

@@ -278,6 +278,7 @@ class InitChunkedUploadRequest(BaseModel):
     total_chunks: int
     file_type: str  # 'snrna_seq', 'loom', 'pathology', 'biochemistry'
     group: Optional[str] = None  # 'control' or 'treatment' for seq data
+    expected_sha256: str
 
 
 # ============== Upload Endpoints ==============
@@ -567,6 +568,12 @@ async def init_chunked_upload(session_id: str, request: Request, body: InitChunk
         raise HTTPException(status_code=400, detail="Unsupported file_type")
     if body.group not in _LEGACY_CHUNK_GROUPS:
         raise HTTPException(status_code=400, detail="Unsupported upload group")
+    expected_sha256 = body.expected_sha256.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise HTTPException(
+            status_code=400,
+            detail="expected_sha256 must be a 64-character hex digest",
+        )
     expected_chunks = (
         body.total_size + UPLOAD_CHUNK_SIZE - 1
     ) // UPLOAD_CHUNK_SIZE
@@ -588,6 +595,7 @@ async def init_chunked_upload(session_id: str, request: Request, body: InitChunk
                 total_chunks=body.total_chunks,
                 file_type=body.file_type,
                 group=body.group,
+                expected_sha256=expected_sha256,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

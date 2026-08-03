@@ -439,7 +439,8 @@ Please reply in JSON format:
                     text_prompt=overview_prompt,
                     images=[overview],
                     temperature=0.3,
-                    request_timeout=600.0  # 10 min for single overview image
+                    request_timeout=600.0,  # 10 min for single overview image
+                    system_prompt=self.system_prompt,
                 ),
                 image_label=image_info.filename,
                 step_label="overview analysis",
@@ -508,7 +509,8 @@ If no abnormality is visible in a tile, use the explicit finding "No abnormality
                             text_prompt=bt,
                             images=imgs,
                             temperature=0.3,
-                            request_timeout=to
+                            request_timeout=to,
+                            system_prompt=self.system_prompt,
                         ),
                         image_label=image_info.filename,
                         step_label=f"tile batch {batch_idx + 1}/{num_batches}",
@@ -770,7 +772,8 @@ Please reply in structured format.
                     model=self.model,
                     text_prompt=prompt,
                     images=tiles,
-                    temperature=0.3
+                    temperature=0.3,
+                    system_prompt=self.system_prompt,
                 ),
                 image_label=image_info.id,
                 step_label="targeted",

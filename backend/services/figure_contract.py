@@ -99,18 +99,18 @@ _LEGACY_FIGURE_OPTOUT_PATTERNS = (
 )
 _LEGACY_OPTIONAL_FIGURE_PATTERNS = (
     re.compile(
-        r"\boptional(?:ly)?\b.{0,60}\b(?:figure|figures|plot|plots|"
+        r"\boptional(?:ly)?\b[^.!?\n]{0,60}\b(?:figure|figures|plot|plots|"
         r"visuali[sz]ation|visuali[sz]ations|chart|charts)\b",
         re.I,
     ),
     re.compile(
         r"\b(?:figure|figures|plot|plots|visuali[sz]ation|visuali[sz]ations|"
-        r"chart|charts)\b.{0,60}\boptional\b",
+        r"chart|charts)\b[^.!?\n]{0,60}\boptional\b",
         re.I,
     ),
     re.compile(
         r"\b(?:figure|figures|plot|plots|visuali[sz]ation|visuali[sz]ations|"
-        r"chart|charts)\b.{0,40}\bif\s+(?:useful|helpful|needed|warranted|"
+        r"chart|charts)\b[^.!?\n]{0,40}\bif\s+(?:useful|helpful|needed|warranted|"
         r"informative|space permits|time permits)\b",
         re.I,
     ),
@@ -345,12 +345,17 @@ def legacy_figure_opt_out(step: Any) -> bool:
         return True
     if any(pattern.search(text) for pattern in _LEGACY_OPTIONAL_FIGURE_PATTERNS):
         return True
-    has_named_visual = any(
-        token in text
-        for _figure_type, tokens in _EXPLICIT_FIGURE_TOKENS
-        for token in tokens
-    )
-    return bool(has_named_visual and _LEGACY_OPTIONAL_QUALIFIER_RE.search(text))
+    # The fallback is clause-scoped. A qualifier in the following sentence
+    # ("Plot the UMAP. If useful, run ...") cannot waive the earlier promise.
+    for clause in re.split(r"[.!?\n]", text):
+        has_named_visual = any(
+            token in clause
+            for _figure_type, tokens in _EXPLICIT_FIGURE_TOKENS
+            for token in tokens
+        )
+        if has_named_visual and _LEGACY_OPTIONAL_QUALIFIER_RE.search(clause):
+            return True
+    return False
 
 
 def _visual_contract_signature(step: Any) -> str:
@@ -739,6 +744,17 @@ def _matches(requirement: RequiredFigure, figure: Any) -> bool:
             and figure_step is not None
             and int(figure_step) == int(requirement.plan_step_id)
         ):
+            return True
+        figure_plan_id = str(getattr(figure, "plan_id", "") or "").strip()
+        if (
+            figure_step is None
+            and figure_plan_id
+            and figure_plan_id == requirement.plan_id
+        ):
+            # Transitional records already carried a stable plan identity but
+            # predated step-level provenance. Type + exact plan identity are
+            # sufficient; inherited plans stay excluded because their missing
+            # step cannot be attributed safely to the revised requirement.
             return True
         if (
             requirement.wildcard_result_type

@@ -8,30 +8,45 @@ Extracted from backend/main.py to decouple report generation and serving route h
 import logging
 import os
 import asyncio
+import threading
+from collections import OrderedDict
 from pathlib import Path
+from typing import Any, Callable
 
 from datetime import datetime
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import Response
 
 from backend.config import WORKSPACE_DIR, UPLOAD_DIR, get_session_workspace
-from backend.models.schemas import AnalysisState, APIResponse, TaskStatus
+from backend.models.schemas import (
+    AnalysisState,
+    APIResponse,
+    LegacyArtifactRecord,
+    TaskStatus,
+)
 
-from backend.utils.files import validate_session_id
+from backend.utils.files import validate_path_within, validate_session_id
 from backend.utils.auth import require_session_ownership
 from ..serialization import serialize_round_results
 from backend.services.session_store import _async_save_session_under_lifecycle
 from backend.services.session_lifecycle import (
+    SessionGoneError,
     SessionGenerationError,
+    assert_session_generation_active,
     assert_generation_writable,
     get_lifecycle_lock,
+    lifecycle_file_lock,
 )
 from backend.state import sessions, state_lock, touch_access_time
-from backend.utils.asyncio_tasks import await_with_deferred_cancellation
+from backend.utils.asyncio_tasks import (
+    await_with_deferred_cancellation,
+    run_in_owned_thread,
+)
 from backend.services.report.artifacts import (
     archival_render_available,
-    eligible_artifact_by_id,
-    eligible_artifacts,
+    gallery_artifact_by_id,
+    gallery_artifacts,
+    has_blocking_layout_defects,
     resolve_legacy_artifact_pdf,
     resolve_legacy_artifact_render,
     resolve_archival_pdf,
@@ -42,11 +57,18 @@ from backend.services.report.figure_discovery import ensure_legacy_artifact_inve
 
 logger = logging.getLogger(__name__)
 
+_LEGACY_INVENTORY_CACHE_MAX = 64
+_legacy_inventory_cache: OrderedDict[
+    tuple[str, int, str], tuple[int, tuple[dict, ...]]
+] = OrderedDict()
+_legacy_inventory_cache_guard = threading.Lock()
+
 
 from .core import router
 
 
 async def _ensure_frozen_artifact_inventory(
+    session_id: str,
     state: AnalysisState,
     workspace: Path,
 ) -> None:
@@ -57,7 +79,127 @@ async def _ensure_frozen_artifact_inventory(
     Keeping the idempotent call here covers direct/internal callers without
     opening a second, route-local read-modify-write race.
     """
-    ensure_legacy_artifact_inventory(state, workspace)
+    if getattr(state, "artifact_registry_version", None) is not None:
+        return
+
+    generation = int(getattr(state, "lifecycle_generation", 0) or 0)
+    cache_key = (
+        str(session_id),
+        generation,
+        os.path.abspath(os.fspath(workspace)),
+    )
+    async with get_lifecycle_lock(session_id):
+        if getattr(state, "artifact_registry_version", None) is not None:
+            return
+        with _legacy_inventory_cache_guard:
+            cached = _legacy_inventory_cache.get(cache_key)
+            if cached is not None:
+                _legacy_inventory_cache.move_to_end(cache_key)
+        if cached is not None:
+            await run_in_owned_thread(
+                _apply_cached_legacy_inventory,
+                session_id,
+                generation,
+                state,
+                cached,
+            )
+            return
+
+        await run_in_owned_thread(
+            _scan_and_freeze_legacy_inventory,
+            session_id,
+            generation,
+            state,
+            workspace,
+            cache_key,
+        )
+
+
+def _with_generation_file_barrier(
+    session_id: str,
+    generation: int,
+    operation: Callable[[], Any],
+) -> Any:
+    """Run one bounded filesystem operation against an exact generation."""
+    if generation <= 0:
+        return operation()
+    with lifecycle_file_lock(session_id):
+        assert_session_generation_active(
+            session_id, expected_generation=generation,
+        )
+        result = operation()
+        assert_session_generation_active(
+            session_id, expected_generation=generation,
+        )
+        return result
+
+
+def _inventory_payload(state: AnalysisState) -> tuple[int, tuple[dict, ...]]:
+    version = int(getattr(state, "artifact_registry_version", 0) or 0)
+    records = tuple(
+        item.model_dump(mode="json")
+        for item in (getattr(state, "legacy_artifacts", None) or [])
+    )
+    return version, records
+
+
+def _remember_legacy_inventory(
+    cache_key: tuple[str, int, str],
+    frozen: tuple[int, tuple[dict, ...]],
+) -> None:
+    with _legacy_inventory_cache_guard:
+        # A lifecycle generation owns one compatibility scan. Remove older
+        # generations for the same session before retaining the bounded result
+        # used by concurrent/reloaded route state objects.
+        for key in list(_legacy_inventory_cache):
+            if key[0] == cache_key[0] and key != cache_key:
+                _legacy_inventory_cache.pop(key, None)
+        _legacy_inventory_cache[cache_key] = frozen
+        _legacy_inventory_cache.move_to_end(cache_key)
+        while len(_legacy_inventory_cache) > _LEGACY_INVENTORY_CACHE_MAX:
+            _legacy_inventory_cache.popitem(last=False)
+
+
+def _scan_and_freeze_legacy_inventory(
+    session_id: str,
+    generation: int,
+    state: AnalysisState,
+    workspace: Path,
+    cache_key: tuple[str, int, str],
+) -> tuple[int, tuple[dict, ...]]:
+    def scan():
+        ensure_legacy_artifact_inventory(state, workspace)
+        return _inventory_payload(state)
+
+    frozen = _with_generation_file_barrier(session_id, generation, scan)
+    # Store from the owned worker before cancellation is re-delivered to the
+    # awaiting route. A completed migration must remain single-flight even if
+    # the client that initiated it disconnected during the scan.
+    _remember_legacy_inventory(cache_key, frozen)
+    return frozen
+
+
+def _apply_cached_legacy_inventory(
+    session_id: str,
+    generation: int,
+    state: AnalysisState,
+    cached: tuple[int, tuple[dict, ...]],
+) -> None:
+    def apply() -> None:
+        version, raw_records = cached
+        existing = {
+            str(getattr(item, "id", "") or ""): item
+            for item in (getattr(state, "legacy_artifacts", None) or [])
+        }
+        for raw in raw_records:
+            record_id = str(raw.get("id") or "")
+            if record_id and record_id not in existing:
+                record = LegacyArtifactRecord.model_validate(raw)
+                state.legacy_artifacts.append(record)
+                existing[record_id] = record
+        state.artifact_registry_version = version
+
+    _with_generation_file_barrier(session_id, generation, apply)
 
 
 def _legacy_artifact_by_id(
@@ -73,6 +215,88 @@ def _legacy_artifact_by_id(
         ),
         None,
     )
+
+
+def _legacy_artifact_by_integrated_report_id(
+    state: AnalysisState,
+    artifact_id: str,
+    workspace: Path,
+    lineage_id: str,
+    *,
+    kind: str,
+):
+    """Resolve a pre-registry message ID through the frozen inventory.
+
+    Old integrated-report messages used an ephemeral workspace figure ID. The
+    message supplies only an alias: bytes are served exclusively through the
+    path and digest already frozen in ``LegacyArtifactRecord``.
+    """
+    workspace = workspace.resolve()
+    legacy_records = list(state.legacy_artifacts or [])
+    for message in state.realtime_messages or []:
+        message_type = (
+            getattr(message, "type", None)
+            if not isinstance(message, dict)
+            else message.get("type")
+        )
+        content = (
+            getattr(message, "content", None)
+            if not isinstance(message, dict)
+            else message.get("content")
+        )
+        if message_type != "integrated_report" or not isinstance(content, dict):
+            continue
+        for raw in content.get("figures") or []:
+            if not isinstance(raw, dict):
+                continue
+            if str(raw.get("id") or "") != str(artifact_id):
+                continue
+            # 0.38.9 added this discriminator; older workspace entries had no
+            # flag.  An explicit True is rejected, while a missing flag still
+            # has to resolve to an unregistered, frozen workspace inventory
+            # record below.
+            publication_flag = raw.get("is_publication")
+            if publication_flag is not None and publication_flag is not False:
+                continue
+            raw_path = str(raw.get("png_path") or "")
+            if not raw_path:
+                continue
+            candidate = Path(raw_path)
+            if not candidate.is_absolute():
+                candidate = workspace / candidate
+            try:
+                resolved = validate_path_within(candidate, workspace)
+                relative = resolved.relative_to(workspace).as_posix()
+            except Exception:
+                continue
+            legacy = next(
+                (
+                    item for item in legacy_records
+                    if str(getattr(item, "relative_path", "") or "") == relative
+                    and str(getattr(item, "lineage_id", None) or "main")
+                    == lineage_id
+                ),
+                None,
+            )
+            if legacy is None:
+                continue
+            message_render_digest = str(raw.get("render_sha256") or "").strip()
+            if (
+                message_render_digest
+                and message_render_digest
+                != str(getattr(legacy, "render_sha256", "") or "")
+            ):
+                continue
+            if kind == "pdf":
+                message_pdf_digest = str(raw.get("pdf_sha256") or "").strip()
+                if (
+                    message_pdf_digest
+                    and message_pdf_digest
+                    != str(getattr(legacy, "pdf_sha256", "") or "")
+                ):
+                    continue
+            return legacy
+    return None
 
 
 def _immutable_download_response(
@@ -95,6 +319,153 @@ def _immutable_download_response(
     # route callers while ensuring ASGI delivery never reopens this path.
     response.path = os.fspath(source_path)
     return response
+
+
+def _prepare_publication_download_sync(
+    state: AnalysisState,
+    figure_id: str,
+    workspace: Path,
+    target_lineage: str,
+    *,
+    kind: str,
+) -> tuple[bytes, Path, str]:
+    """Resolve and verify one immutable response body off the event loop."""
+    from backend.config import REPORTS_DIR as _REPORTS_DIR, SESSION_DIR as _SESSION_DIR
+
+    figure = gallery_artifact_by_id(
+        state.publication_figures,
+        figure_id,
+        lineage_id=target_lineage,
+    )
+    registered_id = any(
+        str(getattr(item, "id", "")) == str(figure_id)
+        for item in state.publication_figures
+    )
+
+    if figure is not None:
+        artifact_record = figure
+        fig_name = figure.name
+        artifact_path = (
+            resolve_archival_pdf(figure, workspace)
+            if kind == "pdf"
+            else resolve_archival_render(figure, workspace)
+        )
+        if artifact_path is None:
+            label = "PDF" if kind == "pdf" else "Image"
+            raise HTTPException(
+                status_code=404,
+                detail=f"{label} not available for this figure",
+            )
+    else:
+        if registered_id:
+            raise HTTPException(
+                status_code=404,
+                detail="Figure is not a current gallery artifact",
+            )
+        legacy = _legacy_artifact_by_id(state, figure_id, target_lineage)
+        if legacy is None:
+            legacy = _legacy_artifact_by_integrated_report_id(
+                state,
+                figure_id,
+                workspace,
+                target_lineage,
+                kind=kind,
+            )
+        if legacy is None:
+            raise HTTPException(status_code=404, detail="Figure not found")
+        artifact_record = legacy
+        fig_name = legacy.name
+        artifact_path = (
+            resolve_legacy_artifact_pdf(legacy, workspace)
+            if kind == "pdf"
+            else resolve_legacy_artifact_render(legacy, workspace)
+        )
+        if artifact_path is None:
+            label = "PDF" if kind == "pdf" else "Image"
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"{label} file is missing or failed frozen-inventory "
+                    "validation"
+                ),
+            )
+
+    resolved = artifact_path.resolve()
+    allowed_parents = [
+        _SESSION_DIR.resolve(),
+        _REPORTS_DIR.resolve(),
+        Path(WORKSPACE_DIR).resolve(),
+        Path(UPLOAD_DIR).resolve(),
+    ]
+    if not any(
+        resolved == parent or resolved.is_relative_to(parent)
+        for parent in allowed_parents
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: file outside allowed directories",
+        )
+
+    payload = verified_artifact_bytes(
+        artifact_path, artifact_record, kind=kind,
+    )
+    if payload is None:
+        label = "PDF" if kind == "pdf" else "Image"
+        raise HTTPException(
+            status_code=404,
+            detail=f"{label} file changed or failed record-bound validation",
+        )
+    return payload, artifact_path, fig_name
+
+
+def _prepare_generation_bound_download_sync(
+    session_id: str,
+    generation: int,
+    state: AnalysisState,
+    figure_id: str,
+    workspace: Path,
+    target_lineage: str,
+    kind: str,
+) -> tuple[bytes, Path, str]:
+    return _with_generation_file_barrier(
+        session_id,
+        generation,
+        lambda: _prepare_publication_download_sync(
+            state,
+            figure_id,
+            workspace,
+            target_lineage,
+            kind=kind,
+        ),
+    )
+
+
+async def _prepare_generation_bound_download(
+    session_id: str,
+    state: AnalysisState,
+    figure_id: str,
+    workspace: Path,
+    target_lineage: str,
+    *,
+    kind: str,
+) -> tuple[bytes, Path, str]:
+    generation = int(getattr(state, "lifecycle_generation", 0) or 0)
+    try:
+        async with get_lifecycle_lock(session_id):
+            return await run_in_owned_thread(
+                _prepare_generation_bound_download_sync,
+                session_id,
+                generation,
+                state,
+                figure_id,
+                workspace,
+                target_lineage,
+                kind,
+            )
+    except SessionGoneError as exc:
+        raise HTTPException(status_code=404, detail="Session no longer exists") from exc
+    except SessionGenerationError as exc:
+        raise HTTPException(status_code=409, detail="Session generation changed") from exc
 
 
 @router.get("/{session_id}/graphic-abstract")
@@ -129,7 +500,7 @@ async def get_publication_figures(session_id: str, request: Request):
     figures = []
     approved = 0
     target_lineage = getattr(state, "restore_branch_id", None) or "main"
-    for fig in eligible_artifacts(state.publication_figures):
+    for fig in gallery_artifacts(state.publication_figures):
         if not getattr(fig, "is_current", True) or getattr(fig, "invalidated_at", None):
             continue
         if (getattr(fig, "lineage_id", None) or "main") != target_lineage:
@@ -161,6 +532,7 @@ async def get_publication_figures(session_id: str, request: Request):
             "is_published_head": bool(getattr(fig, "is_published_head", False)),
             "is_publication": True,
             "round": fig.round_number or None,
+            "layout_blocking": has_blocking_layout_defects(fig),
             "diagnostic": bool(fig.diagnostic),
             "created_at": fig.created_at.isoformat()
         })
@@ -202,59 +574,17 @@ async def get_publication_tables(session_id: str, request: Request):
 @router.get("/{session_id}/figure/{figure_id}/pdf")
 async def download_publication_figure_pdf(session_id: str, figure_id: str, state: AnalysisState = Depends(require_session_ownership)):
     """Download a specific publication figure as PDF"""
-    from backend.config import SESSION_DIR as _SESSION_DIR, REPORTS_DIR as _REPORTS_DIR
-
     workspace = get_session_workspace(session_id)
-    await _ensure_frozen_artifact_inventory(state, workspace)
+    await _ensure_frozen_artifact_inventory(session_id, state, workspace)
     target_lineage = getattr(state, "restore_branch_id", None) or "main"
-    figure = eligible_artifact_by_id(
-        state.publication_figures,
+    payload, pdf_path, fig_name = await _prepare_generation_bound_download(
+        session_id,
+        state,
         figure_id,
-        lineage_id=target_lineage,
+        workspace,
+        target_lineage,
+        kind="pdf",
     )
-    registered_id = any(
-        str(getattr(item, "id", "")) == str(figure_id)
-        for item in state.publication_figures
-    )
-
-    if figure is not None:
-        pdf_path = resolve_archival_pdf(figure, workspace)
-        if pdf_path is None:
-            raise HTTPException(status_code=404, detail="PDF not available for this figure")
-        fig_name = figure.name
-        artifact_record = figure
-    else:
-        if registered_id:
-            # A registry ID is never allowed to fall through to an old
-            # integrated-report message. Pending/failed/abandoned/rejected or
-            # superseded records remain audit entries, not download aliases.
-            raise HTTPException(status_code=404, detail="Figure is not the current eligible head")
-        legacy = _legacy_artifact_by_id(state, figure_id, target_lineage)
-        if legacy is None:
-            raise HTTPException(status_code=404, detail="Figure not found")
-        fig_name = legacy.name
-        artifact_record = legacy
-        pdf_path = resolve_legacy_artifact_pdf(legacy, workspace)
-        if pdf_path is None:
-            raise HTTPException(
-                status_code=404,
-                detail="PDF file is missing or failed frozen-inventory validation",
-            )
-
-    # Validate path is within allowed directories
-    resolved = pdf_path.resolve()
-    allowed_parents = [_SESSION_DIR.resolve(), _REPORTS_DIR.resolve(), WORKSPACE_DIR.resolve(), UPLOAD_DIR.resolve()]
-    if not any(str(resolved).startswith(str(p) + os.sep) or resolved == p for p in allowed_parents):
-        raise HTTPException(status_code=403, detail="Access denied: file outside allowed directories")
-
-    payload = verified_artifact_bytes(
-        pdf_path, artifact_record, kind="pdf"
-    )
-    if payload is None:
-        raise HTTPException(
-            status_code=404,
-            detail="PDF file changed or failed record-bound validation",
-        )
     return _immutable_download_response(
         payload,
         pdf_path,
@@ -265,61 +595,22 @@ async def download_publication_figure_pdf(session_id: str, figure_id: str, state
 @router.get("/{session_id}/figure/{figure_id}/png")
 async def download_publication_figure_png(session_id: str, figure_id: str, state: AnalysisState = Depends(require_session_ownership)):
     """Download a specific publication figure as PNG/JPG"""
-    from backend.config import SESSION_DIR as _SESSION_DIR, REPORTS_DIR as _REPORTS_DIR
-
     workspace = get_session_workspace(session_id)
-    await _ensure_frozen_artifact_inventory(state, workspace)
+    await _ensure_frozen_artifact_inventory(session_id, state, workspace)
     target_lineage = getattr(state, "restore_branch_id", None) or "main"
-    figure = eligible_artifact_by_id(
-        state.publication_figures,
+    payload, img_path, fig_name = await _prepare_generation_bound_download(
+        session_id,
+        state,
         figure_id,
-        lineage_id=target_lineage,
+        workspace,
+        target_lineage,
+        kind="image",
     )
-    registered_id = any(
-        str(getattr(item, "id", "")) == str(figure_id)
-        for item in state.publication_figures
-    )
-
-    if figure is not None:
-        img_path = resolve_archival_render(figure, workspace)
-        if img_path is None:
-            raise HTTPException(status_code=404, detail="Image not available for this figure")
-        fig_name = figure.name
-        artifact_record = figure
-    else:
-        if registered_id:
-            raise HTTPException(status_code=404, detail="Figure is not the current eligible head")
-        legacy = _legacy_artifact_by_id(state, figure_id, target_lineage)
-        if legacy is None:
-            raise HTTPException(status_code=404, detail="Figure not found")
-        fig_name = legacy.name
-        artifact_record = legacy
-        img_path = resolve_legacy_artifact_render(legacy, workspace)
-        if img_path is None:
-            raise HTTPException(
-                status_code=404,
-                detail="Image file is missing or failed frozen-inventory validation",
-            )
-
-    # Validate path is within allowed directories
-    resolved = img_path.resolve()
-    allowed_parents = [_SESSION_DIR.resolve(), _REPORTS_DIR.resolve(), WORKSPACE_DIR.resolve(), UPLOAD_DIR.resolve()]
-    if not any(str(resolved).startswith(str(p) + os.sep) or resolved == p for p in allowed_parents):
-        raise HTTPException(status_code=403, detail="Access denied: file outside allowed directories")
 
     # Determine media type from extension
     ext = img_path.suffix.lower()
     media_type = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
     dl_ext = ext if ext in (".jpg", ".jpeg") else ".png"
-
-    payload = verified_artifact_bytes(
-        img_path, artifact_record, kind="image"
-    )
-    if payload is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Image file changed or failed record-bound validation",
-        )
     return _immutable_download_response(
         payload,
         img_path,

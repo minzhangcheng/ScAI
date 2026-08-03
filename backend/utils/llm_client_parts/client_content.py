@@ -317,7 +317,35 @@ class ClientContentMixin:
             return False
         if getattr(message, "tool_calls", None):
             return False
-        return not getattr(message, "content", None)
+        return not _extract_answer_content(getattr(message, "content", None))
+
+    @staticmethod
+    def _response_has_private_reasoning(response) -> bool:
+        """Detect a reasoning-only provider reply without exposing its text."""
+        try:
+            message = response.choices[0].message
+        except (AttributeError, IndexError, TypeError):
+            return False
+
+        raw_content = getattr(message, "content", None)
+        content_parts = raw_content if isinstance(raw_content, list) else [raw_content]
+        if any(
+            isinstance(part, dict) and _is_private_reasoning_block(part)
+            for part in content_parts
+        ):
+            return True
+        if any(
+            bool(getattr(message, key, None))
+            for key in _PRIVATE_REASONING_BLOCK_KEYS
+        ):
+            return True
+        try:
+            dumped = message.model_dump() if hasattr(message, "model_dump") else {}
+        except Exception:
+            return False
+        return isinstance(dumped, dict) and any(
+            bool(dumped.get(key)) for key in _PRIVATE_REASONING_BLOCK_KEYS
+        )
 
     @staticmethod
     def _answer_empty_no_output(response) -> bool:

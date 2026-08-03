@@ -169,7 +169,34 @@ class ContinuationDispatcher:
         *,
         workspace_path: Any = None,
     ) -> None:
-        """Set resume metadata fields on *analysis_state*.
+        """Atomically set resume metadata fields on *analysis_state*.
+
+        Branch activation spans several independently fallible operations
+        (round-result cloning, figure archival, and provenance seeding). Build
+        the complete result on a detached state first, then replace the live
+        model storage in one step. An exception therefore leaves the caller's
+        original AnalysisState untouched.
+        """
+        candidate = (
+            analysis_state.model_copy(deep=True)
+            if isinstance(analysis_state, BaseModel)
+            else copy.deepcopy(analysis_state)
+        )
+        self._activate_in_place(
+            candidate,
+            staged,
+            workspace_path=workspace_path,
+        )
+        self._swap_state(analysis_state, candidate)
+
+    def _activate_in_place(
+        self,
+        analysis_state: Any,
+        staged: StagedCheckpoint,
+        *,
+        workspace_path: Any = None,
+    ) -> None:
+        """Build one fully activated state on a detached candidate.
 
         Exact continuation only — no fresh-run fallback:
         - ``semantic_gate``: rebuild exact waiting payload
@@ -379,19 +406,27 @@ class ContinuationDispatcher:
         from backend.workflow.provenance import seed_restore_provenance
         seed_restore_provenance(analysis_state)
 
-        # Invalidate report paths so a restore triggers fresh generation — but
-        # only where something can actually regenerate them. A terminal restore
-        # sets COMPLETED and both run() and resume() short-circuit on
-        # restore_resume_kind == "terminal" before entering the graph, and the
-        # WebSocket handler's COMPLETED branch deliberately starts no workflow.
-        # Nulling the four paths there left the one snapshot that represents the
-        # finished analysis with every report view answering 404 and no path
-        # back except the destructive re-analysis route. Report HTML lives under
-        # `reports/`, which is outside the captured workspace scope
-        # (figures/tables/reproducibility), so those files are still on disk and
-        # the restored state's own paths are the right ones to keep.
-        if staged.kind != "terminal":
-            self._invalidate_report_paths(analysis_state)
+        # Snapshot objects do not capture reports/. Keeping any pre-restore path
+        # would bind restored business state to uncaptured report bytes from a
+        # different generation. Terminal restores can be regenerated manually;
+        # an explicit unavailable report is safer than a plausible stale one.
+        self._invalidate_report_paths(analysis_state)
+
+    @staticmethod
+    def _swap_state(target: Any, candidate: Any) -> None:
+        """Publish a completed activation without field-by-field exposure."""
+        # AnalysisState is a Pydantic model whose data live in ``__dict__``;
+        # assigning the prepared mapping is the copy-and-swap publication
+        # point. Keep Pydantic bookkeeping consistent for exclude-unset and
+        # private/extra-field behaviour.
+        target.__dict__ = candidate.__dict__
+        for name in (
+            "__pydantic_fields_set__",
+            "__pydantic_extra__",
+            "__pydantic_private__",
+        ):
+            if hasattr(candidate, name):
+                object.__setattr__(target, name, getattr(candidate, name))
 
     @staticmethod
     def _clear_gate_payload(analysis_state: Any) -> None:

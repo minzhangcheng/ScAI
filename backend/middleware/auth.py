@@ -203,6 +203,19 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+        # A pending account has no active access. This also forms the immediate
+        # revocation boundary for account deletion: changing an active user to
+        # pending invalidates already-issued JWTs on their next request while
+        # the physical session cleanup remains retryable.
+        if user.status == "pending":
+            if path == "/api/auth/logout":
+                request.state.user_id = user_id
+                return await call_next(request)
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Account is pending approval"},
+            )
+
         # Admin role: full access (management paths + analysis paths).
         # Session ownership is still enforced at the route layer via
         # require_session_ownership, so admins only see their own sessions.

@@ -687,10 +687,10 @@ def test_failed_zip_import_releases_the_session_directory(monkeypatch, tmp_path)
     )
 
 
-# ── 17. A terminal restore keeps the reports it is restoring ─────────────────
+# ── 17. A terminal restore cannot claim uncaptured reports ───────────────────
 
 
-def test_terminal_restore_keeps_report_paths():
+def test_terminal_restore_invalidates_uncaptured_report_paths():
     from backend.services.snapshot_v2.dispatcher import (
         ContinuationDispatcher, StagedCheckpoint,
     )
@@ -710,12 +710,8 @@ def test_terminal_restore_keeps_report_paths():
 
     ContinuationDispatcher(MagicMock()).activate(state, staged)
 
-    assert state.detailed_report_html_path == "/reports/detailed.html", (
-        "a terminal restore cannot regenerate reports — run() and resume() both "
-        "short-circuit on restore_resume_kind == 'terminal' — so nulling the "
-        "paths left every report view answering 404 with no way back"
-    )
-    assert state.exploration_report_html_path == "/reports/exploration.html"
+    assert state.detailed_report_html_path is None
+    assert state.exploration_report_html_path is None
 
 
 def test_non_terminal_restore_still_invalidates_report_paths():

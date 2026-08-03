@@ -25,7 +25,7 @@ def test_reset_removes_only_report_owned_asset_directories(tmp_path):
     assert (report_dir / "previous_report.zip").exists()
 
 
-def test_fallback_generator_resets_assets_during_construction(tmp_path):
+def test_fallback_generator_construction_preserves_published_assets(tmp_path):
     report_dir = tmp_path / "report"
     _seed_stale_outputs(report_dir)
 
@@ -36,5 +36,5 @@ def test_fallback_generator_resets_assets_during_construction(tmp_path):
         output_dir=str(report_dir),
     )
 
-    assert list((report_dir / "figures").iterdir()) == []
-    assert list((report_dir / "tables").iterdir()) == []
+    assert (report_dir / "figures" / "nested" / "stale.png").exists()
+    assert (report_dir / "tables" / "stale.csv").exists()

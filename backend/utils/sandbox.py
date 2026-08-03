@@ -688,6 +688,7 @@ except Exception as e:
 import dill
 import json as _scai_json
 import os
+import tempfile
 import types
 import zstandard as zstd
 
@@ -700,14 +701,6 @@ def _scai_is_anndata(_o):
         return _t.__name__ == "AnnData" and "anndata" in (_t.__module__ or "").lower()
     except Exception:
         return False
-
-
-def _scai_stream_safe(_o):
-    # Numeric containers are both the largest values here and reliably
-    # dill-able, so they stream straight through instead of being buffered.
-    return (type(_o).__module__ or "").split(".")[0] in (
-        "numpy", "pandas", "scipy", "anndata",
-    )
 
 
 # Handles and connections are the dangerous case: dill often "succeeds" on them
@@ -818,17 +811,29 @@ try:
                     )
                 else:
                     _frame = (_var_name, _obj)
-                # Streaming writes bytes as it goes, so a failure mid-frame
-                # leaves the stream desynced and nothing after it can be read
-                # back. Only values we are prepared to abort on may stream;
-                # anything skippable is serialized in full first and written
-                # only once it is known good.
-                _streamed = _is_required or _scai_stream_safe(_obj)
+                # Required values may stream because any failure aborts the
+                # generation. Optional values first serialize into a spooled
+                # file, bounding memory without trusting a library's entire
+                # top-level namespace to be dill-safe.
+                _streamed = _is_required
                 try:
                     if _streamed:
                         dill.dump(_frame, _f)
                     else:
-                        _f.write(dill.dumps(_frame))
+                        with tempfile.SpooledTemporaryFile(
+                            max_size=8 * 1024 * 1024, mode='w+b'
+                        ) as _frame_file:
+                            dill.dump(_frame, _frame_file)
+                            _frame_file.seek(0)
+                            # Serialization is complete. A failure from this
+                            # point may have partially modified the compressed
+                            # stream, so it must abort the generation.
+                            _streamed = True
+                            while True:
+                                _frame_chunk = _frame_file.read(1024 * 1024)
+                                if not _frame_chunk:
+                                    break
+                                _f.write(_frame_chunk)
                 except Exception as _e:
                     _skipped_vars.append((
                         _var_name,

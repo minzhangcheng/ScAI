@@ -14,6 +14,12 @@ def _clear(monkeypatch):
     llm_mod._NO_RESPONSES_ENDPOINT.clear()
     llm_mod._PROBE_CACHE.clear()
     monkeypatch.setattr(llm_mod.asyncio, "sleep", AsyncMock())
+    # These protocol unit tests exercise dispatch, not the production JSONL
+    # writer.  Keeping it enabled also makes the tests depend on the host's
+    # default executor and data-directory permissions.
+    llm_logger = llm_mod.get_llm_logger()
+    logging_was_enabled = llm_logger.enabled
+    llm_logger.enabled = False
     _OPEN_CLIENTS.clear()
     try:
         yield
@@ -24,6 +30,7 @@ def _clear(monkeypatch):
 
         asyncio.run(close_all())
         _OPEN_CLIENTS.clear()
+        llm_logger.enabled = logging_was_enabled
 
 
 def _client(base_url):
@@ -126,11 +133,15 @@ async def test_vision_responses_not_implemented_500_falls_back_to_chat():
         images=[],
         temperature=0.5,
         max_tokens=10,
+        system_prompt="PATHOLOGY ROLE",
     )
 
     assert r.content == "VISION_CHAT"
     fake.complete_vision.assert_awaited_once()
     c.client.chat.completions.create.assert_awaited_once()
+    messages = c.client.chat.completions.create.call_args.kwargs["messages"]
+    assert "PATHOLOGY ROLE" in messages[0]["content"]
+    assert "respond exclusively in English" in messages[0]["content"]
     assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "gemini-3.1-pro-preview")] == "chat"
 
 

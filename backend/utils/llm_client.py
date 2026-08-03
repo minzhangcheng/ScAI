@@ -386,6 +386,7 @@ class OpenAICompatibleClient(
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         request_timeout: Optional[float] = None,
+        system_prompt: Optional[str] = None,
     ) -> LLMResponse:
         self._begin_request()
         try:
@@ -397,6 +398,7 @@ class OpenAICompatibleClient(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 request_timeout=request_timeout,
+                system_prompt=system_prompt,
             )
         finally:
             self._end_request()

@@ -82,6 +82,7 @@ class RestoreJobHandle:
     paths: Any = None  # SnapshotV2Paths-like; journals directory for load_transaction
     owner_token: str = ""  # Safe-point requester token for this job
     safe_point_request: SafePointRequest | None = None
+    lifecycle_generation: int = 0
 
 
 def get_restore_job(transaction_id: str) -> RestoreJobHandle | None:
@@ -214,18 +215,40 @@ async def cancel_restore_job(
         handle.task.cancel()
 
 
-def _persist_handle(handle: RestoreJobHandle) -> None:
+def _persist_handle(handle: RestoreJobHandle) -> bool:
     """Write restore_job envelope for the handle's current record (before WS).
 
     Never overwrites a ``restore_apply`` mutation journal. Job status uses
     ``restore-job-{id}`` transaction IDs; the coordinator uses
     ``restore-apply-{id}`` (or the same id only when tests force it).
+
+    Returns ``False`` when the job belongs to a deleted or replaced lifecycle
+    generation. In that case no path is created and no event may be emitted.
     """
+    from backend.services.session_lifecycle import (
+        SessionGenerationError,
+        SessionGoneError,
+        assert_session_generation_active,
+    )
+
+    try:
+        assert_session_generation_active(
+            handle.record.session_id,
+            expected_generation=handle.lifecycle_generation,
+        )
+    except (SessionGoneError, SessionGenerationError):
+        logger.info(
+            "[snapshot-v2] suppress stale restore job persist %s for "
+            "session generation %s",
+            handle.record.transaction_id,
+            handle.lifecycle_generation,
+        )
+        return False
     if handle.paths is None:
-        return
+        return True
     journals = getattr(handle.paths, "journals", None)
     if journals is None:
-        return
+        return True
     from backend.services.snapshot_v2.journal_store import JournalStore, make_envelope
     from backend.services.snapshot_v2.errors import SnapshotIntegrityError
     from backend.services.snapshot_v2.recovery import RecoveryFailure
@@ -240,14 +263,14 @@ def _persist_handle(handle: RestoreJobHandle) -> None:
                 "[snapshot-v2] refuse restore_job persist over restore_apply %s",
                 tx_id,
             )
-            return
+            return False
     except (SnapshotIntegrityError, RecoveryFailure):
         # Integrity failure on existing file — do not overwrite
         logger.warning(
             "[snapshot-v2] refuse restore_job persist over unreadable journal %s",
             tx_id,
         )
-        return
+        return False
 
     record = handle.record
     env = make_envelope(
@@ -259,10 +282,12 @@ def _persist_handle(handle: RestoreJobHandle) -> None:
             "snapshot_id": record.snapshot_id,
             "recovery_mode": record.recovery_mode,
             "failure": record.failure,
+            "lifecycle_generation": handle.lifecycle_generation,
             "record": record.model_dump(mode="json"),
         },
     )
     store.write(env)
+    return True
 
 
 
@@ -379,6 +404,8 @@ class RestoreJobManager:
         self,
         session_id: str,
         reservation: SafePointRequest,
+        *,
+        expected_lifecycle_generation: int | None = None,
     ) -> bool:
         """Acknowledge a restore request when no workflow can reach a boundary.
 
@@ -395,8 +422,20 @@ class RestoreJobManager:
             state_lock,
             workflows,
         )
+        from backend.services.session_lifecycle import (
+            SessionGenerationError,
+            SessionGoneError,
+            assert_session_generation_active,
+        )
 
         async with state_lock:
+            try:
+                assert_session_generation_active(
+                    session_id,
+                    expected_generation=expected_lifecycle_generation,
+                )
+            except (SessionGoneError, SessionGenerationError):
+                return False
             workflow = workflows.get(session_id)
             state = sessions.get(session_id)
             if (
@@ -493,6 +532,7 @@ class RestoreJobManager:
 
         owner_token = f"restore:{tx_id}"
         from backend.services.session_lifecycle import (
+            SessionGenerationError,
             SessionGoneError,
             establish_snapshot_operation,
         )
@@ -515,6 +555,33 @@ class RestoreJobManager:
                         details={"session_id": session_id},
                     )
 
+        handle: RestoreJobHandle | None = None
+
+        def _publish_restore_job(
+            reservation: SafePointRequest,
+            lifecycle_generation: int,
+        ) -> None:
+            """Publish the complete owner handle before deletion can proceed."""
+            nonlocal handle, record
+            handle = RestoreJobHandle(
+                record=record,
+                task=None,
+                cancel_event=asyncio.Event(),
+                paths=self.paths,
+                owner_token=owner_token,
+                safe_point_request=reservation,
+                lifecycle_generation=lifecycle_generation,
+            )
+            if not _persist_handle(handle):
+                raise SessionGenerationError(
+                    "restore generation changed before job publication"
+                )
+            snapshot_restore_jobs[tx_id] = handle
+            handle.task = asyncio.create_task(
+                self._run_job(handle, preflight, request, timeout_seconds)
+            )
+            handle.task.add_done_callback(lambda _: self._on_task_done(tx_id))
+
         try:
             reservation = await establish_snapshot_operation(
                 session_id,
@@ -522,43 +589,19 @@ class RestoreJobManager:
                     session_id, owner_token,
                 ),
                 validate=_validate_report_owner,
+                publish=_publish_restore_job,
             )
-        except SessionGoneError as exc:
-            raise SnapshotTransactionError(
-                "SESSION_GONE",
-                "Session was deleted before restore reservation",
-                details={"session_id": session_id},
-            ) from exc
-        if reservation is None or reservation is False:
-            raise SnapshotTransactionError(
-                "SAFE_POINT_BUSY",
-                "Another snapshot or restore operation owns the session safe point",
-                details={"session_id": session_id},
-            )
-
-        handle = RestoreJobHandle(
-            record=record,
-            task=None,
-            cancel_event=asyncio.Event(),
-            paths=self.paths,
-            owner_token=owner_token,
-            safe_point_request=reservation,
-        )
-        try:
-            # Completed/failed report workflows are removed from the process
-            # maps. They cannot reach another graph boundary, so acknowledge
-            # only after atomically proving that the session is quiescent.
-            await self._acknowledge_if_quiescent(session_id, reservation)
-            _persist_handle(handle)
-            snapshot_restore_jobs[tx_id] = handle
-            handle.task = asyncio.create_task(
-                self._run_job(handle, preflight, request, timeout_seconds)
-            )
-            handle.task.add_done_callback(lambda _: self._on_task_done(tx_id))
+            if reservation is None or reservation is False or handle is None:
+                raise SnapshotTransactionError(
+                    "SAFE_POINT_BUSY",
+                    "Another snapshot or restore operation owns the session "
+                    "safe point",
+                    details={"session_id": session_id},
+                )
         except BaseException as exc:
-            snapshot_restore_jobs.pop(tx_id, None)
-            journal_path = Path(self.paths.journals) / f"{tx_id}.json"
-            if journal_path.exists():
+            if handle is not None:
+                if handle.task is not None and not handle.task.done():
+                    handle.task.cancel()
                 handle.record = handle.record.model_copy(
                     update={
                         "status": "failed",
@@ -568,8 +611,28 @@ class RestoreJobManager:
                         },
                     }
                 )
-                _persist_handle(handle)
-            await self._safe_point.cancel_safe_point_request(session_id, owner_token)
+                try:
+                    _persist_handle(handle)
+                except Exception:
+                    logger.exception(
+                        "[snapshot-v2] failed to persist restore job start "
+                        "failure %s",
+                        tx_id,
+                    )
+            # Keep a published handle visible until its reservation is gone.
+            # Deletion therefore cannot miss a safe-point owner between these
+            # two operations.
+            await self._safe_point.cancel_safe_point_request(
+                session_id, owner_token,
+            )
+            if handle is not None and snapshot_restore_jobs.get(tx_id) is handle:
+                snapshot_restore_jobs.pop(tx_id, None)
+            if isinstance(exc, (SessionGoneError, SessionGenerationError)):
+                raise SnapshotTransactionError(
+                    "SESSION_GONE",
+                    "Session was deleted or replaced before restore publication",
+                    details={"session_id": session_id},
+                ) from exc
             raise
 
         logger.info(
@@ -624,8 +687,17 @@ class RestoreJobManager:
             handle.owner_token = owner_token
         stop_event = handle.cancel_event
         t0 = time.monotonic()
+        from backend.services.session_lifecycle import (
+            SessionGenerationError,
+            SessionGoneError,
+            assert_session_generation_active,
+        )
 
         try:
+            assert_session_generation_active(
+                session_id,
+                expected_generation=handle.lifecycle_generation,
+            )
             # ── queued → waiting_safe_point ──────────────────────
             record = self._update(handle, "waiting_safe_point")
             reservation = handle.safe_point_request
@@ -635,8 +707,8 @@ class RestoreJobManager:
                     "Restore job started without an owned safe-point request",
                     details={"transaction_id": tx_id},
                 )
-            # `enqueue` proves quiescence once, before this task even starts.
-            # That proof expires the moment the activity it observed ends: every
+            # This runner proves quiescence immediately and then rechecks it.
+            # A proof expires the moment the activity it observed ends: every
             # other acknowledger in the system — the graph boundaries, the HITL
             # gate hooks, the sandbox step loop — needs a LIVE run task to reach
             # it. So when the chat delegation / report generation / initializing
@@ -656,6 +728,11 @@ class RestoreJobManager:
             # pending request for the ack to match.
             deadline = time.monotonic() + timeout_seconds
             try:
+                await self._acknowledge_if_quiescent(
+                    session_id,
+                    reservation,
+                    expected_lifecycle_generation=handle.lifecycle_generation,
+                )
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -668,7 +745,11 @@ class RestoreJobManager:
                         break
                     except asyncio.TimeoutError:
                         if await self._acknowledge_if_quiescent(
-                            session_id, reservation,
+                            session_id,
+                            reservation,
+                            expected_lifecycle_generation=(
+                                handle.lifecycle_generation
+                            ),
                         ):
                             break
             except asyncio.TimeoutError:
@@ -704,6 +785,13 @@ class RestoreJobManager:
             apply_tx_id = restore_apply_transaction_id(tx_id)
 
             def _on_status(rec: SnapshotTransactionRecord) -> None:
+                try:
+                    assert_session_generation_active(
+                        session_id,
+                        expected_generation=handle.lifecycle_generation,
+                    )
+                except (SessionGoneError, SessionGenerationError):
+                    return
                 # Map orchestration status onto the in-memory handle only.
                 # Do NOT persist intermediate statuses — the restore coordinator
                 # owns the restore_apply envelope during stage/apply.
@@ -721,17 +809,32 @@ class RestoreJobManager:
                 handle.record = mapped
                 if self._state_hook is not None:
                     asyncio.ensure_future(self._state_hook(mapped))
-                asyncio.ensure_future(self._emit_state_sync(mapped, 0.0))
+                asyncio.ensure_future(self._emit_state_sync(
+                    mapped,
+                    0.0,
+                    lifecycle_generation=handle.lifecycle_generation,
+                ))
 
+            assert_session_generation_active(
+                session_id,
+                expected_generation=handle.lifecycle_generation,
+            )
             result = await service.restore_snapshot(
                 request,
                 apply_tx_id,
                 stop_event,
                 job_transaction_id=tx_id,
                 status_callback=_on_status,
+                expected_lifecycle_generation=(
+                    handle.lifecycle_generation
+                ),
             )
 
             # Final status on the in-memory handle (job id, not apply id).
+            assert_session_generation_active(
+                session_id,
+                expected_generation=handle.lifecycle_generation,
+            )
             handle.record = result.model_copy(update={
                 "transaction_id": tx_id,
                 "retry_of_transaction_id": handle.record.retry_of_transaction_id,
@@ -750,10 +853,14 @@ class RestoreJobManager:
             # restore_apply journal (left APPLYING) plus the session's
             # recovery_blocked marker; those protect the half-applied session,
             # not a job-status record that lies about the job's state.
-            _persist_handle(handle)
-            if self._state_hook is not None:
-                asyncio.ensure_future(self._state_hook(handle.record))
-            asyncio.ensure_future(self._emit_state_sync(handle.record, 0.0))
+            if _persist_handle(handle):
+                if self._state_hook is not None:
+                    asyncio.ensure_future(self._state_hook(handle.record))
+                asyncio.ensure_future(self._emit_state_sync(
+                    handle.record,
+                    0.0,
+                    lifecycle_generation=handle.lifecycle_generation,
+                ))
 
             await self._safe_point.release(session_id, owner_token)
 
@@ -767,6 +874,21 @@ class RestoreJobManager:
             if handle.record.status not in ("cancelled", "committed", "failed", "timed_out"):
                 self._update(handle, "cancelled")
             raise
+        except (SessionGoneError, SessionGenerationError) as exc:
+            logger.info(
+                "[snapshot-v2] Restore job %s stopped after lifecycle "
+                "generation replacement: %s",
+                tx_id,
+                exc,
+            )
+            self._update(
+                handle,
+                "failed",
+                failure={
+                    "code": "SESSION_GENERATION_STALE",
+                    "message": str(exc),
+                },
+            )
         except Exception as exc:
             logger.exception("[snapshot-v2] Restore job %s failed: %s", tx_id, exc)
             self._update(handle, "failed", failure={"message": str(exc)})
@@ -836,23 +958,44 @@ class RestoreJobManager:
 
         record = handle.record.model_copy(update={"status": status, **kw})
         handle.record = record
-        # Persist first
-        _persist_handle(handle)
+        # Persist first. A stale generation must not publish state or events
+        # into a replacement session with the same ID.
+        if not _persist_handle(handle):
+            return record
 
         # Notify test hook
         if self._state_hook is not None:
             asyncio.ensure_future(self._state_hook(record))
 
         # Emit WebSocket state sync after persist
-        asyncio.ensure_future(self._emit_state_sync(record, 0.0))
+        asyncio.ensure_future(self._emit_state_sync(
+            record,
+            0.0,
+            lifecycle_generation=handle.lifecycle_generation,
+        ))
         return record
 
     async def _emit_state_sync(
         self,
         record: SnapshotTransactionRecord,
         elapsed: float = 0.0,
+        *,
+        lifecycle_generation: int | None = None,
     ) -> None:
+        from backend.services.session_lifecycle import (
+            SessionGenerationError,
+            SessionGoneError,
+            assert_session_generation_active,
+        )
         from backend.utils.websocket_delivery import send_analysis_json
+
+        try:
+            assert_session_generation_active(
+                record.session_id,
+                expected_generation=lifecycle_generation,
+            )
+        except (SessionGoneError, SessionGenerationError):
+            return
 
         payload = record.model_dump(mode="json")
         payload["elapsed_seconds"] = round(elapsed, 1)

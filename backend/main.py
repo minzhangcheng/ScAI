@@ -21,7 +21,7 @@ import httpx
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 
@@ -65,7 +65,15 @@ from .routes.reports import router as reports_router
 from .routes.admin import router as admin_router
 from .routes.user_config import router as user_config_router
 from .middleware.auth import AuthMiddleware
-from .utils.auth import get_db, require_auth, require_session_ownership, ws_require_auth, ws_authenticate_and_load, WS_AUTH_FAILED_CODE
+from .utils.auth import (
+    WS_AUTH_FAILED_CODE,
+    get_db,
+    require_auth,
+    require_session_ownership,
+    session_not_found_detail,
+    ws_authenticate_and_load,
+    ws_require_auth,
+)
 from .utils.files import safe_filename, validate_session_id, validate_path_within
 from .state import (
     sessions, workflows, _run_tasks,
@@ -90,6 +98,7 @@ from .services.session_store import (
 )
 
 from .services.upload import upload_manager
+from .services.session_lifecycle import SessionGenerationError, SessionGoneError
 
 from .utils.agent_llm import (
     validate_file_path_ownership as _validate_file_path_ownership,
@@ -251,6 +260,50 @@ app = FastAPI(
     version=VERSION,
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(SessionGoneError)
+async def session_gone_exception_handler(
+    request: Request,
+    exc: SessionGoneError,
+) -> JSONResponse:
+    """Translate a lifecycle tombstone race into the public HTTP contract."""
+    request_user_id = getattr(request.state, "user_id", None)
+    if request_user_id is None or request_user_id != exc.owner_id:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": session_not_found_detail()},
+        )
+    return JSONResponse(
+        status_code=410,
+        content={
+            "detail": {
+                "code": "SESSION_GONE",
+                "message": "This session was deleted and cannot be restored.",
+                "generation": exc.generation,
+            }
+        },
+    )
+
+
+@app.exception_handler(SessionGenerationError)
+async def session_generation_exception_handler(
+    request: Request,
+    exc: SessionGenerationError,
+) -> JSONResponse:
+    """Translate a stale in-flight generation commit into HTTP 409."""
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": {
+                "code": "SESSION_GENERATION_CHANGED",
+                "message": (
+                    "The session generation changed while this request was in progress. "
+                    "Reload the session before retrying."
+                ),
+            }
+        },
+    )
 
 # Mount auth router
 app.include_router(auth_router)

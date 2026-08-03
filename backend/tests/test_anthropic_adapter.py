@@ -158,9 +158,13 @@ async def test_anthropic_adapter_complete_vision_passes_timeout():
 
     await adapter.complete_vision(
         model="claude-x", text_prompt="describe", images=[],
-        temperature=0.5, max_tokens=1000, timeout=42.0)
+        temperature=0.5, max_tokens=1000, timeout=42.0,
+        system_prompt="PATHOLOGY ROLE")
 
-    assert client.messages.create.call_args.kwargs["timeout"] == 42.0
+    kwargs = client.messages.create.call_args.kwargs
+    assert kwargs["timeout"] == 42.0
+    assert "PATHOLOGY ROLE" in kwargs["system"]
+    assert "respond exclusively in English" in kwargs["system"]
 
 
 from backend.utils.llm_client import _tool_calls_to_raw_assistant

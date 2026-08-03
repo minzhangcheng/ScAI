@@ -41,10 +41,17 @@ from backend.utils.asyncio_tasks import (
 )
 from backend.utils.llm_client import OpenAICompatibleClient
 from backend.utils.settings_provider import AgentSettingsProvider
-from backend.services.report.paths import resolve_report_output_dir, resolve_report_target_lineage
+from backend.services.report.paths import (
+    resolve_published_report_dir,
+    resolve_report_output_dir,
+    resolve_report_target_lineage,
+)
+from backend.services.report.output_generation import report_matches_published_dir
 from backend.services.report.lineage import build_lineage_report_state
 
 logger = logging.getLogger(__name__)
+
+_REPORT_RESOURCE_CLEANUP_TIMEOUT_SECONDS = 10.0
 
 
 from .core import _create_report_archive, _enforce_archive_retention, _load_report_json, _next_archive_version, _report_cache_key_for_lineage, _report_generation_pending, _sanitize_nan, _try_begin_generation, clear_generation_pending, router
@@ -114,7 +121,7 @@ async def get_detailed_report_html(session_id: str, request: Request, branch_id:
     else:
         target_lineage_id = resolve_report_target_lineage(branch_id)
         branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
-        report_dir = resolve_report_output_dir(session_id, branch_id_resolved)
+        report_dir = resolve_published_report_dir(session_id, branch_id_resolved)
         html_path = report_dir / "report.html"
     if not html_path.exists():
         raise HTTPException(status_code=404, detail="Detailed report file not found")
@@ -132,12 +139,16 @@ async def get_detailed_report(session_id: str, request: Request, branch_id: Opti
 
     target_lineage_id = resolve_report_target_lineage(branch_id)
     branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
-    report_dir = resolve_report_output_dir(session_id, branch_id_resolved)
+    report_dir = resolve_published_report_dir(session_id, branch_id_resolved)
     cache_key = _report_cache_key_for_lineage(session_id, target_lineage_id)
 
     # First check memory cache
-    if cache_key in detailed_reports:
-        return {"report": _sanitize_nan(detailed_reports[cache_key])}
+    cached_report = detailed_reports.get(cache_key)
+    if (
+        cached_report is not None
+        and report_matches_published_dir(cached_report, report_dir)
+    ):
+        return {"report": _sanitize_nan(cached_report)}
 
     # Try to load from disk first (avoid session loading overhead)
     report_path = report_dir / "report.json"
@@ -250,13 +261,43 @@ async def _cleanup_report_llm_resources(provider, llm_client) -> None:
     """Close report-owned clients independently, retrying transient failures."""
     cancellation = None
 
+    def _consume_detached_cleanup(task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.warning(
+                "Detached report resource cleanup failed",
+                exc_info=True,
+            )
+
     async def _close_with_retry(label: str, closer) -> None:
         nonlocal cancellation
         for attempt in range(2):
+            cleanup_task = asyncio.create_task(
+                closer(),
+                name=f"detailed-report-cleanup:{label}",
+            )
             try:
-                await closer()
+                done, _pending = await asyncio.wait(
+                    {cleanup_task},
+                    timeout=_REPORT_RESOURCE_CLEANUP_TIMEOUT_SECONDS,
+                )
+                if not done:
+                    logger.error(
+                        "Timed out after %.1fs while %s; detaching cleanup",
+                        _REPORT_RESOURCE_CLEANUP_TIMEOUT_SECONDS,
+                        label,
+                    )
+                    cleanup_task.cancel()
+                    cleanup_task.add_done_callback(_consume_detached_cleanup)
+                    return
+                await cleanup_task
                 return
             except asyncio.CancelledError as exc:
+                cleanup_task.cancel()
+                cleanup_task.add_done_callback(_consume_detached_cleanup)
                 cancellation = cancellation or exc
                 consume_current_cancellation_request()
                 logger.warning(
@@ -332,7 +373,9 @@ async def _run_generate_report_task(session_id: str, state: AnalysisState):
     logger.info(f"  state.status: {state.status}")
     logger.info(f"  round_results count: {len(state.round_results)}")
 
-    target_lineage_id = resolve_report_target_lineage(branch_id=None)
+    target_lineage_id = resolve_report_target_lineage(
+        getattr(state, "restore_branch_id", None)
+    )
     branch_id = None if target_lineage_id == "main" else target_lineage_id
     output_dir = str(resolve_report_output_dir(session_id, branch_id))
     os.makedirs(output_dir, exist_ok=True)
@@ -387,7 +430,9 @@ async def _run_generate_report_task(session_id: str, state: AnalysisState):
         )
 
         # Archive and restore ONCE before retry loop
-        report_json_path = Path(output_dir) / "report.json"
+        report_json_path = (
+            resolve_published_report_dir(session_id, branch_id) / "report.json"
+        )
         if report_json_path.exists():
             try:
                 next_version = _next_archive_version(Path(output_dir))

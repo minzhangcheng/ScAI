@@ -272,6 +272,19 @@ class TestSignalLlmFailureAction:
         assert workflow._llm_failure_actions["pathology_analysis"] == "skip"
         assert event.is_set()
 
+    def test_rejects_second_action_for_same_generation(self, workflow):
+        workflow._llm_failure_generations = {"pathology_analysis": 5}
+        event = asyncio.Event()
+        workflow._llm_failure_events["pathology_analysis"] = event
+
+        assert workflow.signal_llm_failure_action(
+            "pathology_analysis", "retry", 5,
+        ) is True
+        assert workflow.signal_llm_failure_action(
+            "pathology_analysis", "terminate", 5,
+        ) is False
+        assert workflow._llm_failure_actions["pathology_analysis"] == "retry"
+
     def test_rejects_missing_event(self, workflow):
         """signal returns False when no event exists for the node."""
         workflow._llm_failure_generations = {"pathology_analysis": 5}
@@ -480,3 +493,27 @@ class TestBioinformaticsNodeUpstreamPropagation:
         bioinfo_result = result.get("bioinformatics_result", {})
         assert bioinfo_result.get("status") == "failed"
         assert bioinfo_result.get("status") != "max_steps_reached"
+
+    @pytest.mark.asyncio
+    async def test_runtime_discard_unwinds_superseded_bioinformatics_node(
+        self, mock_workflow, bioinfo_state,
+    ):
+        from backend.services.runtime_persistence_gate import (
+            RuntimePersistenceBlocked,
+        )
+        from backend.workflow.helpers import WorkflowSupersededError
+
+        mock_workflow.bioinformatics_agent.run_autonomous_analysis = AsyncMock(
+            side_effect=RuntimePersistenceBlocked("runtime save failed")
+        )
+        mock_workflow._wait_for_runtime_persistence_intervention = AsyncMock(
+            return_value="discard"
+        )
+
+        with pytest.raises(WorkflowSupersededError):
+            await mock_workflow._bioinformatics_analysis(bioinfo_state)
+
+        assert (
+            mock_workflow.bioinformatics_agent.run_autonomous_analysis.await_count
+            == 1
+        )

@@ -1,5 +1,10 @@
 import base64
+import hashlib
+import itertools
+from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from backend.models.schemas import (
     AnalysisPlan,
@@ -14,11 +19,20 @@ from backend.services.figure_contract import (
     visual_plan_inheritance_for_plan,
 )
 from backend.agents.bioinformatics_agent import TOOLS
-from backend.tests.figure_image_helpers import valid_image_bytes
+from backend.tests.figure_image_helpers import valid_image_bytes, valid_pdf_bytes
 
 
-_RENDER_PREVIEW = base64.b64encode(valid_image_bytes("PNG")).decode()
 _CURRENT_PLAN = "__current_plan__"
+_ARTIFACT_ROOT: Path | None = None
+_ARTIFACT_SEQUENCE = itertools.count()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _frozen_figure_artifact_root(tmp_path_factory):
+    global _ARTIFACT_ROOT
+    _ARTIFACT_ROOT = tmp_path_factory.mktemp("figure-contract-artifacts")
+    yield
+    _ARTIFACT_ROOT = None
 
 
 def _figure(
@@ -33,13 +47,24 @@ def _figure(
     plan_id=_CURRENT_PLAN,
     purpose="result",
 ):
+    assert _ARTIFACT_ROOT is not None
+    artifact_id = next(_ARTIFACT_SEQUENCE)
+    png_path = _ARTIFACT_ROOT / f"{artifact_id}-{name}.jpg"
+    pdf_path = _ARTIFACT_ROOT / f"{artifact_id}-{name}.pdf"
+    render = valid_image_bytes("JPEG", min_bytes=2200)
+    pdf = valid_pdf_bytes()
+    png_path.write_bytes(render)
+    pdf_path.write_bytes(pdf)
     return PublicationFigure(
         name=name,
         description=description,
         figure_type=figure_type,
-        png_path=f"/tmp/{name}.jpg",
-        pdf_path=f"/tmp/{name}.pdf",
-        png_base64=_RENDER_PREVIEW,
+        png_path=str(png_path),
+        pdf_path=str(pdf_path),
+        png_base64=base64.b64encode(render).decode(),
+        render_sha256=hashlib.sha256(render).hexdigest(),
+        preview_sha256=hashlib.sha256(render).hexdigest(),
+        pdf_sha256=hashlib.sha256(pdf).hexdigest(),
         review_status=status,
         plan_step_id=step_id,
         plan_id=plan_id,
@@ -84,6 +109,29 @@ def test_structured_requirements_need_linked_report_eligible_figures():
     ).passed
 
 
+def test_exact_plan_id_allows_transitional_figure_without_step_id():
+    plan = AnalysisPlan(
+        phase="innovation",
+        steps=[PlanStep(
+            id=7,
+            title="Embedding",
+            method="Plot UMAP",
+            figure_requirements=[{"figure_type": "umap"}],
+        )],
+    )
+    transitional = _figure("legacy_plan_umap", "umap", step_id=None)
+    state = _state(plan, [transitional])
+
+    assert audit_figure_contract(
+        state, planning_stage="full", include_stage_baseline=False,
+    ).passed
+
+    transitional.plan_id = "another-plan"
+    assert not audit_figure_contract(
+        state, planning_stage="full", include_stage_baseline=False,
+    ).passed
+
+
 def test_revision_requested_figure_does_not_close_contract():
     plan = AnalysisPlan(
         phase="innovation",
@@ -119,7 +167,9 @@ def test_structured_requirement_cannot_be_satisfied_by_unlinked_same_type():
             figure_requirements=[{"figure_type": "umap"}],
         )],
     )
-    state = _state(plan, [_figure("unlinked_umap", "umap")])
+    state = _state(
+        plan, [_figure("unlinked_umap", "umap", plan_id=None)]
+    )
     assert not audit_figure_contract(
         state, planning_stage="full", include_stage_baseline=False
     ).passed
@@ -427,6 +477,7 @@ def test_missing_image_bytes_cannot_close_contract():
         )],
     )
     missing = _figure("missing_render", "heatmap", step_id=2)
+    Path(missing.png_path).unlink()
     missing.png_base64 = None
     assert not audit_figure_contract(
         _state(plan, [missing]), planning_stage="full", include_stage_baseline=False

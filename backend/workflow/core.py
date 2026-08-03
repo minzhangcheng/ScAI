@@ -325,6 +325,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         enter_change: str,
         exit_change: str,
         clear_cache_on_retry: bool,
+        wait_seconds: int = -1,
     ) -> LlmFailureAction:
         """Shared HITL intervention scaffold (lock/event/generation/state_sync).
 
@@ -336,6 +337,9 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             if node_name not in self._llm_failure_events:
                 self._llm_failure_events[node_name] = asyncio.Event()
             event = self._llm_failure_events[node_name]
+            # A cancelled/superseded prior gate may have left an unconsumed
+            # action behind.  A new generation starts with no accepted action.
+            self._llm_failure_actions.pop(node_name, None)
             event.clear()
 
             analysis_state.wait_input_reason = reason
@@ -356,11 +360,11 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             # all — and this gate has no timeout, so a user who walks away
             # strands it indefinitely.
             #
-            # `wait_seconds=-1` keeps the block-forever semantics exactly: with a
-            # hook the helper takes its polling loop, which returns True only
-            # when the event is set.
+            # Ordinary agent gates retain wait_seconds=-1 (block forever).
+            # Report content generation supplies a finite budget so an
+            # unattended run can select its deterministic fallback.
             await wait_with_skip_time(
-                event, -1, self.session_id, node_name,
+                event, wait_seconds, self.session_id, node_name,
                 safe_point_hook=getattr(self, "await_restore_safe_point", None),
             )
             action = self._llm_failure_actions.pop(node_name, None)
@@ -392,6 +396,8 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         error: UpstreamExhaustedError,
         node_name: str,
         analysis_state: AnalysisState,
+        *,
+        wait_seconds: int = -1,
     ) -> LlmFailureAction:
         """Block workflow, show LlmTimeoutDialog, wait for user action.
 
@@ -422,6 +428,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             enter_change=StateSyncChangeType.LLM_FAILURE.value,
             exit_change=StateSyncChangeType.LLM_RETRY.value,
             clear_cache_on_retry=True,
+            wait_seconds=wait_seconds,
         )
 
     async def _publish_runtime_persistence_transition(
@@ -671,6 +678,14 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
                     clear_runtime_persistence_gate(analysis_state)
                     self._runtime_persistence_action = None
                     self._runtime_persistence_action_pending = False
+                    self._set_status(analysis_state, TaskStatus.STOPPED)
+                    analysis_state.termination_reason = (
+                        "runtime_persistence_failure"
+                    )
+                    if not await _publish_until_durable(
+                        allow_pending_action=False
+                    ):
+                        return "discard"
                     return "terminate"
 
                 if action == "discard":
@@ -967,6 +982,14 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         if event is None:
             logger.warning(
                 f"[{self.session_id}] No LLM failure event for node '{node_name}'"
+            )
+            return False
+
+        if event.is_set() or node_name in self._llm_failure_actions:
+            logger.warning(
+                f"[{self.session_id}] Rejected duplicate/conflicting LLM "
+                f"failure action '{action}' for node '{node_name}' generation "
+                f"{generation}"
             )
             return False
 
@@ -2350,6 +2373,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             action = await self._wait_for_runtime_persistence_intervention(
                 analysis_state,
                 successful_status=TaskStatus.PAUSED,
+                persist_transitions=True,
             )
             if action == "retry":
                 self._set_status(analysis_state, TaskStatus.PAUSED)
@@ -2435,86 +2459,94 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
 
         if state and state.values:
             analysis_state = analysis_state or state.values["analysis_state"]
-            self._set_status(analysis_state, TaskStatus.PAUSED)
+        if analysis_state is None:
+            # Internal callers without an AnalysisState still receive the
+            # cooperative-gate result. HTTP lifecycle callers always pass the
+            # authoritative object and therefore take the durable path below.
+            return {
+                "success": True,
+                "status": TaskStatus.PAUSED.value,
+                "still_blocked": False,
+            }
 
-            # Save sandbox state including Python session using dill.
-            # The Jupyter kernel is single-threaded, so this queues behind any
-            # in-flight execute() and captures a clean post-step snapshot.
-            if self.sandbox:
+        # The first graph checkpoint may not exist yet.  The lifecycle state is
+        # nevertheless authoritative and must record the pause before success
+        # is exposed; otherwise the cleared cooperative gate leaves a durable
+        # RUNNING session that can never advance.
+        self._set_status(analysis_state, TaskStatus.PAUSED)
+
+        # Save sandbox state including Python session using dill. The Jupyter
+        # kernel is single-threaded, so this queues behind any in-flight
+        # execute() and captures a clean post-step snapshot.
+        if self.sandbox:
+            try:
+                saved = await self.sandbox.save_session()
+                persistence = self.sandbox.sync_runtime_persistence_state(
+                    analysis_state
+                )
+                if not saved or persistence.get("status") == "failed":
+                    raise RuntimeError(
+                        "runtime persistence did not commit a current generation"
+                    )
+                self.sandbox.notebook_state.save()
+            except Exception:
+                logger.warning(
+                    "[%s] Pause persistence failed; arming live-kernel gate",
+                    self.session_id,
+                    exc_info=True,
+                )
+                from ..services.runtime_persistence_gate import (
+                    enter_runtime_persistence_gate,
+                )
+
                 try:
-                    saved = await self.sandbox.save_session()
                     persistence = self.sandbox.sync_runtime_persistence_state(
                         analysis_state
                     )
-                    if not saved or persistence.get("status") == "failed":
-                        raise RuntimeError(
-                            "runtime persistence did not commit a current generation"
-                        )
-                    self.sandbox.notebook_state.save()
-                except Exception:
-                    logger.warning(
-                        "[%s] Pause persistence failed; arming live-kernel gate",
-                        self.session_id,
-                        exc_info=True,
+                except Exception as sync_error:
+                    persistence = dict(
+                        getattr(analysis_state, "runtime_persistence", None) or {}
                     )
-                    from ..services.runtime_persistence_gate import (
-                        enter_runtime_persistence_gate,
-                    )
-
-                    try:
-                        persistence = self.sandbox.sync_runtime_persistence_state(
-                            analysis_state
-                        )
-                    except Exception as sync_error:
-                        persistence = dict(
-                            getattr(analysis_state, "runtime_persistence", None) or {}
-                        )
-                        persistence.update({
-                            "status": "failed",
-                            "error_summary": (
-                                "Pause runtime state synchronization failed: "
-                                f"{type(sync_error).__name__}"
-                            ),
-                        })
-                    failure = enter_runtime_persistence_gate(
-                        analysis_state,
-                        persistence,
-                        degraded_recovery=bool(
-                            persistence.get("degraded_recovery")
+                    persistence.update({
+                        "status": "failed",
+                        "error_summary": (
+                            "Pause runtime state synchronization failed: "
+                            f"{type(sync_error).__name__}"
                         ),
+                    })
+                failure = enter_runtime_persistence_gate(
+                    analysis_state,
+                    persistence,
+                    degraded_recovery=bool(
+                        persistence.get("degraded_recovery")
+                    ),
+                )
+                task = getattr(
+                    self, "_runtime_persistence_pause_task", None,
+                )
+                if task is None or task.done():
+                    task = asyncio.create_task(
+                        self._recover_failed_pause_persistence(
+                            thread_id, analysis_state,
+                        ),
+                        name=f"runtime-persistence-pause:{self.session_id}",
                     )
-                    task = getattr(
-                        self, "_runtime_persistence_pause_task", None,
-                    )
-                    if task is None or task.done():
-                        task = asyncio.create_task(
-                            self._recover_failed_pause_persistence(
-                                thread_id, analysis_state,
-                            ),
-                            name=f"runtime-persistence-pause:{self.session_id}",
-                        )
-                        self._runtime_persistence_pause_task = task
-                    # Let the recovery task establish its in-memory arbitration
-                    # fields before the HTTP response exposes the gate token.
-                    await asyncio.sleep(0)
-                    return {
-                        "success": False,
-                        "status": analysis_state.status.value,
-                        "still_blocked": True,
-                        "snapshot_failure": failure,
-                    }
-                logger.info(f"[{self.session_id}] Sandbox state saved")
+                    self._runtime_persistence_pause_task = task
+                # Let the recovery task establish its in-memory arbitration
+                # fields before the HTTP response exposes the gate token.
+                await asyncio.sleep(0)
+                return {
+                    "success": False,
+                    "status": analysis_state.status.value,
+                    "still_blocked": True,
+                    "snapshot_failure": failure,
+                }
+            logger.info(f"[{self.session_id}] Sandbox state saved")
 
-            # State will be automatically checkpointed
-            logger.info(f"[{self.session_id}] Workflow paused successfully")
-            return {
-                "success": True,
-                "status": analysis_state.status.value,
-                "still_blocked": False,
-            }
+        logger.info(f"[{self.session_id}] Workflow paused successfully")
         return {
             "success": True,
-            "status": TaskStatus.PAUSED.value,
+            "status": analysis_state.status.value,
             "still_blocked": False,
         }
     

@@ -2,6 +2,7 @@
 import types
 import base64
 import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -16,14 +17,23 @@ from backend.tests.figure_image_helpers import (
 
 def _pub_fig(name, png_path=None, status="approved"):
     """Minimal publication-figure stand-in with the attributes reporting reads."""
+    preview = valid_image_bytes("JPEG")
+    render_sha256 = (
+        hashlib.sha256(Path(png_path).read_bytes()).hexdigest()
+        if png_path and Path(png_path).is_file()
+        else hashlib.sha256(preview).hexdigest()
+    )
     return types.SimpleNamespace(
         id=f"id-{name}",
         name=name,
         description="",
         figure_type="umap",
-        png_base64=base64.b64encode(valid_image_bytes("JPEG")).decode(),
+        png_base64=base64.b64encode(preview).decode(),
         png_path=png_path,
         pdf_path=None,
+        render_sha256=render_sha256,
+        preview_sha256=hashlib.sha256(preview).hexdigest(),
+        pdf_sha256="2" * 64,
         review_status=types.SimpleNamespace(value=status),
         revision_count=0,
     )
@@ -168,8 +178,9 @@ async def test_a_blank_on_disk_render_is_not_offered_for_download(monkeypatch, t
     has already overwritten the good file -- with no snapshot to roll back to
     while a blocking defect is outstanding. The record still holds the earlier
     render's base64, so the entry previewed one image and downloaded another.
-    Gallery selection now shares the eligible logical-head resolver, so neither
-    the corrupt attempt nor another revision-requested audit record is offered.
+    Gallery selection still validates the render bytes. The corrupt attempt is
+    withheld, while a valid revision-requested render remains visible with its
+    review badge.
     """
     blank = tmp_path / "abandoned.jpg"
     blank.write_bytes(b"\xff\xd8" + b"\x00" * 700)      # under the blank floor
@@ -204,7 +215,7 @@ async def test_a_blank_on_disk_render_is_not_offered_for_download(monkeypatch, t
     await reporter._assemble_brief_figures(reporter.analysis_state, {"summary": "s"})
 
     names = {f["name"] for f in reporter.sent["integrated_report"]["figures"]}
-    assert names == set()
+    assert names == {"revised"}
     assert "abandoned" not in {c["name"] for c in reporter.captured_selection_input}
 
 

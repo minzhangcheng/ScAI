@@ -17,7 +17,10 @@ from backend.models.schemas import AnalysisState
 
 from backend.utils.files import safe_filename, validate_path_within, validate_session_id
 from backend.utils.auth import require_session_ownership
-from backend.services.report.paths import resolve_report_output_dir, resolve_report_target_lineage
+from backend.services.report.paths import (
+    resolve_published_report_dir,
+    resolve_report_target_lineage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +36,7 @@ async def get_report_html(session_id: str, request: Request, branch_id: Optional
     await require_session_ownership(session_id=session_id, user_id=user_id)
     target_lineage_id = resolve_report_target_lineage(branch_id)
     branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
-    report_dir = resolve_report_output_dir(session_id, branch_id_resolved)
+    report_dir = resolve_published_report_dir(session_id, branch_id_resolved)
     html_path = report_dir / "report.html"
 
     if not html_path.exists():
@@ -53,7 +56,7 @@ async def preview_report(session_id: str, request: Request, branch_id: Optional[
     await require_session_ownership(session_id=session_id, user_id=user_id)
     target_lineage_id = resolve_report_target_lineage(branch_id)
     branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
-    report_dir = resolve_report_output_dir(session_id, branch_id_resolved)
+    report_dir = resolve_published_report_dir(session_id, branch_id_resolved)
     branch_query = _branch_query(branch_id_resolved)
 
     if not report_dir.exists():
@@ -121,7 +124,9 @@ async def get_report_figure(
     safe_name = safe_filename(filename)
     target_lineage_id = resolve_report_target_lineage(branch_id)
     branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
-    figure_parent = resolve_report_output_dir(session_id, branch_id_resolved) / "figures"
+    figure_parent = (
+        resolve_published_report_dir(session_id, branch_id_resolved) / "figures"
+    )
     figure_path = figure_parent / safe_name
     validate_path_within(figure_path, figure_parent)
 
@@ -165,7 +170,9 @@ async def get_report_table(
     safe_name = safe_filename(filename)
     target_lineage_id = resolve_report_target_lineage(branch_id)
     branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
-    table_parent = resolve_report_output_dir(session_id, branch_id_resolved) / "tables"
+    table_parent = (
+        resolve_published_report_dir(session_id, branch_id_resolved) / "tables"
+    )
     table_path = table_parent / safe_name
     validate_path_within(table_path, table_parent)
 
@@ -204,7 +211,7 @@ async def get_report_file(
     validate_session_id(session_id)
     target_lineage_id = resolve_report_target_lineage(branch_id)
     branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
-    report_dir = resolve_report_output_dir(session_id, branch_id_resolved)
+    report_dir = resolve_published_report_dir(session_id, branch_id_resolved)
     file_path = _resolve_report_file(report_dir, filename)
 
     if not file_path.exists():

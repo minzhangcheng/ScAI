@@ -1,4 +1,16 @@
-from backend.services.report.paths import resolve_report_output_dir, resolve_report_target_lineage
+import hashlib
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from backend.services.report.paths import (
+    _sanitize_branch_id,
+    resolve_report_output_dir,
+    resolve_report_target_lineage,
+)
+from backend.services.report.output_generation import ReportGenerationError
 
 
 def test_main_report_output_uses_reports_root(tmp_path, monkeypatch):
@@ -8,7 +20,76 @@ def test_main_report_output_uses_reports_root(tmp_path, monkeypatch):
 
 def test_branch_report_output_uses_safe_branch_subdir(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.services.report.paths.get_session_reports", lambda session_id: tmp_path / session_id / "reports")
-    assert resolve_report_output_dir("s", "branch/A") == tmp_path / "s" / "reports" / "branches" / "branch_A"
+    output = resolve_report_output_dir("s", "branch/A")
+    assert output.parent == tmp_path / "s" / "reports" / "branches"
+    assert output.name.startswith("branch_A--")
+
+
+def test_branch_components_do_not_traverse_or_collide():
+    components = {
+        branch_id: _sanitize_branch_id(branch_id)
+        for branch_id in (".", "..", ".hidden", "branch/A", "branch_A")
+    }
+    assert len(set(components.values())) == len(components)
+    assert all(component not in {"", ".", ".."} for component in components.values())
+    assert all("/" not in component and "\\" not in component for component in components.values())
+
+
+def test_long_branch_id_resolves_to_bounded_component(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "backend.services.report.paths.get_session_reports",
+        lambda _session_id: tmp_path,
+    )
+    output = resolve_report_output_dir("s", "x" * 1024)
+    assert output.parent == tmp_path / "branches"
+    assert len(output.name.encode("utf-8")) < 255
+
+
+def test_legacy_branch_requires_exact_lineage_provenance(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "backend.services.report.paths.get_session_reports",
+        lambda _session_id: tmp_path,
+    )
+    legacy = tmp_path / "branches" / "branch_A"
+    legacy.mkdir(parents=True)
+    (legacy / "report.json").write_text(
+        '{"branch_id":"branch/A"}', encoding="utf-8"
+    )
+    assert resolve_report_output_dir("s", "branch/A") == legacy
+    with pytest.raises(ReportGenerationError, match="unambiguous"):
+        resolve_report_output_dir("s", "branch_A")
+
+
+def test_canonical_restore_legacy_branch_is_compatible(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "backend.services.report.paths.get_session_reports",
+        lambda _session_id: tmp_path,
+    )
+    legacy = tmp_path / "branches" / "restore-tx-1"
+    legacy.mkdir(parents=True)
+    assert resolve_report_output_dir("s", "restore-tx-1") == legacy
+
+
+def test_hashed_branch_wins_over_ambiguous_legacy_and_symlink_is_rejected(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        "backend.services.report.paths.get_session_reports",
+        lambda _session_id: tmp_path,
+    )
+    canonical = tmp_path / "branches" / _sanitize_branch_id("branch/A")
+    legacy = tmp_path / "branches" / "branch_A"
+    canonical.mkdir(parents=True)
+    legacy.mkdir()
+    assert resolve_report_output_dir("s", "branch/A") == canonical
+
+    canonical.rmdir()
+    try:
+        canonical.symlink_to(legacy, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are not available on this platform")
+    with pytest.raises(ReportGenerationError, match="unsafe"):
+        resolve_report_output_dir("s", "branch/A")
 
 
 def test_report_target_lineage_does_not_depend_on_current_session_branch():
@@ -22,11 +103,6 @@ def test_main_regenerate_target_ignores_current_restore_branch():
     assert current_session_state["restore_branch_id"] == "branch-a"
     assert resolve_report_target_lineage(branch_id_from_request) == "main"
 
-
-import pytest
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 from backend.models.schemas import (
     AnalysisPhase,
@@ -121,8 +197,8 @@ def test_branch_report_rejects_unowned_log_and_workspace_figures(tmp_path):
     scan_only_path = figures_dir / "scan_only_legacy.png"
     deep_unlogged_path = tmp_path / "a" / "b" / "c" / "d" / "deep_unlogged.png"
     deep_unlogged_path.parent.mkdir(parents=True)
-    write_valid_image(branch_path, min_bytes=2500)
-    write_valid_image(main_path, min_bytes=2500)
+    branch_payload = write_valid_image(branch_path, min_bytes=2500)
+    main_payload = write_valid_image(main_path, min_bytes=2500)
     write_valid_image(orphan_path, min_bytes=2500)
     write_valid_image(scan_only_path, min_bytes=2500)
     write_valid_image(deep_unlogged_path, min_bytes=2500)
@@ -147,6 +223,8 @@ def test_branch_report_rejects_unowned_log_and_workspace_figures(tmp_path):
                 figure_type="heatmap",
                 png_path=str(main_path),
                 pdf_path=str(main_path.with_suffix(".pdf")),
+                render_sha256=hashlib.sha256(main_payload).hexdigest(),
+                pdf_sha256="1" * 64,
                 lineage_id="main",
                 review_status=FigureReviewStatus.APPROVED,
             ),
@@ -157,6 +235,8 @@ def test_branch_report_rejects_unowned_log_and_workspace_figures(tmp_path):
                 figure_type="heatmap",
                 png_path=str(branch_path),
                 pdf_path=str(branch_path.with_suffix(".pdf")),
+                render_sha256=hashlib.sha256(branch_payload).hexdigest(),
+                pdf_sha256="2" * 64,
                 lineage_id="branch-a",
                 review_status=FigureReviewStatus.APPROVED,
             ),
@@ -341,6 +421,36 @@ def test_branch_clone_requires_a_complete_frozen_render_pdf_pair(tmp_path):
         )
 
     assert (source.png_path, source.pdf_path) == original_paths
+
+
+def test_branch_clone_skips_hashless_legacy_review_without_failing(tmp_path):
+    from backend.services.report.artifacts import archival_render_available
+    from backend.services.report.lineage import clone_publication_figures_for_branch
+    from backend.tests.figure_image_helpers import valid_pdf_bytes, write_valid_image
+
+    jpg = tmp_path / "figures" / "legacy.jpg"
+    pdf = jpg.with_suffix(".pdf")
+    jpg.parent.mkdir(parents=True)
+    write_valid_image(jpg, min_bytes=2200)
+    pdf.write_bytes(valid_pdf_bytes())
+    source = PublicationFigure(
+        id="legacy-source",
+        name="legacy",
+        description="Review predates integrity binding",
+        figure_type="heatmap",
+        png_path=str(jpg),
+        pdf_path=str(pdf),
+        review_status=FigureReviewStatus.APPROVED,
+    )
+    before = source.model_dump()
+
+    cloned = clone_publication_figures_for_branch(
+        [source], branch_id="branch-a", workspace_path=tmp_path,
+    )
+
+    assert cloned == [source]
+    assert source.model_dump() == before
+    assert archival_render_available(source) is False
 
 
 def test_lineage_archive_rejects_preexisting_symlink_object(tmp_path):
@@ -568,7 +678,7 @@ async def test_branch_report_figure_route_serves_branch_asset(tmp_path, monkeypa
 
     reports_root = tmp_path / "s" / "reports"
     main_figures = reports_root / "figures"
-    branch_figures = reports_root / "branches" / "branch-a" / "figures"
+    branch_figures = reports_root / "branches" / _sanitize_branch_id("branch-a") / "figures"
     main_figures.mkdir(parents=True)
     branch_figures.mkdir(parents=True)
     (main_figures / "plot.png").write_bytes(b"main")
@@ -592,7 +702,7 @@ async def test_branch_report_table_route_serves_branch_asset(tmp_path, monkeypat
 
     reports_root = tmp_path / "s" / "reports"
     main_tables = reports_root / "tables"
-    branch_tables = reports_root / "branches" / "branch-a" / "tables"
+    branch_tables = reports_root / "branches" / _sanitize_branch_id("branch-a") / "tables"
     main_tables.mkdir(parents=True)
     branch_tables.mkdir(parents=True)
     (main_tables / "table.csv").write_text("main\n", encoding="utf-8")
@@ -616,7 +726,7 @@ async def test_branch_report_preview_urls_include_branch_id(tmp_path, monkeypatc
     from backend.routes import reports
 
     reports_root = tmp_path / "s" / "reports"
-    branch_dir = reports_root / "branches" / "branch-a"
+    branch_dir = reports_root / "branches" / _sanitize_branch_id("branch-a")
     (branch_dir / "figures").mkdir(parents=True)
     (branch_dir / "tables").mkdir(parents=True)
     (branch_dir / "report.html").write_text("<html></html>", encoding="utf-8")
@@ -654,7 +764,7 @@ async def test_detailed_report_cache_is_lineage_scoped(tmp_path, monkeypatch):
 
     reports_root = tmp_path / "s" / "reports"
     main_dir = reports_root
-    branch_dir = reports_root / "branches" / "branch-a"
+    branch_dir = reports_root / "branches" / _sanitize_branch_id("branch-a")
     main_dir.mkdir(parents=True)
     branch_dir.mkdir(parents=True)
     (main_dir / "report.json").write_text('{"which": "main"}', encoding="utf-8")

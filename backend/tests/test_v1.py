@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
 
 
 @pytest.fixture
@@ -189,3 +190,45 @@ class TestValidation:
         ov = AgentOverride(vision=True)
         assert ov.vision is True
         assert not hasattr(ov, "vision_enabled")
+
+
+class TestReportArtifacts:
+    @pytest.mark.asyncio
+    async def test_v1_artifacts_expose_only_current_branch_generation(
+        self, tmp_path, monkeypatch,
+    ):
+        from backend.models.schemas import AnalysisState, TaskStatus
+        from backend.routes import v1
+        from backend.services.report.output_generation import ReportGenerationTransaction
+        from backend.services.report.paths import resolve_report_output_dir
+
+        state = AnalysisState(
+            id="sid1",
+            user_id="u1",
+            status=TaskStatus.COMPLETED,
+            restore_branch_id="branch/A",
+        )
+        monkeypatch.setattr(
+            "backend.services.report.paths.get_session_reports",
+            lambda _session_id: tmp_path,
+        )
+        branch_root = resolve_report_output_dir("sid1", "branch/A")
+        transaction = ReportGenerationTransaction(branch_root)
+        (transaction.staging_dir / "figures").mkdir()
+        (transaction.staging_dir / "tables").mkdir()
+        (transaction.staging_dir / "figures" / "panel.png").write_bytes(b"branch")
+        (transaction.staging_dir / "report.html").write_text("branch", encoding="utf-8")
+        transaction.commit_report({"id": "branch", "branch_id": "branch/A"})
+        (tmp_path / "report.html").write_text("main", encoding="utf-8")
+        monkeypatch.setattr(v1, "require_session_ownership", AsyncMock(return_value=state))
+        request = SimpleNamespace(state=SimpleNamespace(user_id="u1"))
+
+        payload = await v1.get_analysis("sid1", request)
+        names = {item["name"] for item in payload["artifacts"]}
+        assert names == {"report.json", "report.html", "figures/panel.png"}
+
+        response = await v1.download_artifact("sid1", "report.html", request)
+        assert Path(response.path).read_text(encoding="utf-8") == "branch"
+        with pytest.raises(Exception) as exc_info:
+            await v1.download_artifact("sid1", ".report-current.json", request)
+        assert exc_info.value.status_code == 404
