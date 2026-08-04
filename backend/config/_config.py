@@ -458,14 +458,24 @@ class SystemConfig(BaseModel):
     # Local Jupyter kernel settings
     sandbox_timeout: int = 5400  # Code execution timeout in seconds (1.5 hours)
     # Runtime persistence must stop runaway namespaces before container OOM.
-    # These administrator-adjustable ceilings are further reduced at runtime
-    # to safe fractions of a detected cgroup/system memory limit.
-    runtime_max_namespace_count: int = Field(default=1500, ge=1)
-    runtime_max_single_object_bytes: int = Field(default=4 * 1024 ** 3, ge=1)
-    runtime_max_anndata_total_bytes: int = Field(default=12 * 1024 ** 3, ge=1)
-    runtime_max_rss_bytes: int = Field(default=16 * 1024 ** 3, ge=1)
-    runtime_max_pkl_bytes: int = Field(default=8 * 1024 ** 3, ge=1)
-    runtime_max_save_seconds: float = Field(default=300.0, gt=0)
+    # Memory ceilings default to ``None`` (automatic): workflow construction
+    # derives them from the Docker cgroup or host capacity. They are
+    # deployment-scoped rather than database configuration; the corresponding
+    # SCAI_RUNTIME_* environment variables may install stricter absolute caps.
+    runtime_max_namespace_count: int = Field(default=1500, ge=1, exclude=True)
+    runtime_max_single_object_bytes: Optional[int] = Field(
+        default=None, ge=1, exclude=True
+    )
+    runtime_max_anndata_total_bytes: Optional[int] = Field(
+        default=None, ge=1, exclude=True
+    )
+    runtime_max_rss_bytes: Optional[int] = Field(
+        default=None, ge=1, exclude=True
+    )
+    runtime_max_pkl_bytes: Optional[int] = Field(
+        default=None, ge=1, exclude=True
+    )
+    runtime_max_save_seconds: float = Field(default=300.0, gt=0, exclude=True)
 
     # Bioinformatics agent settings
     bioinfo_max_steps: int = 200  # Max autonomous analysis steps per execution

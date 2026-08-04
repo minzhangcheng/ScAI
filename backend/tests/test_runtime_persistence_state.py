@@ -17,6 +17,19 @@ from backend.utils.sandbox import (
 )
 
 
+def test_system_config_runtime_memory_ceilings_default_to_auto_and_are_not_persisted():
+    from backend.config._config import SystemConfig
+
+    config = SystemConfig()
+    assert config.runtime_max_single_object_bytes is None
+    assert config.runtime_max_anndata_total_bytes is None
+    assert config.runtime_max_rss_bytes is None
+    assert config.runtime_max_pkl_bytes is None
+    persisted = config.model_dump(mode="json")
+    assert "runtime_max_rss_bytes" not in persisted
+    assert "runtime_max_save_seconds" not in persisted
+
+
 @pytest.mark.asyncio
 async def test_runtime_metrics_count_dense_backing_allocation_once():
     np = pytest.importorskip("numpy")
@@ -112,6 +125,91 @@ def test_effective_runtime_budgets_clamp_to_container_capacity():
     assert effective["max_rss_bytes"] == int(8 * gib * 0.60)
     assert effective["max_pkl_bytes"] == int(8 * gib * 0.30)
     assert effective["effective_limit_basis"] == "test_cgroup"
+
+
+def test_effective_runtime_budgets_default_to_capacity_fractions():
+    from backend.utils.runtime_budget import resolve_effective_runtime_budgets
+
+    gib = 1024 ** 3
+    effective = resolve_effective_runtime_budgets(
+        {
+            "max_namespace_count": 1500,
+            "max_single_object_bytes": None,
+            "max_anndata_total_bytes": None,
+            "max_rss_bytes": None,
+            "max_pkl_bytes": None,
+            "max_save_seconds": 300,
+        },
+        memory_capacity_bytes=2 * 1024 * gib,
+        capacity_source="test_cgroup",
+    )
+
+    assert effective["max_single_object_bytes"] == 512 * gib
+    assert effective["max_anndata_total_bytes"] == int(2 * 1024 * gib * 0.45)
+    assert effective["max_rss_bytes"] == int(2 * 1024 * gib * 0.60)
+    assert effective["max_pkl_bytes"] == int(2 * 1024 * gib * 0.30)
+    assert effective["max_namespace_count"] == 1500
+    assert effective["max_save_seconds"] == 300
+
+
+def test_runtime_budget_environment_supports_numeric_caps_and_auto():
+    from backend.utils.runtime_budget import apply_runtime_budget_environment
+
+    gib = 1024 ** 3
+    configured = {
+        "max_namespace_count": 1500,
+        "max_single_object_bytes": None,
+        "max_anndata_total_bytes": None,
+        "max_rss_bytes": None,
+        "max_pkl_bytes": None,
+        "max_save_seconds": 300,
+    }
+    resolved = apply_runtime_budget_environment(
+        configured,
+        environ={
+            "SCAI_RUNTIME_MAX_SINGLE_OBJECT_GB": "32.5",
+            "SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB": "48",
+            "SCAI_RUNTIME_MAX_RSS_GB": "64",
+            "SCAI_RUNTIME_MAX_PKL_GB": "auto",
+            "SCAI_RUNTIME_MAX_NAMESPACE_COUNT": "3000",
+            "SCAI_RUNTIME_MAX_SAVE_SECONDS": "900.5",
+        },
+    )
+
+    assert resolved == {
+        "max_namespace_count": 3000,
+        "max_single_object_bytes": int(32.5 * gib),
+        "max_anndata_total_bytes": 48 * gib,
+        "max_rss_bytes": 64 * gib,
+        "max_pkl_bytes": None,
+        "max_save_seconds": 900.5,
+    }
+
+
+def test_runtime_budget_environment_ignores_invalid_values(caplog):
+    from backend.utils.runtime_budget import apply_runtime_budget_environment
+
+    configured = {
+        "max_namespace_count": 1500,
+        "max_single_object_bytes": None,
+        "max_anndata_total_bytes": None,
+        "max_rss_bytes": None,
+        "max_pkl_bytes": None,
+        "max_save_seconds": 300,
+    }
+    resolved = apply_runtime_budget_environment(
+        configured,
+        environ={
+            "SCAI_RUNTIME_MAX_RSS_GB": "not-a-size",
+            "SCAI_RUNTIME_MAX_NAMESPACE_COUNT": "0",
+            "SCAI_RUNTIME_MAX_SAVE_SECONDS": "inf",
+        },
+    )
+
+    assert resolved == configured
+    assert "SCAI_RUNTIME_MAX_RSS_GB" in caplog.text
+    assert "SCAI_RUNTIME_MAX_NAMESPACE_COUNT" in caplog.text
+    assert "SCAI_RUNTIME_MAX_SAVE_SECONDS" in caplog.text
 
 
 @pytest.mark.asyncio

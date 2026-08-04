@@ -186,6 +186,25 @@ def test_global_system_config_seals_api_credentials():
     assert open_system_config_payload(sealed) == payload
 
 
+def test_global_system_config_discards_legacy_deployment_runtime_budgets():
+    payload = {
+        "api": {"api_key": "", "llm_base_url": "https://example.test/v1"},
+        "runtime_max_namespace_count": 1500,
+        "runtime_max_single_object_bytes": 4 * 1024 ** 3,
+        "runtime_max_anndata_total_bytes": 12 * 1024 ** 3,
+        "runtime_max_rss_bytes": 16 * 1024 ** 3,
+        "runtime_max_pkl_bytes": 8 * 1024 ** 3,
+        "runtime_max_save_seconds": 300,
+    }
+
+    sealed = seal_system_config_payload(payload)
+    opened = open_system_config_payload(payload)
+
+    for key in payload.keys() - {"api"}:
+        assert key not in sealed
+        assert key not in opened
+
+
 def test_portable_export_state_omits_credentials(tmp_path):
     from backend.routes.export_import import _add_portable_state_json
 

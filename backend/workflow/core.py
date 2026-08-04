@@ -1198,9 +1198,12 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         )
 
         # Initialize local Jupyter sandbox with session-specific paths
-        from backend.utils.runtime_budget import resolve_effective_runtime_budgets
+        from backend.utils.runtime_budget import (
+            apply_runtime_budget_environment,
+            resolve_effective_runtime_budgets,
+        )
 
-        runtime_budgets = resolve_effective_runtime_budgets({
+        configured_runtime_budgets = apply_runtime_budget_environment({
             "max_namespace_count": self.config.runtime_max_namespace_count,
             "max_single_object_bytes": self.config.runtime_max_single_object_bytes,
             "max_anndata_total_bytes": self.config.runtime_max_anndata_total_bytes,
@@ -1208,11 +1211,16 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             "max_pkl_bytes": self.config.runtime_max_pkl_bytes,
             "max_save_seconds": self.config.runtime_max_save_seconds,
         })
+        runtime_budgets = resolve_effective_runtime_budgets(
+            configured_runtime_budgets
+        )
         logger.info(
-            "[%s] Effective runtime persistence budgets (%s, capacity=%s): %s",
+            "[%s] Effective runtime persistence budgets (%s, capacity=%s, "
+            "configured=%s): %s",
             self.session_id,
             runtime_budgets.get("effective_limit_basis"),
             runtime_budgets.get("effective_memory_capacity_bytes"),
+            configured_runtime_budgets,
             {
                 key: value for key, value in runtime_budgets.items()
                 if key.startswith("max_")

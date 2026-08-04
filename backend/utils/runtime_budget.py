@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +16,115 @@ _MEMORY_FRACTIONS = {
     "max_pkl_bytes": 0.30,
 }
 _UNBOUNDED_CGROUP_SENTINEL = 1 << 60
+
+_CAPACITY_ENV_VARS = {
+    "max_single_object_bytes": "SCAI_RUNTIME_MAX_SINGLE_OBJECT_GB",
+    "max_anndata_total_bytes": "SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB",
+    "max_rss_bytes": "SCAI_RUNTIME_MAX_RSS_GB",
+    "max_pkl_bytes": "SCAI_RUNTIME_MAX_PKL_GB",
+}
+_POSITIVE_INT_ENV_VARS = {
+    "max_namespace_count": "SCAI_RUNTIME_MAX_NAMESPACE_COUNT",
+}
+_POSITIVE_FLOAT_ENV_VARS = {
+    "max_save_seconds": "SCAI_RUNTIME_MAX_SAVE_SECONDS",
+}
+
+
+def apply_runtime_budget_environment(
+    configured: dict[str, int | float | None],
+    *,
+    environ: dict[str, str] | None = None,
+) -> dict[str, int | float | None]:
+    """Overlay deployment-only runtime persistence budget settings.
+
+    Capacity variables are expressed in GiB. Missing values preserve the
+    supplied configuration, while ``auto`` explicitly removes an absolute
+    ceiling so :func:`resolve_effective_runtime_budgets` derives one from the
+    Docker cgroup or host memory capacity. Invalid values are ignored with a
+    warning instead of making the backend unavailable because of an operator
+    typo.
+    """
+    env = os.environ if environ is None else environ
+    result: dict[str, int | float | None] = dict(configured)
+    logger = logging.getLogger(__name__)
+
+    for key, name in _CAPACITY_ENV_VARS.items():
+        raw = str(env.get(name, "") or "").strip()
+        if not raw:
+            continue
+        if raw.lower() == "auto":
+            result[key] = None
+            continue
+        try:
+            value_gib = float(raw)
+        except ValueError:
+            logger.warning(
+                "%s=%r is not a number of GiB or 'auto'; keeping %r",
+                name,
+                raw,
+                result.get(key),
+            )
+            continue
+        if not math.isfinite(value_gib) or value_gib <= 0:
+            logger.warning(
+                "%s=%r must be a positive finite number of GiB; keeping %r",
+                name,
+                raw,
+                result.get(key),
+            )
+            continue
+        result[key] = max(1, int(value_gib * 1024 ** 3))
+
+    for key, name in _POSITIVE_INT_ENV_VARS.items():
+        raw = str(env.get(name, "") or "").strip()
+        if not raw:
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning(
+                "%s=%r is not a positive integer; keeping %r",
+                name,
+                raw,
+                result.get(key),
+            )
+            continue
+        if value <= 0:
+            logger.warning(
+                "%s=%r must be a positive integer; keeping %r",
+                name,
+                raw,
+                result.get(key),
+            )
+            continue
+        result[key] = value
+
+    for key, name in _POSITIVE_FLOAT_ENV_VARS.items():
+        raw = str(env.get(name, "") or "").strip()
+        if not raw:
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.warning(
+                "%s=%r is not a positive number; keeping %r",
+                name,
+                raw,
+                result.get(key),
+            )
+            continue
+        if not math.isfinite(value) or value <= 0:
+            logger.warning(
+                "%s=%r must be a positive finite number; keeping %r",
+                name,
+                raw,
+                result.get(key),
+            )
+            continue
+        result[key] = value
+
+    return result
 
 
 def _read_positive_int(path: Path) -> int | None:
@@ -48,7 +160,7 @@ def detect_memory_capacity_bytes() -> tuple[int | None, str]:
 
 
 def resolve_effective_runtime_budgets(
-    configured: dict[str, int | float],
+    configured: dict[str, int | float | None],
     *,
     memory_capacity_bytes: int | None = None,
     capacity_source: str | None = None,
@@ -61,10 +173,11 @@ def resolve_effective_runtime_budgets(
     if memory_capacity_bytes and memory_capacity_bytes > 0:
         for key, fraction in _MEMORY_FRACTIONS.items():
             configured_limit = configured.get(key)
-            if configured_limit is None or float(configured_limit) <= 0:
-                continue
             dynamic_limit = max(1, int(memory_capacity_bytes * fraction))
-            effective[key] = min(int(configured_limit), dynamic_limit)
+            if configured_limit is None:
+                effective[key] = dynamic_limit
+            elif float(configured_limit) > 0:
+                effective[key] = min(int(configured_limit), dynamic_limit)
     effective["effective_memory_capacity_bytes"] = memory_capacity_bytes
     effective["effective_limit_basis"] = capacity_source or "configured_only"
     return effective

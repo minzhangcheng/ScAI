@@ -154,6 +154,19 @@ ENDPOINT_FIELD_NAMES = frozenset({
     "proxy_url",
 })
 
+# Resource ceilings are owned by the deployment environment. Older releases
+# serialized these SystemConfig defaults into app_meta, which would otherwise
+# keep the legacy 16 GiB RSS ceiling alive after an upgrade even though the new
+# operator default is automatic cgroup/host sizing.
+DEPLOYMENT_ONLY_SYSTEM_CONFIG_FIELDS = frozenset({
+    "runtime_max_namespace_count",
+    "runtime_max_single_object_bytes",
+    "runtime_max_anndata_total_bytes",
+    "runtime_max_rss_bytes",
+    "runtime_max_pkl_bytes",
+    "runtime_max_save_seconds",
+})
+
 
 _ENDPOINT_BEARING_SECTIONS = (
     "agent_server_configs",
@@ -178,6 +191,8 @@ def strip_analysis_state_secrets(payload: Mapping[str, Any]) -> dict[str, Any]:
 def seal_system_config_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Encrypt global API credentials before writing configuration metadata."""
     result = copy.deepcopy(dict(payload))
+    for field in DEPLOYMENT_ONLY_SYSTEM_CONFIG_FIELDS:
+        result.pop(field, None)
     api = result.get("api")
     if isinstance(api, dict):
         for field in ("api_key", "proxy_url"):
@@ -189,6 +204,8 @@ def seal_system_config_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 def open_system_config_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Decrypt global API credentials, accepting plaintext legacy metadata."""
     result = copy.deepcopy(dict(payload))
+    for field in DEPLOYMENT_ONLY_SYSTEM_CONFIG_FIELDS:
+        result.pop(field, None)
     api = result.get("api")
     if isinstance(api, dict):
         for field in ("api_key", "proxy_url"):

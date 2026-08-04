@@ -50,6 +50,7 @@ The recommended figures include **30% safety margin** over the modelled peak.
 | 8  | 100,000 | 32.3 GiB  | **44 GiB**   | **59 GiB**   |
 | 12 | 200,000 | 63.9 GiB  | **86 GiB**   | **115 GiB**  |
 | 20 | 500,000 | 158.7 GiB | **209 GiB**  | **281 GiB**  |
+| 100 | 1,000,000 | 320.0 GiB | **418 GiB** | **564 GiB** |
 
 Both recommended columns are **per concurrent analysis**. The snapshot column is
 explained in [section 8](#memory-impact-of-snapshots); if snapshots are disabled,
@@ -62,13 +63,70 @@ use the middle column.
   detection use more.
 - Cell count dominates. Memory scales with the number of non-zero entries, which
   grows with cells, not with the size of the gene annotation.
-- The model is fitted to **one** measured deployment. Treat the 200,000- and
-  500,000-cell rows as extrapolation, not measurement, and verify before
-  committing hardware at that scale.
+- The model is fitted to **one** measured deployment. Treat the 200,000-,
+  500,000-, and 1,000,000-cell rows as extrapolation, not measurement, and
+  verify before committing hardware at that scale.
 - Peaks are transient. A dense transformation of a full matrix costs
   `cells × genes × 4 bytes` on top of the table — 1.6 GiB for the reference
   dataset, and it scales with the gene count rather than with detected genes.
   Analyses that restrict such work to highly variable genes stay far below this.
+
+The 100-sample row assumes approximately 10,000 retained cells per sample. A
+different number of samples with the same total cell count has a similar matrix
+cost; sample count adds smaller per-sample QC and metadata overhead. Treat this
+row as capacity-planning guidance, not a claim that every analysis method is
+validated at one million cells.
+
+#### Runtime persistence budgets
+
+Regular runtime persistence has a separate resource gate from Snapshot V2. By
+default, its memory and file-size ceilings are **automatic**, derived from the
+Docker cgroup memory limit when one is present, otherwise from host memory:
+
+| Budget | Automatic ceiling |
+|---|---:|
+| Largest single object | 25% of detected capacity |
+| Total live AnnData size | 45% |
+| Analysis-kernel RSS | 60% |
+| Compressed runtime file | 30% |
+
+These are per-session persistence ceilings, not a global scheduler. On a shared
+instance, size the container and any explicit per-session caps for the maximum
+number of concurrently live analysis kernels. An unbounded container lets every
+session see host capacity, so two sessions can each receive an individually
+valid budget whose sum exceeds the host. Prefer a finite container memory limit,
+or install explicit `SCAI_RUNTIME_MAX_*` ceilings from the environment-variable
+table in section 17.
+
+Unset capacity variables and the explicit value `auto` both select the automatic
+ceiling. A positive numeric GiB value is an administrator ceiling; the effective
+limit is the lower of that value and the automatic ceiling. For example:
+
+```bash
+docker run -d --name scai --memory=128g \
+  -e SCAI_RUNTIME_MAX_RSS_GB=64 \
+  -e SCAI_RUNTIME_MAX_SINGLE_OBJECT_GB=32 \
+  -e SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB=48 \
+  -e SCAI_RUNTIME_MAX_PKL_GB=16 \
+  -e SCAI_RUNTIME_MAX_SAVE_SECONDS=900 \
+  ... ghcr.io/minzhangcheng/scai:latest
+```
+
+Illustrative explicit profiles are:
+
+| Total cells | RSS | Single object | AnnData total | Runtime file | Save timeout |
+|---:|---:|---:|---:|---:|---:|
+| up to 50,000 | 32 GiB | 16 GiB | 24 GiB | 8 GiB | 300 s |
+| 50,000–200,000 | 64 GiB | 32 GiB | 48 GiB | 16 GiB | 900 s |
+| 200,000–500,000 | 256 GiB | 128 GiB | 192 GiB | 64 GiB | 1,800 s |
+| around 1,000,000 | 512 GiB | 256 GiB | 384 GiB | 128 GiB | 3,600 s |
+
+The last two profiles are extrapolations and assume one large analysis per
+allocated memory share. Use the automatic defaults unless an operator needs a
+stricter concurrency boundary. Disk capacity only stores a checkpoint; it does
+not evict live Python objects or reduce kernel RSS. Backed AnnData may also need
+materialisation during regular persistence, so disk-backed input is not itself
+an out-of-core execution guarantee.
 
 **Do not run an instance without a memory ceiling.** An unbounded kernel that
 exhausts host memory invites the kernel OOM killer to terminate an arbitrary
@@ -207,8 +265,8 @@ The release helper always builds both the selected tag and `latest`:
 ```
 
 ```bash
-./build.sh --version 0.38.13
-./build.sh --version 0.38.13 --push
+./build.sh --version 0.39.1
+./build.sh --version 0.39.1 --push
 ```
 
 Without `--version`, the helper uses the newest Git tag returned by `git describe --tags --abbrev=0`, or `latest` if none exists. `--push` pushes both tags to `ghcr.io/minzhangcheng/scai`; authenticate Docker to that registry before using it. The helper does not accept registry, image-name, platform, or build-argument flags.
@@ -382,13 +440,12 @@ again — the gate could never clear.
 
 Two scoping rules matter:
 
-- **With snapshots disabled, nothing is checked.** No probe runs and no memory
-  is measured; sizing the host is entirely the operator's responsibility, per
-  [Memory sizing](#memory-sizing).
-- **Ordinary analysis code is never checked either.** The preflight covers only
-  the copy the capture itself is about to make. An analysis step that exhausts
-  memory on its own is not intercepted — that is what the container memory limit
-  is for.
+- **With snapshots disabled, this snapshot-copy preflight does not run.** The
+  separate regular runtime-persistence gate still checks the live namespace at
+  its persistence boundaries using the automatic/operator budgets above.
+- **Ordinary analysis allocations are not pre-authorised.** A step may allocate
+  memory before the next persistence boundary; the container memory limit remains
+  the hard backstop for that interval.
 
 The margin is tunable with `SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO` (default `0.8`,
 see section 17). Missing evidence never refuses a capture: if the probe cannot
@@ -682,6 +739,12 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 | `SCAI_SNAPSHOT_SESSION_QUOTA_GB` | `500` | Per-session snapshot store ceiling, in GiB. **Values below 100 GiB are not advised** — see [Snapshot capacity](#snapshot-capacity) |
 | `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB` | `50` | Free space that must remain on the data volume after a capture, in GiB |
 | `SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO` | `0.8` | Fraction of measured kernel memory headroom a capture may plan against — see [Memory impact of snapshots](#memory-impact-of-snapshots). Values outside `(0, 1]` are ignored with a warning |
+| `SCAI_RUNTIME_MAX_RSS_GB` | `auto` | Per-session kernel RSS ceiling for regular runtime persistence; numeric values are GiB administrator caps |
+| `SCAI_RUNTIME_MAX_SINGLE_OBJECT_GB` | `auto` | Largest live object ceiling; numeric values are GiB administrator caps |
+| `SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB` | `auto` | Total estimated size of live AnnData objects; numeric values are GiB administrator caps |
+| `SCAI_RUNTIME_MAX_PKL_GB` | `auto` | Compressed regular-runtime file ceiling; numeric values are GiB administrator caps |
+| `SCAI_RUNTIME_MAX_NAMESPACE_COUNT` | `1500` | Maximum measured live namespace entries before regular persistence |
+| `SCAI_RUNTIME_MAX_SAVE_SECONDS` | `300` | Maximum regular-runtime serialization time in seconds |
 | `SCAI_MODE` | `prod` | Docker entrypoint mode; the production image rejects `dev` |
 | `PIP_INDEX_URL` | pip environment/default | Docker Python package index |
 | `SCAI_AUTO_FETCH_MARKERS` | `0` | Direct startup; `1` attempts marker-database download |

@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.38.13 · **Last updated**: 2026-08-03
+**Version**: 0.39.1 · **Last updated**: 2026-08-04
 
 ## 1. Runtime Architecture
 
@@ -256,9 +256,14 @@ the preflight is deterministic, so a retry would refuse again and the gate could
 never clear. `proceed` arms a one-shot
 `AnalysisState.force_snapshot_memory_override` that the next capture consumes.
 Missing evidence never refuses — an unreadable probe or unknown headroom falls
-back to capturing. **Nothing outside the capture path is checked**: with
-Snapshot V2 disabled no probe runs at all, and ordinary analysis code is never
-memory-policed (that is the container memory limit's job).
+back to capturing. This is the preflight for Snapshot V2's own copy allocation.
+Regular runtime persistence separately checks namespace count, largest object,
+AnnData total, kernel RSS, estimated pickle size, and save time at persistence
+boundaries. Those budgets default to automatic fractions of the container
+cgroup memory limit (host memory fallback) and may be capped with deployment
+environment variables. With Snapshot V2 disabled only its copy-specific probe
+is absent. Arbitrary analysis allocations can still occur before the next
+persistence boundary, so the container memory limit remains the hard backstop.
 
 ### Known limits
 
@@ -326,6 +331,16 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.39.x — (2026-08-04 onward)**
+
+- `0.39.1` — Runtime persistence capacity is now deployment-sized instead of being constrained by the fixed 4/12/16/8 GiB object, AnnData, RSS, and runtime-file defaults introduced with the persistence failure gate. This keeps the fail-closed verified-generation boundary while allowing the same platform build to operate on small Docker allocations, large-memory servers, and analyses ranging from tens of thousands to approximately one million cells without source edits (2026-08-04):
+  - **Memory budgets default to the effective deployment capacity (`backend/config/_config.py`, `backend/utils/runtime_budget.py`)**: the four fixed byte ceilings now default to automatic mode. Resolution reads cgroup v2 `memory.max`, then cgroup v1 `memory.limit_in_bytes`, and falls back to host `MemTotal`. Effective limits are 25% for the largest object, 45% for total live AnnData, 60% for kernel RSS, and 30% for the compressed runtime file. The namespace ceiling and save timeout remain independently bounded.
+  - **Administrators can install deployment-only caps without persisting machine policy into application configuration (`backend/utils/runtime_budget.py`, `backend/workflow/core.py`)**: `SCAI_RUNTIME_MAX_SINGLE_OBJECT_GB`, `SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB`, `SCAI_RUNTIME_MAX_RSS_GB`, and `SCAI_RUNTIME_MAX_PKL_GB` accept positive GiB values or `auto`; namespace count and save timeout have their own positive environment controls. Numeric capacity values are upper bounds and are still clamped to the automatic fraction. Workflow startup logs both configured and effective budgets with the detected capacity source.
+  - **Upgrades cannot silently resurrect the former 16 GiB ceiling (`backend/utils/secret_redaction.py`)**: all six deployment-only runtime fields are stripped on both global-config sealing and opening. New database writes omit them, while legacy `app_meta` payloads are ignored at load time even when they already contain encrypted credentials and therefore need no credential migration.
+  - **Operator guidance covers large and concurrent deployments (`docs/admin-manual.md`, `docs/admin-manual-zh.md`)**: both manuals document automatic resolution, every environment override, explicit profiles through approximately one million cells, and an extrapolated 100-sample / one-million-cell sizing row. They distinguish per-session persistence budgets from global concurrency scheduling and clarify that disk checkpoints do not evict live Python objects, reduce kernel RSS, or turn backed AnnData into an out-of-core execution guarantee.
+  - **Snapshot scope documentation is corrected (`AGENTS.md`, `CLAUDE.md`, `docs/HANDOVER.md`)**: disabling Snapshot V2 removes only the copy-specific capture preflight. Regular persistence budgets still run at persistence boundaries, while the container memory limit remains the hard backstop for arbitrary allocations between those boundaries. No dense-matrix, AnnData lifecycle, or out-of-core analysis algorithm was changed in this release.
+  - **Verification**: 119 targeted backend tests cover automatic and explicit budgets, the 2 TiB capacity case, invalid environment values, legacy-config stripping, runtime-persistence gates, snapshot-failure resume, workflow close, secret persistence, configuration I/O, and version consistency. The Python sources compile and `git diff --check` is clean.
 
 **0.38.x — (2026-08-01 onward)**
 
