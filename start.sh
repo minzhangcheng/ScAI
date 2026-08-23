@@ -80,7 +80,8 @@ PID_FILE="$SCRIPT_DIR/.scai.pid"
 
 # Dependencies directory (outside code directory)
 DEP_DIR="$PARENT_DIR/dep"
-VENV_DIR="$DEP_DIR/venv"
+PYTHON_VERSION="3.11"
+VENV_DIR="$DEP_DIR/venv-py311"
 FRONTEND_DEP_DIR="$DEP_DIR/frontend"
 NODE_MODULES_DIR="$FRONTEND_DEP_DIR/node_modules"
 
@@ -94,11 +95,70 @@ if [ -f "$PID_FILE" ]; then
     exit 1
 fi
 
-# Check if Python is available
-if ! command -v python3 &> /dev/null; then
-    echo "Error: Python3 not installed. Please install Python3 first"
+# Create the dependency directory before resolving a direct-run interpreter.
+# The provider check is deliberately before Node/package parsing, venv creation,
+# dependency installation, PID creation, and service startup.
+mkdir -p "$DEP_DIR"
+echo "Dependencies directory: $DEP_DIR"
+
+python_minor() {
+    "$1" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null
+}
+
+require_python_minor() {
+    local label="$1" interpreter="$2" minor
+    [ -x "$interpreter" ] || {
+        echo "Error: $label is not an executable Python $PYTHON_VERSION interpreter." >&2
+        return 1
+    }
+    minor="$(python_minor "$interpreter")" || return 1
+    [ "$minor" = "$PYTHON_VERSION" ] || {
+        echo "Error: $label reports Python $minor; Python $PYTHON_VERSION is required." >&2
+        return 1
+    }
+}
+
+exit_with_python_error() {
+    local operation="$1"
+    echo "Error: $operation failed; services were not started." >&2
+    exit 1
+}
+
+PYTHON_BIN=""
+if command -v "python$PYTHON_VERSION" >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v "python$PYTHON_VERSION")"
+    require_python_minor "system python$PYTHON_VERSION" "$PYTHON_BIN" || exit 1
+elif command -v uv >/dev/null 2>&1; then
+    UV_PYTHON_INSTALL_DIR="$DEP_DIR/python"
+    mkdir -p "$UV_PYTHON_INSTALL_DIR"
+    UV_PYTHON_CMD=(env "UV_CACHE_DIR=$DEP_DIR/uv-cache"
+        "UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR" uv)
+    UV_FIND_ARGS=(python find --no-project --no-python-downloads
+        --managed-python --no-config --resolve-links "$PYTHON_VERSION")
+    if ! PYTHON_BIN="$("${UV_PYTHON_CMD[@]}" "${UV_FIND_ARGS[@]}" 2>/dev/null)"; then
+        "${UV_PYTHON_CMD[@]}" python install --no-bin \
+            --install-dir "$UV_PYTHON_INSTALL_DIR" --no-config "$PYTHON_VERSION" \
+            || exit_with_python_error "uv Python $PYTHON_VERSION installation"
+        PYTHON_BIN="$("${UV_PYTHON_CMD[@]}" "${UV_FIND_ARGS[@]}" 2>/dev/null)" \
+            || exit_with_python_error "post-install uv Python lookup"
+    fi
+    UV_ROOT_REAL="$(realpath -e "$UV_PYTHON_INSTALL_DIR")" \
+        || exit_with_python_error "uv Python install-root resolution"
+    PYTHON_REAL="$(realpath -e "$PYTHON_BIN")" \
+        || exit_with_python_error "uv Python interpreter resolution"
+    case "$PYTHON_REAL" in
+        "$UV_ROOT_REAL"/*) PYTHON_BIN="$PYTHON_REAL" ;;
+        *)
+            echo "Error: uv returned an interpreter outside $UV_ROOT_REAL." >&2
+            exit 1
+            ;;
+    esac
+    require_python_minor "uv-managed Python" "$PYTHON_BIN" || exit 1
+else
+    echo "Error: Python $PYTHON_VERSION is required. Install python$PYTHON_VERSION or uv." >&2
     exit 1
 fi
+echo "Python interpreter: $PYTHON_BIN"
 
 # Production needs Node.js only when the checked-out frontend build is missing
 # or stale. Packaged deployments can run the FastAPI-served dist without a
@@ -124,7 +184,7 @@ if [ "$MODE" = "dev" ] || [ "$NEEDS_FRONTEND_BUILD" -eq 1 ]; then
 fi
 
 if [ "$NEEDS_NODE" -eq 1 ]; then
-    VITE_VERSION="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["packages"]["node_modules/vite"]["version"])' "$SCRIPT_DIR/frontend/package-lock.json" 2>/dev/null)"
+    VITE_VERSION="$("$PYTHON_BIN" -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["packages"]["node_modules/vite"]["version"])' "$SCRIPT_DIR/frontend/package-lock.json" 2>/dev/null)"
     VITE_MAJOR="${VITE_VERSION%%.*}"
     if [ -z "$VITE_VERSION" ] || [ "$VITE_MAJOR" != "8" ]; then
         echo "Error: Unable to determine a supported Node.js range for locked Vite ${VITE_VERSION:-unknown}."
@@ -140,10 +200,6 @@ if [ "$NEEDS_NODE" -eq 1 ]; then
     fi
 fi
 
-# Create dependencies directory
-mkdir -p "$DEP_DIR"
-echo "Dependencies directory: $DEP_DIR"
-
 # Create data directory
 mkdir -p "$DATA_DIR"
 mkdir -p "$DATA_DIR/uploads"
@@ -153,10 +209,17 @@ mkdir -p "$DATA_DIR/sessions"
 mkdir -p "$DATA_DIR/reports"
 echo "Data directory: $DATA_DIR"
 
-# Create virtual environment if it doesn't exist
-if [ ! -d "$VENV_DIR" ]; then
+# Create virtual environment if it doesn't exist.  A symlink, regular file, or
+# other pre-existing non-directory is never followed, repaired, or replaced.
+if [ ! -e "$VENV_DIR" ] && [ ! -L "$VENV_DIR" ]; then
     echo "Creating Python virtual environment..."
-    python3.12 -m venv "$VENV_DIR"
+    "$PYTHON_BIN" -m venv "$VENV_DIR" \
+        || exit_with_python_error "Python $PYTHON_VERSION virtual environment creation"
+elif [ -L "$VENV_DIR" ] || [ ! -d "$VENV_DIR" ] \
+     || ! require_python_minor "existing virtual environment" "$VENV_DIR/bin/python"; then
+    echo "Error: $VENV_DIR is not a usable Python $PYTHON_VERSION virtual environment." >&2
+    echo "Move it aside and retry; start.sh will create a compatible environment." >&2
+    exit 1
 fi
 
 # Activate virtual environment
@@ -166,15 +229,27 @@ source "$VENV_DIR/bin/activate"
 # Install backend dependencies
 echo "Installing backend dependencies..."
 PIP_CMD=("$VENV_DIR/bin/python" -m pip)
+run_dependency_install() {
+    local label="$1"
+    shift
+    if ! "$@"; then
+        echo "Error: $label failed; services were not started." >&2
+        exit 1
+    fi
+}
+
 # Upgrade the ensurepip-provided resolver before processing the large
 # scientific dependency graph. pip 24.0 can fail with ResolutionTooDeep.
-"${PIP_CMD[@]}" install -q --upgrade "pip>=25.3,<27"
+run_dependency_install "pip resolver upgrade" \
+    "${PIP_CMD[@]}" install -q --upgrade "pip>=25.3,<27"
 PIP_ARGS=(install -q -r "$SCRIPT_DIR/requirements.txt")
 if "${PIP_CMD[@]}" install --help 2>/dev/null | grep -q -- '--build-constraint'; then
-    "${PIP_CMD[@]}" "${PIP_ARGS[@]}" \
+    run_dependency_install "backend requirements" \
+        "${PIP_CMD[@]}" "${PIP_ARGS[@]}" \
         --build-constraint "$SCRIPT_DIR/build-constraints.txt"
 else
-    PIP_CONSTRAINT="$SCRIPT_DIR/build-constraints.txt" \
+    run_dependency_install "backend requirements" env \
+        "PIP_CONSTRAINT=$SCRIPT_DIR/build-constraints.txt" \
         "${PIP_CMD[@]}" "${PIP_ARGS[@]}"
 fi
 
@@ -183,7 +258,8 @@ fi
 # pip would downgrade a pin this project deliberately holds. Rationale for
 # every entry lives in requirements-nodeps.txt.
 if [ -f "$SCRIPT_DIR/requirements-nodeps.txt" ]; then
-    "${PIP_CMD[@]}" install -q --no-deps -r "$SCRIPT_DIR/requirements-nodeps.txt"
+    run_dependency_install "no-deps requirements" \
+        "${PIP_CMD[@]}" install -q --no-deps -r "$SCRIPT_DIR/requirements-nodeps.txt"
 fi
 
 if [ "$NEEDS_NODE" -eq 1 ]; then
@@ -200,13 +276,17 @@ if [ "$NEEDS_NODE" -eq 1 ]; then
 
     if [ "$NEEDS_NPM_CI" -eq 1 ]; then
         echo "Installing the locked frontend dependency graph..."
-        mkdir -p "$FRONTEND_DEP_DIR"
-        rm -f "$FRONTEND_DEP_DIR/.install-complete"
-        cp "$SCRIPT_DIR/frontend/package.json" "$FRONTEND_DEP_DIR/package.json"
-        cp "$SCRIPT_DIR/frontend/package-lock.json" "$FRONTEND_DEP_DIR/package-lock.json"
+        prepare_frontend_inputs() {
+            mkdir -p "$FRONTEND_DEP_DIR" \
+                && rm -f "$FRONTEND_DEP_DIR/.install-complete" \
+                && cp "$SCRIPT_DIR/frontend/package.json" "$FRONTEND_DEP_DIR/package.json" \
+                && cp "$SCRIPT_DIR/frontend/package-lock.json" "$FRONTEND_DEP_DIR/package-lock.json"
+        }
+        run_dependency_install "locked frontend input preparation" prepare_frontend_inputs
         cd "$FRONTEND_DEP_DIR"
-        npm ci
-        touch "$FRONTEND_DEP_DIR/.install-complete"
+        run_dependency_install "locked frontend npm ci" npm ci
+        run_dependency_install "locked frontend install marker" \
+            touch "$FRONTEND_DEP_DIR/.install-complete"
         cd "$SCRIPT_DIR"
     else
         echo "Locked frontend dependencies are up to date."

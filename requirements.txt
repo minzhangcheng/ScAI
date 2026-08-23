@@ -43,6 +43,8 @@ dill>=0.3.7,<1.0
 # Core single-cell
 scanpy==1.11.5
 anndata==0.11.4
+# anndata 0.11.4 rejects Zarr 3 at import time; keep the accepted Zarr 2 line.
+zarr>=2.18.7,<3.0
 muon>=0.1.5,<1.0  # Multi-omics analysis
 
 # Data handling
@@ -115,6 +117,7 @@ infercnvpy>=0.4.0,<1.0
 # ============================================
 # Spatial Transcriptomics
 # ============================================
+dask-image>=2024.5.0
 squidpy>=1.4.0,<2.0
 
 # ============================================

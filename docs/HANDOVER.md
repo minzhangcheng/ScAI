@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.39.1 · **Last updated**: 2026-08-04
+**Version**: 0.39.15 · **Last updated**: 2026-08-22
 
 ## 1. Runtime Architecture
 
@@ -314,10 +314,13 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 ## 11. Development Guide
 
 - **Dev loop**: `./start.sh --dev` — hot reload for both frontend and backend.
-- **Backend tests**: `pytest backend/tests`; `conftest.py` supplies isolated data and the route registry is pinned by `route_snapshot.json`.
-- **Focused backend test**: `pytest backend/tests/test_specific.py::test_name`.
-- **Frontend tests**: `cd frontend && npm test`.
-- **Python client tests**: `pytest clients/python/tests`.
+- **Supported Python tests**: use the immutable runner described in [Test Strategy](test-strategy.md):
+  `scripts/scai-test fast backend/tests/test_x.py::test_y`,
+  `scripts/scai-test client`, `scripts/scai-test kernel`,
+  `scripts/scai-test backend-full`, or
+  `scripts/scai-test -- <raw pytest args>`.
+- **Supported frontend tests**: `scripts/scai-frontend-test --install-and-test` at the separately authorized isolated npm checkpoint.
+- **Test evidence**: every supported run records its image, source, command, counts, and artifact evidence under `test-results/`; focused evidence is not full-suite or release evidence.
 - **Adding a route**: create `backend/routes/<name>.py`, register it in `main.py`, update `route_snapshot.json` (`test_route_registry.py` will tell you if it drifts).
 - **Adding an agent**: subclass `backend/agents/base.py` where appropriate, register settings, and wire the node through `backend/workflow/` and `backend/constants.py`.
 - **Adding a workflow node**: update the relevant mixin, `workflow/graph.py`, `WORKFLOW_GRAPH_NODES`, node mappings, and workflow state.
@@ -333,6 +336,12 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.39.x — (2026-08-04 onward)**
+
+- `0.39.15` — F0 reproducible-environment rebaseline: Python 3.11 direct-start identity, scientific dependency bounds, immutable hash-locked Python test image, repository-owned serial profiles, isolated locked frontend tests, and content-addressed evidence (2026-08-22):
+  - **Direct startup is fail-closed (`start.sh`, dependency inputs)**: system or uv-managed Python is explicitly verified as minor 3.11, stale versioned venvs are refused without deletion, and failed pip or required npm installation starts no service.
+  - **Python test dependencies are immutable (`docker/test-deps*`, `scripts/lock-test-deps.sh`, image build/verification scripts)**: Python 3.11.15/linux-amd64 and every artifact are hash locked; application source and production dependency volumes are absent.
+  - **Test claims are content-addressed (`scripts/scai-test`, `scripts/scai-frontend-test`, `test-profiles.toml`, `docs/test-strategy.md`)**: every run records immutable dependency identity, exact source bytes, commands, environment, counts, duration, and claim scope; focused evidence is never release proof.
+  - **Verification is recorded after execution (`docs/coding/gate-rebaseline-f0-baseline.md`)**: the tracked record is added only after the final candidate matrix and describes failures without changing unrelated application behavior.
 
 - `0.39.1` — Runtime persistence capacity is now deployment-sized instead of being constrained by the fixed 4/12/16/8 GiB object, AnnData, RSS, and runtime-file defaults introduced with the persistence failure gate. This keeps the fail-closed verified-generation boundary while allowing the same platform build to operate on small Docker allocations, large-memory servers, and analyses ranging from tens of thousands to approximately one million cells without source edits (2026-08-04):
   - **Memory budgets default to the effective deployment capacity (`backend/config/_config.py`, `backend/utils/runtime_budget.py`)**: the four fixed byte ceilings now default to automatic mode. Resolution reads cgroup v2 `memory.max`, then cgroup v1 `memory.limit_in_bytes`, and falls back to host `MemTotal`. Effective limits are 25% for the largest object, 45% for total live AnnData, 60% for kernel RSS, and 30% for the compressed runtime file. The namespace ceiling and save timeout remain independently bounded.

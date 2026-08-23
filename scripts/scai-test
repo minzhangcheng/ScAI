@@ -1,0 +1,483 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
+readonly BASE_COMMIT="0c1edf479f7360dc80afa89cf7fc9534c1effce6"
+readonly PLATFORM="linux/amd64"
+readonly IMAGE_NAME="ghcr.io/minzhangcheng/scai-test-deps"
+readonly IMAGE_POINTER="docker/test-deps-image.json"
+readonly LOCAL_IDENTITY=".scai-test-deps-image.json"
+readonly PROFILES_TOML="test-profiles.toml"
+
+die() { echo "error: $*" >&2; exit 2; }
+usage() {
+    cat >&2 <<'EOF'
+Usage:
+  scripts/scai-test fast NODE [MORE_NODES]
+  scripts/scai-test client
+  scripts/scai-test kernel
+  scripts/scai-test backend-full
+  scripts/scai-test -- PYTEST_ARG [MORE_PYTEST_ARGS]
+EOF
+    exit 2
+}
+[[ $# -gt 0 ]] || usage
+
+MODE="$1"; shift
+RAW=0
+case "$MODE" in
+    --) RAW=1; PROFILE=raw; [[ $# -gt 0 ]] || die "raw mode (--) requires pytest arguments" ;;
+    fast) PROFILE=fast; [[ $# -gt 0 ]] || die "fast requires at least one explicit node or file" ;;
+    client|kernel|backend-full) PROFILE="$MODE" ;;
+    *) die "unknown profile: $MODE" ;;
+esac
+
+declare -a PROFILE_ARGS=()
+declare -a PROFILE_ENV=()
+if [[ "$RAW" -eq 1 || "$PROFILE" == fast ]]; then
+    PROFILE_ARGS=("$@")
+    if [[ "$RAW" -eq 1 ]]; then CLAIM_SCOPE="raw explicit pytest arguments"; else CLAIM_SCOPE="focused edit-loop evidence only"; fi
+else
+    PROFILE_JSON="$(mktemp /tmp/scai-profile.XXXXXX)"
+    trap 'rm -f "${PROFILE_JSON:-}" 2>/dev/null || true' EXIT
+    python3 - "$PROFILES_TOML" "$PROFILE" "$PROFILE_JSON" <<'PY' || die "invalid profile: $PROFILE"
+import json
+import sys
+import tomllib
+from pathlib import Path
+
+profiles = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+profile = profiles.get("profiles", {}).get(sys.argv[2])
+if not isinstance(profile, dict):
+    raise SystemExit("profile is missing")
+args = profile.get("args")
+if not isinstance(args, list) or not args or not all(isinstance(item, str) and item for item in args):
+    raise SystemExit("profile has no explicit args")
+env = profile.get("env", {})
+if not isinstance(env, dict) or set(env) - {"SCAI_RUN_KERNEL_TESTS", "SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB", "NUMBA_DISABLE_JIT"}:
+    raise SystemExit("profile env is not allowlisted")
+json.dump({"args": args, "env": env, "claim_scope": profile.get("claim_scope", "")}, open(sys.argv[3], "w"))
+PY
+    mapfile -t PROFILE_ARGS < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["args"]))' "$PROFILE_JSON")
+    mapfile -t PROFILE_ENV < <(python3 -c 'import json,sys; sys.stdout.write("\n".join(k+"="+v for k,v in json.load(open(sys.argv[1]))["env"].items()))' "$PROFILE_JSON")
+    CLAIM_SCOPE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["claim_scope"])' "$PROFILE_JSON")"
+fi
+
+declare -a PYTEST_ARGS=()
+COLLECT_ONLY=0
+for argument in "${PROFILE_ARGS[@]}"; do
+    case "$argument" in
+        --junitxml|--junitxml=*|--scai-collection-json|--scai-collection-json=*|--scai-outcomes-json|--scai-outcomes-json=*)
+            die "caller-owned evidence output option is forbidden: $argument" ;;
+        --benchmark*|--timeout|--timeout=*|--numprocesses|--numprocesses=*|-n|-n[0-9]*)
+            die "runner-owned or unsupported pytest option is forbidden: $argument" ;;
+        --collect-only|--collectonly|--co) COLLECT_ONLY=1; PYTEST_ARGS+=("$argument") ;;
+        --collect-only=*|--collectonly=*|--co=*) die "collect-only must use an exact alias" ;;
+        *) PYTEST_ARGS+=("$argument") ;;
+    esac
+done
+
+declare -a EXPANDED_ARGS=()
+for argument in "${PYTEST_ARGS[@]}"; do
+    if [[ "$argument" == *[*?[]* ]]; then
+        mapfile -t matches < <(compgen -G "$argument" || true)
+        (( ${#matches[@]} > 0 )) || die "profile glob has no matches: $argument"
+        mapfile -t sorted_matches < <(printf '%s\n' "${matches[@]}" | LC_ALL=C sort)
+        EXPANDED_ARGS+=("${sorted_matches[@]}")
+    else
+        EXPANDED_ARGS+=("$argument")
+    fi
+done
+PYTEST_ARGS=("${EXPANDED_ARGS[@]}")
+
+CURRENT_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
+[[ "$CURRENT_HEAD" == "$BASE_COMMIT" ]] || die "fixed base HEAD required before image lookup (expected $BASE_COMMIT, got $CURRENT_HEAD)"
+
+FINGERPRINT_OUTPUT="$(scripts/test-deps-fingerprint.sh)"
+FINGERPRINT="$(printf '%s\n' "$FINGERPRINT_OUTPUT" | awk -F= '$1=="FINGERPRINT"{print $2}')"
+DISCOVERY_TAG="$(printf '%s\n' "$FINGERPRINT_OUTPUT" | awk -F= '$1=="TAG"{print $2}')"
+[[ "$FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] || die "invalid dependency fingerprint"
+[[ "$DISCOVERY_TAG" == "$IMAGE_NAME:"* ]] || die "invalid discovery tag"
+LOCK_SHA256="$(sha256sum docker/test-deps/requirements-test.lock | awk '{print $1}')"
+BASE_DIGEST="sha256:77923445c077d8eb971b14b2b114a1d9cd4a87edb4c75654820ca4832ee8cb15"
+
+pointer_ref="$(python3 - "$IMAGE_POINTER" "$FINGERPRINT" "$LOCK_SHA256" "$IMAGE_NAME" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if set(value) != {"schema", "image", "digest", "fingerprint", "lock_sha256", "selected_at_utc"} or value.get("schema") != 1:
+    raise SystemExit("tracked image pointer schema/keys mismatch")
+fields = [value[key] for key in ("image", "digest", "fingerprint", "lock_sha256", "selected_at_utc")]
+if any(item is None for item in fields):
+    if not all(item is None for item in fields):
+        raise SystemExit("tracked image pointer is partially null")
+    print("NULL")
+else:
+    if value["image"] != sys.argv[4] or value["fingerprint"] != sys.argv[2] or value["lock_sha256"] != sys.argv[3]:
+        raise SystemExit("tracked image pointer does not match current inputs")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", value["digest"]) or not isinstance(value["selected_at_utc"], str):
+        raise SystemExit("tracked image pointer digest/timestamp invalid")
+    print(value["image"] + "@" + value["digest"])
+PY
+)" || die "tracked image pointer rejected"
+
+IMAGE_REF=""
+SELECTION_MODE=""
+if [[ "$pointer_ref" != NULL ]]; then
+    IMAGE_REF="$pointer_ref"
+    SELECTION_MODE=tracked_digest
+elif [[ -f "$LOCAL_IDENTITY" ]]; then
+    IMAGE_REF="$(python3 - "$LOCAL_IDENTITY" "$FINGERPRINT" "$LOCK_SHA256" "$DISCOVERY_TAG" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if value.get("schema") != 1 or value.get("fingerprint") != sys.argv[2] or value.get("lock_sha256") != sys.argv[3] or value.get("tag") != sys.argv[4]:
+    raise SystemExit("local image identity mismatch")
+image_id = value.get("image_id")
+if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+    raise SystemExit("local image identity has no image ID")
+print(image_id)
+PY
+    )" || die "local image identity rejected"
+    SELECTION_MODE=local_id
+else
+    IMAGE_REF="$(docker image inspect --format '{{.Id}}' "$DISCOVERY_TAG" 2>/dev/null || true)"
+    [[ "$IMAGE_REF" =~ ^sha256:[0-9a-f]{64}$ ]] || die "no verified local dependency image; build it before running tests"
+    SELECTION_MODE=local_id
+fi
+scripts/verify-test-deps-image.sh "$IMAGE_REF"
+if [[ "$SELECTION_MODE" == tracked_digest ]]; then
+    IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE_REF" 2>/dev/null || true)"
+    [[ "$IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die "tracked image did not resolve to an immutable local ID"
+else
+    IMAGE_ID="$IMAGE_REF"
+fi
+
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+EVIDENCE_STAGE="$(mktemp -d "/tmp/scai-test-evidence.${RUN_ID}.XXXXXX")"
+chmod 0700 "$EVIDENCE_STAGE"
+CONTAINER_OUTPUT="$EVIDENCE_STAGE/container-output"
+install -d -m 0777 "$CONTAINER_OUTPUT"
+PUBLISHED=0
+DIAGNOSTIC_REASON="runner exited before evidence publication"
+cleanup_runner() {
+    rm -f "${PROFILE_JSON:-}" 2>/dev/null || true
+    if [[ "$PUBLISHED" -eq 1 ]]; then
+        rm -rf "$EVIDENCE_STAGE" 2>/dev/null || true
+    elif [[ -n "${EVIDENCE_STAGE:-}" && -d "$EVIDENCE_STAGE" ]]; then
+        echo "unaccepted diagnostic: $EVIDENCE_STAGE ($DIAGNOSTIC_REASON)" >&2
+    fi
+}
+trap cleanup_runner EXIT
+
+SOURCE_PRE="$EVIDENCE_STAGE/pre-source-manifest.json"
+SOURCE_POST="$EVIDENCE_STAGE/post-source-manifest.json"
+STDOUT_LOG="$EVIDENCE_STAGE/stdout.txt"
+STDERR_LOG="$EVIDENCE_STAGE/stderr.txt"
+python3 scripts/scai_test_tree.py worktree --base "$BASE_COMMIT" --output "$SOURCE_PRE"
+
+declare -a ENV_ARGS=(
+    "PYTHONPATH=/workspace/scai"
+    "PYTHONDONTWRITEBYTECODE=1"
+    "PYTHONPYCACHEPREFIX=/tmp/pycache"
+    "SCAI_DATA_DIR=/tmp/scai-data"
+    "MPLCONFIGDIR=/tmp/matplotlib"
+    "XDG_CACHE_HOME=/tmp/xdg"
+    "NUMBA_DISABLE_JIT=1"
+    "LANG=C.UTF-8"
+    "LC_ALL=C.UTF-8"
+)
+ENV_ARGS+=("${PROFILE_ENV[@]}")
+
+declare -a DOCKER_ARGS=(
+    docker run --rm --pull=never --read-only --network none --user 10001
+    --platform "$PLATFORM" --workdir /workspace/scai
+    --tmpfs /tmp:rw,size=2g
+    --volume "$REPO_ROOT:/workspace/scai:ro"
+    --volume "$CONTAINER_OUTPUT:/results/output:rw"
+)
+for environment in "${ENV_ARGS[@]}"; do
+    DOCKER_ARGS+=(--env "$environment")
+done
+DOCKER_ARGS+=(--entrypoint /opt/scai-test/venv/bin/python "$IMAGE_REF" -m pytest "${PYTEST_ARGS[@]}" -p no:cacheprovider -p scripts.scai_pytest_collection --scai-collection-json=/results/output/collection.json)
+if [[ "$COLLECT_ONLY" -eq 0 ]]; then
+    DOCKER_ARGS+=(--scai-outcomes-json=/results/output/outcomes.json --junitxml=/results/output/junit.xml)
+fi
+
+START_EPOCH="$(date +%s)"
+UTC_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+set +e
+python3 - "$STDOUT_LOG" "$STDERR_LOG" "${DOCKER_ARGS[@]}" <<'PY'
+import os
+import stat
+import subprocess
+import sys
+
+
+def open_log(path: str) -> int:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        os.close(fd)
+        raise OSError(f"unsafe runner log inode: {path}")
+    return fd
+
+
+stdout_fd = open_log(sys.argv[1])
+try:
+    stderr_fd = open_log(sys.argv[2])
+except BaseException:
+    os.close(stdout_fd)
+    raise
+try:
+    completed = subprocess.run(sys.argv[3:], stdout=stdout_fd, stderr=stderr_fd, check=False)
+finally:
+    os.close(stderr_fd)
+    os.close(stdout_fd)
+if completed.returncode < 0:
+    raise SystemExit(128 - completed.returncode)
+raise SystemExit(completed.returncode)
+PY
+EXIT_CODE=$?
+set -e
+UTC_END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+END_EPOCH="$(date +%s)"
+
+EXPECTED_OUTPUTS=(collection.json)
+if [[ "$COLLECT_ONLY" -eq 0 ]]; then EXPECTED_OUTPUTS+=(outcomes.json junit.xml); fi
+DIAGNOSTIC_REASON="post-run source manifest generation failed"
+python3 scripts/scai_test_tree.py worktree --base "$BASE_COMMIT" --output "$SOURCE_POST"
+export SCAI_PYTEST_ARGS_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${PYTEST_ARGS[@]}")"
+export SCAI_ENV_ARGS_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${ENV_ARGS[@]}")"
+export SCAI_DOCKER_ARGS_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${DOCKER_ARGS[@]}")"
+export SCAI_EXPANDED_COMMAND="$(printf '%q ' "${DOCKER_ARGS[@]}")"
+export SCAI_IMAGE_ID="$IMAGE_ID"
+DIAGNOSTIC_REASON="container output validation or evidence publication failed"
+if ! FINAL_DIR="$(
+    python3 - "$CONTAINER_OUTPUT" "$SOURCE_PRE" "$SOURCE_POST" "$STDOUT_LOG" "$STDERR_LOG" "$RUN_ID" "$PROFILE" "$CLAIM_SCOPE" "$IMAGE_REF" "$FINGERPRINT" "$LOCK_SHA256" "$BASE_DIGEST" "$SELECTION_MODE" "$BASE_COMMIT" "$UTC_START" "$UTC_END" "$START_EPOCH" "$END_EPOCH" "$EXIT_CODE" "$COLLECT_ONLY" "${EXPECTED_OUTPUTS[@]}" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "scripts")
+from scai_test_tree import (  # noqa: E402
+    ArtifactBytes,
+    ContractError,
+    _sha256_bytes,
+    _validate_manifest_payload,
+    parse_junit_bytes,
+    publish_evidence,
+    read_direct_children_nofollow,
+    reject_kernel_gated_live_skips,
+    validate_collection,
+    validate_outcomes,
+)
+
+container_root = Path(sys.argv[1])
+source_pre_path = Path(sys.argv[2])
+source_post_path = Path(sys.argv[3])
+stdout_path = Path(sys.argv[4])
+stderr_path = Path(sys.argv[5])
+run_id, profile, claim_scope, image_ref, fingerprint, lock_sha, base_digest = sys.argv[6:13]
+selection_mode, base, utc_start, utc_end, start_epoch, end_epoch, exit_code, collect_only = sys.argv[13:21]
+expected_names = tuple(sys.argv[21:])
+pytest_argv = json.loads(os.environ["SCAI_PYTEST_ARGS_JSON"])
+docker_argv = json.loads(os.environ["SCAI_DOCKER_ARGS_JSON"])
+environment = {}
+for item in json.loads(os.environ["SCAI_ENV_ARGS_JSON"]):
+    key, _, value = item.partition("=")
+    environment[key] = value
+
+
+def read_host_bytes(path: Path) -> ArtifactBytes:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ContractError(f"unsafe host artifact: {path}")
+        chunks: list[bytes] = []
+        digest = hashlib.sha256()
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            chunks.append(block)
+            digest.update(block)
+        payload = b"".join(chunks)
+        return ArtifactBytes(path.name, payload, len(payload), digest.hexdigest())
+    finally:
+        os.close(fd)
+
+
+try:
+    try:
+        container_artifacts = read_direct_children_nofollow(container_root, expected_names)
+    except ContractError as exc:
+        message = str(exc)
+        if message.startswith("artifact child allowlist mismatch:"):
+            message = "container output allowlist mismatch:" + message.split(":", 1)[1]
+        raise ContractError(message) from exc
+
+    pre_artifact = read_host_bytes(source_pre_path)
+    post_artifact = read_host_bytes(source_post_path)
+    stdout_artifact = read_host_bytes(stdout_path)
+    stderr_artifact = read_host_bytes(stderr_path)
+    pre = _validate_manifest_payload(json.loads(pre_artifact.payload.decode("utf-8")), "worktree", base)
+    post = _validate_manifest_payload(json.loads(post_artifact.payload.decode("utf-8")), "worktree", base)
+    if pre != post:
+        raise ContractError("source tree changed while tests ran")
+
+    collection_artifact = container_artifacts["collection.json"]
+    collection = validate_collection(collection_artifact.payload)
+    if collect_only == "1":
+        if int(exit_code) != 0:
+            raise ContractError("collect-only pytest exited nonzero")
+        outcome_details = None
+        junit = None
+    else:
+        outcome_artifact = container_artifacts["outcomes.json"]
+        junit_artifact = container_artifacts["junit.xml"]
+        outcome_details = validate_outcomes(outcome_artifact.payload, tuple(collection["nodeids"]))
+        junit = parse_junit_bytes(junit_artifact.payload)
+        projection = outcome_details["junit_projection"]
+        for key in ("tests", "failures", "errors", "skipped"):
+            actual = junit.get(key)
+            phase_expected = projection.get(key)
+            if actual != phase_expected:
+                raise ContractError(
+                    f"JUnit projection mismatch for {key}: "
+                    f"parsed actual={actual!r}; phase projection expected={phase_expected!r}"
+                )
+        reject_kernel_gated_live_skips(profile, outcome_details)
+
+    artifacts: dict[str, ArtifactBytes] = {
+        **container_artifacts,
+        "pre-source-manifest.json": pre_artifact,
+        "post-source-manifest.json": post_artifact,
+        "stdout.txt": stdout_artifact,
+        "stderr.txt": stderr_artifact,
+    }
+    counts = {
+        "collected": collection["count"],
+        "passed": None,
+        "failed": None,
+        "errors": None,
+        "skipped": None,
+        "xfail": None,
+        "xpass": None,
+        "warnings": None,
+    }
+    outcome_summary = None
+    if outcome_details is not None:
+        details_payload = json.dumps(outcome_details, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+        details_artifact = ArtifactBytes("outcome-details.json", details_payload, len(details_payload), _sha256_bytes(details_payload))
+        artifacts[details_artifact.name] = details_artifact
+        counts.update(outcome_details["counts"])
+        outcome_summary = {
+            "path": details_artifact.name,
+            "sha256": details_artifact.sha256,
+            "size": details_artifact.size,
+            "count": len(outcome_details["records"]),
+            "nodeids": [record["nodeid"] for record in outcome_details["records"]],
+            "counts": outcome_details["counts"],
+            "warnings": len(outcome_details["warnings"]),
+            "complete": True,
+        }
+
+    artifact_index: dict[str, dict[str, object]] = {}
+    for path in sorted(Path(name) for name in artifacts):
+        if path.name not in {"evidence.json", "artifact-manifest.json"}:
+            item = artifacts[path.name]
+            artifact_index[path.name] = {"path": path.name, "sha256": item.sha256, "size": item.size}
+    artifact_manifest_payload = "".join(
+        f"{artifact_index[name]['sha256']}  {name}\n" for name in sorted(artifact_index)
+    ).encode("utf-8")
+    artifact_manifest = ArtifactBytes(
+        "artifact-manifest.json", artifact_manifest_payload, len(artifact_manifest_payload), _sha256_bytes(artifact_manifest_payload)
+    )
+
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True
+    ).stdout.strip()
+    source_summary = {
+        "base_commit": base,
+        "branch": branch,
+        "dirty": bool(pre["entries"]),
+        "dirty_tree_digest": pre["digest"],
+        "pre_manifest": {"path": pre_artifact.name, "size": pre_artifact.size, "sha256": pre_artifact.sha256},
+        "post_manifest": {"path": post_artifact.name, "size": post_artifact.size, "sha256": post_artifact.sha256},
+        "manifest_path": pre_artifact.name,
+        "manifest": pre,
+    }
+    evidence = {
+        "schema": 1,
+        "run_id": run_id,
+        "profile": profile,
+        "claim_scope": claim_scope,
+        "tiers_run": [profile],
+        "tiers_not_run": [name for name in ("fast", "client", "kernel", "backend-full") if name != profile],
+        "image": {
+            "executed_ref": image_ref,
+            "image_id": os.environ["SCAI_IMAGE_ID"],
+            "registry_digest": image_ref.split("@", 1)[1] if "@" in image_ref else None,
+            "fingerprint": fingerprint,
+            "lock_sha256": lock_sha,
+            "base_digest": base_digest,
+            "python": "3.11.15",
+            "platform": "linux/amd64",
+            "selection_mode": selection_mode,
+        },
+        "source": source_summary,
+        "pytest_argv": pytest_argv,
+        "docker_argv": docker_argv,
+        "expanded_command": os.environ["SCAI_EXPANDED_COMMAND"].strip(),
+        "environment": environment,
+        "pytest_effective_config": collection["effective_config"],
+        "collection": {
+            "path": collection_artifact.name,
+            "size": collection_artifact.size,
+            "sha256": collection_artifact.sha256,
+            "count": collection["count"],
+            "nodeids": collection["nodeids"],
+            "nodeids_sha256": collection["nodeids_sha256"],
+            "complete": collection["complete"],
+            "effective_config": collection["effective_config"],
+            "candidate_tools": collection["candidate_tools"],
+        },
+        "outcomes": outcome_summary,
+        "junit": junit,
+        "utc_start": utc_start,
+        "utc_end": utc_end,
+        "duration_seconds": max(0, int(end_epoch) - int(start_epoch)),
+        "exit_code": int(exit_code),
+        "counts": counts,
+        "artifacts": artifact_index,
+        "artifact_manifest": {"path": artifact_manifest.name, "size": artifact_manifest.size, "sha256": artifact_manifest.sha256},
+    }
+    evidence_payload = json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    evidence_artifact = ArtifactBytes("evidence.json", evidence_payload, len(evidence_payload), _sha256_bytes(evidence_payload))
+    artifacts[artifact_manifest.name] = artifact_manifest
+    artifacts[evidence_artifact.name] = evidence_artifact
+    final = publish_evidence(Path("test-results"), run_id, artifacts)
+except (ContractError, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+    raise SystemExit(str(exc)) from exc
+print(final)
+PY
+)"; then
+    exit 2
+fi
+PUBLISHED=1
+echo "evidence: $FINAL_DIR/evidence.json"
+exit "$EXIT_CODE"

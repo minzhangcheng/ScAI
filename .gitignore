@@ -41,3 +41,6 @@ review.md
 # 100 MB per-file ceiling. A local copy lives at the path the demo pipelines
 # expect without ever being staged.
 demo/*/upload/
+# Immutable test runner evidence and local-only identities
+test-results/
+.scai-test-deps-image.json

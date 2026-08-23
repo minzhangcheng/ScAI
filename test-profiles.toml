@@ -1,0 +1,28 @@
+[profiles.fast]
+description = "Explicit focused node/file selection; requires at least one argument"
+claim_scope = "focused edit-loop evidence only"
+
+[profiles.client]
+description = "Complete retained Python client unit suite"
+claim_scope = "complete retained Python client unit suite"
+args = ["clients/python/tests"]
+
+[profiles.kernel]
+description = "Known real-kernel and integration surface; serial"
+claim_scope = "complete known real-kernel/integration evidence"
+env = { SCAI_RUN_KERNEL_TESTS = "1", SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB = "1" }
+args = [
+  "backend/tests/integration",
+  "backend/tests/test_kernel_bootstrap.py",
+  "backend/tests/test_sandbox_kernel_isolation.py",
+  "backend/tests/test_snapshot_v2_capture_acceptance.py",
+  "backend/tests/test_snapshot_v2_restore_acceptance.py",
+  "backend/tests/test_snapshot_v2_runtime_kernel.py",
+  "backend/tests/test_figure_dedup.py",
+  "backend/tests/test_sandbox_save_restore_streaming.py",
+]
+
+[profiles.backend-full]
+description = "Complete backend suite; serial"
+claim_scope = "complete backend suite"
+args = ["backend/tests"]

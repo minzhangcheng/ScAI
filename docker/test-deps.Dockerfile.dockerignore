@@ -1,0 +1,10 @@
+# Deny the build context, including descendants below re-admitted parents.
+*
+**
+!build-constraints.txt
+!docker/
+!docker/test-deps/
+!docker/test-deps/requirements-test.in
+!docker/test-deps/requirements-test.lock
+!docker/test-deps/requirements-test-nodeps.lock
+!docker/test-deps/lock-manifest.json

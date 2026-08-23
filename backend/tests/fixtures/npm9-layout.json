@@ -1,0 +1,76 @@
+{
+  "bin_links": {
+    "node_modules/.bin/vitest": "../vitest/vitest.mjs",
+    "node_modules/plain/node_modules/.bin/child-tool": "../child/cli.js"
+  },
+  "directories": [
+    "node_modules/.bin",
+    "node_modules/@scope/pkg",
+    "node_modules/plain/node_modules/.bin",
+    "node_modules/plain/node_modules/child",
+    "node_modules/vitest"
+  ],
+  "optional_lock_packages": {
+    "node_modules/optional-os": {
+      "integrity": "sha512-b3B0c2FwdGlvbmFsLW9z",
+      "optional": true,
+      "os": ["darwin"],
+      "resolved": "https://registry.npmjs.org/optional-os/-/optional-os-1.0.0.tgz",
+      "version": "1.0.0"
+    },
+    "node_modules/optional-cpu": {
+      "cpu": ["arm64"],
+      "integrity": "sha512-b3B0c2FwdGlvbmFsLWNwdQ==",
+      "optional": true,
+      "resolved": "https://registry.npmjs.org/optional-cpu/-/optional-cpu-1.0.0.tgz",
+      "version": "1.0.0"
+    },
+    "node_modules/optional-empty": {
+      "integrity": "sha512-b3B0c2FwdGlvbmFsLWVtcHR5",
+      "optional": true,
+      "resolved": "https://registry.npmjs.org/optional-empty/-/optional-empty-1.0.0.tgz",
+      "version": "1.0.0"
+    },
+    "node_modules/optional-unreported": {
+      "integrity": "sha512-b3B0c2FwdGlvbmFsLXVucmVwb3J0ZWQ=",
+      "optional": true,
+      "resolved": "https://registry.npmjs.org/optional-unreported/-/optional-unreported-1.0.0.tgz",
+      "version": "1.0.0"
+    }
+  },
+  "npm_major": 9,
+  "packages": {
+    "node_modules/@scope/pkg": {
+      "integrity": "sha512-c2NvcGUtcGtn",
+      "name": "@scope/pkg",
+      "resolved": "https://registry.npmjs.org/@scope/pkg/-/pkg-2.0.0.tgz",
+      "version": "2.0.0"
+    },
+    "node_modules/plain": {
+      "integrity": "sha512-cGxhaW4=",
+      "name": "plain",
+      "resolved": "https://registry.npmjs.org/plain/-/plain-1.0.0.tgz",
+      "version": "1.0.0"
+    },
+    "node_modules/plain/node_modules/child": {
+      "bin": {
+        "child-tool": "cli.js"
+      },
+      "integrity": "sha512-Y2hpbGQ=",
+      "name": "child",
+      "resolved": "https://registry.npmjs.org/child/-/child-3.0.0.tgz",
+      "version": "3.0.0"
+    },
+    "node_modules/vitest": {
+      "bin": {
+        "vitest": "vitest.mjs"
+      },
+      "integrity": "sha512-flYyaFd2CgoCoU+0UKt3pxksgC+S02iTDN0n3LtqaMeXsI9SBcdNujc2k0DeFLzUn/0k538yNjOSdwgCqcrwJA==",
+      "name": "vitest",
+      "resolved": "https://registry.npmjs.org/vitest/-/vitest-4.1.7.tgz",
+      "version": "4.1.7"
+    }
+  },
+  "root_hidden_lock": "node_modules/.package-lock.json",
+  "schema": 1
+}
