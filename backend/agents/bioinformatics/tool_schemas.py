@@ -245,7 +245,11 @@ TOOLS = [
                 "reach the network, so this tool does the fetch and returns the genes. "
                 "The resource publishes native collections for two organisms; for any "
                 "other organism the set is projected through orthology and the mapping "
-                "rate is returned with it. Note that a curated set is not automatically "
+                "rate is returned with it. For a native collection, list_sets=true also "
+                "binds the complete versioned GMT in the sandbox; pass that path variable "
+                "directly as gene_sets= to gseapy.prerank or enrichr. For a projected "
+                "organism the source-organism GMT is not bound; fetch the named set by "
+                "set_id so the projection and mapping rate are recorded. Note that a curated set is not automatically "
                 "the right panel: many are broad and mix genes that drive a process with "
                 "genes that suppress it. Read the genes before scoring them, and use "
                 "register_analysis_plan's partition operation when a set needs splitting."
@@ -315,7 +319,10 @@ TOOLS = [
                         "type": "boolean",
                         "description": (
                             "Return matching set identifiers instead of genes. Use with "
-                            "a partial set_id to discover what the collection contains."
+                            "a partial set_id to discover what the collection contains. "
+                            "For native collections, the full GMT is bound for direct "
+                            "gene_sets= use; projected source-organism collections are "
+                            "not bound in the sandbox."
                         )
                     }
                 },

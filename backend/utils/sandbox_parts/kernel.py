@@ -17,6 +17,7 @@ import time
 import hmac
 import hashlib
 import logging
+from importlib.metadata import PackageNotFoundError, version as package_version
 from queue import Empty as QueueEmpty
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
@@ -93,6 +94,18 @@ from .shared import (  # noqa: F401
 _KERNEL_PROCESS_START_TIMEOUT = 30.0
 _KERNEL_MANAGER_RESTART_TIMEOUT = 30.0
 _KERNEL_MANAGER_SHUTDOWN_TIMEOUT = 10.0
+
+
+def _dask_query_planning_setting() -> str:
+    """Select the dataframe backend supported by the installed Dask release."""
+    try:
+        release = package_version("dask")
+    except PackageNotFoundError:
+        return "false"
+    match = re.match(r"^(\d+)\.(\d+)", str(release))
+    if match is None:
+        return "false"
+    return "true" if tuple(map(int, match.groups())) >= (2025, 1) else "false"
 
 
 async def _start_kernel_manager(
@@ -185,10 +198,9 @@ class KernelMixin:
         )
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["PYTHONSAFEPATH"] = "1"
-        # Arboreto 0.1.x uses the legacy Dask dataframe implementation. Keep
-        # its graph builder off dask-expr, whose empty from_delayed contract is
-        # incompatible with that release.
-        env["DASK_DATAFRAME__QUERY_PLANNING"] = "false"
+        env["DASK_DATAFRAME__QUERY_PLANNING"] = (
+            _dask_query_planning_setting()
+        )
         env["SCAI_KERNEL_WRITE_ROOTS"] = json.dumps(
             [str(resolved_workspace), str(resolved_state_dir), str(session_tmp)]
         )
@@ -604,6 +616,10 @@ try:
     sc.settings.seed = SEED
 except ImportError:
     pass
+
+sys.modules["scai_pydeseq2_compat"].install()
+sys.modules["scai_scanpy_compat"].install()
+sys.modules["scai_arboreto_compat"].install()
 
 try:
     import anndata as ad

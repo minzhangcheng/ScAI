@@ -1206,6 +1206,37 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             )
             return None
 
+    async def _bind_gene_set_collection(
+        self, collection: str, path: Path,
+    ) -> Optional[str]:
+        """Bind a backend-cached GMT path into the analysis kernel."""
+        var_name = (
+            "gene_set_collection_"
+            + re.sub(r"[^0-9A-Za-z_]", "_", collection)[:60]
+            + "_path"
+        )
+        try:
+            result = await self.sandbox.execute(
+                f"{var_name} = {str(path)!r}",
+                save_to_history=False,
+                skip_safety_check=True,
+            )
+            if result.error:
+                logger.warning(
+                    "[%s] gene-set collection path injection failed: %s",
+                    self.session_id,
+                    compact_traceback(result.error, max_chars=1000),
+                )
+                return None
+            return var_name
+        except Exception as exc:
+            logger.warning(
+                "[%s] gene-set collection path injection failed: %s",
+                self.session_id,
+                compact_traceback(str(exc), max_chars=1000),
+            )
+            return None
+
     async def run_autonomous_analysis(
         self,
         state: AnalysisState,
@@ -3265,10 +3296,12 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                     elif tool_name == "fetch_gene_set":
                         from ..services.gene_set_fetch import (
                             list_collections as list_gene_set_collections,
-                            load_collection, resolve_gene_set,
+                            load_collection, collection_cache_path,
+                            resolve_gene_set,
                             resolve_partitioned_gene_set,
                         )
                         from ..services.gene_set_resolver import (
+                            DEFAULT_PROJECTION_SOURCE, MSIGDB_ORGANISMS,
                             direction_sibling_ids, normalize_organism, suggest_similar,
                         )
 
@@ -3277,6 +3310,18 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         version = str(args.get("version", "") or "").strip()
                         organism = normalize_organism(
                             args.get("organism") or state.species or ""
+                        )
+
+                        native = organism in MSIGDB_ORGANISMS
+                        browse_organism = (
+                            organism if native else DEFAULT_PROJECTION_SOURCE
+                        )
+                        projection_note = "" if native else (
+                            f" The resource publishes these identifiers for "
+                            f"{browse_organism}, not for the session organism "
+                            f"{organism}: a set fetched by set_id is projected "
+                            f"from {browse_organism} through orthology and carries "
+                            f"its mapping rate."
                         )
 
                         if not organism:
@@ -3295,19 +3340,19 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             # and a guess fails with a 404 that teaches nothing.
                             try:
                                 available = await asyncio.to_thread(
-                                    list_gene_set_collections, version, organism
+                                    list_gene_set_collections, version, browse_organism
                                 )
                                 content = (
-                                    f"Collections available for {organism} in release "
+                                    f"Collections available for {browse_organism} in release "
                                     f"{version}: {', '.join(available)}. "
                                     f"Pick one and call again with collection=<id> and "
                                     f"either list_sets=true to browse or set_id=<id> to "
-                                    f"fetch."
+                                    f"fetch.{projection_note}"
                                 )
                             except Exception as exc:
                                 content = (
                                     f"fetch_gene_set could not list collections for "
-                                    f"{organism} in release {version!r}: {exc}"
+                                    f"{browse_organism} in release {version!r}: {exc}"
                                 )
                             messages.append({
                                 "role": "tool",
@@ -3325,7 +3370,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             # Discovery path: never fabricate an identifier, look it up.
                             try:
                                 available = await asyncio.to_thread(
-                                    load_collection, version, collection, organism
+                                    load_collection, version, collection, browse_organism
                                 )
                             except Exception as exc:
                                 messages.append({
@@ -3347,12 +3392,43 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 continue
                             hits = (suggest_similar(set_id, available.keys(), limit=25)
                                     if set_id else sorted(available)[:25])
+                            path_var = None
+                            if native:
+                                collection_path = collection_cache_path(
+                                    version, collection, organism
+                                )
+                                path_var = await self._bind_gene_set_collection(
+                                    collection, collection_path
+                                )
+                            if path_var:
+                                binding_note = (
+                                    f" The complete versioned GMT is bound in the "
+                                    f"sandbox as {path_var}. Pass that variable directly "
+                                    f"as gene_sets= to gseapy.prerank/enrichr; do not "
+                                    f"scan _WORKSPACE_DIR for the backend cache."
+                                )
+                            elif native:
+                                binding_note = (
+                                    " The full native GMT could not be bound in the "
+                                    "sandbox; fetch the named sets you need with "
+                                    "set_id=<id>."
+                                )
+                            else:
+                                binding_note = (
+                                    " GMT is NOT bound in the sandbox: it carries "
+                                    f"{browse_organism} symbols and this session analyses "
+                                    f"{organism}. Fetch the named sets you need with "
+                                    "set_id=<id>, which projects them and reports the "
+                                    "mapping rate."
+                                )
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call.id,
                                 "content": (
                                     f"{len(available)} sets in {collection} v{version} "
-                                    f"({organism}). Matching: {', '.join(hits) or 'none'}"
+                                    f"({browse_organism}). Matching: "
+                                    f"{', '.join(hits) or 'none'}."
+                                    f"{binding_note}{projection_note}"
                                 ),
                             })
                             continue

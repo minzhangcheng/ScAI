@@ -13,6 +13,7 @@ analysis mid-round.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
@@ -81,18 +82,15 @@ def list_collections(version: str, organism: str) -> list[str]:
     return parse_release_index(html, version, code)
 
 
-def load_collection(version: str, collection: str, organism: str,
-                    cache_dir: Optional[Path] = None) -> dict[str, list[str]]:
-    """Return {set_id: genes} for one MSigDB collection, caching the GMT on disk.
+def collection_cache_path(version: str, collection: str, organism: str,
+                          cache_dir: Optional[Path] = None) -> Path:
+    """Return the validated canonical GMT path for a native collection.
 
-    The cache key includes the release, so a pinned version is served from disk
-    forever and a version bump is a different file rather than a silent change
-    under the same name.
+    The backend owns the cache, but enrichment runs inside the kernel. Exposing
+    this path after ``load_collection`` succeeds gives the kernel the complete
+    versioned collection without asking generated code to guess or scan the
+    per-session workspace for a file that lives on the data volume.
     """
-    # The collection is model-chosen and lands in both a cache filename and the
-    # release URL, so it is validated for the same reason set_id is. Without
-    # this a traversal prefix writes the downloaded GMT outside the cache
-    # directory, in the FastAPI process rather than the sandbox.
     problem = validate_collection(collection)
     if problem:
         raise ValueError(problem)
@@ -104,8 +102,7 @@ def load_collection(version: str, collection: str, organism: str,
             f"{sorted(MSIGDB_ORGANISMS)} only; {organism!r} must be projected."
         )
     release, suffix = normalize_version(version)
-    # A bare token with no dot is a collection name, not a release identifier.
-    if "." not in release:
+    if not re.fullmatch(r"\d+\.\d+", release):
         raise ValueError(
             f"{version!r} is not a release identifier. Releases look like '2025.1' "
             f"or '2025.1.{code}'. Call with list_collections=true to see what a "
@@ -116,9 +113,28 @@ def load_collection(version: str, collection: str, organism: str,
             f"version {version!r} names organism {suffix!r}, but the analysis "
             f"organism maps to {code!r}"
         )
+    root = Path(cache_dir) if cache_dir else runtime_gene_sets_dir()
+    return cache_path(root, version, collection, code)
+
+
+def load_collection(version: str, collection: str, organism: str,
+                    cache_dir: Optional[Path] = None) -> dict[str, list[str]]:
+    """Return {set_id: genes} for one MSigDB collection, caching the GMT on disk.
+
+    The cache key includes the release, so a pinned version is served from disk
+    forever and a version bump is a different file rather than a silent change
+    under the same name.
+    """
+    organism = normalize_organism(organism)
+    code = MSIGDB_ORGANISMS.get(organism)
+    if not code:
+        raise ValueError(
+            f"MSigDB publishes native collections for "
+            f"{sorted(MSIGDB_ORGANISMS)} only; {organism!r} must be projected."
+        )
     cache_dir = Path(cache_dir) if cache_dir else runtime_gene_sets_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_path(cache_dir, version, collection, code)
+    path = collection_cache_path(version, collection, organism, cache_dir)
 
     if path.exists():
         return _parse_cached_gmt(path)

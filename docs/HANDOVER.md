@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.39.20 · **Last updated**: 2026-08-23
+**Version**: 0.39.21 · **Last updated**: 2026-08-23
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,7 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.39.x — (2026-08-04 onward)**
 
+- `0.39.21` — S2 scientific-library kernel adapter rebaseline: versioned gene-set collection binding and trusted PyDESeq2/Scanpy/Dask/Arboreto compatibility adapters. Accepted replacement: `255 collected / 225 passed / 28 failed / 2 errors / 0 skipped` in 378 seconds at `test-results/20260823T122931Z-892539/evidence.json` (dependency fingerprint `4a7cbb66ad06298e8b6ccc36ebcd0fe98e5a1f245a51eb1aa2a1bab166eaeec4`); the 28 failures and 2 errors match clean baseline `test-results/20260823T121933Z-850895/evidence.json`, and all 39 S2 nodes passed. Retained candidate `test-results/20260823T115140Z-731699/` is rejected evidence.
 - `0.39.20` — S1 pure-correctness rebaseline: grammar-safe expression instrumentation, continuous-matrix classification with collision-safe trusted-startup barcode identity, Matplotlib table geometry classification, and tail-preserving one-line diagnostics. The affected-file scope plus the retained kernel launch-environment node passed `213 collected / 213 passed / 0 failed / 0 skipped` in 9 seconds at `test-results/20260823T102155Z-342408` (dependency fingerprint `4a7cbb66ad06298e8b6ccc36ebcd0fe98e5a1f245a51eb1aa2a1bab166eaeec4`); broad suites, build, deployment, and production sessions were not run (2026-08-23).
 - `0.39.19` — F4 notebook/state durability rebaseline: descriptor-pinned notebook media, bounded state size and checkpoint retention, copy-only durable realtime history, and verified standalone snapshots (2026-08-23).
 - `0.39.18` — F3 ordinary dill runtime-save rebaseline: atomic, bounded, cancellation-safe save generations that preserve the prior valid generation on failure (2026-08-23).

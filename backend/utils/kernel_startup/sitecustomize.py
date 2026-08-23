@@ -12,3 +12,6 @@ install_process_guard()
 # after that point would let a pre-existing workspace file with the same name
 # replace the bootstrap-owned capability store.
 import scai_kernel_trust as _scai_kernel_trust  # noqa: E402,F401
+import scai_pydeseq2_compat as _scai_pydeseq2_compat  # noqa: E402,F401
+import scai_scanpy_compat as _scai_scanpy_compat  # noqa: E402,F401
+import scai_arboreto_compat as _scai_arboreto_compat  # noqa: E402,F401

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import os
 from pathlib import Path
@@ -63,10 +64,74 @@ async def test_bootstrap_injects_repr_safe_paths_before_workspace_use(tmp_path):
     assert "_sandboxed_open" not in init_source
     assert "scai_kernel_trust.capture_runtime" in init_source
     assert "_scai_threaded_local_cluster_init" in init_source
+    trusted_startup = Path(
+        "backend/utils/kernel_startup/sitecustomize.py"
+    ).read_text(encoding="utf-8")
+    assert "import scai_pydeseq2_compat" in trusted_startup
+    assert 'sys.modules["scai_pydeseq2_compat"].install()' in init_source
+    assert "import scai_scanpy_compat" in trusted_startup
+    assert 'sys.modules["scai_scanpy_compat"].install()' in init_source
+    assert "import scai_arboreto_compat" in trusted_startup
+    assert 'sys.modules["scai_arboreto_compat"].install()' in init_source
     assert "Set num_workers=0" in init_source
     assert "os.chdir(_WORKSPACE_DIR)" in path_source
     assert "_sandboxed_open" in path_source
     assert sandbox._initialized is True
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_adapter_installation_is_fail_closed(tmp_path):
+    sandbox = _sandbox(tmp_path)
+    sandbox._execute_unlocked = AsyncMock(
+        side_effect=[
+            CodeExecutionResult(success=True),
+            CodeExecutionResult(success=True),
+        ]
+    )
+
+    await sandbox._initialize_kernel()
+    init_source = sandbox._execute_unlocked.await_args_list[0].args[0]
+    tree = ast.parse(init_source)
+    parents = {
+        child: node
+        for node in ast.walk(tree)
+        for child in ast.iter_child_nodes(node)
+    }
+    adapter_names = {
+        "scai_pydeseq2_compat",
+        "scai_scanpy_compat",
+        "scai_arboreto_compat",
+    }
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != "install" or not isinstance(node.func.value, ast.Subscript):
+            continue
+        subscript = node.func.value
+        if not (
+            isinstance(subscript.value, ast.Attribute)
+            and isinstance(subscript.value.value, ast.Name)
+            and subscript.value.value.id == "sys"
+            and subscript.value.attr == "modules"
+            and isinstance(subscript.slice, ast.Constant)
+            and subscript.slice.value in adapter_names
+        ):
+            continue
+        adapter = subscript.slice.value
+        found.add(adapter)
+        ancestor = parents.get(node)
+        while ancestor is not None:
+            if isinstance(ancestor, ast.Try):
+                caught = {
+                    handler.type.id
+                    for handler in ancestor.handlers
+                    if isinstance(handler.type, ast.Name)
+                }
+                assert not caught.intersection({"ImportError", "ModuleNotFoundError"})
+            ancestor = parents.get(ancestor)
+
+    assert found == adapter_names
 
 
 def test_kernel_launch_environment_is_session_scoped(tmp_path):
@@ -83,7 +148,10 @@ def test_kernel_launch_environment_is_session_scoped(tmp_path):
     )
     assert env["PYTHONDONTWRITEBYTECODE"] == "1"
     assert env["PYTHONSAFEPATH"] == "1"
-    assert env["DASK_DATAFRAME__QUERY_PLANNING"] == "false"
+    from backend.utils.sandbox_parts import kernel as kernel_module
+    assert env["DASK_DATAFRAME__QUERY_PLANNING"] == (
+        kernel_module._dask_query_planning_setting()
+    )
     assert env["HOME"].startswith(str(sandbox._session_tmp.resolve()))
     assert env["TMPDIR"] == str(sandbox._session_tmp.resolve())
     assert "kernel_startup" in env["PYTHONPATH"].split(os.pathsep)[0]
