@@ -69,9 +69,38 @@ class Client:
 
         Returns:
             A Job object for tracking progress
+
+        Raises:
+            FileNotFoundError: If a referenced local file does not exist.
         """
         config_path = Path(config_path)
         cfg = json.loads(config_path.read_text())
+
+        # Resolve every local path before creating a remote job. A missing path
+        # must never leave behind a session that can only be populated partly.
+        config_dir = config_path.parent
+        locals_: list[Path] = []
+        missing: list[str] = []
+        entries = cfg.get("data", {}).get("files", [])
+        for entry in entries:
+            candidate = Path(entry["local_path"])
+            if not candidate.is_absolute():
+                candidate = config_dir / candidate
+            try:
+                local = candidate.resolve(strict=True)
+            except (OSError, RuntimeError):
+                missing.append(str(candidate))
+                continue
+            if not local.is_file():
+                missing.append(str(candidate))
+                continue
+            locals_.append(local)
+        if missing:
+            raise FileNotFoundError(
+                f"{config_path}: data.files references "
+                f"{len(missing)} path(s) that do not exist: "
+                + ", ".join(missing)
+            )
 
         # 1. Create the job
         r = self._http.post("/api/v1/analyses", json=cfg)
@@ -80,16 +109,84 @@ class Client:
         if r.status_code == 401:
             raise AuthError("Authentication failed")
         r.raise_for_status()
-        job_id = r.json()["job_id"]
+        created = r.json()
+        job_id = created["job_id"]
+
+        manifest = created.get("files")
+        if not isinstance(manifest, list) or len(manifest) != len(entries):
+            raise ScaiError(
+                "Create response does not contain a complete placeholder manifest"
+            )
+        file_ids: list[str] = []
+        seen_ids: set[str] = set()
+        group_ids_by_config_key: dict[str, str] = {}
+        config_keys_by_group_id: dict[str, str] = {}
+        for index, item in enumerate(manifest):
+            if not isinstance(item, dict):
+                raise ScaiError(
+                    f"Create response has an invalid placeholder entry for data.files[{index}]"
+                )
+            required = ("id", "filename", "section", "group_id", "sample_number")
+            missing_fields = [field for field in required if field not in item]
+            if missing_fields:
+                raise ScaiError(
+                    f"Create response placeholder data.files[{index}] is missing "
+                    + ", ".join(missing_fields)
+                )
+            file_id = item["id"]
+            if not isinstance(file_id, str) or not file_id.strip() or file_id != file_id.strip():
+                raise ScaiError(
+                    f"Create response is missing the placeholder id for data.files[{index}]"
+                )
+            if file_id in seen_ids:
+                raise ScaiError(
+                    f"Create response repeats the placeholder id for data.files[{index}]"
+                )
+            expected_filename = entries[index].get("filename") or locals_[index].name
+            if item["filename"] != expected_filename:
+                raise ScaiError(
+                    f"Create response filename does not match data.files[{index}]"
+                )
+            if item["section"] != entries[index].get("section"):
+                raise ScaiError(
+                    f"Create response section does not match data.files[{index}]"
+                )
+            if item["sample_number"] != entries[index].get("sample_number"):
+                raise ScaiError(
+                    f"Create response sample_number does not match data.files[{index}]"
+                )
+            configured_group = entries[index].get("group")
+            manifest_group = item["group_id"]
+            if configured_group is None:
+                if manifest_group is not None:
+                    raise ScaiError(
+                        f"Create response group_id does not match data.files[{index}]"
+                    )
+            else:
+                if not isinstance(manifest_group, str) or not manifest_group.strip():
+                    raise ScaiError(
+                        f"Create response group_id is missing for data.files[{index}]"
+                    )
+                prior_group_id = group_ids_by_config_key.get(configured_group)
+                if prior_group_id is not None and prior_group_id != manifest_group:
+                    raise ScaiError(
+                        f"Create response group_id does not preserve group "
+                        f"{configured_group!r} at data.files[{index}]"
+                    )
+                prior_config_key = config_keys_by_group_id.get(manifest_group)
+                if prior_config_key is not None and prior_config_key != configured_group:
+                    raise ScaiError(
+                        f"Create response reuses group_id across config groups at "
+                        f"data.files[{index}]"
+                    )
+                group_ids_by_config_key[configured_group] = manifest_group
+                config_keys_by_group_id[manifest_group] = configured_group
+            seen_ids.add(file_id)
+            file_ids.append(file_id)
 
         # 2. Upload each referenced file
-        config_dir = config_path.parent
-        for entry in cfg.get("data", {}).get("files", []):
-            local = Path(entry["local_path"])
-            if not local.is_absolute():
-                local = config_dir / local
-            if local.exists():
-                upload_file(self._http, job_id, local)
+        for local, file_id in zip(locals_, file_ids):
+            upload_file(self._http, job_id, local, file_id=file_id)
 
         # 3. Start the analysis
         r = self._http.post(f"/api/v1/analyses/{job_id}/start")

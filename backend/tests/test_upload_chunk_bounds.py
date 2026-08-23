@@ -83,6 +83,7 @@ class TestInitUploadTotalSize:
 
             async def json(self):
                 return {
+                    "file_id": "p1",
                     "filename": "test.h5ad",
                     "expected_sha256": digest,
                     "total_chunks": 2,
@@ -95,7 +96,14 @@ class TestInitUploadTotalSize:
             data_files = [
                 type(
                     "f", (),
-                    {"filename": "test.h5ad", "file_path": "", "id": "p1"},
+                    {
+                        "filename": "test.h5ad",
+                        "file_path": "",
+                        "id": "p1",
+                        "section": "sequencing",
+                        "group_id": None,
+                        "sample_number": None,
+                    },
                 )()
             ]
 
@@ -129,6 +137,7 @@ class TestInitUploadTotalSize:
 
             async def json(self):
                 return {
+                    "file_id": "p1",
                     "filename": "test.h5ad",
                     "expected_sha256": "a" * 64,
                     "total_chunks": 2,
@@ -141,7 +150,14 @@ class TestInitUploadTotalSize:
             data_files = [
                 type(
                     "f", (),
-                    {"filename": "test.h5ad", "file_path": "", "id": "p1"},
+                    {
+                        "filename": "test.h5ad",
+                        "file_path": "",
+                        "id": "p1",
+                        "section": "sequencing",
+                        "group_id": None,
+                        "sample_number": None,
+                    },
                 )()
             ]
 
@@ -180,6 +196,7 @@ class TestInitUploadTotalSize:
         class _Req:
             async def json(self):
                 return {
+                    "file_id": "p1",
                     "filename": "test.h5ad",
                     "expected_sha256": "abc" * 10,
                     "total_chunks": 2,
@@ -192,7 +209,18 @@ class TestInitUploadTotalSize:
             user_id = "u"
             data_files = []
             def __init__(self):
-                f = type("f", (), {"filename": "test.h5ad", "file_path": "", "id": "p1"})()
+                f = type(
+                    "f",
+                    (),
+                    {
+                        "filename": "test.h5ad",
+                        "file_path": "",
+                        "id": "p1",
+                        "section": "sequencing",
+                        "group_id": None,
+                        "sample_number": None,
+                    },
+                )()
                 self.data_files = [f]
 
         monkeypatch.setattr(up, "sessions", {"sid": _State()})
@@ -217,6 +245,7 @@ class TestInitUploadTotalSize:
         class _Req:
             async def json(self):
                 return {
+                    "file_id": "p1",
                     "filename": "test.h5ad",
                     "expected_sha256": "abc" * 10,
                     "total_chunks": 2,
@@ -229,7 +258,18 @@ class TestInitUploadTotalSize:
             user_id = "u"
             data_files = []
             def __init__(self):
-                f = type("f", (), {"filename": "test.h5ad", "file_path": "", "id": "p1"})()
+                f = type(
+                    "f",
+                    (),
+                    {
+                        "filename": "test.h5ad",
+                        "file_path": "",
+                        "id": "p1",
+                        "section": "sequencing",
+                        "group_id": None,
+                        "sample_number": None,
+                    },
+                )()
                 self.data_files = [f]
 
         monkeypatch.setattr(up, "sessions", {"sid": _State()})

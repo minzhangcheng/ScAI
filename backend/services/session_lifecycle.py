@@ -34,6 +34,10 @@ class SessionGenerationError(RuntimeError):
     """A stale in-memory object attempted to mutate another generation."""
 
 
+class SessionOwnerMismatchError(SessionGenerationError):
+    """The persisted lifecycle owner differs from the state owner."""
+
+
 _locks: weakref.WeakKeyDictionary[
     asyncio.AbstractEventLoop,
     weakref.WeakValueDictionary[str, asyncio.Lock],
@@ -328,7 +332,7 @@ def bind_import_generation(state) -> int:
                 f"session {state.id} has no active import reservation"
             )
         if str(record.get("owner_id") or "") != state.user_id:
-            raise SessionGenerationError(
+            raise SessionOwnerMismatchError(
                 "import owner does not match lifecycle owner"
             )
         state.lifecycle_generation = int(record.get("generation") or 0)
@@ -349,7 +353,7 @@ def commit_import_generation(state) -> int:
             )
         generation = int(record.get("generation") or 0)
         if str(record.get("owner_id") or "") != state.user_id:
-            raise SessionGenerationError(
+            raise SessionOwnerMismatchError(
                 "import owner does not match lifecycle owner"
             )
         if int(getattr(state, "lifecycle_generation", 0) or 0) != generation:
@@ -381,7 +385,7 @@ def request_import_generation_cancellation(
         if record is None or record.get("status") != "importing":
             return None
         if str(record.get("owner_id") or "") != owner_id:
-            raise SessionGenerationError(
+            raise SessionOwnerMismatchError(
                 "import owner does not match lifecycle owner"
             )
         cancelled = dict(record)
@@ -499,7 +503,9 @@ def _adopt_persisted_generation_locked(state) -> int:
     if record.get("status") == "deleted":
         raise SessionGoneError(state.id, owner_id, generation)
     if owner_id != state.user_id:
-        raise SessionGenerationError("persisted session owner does not match lifecycle owner")
+        raise SessionOwnerMismatchError(
+            "persisted session owner does not match lifecycle owner"
+        )
     state_generation = int(getattr(state, "lifecycle_generation", 0) or 0)
     if state_generation not in (0, generation):
         if state_generation in _deleted_generations(record):
@@ -534,7 +540,7 @@ def _assert_generation_writable_locked(session_id: str, state) -> None:
     if record.get("status") == "deleted":
         raise SessionGoneError(session_id, owner_id, generation)
     if owner_id != state.user_id:
-        raise SessionGenerationError("session owner does not match lifecycle owner")
+        raise SessionOwnerMismatchError("session owner does not match lifecycle owner")
     state_generation = int(getattr(state, "lifecycle_generation", 0) or 0)
     if state_generation == 0:
         state.lifecycle_generation = generation
@@ -574,7 +580,7 @@ def _tombstone_generation_locked(
     if record is not None:
         record_owner = str(record.get("owner_id") or "")
         if record_owner != owner_id:
-            raise SessionGenerationError("session owner does not match lifecycle owner")
+            raise SessionOwnerMismatchError("session owner does not match lifecycle owner")
         current_generation = int(record.get("generation") or generation or 1)
         requested_generation = int(generation or 0)
         if (

@@ -16,6 +16,7 @@ from typing import Dict, Callable, Awaitable, Optional
 from fastapi import HTTPException, Request
 
 from backend.config import UPLOAD_CHUNK_SIZE, UPLOAD_TEMP_DIR, MAX_UPLOAD_SIZE, get_session_uploads
+from backend.models.schemas import DataFile
 from backend.utils.auth import get_db
 from backend.utils.files import safe_filename, validate_path_within
 from backend.utils.upload import ChunkedUploadManager
@@ -88,6 +89,80 @@ def set_session_callbacks(
     _on_session_save = on_save
 
 
+def _sha256_of_file(path: Path) -> str:
+    """Calculate a file digest for interrupted-completion verification."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def resolve_upload_destination(session_id: str, target: DataFile) -> Path:
+    """Derive the browser-compatible destination for one placeholder."""
+    filename = safe_filename(target.filename)
+    if not filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    upload_root = get_session_uploads(session_id)
+    if target.group_id:
+        sample_dir = (
+            str(target.sample_number)
+            if target.sample_number is not None
+            else "_unsorted"
+        )
+        parent = upload_root / target.section / target.group_id / sample_dir
+    else:
+        parent = upload_root / target.section / "_ungrouped"
+
+    validate_path_within(parent, upload_root)
+    return validate_path_within(parent / filename, upload_root)
+
+
+async def _other_upload_owns_destination(
+    db,
+    session_id: str,
+    state,
+    current_upload_id: str,
+    destination: Path,
+) -> bool:
+    """Return whether another upload row reserves this exact destination."""
+    list_uploads = getattr(db, "list_uploads_for_session", None)
+    if list_uploads is None:
+        return False
+    for row in await list_uploads(session_id):
+        if str(row.get("id") or "") == current_upload_id:
+            continue
+        placeholder_id = row.get("placeholder_file_id")
+        owner = next(
+            (
+                data_file
+                for data_file in state.data_files
+                if data_file.id == placeholder_id
+            ),
+            None,
+        )
+        if owner is None:
+            continue
+        try:
+            if resolve_upload_destination(session_id, owner) == destination:
+                return True
+        except HTTPException:
+            continue
+    return False
+
+
+async def _persist_binding(session_id: str, state, target: DataFile, path: Path) -> None:
+    """Persist a binding, restoring the old in-memory value if saving fails."""
+    previous = target.file_path
+    target.file_path = str(path)
+    try:
+        await _async_save_session_under_lifecycle(session_id, state, force=True)
+    except BaseException:
+        target.file_path = previous
+        raise
+
+
 async def init_upload(session_id: str, request: Request) -> dict:
     """Initialize a chunked file upload for a session's placeholder file.
 
@@ -118,8 +193,7 @@ async def init_upload(session_id: str, request: Request) -> dict:
             ),
         )
 
-    filename = safe_filename(raw_filename)
-    if not filename or not expected_sha256:
+    if not isinstance(raw_filename, str) or not raw_filename or not expected_sha256:
         raise HTTPException(status_code=400, detail="filename and expected_sha256 required")
     if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
         raise HTTPException(
@@ -127,23 +201,79 @@ async def init_upload(session_id: str, request: Request) -> dict:
             detail="expected_sha256 must be a 64-character hex digest",
         )
 
-    state = sessions.get(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
     user_id = getattr(request.state, "user_id", "")
-    if getattr(state, "user_id", "") != user_id:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    target = next(
-        (f for f in state.data_files if f.filename == filename and not f.file_path),
-        None,
-    )
-    if target is None:
-        raise HTTPException(status_code=400, detail=f"No placeholder for filename {filename}")
+    requested_id = str(body.get("file_id", "") or "").strip()
+    if not requested_id:
+        raise HTTPException(
+            status_code=400,
+            detail="file_id is required; bind the upload to a placeholder",
+        )
 
     async with get_lifecycle_lock(session_id):
+        state = sessions.get(session_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if getattr(state, "user_id", "") != user_id:
+            raise HTTPException(status_code=404, detail="Session not found")
         assert_generation_writable(session_id, state)
         db = await get_db()
+        target = next(
+            (data_file for data_file in state.data_files if data_file.id == requested_id),
+            None,
+        )
+        if target is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No data file with id {requested_id}",
+            )
+        if target.file_path:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Data file {requested_id} is already bound to "
+                    f"{target.file_path}; delete it before uploading again."
+                ),
+            )
+        # Compare the raw request to the placeholder. Sanitization is only for
+        # deriving the destination and never makes a mismatch equivalent.
+        if raw_filename != target.filename:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"file_id {requested_id} names {target.filename!r}, but "
+                    f"this upload declares {raw_filename!r}"
+                ),
+            )
+        filename = safe_filename(target.filename)
+        if not filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        destination = resolve_upload_destination(session_id, target)
+        if destination.exists() or any(
+            data_file is not target
+            and data_file.file_path
+            and Path(data_file.file_path).resolve() == destination
+            for data_file in state.data_files
+        ) or await _other_upload_owns_destination(
+            db, session_id, state, "", destination
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{filename} would overwrite another upload in the same "
+                    "section, group and sample."
+                ),
+            )
+        list_uploads = getattr(db, "list_uploads_for_session", None)
+        if list_uploads is not None:
+            for row in await list_uploads(session_id):
+                if row.get("placeholder_file_id") == target.id:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Data file {target.id} already has an active upload; "
+                            "complete or discard it before retrying."
+                        ),
+                    )
         expires_at = (
             datetime.now(timezone.utc) + timedelta(hours=24)
         ).isoformat()
@@ -254,17 +384,84 @@ async def complete_upload(session_id: str, upload_id: str) -> dict:
             if upload is None or upload["session_id"] != session_id:
                 raise HTTPException(status_code=404, detail="Upload session not found")
 
-            # Idempotent: already completed — return the actual stored path
+            # Idempotent: already completed — return the actual stored path.
+            # If the process died before persisting the binding, repair it only
+            # when the exact derived path still has the recorded size and digest.
             if upload["completed"]:
-                stored_path = ""
-                if state:
-                    placeholder_id = upload.get("placeholder_file_id")
-                    target = next(
-                        (df for df in state.data_files if df.id == placeholder_id), None
-                    ) if placeholder_id else None
-                    if target and target.file_path:
-                        stored_path = target.file_path
-                return {"success": True, "filename": upload["filename"], "path": stored_path}
+                placeholder_id = upload.get("placeholder_file_id")
+                target = next(
+                    (df for df in state.data_files if df.id == placeholder_id), None
+                ) if placeholder_id else None
+                if target is None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="The completed upload has no surviving placeholder binding.",
+                    )
+                if target.file_path:
+                    bound_destination = resolve_upload_destination(session_id, target)
+                    if Path(target.file_path).resolve() != bound_destination:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="The completed upload binding is not its derived destination.",
+                        )
+                    if await _other_upload_owns_destination(
+                        db, session_id, state, upload_id, bound_destination
+                    ):
+                        raise HTTPException(
+                            status_code=409,
+                            detail="The completed upload destination is owned by another upload.",
+                        )
+                    return {
+                        "success": True,
+                        "filename": upload["filename"],
+                        "path": target.file_path,
+                    }
+
+                recovered = resolve_upload_destination(session_id, target)
+                state_occupied = any(
+                    data_file is not target
+                    and data_file.file_path
+                    and Path(data_file.file_path).resolve() == recovered
+                    for data_file in state.data_files
+                )
+                row_occupied = await _other_upload_owns_destination(
+                    db, session_id, state, upload_id, recovered
+                )
+                expected_size = upload.get("total_size")
+                exact = False
+                if (
+                    not state_occupied
+                    and not row_occupied
+                    and recovered.is_file()
+                    and isinstance(expected_size, int)
+                ):
+                    try:
+                        exact = (
+                            recovered.stat().st_size == expected_size
+                            and await asyncio.to_thread(_sha256_of_file, recovered)
+                            == upload["expected_sha256"]
+                        )
+                    except OSError:
+                        exact = False
+                if state_occupied or row_occupied:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="The completed upload destination is owned by another upload.",
+                    )
+                if not exact:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "The completed upload cannot be recovered: its exact "
+                            "destination, size, and checksum do not match."
+                        ),
+                    )
+                await _persist_binding(session_id, state, target, recovered)
+                return {
+                    "success": True,
+                    "filename": upload["filename"],
+                    "path": str(recovered),
+                }
 
             if upload["received_chunks"] != upload["total_chunks"]:
                 raise HTTPException(
@@ -285,13 +482,81 @@ async def complete_upload(session_id: str, upload_id: str) -> dict:
                     detail="Upload exceeds the configured size limit",
                 )
 
-            upload_dir = get_session_uploads(session_id)
-            upload_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = safe_filename(upload["filename"])
-            if not safe_name:
-                raise HTTPException(status_code=400, detail="Invalid filename")
-            final_path = upload_dir / safe_name
-            final_path = validate_path_within(final_path, upload_dir)
+            placeholder_id = upload.get("placeholder_file_id")
+            target = next(
+                (df for df in state.data_files if df.id == placeholder_id), None
+            ) if placeholder_id else None
+            if target is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "The data file this upload was initialized for no "
+                        "longer exists; re-initialize the upload."
+                    ),
+                )
+            if target.file_path:
+                raise HTTPException(
+                    status_code=409,
+                    detail="The upload placeholder is already bound to a file.",
+                )
+            final_path = resolve_upload_destination(session_id, target)
+            occupant = any(
+                data_file is not target
+                and data_file.file_path
+                and Path(data_file.file_path).resolve() == final_path
+                for data_file in state.data_files
+            )
+            row_occupied = await _other_upload_owns_destination(
+                db, session_id, state, upload_id, final_path
+            )
+            if occupant or row_occupied:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"{final_path.name} is already owned by another upload; "
+                        "refusing to overwrite it."
+                    ),
+                )
+            if final_path.exists():
+                exact_residue = False
+                try:
+                    exact_residue = (
+                        final_path.stat().st_size == total_size
+                        and await asyncio.to_thread(_sha256_of_file, final_path)
+                        == upload["expected_sha256"]
+                    )
+                except OSError:
+                    exact_residue = False
+                if exact_residue:
+                    for i in range(upload["total_chunks"]):
+                        try:
+                            (UPLOAD_TEMP_DIR / f"{upload_id}.chunk.{i}").unlink(
+                                missing_ok=True
+                            )
+                        except OSError:
+                            pass
+                    await db.complete_upload_session(upload_id)
+                    async with state_lock:
+                        if sessions.get(session_id) is not state:
+                            raise HTTPException(
+                                status_code=409,
+                                detail="Session generation changed during upload",
+                        )
+                        session_access_times[session_id] = time.time()
+                    await _persist_binding(session_id, state, target, final_path)
+                    return {
+                        "success": True,
+                        "filename": upload["filename"],
+                        "path": str(final_path),
+                    }
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"{final_path.name} is an unverified residue; "
+                        "refusing to overwrite it."
+                    ),
+                )
+            final_path.parent.mkdir(parents=True, exist_ok=True)
             sha256 = hashlib.sha256()
             assembled_size = 0
 
@@ -382,12 +647,6 @@ async def complete_upload(session_id: str, upload_id: str) -> dict:
 
             await db.complete_upload_session(upload_id)
 
-            placeholder_id = upload.get("placeholder_file_id")
-            target = next(
-                (df for df in state.data_files if df.id == placeholder_id), None
-            ) if placeholder_id else None
-            if target:
-                target.file_path = str(final_path)
             async with state_lock:
                 if sessions.get(session_id) is not state:
                     raise HTTPException(
@@ -395,9 +654,7 @@ async def complete_upload(session_id: str, upload_id: str) -> dict:
                         detail="Session generation changed during upload",
                     )
                 session_access_times[session_id] = time.time()
-            await _async_save_session_under_lifecycle(
-                session_id, state, force=True,
-            )
+            await _persist_binding(session_id, state, target, final_path)
 
             return {"success": True, "filename": upload["filename"], "path": str(final_path)}
         finally:

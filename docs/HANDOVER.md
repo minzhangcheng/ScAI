@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.39.23 · **Last updated**: 2026-08-23
+**Version**: 0.39.24 · **Last updated**: 2026-08-24
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,7 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.39.x — (2026-08-04 onward)**
 
+- `0.39.24` — P1 upload identity and API lifecycle: ordered placeholder manifests, exact ID-bound nested destinations, collision-safe interrupted completion, authoritative stored paths, strict Python-client submission, and distinct owner-mismatch diagnostics. Accepted checkpoints: backend-full `5654 collected / 5481 passed / 79 failed / 94 skipped` at `test-results/20260823T223750Z-2552787/evidence.json` with no P1 failures, plus client `32/32` at `test-results/20260823T224458Z-2586147/evidence.json`; the 79 unrelated backend failures remain baseline.
 - `0.39.23` — S4 controlled deletion relaxation: direct `os.remove`, `os.unlink`, and `os.rmdir` calls may defer computed or lexically safe targets to the existing exact-root runtime boundary, while unsafe literals and every recursive/move/rename operation remain refused. Accepted kernel checkpoint: `282 collected / 252 passed / 28 failed / 2 errors / 0 skipped` in 387 seconds at `test-results/20260823T144917Z-1467231/evidence.json` (dependency fingerprint `4a7cbb66ad06298e8b6ccc36ebcd0fe98e5a1f245a51eb1aa2a1bab166eaeec4`); all 5 new S4 nodes passed and all 277 shared S3 outcomes were unchanged.
 - `0.39.22` — S3 renderer and sandbox-precision rebaseline: platform-owned publication saving and exact wrapper restoration, objective figure census, source-bearing tracebacks, Scanpy raster recovery, prose-aware dangerous-call matching, and actionable persistent-output filtering. Accepted kernel checkpoint: `277 collected / 247 passed / 28 failed / 2 errors / 0 skipped` in 386 seconds at `test-results/20260823T142053Z-1335302/evidence.json` (dependency fingerprint `4a7cbb66ad06298e8b6ccc36ebcd0fe98e5a1f245a51eb1aa2a1bab166eaeec4`); all 22 new S3 nodes passed and all 255 shared baseline outcomes were unchanged.
 - `0.39.21` — S2 scientific-library kernel adapter rebaseline: versioned gene-set collection binding and trusted PyDESeq2/Scanpy/Dask/Arboreto compatibility adapters. Accepted replacement: `255 collected / 225 passed / 28 failed / 2 errors / 0 skipped` in 378 seconds at `test-results/20260823T122931Z-892539/evidence.json` (dependency fingerprint `4a7cbb66ad06298e8b6ccc36ebcd0fe98e5a1f245a51eb1aa2a1bab166eaeec4`); the 28 failures and 2 errors match clean baseline `test-results/20260823T121933Z-850895/evidence.json`, and all 39 S2 nodes passed. Retained candidate `test-results/20260823T115140Z-731699/` is rejected evidence.

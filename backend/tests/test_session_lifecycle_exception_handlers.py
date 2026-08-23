@@ -71,3 +71,53 @@ async def test_report_generation_handler_returns_stable_conflict_without_path_le
     assert response.status_code == 409
     assert body["detail"]["code"] == "REPORT_GENERATION_INVALID"
     assert "/private/session/report" not in body["detail"]["message"]
+
+
+def test_owner_mismatch_has_precise_subtype_and_base_catch(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from backend.services import session_lifecycle
+    from backend.services.session_lifecycle import (
+        SessionGenerationError,
+        SessionOwnerMismatchError,
+    )
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(session_lifecycle, "SESSION_DIR", session_dir)
+
+    state = SimpleNamespace(
+        id="p1-owner-mismatch",
+        user_id="owner-a",
+        lifecycle_generation=0,
+    )
+    session_lifecycle.adopt_persisted_generation(state)
+    intruder = SimpleNamespace(
+        id=state.id,
+        user_id="owner-b",
+        lifecycle_generation=0,
+    )
+
+    with pytest.raises(SessionGenerationError) as caught:
+        session_lifecycle.adopt_persisted_generation(intruder)
+    assert type(caught.value) is SessionOwnerMismatchError
+    assert isinstance(caught.value, SessionGenerationError)
+
+
+@pytest.mark.asyncio
+async def test_owner_mismatch_handler_is_distinct_and_non_disclosing():
+    import backend.main as main
+    from backend.services.session_lifecycle import SessionOwnerMismatchError
+
+    response = await main.session_owner_mismatch_exception_handler(
+        _request("owner-a"),
+        SessionOwnerMismatchError("owner-a != owner-b"),
+    )
+    body = json.loads(response.body)
+    assert response.status_code == 409
+    assert body["detail"]["code"] == "SESSION_OWNER_MISMATCH"
+    message = body["detail"]["message"]
+    assert "owner-a" not in message
+    assert "owner-b" not in message
+    assert "generation" not in message.lower()
+    assert main.app.exception_handlers[SessionOwnerMismatchError] is main.session_owner_mismatch_exception_handler

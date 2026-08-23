@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from backend.models.config_schema import ConfigV1, AgentOverride, FileEntry, GroupEntry, IndicatorEntry, AGENT_NAMES
 from backend.models.schemas import AnalysisState, TaskStatus, TreatmentGroup, DataFile, BiochemistryIndicator
+from backend.config import get_session_dir
 
 
 def build_agent_server_configs(config: ConfigV1) -> Dict[str, Dict[str, Any]]:
@@ -140,10 +141,24 @@ def apply_config_to_session(config: ConfigV1, user_id: str = "") -> AnalysisStat
     return state
 
 
+def _portable_local_path(session_id: str, data_file: DataFile) -> str:
+    """Return a bound file path relative to its session root."""
+    if data_file.file_path:
+        try:
+            return str(
+                Path(data_file.file_path).resolve().relative_to(
+                    get_session_dir(session_id).resolve()
+                )
+            )
+        except (OSError, ValueError):
+            pass
+    return ""
+
+
 def export_session_to_config(state: AnalysisState) -> Dict[str, Any]:
     """Export an AnalysisState to a ConfigV1-compatible dict.
 
-    - local_path is rewritten to uploads/<filename> (portable)
+    - local_path is rewritten relative to the session directory (portable)
     - API keys are included as-is (user warned in frontend)
     - config_snapshot is excluded
     """
@@ -170,7 +185,7 @@ def export_session_to_config(state: AnalysisState) -> Dict[str, Any]:
     files: List[Dict[str, Any]] = []
     for f in state.data_files:
         entry: Dict[str, Any] = {
-            "local_path": f"uploads/{f.filename}" if f.filename else "",
+            "local_path": _portable_local_path(state.id, f),
             "section": f.section,
             "data_type": f.data_type,
             "description": f.description or "",

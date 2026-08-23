@@ -103,3 +103,50 @@ class TestGeneratorReproducibilityToggle:
         )
         assert result == fake_path
         mock_cls.assert_called_once()
+
+    def test_bundle_uses_bound_file_paths(self, monkeypatch, tmp_path):
+        from types import SimpleNamespace
+
+        from backend.services.report import generator as gen_mod
+
+        monkeypatch.setattr(gen_mod.default_config, "enable_reproducibility", True)
+        first = tmp_path / "uploads/sequencing/group-a/_unsorted/same.h5ad"
+        second = tmp_path / "uploads/sequencing/group-b/2/same.h5ad"
+        first.parent.mkdir(parents=True)
+        second.parent.mkdir(parents=True)
+        first.write_bytes(b"a")
+        second.write_bytes(b"b")
+
+        bundle = MagicMock()
+        bundle.generate.return_value = str(tmp_path / "bundle")
+        bundle_cls = MagicMock(return_value=bundle)
+        import backend.services.reproducibility as repro_mod
+
+        monkeypatch.setattr(repro_mod, "ReproducibilityBundle", bundle_cls)
+        monkeypatch.setattr(gen_mod, "get_session_workspace", lambda _sid: tmp_path)
+        monkeypatch.setattr(
+            gen_mod,
+            "get_session_uploads",
+            lambda _sid: tmp_path / "uploads",
+        )
+
+        state = SimpleNamespace(
+            id="bound-paths",
+            data_files=[
+                SimpleNamespace(filename="same.h5ad", file_path=str(first)),
+                SimpleNamespace(filename="same.h5ad", file_path=str(second)),
+            ],
+            round_results=[],
+        )
+        gen = gen_mod.DetailedReportGenerator.__new__(gen_mod.DetailedReportGenerator)
+
+        result = gen._maybe_generate_reproducibility_bundle(
+            state=state,
+            notebook_src=tmp_path / "notebook.ipynb",
+        )
+
+        assert result == str(tmp_path / "bundle")
+        assert bundle.generate.call_args.kwargs["upload_paths"] == [
+            str(first),
+            str(second),
+        ]

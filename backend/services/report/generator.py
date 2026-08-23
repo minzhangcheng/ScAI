@@ -372,9 +372,8 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             notebook_path = str(notebook_src)
             upload_paths = []
             for f in state.data_files:
-                up = get_session_uploads(state.id) / f.filename
-                if up.exists():
-                    upload_paths.append(str(up))
+                if f.file_path and Path(f.file_path).is_file():
+                    upload_paths.append(f.file_path)
             bundle_path = bundle.generate(
                 session_id=state.id,
                 workspace_path=workspace_dir,

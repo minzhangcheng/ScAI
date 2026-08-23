@@ -27,6 +27,7 @@ def upload_file(
     file_path: Path,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     max_retries: int = 3,
+    file_id: str | None = None,
 ) -> None:
     """Upload a file to a job using chunked upload with SHA256 verification.
 
@@ -36,22 +37,26 @@ def upload_file(
         file_path: Path to the local file
         chunk_size: Size of each chunk in bytes
         max_retries: Maximum retries per chunk
+        file_id: Exact placeholder ID returned by the create endpoint
     """
     file_path = Path(file_path)
     file_size = file_path.stat().st_size
     total_chunks = (file_size + chunk_size - 1) // chunk_size
     expected_sha256 = sha256_file(file_path)
 
-    # 1. Initialize upload
+    # 1. Initialize upload. The server requires file_id for every new client
+    # upload; an omitted value is sent explicitly so the server can reject it.
+    init_payload = {
+        "file_id": file_id,
+        "filename": file_path.name,
+        "expected_sha256": expected_sha256,
+        "total_size": file_size,
+        "total_chunks": total_chunks,
+        "chunk_size": chunk_size,
+    }
     init_resp = client.post(
         f"/api/v1/analyses/{job_id}/files/init",
-        json={
-            "filename": file_path.name,
-            "expected_sha256": expected_sha256,
-            "total_size": file_size,
-            "total_chunks": total_chunks,
-            "chunk_size": chunk_size,
-        },
+        json=init_payload,
     )
     if init_resp.status_code != 200:
         if init_resp.status_code == 401:

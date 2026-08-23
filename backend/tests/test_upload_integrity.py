@@ -56,7 +56,7 @@ class TestSHA256Rollback:
                 await complete_upload("sid1", uid)
             assert "integrity" in str(exc_info.value.detail).lower()
 
-        final_path = upload_dir / "test.h5ad"
+        final_path = upload_dir / "sequencing/_ungrouped/test.h5ad"
         assert not final_path.exists()
         assert not chunk_path.exists()
 
@@ -92,9 +92,11 @@ class TestSHA256Rollback:
             result = await complete_upload("sid1", uid)
 
         assert result["success"] is True
-        assert (upload_dir / "test.h5ad").exists()
+        assert (upload_dir / "sequencing/_ungrouped/test.h5ad").exists()
         assert not chunk_path.exists()
-        assert state.data_files[0].file_path == str(upload_dir / "test.h5ad")
+        assert state.data_files[0].file_path == str(
+            upload_dir / "sequencing/_ungrouped/test.h5ad"
+        )
 
         sessions.pop("sid1", None)
 
@@ -127,7 +129,7 @@ class TestSHA256Rollback:
                 await complete_upload("sid1", uid)
 
         assert "expected 5" in str(exc_info.value.detail)
-        assert not (upload_dir / "test.h5ad").exists()
+        assert not (upload_dir / "sequencing/_ungrouped/test.h5ad").exists()
         sessions.pop("sid1", None)
 
     @pytest.mark.asyncio
@@ -148,16 +150,19 @@ class TestSHA256Rollback:
         await app_db.complete_upload_session(uid)
 
         state = _make_state()
-        state.data_files[0].file_path = "/some/stored/path"
+        upload_dir = tmp_path / "uploads"
+        stored_path = upload_dir / "sequencing/_ungrouped/test.h5ad"
+        state.data_files[0].file_path = str(stored_path)
         sessions["sid1"] = state
 
         with patch("backend.services.upload.get_db", return_value=app_db), \
+             patch("backend.services.upload.get_session_uploads", return_value=upload_dir), \
              patch("backend.services.upload._on_session_update", None), \
              patch("backend.services.upload._on_session_save", None):
             result = await complete_upload("sid1", uid)
 
         assert result["success"] is True
-        assert result["path"] == "/some/stored/path"
+        assert result["path"] == str(stored_path)
 
         sessions.pop("sid1", None)
 

@@ -56,8 +56,22 @@ def _v1_report_artifact_is_public(relative_path: Path) -> bool:
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
-async def _create_pending_session(request: Request) -> str:
-    """Parse ConfigV1 from request body, create pending session, return session_id."""
+def _placeholder_manifest(state) -> List[Dict[str, Any]]:
+    """Return the upload bindings in the same order as the config files."""
+    return [
+        {
+            "id": data_file.id,
+            "filename": data_file.filename,
+            "section": data_file.section,
+            "group_id": data_file.group_id,
+            "sample_number": data_file.sample_number,
+        }
+        for data_file in state.data_files
+    ]
+
+
+async def _create_pending_session(request: Request):
+    """Parse ConfigV1, create a pending session, and return its state."""
     from backend.services.session_store import update_session_cache as _update_session_cache, async_save_session
 
     user_id = getattr(request.state, "user_id", "")
@@ -92,7 +106,7 @@ async def _create_pending_session(request: Request) -> str:
                 "Failed to clean up partially-created V1 session %s", session_id
             )
         raise
-    return session_id
+    return state
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────
@@ -100,10 +114,14 @@ async def _create_pending_session(request: Request) -> str:
 @router.post("/analyses")
 async def create_analysis(request: Request):
     """Create a new pending analysis from a ConfigV1 JSON.
-    Returns job_id. Files must be uploaded separately, then call /start.
+    Returns job_id and the placeholder manifest for the separate uploads.
     """
-    session_id = await _create_pending_session(request)
-    return {"job_id": session_id, "status": "pending"}
+    state = await _create_pending_session(request)
+    return {
+        "job_id": state.id,
+        "status": "pending",
+        "files": _placeholder_manifest(state),
+    }
 
 
 @router.post("/analyses/from-config")
@@ -111,8 +129,12 @@ async def create_from_config(request: Request):
     """Create a new pending session from a ConfigV1 JSON (for web UI import).
     Returns session_id. The session is pending — user must upload files before starting.
     """
-    session_id = await _create_pending_session(request)
-    return {"id": session_id, "status": "pending"}
+    state = await _create_pending_session(request)
+    return {
+        "id": state.id,
+        "status": "pending",
+        "files": _placeholder_manifest(state),
+    }
 
 
 @router.post("/analyses/{session_id}/files/init")
@@ -172,9 +194,33 @@ async def start_analysis(session_id: str, request: Request):
     if config is None:
         raise HTTPException(status_code=400, detail="No API key configured. Please configure your LLM API key in Settings before starting analysis.")
 
-    missing = [df.filename for df in state.data_files if not df.file_path]
-    if missing:
-        logger.warning(f"Starting analysis {session_id} with missing files: {missing}")
+    unbound: List[str] = []
+    stale: List[str] = []
+    for data_file in state.data_files:
+        if not data_file.file_path:
+            unbound.append(data_file.filename)
+        elif not Path(data_file.file_path).exists():
+            stale.append(data_file.filename)
+    if unbound or stale:
+        problems = []
+        if unbound:
+            problems.append(
+                "declared in the configuration but never uploaded: "
+                + ", ".join(unbound)
+            )
+        if stale:
+            problems.append(
+                "bound to a path that no longer exists: " + ", ".join(stale)
+            )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Cannot start: these data files are "
+                + "; ".join(problems)
+                + ". Upload them, or drop them with "
+                "DELETE /api/session/{session_id}/data/{file_id}."
+            ),
+        )
 
     async def _prepare_start() -> None:
         state.status = TaskStatus.RUNNING

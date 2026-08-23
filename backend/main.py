@@ -99,7 +99,11 @@ from .services.session_store import (
 )
 
 from .services.upload import upload_manager
-from .services.session_lifecycle import SessionGenerationError, SessionGoneError
+from .services.session_lifecycle import (
+    SessionGenerationError,
+    SessionGoneError,
+    SessionOwnerMismatchError,
+)
 
 from .utils.agent_llm import (
     validate_file_path_ownership as _validate_file_path_ownership,
@@ -287,6 +291,26 @@ async def session_gone_exception_handler(
                 "code": "SESSION_GONE",
                 "message": "This session was deleted and cannot be restored.",
                 "generation": exc.generation,
+            }
+        },
+    )
+
+
+@app.exception_handler(SessionOwnerMismatchError)
+async def session_owner_mismatch_exception_handler(
+    request: Request,
+    exc: SessionOwnerMismatchError,
+) -> JSONResponse:
+    """Return a stable non-disclosing conflict for an owner mismatch."""
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": {
+                "code": "SESSION_OWNER_MISMATCH",
+                "message": (
+                    "This session's stored owner does not match the session "
+                    "being operated on. Reloading will not resolve it."
+                ),
             }
         },
     )

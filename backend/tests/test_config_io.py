@@ -220,3 +220,57 @@ def test_bioinfo_max_steps_custom():
     from backend.config._config import SystemConfig
     cfg = SystemConfig(bioinfo_max_steps=500)
     assert cfg.bioinfo_max_steps == 500
+
+
+class TestExportedLocalPath:
+    def test_bound_files_export_real_distinct_relative_paths(self, tmp_path, monkeypatch):
+        from backend.services import config_io
+        from backend.models.schemas import AnalysisState, DataFile, TreatmentGroup
+
+        session_root = tmp_path / "session"
+        monkeypatch.setattr(
+            config_io,
+            "get_session_dir",
+            lambda _session_id: session_root,
+            raising=False,
+        )
+        group_a = "group-a"
+        group_b = "group-b"
+        state = AnalysisState(
+            id="export-paths",
+            user_id="u1",
+            name="Export paths",
+            treatment_groups=[
+                TreatmentGroup(id=group_a, name="Control", sample_count=1, order=0),
+                TreatmentGroup(id=group_b, name="Treatment", sample_count=1, order=1),
+            ],
+            data_files=[
+                DataFile(
+                    id="file-a",
+                    filename="same.h5ad",
+                    file_path=str(
+                        session_root / "uploads/sequencing/group-a/_unsorted/same.h5ad"
+                    ),
+                    section="sequencing",
+                    data_type="h5ad",
+                    group_id=group_a,
+                ),
+                DataFile(
+                    id="file-b",
+                    filename="same.h5ad",
+                    file_path=str(
+                        session_root / "uploads/sequencing/group-b/2/same.h5ad"
+                    ),
+                    section="sequencing",
+                    data_type="h5ad",
+                    group_id=group_b,
+                    sample_number=2,
+                ),
+            ],
+        )
+
+        exported = config_io.export_session_to_config(state)
+        assert [entry["local_path"] for entry in exported["data"]["files"]] == [
+            "uploads/sequencing/group-a/_unsorted/same.h5ad",
+            "uploads/sequencing/group-b/2/same.h5ad",
+        ]
