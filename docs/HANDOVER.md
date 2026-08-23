@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.39.15 · **Last updated**: 2026-08-22
+**Version**: 0.39.16 · **Last updated**: 2026-08-23
 
 ## 1. Runtime Architecture
 
@@ -336,6 +336,12 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.39.x — (2026-08-04 onward)**
+
+- `0.39.16` — F1 kernel lifecycle rebaseline: core-dump suppression and signal diagnosis, bounded native asynchronous Jupyter lifecycle operations, and run-start source-evidence identity (2026-08-23):
+  - **Kernel failures remain bounded and diagnosable**: the trusted launcher suppresses core dumps by default with `RLIMIT_CORE=(0, 0)` while preserving an explicit host-developer opt-in; kernel-death reports distinguish ordinary exits and fatal signals before restart replaces the process identity.
+  - **Jupyter lifecycle calls use bounded native async operations**: start, restart, and shutdown keep the event loop responsive; timeout, error, and cancellation paths clean partial resources, while unsuccessful shutdown retains the same manager/process for an explicit retry.
+  - **Test evidence is anchored once**: `scripts/scai-test` captures the verified run-start HEAD once and reuses it for pre-run, post-run, and published evidence without weakening source-drift detection.
+  - **Verification**: kernel run `20260823T031849Z-2848414` recorded `214 collected / 185 passed / 29 failed / 0 skipped`; the 29 failure-node set exactly matches F0 run `20260823T014807Z-2515509`, and every F1 node passed.
 
 - `0.39.15` — F0 reproducible-environment rebaseline: Python 3.11 direct-start identity, scientific dependency bounds, immutable hash-locked Python test image, repository-owned serial profiles, isolated locked frontend tests, and content-addressed evidence (2026-08-22):
   - **Direct startup is fail-closed (`start.sh`, dependency inputs)**: system or uv-managed Python is explicitly verified as minor 3.11, stale versioned venvs are refused without deletion, and failed pip or required npm installation starts no service.

@@ -13,6 +13,8 @@ claim_scope = "complete known real-kernel/integration evidence"
 env = { SCAI_RUN_KERNEL_TESTS = "1", SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB = "1" }
 args = [
   "backend/tests/integration",
+  "backend/tests/test_kernel_core_dump_suppression.py",
+  "backend/tests/test_kernel_async_lifecycle.py",
   "backend/tests/test_kernel_bootstrap.py",
   "backend/tests/test_sandbox_kernel_isolation.py",
   "backend/tests/test_snapshot_v2_capture_acceptance.py",

@@ -3,7 +3,6 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
-readonly BASE_COMMIT="0c1edf479f7360dc80afa89cf7fc9534c1effce6"
 readonly PLATFORM="linux/amd64"
 readonly IMAGE_NAME="ghcr.io/minzhangcheng/scai-test-deps"
 readonly IMAGE_POINTER="docker/test-deps-image.json"
@@ -91,8 +90,9 @@ for argument in "${PYTEST_ARGS[@]}"; do
 done
 PYTEST_ARGS=("${EXPANDED_ARGS[@]}")
 
-CURRENT_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
-[[ "$CURRENT_HEAD" == "$BASE_COMMIT" ]] || die "fixed base HEAD required before image lookup (expected $BASE_COMMIT, got $CURRENT_HEAD)"
+RUN_START_HEAD="$(git rev-parse --verify HEAD^{commit} 2>/dev/null || true)"
+[[ "$RUN_START_HEAD" =~ ^[0-9a-f]{40}$ ]] || die "unable to verify run-start HEAD commit"
+readonly BASE_COMMIT="$RUN_START_HEAD"
 
 FINGERPRINT_OUTPUT="$(scripts/test-deps-fingerprint.sh)"
 FINGERPRINT="$(printf '%s\n' "$FINGERPRINT_OUTPUT" | awk -F= '$1=="FINGERPRINT"{print $2}')"

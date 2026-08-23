@@ -12,6 +12,7 @@ import re
 import json
 import base64
 import asyncio
+import signal
 import time
 import hmac
 import hashlib
@@ -90,6 +91,43 @@ from .shared import (  # noqa: F401
 
 
 IOPUB_INTERRUPT_DRAIN_TIMEOUT = 5.0
+
+
+_CORE_DUMPING_EXITS = frozenset(
+    -int(member)
+    for member in (
+        getattr(signal, name, None)
+        for name in ("SIGSEGV", "SIGABRT", "SIGBUS", "SIGFPE", "SIGILL", "SIGQUIT")
+    )
+    if member is not None
+)
+
+
+def describe_kernel_exit(kernel_manager: Any) -> str:
+    """Return a safe, factual description of a terminated kernel process."""
+    try:
+        process = getattr(getattr(kernel_manager, "provisioner", None), "process", None)
+        if process is None:
+            return "exit status unavailable (no kernel process handle)"
+        # jupyter_client 8 exposes provisioner.poll() as a coroutine. The
+        # process handle is the synchronous source of the POSIX exit status.
+        code = process.poll()
+        if code is None:
+            return "process still present, no exit status yet"
+        if code < 0:
+            try:
+                name = signal.Signals(-code).name
+            except ValueError:
+                name = f"signal {-code}"
+            dumped = (
+                " (core dump suppressed by RLIMIT_CORE)"
+                if code in _CORE_DUMPING_EXITS
+                else ""
+            )
+            return f"killed by {name}{dumped}"
+        return f"exited with status {code}"
+    except Exception as exc:  # pragma: no cover - failure diagnostics must not raise
+        return f"exit status unavailable ({exc!r})"
 
 
 async def _drain_iopub_until_idle(
@@ -249,9 +287,10 @@ class ExecutionMixin:
         # Without this check, kc.execute() on a dead kernel triggers ZMQ channel
         # corruption that calls abort() inside libzmq, killing the entire process.
         if self.km is not None and not self.km.is_alive():
+            exit_reason = describe_kernel_exit(self.km)
             logger.warning(
-                f"[{self.session_id}] Kernel process is dead before execute; "
-                f"attempting restart"
+                f"[{self.session_id}] Kernel process is dead before execute "
+                f"({exit_reason}); attempting restart"
             )
             await self._restart_kernel()
             if self._kernel_dead:
@@ -298,16 +337,20 @@ class ExecutionMixin:
                         # poll cap.  Re-check the wall-clock deadline and
                         # kernel liveness before looping or declaring timeout.
                         if self.km and not self.km.is_alive():
+                            exit_reason = describe_kernel_exit(self.km)
                             logger.warning(
-                                f"[{self.session_id}] Kernel died during execution; "
-                                f"aborting output collection"
+                                f"[{self.session_id}] Kernel died during execution "
+                                f"({exit_reason}); aborting output collection"
                             )
                             await self._restart_kernel()
                             if self._kernel_dead:
                                 return CodeExecutionResult(
                                     success=False,
                                     output="",
-                                    error="Kernel died during execution and restart failed.",
+                                    error=(
+                                        "Kernel died during execution and restart "
+                                        f"failed ({exit_reason})."
+                                    ),
                                     figures=[]
                                 )
                             # Kernel restarted successfully; the old execution is gone,
@@ -315,7 +358,11 @@ class ExecutionMixin:
                             return CodeExecutionResult(
                                 success=False,
                                 output="",
-                                error="Kernel died during execution. Restarted successfully, but the execution was lost.",
+                                error=(
+                                    "Kernel died during execution "
+                                    f"({exit_reason}). Restarted successfully, "
+                                    "but the execution was lost."
+                                ),
                                 figures=[]
                             )
                         if compute_remaining_timeout(deadline, time.monotonic()) > 0:

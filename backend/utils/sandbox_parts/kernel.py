@@ -90,6 +90,43 @@ from .shared import (  # noqa: F401
 )
 
 
+_KERNEL_PROCESS_START_TIMEOUT = 30.0
+_KERNEL_MANAGER_RESTART_TIMEOUT = 30.0
+_KERNEL_MANAGER_SHUTDOWN_TIMEOUT = 10.0
+
+
+async def _start_kernel_manager(
+    manager: KernelManager,
+    *,
+    cwd: str,
+    env: Dict[str, str],
+) -> None:
+    """Start a kernel through Jupyter's native coroutine when available."""
+    native = getattr(manager, "_async_start_kernel", None)
+    if callable(native):
+        await native(cwd=cwd, env=env)
+        return
+    manager.start_kernel(cwd=cwd, env=env)
+
+
+async def _restart_kernel_manager(manager: KernelManager) -> None:
+    """Restart a manager without blocking the event loop."""
+    native = getattr(manager, "_async_restart_kernel", None)
+    if callable(native):
+        await native()
+        return
+    await _to_thread_drained(manager.restart_kernel)
+
+
+async def _shutdown_kernel_manager(manager: KernelManager) -> None:
+    """Shut down a manager through its native coroutine when available."""
+    native = getattr(manager, "_async_shutdown_kernel", None)
+    if callable(native):
+        await native(now=True)
+        return
+    manager.shutdown_kernel(now=True)
+
+
 class KernelMixin:
     """Jupyter kernel lifecycle: start, readiness, restart, stop."""
 
@@ -219,10 +256,19 @@ class KernelMixin:
         try:
             self.km = KernelManager(kernel_name='python3')
             self._install_isolated_kernel_launcher(self.km)
-            self.km.start_kernel(
-                cwd=str(self.working_dir),
-                env=self._kernel_launch_environment(),
-            )
+            try:
+                await asyncio.wait_for(
+                    _start_kernel_manager(
+                        self.km,
+                        cwd=str(self.working_dir),
+                        env=self._kernel_launch_environment(),
+                    ),
+                    timeout=_KERNEL_PROCESS_START_TIMEOUT,
+                )
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError(
+                    "Kernel process failed to start within timeout"
+                ) from exc
             self.kc = self.km.client()
             self.kc.start_channels()
 
@@ -955,7 +1001,10 @@ print(f"I/O sandbox active: writes restricted to session directory")
         self._restarting = True
         try:
             try:
-                await _to_thread_drained(self.km.restart_kernel)
+                await asyncio.wait_for(
+                    _restart_kernel_manager(self.km),
+                    timeout=_KERNEL_MANAGER_RESTART_TIMEOUT,
+                )
 
                 # Rebuild client connection.  Brief sleep to let any
                 # in-flight ZMQ reader threads finish their current poll
@@ -1078,6 +1127,8 @@ print(f"I/O sandbox active: writes restricted to session directory")
                     "the live kernel was preserved"
                 ) from exc
 
+        manager = self.km
+
         if self.kc is not None:
             try:
                 self.kc.stop_channels()
@@ -1086,16 +1137,19 @@ print(f"I/O sandbox active: writes restricted to session directory")
                     "Error stopping kernel channels for %s", self.session_id
                 )
             self.kc = None
+        self._initialized = False
 
-        if self.km is not None:
+        if manager is not None:
             try:
-                self.km.shutdown_kernel(now=True)
-            except Exception:
-                logger.exception(
-                    "Error shutting down kernel for %s", self.session_id
+                await asyncio.wait_for(
+                    _shutdown_kernel_manager(manager),
+                    timeout=_KERNEL_MANAGER_SHUTDOWN_TIMEOUT,
                 )
+            except BaseException:
+                self._kernel_dead = True
+                self.km = manager
+                raise
             self.km = None
-            self._initialized = False
 
         logger.info(f"Kernel stopped for session {self.session_id}")
 

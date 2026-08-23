@@ -1100,23 +1100,43 @@ def test_junit_projection_mismatch_reports_actual_and_phase_expected():
     assert "phase projection expected=" in RUNNER
 
 
-def test_runner_rejects_nonfixed_head_before_image_lookup(tmp_path):
+def test_runner_uses_run_start_head_for_later_commits(tmp_path):
     repo, fake_bin = _fake_runner_repo(tmp_path)
-    runner = repo / "scripts/scai-test"
-    runner.write_text(runner.read_text(encoding="utf-8").replace(
-        git(repo, "rev-parse", "HEAD"), "f" * 40
-    ), encoding="utf-8")
-    log = fake_bin / "docker.log"
-    (fake_bin / "docker").write_text(
-        f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {str(log)!r}\nexit 0\n",
-        encoding="utf-8",
+    _install_fake_docker_artifacts(
+        fake_bin,
+        [record("case", [phase("setup"), phase("call"), phase("teardown")])],
+        {"tests": 1, "failures": 0, "errors": 0, "skipped": 0},
+        exit_code=0,
     )
-    (fake_bin / "docker").chmod(0o755)
+    (repo / "later.txt").write_text("later\n", encoding="utf-8")
+    git(repo, "add", "later.txt")
+    git(repo, "commit", "-qm", "later")
+    run_start_head = git(repo, "rev-parse", "HEAD")
     env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
-    result = subprocess.run([str(runner), "fast", "placeholder.py"], cwd=repo, env=env, text=True, capture_output=True)
-    assert result.returncode != 0
-    assert "fixed base" in result.stderr.lower()
-    assert not log.exists()
+    result = subprocess.run(
+        [str(repo / "scripts/scai-test"), "fast", "placeholder.py"],
+        cwd=repo,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    try:
+        assert result.returncode == 0, result.stderr
+        run_dirs = [
+            path for path in (repo / "test-results").iterdir()
+            if path.is_dir() and not path.name.startswith(".")
+        ]
+        assert len(run_dirs) == 1
+        evidence = json.loads((run_dirs[0] / "evidence.json").read_text(encoding="utf-8"))
+        assert evidence["source"]["base_commit"] == run_start_head
+        assert evidence["source"]["manifest"]["base"] == run_start_head
+        for name in ("pre-source-manifest.json", "post-source-manifest.json"):
+            manifest = json.loads((run_dirs[0] / name).read_text(encoding="utf-8"))
+            assert manifest["base"] == run_start_head
+    finally:
+        _cleanup_nested_runner_diagnostics(result.stderr)
+        shutil.rmtree(repo / "test-results", ignore_errors=True)
+        shutil.rmtree(fake_bin / "container-artifacts", ignore_errors=True)
 
 
 def test_collection_validator_requires_complete_true_and_exact_plugins():
