@@ -10,16 +10,12 @@ import os
 import shutil
 import stat
 import tempfile
-import zipfile
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote as url_quote
 
 from datetime import datetime
 from fastapi import Depends, HTTPException, Request
-from fastapi.responses import FileResponse
-from starlette.background import BackgroundTask
-
 from backend.config import MAX_UPLOAD_SIZE, UPLOAD_TEMP_DIR
 from backend.models.schemas import AnalysisState
 
@@ -27,10 +23,16 @@ from backend.utils.files import (
     validate_path_within,
     validate_session_id,
     slugify_session_name,
-    temp_file_on_error,
 )
 from backend.utils.auth import require_session_ownership
 from backend.utils.asyncio_tasks import run_in_owned_bulk_thread
+from backend.services.export_lifecycle import (
+    OwnedArchiveFileResponse,
+    SecureArchiveError,
+    build_secure_zip,
+    copy_secure_file,
+    unlink_export_archive_and_marker,
+)
 from backend.services.report.paths import (
     resolve_published_report_dir,
     resolve_report_output_dir,
@@ -46,6 +48,13 @@ from .core import REPORT_ARCHIVE_PREFIX, _should_skip_in_report_zip, router
 _BULK_ZIP_MAX_FILES = 10_000
 _BULK_ZIP_MAX_SOURCE_BYTES = MAX_UPLOAD_SIZE
 _BULK_ZIP_DISK_RESERVE_BYTES = 64 * 1024 * 1024
+
+
+def _inode_identity_from_fd(fd: int) -> tuple[int, int]:
+    metadata = os.fstat(fd)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OSError("archive staging descriptor is not a regular file")
+    return int(metadata.st_dev), int(metadata.st_ino)
 
 
 class _BulkZipRejected(Exception):
@@ -64,77 +73,55 @@ class _ArchiveChanged(Exception):
 def _copy_validated_archive(
     source: Path,
     destination: Path,
-    expected_identity: tuple[int, int],
+    destination_fd: int,
+    expected_identity: tuple[int, ...],
 ) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        source_fd = os.open(source, flags)
-    except OSError as exc:
-        raise _ArchiveChanged from exc
-    try:
-        metadata = os.fstat(source_fd)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or (metadata.st_dev, metadata.st_ino) != expected_identity
-        ):
-            raise _ArchiveChanged
-        with os.fdopen(source_fd, "rb") as source_handle:
-            source_fd = -1
-            with open(destination, "wb") as destination_handle:
-                shutil.copyfileobj(source_handle, destination_handle, 1024 * 1024)
-                destination_handle.flush()
-                os.fsync(destination_handle.fileno())
-    finally:
-        if source_fd >= 0:
-            os.close(source_fd)
+        copy_secure_file(
+            source.parent,
+            Path(source.name),
+            destination,
+            destination_fd=destination_fd,
+            expected_identity=expected_identity,
+            reserve_bytes=_BULK_ZIP_DISK_RESERVE_BYTES,
+        )
+    except SecureArchiveError as exc:
+        if exc.status_code == 409:
+            raise _ArchiveChanged from exc
+        raise _BulkZipRejected(exc.status_code, exc.detail) from exc
 
 
 def _build_disk_zip(
     source_dir: Path,
     destination: Path,
+    destination_fd: int,
     *,
     recursive: bool,
     csv_only: bool = False,
     skip_report_artifacts: bool = False,
 ) -> None:
     """Build a bounded ZIP without retaining inputs or output in memory."""
-    candidates = source_dir.rglob("*") if recursive else source_dir.glob("*")
-    selected: list[tuple[Path, Path, int]] = []
-    total_bytes = 0
-
-    for file_path in sorted(candidates):
-        if file_path.is_symlink() or not file_path.is_file():
-            continue
+    def include(relative: Path) -> bool:
+        file_path = source_dir / relative
         if csv_only and file_path.suffix.lower() != ".csv":
-            continue
+            return False
         if skip_report_artifacts and _should_skip_in_report_zip(file_path):
-            continue
+            return False
+        return True
 
-        size = file_path.stat().st_size
-        selected.append((file_path, file_path.relative_to(source_dir), size))
-        total_bytes += size
-        if len(selected) > _BULK_ZIP_MAX_FILES:
-            raise _BulkZipRejected(
-                413,
-                f"Archive contains more than {_BULK_ZIP_MAX_FILES} files",
-            )
-        if total_bytes > _BULK_ZIP_MAX_SOURCE_BYTES:
-            raise _BulkZipRejected(
-                413,
-                f"Archive source exceeds {_BULK_ZIP_MAX_SOURCE_BYTES} bytes",
-            )
-
-    # Stored or poorly-compressible data can produce an archive slightly larger
-    # than its inputs. Refuse before publication when the staging filesystem
-    # cannot accommodate that conservative estimate.
-    estimated_bytes = total_bytes + (len(selected) * 1024)
-    free_bytes = shutil.disk_usage(destination.parent).free
-    if free_bytes < estimated_bytes + _BULK_ZIP_DISK_RESERVE_BYTES:
-        raise _BulkZipRejected(507, "Insufficient disk space for report archive")
-
-    with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as zf:
-        for file_path, arcname, _size in selected:
-            zf.write(file_path, arcname)
+    try:
+        build_secure_zip(
+            source_dir,
+            destination,
+            destination_fd=destination_fd,
+            recursive=recursive,
+            include=include,
+            max_files=_BULK_ZIP_MAX_FILES,
+            max_source_bytes=_BULK_ZIP_MAX_SOURCE_BYTES,
+            reserve_bytes=_BULK_ZIP_DISK_RESERVE_BYTES,
+        )
+    except SecureArchiveError as exc:
+        raise _BulkZipRejected(exc.status_code, exc.detail) from exc
 
 
 async def _disk_zip_response(
@@ -144,24 +131,23 @@ async def _disk_zip_response(
     recursive: bool,
     csv_only: bool = False,
     skip_report_artifacts: bool = False,
-) -> FileResponse:
+) -> OwnedArchiveFileResponse:
     """Stage a bounded ZIP on disk and retire it after the response completes."""
     UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile(
+    fd, raw_path = tempfile.mkstemp(
         prefix="report_bundle_",
         suffix=".zip",
-        delete=False,
         dir=str(UPLOAD_TEMP_DIR),
     )
-    tmp_path = Path(tmp.name)
-    tmp.close()
-
-    async with temp_file_on_error(str(tmp_path)):
+    tmp_path = Path(raw_path)
+    owned_identity = _inode_identity_from_fd(fd)
+    try:
         try:
             await run_in_owned_bulk_thread(
                 _build_disk_zip,
                 source_dir,
                 tmp_path,
+                fd,
                 recursive=recursive,
                 csv_only=csv_only,
                 skip_report_artifacts=skip_report_artifacts,
@@ -169,12 +155,22 @@ async def _disk_zip_response(
         except _BulkZipRejected as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
-        return FileResponse(
+        return OwnedArchiveFileResponse(
             tmp_path,
+            file_fd=fd,
+            owned_identity=owned_identity,
             media_type="application/zip",
             filename=filename,
-            background=BackgroundTask(tmp_path.unlink, missing_ok=True),
         )
+    except BaseException:
+        try:
+            unlink_export_archive_and_marker(
+                tmp_path,
+                expected_identity=owned_identity,
+            )
+        finally:
+            os.close(fd)
+        raise
 
 
 @router.post("/{session_id}/report/download-all-figures")
@@ -342,34 +338,58 @@ async def download_report_archive(
     resolved_archive = validate_path_within(archive_path, reports_dir)
     resolved_metadata = resolved_archive.stat()
     if (
-        not resolved_archive.is_file()
+        stat.S_ISLNK(resolved_metadata.st_mode)
+        or not stat.S_ISREG(resolved_metadata.st_mode)
         or (resolved_metadata.st_dev, resolved_metadata.st_ino)
         != (metadata.st_dev, metadata.st_ino)
     ):
         raise HTTPException(status_code=404, detail="Archive not found")
+    expected_identity = (
+        int(metadata.st_dev),
+        int(metadata.st_ino),
+        int(metadata.st_mode),
+        int(metadata.st_size),
+        int(metadata.st_mtime_ns),
+        int(metadata.st_ctime_ns),
+    )
     
     UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile(
+    fd, raw_path = tempfile.mkstemp(
         prefix="report_archive_",
         suffix=".zip",
-        delete=False,
         dir=str(UPLOAD_TEMP_DIR),
     )
-    staged_archive = Path(tmp.name)
-    tmp.close()
-    async with temp_file_on_error(str(staged_archive)):
+    staged_archive = Path(raw_path)
+    owned_identity = _inode_identity_from_fd(fd)
+    try:
         try:
             await run_in_owned_bulk_thread(
                 _copy_validated_archive,
                 resolved_archive,
                 staged_archive,
-                (metadata.st_dev, metadata.st_ino),
+                fd,
+                expected_identity,
             )
         except _ArchiveChanged as exc:
-            raise HTTPException(status_code=404, detail="Archive not found") from exc
-        return FileResponse(
+            raise HTTPException(
+                status_code=409,
+                detail="Archive changed during streaming",
+            ) from exc
+        except _BulkZipRejected as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        return OwnedArchiveFileResponse(
             staged_archive,
+            file_fd=fd,
+            owned_identity=owned_identity,
             media_type="application/zip",
             filename=filename,
-            background=BackgroundTask(staged_archive.unlink, missing_ok=True),
         )
+    except BaseException:
+        try:
+            unlink_export_archive_and_marker(
+                staged_archive,
+                expected_identity=owned_identity,
+            )
+        finally:
+            os.close(fd)
+        raise

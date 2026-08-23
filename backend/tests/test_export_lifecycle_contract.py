@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import stat
+import tempfile
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
+import zipfile
 
 import pytest
 
@@ -16,12 +21,437 @@ from backend.services.export_lifecycle import (
     cleanup_export_record,
     create_export_ownership_marker,
     export_ownership_marker_path,
+    unlink_export_archive_and_marker,
 )
 from backend.state import (
     get_session_lock,
     prepared_exports,
     prepared_exports_lock,
 )
+
+
+def _identity(path: Path) -> tuple[int, int, int, int, int, int]:
+    metadata = path.stat()
+    return (
+        int(metadata.st_dev),
+        int(metadata.st_ino),
+        int(metadata.st_mode),
+        int(metadata.st_size),
+        int(metadata.st_mtime_ns),
+        int(metadata.st_ctime_ns),
+    )
+
+
+def _secure_zip_kwargs():
+    return {
+        "recursive": True,
+        "include": lambda _relative: True,
+        "max_files": 100,
+        "max_source_bytes": 10 * 1024 * 1024,
+        "reserve_bytes": 64 * 1024 * 1024,
+    }
+
+
+def _allocated_stage(directory: Path) -> tuple[int, Path, tuple[int, int]]:
+    fd, raw = tempfile.mkstemp(prefix="owned_", suffix=".zip", dir=directory)
+    metadata = os.fstat(fd)
+    return fd, Path(raw), (int(metadata.st_dev), int(metadata.st_ino))
+
+
+def _assert_secure_archive_changed(exc_info):
+    assert exc_info.value.status_code == 409
+    assert "changed" in exc_info.value.detail.lower()
+
+
+def test_secure_archive_fails_closed_without_descriptor_primitives(
+    monkeypatch, tmp_path,
+):
+    from backend.services import export_lifecycle as lifecycle
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "input.txt").write_text("input", encoding="utf-8")
+    fd, destination, _owned = _allocated_stage(tmp_path)
+    monkeypatch.setattr(lifecycle.os, "supports_dir_fd", set())
+    try:
+        with pytest.raises(lifecycle.SecureArchiveError) as exc_info:
+            lifecycle.build_secure_zip(
+                source,
+                destination,
+                destination_fd=fd,
+                **_secure_zip_kwargs(),
+            )
+
+        assert exc_info.value.status_code == 501
+        assert not destination.exists()
+    finally:
+        os.close(fd)
+        destination.unlink(missing_ok=True)
+
+
+def test_secure_archive_skips_symlink_present_at_selection_time(tmp_path):
+    from backend.services import export_lifecycle as lifecycle
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "safe.txt").write_text("safe", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    try:
+        (source / "linked.txt").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are not available on this platform")
+    fd, destination, _owned = _allocated_stage(tmp_path)
+    try:
+        lifecycle.build_secure_zip(
+            source,
+            destination,
+            destination_fd=fd,
+            **_secure_zip_kwargs(),
+        )
+
+        with zipfile.ZipFile(destination) as archive:
+            assert archive.namelist() == ["safe.txt"]
+    finally:
+        os.close(fd)
+        destination.unlink(missing_ok=True)
+
+
+def test_secure_archive_rejects_selected_leaf_swap(monkeypatch, tmp_path):
+    from backend.services import export_lifecycle as lifecycle
+
+    source = tmp_path / "source"
+    source.mkdir()
+    target = source / "leaf.bin"
+    target.write_bytes(b"old bytes")
+    fd, destination, _owned = _allocated_stage(tmp_path)
+    expected = _identity(target)
+    original_fstat = lifecycle.os.fstat
+    swapped = False
+
+    def fstat(fd):
+        nonlocal swapped
+        metadata = original_fstat(fd)
+        if (
+            not swapped
+            and stat.S_ISREG(metadata.st_mode)
+            and (metadata.st_dev, metadata.st_ino) == expected[:2]
+        ):
+            replacement = source / "replacement.bin"
+            replacement.write_bytes(b"replacement bytes")
+            replacement.replace(target)
+            swapped = True
+        return metadata
+
+    monkeypatch.setattr(lifecycle.os, "fstat", fstat)
+    try:
+        with pytest.raises(lifecycle.SecureArchiveError) as exc_info:
+            lifecycle.build_secure_zip(
+                source,
+                destination,
+                destination_fd=fd,
+                **_secure_zip_kwargs(),
+            )
+
+        _assert_secure_archive_changed(exc_info)
+        assert swapped
+        assert not destination.exists()
+    finally:
+        os.close(fd)
+        destination.unlink(missing_ok=True)
+
+
+def test_secure_archive_rejects_parent_directory_swap(monkeypatch, tmp_path):
+    from backend.services import export_lifecycle as lifecycle
+
+    source = tmp_path / "source"
+    parent = source / "nested"
+    parent.mkdir(parents=True)
+    target = parent / "leaf.bin"
+    target.write_bytes(b"old bytes")
+    fd, destination, _owned = _allocated_stage(tmp_path)
+    expected = _identity(parent)
+    original_fstat = lifecycle.os.fstat
+    swapped = False
+
+    def fstat(fd):
+        nonlocal swapped
+        metadata = original_fstat(fd)
+        if (
+            not swapped
+            and stat.S_ISDIR(metadata.st_mode)
+            and (metadata.st_dev, metadata.st_ino) == expected[:2]
+        ):
+            old_parent = source / "nested-old"
+            parent.rename(old_parent)
+            parent.mkdir()
+            (parent / "leaf.bin").write_bytes(b"replacement bytes")
+            swapped = True
+        return metadata
+
+    monkeypatch.setattr(lifecycle.os, "fstat", fstat)
+    try:
+        with pytest.raises(lifecycle.SecureArchiveError) as exc_info:
+            lifecycle.build_secure_zip(
+                source,
+                destination,
+                destination_fd=fd,
+                **_secure_zip_kwargs(),
+            )
+
+        _assert_secure_archive_changed(exc_info)
+        assert swapped
+        assert not destination.exists()
+    finally:
+        os.close(fd)
+        destination.unlink(missing_ok=True)
+
+
+def test_secure_archive_rejects_midstream_identity_change(monkeypatch, tmp_path):
+    from backend.services import export_lifecycle as lifecycle
+
+    source = tmp_path / "source"
+    source.mkdir()
+    target = source / "stream.bin"
+    target.write_bytes(b"x" * (2 * 1024 * 1024))
+    fd, destination, _owned = _allocated_stage(tmp_path)
+    expected = _identity(target)
+    original_fstat = lifecycle.os.fstat
+    original_read = lifecycle.os.read
+    target_fd = None
+    mutated = False
+
+    def fstat(fd):
+        nonlocal target_fd
+        metadata = original_fstat(fd)
+        if stat.S_ISREG(metadata.st_mode) and (metadata.st_dev, metadata.st_ino) == expected[:2]:
+            target_fd = fd
+        return metadata
+
+    def read(fd, size):
+        nonlocal mutated
+        block = original_read(fd, size)
+        if fd == target_fd and block and not mutated:
+            with target.open("ab") as handle:
+                handle.write(b"mutation")
+            mutated = True
+        return block
+
+    monkeypatch.setattr(lifecycle.os, "fstat", fstat)
+    monkeypatch.setattr(lifecycle.os, "read", read)
+    try:
+        with pytest.raises(lifecycle.SecureArchiveError) as exc_info:
+            lifecycle.build_secure_zip(
+                source,
+                destination,
+                destination_fd=fd,
+                **_secure_zip_kwargs(),
+            )
+
+        _assert_secure_archive_changed(exc_info)
+        assert mutated
+        assert not destination.exists()
+    finally:
+        os.close(fd)
+        destination.unlink(missing_ok=True)
+
+
+def test_secure_archive_reserve_failure_removes_empty_stage(monkeypatch, tmp_path):
+    from backend.services import export_lifecycle as lifecycle
+    import shutil
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "input.txt").write_text("input", encoding="utf-8")
+    fd, destination, _owned = _allocated_stage(tmp_path)
+    monkeypatch.setattr(
+        shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=0, total=0, used=0),
+    )
+
+    try:
+        with pytest.raises(lifecycle.SecureArchiveError) as exc_info:
+            lifecycle.build_secure_zip(
+                source,
+                destination,
+                destination_fd=fd,
+                **_secure_zip_kwargs(),
+            )
+
+        assert exc_info.value.status_code == 507
+        assert not destination.exists()
+    finally:
+        os.close(fd)
+        destination.unlink(missing_ok=True)
+
+
+def test_secure_direct_copy_uses_expected_identity_and_removes_rejected_stage(
+    tmp_path,
+):
+    from backend.services import export_lifecycle as lifecycle
+
+    source = tmp_path / "source"
+    source.mkdir()
+    source_file = source / "archive.zip"
+    source_file.write_bytes(b"archive bytes")
+    fd, destination, _owned = _allocated_stage(tmp_path)
+    try:
+        lifecycle.copy_secure_file(
+            source,
+            Path("archive.zip"),
+            destination,
+            destination_fd=fd,
+            expected_identity=_identity(source_file),
+            reserve_bytes=0,
+        )
+
+        assert destination.read_bytes() == b"archive bytes"
+    finally:
+        os.close(fd)
+        destination.unlink(missing_ok=True)
+
+
+def test_secure_zip_never_writes_or_unlinks_a_rebound_stage_inode(
+    monkeypatch, tmp_path,
+):
+    from backend.services import export_lifecycle as lifecycle
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "input.txt").write_bytes(b"source bytes")
+    fd, destination, owned = _allocated_stage(tmp_path)
+    canary = tmp_path / "foreign-canary"
+    canary.write_bytes(b"foreign bytes")
+    rebound = False
+    original_usage = shutil.disk_usage
+
+    def disk_usage(path):
+        nonlocal rebound
+        if not rebound:
+            destination.unlink()
+            os.link(canary, destination)
+            rebound = True
+        return original_usage(path)
+
+    monkeypatch.setattr(lifecycle.shutil, "disk_usage", disk_usage)
+    try:
+        with pytest.raises(lifecycle.SecureArchiveError) as exc_info:
+            lifecycle.build_secure_zip(
+                source,
+                destination,
+                destination_fd=fd,
+                **_secure_zip_kwargs(),
+            )
+        _assert_secure_archive_changed(exc_info)
+        assert rebound
+        assert destination.read_bytes() == b"foreign bytes"
+        assert canary.read_bytes() == b"foreign bytes"
+        assert (destination.stat().st_dev, destination.stat().st_ino) != owned
+    finally:
+        os.close(fd)
+        destination.unlink(missing_ok=True)
+        canary.unlink(missing_ok=True)
+
+
+def test_secure_copy_never_writes_or_unlinks_a_rebound_stage_inode(
+    monkeypatch, tmp_path,
+):
+    from backend.services import export_lifecycle as lifecycle
+
+    source = tmp_path / "source"
+    source.mkdir()
+    source_file = source / "archive.zip"
+    source_file.write_bytes(b"source archive")
+    fd, destination, owned = _allocated_stage(tmp_path)
+    canary = tmp_path / "foreign-canary"
+    canary.write_bytes(b"foreign bytes")
+    rebound = False
+    original_usage = shutil.disk_usage
+
+    def disk_usage(path):
+        nonlocal rebound
+        if not rebound:
+            destination.unlink()
+            os.link(canary, destination)
+            rebound = True
+        return original_usage(path)
+
+    monkeypatch.setattr(lifecycle.shutil, "disk_usage", disk_usage)
+    try:
+        with pytest.raises(lifecycle.SecureArchiveError) as exc_info:
+            lifecycle.copy_secure_file(
+                source,
+                Path("archive.zip"),
+                destination,
+                destination_fd=fd,
+                expected_identity=_identity(source_file),
+                reserve_bytes=0,
+            )
+        _assert_secure_archive_changed(exc_info)
+        assert rebound
+        assert destination.read_bytes() == b"foreign bytes"
+        assert canary.read_bytes() == b"foreign bytes"
+        assert (destination.stat().st_dev, destination.stat().st_ino) != owned
+    finally:
+        os.close(fd)
+        destination.unlink(missing_ok=True)
+        canary.unlink(missing_ok=True)
+
+
+def test_missing_descriptor_capability_removes_a_preallocated_owned_stage(
+    monkeypatch, tmp_path,
+):
+    from backend.services import export_lifecycle as lifecycle
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "input.txt").write_bytes(b"input")
+    fd, destination, _owned = _allocated_stage(tmp_path)
+    monkeypatch.setattr(lifecycle.os, "supports_dir_fd", set())
+    try:
+        with pytest.raises(lifecycle.SecureArchiveError) as exc_info:
+            lifecycle.build_secure_zip(
+                source,
+                destination,
+                destination_fd=fd,
+                **_secure_zip_kwargs(),
+            )
+        assert exc_info.value.status_code == 501
+        assert not destination.exists()
+    finally:
+        os.close(fd)
+        destination.unlink(missing_ok=True)
+
+
+def test_secure_zip_preserves_member_mtime_mode_and_zip64(monkeypatch, tmp_path):
+    from backend.services import export_lifecycle as lifecycle
+
+    source = tmp_path / "source"
+    source.mkdir()
+    member = source / "member.bin"
+    member.write_bytes(b"zip64 metadata bytes")
+    fixed_time = time.mktime((2024, 6, 1, 12, 34, 56, 0, 0, -1))
+    os.utime(member, (fixed_time, fixed_time))
+    os.chmod(member, 0o751)
+    fd, destination, _owned = _allocated_stage(tmp_path)
+    monkeypatch.setattr(lifecycle.zipfile, "ZIP64_LIMIT", 1)
+    try:
+        lifecycle.build_secure_zip(
+            source,
+            destination,
+            destination_fd=fd,
+            **_secure_zip_kwargs(),
+        )
+        with zipfile.ZipFile(destination) as archive:
+            info = archive.getinfo("member.bin")
+            assert info.date_time == time.localtime(fixed_time)[:6]
+            assert info.external_attr >> 16 == stat.S_IFREG | 0o751
+            assert archive.read("member.bin") == b"zip64 metadata bytes"
+    finally:
+        os.close(fd)
+        destination.unlink(missing_ok=True)
+
 
 
 @pytest.mark.asyncio
@@ -135,6 +565,40 @@ def test_ownership_marker_collision_never_removes_existing_marker(tmp_path):
     assert marker.stat().st_ino == marker_inode
 
 
+def test_legacy_unlink_removes_owned_marker_when_archive_path_is_missing(tmp_path):
+    archive = tmp_path / "prepared_export_missing.tar.gz"
+    archive.write_bytes(b"owned")
+    marker = create_export_ownership_marker(archive)
+    archive.unlink()
+
+    unlink_export_archive_and_marker(archive, remove_marker=True)
+
+    assert not archive.exists()
+    assert not marker.exists()
+
+
+def test_identity_unlink_preserves_rebound_archive_and_removes_owned_marker(tmp_path):
+    archive = tmp_path / "prepared_export_rebound.tar.gz"
+    archive.write_bytes(b"owned")
+    owned_metadata = archive.stat()
+    owned_identity = (int(owned_metadata.st_dev), int(owned_metadata.st_ino))
+    marker = create_export_ownership_marker(
+        archive,
+        expected_identity=owned_identity,
+    )
+    archive.unlink()
+    archive.write_bytes(b"foreign")
+
+    unlink_export_archive_and_marker(
+        archive,
+        remove_marker=True,
+        expected_identity=owned_identity,
+    )
+
+    assert archive.read_bytes() == b"foreign"
+    assert not marker.exists()
+
+
 @pytest.mark.asyncio
 async def test_direct_cleanup_rejects_archive_inode_replacement(tmp_path):
     token = "direct-inode-replacement"
@@ -156,6 +620,34 @@ async def test_direct_cleanup_rejects_archive_inode_replacement(tmp_path):
 
     assert await cleanup_export_record(info) is False
     assert archive.read_bytes() == b"replacement"
+    async with prepared_exports_lock:
+        assert prepared_exports[token] is info
+        assert info["phase"] == "cleanup_failed"
+        prepared_exports.pop(token, None)
+
+
+@pytest.mark.asyncio
+async def test_direct_cleanup_rejects_archive_non_regular_replacement(tmp_path):
+    token = "direct-non-regular-replacement"
+    archive = tmp_path / "prepared_export_non_regular.tar.gz"
+    archive.write_bytes(b"owned")
+    marker = create_export_ownership_marker(archive)
+    info = {
+        "token": token,
+        "path": str(archive),
+        "path_owned": True,
+        "ownership_marker_required": True,
+        "ownership_marker_owned": True,
+        "phase": "ready",
+    }
+    async with prepared_exports_lock:
+        prepared_exports[token] = info
+    archive.unlink()
+    archive.mkdir()
+
+    assert await cleanup_export_record(info) is False
+    assert archive.is_dir()
+    assert marker.exists()
     async with prepared_exports_lock:
         assert prepared_exports[token] is info
         assert info["phase"] == "cleanup_failed"

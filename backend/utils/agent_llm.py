@@ -91,7 +91,12 @@ def get_agent_llm_client(
     agent_cfg = state.agent_server_configs.get(agent_name, {})
     agent_url = agent_cfg.get("llm_base_url", "")
     agent_key = agent_cfg.get("api_key", "")
-    if agent_endpoint_lacks_credential(agent_url, agent_key, cfg.api.llm_base_url):
+    if agent_endpoint_lacks_credential(
+        agent_url,
+        agent_key,
+        cfg.api.llm_base_url,
+        cfg.api.api_key,
+    ):
         # Custom endpoint, no credential of its own (the shape an imported
         # session always has, since export blanks credentials but not URLs).
         # Pairing it with the installation key would leak that key to a host

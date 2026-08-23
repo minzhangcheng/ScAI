@@ -355,6 +355,49 @@ class TestForeignEndpointNeverGetsTheLocalKey:
 
         assert provider.get_llm_client("pi") is sentinel
 
+    def test_installation_equal_credential_falls_back_to_the_global_client(self):
+        provider, sentinel = self._provider(
+            {"llm_base_url": "https://archive.example/v1", "api_key": "sk-installation"}
+        )
+
+        assert provider.get_llm_client("pi") is sentinel
+
+    def _agent_client(self, agent_cfg):
+        from backend.config import SystemConfig
+        from backend.models.schemas import AnalysisState
+        from backend.utils.agent_llm import get_agent_llm_client
+
+        config = SystemConfig()
+        config.api.llm_base_url = "https://global.example/v1"
+        config.api.api_key = "sk-installation"
+        state = AnalysisState(id="endpoint", user_id="u1")
+        state.agent_server_configs = {"pi": agent_cfg}
+        return get_agent_llm_client(state, config, "pi", "endpoint")
+
+    def test_agent_llm_empty_custom_key_falls_back_to_global_endpoint(self):
+        client = self._agent_client(
+            {"llm_base_url": "https://archive.example/v1", "api_key": ""}
+        )
+
+        assert client.base_url.startswith("https://global.example")
+        assert client.api_key == "sk-installation"
+
+    def test_agent_llm_installation_equal_key_falls_back_to_global_endpoint(self):
+        client = self._agent_client(
+            {"llm_base_url": "https://archive.example/v1", "api_key": "sk-installation"}
+        )
+
+        assert client.base_url.startswith("https://global.example")
+        assert client.api_key == "sk-installation"
+
+    def test_agent_llm_distinct_own_key_still_uses_custom_endpoint(self):
+        client = self._agent_client(
+            {"llm_base_url": "https://archive.example/v1", "api_key": "sk-its-own"}
+        )
+
+        assert client.base_url.startswith("https://archive.example")
+        assert client.api_key == "sk-its-own"
+
     def test_a_complete_override_is_still_honoured(self):
         provider, sentinel = self._provider(
             {"llm_base_url": "https://archive.example/v1", "api_key": "sk-its-own"}

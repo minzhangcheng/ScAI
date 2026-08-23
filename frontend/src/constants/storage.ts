@@ -5,7 +5,7 @@ export const PERSIST_STORAGE_KEY = 'scai-storage'
 
 // Bump when the persisted shape changes in a backwards-incompatible way.
 // `migrate` in appStore.ts handles older versions.
-export const PERSIST_VERSION = 1
+export const PERSIST_VERSION = 2
 
 // A figure message's base64 payload is replaced with this sentinel before the
 // message is persisted, so a reloaded session carries the marker rather than an

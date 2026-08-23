@@ -347,9 +347,6 @@ def make_frontend_repo(tmp_path: Path, behavior: dict | None = None, *, source_n
     git(repo, "config", "user.name", "Frontend")
     git(repo, "add", "-A")
     git(repo, "commit", "-qm", "base")
-    base = git(repo, "rev-parse", "HEAD")
-    runner = repo / "scripts/scai-frontend-test"
-    runner.write_text(runner.read_text(encoding="utf-8").replace(FRONTEND.BASE_COMMIT, base), encoding="utf-8")
     behavior_path = tmp_path / "behavior.json"
     behavior_path.write_text(json.dumps(behavior or {}), encoding="utf-8")
     log_path = tmp_path / "npm.log"
@@ -930,6 +927,50 @@ def test_frontend_runner_hashes_both_exact_inputs_before_install(tmp_path):
     assert json.loads(log.read_text().splitlines()[2])[:2] == ["config", "list"]
 
 
+def test_resolve_run_start_head_uses_one_strict_git_invocation(monkeypatch, tmp_path):
+    expected = "0123456789abcdef0123456789abcdef01234567"
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return types.SimpleNamespace(returncode=0, stdout=(expected + "\n").encode(), stderr=b"")
+
+    monkeypatch.setattr(FRONTEND.subprocess, "run", fake_run)
+
+    assert FRONTEND.resolve_run_start_head(tmp_path) == expected
+    assert calls == [
+        (
+            ["git", "-C", str(tmp_path), "rev-parse", "--verify", "HEAD^{commit}"],
+            {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "check": False,
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "returncode, stdout",
+    [
+        (128, b"0123456789abcdef0123456789abcdef01234567\n"),
+        (0, b"0123456789abcdef0123456789abcdef01234567"),
+        (0, b"0123456789abcdef0123456789abcdef01234567 \n"),
+        (0, b"0123456789ABCDEF0123456789abcdef01234567\n"),
+        (0, b"0123456789abcdef0123456789abcdef01234567\n\n"),
+    ],
+)
+def test_resolve_run_start_head_rejects_noncanonical_git_output(monkeypatch, tmp_path, returncode, stdout):
+    def fake_run(argv, **kwargs):
+        return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=b"git error")
+
+    monkeypatch.setattr(FRONTEND.subprocess, "run", fake_run)
+
+    with pytest.raises(FRONTEND.FrontendError) as exc_info:
+        FRONTEND.resolve_run_start_head(tmp_path)
+    assert exc_info.value.label == "source manifest"
+
+
 def test_frontend_runner_uses_fresh_run_directory_under_input_key(tmp_path):
     repo, _, _ = make_frontend_repo(tmp_path)
     assert run_frontend(repo, tmp_path / "tools").returncode == 0
@@ -937,6 +978,22 @@ def test_frontend_runner_uses_fresh_run_directory_under_input_key(tmp_path):
     assert run_frontend(repo, tmp_path / "tools").returncode == 0
     second = latest_evidence(repo)[1]["installation"]
     assert first["namespace"] == second["namespace"] and first["run_dir"] != second["run_dir"]
+
+
+def test_frontend_runner_uses_run_start_head_for_later_commits(tmp_path):
+    repo, _, _ = make_frontend_repo(tmp_path)
+    (repo / "later-commit.txt").write_text("later\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "later")
+    later = git(repo, "rev-parse", "HEAD")
+    completed = run_frontend(repo, tmp_path / "tools")
+    assert completed.returncode == 0, completed.stderr
+    source = latest_evidence(repo)[1]["source"]
+    assert source["base_commit"] == later
+    assert source["manifest"]["base"] == later
+    assert source["manifest_after"]["base"] == later
+    assert source["manifest"]["entries"] == []
+    assert source["manifest_after"]["entries"] == []
 
 
 def test_frontend_lock_order_is_read_hash_global_namespace_keyed_recheck_then_run():

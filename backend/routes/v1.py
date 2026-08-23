@@ -1,7 +1,8 @@
 """V1 API routes: batch analysis API with chunked upload, TTL, and lifecycle management."""
 import asyncio
 import logging
-import zipfile
+import os
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -23,13 +24,25 @@ from backend.services.upload import (
 from backend.services.report.paths import resolve_published_report_dir
 from backend.config import (
     UPLOAD_CHUNK_SIZE,
+    UPLOAD_TEMP_DIR,
+    EXPORT_STREAM_PREFIX,
     ensure_session_dirs,
     get_session_dir,
 )
+from backend.services.export_lifecycle import (
+    OwnedArchiveFileResponse,
+    SecureArchiveError,
+    build_secure_zip,
+    create_export_ownership_marker,
+    unlink_export_archive_and_marker,
+)
+from backend.utils.asyncio_tasks import run_in_owned_bulk_thread
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["v1"])
+
+_V1_EXPORT_RESERVE_BYTES = 64 * 1024 * 1024
 
 
 def _v1_report_artifact_is_public(relative_path: Path) -> bool:
@@ -274,19 +287,9 @@ async def download_artifact(session_id: str, name: str, request: Request):
     return FileResponse(file_path, filename=file_path.name)
 
 
-def _zip_session_dir(session_dir: Path, tmp: Path) -> None:
-    """Synchronous helper to zip a session directory (runs in thread pool)."""
-    with zipfile.ZipFile(str(tmp), 'w', zipfile.ZIP_DEFLATED) as zf:
-        for file_path in session_dir.rglob("*"):
-            if file_path.is_file():
-                zf.write(file_path, file_path.relative_to(session_dir))
-
-
 @router.get("/analyses/{session_id}/export")
 async def export_analysis(session_id: str, request: Request):
     """Download the full session as a zip."""
-    from fastapi.responses import FileResponse
-
     user_id = getattr(request.state, "user_id", "")
     await require_session_ownership(session_id=session_id, user_id=user_id)
 
@@ -294,25 +297,78 @@ async def export_analysis(session_id: str, request: Request):
     if not session_dir.exists():
         raise HTTPException(status_code=404, detail="Session directory not found")
 
-    export_dir = session_dir / "workspace"
-    if export_dir.exists():
-        for f in export_dir.glob("*.zip"):
-            return FileResponse(f, filename=f.name, media_type="application/zip")
+    UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=EXPORT_STREAM_PREFIX,
+        suffix=".zip",
+        dir=str(UPLOAD_TEMP_DIR),
+    )
+    tmp = Path(tmp_name)
+    metadata = os.fstat(fd)
+    owned_identity = (int(metadata.st_dev), int(metadata.st_ino))
+    marker_owned = False
 
-    import tempfile
-    from starlette.background import BackgroundTask
-    tmp = Path(tempfile.mkstemp(suffix=".zip")[1])
+    def cleanup_stage() -> None:
+        try:
+            unlink_export_archive_and_marker(
+                tmp,
+                expected_identity=owned_identity,
+                remove_marker=marker_owned,
+            )
+        except OSError as exc:
+            logger.warning("Failed to clean V1 export archive %s: %s", tmp, exc)
+        finally:
+            os.close(fd)
+
     try:
-        await asyncio.to_thread(_zip_session_dir, session_dir, tmp)
-        return FileResponse(
-            str(tmp),
+        await run_in_owned_bulk_thread(
+            build_secure_zip,
+            session_dir,
+            tmp,
+            destination_fd=fd,
+            recursive=True,
+            include=lambda _relative: True,
+            max_files=None,
+            max_source_bytes=None,
+            reserve_bytes=_V1_EXPORT_RESERVE_BYTES,
+        )
+        current_metadata = os.fstat(fd)
+        current_identity = (
+            int(current_metadata.st_dev),
+            int(current_metadata.st_ino),
+        )
+        if current_identity != owned_identity:
+            raise OSError("V1 export staging descriptor changed during construction")
+        owned_identity = current_identity
+    except SecureArchiveError as exc:
+        cleanup_stage()
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except BaseException:
+        cleanup_stage()
+        raise
+
+    try:
+        create_export_ownership_marker(
+            tmp,
+            expected_identity=owned_identity,
+        )
+        marker_owned = True
+    except BaseException:
+        cleanup_stage()
+        raise
+
+    try:
+        return OwnedArchiveFileResponse(
+            tmp,
+            file_fd=fd,
+            owned_identity=owned_identity,
+            marker_owned=marker_owned,
             filename=f"scai-{session_id}.zip",
             media_type="application/zip",
-            background=BackgroundTask(tmp.unlink, missing_ok=True),
         )
-    except Exception as e:
-        tmp.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"Export failed: {e}")
+    except BaseException:
+        cleanup_stage()
+        raise
 
 
 @router.get("/analyses/{session_id}/config/export")

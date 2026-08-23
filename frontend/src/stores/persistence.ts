@@ -2,7 +2,36 @@
 // Split out of frontend/src/stores/appStore.ts verbatim.
 
 import { AppState } from './appState'
-import { PublicationFigure } from './domain'
+import { AgentServerConfig, AgentType, PublicationFigure } from './domain'
+
+const AGENT_TYPES: readonly AgentType[] = [
+  'pi',
+  'pathology',
+  'bioinformatics',
+  'biochemistry',
+  'literature',
+  'painter',
+  'supervisor',
+  'technique',
+]
+
+/** Remove credentials while retaining a valid per-agent endpoint hint. */
+export function scrubAgentServerConfigs(
+  value: unknown,
+): Partial<Record<AgentType, AgentServerConfig>> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+
+  const source = value as Record<string, unknown>
+  const scrubbed: Partial<Record<AgentType, AgentServerConfig>> = {}
+  for (const agent of AGENT_TYPES) {
+    const candidate = source[agent]
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue
+    const config = candidate as Record<string, unknown>
+    if (typeof config.llmBaseUrl !== 'string') continue
+    scrubbed[agent] = { llmBaseUrl: config.llmBaseUrl, apiKey: '' }
+  }
+  return scrubbed
+}
 
 export function partialize(state: AppState) {
   return {
@@ -14,7 +43,7 @@ export function partialize(state: AppState) {
     temperatures: state.temperatures,
     maxRounds: state.maxRounds,
     roundWaitSeconds: state.roundWaitSeconds,
-    agentServerConfigs: state.agentServerConfigs,
+    agentServerConfigs: scrubAgentServerConfigs(state.agentServerConfigs),
     agentVisionSettings: state.agentVisionSettings,
     literatureMode: state.literatureMode,
     deepResearchModel: state.deepResearchModel,
@@ -63,6 +92,9 @@ export function migratePersistedState(persistedState: unknown, version: number):
     delete ps.messages
     delete ps.chatMessages
     delete ps.currentSession
+  }
+  if (Object.prototype.hasOwnProperty.call(ps, 'agentServerConfigs')) {
+    ps.agentServerConfigs = scrubAgentServerConfigs(ps.agentServerConfigs)
   }
   return ps
 }

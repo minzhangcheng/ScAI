@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 
-BASE_COMMIT = "0c1edf479f7360dc80afa89cf7fc9534c1effce6"
 REGISTRY = "https://registry.npmjs.org/"
 CONFIG_KEYS = ("cache", "userconfig", "globalconfig", "registry", "audit", "fund", "update-notifier")
 SECRET_KEYS = {"_auth", "_authtoken", "_password", "password", "token", "cert", "key"}
@@ -284,9 +283,24 @@ def load_tree_helper(repo: Path):
     return module
 
 
-def source_snapshot(repo: Path, tree: Any) -> dict[str, Any]:
+def resolve_run_start_head(repo: Path) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "HEAD^{commit}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode or not completed.stdout.endswith(b"\n"):
+        fail("source manifest", "cannot resolve one terminal-LF run-start HEAD")
+    raw = completed.stdout[:-1]
+    if re.fullmatch(rb"[0-9a-f]{40}", raw) is None:
+        fail("source manifest", "run-start HEAD is not one lowercase 40-hex commit")
+    return raw.decode("ascii")
+
+
+def source_snapshot(repo: Path, tree: Any, base_commit: str) -> dict[str, Any]:
     try:
-        return tree.build_worktree_manifest(repo, BASE_COMMIT)
+        return tree.build_worktree_manifest(repo, base_commit)
     except Exception as exc:
         fail("source manifest", str(exc))
 
@@ -1121,6 +1135,7 @@ class FrontendRun:
         self.repo = repo
         self.frontend = repo / "frontend"
         self.tree = load_tree_helper(repo)
+        self.base_commit = ""
         self.source_before: dict[str, Any] | None = None
         self.source_after: dict[str, Any] | None = None
         self.package_hash = ""
@@ -1196,7 +1211,8 @@ class FrontendRun:
         if lstat_or_none(npmrc) is not None:
             self.fail("source npmrc", "frontend/.npmrc must be absent")
         self.original_link = source_node_modules_state(self.frontend)
-        self.source_before = source_snapshot(self.repo, self.tree)
+        self.base_commit = resolve_run_start_head(self.repo)
+        self.source_before = source_snapshot(self.repo, self.tree, self.base_commit)
         self.package_hash, self.lock_hash, self.input_key = input_hashes(self.frontend)
         self.input_namespace = self.repo / "test-results" / "frontend-installations" / self.input_key
         canonical_repo = str(self.repo.resolve())
@@ -1207,7 +1223,7 @@ class FrontendRun:
         ensure_directory(self.input_namespace, "frontend input namespace")
         ensure_directory(self.input_namespace / "runs", "frontend input runs")
         self.keyed_fd = safe_lock(self.input_namespace / ".install.lock", "frontend keyed lock")
-        latest_source = source_snapshot(self.repo, self.tree)
+        latest_source = source_snapshot(self.repo, self.tree, self.base_commit)
         latest_hashes = input_hashes(self.frontend)
         latest_link = source_node_modules_state(self.frontend)
         if lstat_or_none(self.frontend / ".npmrc") is not None:
@@ -1408,7 +1424,7 @@ class FrontendRun:
             self.fail("source npmrc", "frontend/.npmrc was created during frontend run")
         if self.original_link is not None and source_node_modules_state(self.frontend) != self.original_link:
             self.fail("frontend source identity", "frontend/node_modules state changed during frontend run")
-        self.source_after = source_snapshot(self.repo, self.tree)
+        self.source_after = source_snapshot(self.repo, self.tree, self.base_commit)
         if self.source_before != self.source_after:
             self.fail("frontend source identity", "source manifest changed during frontend run")
 
@@ -1422,7 +1438,7 @@ class FrontendRun:
 
     def evidence(self, status: str, manifest: dict[str, Any]) -> dict[str, Any]:
         assert self.result_dir
-        source = {"base_commit": BASE_COMMIT, "manifest": self.source_before, "manifest_after": self.source_after}
+        source = {"base_commit": self.base_commit, "manifest": self.source_before, "manifest_after": self.source_after}
         installation = tokenized({"namespace": str(self.input_namespace) if self.input_namespace else None, "run_dir": str(self.install_dir) if self.install_dir else None}, self.repo, self.result_dir, self.install_dir)
         if self.run_id and installation.get("run_dir") == "<install-dir>":
             installation["run_dir"] = f"<install-dir>/{self.run_id}"

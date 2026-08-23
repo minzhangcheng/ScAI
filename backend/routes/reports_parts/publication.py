@@ -26,7 +26,7 @@ from backend.models.schemas import (
 )
 
 from backend.utils.files import validate_path_within, validate_session_id
-from backend.utils.auth import require_session_ownership
+from backend.utils.auth import require_auth, require_session_ownership
 from ..serialization import serialize_round_results
 from backend.services.session_store import _async_save_session_under_lifecycle
 from backend.services.session_lifecycle import (
@@ -674,9 +674,12 @@ async def get_report(session_id: str, request: Request):
     }
 
 @router.post("/{session_id}/report/partial/approve")
-async def approve_partial_report(session_id: str, request: Request):
+async def approve_partial_report(
+    session_id: str,
+    request: Request,
+    user_id: str = Depends(require_auth),
+):
     validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
     from backend.services.workflow_runner import (
         SessionWorkflowConflictError,

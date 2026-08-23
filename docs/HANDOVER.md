@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.39.16 · **Last updated**: 2026-08-23
+**Version**: 0.39.17 · **Last updated**: 2026-08-23
 
 ## 1. Runtime Architecture
 
@@ -336,6 +336,8 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.39.x — (2026-08-04 onward)**
+
+- `0.39.17` — F2 export and secret-boundary rebaseline: descriptor-owned archive staging with exact range cleanup, authenticated state-mutating report approval and credential isolation, and frontend test evidence anchored to the verified run-start HEAD (2026-08-23).
 
 - `0.39.16` — F1 kernel lifecycle rebaseline: core-dump suppression and signal diagnosis, bounded native asynchronous Jupyter lifecycle operations, and run-start source-evidence identity (2026-08-23):
   - **Kernel failures remain bounded and diagnosable**: the trusted launcher suppresses core dumps by default with `RLIMIT_CORE=(0, 0)` while preserving an explicit host-developer opt-in; kernel-death reports distinguish ordinary exits and fatal signals before restart replaces the process identity.

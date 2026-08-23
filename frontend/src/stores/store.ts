@@ -9,7 +9,18 @@ import { PERSIST_STORAGE_KEY, PERSIST_VERSION } from '../constants/storage'
 import { resolveSnapshotFailureActions } from '../utils/snapshotV2'
 import { AppState } from './appState'
 import { DEFAULT_MODELS, DEFAULT_TEMPERATURES, DEFAULT_VISION_SETTINGS } from './domain'
-import { migratePersistedState, partialize } from './persistence'
+import { migratePersistedState, partialize, scrubAgentServerConfigs } from './persistence'
+
+function clearSignedOutSecrets(state: AppState, authReady: boolean) {
+  return {
+    agentServerConfigs: {},
+    apiConfig: { ...state.apiConfig, apiKey: '' },
+    deepResearchApiKey: '',
+    googleApiKey: '',
+    authUser: null,
+    authReady,
+  }
+}
 
 const createAppState: StateCreator<AppState> = (set, get) => ({
       // Language
@@ -412,13 +423,18 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
       },
       logout: () => {
         clearToken()
-        set({ authUser: null, currentSession: null, messages: [], chatMessages: [] })
+        set((state) => ({
+          ...clearSignedOutSecrets(state, state.authReady),
+          currentSession: null,
+          messages: [],
+          chatMessages: [],
+        }))
       },
       loadAuthFromStorage: async () => {
         if (get().authReady) return
         const t = getToken()
         if (!t) {
-          set({ authReady: true })
+          set((state) => clearSignedOutSecrets(state, true))
           return
         }
         try {
@@ -428,11 +444,11 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
             set({ authUser: me, authReady: true })
           } else {
             clearToken()
-            set({ authUser: null, authReady: true })
+            set((state) => clearSignedOutSecrets(state, true))
           }
         } catch {
           clearToken()
-          set({ authUser: null, authReady: true })
+          set((state) => clearSignedOutSecrets(state, true))
         }
       },
 })
@@ -458,12 +474,14 @@ export const useAppStore = create<AppState>()(
       },
       // Validate critical fields on hydration to prevent crashes from corrupted/outdated localStorage
       merge: (persistedState: unknown, currentState) => {
-        const ps = (persistedState && typeof persistedState === 'object') ? persistedState as Record<string, any> : {}
+        const ps = (persistedState && typeof persistedState === 'object')
+          ? { ...(persistedState as Record<string, any>) }
+          : {}
         // Validate key types; fall back to current (default) state for invalid fields
         if (ps.models && (typeof ps.models !== 'object' || Array.isArray(ps.models))) delete ps.models
         if (ps.temperatures && (typeof ps.temperatures !== 'object' || Array.isArray(ps.temperatures))) delete ps.temperatures
         if (ps.prompts && (typeof ps.prompts !== 'object' || Array.isArray(ps.prompts))) delete ps.prompts
-        if (ps.agentServerConfigs && (typeof ps.agentServerConfigs !== 'object' || Array.isArray(ps.agentServerConfigs))) delete ps.agentServerConfigs
+        ps.agentServerConfigs = scrubAgentServerConfigs(ps.agentServerConfigs)
         if (ps.language && typeof ps.language !== 'string') delete ps.language
         if (ps.maxRounds && typeof ps.maxRounds !== 'number') delete ps.maxRounds
         // Realtime messages are server-authoritative and re-hydrated from /load on
