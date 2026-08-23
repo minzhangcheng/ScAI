@@ -1019,6 +1019,132 @@ def _is_safe_importlib(code: str) -> bool:
     return True
 
 
+def _literal_is_safe(value: str) -> bool:
+    """Whether a literal path names an existing sandbox output area."""
+    normalized = value.replace("\\", "/").lower()
+    return (
+        normalized.startswith("/tmp/scai-")
+        or "/workspace/" in normalized
+        or "/figures/" in normalized
+        or "/tables/" in normalized
+        or "/annotation_validation/" in normalized
+        or normalized.startswith(
+            (
+                "figures/",
+                "tables/",
+                "annotation_validation/",
+                "./figures/",
+                "./tables/",
+                "./annotation_validation/",
+            )
+        )
+    )
+
+
+def _literal_path(expr):
+    """Return the literal path named by an AST expression, if any."""
+    import ast
+
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+        return expr.value
+    if (
+        isinstance(expr, ast.Call)
+        and isinstance(expr.func, (ast.Name, ast.Attribute))
+        and getattr(expr.func, "id", getattr(expr.func, "attr", None)) == "Path"
+        and expr.args
+        and isinstance(expr.args[0], ast.Constant)
+        and isinstance(expr.args[0].value, str)
+    ):
+        return expr.args[0].value
+    return None
+
+
+def _is_safe_file_removal(code: str, operation: str) -> bool:
+    """Validate one direct ``os`` deletion API and its unique path target."""
+    import ast
+    import re
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+
+    lines = code.splitlines(keepends=True)
+    line_offsets: list[int] = []
+    offset = 0
+    for line in lines:
+        line_offsets.append(offset)
+        offset += len(line)
+
+    def _offset(lineno: int, col: int) -> int:
+        if lineno <= 0 or lineno > len(line_offsets):
+            return -1
+        return line_offsets[lineno - 1] + col
+
+    direct_spans: list[tuple[int, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != operation:
+            continue
+        if not (
+            isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "os"
+        ):
+            # Unrelated receivers (for example ``values.remove`` or
+            # ``Path.unlink``) keep their prior treatment. A textual spelling
+            # such as ``foo.os.remove`` is rejected by the span check below.
+            continue
+
+        start = _offset(node.func.lineno, node.func.col_offset)
+        end = _offset(node.func.end_lineno, node.func.end_col_offset)
+        if start < 0 or end < start:
+            return False
+        direct_spans.append((start, end))
+
+        path_keywords = [keyword for keyword in node.keywords if keyword.arg == "path"]
+        if (
+            not isinstance(node.func.value, ast.Name)
+            or node.func.value.id != "os"
+            or len(path_keywords) > 1
+            or len(node.args) > 1
+            or (node.args and path_keywords)
+            or any(keyword.arg is None for keyword in node.keywords)
+        ):
+            return False
+        if node.args:
+            target = node.args[0]
+        elif path_keywords:
+            target = path_keywords[0].value
+        else:
+            return False
+        if isinstance(target, ast.Starred):
+            return False
+        literal = _literal_path(target)
+        if literal is not None and not _literal_is_safe(literal):
+            return False
+
+    pattern = re.compile(rf"\bos\.{re.escape(operation)}\b")
+    for match in pattern.finditer(code):
+        if not any(start <= match.start() < end for start, end in direct_spans):
+            return False
+    return True
+
+
+def _is_safe_os_remove(code: str) -> bool:
+    return _is_safe_file_removal(code, "remove")
+
+
+def _is_safe_os_unlink(code: str) -> bool:
+    return _is_safe_file_removal(code, "unlink")
+
+
+def _is_safe_os_rmdir(code: str) -> bool:
+    return _is_safe_file_removal(code, "rmdir")
+
+
 def _is_safe_file_write(code: str) -> bool:
     """Reject static file-open calls in write modes on unsafe literal paths.
 
@@ -1036,34 +1162,6 @@ def _is_safe_file_write(code: str) -> bool:
         tree = ast.parse(code)
     except SyntaxError:
         return False
-
-    def _literal_is_safe(value: str) -> bool:
-        normalized = value.replace("\\", "/").lower()
-        return (
-            normalized.startswith("/tmp/scai-")
-            or "/workspace/" in normalized
-            or "/figures/" in normalized
-            or "/tables/" in normalized
-            or "/annotation_validation/" in normalized
-            or normalized.startswith((
-                "figures/", "tables/", "annotation_validation/",
-                "./figures/", "./tables/", "./annotation_validation/",
-            ))
-        )
-
-    def _literal_path(expr):
-        if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
-            return expr.value
-        if (
-            isinstance(expr, ast.Call)
-            and isinstance(expr.func, (ast.Name, ast.Attribute))
-            and getattr(expr.func, "id", getattr(expr.func, "attr", None)) == "Path"
-            and expr.args
-            and isinstance(expr.args[0], ast.Constant)
-            and isinstance(expr.args[0].value, str)
-        ):
-            return expr.args[0].value
-        return None
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -1116,6 +1214,9 @@ _EXCEPTION_CHECKS = {
     'subprocess':  _is_safe_subprocess,
     'importlib':   _is_safe_importlib,
     'file write':  _is_safe_file_write,
+    'os.remove':   _is_safe_os_remove,
+    'os.unlink':   _is_safe_os_unlink,
+    'os.rmdir':    _is_safe_os_rmdir,
 }
 
 
