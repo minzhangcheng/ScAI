@@ -218,6 +218,10 @@ def evaluate_runtime_budget(
         "largest_object_bytes": "max_single_object_bytes",
         "anndata_total_bytes": "max_anndata_total_bytes",
         "rss_bytes": "max_rss_bytes",
+        # Backed AnnData is materialized before dill can persist it. The live
+        # RSS and on-disk object can each fit independently while their sum
+        # exceeds the same kernel ceiling, so evaluate that projected peak too.
+        "projected_materialized_rss_bytes": "max_rss_bytes",
         "pkl_bytes": "max_pkl_bytes",
         "save_seconds": "max_save_seconds",
     }

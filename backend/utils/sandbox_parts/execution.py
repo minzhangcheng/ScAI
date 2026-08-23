@@ -250,7 +250,8 @@ class ExecutionMixin:
         self,
         code: str,
         save_to_history: bool = True,
-        skip_safety_check: bool = False
+        skip_safety_check: bool = False,
+        execution_timeout: Optional[float] = None,
     ) -> CodeExecutionResult:
         """Execute code in the kernel (unlocked — caller must hold _exec_lock).
 
@@ -259,6 +260,9 @@ class ExecutionMixin:
             save_to_history: Whether to save successful execution to notebook history
             skip_safety_check: If True, skip dangerous-pattern validation.
                 Only set this for trusted internal code (e.g. kernel init, session restore).
+            execution_timeout: Optional wall-clock limit for this execution.
+                Internal operations such as runtime persistence use their own
+                stricter deadline instead of inheriting the general sandbox timeout.
         """
         # Check if kernel is dead (failed restart)
         if self._kernel_dead:
@@ -306,6 +310,7 @@ class ExecutionMixin:
         output_text = []
         error_msg = None
         execution_count = 0
+        timed_out = False
         
         try:
             # Send execute request
@@ -314,7 +319,14 @@ class ExecutionMixin:
             # Collect outputs — only process messages belonging to THIS execution (matched by msg_id).
             # Timeout is wall-clock: the deadline is fixed before the loop so a task that
             # keeps streaming output (tqdm/scanpy verbose) cannot reset it indefinitely.
-            deadline = time.monotonic() + self.timeout
+            timeout_seconds = (
+                float(execution_timeout)
+                if execution_timeout is not None
+                else float(self.timeout)
+            )
+            if timeout_seconds <= 0:
+                raise ValueError("execution_timeout must be positive")
+            deadline = time.monotonic() + timeout_seconds
             while True:
                 remaining = compute_remaining_timeout(deadline, time.monotonic())
                 msg = None
@@ -370,7 +382,8 @@ class ExecutionMixin:
                         remaining = 0  # fall through to timeout handling below
 
                 if remaining <= 0:
-                    error_msg = f"Execution timed out after {self.timeout} seconds"
+                    timed_out = True
+                    error_msg = f"Execution timed out after {timeout_seconds} seconds"
                     # Interrupt the kernel to stop the running code
                     if self.km:
                         try:
@@ -456,7 +469,8 @@ class ExecutionMixin:
                 output='\n'.join(output_text),
                 error=error_msg,
                 figures=figures,
-                execution_count=execution_count
+                execution_count=execution_count,
+                timed_out=timed_out,
             )
             
         except Exception as e:

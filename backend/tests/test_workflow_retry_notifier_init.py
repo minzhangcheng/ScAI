@@ -19,8 +19,10 @@ class _FakeLLMManager:
 
 
 class _FakeSandbox:
+    last_runtime_budgets = None
+
     def __init__(self, *args, **kwargs):
-        return None
+        type(self).last_runtime_budgets = kwargs.get("runtime_budgets")
 
 
 class _FakeCheckpointer:
@@ -38,6 +40,60 @@ class _FakeDeepResearchClient:
 
     async def close(self):
         return None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_v2_disabled_keeps_regular_runtime_budgets(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr("backend.workflow.core.LLMManager", _FakeLLMManager)
+    monkeypatch.setattr("backend.workflow.core.LocalJupyterSandbox", _FakeSandbox)
+    monkeypatch.setattr("backend.workflow.core.AsyncSqliteSaver", _FakeCheckpointer)
+    monkeypatch.setattr(
+        "backend.workflow.core.get_session_states",
+        lambda session_id: tmp_path / "states",
+    )
+    monkeypatch.setattr(
+        "backend.workflow.core.get_session_workspace",
+        lambda session_id: tmp_path / "workspace",
+    )
+    monkeypatch.setattr("backend.config._config.SNAPSHOT_V2_ENABLED", False)
+    gib = 1024 ** 3
+    monkeypatch.setattr(
+        "backend.utils.runtime_budget.detect_memory_capacity_bytes",
+        lambda: (64 * gib, "test_capacity"),
+    )
+    monkeypatch.setattr(
+        SingleCellAnalysisWorkflow,
+        "ensure_agent_ready",
+        lambda self, agent_name: None,
+    )
+    monkeypatch.setattr(SingleCellAnalysisWorkflow, "_build_graph", lambda self: None)
+
+    state = AnalysisState(
+        id="snapshot-disabled-runtime-budgets",
+        name="Snapshot Disabled Runtime Budgets",
+        user_id="user-1",
+        initial_instruction="test",
+    )
+    config = SystemConfig(
+        runtime_max_rss_bytes=2 * gib,
+        runtime_max_pkl_bytes=1 * gib,
+        runtime_max_save_seconds=17.5,
+    )
+    workflow = SingleCellAnalysisWorkflow(config=config, session_id=state.id)
+    workflow._state = state
+    workflow._db_conn = MagicMock()
+    workflow._db_conn.close = AsyncMock()
+
+    await workflow.initialize()
+
+    assert _FakeSandbox.last_runtime_budgets["max_namespace_count"] == 1500
+    assert _FakeSandbox.last_runtime_budgets["max_rss_bytes"] == 2 * gib
+    assert _FakeSandbox.last_runtime_budgets["max_pkl_bytes"] == 1 * gib
+    assert _FakeSandbox.last_runtime_budgets["max_save_seconds"] == 17.5
+    assert _FakeSandbox.last_runtime_budgets["effective_limit_basis"] == "test_capacity"
 
 
 @pytest.mark.asyncio

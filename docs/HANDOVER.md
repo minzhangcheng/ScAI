@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.39.17 · **Last updated**: 2026-08-23
+**Version**: 0.39.18 · **Last updated**: 2026-08-23
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,7 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.39.x — (2026-08-04 onward)**
 
+- `0.39.18` — F3 ordinary dill runtime-save rebaseline: atomic, bounded, cancellation-safe save generations that preserve the prior valid generation on failure (2026-08-23).
 - `0.39.17` — F2 export and secret-boundary rebaseline: descriptor-owned archive staging with exact range cleanup, authenticated state-mutating report approval and credential isolation, and frontend test evidence anchored to the verified run-start HEAD (2026-08-23).
 
 - `0.39.16` — F1 kernel lifecycle rebaseline: core-dump suppression and signal diagnosis, bounded native asynchronous Jupyter lifecycle operations, and run-start source-evidence identity (2026-08-23):

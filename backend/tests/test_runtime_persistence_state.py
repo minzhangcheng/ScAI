@@ -1,8 +1,10 @@
 import json
 import io
 import asyncio
+import builtins
 from contextlib import redirect_stdout
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +14,7 @@ from backend.utils.sandbox import (
     LocalJupyterSandbox,
     _commit_pkl_transaction,
     _sha256_file,
+    _sig_path,
     _verify_pkl_integrity,
     recover_regular_save_transaction,
 )
@@ -101,6 +104,221 @@ async def test_runtime_metrics_deduplicate_anndata_dense_and_sparse_aliases():
     assert offenders["sparse_alias"]["bytes"] < 512
     assert offenders["dense_alias"]["bytes"] < 512
     assert metrics["anndata_total_bytes"] == offenders["adata"]["bytes"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_metrics_project_backed_anndata_materialization_peak(tmp_path):
+    ad = pytest.importorskip("anndata")
+    np = pytest.importorskip("numpy")
+    from backend.utils.sandbox_parts.state_tracking import StateTrackingMixin
+
+    source = ad.AnnData(np.ones((128, 32), dtype=np.float32))
+    source_path = tmp_path / "backed.h5ad"
+    source.write_h5ad(source_path)
+    backed = ad.read_h5ad(source_path, backed="r")
+    namespace = {
+        "backed_adata": backed,
+        "backed_alias": backed,
+    }
+
+    class _KernelProbe:
+        async def _execute_unlocked(self, code, **_kwargs):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                exec(code, namespace)
+            return SimpleNamespace(success=True, output=output.getvalue())
+
+    try:
+        metrics = await StateTrackingMixin._runtime_resource_metrics(_KernelProbe())
+    finally:
+        backed.file.close()
+
+    assert metrics["backed_anndata_total_bytes"] > 0
+    assert metrics["projected_materialized_rss_bytes"] == (
+        metrics["rss_bytes"] + metrics["backed_anndata_total_bytes"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_projected_materialization_peak_uses_rss_budget_before_serialization(
+    tmp_path,
+):
+    from backend.utils.runtime_budget import RuntimeBudgetExceeded
+
+    budgets = {
+        "max_namespace_count": 100,
+        "max_single_object_bytes": 1024,
+        "max_anndata_total_bytes": 1024,
+        "max_rss_bytes": 60,
+        "max_pkl_bytes": 1024,
+        "max_save_seconds": 30,
+    }
+
+    class _Notebook:
+        session_path = tmp_path / "projected-rss.pkl"
+        state_path = tmp_path / "projected-rss.json"
+        state_dir = tmp_path
+        runtime_persistence = {"commit_source": None, "saved_revision": 0}
+
+        def __init__(self):
+            self.updates = []
+
+        def has_session_dump(self):
+            return False
+
+        def update_runtime_persistence(self, status, **kwargs):
+            self.updates.append((status, kwargs))
+
+    class _Sandbox:
+        session_id = "projected-rss"
+        runtime_revision = 1
+        saved_runtime_revision = 0
+        runtime_budgets = budgets
+        runtime_dependency_tracker = None
+        _expected_lifecycle_generation = 0
+        _session_restore_failed = False
+        _exec_lock = asyncio.Lock()
+        notebook_state = _Notebook()
+        serialization_started = False
+
+        async def _runtime_resource_metrics(self):
+            return {
+                "namespace_count": 1,
+                "largest_object_bytes": 1,
+                "anndata_total_bytes": 1,
+                "rss_bytes": 50,
+                "backed_anndata_total_bytes": 20,
+                "projected_materialized_rss_bytes": 70,
+                "top_offenders": [],
+            }
+
+        async def _snapshot_user_globals(self):
+            self.serialization_started = True
+            return set()
+
+        def _prune_legacy_unobserved_required(self, _live_names):
+            return set()
+
+        def get_runtime_dependency_names(self):
+            return set()
+
+        async def _execute_unlocked(self, *_args, **_kwargs):
+            self.serialization_started = True
+            return SimpleNamespace(success=False, output="", error="unexpected")
+
+    sandbox = _Sandbox()
+    with pytest.raises(RuntimeBudgetExceeded) as blocked:
+        await LocalJupyterSandbox.save_session(sandbox)
+
+    assert sandbox.serialization_started is False
+    assert [item.to_dict() for item in blocked.value.violations] == [{
+        "resource": "projected_materialized_rss_bytes",
+        "observed": 70,
+        "limit": 60,
+    }]
+    status, failure = sandbox.notebook_state.updates[-1]
+    assert status == "failed"
+    assert failure["budget_violations"] == [{
+        "resource": "projected_materialized_rss_bytes",
+        "observed": 70,
+        "limit": 60,
+    }]
+
+
+@pytest.mark.asyncio
+async def test_save_duration_budget_is_passed_to_kernel_and_cleans_staging(
+    tmp_path,
+):
+    from backend.utils.runtime_budget import RuntimeBudgetExceeded
+
+    old_pkl = tmp_path / "timeout-session.pkl"
+    old_pkl.write_bytes(b"known-generation")
+    old_digest = "a" * 64
+
+    class _Notebook:
+        session_path = old_pkl
+        state_path = tmp_path / "timeout-session.json"
+        state_dir = tmp_path
+        runtime_persistence = {
+            "status": "current",
+            "commit_source": "regular_save",
+            "saved_revision": 7,
+            "committed_revision": 7,
+            "runtime_digest": old_digest,
+            "committed_digest": old_digest,
+        }
+
+        def __init__(self):
+            self.updates = []
+
+        def has_session_dump(self):
+            return True
+
+        def update_runtime_persistence(self, status, **kwargs):
+            self.updates.append((status, kwargs))
+
+    class _Sandbox:
+        session_id = "save-timeout"
+        runtime_revision = 8
+        saved_runtime_revision = 7
+        runtime_budgets = {
+            "max_namespace_count": 100,
+            "max_single_object_bytes": 1024,
+            "max_anndata_total_bytes": 1024,
+            "max_rss_bytes": 1024,
+            "max_pkl_bytes": 1024,
+            "max_save_seconds": 17.5,
+        }
+        runtime_dependency_tracker = None
+        _expected_lifecycle_generation = 0
+        _session_restore_failed = False
+        _exec_lock = asyncio.Lock()
+        notebook_state = _Notebook()
+
+        async def _runtime_resource_metrics(self):
+            return {
+                "namespace_count": 1,
+                "largest_object_bytes": 1,
+                "anndata_total_bytes": 0,
+                "rss_bytes": 1,
+                "backed_anndata_total_bytes": 0,
+                "projected_materialized_rss_bytes": 1,
+                "top_offenders": [],
+            }
+
+        async def _snapshot_user_globals(self):
+            return set()
+
+        def _prune_legacy_unobserved_required(self, _live_names):
+            return set()
+
+        def get_runtime_dependency_names(self):
+            return set()
+
+        async def _execute_unlocked(self, _code, **kwargs):
+            assert kwargs["execution_timeout"] == 17.5
+            Path(str(self.notebook_state.session_path) + ".tmp").write_bytes(
+                b"partial-generation"
+            )
+            return SimpleNamespace(
+                success=False,
+                output="",
+                error="Execution timed out after 17.5 seconds",
+                timed_out=True,
+            )
+
+    sandbox = _Sandbox()
+    with pytest.raises(RuntimeBudgetExceeded) as blocked:
+        await LocalJupyterSandbox.save_session(sandbox)
+
+    assert blocked.value.violations[0].resource == "save_seconds"
+    assert blocked.value.violations[0].limit == 17.5
+    assert old_pkl.read_bytes() == b"known-generation"
+    assert not Path(str(old_pkl) + ".tmp").exists()
+    assert sandbox.notebook_state.runtime_persistence["committed_revision"] == 7
+    status, failure = sandbox.notebook_state.updates[-1]
+    assert status == "failed"
+    assert failure["budget_violations"][0]["resource"] == "save_seconds"
 
 
 def test_effective_runtime_budgets_clamp_to_container_capacity():
@@ -254,6 +472,7 @@ async def test_preflight_budget_blocks_before_kernel_serialization(tmp_path):
         runtime_revision = 1
         saved_runtime_revision = 0
         runtime_budgets = budgets
+        _expected_lifecycle_generation = 0
         _session_restore_failed = False
         _exec_lock = asyncio.Lock()
         notebook_state = _Notebook()
@@ -265,6 +484,8 @@ async def test_preflight_budget_blocks_before_kernel_serialization(tmp_path):
                 "largest_object_bytes": 512 * 1024 ** 2,
                 "anndata_total_bytes": 1024 ** 3,
                 "rss_bytes": budgets["max_rss_bytes"] + 1,
+                "backed_anndata_total_bytes": 0,
+                "projected_materialized_rss_bytes": budgets["max_rss_bytes"] + 1,
                 "top_offenders": [{
                     "name": "adata", "type": "AnnData", "bytes": 1024 ** 3,
                 }],
@@ -282,11 +503,18 @@ async def test_preflight_budget_blocks_before_kernel_serialization(tmp_path):
     assert not sandbox.notebook_state.session_path.exists()
     status, failure = sandbox.notebook_state.updates[-1]
     assert status == "failed"
-    assert failure["budget_violations"] == [{
-        "resource": "rss_bytes",
-        "observed": budgets["max_rss_bytes"] + 1,
-        "limit": budgets["max_rss_bytes"],
-    }]
+    assert failure["budget_violations"] == [
+        {
+            "resource": "rss_bytes",
+            "observed": budgets["max_rss_bytes"] + 1,
+            "limit": budgets["max_rss_bytes"],
+        },
+        {
+            "resource": "projected_materialized_rss_bytes",
+            "observed": budgets["max_rss_bytes"] + 1,
+            "limit": budgets["max_rss_bytes"],
+        },
+    ]
     assert blocked.value.violations[0].limit == budgets["max_rss_bytes"]
 
 
@@ -553,6 +781,203 @@ def test_regular_save_recovers_every_crash_boundary(
         assert json.loads(manifest.read_text())["version"] == 2
     assert _verify_pkl_integrity(live, integrity)
     assert not live.with_name(f"{live.name}.regular-save.json").exists()
+    assert not live.with_name(f"{live.name}.regular-save.tmp").exists()
+    assert not live.with_name(f"{live.name}.regular-save.bak").exists()
+    assert not _sig_path(live, integrity).with_name(
+        f"{_sig_path(live, integrity).name}.regular-save.tmp"
+    ).exists()
+
+
+def test_regular_save_backup_copy_uses_fixed_size_reads(tmp_path, monkeypatch):
+    from backend.utils.sandbox_parts import shared
+
+    copy_chunk = shared._REGULAR_SAVE_COPY_CHUNK_BYTES
+    source = tmp_path / "large-source.bin"
+    target = tmp_path / "large-target.bin"
+    source.write_bytes(b"x" * (copy_chunk * 2 + 17))
+    real_open = builtins.open
+    reads = []
+
+    class _GuardedSource:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self._handle.__exit__(*args)
+
+        def read(self, size=-1):
+            assert size > 0
+            assert size <= copy_chunk
+            reads.append(size)
+            return self._handle.read(size)
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+    def guarded_open(path, mode="r", *args, **kwargs):
+        handle = real_open(path, mode, *args, **kwargs)
+        if Path(path) == source and "r" in mode and "b" in mode:
+            return _GuardedSource(handle)
+        return handle
+
+    monkeypatch.setattr(builtins, "open", guarded_open)
+    shared._copy_durable(source, target)
+    assert reads
+    assert max(reads) <= copy_chunk
+    assert target.read_bytes() == source.read_bytes()
+
+
+def test_mid_backup_copy_failure_cleans_unjournaled_products_and_preserves_committed_generation(
+    tmp_path, monkeypatch,
+):
+    from backend.utils.sandbox import _sig_path, _write_pkl_signature
+    from backend.utils.sandbox_parts import shared
+
+    states = tmp_path / "states"
+    integrity = tmp_path / "integrity"
+    states.mkdir()
+    live = states / "mid-copy.pkl"
+    staged = states / "mid-copy.pkl.tmp"
+    metadata = states / "mid-copy.json"
+    live.write_bytes(b"old-generation")
+    staged.write_bytes(b"new-generation")
+    metadata.write_bytes(b"old-metadata")
+    _write_pkl_signature(live, integrity)
+    old = {
+        "pkl": live.read_bytes(),
+        "sig": _sig_path(live, integrity).read_bytes(),
+        "metadata": metadata.read_bytes(),
+    }
+    foreign_temp = states / ".mid-copy.pkl.regular-save.bak.foreign.tmp"
+    foreign_temp.write_bytes(b"foreign-temp-sentinel")
+    calls = 0
+    current_temp = None
+    partial_write_calls = 0
+    original_copy = shared._copy_durable
+    real_fdopen = shared.os.fdopen
+
+    def fail_on_later_backup(source, target):
+        nonlocal calls, current_temp, partial_write_calls
+        calls += 1
+        if calls != 2:
+            return original_copy(source, target)
+
+        def guarded_fdopen(fd, mode="r", *args, **kwargs):
+            nonlocal current_temp
+            handle = real_fdopen(fd, mode, *args, **kwargs)
+            if "wb" not in mode:
+                return handle
+            current_temp = Path(shared.os.readlink(f"/proc/self/fd/{fd}"))
+
+            class _PartialTarget:
+                def __enter__(self):
+                    handle.__enter__()
+                    return self
+
+                def __exit__(self, *exit_args):
+                    return handle.__exit__(*exit_args)
+
+                def write(self, data):
+                    nonlocal partial_write_calls
+                    partial_write_calls += 1
+                    if partial_write_calls >= 2:
+                        raise OSError("backup copy failed after partial write")
+                    return handle.write(data)
+
+                def __getattr__(self, name):
+                    return getattr(handle, name)
+
+            return _PartialTarget()
+
+        monkeypatch.setattr(shared.os, "fdopen", guarded_fdopen)
+        try:
+            return original_copy(source, target)
+        finally:
+            monkeypatch.setattr(shared.os, "fdopen", real_fdopen)
+
+    monkeypatch.setattr(shared, "_REGULAR_SAVE_COPY_CHUNK_BYTES", 16)
+    monkeypatch.setattr(shared, "_copy_durable", fail_on_later_backup)
+    with pytest.raises(OSError, match="backup copy failed after partial write"):
+        _commit_pkl_transaction(
+            staged,
+            live,
+            integrity,
+            lambda: None,
+            metadata_path=metadata,
+            target_revision=2,
+        )
+
+    assert calls >= 2
+    assert partial_write_calls >= 2
+    assert current_temp is not None
+    assert not current_temp.exists()
+    assert live.read_bytes() == old["pkl"]
+    assert _sig_path(live, integrity).read_bytes() == old["sig"]
+    assert metadata.read_bytes() == old["metadata"]
+    assert foreign_temp.read_bytes() == b"foreign-temp-sentinel"
+    assert not states.joinpath("mid-copy.pkl.regular-save.json").exists()
+    assert not staged.exists()
+    assert not states.joinpath("mid-copy.json.regular-save.bak").exists()
+    assert not _sig_path(live, integrity).with_name(
+        f"{_sig_path(live, integrity).name}.regular-save.tmp"
+    ).exists()
+
+
+def test_partial_staged_signature_write_is_removed_before_journal(
+    tmp_path, monkeypatch,
+):
+    from backend.utils.sandbox import _sig_path, _write_pkl_signature
+
+    states = tmp_path / "states"
+    integrity = tmp_path / "integrity"
+    states.mkdir()
+    live = states / "partial-signature.pkl"
+    staged = states / "partial-signature.pkl.tmp"
+    metadata = states / "partial-signature.json"
+    live.write_bytes(b"old-generation")
+    staged.write_bytes(b"new-generation")
+    metadata.write_bytes(b"old-metadata")
+    _write_pkl_signature(live, integrity)
+    old = {
+        "pkl": live.read_bytes(),
+        "sig": _sig_path(live, integrity).read_bytes(),
+        "metadata": metadata.read_bytes(),
+    }
+    staged_sig = _sig_path(live, integrity).with_name(
+        f"{_sig_path(live, integrity).name}.regular-save.tmp"
+    )
+    real_write_text = Path.write_text
+
+    def partial_signature_write(path, data, *args, **kwargs):
+        if path == staged_sig:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with builtins.open(path, "w", encoding="utf-8") as handle:
+                handle.write(data[:3])
+            raise OSError("partial staged signature write")
+        return real_write_text(path, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", partial_signature_write)
+    with pytest.raises(OSError, match="partial staged signature write"):
+        _commit_pkl_transaction(
+            staged,
+            live,
+            integrity,
+            lambda: None,
+            metadata_path=metadata,
+            target_revision=2,
+        )
+
+    assert live.read_bytes() == old["pkl"]
+    assert _sig_path(live, integrity).read_bytes() == old["sig"]
+    assert metadata.read_bytes() == old["metadata"]
+    assert not states.joinpath("partial-signature.pkl.regular-save.json").exists()
+    assert not staged.exists()
+    assert not staged_sig.exists()
+    assert not list(states.glob("*.regular-save.bak"))
+    assert not list(integrity.glob("*.regular-save.bak"))
 
 
 @pytest.mark.parametrize(

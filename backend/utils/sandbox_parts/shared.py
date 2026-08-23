@@ -14,8 +14,9 @@ import time
 import hmac
 import hashlib
 import logging
+import tempfile
 from queue import Empty as QueueEmpty
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Final
 from datetime import datetime
 from pathlib import Path
 import nbformat
@@ -28,6 +29,7 @@ from backend.config._config import DATA_BASE_DIR
 # Cap on a single iopub poll so the wall-clock deadline is re-checked at least
 # this often even while the kernel keeps streaming output (tqdm/scanpy verbose).
 IOPUB_POLL_CAP = 30.0
+_REGULAR_SAVE_COPY_CHUNK_BYTES: Final[int] = 8 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -108,9 +110,36 @@ def _read_regular_save_journal(path: Path) -> Dict[str, Any]:
 
 
 def _copy_durable(src: Path, dst: Path) -> None:
-    from backend.utils.files import atomic_copy_file
+    """Copy one transaction component through a bounded sibling temporary."""
+    from backend.utils.files import fsync_directory
 
-    atomic_copy_file(src, dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{dst.name}.",
+        suffix=".tmp",
+        dir=str(dst.parent),
+    )
+    temporary = Path(temporary_name)
+    owned_fd: int | None = fd
+    try:
+        with open(src, "rb") as source:
+            target = os.fdopen(fd, "wb")
+            owned_fd = None
+            with target:
+                while True:
+                    chunk = source.read(_REGULAR_SAVE_COPY_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    target.write(chunk)
+                target.flush()
+                os.fsync(target.fileno())
+        os.replace(temporary, dst)
+        fsync_directory(dst.parent)
+    except BaseException:
+        if owned_fd is not None:
+            os.close(owned_fd)
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _remove_durable(path: Path) -> None:
@@ -600,30 +629,47 @@ def _commit_pkl_transaction(
     journal_path = _regular_save_journal_path(live_pkl)
     target_digest = _sha256_file(staged_pkl)
 
-    staged_sig.write_text(_pkl_hmac_stream(staged_pkl), encoding="utf-8")
-    with open(staged_sig, "r+", encoding="utf-8") as handle:
-        handle.flush()
-        os.fsync(handle.fileno())
-    # Backups are complete and durable before the journal exposes a transaction.
-    for descriptor, component in component_records:
-        backup = _regular_save_backup_path(component)
-        backup.unlink(missing_ok=True)
-        if descriptor["previous_exists"]:
-            _copy_durable(component, backup)
-            if _sha256_file(backup) != descriptor["previous_sha256"]:
-                raise RuntimeError(
-                    f"regular runtime save backup failed verification: {backup.name}"
-                )
+    staged_sig_owned = True
+    prejournal_backups: List[Path] = []
+    journal = None
+    try:
+        staged_sig.write_text(_pkl_hmac_stream(staged_pkl), encoding="utf-8")
+        with open(staged_sig, "r+", encoding="utf-8") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Backups are complete and durable before the journal exposes a transaction.
+        for descriptor, component in component_records:
+            backup = _regular_save_backup_path(component)
+            backup.unlink(missing_ok=True)
+            if descriptor["previous_exists"]:
+                # Register before the copy: a copy implementation may publish
+                # the destination and then fail while flushing its directory.
+                prejournal_backups.append(backup)
+                _copy_durable(component, backup)
+                if _sha256_file(backup) != descriptor["previous_sha256"]:
+                    raise RuntimeError(
+                        f"regular runtime save backup failed verification: {backup.name}"
+                    )
 
-    journal = {
-        "version": 2,
-        "status": "APPLYING",
-        "target_digest": target_digest,
-        "target_revision": int(target_revision),
-        "keep_h5ad_names": [],
-        "components": [descriptor for descriptor, _path in component_records],
-    }
-    _write_regular_save_journal(journal_path, journal)
+        journal = {
+            "version": 2,
+            "status": "APPLYING",
+            "target_digest": target_digest,
+            "target_revision": int(target_revision),
+            "keep_h5ad_names": [],
+            "components": [descriptor for descriptor, _path in component_records],
+        }
+        _write_regular_save_journal(journal_path, journal)
+    except BaseException:
+        # No signed journal owns these products yet. Remove only the products
+        # established by this attempt; after publication recovery owns cleanup.
+        if not journal_path.exists():
+            staged_pkl.unlink(missing_ok=True)
+            if staged_sig_owned:
+                staged_sig.unlink(missing_ok=True)
+            for backup in prejournal_backups:
+                backup.unlink(missing_ok=True)
+        raise
     if fault_hook is not None:
         fault_hook("journal_applying")
 
@@ -1444,13 +1490,15 @@ class CodeExecutionResult:
         output: str = "",
         error: Optional[str] = None,
         figures: Optional[List[str]] = None,  # Base64 encoded images
-        execution_count: int = 0
+        execution_count: int = 0,
+        timed_out: bool = False,
     ):
         self.success = success
         self.output = output
         self.error = error
         self.figures = figures or []
         self.execution_count = execution_count
+        self.timed_out = bool(timed_out)
     
     def to_dict(self) -> Dict[str, Any]:
         return {

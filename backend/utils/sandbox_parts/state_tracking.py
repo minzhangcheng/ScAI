@@ -327,6 +327,7 @@ def _scai_size(_value, _seen_buffers=None):
 
 _scai_rows = []
 _scai_anndata_total = 0
+_scai_backed_anndata_total = 0
 _scai_seen_globals = {}
 _scai_global_seen_buffers = set()
 _scai_public_globals = [
@@ -359,6 +360,8 @@ for _scai_name, _scai_value in _scai_public_globals:
     _scai_rows.append(_scai_row)
     if _scai_type == "AnnData" and _scai_alias_of is None:
         _scai_anndata_total += _scai_bytes
+        if bool(getattr(_scai_value, "isbacked", False)):
+            _scai_backed_anndata_total += _scai_bytes
 try:
     _scai_pages = int(open("/proc/self/statm").read().split()[1])
     _scai_rss = _scai_pages * int(_scai_os.sysconf("SC_PAGE_SIZE"))
@@ -369,7 +372,9 @@ print("__SCAI_RUNTIME_METRICS__:" + _scai_json.dumps({
     "namespace_count": len(_scai_rows),
     "largest_object_bytes": (_scai_rows[0]["bytes"] if _scai_rows else 0),
     "anndata_total_bytes": _scai_anndata_total,
+    "backed_anndata_total_bytes": _scai_backed_anndata_total,
     "rss_bytes": _scai_rss,
+    "projected_materialized_rss_bytes": _scai_rss + _scai_backed_anndata_total,
     "top_offenders": _scai_rows[:20],
     "measurement_basis": "estimated_known_buffers_identity_deduplicated",
 }))

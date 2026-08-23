@@ -91,6 +91,28 @@ from .shared import (  # noqa: F401
 class PersistenceMixin:
     """Dill state persistence and file upload into the workspace."""
 
+    async def _run_coalesced_save(self) -> bool:
+        """Run the one shared save generation owned by this sandbox."""
+        return await self.save_session()
+
+    def _schedule_coalesced_save(self, loop: asyncio.AbstractEventLoop):
+        """Return the active save task or schedule one for this revision."""
+        active = getattr(self, "_pending_save_task", None)
+        if active is not None and not active.done():
+            return active
+
+        task = loop.create_task(self._run_coalesced_save())
+        self._pending_save_task = task
+        self._pending_save_tasks.add(task)
+
+        def _retire(completed):
+            self._pending_save_tasks.discard(completed)
+            if getattr(self, "_pending_save_task", None) is completed:
+                self._pending_save_task = None
+
+        task.add_done_callback(_retire)
+        return task
+
     def save_state(self):
         """Save current state synchronously - only saves notebook, not session.
 
@@ -99,26 +121,22 @@ class PersistenceMixin:
         Use save_state_async() for complete state persistence.
         """
         self.notebook_state.save()
-        # Try to run in existing event loop, or create one if needed
         try:
             loop = asyncio.get_running_loop()
-            # We're in an async context - cannot safely run async code
-            # Log warning and skip session save (notebook is already saved)
-            # 在已有事件循环中调度异步保存
-            task = loop.create_task(self.save_session())
-            self._pending_save_tasks.add(task)
-            task.add_done_callback(self._pending_save_tasks.discard)
         except RuntimeError:
             # No running loop - safe to create a new one
             try:
                 asyncio.run(self.save_session())
             except Exception as e:
                 logger.exception("Failed to save session state")
+        else:
+            self._schedule_coalesced_save(loop)
 
-    async def save_state_async(self):
-        """Save current state asynchronously"""
+    async def save_state_async(self) -> None:
+        """Save current state asynchronously through the shared generation."""
         self.notebook_state.save()
-        await self.save_session()
+        task = self._schedule_coalesced_save(asyncio.get_running_loop())
+        await asyncio.shield(task)
 
     async def await_pending_saves(self):
         """Wait for all pending save tasks to complete."""

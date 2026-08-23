@@ -15,7 +15,7 @@ import hmac
 import hashlib
 import logging
 from queue import Empty as QueueEmpty
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Callable
 from datetime import datetime
 from pathlib import Path
 import nbformat
@@ -91,6 +91,34 @@ from .sandbox_parts import (  # noqa: F401
     PersistenceMixin,
     PathsMixin,
 )
+
+
+async def _run_durable_host_operation(
+    operation: Callable[[], Any],
+    *,
+    session_id: str,
+    description: str,
+) -> Any:
+    """Run blocking durable I/O in the owned bulk worker.
+
+    A caller cancellation cannot stop a filesystem worker halfway through a
+    digest or transaction. The owned worker is therefore drained before the
+    cancellation is re-delivered to the caller.
+    """
+    from backend.utils.asyncio_tasks import run_in_owned_bulk_thread
+
+    try:
+        return await run_in_owned_bulk_thread(operation)
+    except asyncio.CancelledError:
+        logger.warning(
+            "[%s] Cancellation requested during %s was deferred until the "
+            "durable file operation reached a safe boundary",
+            session_id,
+            description,
+        )
+        raise
+
+
 class LocalJupyterSandbox(
     KernelMixin,
     ExecutionMixin,
@@ -117,6 +145,16 @@ class LocalJupyterSandbox(
         runtime_budgets: Optional[Dict[str, Any]] = None,
     ):
         self.session_id = session_id
+        from backend.services.session_lifecycle import (
+            lifecycle_file_lock,
+            read_lifecycle_record,
+        )
+
+        with lifecycle_file_lock(session_id):
+            lifecycle_record = read_lifecycle_record(session_id)
+            self._expected_lifecycle_generation = int(
+                (lifecycle_record or {}).get("generation") or 0
+            )
         import tempfile as _tmpfile_mod
         self._session_tmp = Path(_tmpfile_mod.gettempdir()) / f"scai-{self.session_id}"
         if self._session_tmp.is_symlink():
@@ -152,6 +190,7 @@ class LocalJupyterSandbox(
         # one namespace instead of silently mixing generations.
         self.kernel_epoch = 0
         self._pending_save_tasks: set = set()
+        self._pending_save_task: asyncio.Task[bool] | None = None
         # Snapshot V2 runtime dependency tracking (created/loaded user globals).
         self._known_user_globals: set[str] = set()
         self._last_execution_diff: Dict[str, Any] = {
@@ -512,46 +551,117 @@ except Exception as e:
         (``_restore_failed_globals``); only values this kernel added on top of
         that residue count as a rebuild.
         """
-        restore_failed = bool(getattr(self, "_session_restore_failed", False))
-        mark = getattr(self, "_restore_failed_at_revision", None)
-        revision = getattr(self, "runtime_revision", 0)
-        saved_revision = getattr(self, "saved_runtime_revision", -1)
-        has_committed_dump = getattr(self.notebook_state, "has_session_dump", None)
-        if (
-            not restore_failed
-            and revision == saved_revision
-            and (
-                getattr(self.notebook_state, "runtime_persistence", {}) or {}
-            ).get("commit_source") == "regular_save"
-            and callable(has_committed_dump)
-            and has_committed_dump()
-        ):
-            logger.debug(
-                "[%s] Reusing integrity-validated runtime generation %d",
-                self.session_id,
-                revision,
-            )
-            return True
-        if restore_failed and (mark is None or revision <= mark):
-            # Cheap short-circuit: nothing has run, so nothing can have been
-            # rebuilt, and the kernel need not be touched to establish that.
-            logger.error(
-                "[%s] refusing to persist a kernel whose restore failed and "
-                "which has executed nothing since; keeping the previous pkl",
-                self.session_id,
-            )
-            updater = getattr(self.notebook_state, "update_runtime_persistence", None)
-            if callable(updater):
-                updater(
-                    "failed",
-                    current_revision=revision,
-                    saved_revision=getattr(self, "saved_runtime_revision", 0),
-                    failed_variables=sorted(self.get_runtime_dependency_names()),
-                    error_summary="Runtime restore failed and no recomputation has completed.",
-                )
-            return False
-
         async with self._exec_lock:
+            # Select the live generation only after waiting for any in-flight
+            # execution.  The same lock owns serialization and host commit
+            # below, so the selected revision remains immutable throughout.
+            restore_failed = bool(getattr(self, "_session_restore_failed", False))
+            mark = getattr(self, "_restore_failed_at_revision", None)
+            revision = getattr(self, "runtime_revision", 0)
+            saved_revision = getattr(self, "saved_runtime_revision", -1)
+            previous_persistence = dict(
+                getattr(self.notebook_state, "runtime_persistence", {}) or {}
+            )
+            expected_lifecycle_generation = int(
+                self._expected_lifecycle_generation
+            )
+
+            from backend.services.session_lifecycle import (
+                SessionGenerationError,
+                SessionGoneError,
+                assert_session_generation_active,
+                lifecycle_file_lock,
+            )
+
+            def _restore_previous_persistence() -> None:
+                self.saved_runtime_revision = int(
+                    previous_persistence.get("saved_revision") or 0
+                )
+                if hasattr(self.notebook_state, "runtime_persistence"):
+                    self.notebook_state.runtime_persistence = dict(
+                        previous_persistence
+                    )
+
+            def _record_generation_failure(
+                error_summary: str,
+                *,
+                failed_variables=None,
+                budget_violations=None,
+                top_offenders=None,
+                recommended_action=None,
+                requires_recompute=False,
+                recompute_variables=None,
+            ) -> bool:
+                """Persist one bounded failure fact for the frozen generation."""
+                _restore_previous_persistence()
+                try:
+                    with lifecycle_file_lock(self.session_id):
+                        assert_session_generation_active(
+                            self.session_id,
+                            expected_generation=expected_lifecycle_generation,
+                        )
+                        updater = getattr(
+                            self.notebook_state,
+                            "update_runtime_persistence",
+                            None,
+                        )
+                        if callable(updater):
+                            updater(
+                                "failed",
+                                current_revision=revision,
+                                saved_revision=self.saved_runtime_revision,
+                                failed_variables=list(failed_variables or []),
+                                error_summary=error_summary,
+                                budget_violations=list(budget_violations or []),
+                                top_offenders=list(top_offenders or []),
+                                recommended_action=recommended_action,
+                                requires_recompute=requires_recompute,
+                                recompute_variables=list(
+                                    recompute_variables or []
+                                ),
+                            )
+                except (SessionGenerationError, SessionGoneError) as lifecycle_error:
+                    _restore_previous_persistence()
+                    logger.warning(
+                        "[%s] Suppressed runtime failure fact for frozen "
+                        "lifecycle generation %d (%s)",
+                        self.session_id,
+                        expected_lifecycle_generation,
+                        type(lifecycle_error).__name__,
+                    )
+                    return False
+                return True
+
+            has_committed_dump = getattr(self.notebook_state, "has_session_dump", None)
+            if (
+                not restore_failed
+                and revision == saved_revision
+                and (
+                    getattr(self.notebook_state, "runtime_persistence", {}) or {}
+                ).get("commit_source") == "regular_save"
+                and callable(has_committed_dump)
+                and has_committed_dump()
+            ):
+                logger.debug(
+                    "[%s] Reusing integrity-validated runtime generation %d",
+                    self.session_id,
+                    revision,
+                )
+                return True
+            if restore_failed and (mark is None or revision <= mark):
+                # Cheap short-circuit: nothing has run, so nothing can have
+                # been rebuilt, and the kernel need not be touched to establish
+                # that.  This decision is deliberately made under the lock.
+                logger.error(
+                    "[%s] refusing to persist a kernel whose restore failed and "
+                    "which has executed nothing since; keeping the previous pkl",
+                    self.session_id,
+                )
+                _record_generation_failure(
+                    "Runtime restore failed and no recomputation has completed.",
+                    failed_variables=sorted(self.get_runtime_dependency_names()),
+                )
+                return False
             session_path = str(self.notebook_state.session_path.absolute())
             escaped_path = repr(session_path)
 
@@ -566,18 +676,11 @@ except Exception as e:
                         self.session_id,
                         revision - mark,
                     )
-                    updater = getattr(self.notebook_state, "update_runtime_persistence", None)
-                    if callable(updater):
-                        updater(
-                            "failed",
-                            current_revision=revision,
-                            saved_revision=getattr(self, "saved_runtime_revision", 0),
-                            failed_variables=sorted(self.get_runtime_dependency_names()),
-                            error_summary=(
-                                "Runtime restore failed and the live namespace has not "
-                                "rebuilt required continuation state."
-                            ),
-                        )
+                    _record_generation_failure(
+                        "Runtime restore failed and the live namespace has not "
+                        "rebuilt required continuation state.",
+                        failed_variables=sorted(self.get_runtime_dependency_names()),
+                    )
                     return False
                 logger.warning(
                     "[%s] restore failed earlier; the kernel has since rebuilt "
@@ -593,6 +696,7 @@ except Exception as e:
 
             from backend.utils.runtime_budget import (
                 RuntimeBudgetExceeded,
+                RuntimeBudgetViolation,
                 evaluate_runtime_budget,
             )
 
@@ -604,19 +708,12 @@ except Exception as e:
                     item.to_dict() if hasattr(item, "to_dict") else dict(item)
                     for item in violations
                 ]
-                updater = getattr(
-                    self.notebook_state, "update_runtime_persistence", None
+                _record_generation_failure(
+                    error_summary,
+                    budget_violations=serialized,
+                    top_offenders=resource_metrics.get("top_offenders") or [],
+                    recommended_action="reduce_runtime_footprint",
                 )
-                if callable(updater):
-                    updater(
-                        "failed",
-                        current_revision=revision,
-                        saved_revision=getattr(self, "saved_runtime_revision", 0),
-                        error_summary=error_summary,
-                        budget_violations=serialized,
-                        top_offenders=resource_metrics.get("top_offenders") or [],
-                        recommended_action="reduce_runtime_footprint",
-                    )
 
             if budgets:
                 resource_metrics = await self._runtime_resource_metrics()
@@ -625,6 +722,8 @@ except Exception as e:
                     "largest_object_bytes",
                     "anndata_total_bytes",
                     "rss_bytes",
+                    "backed_anndata_total_bytes",
+                    "projected_materialized_rss_bytes",
                 }
                 missing_metrics = sorted(required_metrics - set(resource_metrics))
                 if missing_metrics:
@@ -865,7 +964,36 @@ print(f"Session saved: {_saved_count} variables")
 print("__SCAI_SAVED_NAMES__:" + _scai_json.dumps(sorted(_saved_names)))
 """
             save_started = time.monotonic()
-            result = await self._execute_unlocked(save_code, save_to_history=False, skip_safety_check=True)
+            save_timeout = budgets.get("max_save_seconds") if budgets else None
+            execute_kwargs = {
+                "save_to_history": False,
+                "skip_safety_check": True,
+            }
+            if save_timeout is not None and float(save_timeout) > 0:
+                execute_kwargs["execution_timeout"] = float(save_timeout)
+            result = await self._execute_unlocked(save_code, **execute_kwargs)
+
+            save_elapsed = time.monotonic() - save_started
+            if (
+                not result.success
+                and save_timeout is not None
+                and float(save_timeout) > 0
+                and getattr(result, "timed_out", False) is True
+            ):
+                staged_timeout_path = Path(str(self.notebook_state.session_path) + ".tmp")
+                staged_timeout_path.unlink(missing_ok=True)
+                resource_metrics["save_seconds"] = save_elapsed
+                timeout_violation = RuntimeBudgetViolation(
+                    "save_seconds", save_elapsed, float(save_timeout)
+                )
+                _record_budget_failure(
+                    [timeout_violation],
+                    error_summary=(
+                        "Runtime serialization exceeded its configured duration "
+                        "budget; the previous generation was retained."
+                    ),
+                )
+                raise RuntimeBudgetExceeded([timeout_violation])
 
             skipped = []
             for line in (result.output or "").splitlines():
@@ -928,9 +1056,16 @@ print("__SCAI_SAVED_NAMES__:" + _scai_json.dumps(sorted(_saved_names)))
                             postflight_violations,
                             resource_metrics.get("top_offenders"),
                         )
-                previous_persistence = dict(
-                    getattr(self.notebook_state, "runtime_persistence", {}) or {}
-                )
+                integrity_path = _integrity_dir(self.session_id)
+
+                def _cleanup_unjournaled_products() -> None:
+                    """Remove only this attempt's unjournaled staged pkl."""
+                    journal_path = pkl_path.with_name(
+                        f"{pkl_path.name}.regular-save.json"
+                    )
+                    if journal_path.exists():
+                        return
+                    staged_path.unlink(missing_ok=True)
 
                 manifest_path = None
                 target_digest = None
@@ -941,7 +1076,19 @@ print("__SCAI_SAVED_NAMES__:" + _scai_json.dumps(sorted(_saved_names)))
                         self.session_id,
                         states_dir=self.notebook_state.state_dir,
                     )
-                    target_digest = _sha256_file(staged_path)
+                    try:
+                        target_digest = await _run_durable_host_operation(
+                            lambda: _sha256_file(staged_path),
+                            session_id=self.session_id,
+                            description="runtime digest calculation",
+                        )
+                    except BaseException as exc:
+                        _cleanup_unjournaled_products()
+                        _record_generation_failure(
+                            "Runtime digest calculation did not complete: "
+                            f"{type(exc).__name__}."
+                        )
+                        raise
 
                 def _commit_generation_manifest():
                     if not production_transaction:
@@ -982,61 +1129,87 @@ print("__SCAI_SAVED_NAMES__:" + _scai_json.dumps(sorted(_saved_names)))
                             runtime_digest=target_digest,
                         )
 
+                commit_outcome: Dict[str, Any] = {
+                    "completed": False,
+                    "error": None,
+                }
+
                 try:
-                    from backend.services.session_lifecycle import (
-                        assert_session_generation_active,
-                        lifecycle_file_lock,
-                    )
-
-                    with lifecycle_file_lock(self.session_id):
-                        assert_session_generation_active(self.session_id)
-                        if staged_path.exists():
-                            _commit_pkl_transaction(
-                                staged_path,
-                                pkl_path,
-                                _integrity_dir(self.session_id),
-                                _commit_generation_metadata,
-                                metadata_path=Path(self.notebook_state.state_path),
-                                manifest_path=manifest_path,
-                                commit_manifest=_commit_generation_manifest,
-                                retire_sidecars=_retire_generation_sidecars,
-                                target_revision=revision,
-                                authoritative_pkl_names=saved_names,
-                                fault_hook=getattr(
-                                    self, "_regular_save_fault_hook", None
-                                ),
-                            )
+                    def _commit_on_host() -> None:
+                        try:
+                            with lifecycle_file_lock(self.session_id):
+                                assert_session_generation_active(
+                                    self.session_id,
+                                    expected_generation=expected_lifecycle_generation,
+                                )
+                                if staged_path.exists():
+                                    _commit_pkl_transaction(
+                                        staged_path,
+                                        pkl_path,
+                                        integrity_path,
+                                        _commit_generation_metadata,
+                                        metadata_path=Path(self.notebook_state.state_path),
+                                        manifest_path=manifest_path,
+                                        commit_manifest=_commit_generation_manifest,
+                                        retire_sidecars=_retire_generation_sidecars,
+                                        target_revision=revision,
+                                        authoritative_pkl_names=saved_names,
+                                        fault_hook=getattr(
+                                            self, "_regular_save_fault_hook", None
+                                        ),
+                                    )
+                                else:
+                                    # Compatibility for test doubles and pre-transaction
+                                    # custom kernels. Production save code always leaves
+                                    # the staged path and never reaches this branch.
+                                    _write_pkl_signature(pkl_path, integrity_path)
+                                    assert_session_generation_active(
+                                        self.session_id,
+                                        expected_generation=expected_lifecycle_generation,
+                                    )
+                                    _commit_generation_metadata()
+                        except BaseException as exc:
+                            commit_outcome["error"] = exc
+                            raise
                         else:
-                            # Compatibility for test doubles and pre-transaction
-                            # custom kernels. Production save code always leaves
-                            # the staged path and never reaches this branch.
-                            _write_pkl_signature(
-                                pkl_path, _integrity_dir(self.session_id)
-                            )
-                            assert_session_generation_active(self.session_id)
-                            _commit_generation_metadata()
-                    logger.info("Session saved successfully")
-                except Exception as exc:
-                    from backend.services.session_lifecycle import SessionGoneError
+                            commit_outcome["completed"] = True
 
-                    self.saved_runtime_revision = int(
-                        previous_persistence.get("saved_revision") or 0
+                    await _run_durable_host_operation(
+                        _commit_on_host,
+                        session_id=self.session_id,
+                        description="runtime generation commit",
                     )
-                    if hasattr(self.notebook_state, "runtime_persistence"):
-                        self.notebook_state.runtime_persistence = previous_persistence
-                    if isinstance(exc, SessionGoneError):
+                    logger.info("Session saved successfully")
+                except BaseException as exc:
+                    worker_error = commit_outcome.get("error")
+                    if isinstance(exc, asyncio.CancelledError):
+                        if commit_outcome.get("completed"):
+                            # The worker published a complete generation; preserve
+                            # its metadata before re-delivering cancellation.
+                            raise
+                        _cleanup_unjournaled_products()
+                        if isinstance(worker_error, SessionGoneError):
+                            _restore_previous_persistence()
+                        else:
+                            _record_generation_failure(
+                                "Runtime generation commit was cancelled after "
+                                "the durable worker reached its terminal boundary."
+                            )
                         raise
-                    updater = getattr(
-                        self.notebook_state, "update_runtime_persistence", None
-                    )
-                    if callable(updater):
-                        updater(
-                            "failed",
-                            current_revision=revision,
-                            saved_revision=self.saved_runtime_revision,
-                            failed_variables=[sv["name"] for sv in skipped],
-                            error_summary=f"Runtime commit failed: {type(exc).__name__}",
+
+                    _cleanup_unjournaled_products()
+                    if isinstance(exc, SessionGoneError):
+                        # A tombstoned generation must not write new metadata.
+                        _restore_previous_persistence()
+                        raise
+                    if isinstance(exc, SessionGenerationError):
+                        _record_generation_failure(
+                            "Runtime generation rejected by the session lifecycle."
                         )
+                        raise
+                    _record_generation_failure(
+                        f"Runtime commit failed: {type(exc).__name__}"
+                    )
                     raise RuntimeError(
                         f"Sandbox runtime commit failed for session {self.session_id}"
                     ) from exc
@@ -1060,17 +1233,12 @@ print("__SCAI_SAVED_NAMES__:" + _scai_json.dumps(sorted(_saved_names)))
                 tracker = getattr(self, "runtime_dependency_tracker", None)
                 if tracker is not None and failed_names:
                     poisoned = tracker.record_persistence_failure(failed_names)
-                updater = getattr(self.notebook_state, "update_runtime_persistence", None)
-                if callable(updater):
-                    updater(
-                        "failed",
-                        current_revision=revision,
-                        saved_revision=getattr(self, "saved_runtime_revision", 0),
-                        failed_variables=sorted(failed_names),
-                        error_summary=result.error or "Runtime serialization failed.",
-                        requires_recompute=bool(poisoned),
-                        recompute_variables=sorted(poisoned),
-                    )
+                _record_generation_failure(
+                    result.error or "Runtime serialization failed.",
+                    failed_variables=sorted(failed_names),
+                    requires_recompute=bool(poisoned),
+                    recompute_variables=sorted(poisoned),
+                )
                 raise RuntimeError(
                     f"Sandbox runtime save failed for session {self.session_id}: "
                     f"{result.error or 'unknown error'}"
