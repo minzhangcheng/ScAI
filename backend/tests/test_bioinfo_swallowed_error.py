@@ -64,6 +64,19 @@ def test_prompt_forbids_swallow_and_skip():
     assert "DPT/PAGA" in prompt
 
 
+def test_prompt_requires_collision_safe_cross_file_barcode_helper():
+    prompt = _render_static_prompt()
+
+    assert "from scai_barcodes import canonicalize_barcodes, barcode_index" in prompt
+    assert "sample prefixes" in prompt
+    assert "-1" in prompt
+    assert "Loom" in prompt and "x" in prompt
+    assert "collision" in prompt.lower()
+    assert "ad-hoc" in prompt
+    assert "split" in prompt and "replace" in prompt
+    assert "regex" in prompt
+
+
 def test_build_swallowed_error_feedback_includes_type_and_docs():
     from backend.agents.bioinformatics_agent import _build_swallowed_error_feedback
     msg = _build_swallowed_error_feedback(

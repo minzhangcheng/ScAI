@@ -674,6 +674,12 @@ WORKFLOW GUIDELINES:
     Failure causes InvalidIndexError and corrupts all downstream analysis.
     Pattern: adata = ad.concat([a, b]); adata.obs_names_make_unique(); adata.var_names_make_unique()
   * Only REDO a step if the user EXPLICITLY requests it or if a prerequisite has changed
+  * **CROSS-FILE BARCODE IDENTITY (CRITICAL):** When joining Loom, AnnData, or other files,
+    canonicalize both barcode collections before deciding that there is zero overlap:
+    `from scai_barcodes import canonicalize_barcodes, barcode_index`. The helper accepts
+    sample prefixes, the 10x `-1` suffix, and the Loom `x` suffix, and refuses lossy
+    collisions. Do not invent identity rules with ad-hoc `split`, `replace`, or regex
+    stripping; use the helper and investigate any collision it reports.
 - **UMAP EXECUTION RULES (CRITICAL)**:
   * ALWAYS call sc.pp.neighbors() before sc.tl.umap() — verify with `assert adata.obsp.get('connectivities') is not None`
   * For datasets with n_obs > 5000, ALWAYS use `init_pos='random'` (e.g., `sc.tl.umap(adata, init_pos='random', random_state=42)`)

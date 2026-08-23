@@ -124,6 +124,76 @@ def test_compact_traceback_preserves_final_exception_and_user_frame():
     assert extract_error_type(compacted) == "TypeError"
 
 
+def _long_diagnostic_traceback():
+    frames = "\n".join(
+        f'  File "/workspace/project/frame_{index}.py", line {index}, in helper\n'
+        f"    frame_{index}()"
+        for index in range(120)
+    )
+    return (
+        "Traceback (most recent call last):\n"
+        f"{frames}\n"
+        "TypeError: boolean value of NA is ambiguous"
+    )
+
+
+def test_bounded_diagnostic_keeps_final_exception_and_marks_cut():
+    from backend.utils.error_parsing import (
+        DIAGNOSTIC_TRUNCATION_MARKER,
+        bounded_diagnostic,
+    )
+
+    bounded = bounded_diagnostic(_long_diagnostic_traceback(), 500)
+
+    assert len(bounded) <= 500
+    assert DIAGNOSTIC_TRUNCATION_MARKER in bounded
+    assert "TypeError: boolean value of NA is ambiguous" in bounded
+
+
+def test_bounded_diagnostic_respects_budget_and_short_value_contract():
+    from backend.utils.error_parsing import bounded_diagnostic
+
+    assert bounded_diagnostic(None, 500) == ""
+    assert bounded_diagnostic("", 500) == ""
+    assert bounded_diagnostic("ValueError: short", 500) == "ValueError: short"
+    assert bounded_diagnostic("ValueError: first line\n  second line", 500) == (
+        "ValueError: first line second line"
+    )
+
+    for limit in (1, 7, 32, 79, 500):
+        bounded = bounded_diagnostic(_long_diagnostic_traceback(), limit)
+        assert len(bounded) <= limit
+        assert bounded == bounded_diagnostic(_long_diagnostic_traceback(), limit)
+
+
+def test_bounded_diagnostic_redacts_before_bounding():
+    from backend.utils.error_parsing import bounded_diagnostic
+
+    secret = "synthetic-diagnostic-secret"
+    bounded = bounded_diagnostic(
+        "Traceback:\n"
+        f"  File '/home/synthetic-user/project/{'x' * 600}.py'\n"
+        f"  Authorization: Bearer {secret}\n"
+        "TypeError: boolean value of NA is ambiguous",
+        500,
+    )
+
+    assert len(bounded) <= 500
+    assert secret not in bounded
+    assert "synthetic-user" not in bounded
+    assert "TypeError: boolean value of NA is ambiguous" in bounded
+
+
+def test_compact_traceback_tail_is_not_resliced_away():
+    from backend.utils.error_parsing import bounded_diagnostic
+
+    compacted = compact_traceback(_long_diagnostic_traceback(), max_chars=500)
+    bounded = bounded_diagnostic(compacted, 500)
+
+    assert "TypeError: boolean value of NA is ambiguous" in compacted
+    assert "TypeError: boolean value of NA is ambiguous" in bounded
+
+
 def test_compact_traceback_redacts_credentials_before_persisting():
     secret = "synthetic-fixture-credential-value"
     compacted = compact_traceback(

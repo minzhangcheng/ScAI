@@ -1818,7 +1818,7 @@ class NotebookState:
         """Persist the live runtime lifecycle without exposing raw tracebacks."""
         now = datetime.now().isoformat()
         previous = dict(self.runtime_persistence)
-        from backend.utils.error_parsing import compact_traceback
+        from backend.utils.error_parsing import bounded_diagnostic, compact_traceback
 
         def _safe_runtime_text(value: Any, limit: int) -> str:
             # Redaction must precede slicing: a credential or private path near
@@ -1834,7 +1834,7 @@ class NotebookState:
 
         safe_error = None
         if error_summary:
-            safe_error = _safe_runtime_text(error_summary, 500)
+            safe_error = bounded_diagnostic(error_summary, 500)
         safe_variables = sorted({
             _safe_runtime_text(name, 128)
             for name in (failed_variables or [])

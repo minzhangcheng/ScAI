@@ -557,6 +557,62 @@ def test_sanitize_review_result_bounds_lists_and_survives_non_dict():
     assert bad["findings"] == [] and bad["figures"] == []
 
 
+def _long_review_diagnostic_traceback():
+    frames = "\n".join(
+        f'  File "/workspace/project/frame_{index}.py", line {index}, in helper\n'
+        f"    frame_{index}()"
+        for index in range(120)
+    )
+    return (
+        "Traceback (most recent call last):\n"
+        f"{frames}\n"
+        "TypeError: boolean value of NA is ambiguous"
+    )
+
+
+def test_supplementary_warning_retains_the_exception():
+    out = sanitize_review_result({
+        "warnings": [_long_review_diagnostic_traceback()],
+    })
+
+    assert len(out["warnings"][0]) <= 500
+    assert "TypeError: boolean value of NA is ambiguous" in out["warnings"][0]
+
+
+def test_supplementary_warning_survives_the_discarded_figure_prefix():
+    out = sanitize_review_result({
+        "figures": ["supplementary.png"],
+        "warnings": [_long_review_diagnostic_traceback()],
+    })
+
+    assert any("discarded" in warning.lower() for warning in out["warnings"])
+    assert any(
+        "TypeError: boolean value of NA is ambiguous" in warning
+        for warning in out["warnings"]
+    )
+
+
+def test_plan_prose_is_still_head_sliced():
+    rationale = "plan-head-" + ("x" * 2200) + "-plan-tail"
+
+    out = sanitize_review_plan(
+        {
+            "rationale": rationale,
+            "supplementary_tasks": [rationale],
+            "gaps": [rationale],
+            "out_of_scope": [rationale],
+        },
+        1,
+    )
+
+    assert out["rationale"] == rationale[:2000]
+    assert out["rationale"].startswith("plan-head-")
+    assert "plan-tail" not in out["rationale"]
+    assert out["supplementary_tasks"][0] == rationale[:600]
+    assert out["gaps"][0] == rationale[:500]
+    assert out["out_of_scope"][0] == rationale[:500]
+
+
 def test_evidence_gap_labels_describe_vocabulary_not_feasibility():
     """The labels say what the text mentions. Measured on all 542 real items, a
     feasibility reading is wrong most of the time, so the two things a caller may

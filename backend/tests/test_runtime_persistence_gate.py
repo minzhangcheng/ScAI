@@ -42,6 +42,19 @@ def _failed_persistence(**updates):
     return payload
 
 
+def _long_runtime_diagnostic_traceback():
+    frames = "\n".join(
+        f'  File "/workspace/project/frame_{index}.py", line {index}, in helper\n'
+        f"    frame_{index}()"
+        for index in range(120)
+    )
+    return (
+        "Traceback (most recent call last):\n"
+        f"{frames}\n"
+        "TypeError: boolean value of NA is ambiguous"
+    )
+
+
 def test_runtime_gate_payload_is_safe_and_actionable():
     failure = build_runtime_persistence_failure(
         "runtime-gate",
@@ -109,6 +122,27 @@ def test_runtime_gate_redacts_raw_names_paths_and_errors_before_bounding():
     assert "private-project" not in rendered
     assert "private-session" not in rendered
     assert "******" in rendered
+
+
+def test_runtime_gate_preserves_notebook_error_summary_tail(tmp_path):
+    from backend.utils.sandbox import NotebookState
+
+    notebook = NotebookState("runtime-gate-tail", str(tmp_path))
+    persistence = notebook.update_runtime_persistence(
+        "failed",
+        current_revision=2,
+        saved_revision=1,
+        error_summary=_long_runtime_diagnostic_traceback(),
+        persist=False,
+    )
+    assert "TypeError: boolean value of NA is ambiguous" in persistence["error_summary"]
+
+    failure = build_runtime_persistence_failure("runtime-gate-tail", persistence)
+
+    assert len(failure["details"]["error_summary"]) <= 500
+    assert "TypeError: boolean value of NA is ambiguous" in (
+        failure["details"]["error_summary"]
+    )
 
 
 def test_degraded_recovery_discloses_attempted_and_committed_revisions():

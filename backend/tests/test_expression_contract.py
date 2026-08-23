@@ -226,6 +226,78 @@ def test_runtime_contract_handles_nested_nmf_and_non_ascii_byte_offsets():
     assert namespace["result"] is matrix
 
 
+def test_runtime_contract_preserves_unparenthesized_generator_expressions():
+    instrumented, count = instrument_expression_contract_calls(
+        "result = max(value for value in values)"
+    )
+    assert count == 1
+
+    namespace = {"values": [1, 3, 2]}
+    exec(build_expression_runtime_code(), namespace)
+    exec(instrumented, namespace)
+
+    assert namespace["result"] == 3
+
+
+def test_runtime_contract_preserves_calls_inside_f_strings():
+    matrix = np.array([[0.0, np.log1p(2.0)]])
+    obj = SimpleNamespace(X=matrix, shape=matrix.shape, layers={})
+
+    for code in (
+        "result = f'{sc.tl.score_genes(adata, gene_list=items)}'",
+        'result = f"{sc.tl.score_genes(adata, gene_list=items)}"',
+    ):
+        calls = []
+
+        def score_genes(value, *, gene_list):
+            calls.append((value, tuple(gene_list)))
+            return "validated"
+
+        namespace = {
+            "adata": obj,
+            "items": ["A"],
+            "sc": SimpleNamespace(
+                tl=SimpleNamespace(score_genes=score_genes)
+            ),
+        }
+        instrumented, count = instrument_expression_contract_calls(code)
+        assert count == 1
+        exec(build_expression_runtime_code(), namespace)
+        exec(instrumented, namespace)
+
+        assert namespace["result"] == "validated"
+        assert calls == [(obj, ("A",))]
+
+
+def test_runtime_contract_still_guards_sensitive_call_inside_generator():
+    raw = SimpleNamespace(
+        X=np.array([[0.0, 4.0]]), shape=(1, 2), layers={}
+    )
+    calls = []
+
+    def score_genes(value, *, gene_list):
+        calls.append((value, tuple(gene_list)))
+        return [1, 2]
+
+    namespace = {
+        "adata": raw,
+        "items": ["A"],
+        "sc": SimpleNamespace(
+            tl=SimpleNamespace(score_genes=score_genes)
+        ),
+    }
+    instrumented, count = instrument_expression_contract_calls(
+        "result = max(value for value in sc.tl.score_genes("
+        "adata, gene_list=items))"
+    )
+    assert count == 2
+    exec(build_expression_runtime_code(), namespace)
+
+    with pytest.raises(ValueError, match="raw integer counts"):
+        exec(instrumented, namespace)
+    assert calls == []
+
+
 def test_runtime_contract_guards_sensitive_call_inside_method_chain():
     calls = []
     raw = np.array([[0.0, 4.0]])
@@ -514,27 +586,26 @@ def test_runtime_contract_rejects_mixed_raw_and_continuous_dataframe():
         exec(guard, {"adata": frame})
 
 
-def test_runtime_contract_checks_every_value_beyond_old_sampling_limit():
+def test_runtime_contract_does_not_treat_one_exact_integer_as_raw_component():
     values = np.full(10001, 0.5, dtype=float)
     old_sample = set(np.linspace(0, values.size - 1, 10000, dtype=int))
     missed_index = next(index for index in range(values.size) if index not in old_sample)
     values[missed_index] = 4.0
     guard = build_expression_preflight_code([{"name": "adata", "layer": None}])
 
-    with pytest.raises(ValueError, match="raw integer counts"):
-        exec(
-            guard,
-            {
-                "adata": SimpleNamespace(
-                    X=values.reshape(1, -1),
-                    shape=(1, values.size),
-                    layers={},
-                )
-            },
-        )
+    exec(
+        guard,
+        {
+            "adata": SimpleNamespace(
+                X=values.reshape(1, -1),
+                shape=(1, values.size),
+                layers={},
+            )
+        },
+    )
 
 
-def test_runtime_contract_checks_last_value_in_every_chunked_matrix_kind():
+def test_runtime_contract_accepts_incidental_integer_in_every_matrix_kind():
     scipy_sparse = pytest.importorskip("scipy.sparse")
     pd = pytest.importorskip("pandas")
     runtime = {}
@@ -549,10 +620,17 @@ def test_runtime_contract_checks_last_value_in_every_chunked_matrix_kind():
     )
 
     for matrix in matrices:
-        with pytest.raises(ValueError, match="raw integer counts"):
-            runtime["_scai_validate_expression_contract"](
-                matrix, "chunked input", emit=False
-            )
+        contract = runtime["_scai_validate_expression_contract"](
+            matrix, "chunked input", emit=False
+        )
+        assert contract["scale"] == "normalized_continuous"
+
+
+def test_runtime_contract_accepts_log_matrix_with_incidental_exact_integer():
+    guard = build_expression_preflight_code([{"name": "adata", "layer": None}])
+    matrix = np.array([[0.0, 1.0, np.log1p(3.0)]], dtype=float)
+
+    exec(guard, {"adata": SimpleNamespace(X=matrix, shape=matrix.shape, layers={})})
 
 
 def test_runtime_contract_bounds_dense_sparse_and_pandas_temporary_vectors(
@@ -791,6 +869,46 @@ def test_setup_failure_before_user_cell_does_not_invalidate_artifacts(tmp_path):
         tmp_path,
         before,
         execution_started=False,
+    )
+
+    assert (count, stems, note) == (0, set(), "")
+    assert state.publication_figures[0].is_current
+    assert "analysis_generation" not in state.sandbox_state
+
+
+def test_matplotlib_table_scaling_is_not_an_expression_mutation():
+    assert not mutates_expression_representation(
+        "table = ax.table(cellText=rows)\n"
+        "alias = table\n"
+        "table.scale(1.0, 2.0)\n"
+        "alias.scale(0.5, 0.5)"
+    )
+
+
+def test_unknown_scale_receiver_remains_fail_closed():
+    for code in (
+        "obj.scale(1.0, 1.0)",
+        "table = ax.table(cellText=rows)\n"
+        "table = make_table()\n"
+        "table.scale(1.0, 1.0)",
+        "sc.pp.scale(adata)",
+    ):
+        assert mutates_expression_representation(code)
+
+
+def test_matplotlib_table_scaling_keeps_existing_figure_current(tmp_path):
+    state, before = _state_with_current_expression_artifact(
+        tmp_path, "table_geometry"
+    )
+
+    count, stems, note = record_executed_representation_change(
+        state,
+        "table = ax.table(cellText=rows)\n"
+        "alias = table\n"
+        "alias.scale(1.0, 2.0)",
+        tmp_path,
+        before,
+        execution_started=True,
     )
 
     assert (count, stems, note) == (0, set(), "")

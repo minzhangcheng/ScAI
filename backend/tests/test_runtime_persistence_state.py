@@ -20,6 +20,19 @@ from backend.utils.sandbox import (
 )
 
 
+def _long_runtime_diagnostic_traceback():
+    frames = "\n".join(
+        f'  File "/workspace/project/frame_{index}.py", line {index}, in helper\n'
+        f"    frame_{index}()"
+        for index in range(120)
+    )
+    return (
+        "Traceback (most recent call last):\n"
+        f"{frames}\n"
+        "TypeError: boolean value of NA is ambiguous"
+    )
+
+
 def test_system_config_runtime_memory_ceilings_default_to_auto_and_are_not_persisted():
     from backend.config._config import SystemConfig
 
@@ -1246,6 +1259,52 @@ def test_notebook_runtime_metadata_redacts_raw_fields_before_persisting(tmp_path
     assert "private-project" not in rendered
     assert "private-session" not in rendered
     assert "******" in rendered
+
+
+def test_runtime_persistence_error_summary_retains_final_exception(tmp_path):
+    notebook = NotebookState("runtime-tail", str(tmp_path))
+
+    persistence = notebook.update_runtime_persistence(
+        "failed",
+        current_revision=2,
+        saved_revision=1,
+        error_summary=_long_runtime_diagnostic_traceback(),
+        persist=False,
+    )
+
+    assert len(persistence["error_summary"]) <= 500
+    assert "TypeError: boolean value of NA is ambiguous" in persistence["error_summary"]
+
+
+def test_runtime_persistence_identifier_fields_remain_head_bounded(tmp_path):
+    notebook = NotebookState("runtime-identifiers", str(tmp_path))
+    identifier = "identifier-head-" + ("x" * 256) + "-identifier-tail"
+
+    persistence = notebook.update_runtime_persistence(
+        "failed",
+        current_revision=2,
+        saved_revision=1,
+        failed_variables=[identifier],
+        recompute_variables=[identifier],
+        budget_violations=[{"resource": identifier, "observed": 2, "limit": 1}],
+        top_offenders=[{"name": identifier, "type": identifier, "bytes": 2}],
+        persist=False,
+    )
+
+    assert persistence["failed_variables"][0].startswith("identifier-head-")
+    assert persistence["recompute_variables"][0].startswith("identifier-head-")
+    assert persistence["budget_violations"][0]["resource"].startswith("identifier-head-")
+    assert persistence["top_offenders"][0]["name"].startswith("identifier-head-")
+    assert persistence["top_offenders"][0]["type"].startswith("identifier-head-")
+    for value in (
+        persistence["failed_variables"][0],
+        persistence["recompute_variables"][0],
+        persistence["budget_violations"][0]["resource"],
+        persistence["top_offenders"][0]["name"],
+        persistence["top_offenders"][0]["type"],
+    ):
+        assert len(value) <= 128
+        assert "identifier-tail" not in value
 
 
 def test_regular_save_fails_closed_before_partial_rollback_when_backup_corrupt(

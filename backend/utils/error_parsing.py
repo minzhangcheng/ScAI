@@ -114,6 +114,8 @@ _USER_FRAME_RE = re.compile(
     r"<workspace-path>|<session-path>|<private-path>)"
 )
 
+DIAGNOSTIC_TRUNCATION_MARKER = "[... diagnostic truncated ...]"
+
 
 def _redact_private_paths(text: str) -> str:
     """Remove host-, workspace-, and session-specific absolute paths."""
@@ -182,6 +184,42 @@ def compact_traceback(error_text: str, max_chars: int = 3000) -> str:
     tail_budget = min(max(limit // 2, 160), limit - len(marker) - 80)
     head_budget = max(40, limit - len(marker) - tail_budget)
     return rendered[:head_budget].rstrip() + marker + rendered[-tail_budget:].lstrip()
+
+
+def bounded_diagnostic(value: Any, limit: int = 500) -> str:
+    """Redact and compact a diagnostic before applying a hard character budget.
+
+    Unlike ordinary identifier fields, diagnostics need their terminal
+    exception to remain actionable when a consumer persists only a small
+    summary.  Compact first so the final traceback tail is available, then
+    retain both context and that tail when the consumer budget requires a cut.
+    """
+    try:
+        budget = int(limit)
+    except (TypeError, ValueError):
+        return ""
+    if budget <= 0 or value is None:
+        return ""
+    raw = str(value)
+    if not raw:
+        return ""
+
+    compacted = " ".join(
+        compact_traceback(raw, max_chars=max(3000, budget * 8)).split()
+    )
+    if len(compacted) <= budget:
+        return compacted
+    if budget <= len(DIAGNOSTIC_TRUNCATION_MARKER):
+        return DIAGNOSTIC_TRUNCATION_MARKER[:budget]
+
+    remaining = budget - len(DIAGNOSTIC_TRUNCATION_MARKER)
+    head_budget = remaining // 2
+    tail_budget = remaining - head_budget
+    return (
+        compacted[:head_budget].rstrip()
+        + DIAGNOSTIC_TRUNCATION_MARKER
+        + compacted[-tail_budget:].lstrip()
+    )
 
 
 def sanitize_error_payload(value: Any, max_chars: int = 3000) -> Any:

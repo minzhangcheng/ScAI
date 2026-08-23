@@ -442,10 +442,7 @@ def _scai_validate_expression_contract(
         _scai_scale = "raw_counts"
     elif (
         _scai_has_continuous
-        and (
-            _scai_has_integer_valued_component
-            or _scai_has_positive_integer
-        )
+        and _scai_has_integer_valued_component
     ):
         _scai_scale = "mixed_raw_and_continuous"
     else:
@@ -592,6 +589,7 @@ def instrument_expression_contract_calls(code: str) -> tuple[str, int]:
         return line_offsets[lineno - 1] + col
 
     edits: list[tuple[int, int, bytes]] = []
+    instrumented_call_count = 0
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -611,11 +609,23 @@ def instrument_expression_contract_calls(code: str) -> tuple[str, int]:
         if opening < 0:
             continue
         edits.append((start, start, _RUNTIME_CALL_HELPER.encode("ascii") + b"("))
-        edits.append((opening, opening + 1, b", '', "))
+        generator = node.args[0] if len(node.args) == 1 else None
+        sole_unparenthesized_generator = (
+            isinstance(generator, ast.GeneratorExp)
+            and absolute(generator.lineno, generator.col_offset) == opening
+            and absolute(generator.end_lineno, generator.end_col_offset)
+            == call_end
+        )
+        if sole_unparenthesized_generator:
+            edits.append((opening, opening + 1, b", None, ("))
+            edits.append((call_end, call_end, b")"))
+        else:
+            edits.append((opening, opening + 1, b", None, "))
+        instrumented_call_count += 1
 
     for start, end, replacement in sorted(edits, reverse=True):
         source = source[:start] + replacement + source[end:]
-    return source.decode("utf-8"), len(edits) // 2
+    return source.decode("utf-8"), instrumented_call_count
 
 
 def has_direct_expression_contract_call(code: str) -> bool:
@@ -753,19 +763,35 @@ def mutates_expression_representation(code: str) -> bool:
                 events.append((pos, 0, "assign", (names, node.value)))
             for target in targets:
                 if isinstance(target, ast.Attribute) and target.attr == "X":
-                    events.append((pos, 1, "mutate", _root_name(target)))
+                    events.append((
+                        pos,
+                        1,
+                        "mutate",
+                        (_root_name(target), None, None),
+                    ))
         elif isinstance(node, ast.AugAssign):
             if isinstance(node.target, ast.Attribute) and node.target.attr == "X":
-                events.append((pos, 1, "mutate", _root_name(node.target)))
+                events.append((
+                    pos,
+                    1,
+                    "mutate",
+                    (_root_name(node.target), None, None),
+                ))
         elif isinstance(node, ast.Call):
             name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
             if (
                 name in _REPRESENTATION_MUTATORS
                 and _call_module_root(node) not in _NON_EXPRESSION_CALL_ROOTS
             ):
-                events.append((pos, 1, "mutate", _mutation_target_root(node)))
+                events.append((
+                    pos,
+                    1,
+                    "mutate",
+                    (_mutation_target_root(node), _call_module_root(node), name),
+                ))
 
     local: set[str] = set()
+    table_names: set[str] = set()
     for _pos, _tie, kind, data in sorted(events, key=lambda e: (e[0], e[1])):
         if kind == "assign":
             names, value = data
@@ -775,8 +801,24 @@ def mutates_expression_representation(code: str) -> bool:
                 # Rebinding a name to the canonical object (or an unknown source)
                 # drops its local-copy status.
                 local.difference_update(names)
-        elif data is None or data not in local:
-            return True
+            is_table_result = (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Attribute)
+                and value.func.attr == "table"
+            )
+            is_table_alias = (
+                isinstance(value, ast.Name) and value.id in table_names
+            )
+            if is_table_result or is_table_alias:
+                table_names.update(names)
+            else:
+                table_names.difference_update(names)
+        elif kind == "mutate":
+            target, receiver, mutator = data
+            if mutator == "scale" and receiver in table_names:
+                continue
+            if target is None or target not in local:
+                return True
     return False
 
 

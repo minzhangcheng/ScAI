@@ -1152,15 +1152,34 @@ _MAX_GAP_LEN = 500
 _MAX_LIST = 12
 
 
-def _clean_list(values: Any, limit: int, item_limit: int) -> List[str]:
+def _clean_list(
+    values: Any,
+    limit: int,
+    item_limit: int,
+    *,
+    diagnostic: bool = False,
+) -> List[str]:
     """Drop blanks BEFORE applying the limit, so the cap counts real items.
 
     Slicing first would let a model's empty strings silently consume the task
     budget, which is the one number in this feature that has to mean what it says.
     """
+    bounded_diagnostic = None
+    if diagnostic:
+        from backend.utils.error_parsing import bounded_diagnostic
+
     out: List[str] = []
     for value in (values or []):
-        text = (value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)).strip()
+        raw = (
+            value
+            if isinstance(value, str)
+            else json.dumps(value, ensure_ascii=False)
+        )
+        text = (
+            bounded_diagnostic(raw, item_limit)
+            if diagnostic
+            else raw
+        ).strip()
         if not text:
             continue
         out.append(text[:item_limit])
@@ -1203,7 +1222,9 @@ def sanitize_review_result(result: Any) -> Dict[str, Any]:
     if not isinstance(result, dict):
         return {"status": "failed", "summary": "Supplementary pass returned no structured result.",
                 "findings": [], "figures": [], "warnings": ["non-dict result"]}
-    warnings = _clean_list(result.get("warnings"), _MAX_LIST, _MAX_GAP_LEN)
+    warnings = _clean_list(
+        result.get("warnings"), _MAX_LIST, _MAX_GAP_LEN, diagnostic=True,
+    )
     if result.get("figures"):
         warnings = _clean_list(
             [
@@ -1212,6 +1233,7 @@ def sanitize_review_result(result: Any) -> Dict[str, Any]:
             ] + warnings,
             _MAX_LIST,
             _MAX_GAP_LEN,
+            diagnostic=True,
         )
     return {
         "status": str(result.get("status", "completed") or "completed"),
