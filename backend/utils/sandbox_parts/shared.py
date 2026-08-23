@@ -1167,6 +1167,59 @@ _OS_PROCESS_EXEC_FUNCS = frozenset({
 })
 
 
+_CALL_SITE_PATTERN_KEYS = frozenset({
+    "eval() function",
+    "exec() function",
+    "__import__ function",
+    "compile() function",
+})
+
+
+def _mask_prose(code: str) -> str:
+    """Blank comments and string literals without changing source offsets."""
+    import ast
+    import io
+    import tokenize
+
+    try:
+        ast.parse(code)
+    except SyntaxError:
+        return code
+
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(code).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError, ValueError):
+        return code
+
+    lines = [list(line) for line in code.splitlines(keepends=True)]
+    for token in tokens:
+        if token.type not in (tokenize.COMMENT, tokenize.STRING):
+            continue
+        (start_row, start_col), (end_row, end_col) = token.start, token.end
+        for row in range(start_row, end_row + 1):
+            index = row - 1
+            if not 0 <= index < len(lines):
+                continue
+            line = lines[index]
+            lo = start_col if row == start_row else 0
+            hi = end_col if row == end_row else len(line)
+            for col in range(lo, min(hi, len(line))):
+                if line[col] not in "\r\n":
+                    line[col] = " "
+    return "".join("".join(line) for line in lines)
+
+
+def _match_context(code: str, match: "re.Match[str]", window: int = 90) -> str:
+    """Return the original-source line and nearby context for a match."""
+    start = max(0, match.start() - window)
+    end = min(len(code), match.end() + window)
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(code) else ""
+    context = code[start:end].replace("\n", " ")
+    line = code.count("\n", 0, match.start()) + 1
+    return f"line {line}: {prefix}{context}{suffix}"
+
+
 def _validate_code_safety_ast(code: str) -> Tuple[bool, str]:
     """AST-based validation layer that catches reflection-based bypasses
     which regex patterns may miss (e.g. string concatenation, variable indirection).
@@ -1329,6 +1382,11 @@ def _validate_code_safety_ast(code: str) -> Tuple[bool, str]:
             return False, "Access to reserved ScAI kernel namespace"
 
         if isinstance(node, ast.Call):
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id in {"eval", "exec", "__import__", "compile"}
+            ):
+                return False, f"Call to blocked builtin '{node.func.id}'"
             if isinstance(node.func, ast.Name) and node.func.id in blocked_direct_calls:
                 return False, f"Call to blocked dependency/system function '{blocked_direct_calls[node.func.id]}'"
 
@@ -1413,14 +1471,24 @@ def validate_code_safety(code: str) -> Tuple[bool, str]:
         Tuple of (is_safe, error_message). is_safe is True if the code
         passes all security checks.
     """
+    masked: Optional[str] = None
     for pattern, description in DANGEROUS_PATTERNS:
-        if re.search(pattern, code):
+        match = re.search(pattern, code)
+        if match:
+            if description in _CALL_SITE_PATTERN_KEYS:
+                if masked is None:
+                    masked = _mask_prose(code)
+                match = re.search(pattern, masked)
+                if match is None:
+                    continue
             # Check if the matched pattern has a known safe-usage exception
             if any(key in description and check(code) for key, check in _EXCEPTION_CHECKS.items()):
                 continue
             logger.warning(
-                "Security: blocked dangerous code pattern [%s] — snippet: %.200s",
-                description, code.replace('\n', ' '),
+                "Security: blocked dangerous code pattern [%s] at offset %d — %s",
+                description,
+                match.start(),
+                _match_context(code, match),
             )
             return False, f"Dangerous pattern detected: {description}"
 

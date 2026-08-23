@@ -46,6 +46,7 @@ from ...services.figure_layout import (
     parse_layout_violations,
     summarize_violations,
 )
+from ...services.figure_content import empty_render_reason
 from ...services.report.artifacts import (
     archival_render_available,
     eligible_artifacts,
@@ -197,6 +198,9 @@ def _publication_output_error(
             "Figure generation produced no new JPG render; an older file with "
             "the same name, if present, was not re-registered."
         )
+    content_error = empty_render_reason(output)
+    if content_error:
+        return content_error
     if not jpg_path.exists():
         return f"JPG file was not created: {jpg_path}"
     try:

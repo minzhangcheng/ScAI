@@ -483,6 +483,7 @@ plt.rcParams.update({
 # makes lines 781+ dead code in the kernel.
 _original_plt_close = plt.close
 _original_plt_show = plt.show
+_original_plt_savefig = plt.savefig
 
 # === Combined Monkey-patch: Figure.savefig with PNG->JPG + path redirect ===
 import matplotlib.figure as _mpl_figure
@@ -503,6 +504,7 @@ def _combined_savefig(self, fname, *args, **kwargs):
             _jpg_path = _base + '.jpg'
             # Modify kwargs only; let the final return handle saving
             kwargs = dict(kwargs)
+            kwargs.pop('metadata', None)
             kwargs['format'] = 'jpeg'
             kwargs.setdefault('facecolor', 'white')
             if 'pil_kwargs' not in kwargs:

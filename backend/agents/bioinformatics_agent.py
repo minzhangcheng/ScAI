@@ -2346,8 +2346,12 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                     # back to append-only explicit declarations.
                                     deps = sandbox_state.setdefault("runtime_dependencies_v2", [])
                                     for var_name in (persistent_outputs or []):
-                                        if var_name and var_name not in deps:
-                                            deps.append(var_name)
+                                        _var_name = str(var_name).strip()
+                                        if (
+                                            _var_name.isidentifier()
+                                            and _var_name not in deps
+                                        ):
+                                            deps.append(_var_name)
                                 sandbox_state["runtime_revision"] = getattr(
                                     self.sandbox, "runtime_revision", 0
                                 )

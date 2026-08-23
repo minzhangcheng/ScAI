@@ -43,10 +43,12 @@ TOOLS = [
                         "description": (
                             "REQUIRED when this cell creates variables intended for later "
                             "cells or snapshot restore (e.g., adata, results, markers, "
-                            "model). List every user-global name that subsequent cells will "
-                            "read. Empty array is allowed only when the cell creates no "
-                            "values for later reuse. Dynamic namespace reads depend on "
-                            "this declaration."
+                            "model). Variable names only -- never a filename or a path. "
+                            "List every user-global name that subsequent cells will read. "
+                            "Entries that are not valid Python identifiers are ignored. "
+                            "Empty array is allowed only when the cell creates no values "
+                            "for later reuse. Dynamic namespace reads depend on this "
+                            "declaration."
                         ),
                         "default": [],
                     }

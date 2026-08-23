@@ -26,6 +26,8 @@ args = [
   "backend/tests/test_snapshot_v2_restore_acceptance.py",
   "backend/tests/test_snapshot_v2_runtime_kernel.py",
   "backend/tests/test_figure_dedup.py",
+  "backend/tests/test_figure_content_census.py",
+  "backend/tests/test_sandbox_prose_guard_and_output_contract.py",
   "backend/tests/test_sandbox_save_restore_streaming.py",
 ]
 

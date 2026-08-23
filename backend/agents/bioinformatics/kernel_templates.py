@@ -11,6 +11,7 @@ import textwrap
 
 
 from ...utils.sandbox import _TPL_NOOP_INSTALL
+from ...services.figure_content import FIGURE_CONTENT_SRC
 from ...services.figure_layout import LAYOUT_LINT_SRC
 
 # Configure logger
@@ -125,6 +126,18 @@ _pre_fignums = set(plt.get_fignums())
 # even when the user code raises midway through)
 try:
     _scai_user_source = {user_source_repr}
+    # Keep the exact source behind the compiled filename so traceback
+    # rendering and later diagnostics retain the user's original line.
+    try:
+        import linecache as _scai_linecache
+        _scai_linecache.cache['<scai-user-code>'] = (
+            len(_scai_user_source),
+            None,
+            _scai_user_source.splitlines(True),
+            '<scai-user-code>',
+        )
+    except Exception:
+        pass
     exec(compile(_scai_user_source, '<scai-user-code>', 'exec'), globals(), globals())
 finally:
 {restore_baseline}
@@ -161,6 +174,42 @@ finally:
                             print(f"[Auto-saved] JPG: {{_sp}}")
                         elif _sp_lower.endswith('.png'):
                             print(f"[Auto-saved] PNG: {{_sp}}")
+                    # Scanpy accepts the requested suffix but may write only a
+                    # vector file such as ``dotplot__x.jpg.pdf``. Recover one
+                    # raster companion for that explicitly tracked save.
+                    _has_raster = any(
+                        _p.lower().endswith(('.jpg', '.jpeg', '.png'))
+                        for _p in _saved_paths
+                    )
+                    if not _has_raster and _saved_paths:
+                        _seen_jpg_targets = set()
+                        for _src_str in _saved_paths:
+                            _src_path = Path(_src_str)
+                            if _src_path.suffix.lower() != '.pdf':
+                                continue
+                            if Path(_src_path.stem).suffix.lower() in ('.jpg', '.jpeg', '.png'):
+                                _jpg_supplement = _src_path.with_name(_src_path.stem)
+                            else:
+                                _jpg_supplement = _src_path.with_suffix('.jpg')
+                            if str(_jpg_supplement) in _seen_jpg_targets:
+                                continue
+                            _seen_jpg_targets.add(str(_jpg_supplement))
+                            try:
+                                _fig.savefig(
+                                    str(_jpg_supplement),
+                                    dpi=150,
+                                    bbox_inches='tight',
+                                    facecolor='white',
+                                    edgecolor='none',
+                                    format='jpeg',
+                                    pil_kwargs={{'quality': 85, 'optimize': True}},
+                                )
+                                print(f"[Auto-saved] JPG: {{_jpg_supplement}}")
+                            except Exception as _jpg_supp_err:
+                                print(
+                                    "[Auto-save] Warning: could not supplement JPG "
+                                    f"for {{_src_path}}: {{_jpg_supp_err}}"
+                                )
                     _has_pdf = any(_p.lower().endswith('.pdf') for _p in _saved_paths)
                     if not _has_pdf and _saved_paths:
                         # Supplement PDF for every image path that doesn't already have one
@@ -240,6 +289,7 @@ def _build_publication_figure_wrapper(
     layout_lint_src_repr = repr(LAYOUT_LINT_SRC)
     return f'''
 import matplotlib.pyplot as plt
+import matplotlib.figure as _scai_local_figure
 from pathlib import Path
 
 # Close any stale figures from previous executions to prevent poisoning
@@ -275,6 +325,7 @@ def _scai_execute_publication_source():
     import json as _scai_local_json
     import matplotlib.figure as _scai_local_figure
     import matplotlib.pyplot as _scai_local_plt
+    import linecache as _scai_local_linecache
     import sys as _scai_local_sys
     import warnings as _scai_local_warnings
 
@@ -311,6 +362,9 @@ def _scai_execute_publication_source():
         )
         _scai_trusted_savefig = _scai_local_figure.Figure.savefig
         _scai_runtime_savefig = _scai_local_figure.Figure.savefig
+        _scai_trusted_plt_savefig = _scai_persistent_ns.get(
+            '_original_plt_savefig', _scai_local_plt.savefig
+        )
     else:
         _scai_pristine_builtins = _scai_runtime_trust.builtins_map['dict'](
             _scai_runtime_trust.builtins_map
@@ -326,6 +380,9 @@ def _scai_execute_publication_source():
         _scai_trusted_show = _scai_runtime_trust.plt_show
         _scai_trusted_savefig = _scai_runtime_trust.figure_savefig
         _scai_runtime_savefig = _scai_runtime_trust.runtime_savefig
+        _scai_trusted_plt_savefig = _scai_persistent_ns.get(
+            '_original_plt_savefig', _scai_local_plt.savefig
+        )
 
     _scai_trusted_exec = _scai_pristine_builtins['exec']
     _scai_trusted_compile = _scai_pristine_builtins['compile']
@@ -336,6 +393,17 @@ def _scai_execute_publication_source():
     _scai_trusted_any = _scai_pristine_builtins['any']
     _scai_trusted_getattr = _scai_pristine_builtins['getattr']
     _scai_trusted_exception = _scai_pristine_builtins['Exception']
+    _scai_content_ns = {{'__builtins__': _scai_pristine_builtins}}
+    _scai_trusted_exec(
+        _scai_trusted_compile(
+            {repr(FIGURE_CONTENT_SRC)}, '<scai-figure-content>', 'exec'
+        ),
+        _scai_content_ns,
+        _scai_content_ns,
+    )
+    _scai_census_figure_content = _scai_content_ns[
+        '_scai_census_figure_content'
+    ]
     # ipykernel assigns an execute_request parent only to whatever object is
     # currently installed as sys.stdout. A prior cell may have replaced that
     # object, leaving the bootstrap-owned OutStream associated with an older
@@ -364,6 +432,20 @@ def _scai_execute_publication_source():
         with _scai_local_warnings.catch_warnings(record=True) as _scai_captured_warnings:
             _scai_local_warnings.simplefilter('always')
             _scai_user_source = {user_source_repr}
+            _scai_local_linecache.cache['<scai-user-code>'] = (
+                _scai_trusted_len(_scai_user_source),
+                None,
+                _scai_user_source.splitlines(True),
+                '<scai-user-code>',
+            )
+            _scai_original_figure_savefig = _scai_local_figure.Figure.savefig
+            _scai_original_plt_savefig = _scai_local_plt.savefig
+            def _scai_noop_user_figure_savefig(*_args, **_kwargs):
+                return None
+            def _scai_noop_user_plt_savefig(*_args, **_kwargs):
+                return None
+            _scai_local_figure.Figure.savefig = _scai_noop_user_figure_savefig
+            _scai_local_plt.savefig = _scai_noop_user_plt_savefig
             _scai_trusted_exec(
                 _scai_trusted_compile(
                     _scai_user_source, '<scai-user-code>', 'exec'
@@ -381,6 +463,7 @@ def _scai_execute_publication_source():
             _scai_local_sys.stdout = _scai_trusted_stdout
             _scai_local_plt.close = _scai_trusted_close
             _scai_local_plt.show = _scai_trusted_show
+            _scai_local_plt.savefig = _scai_trusted_plt_savefig
             _scai_local_plt.get_fignums = _scai_trusted_get_fignums
             _scai_local_plt.gcf = _scai_trusted_gcf
             _scai_local_figure.Figure.savefig = _scai_runtime_savefig
@@ -393,6 +476,27 @@ def _scai_execute_publication_source():
             _scai_fignums = _scai_trusted_get_fignums()
             if _scai_fignums:
                 _scai_fig = _scai_trusted_gcf()
+                try:
+                    _scai_content = _scai_census_figure_content(_scai_fig)
+                    if _scai_content is None:
+                        _scai_content_event = (
+                            '__SCAI_FIGURE_CONTENT_ERROR__ '
+                            'figure could not be inspected'
+                        )
+                    else:
+                        _scai_content_event = (
+                            '__SCAI_FIGURE_CONTENT__'
+                            + _scai_trusted_dumps(_scai_content)
+                        )
+                except _scai_trusted_exception as _scai_content_err:
+                    _scai_content_event = (
+                        '__SCAI_FIGURE_CONTENT_ERROR__ '
+                        + _scai_one_line(_scai_content_err)
+                    )
+                _scai_trusted_print(
+                    _scai_content_event,
+                    file=_scai_trusted_stdout,
+                )
                 _scai_layout_v = _scai_trusted_lint(_scai_fig)
                 if _scai_layout_v is None:
                     _scai_authoritative_event = (

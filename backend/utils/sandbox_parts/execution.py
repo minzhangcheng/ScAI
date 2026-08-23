@@ -189,7 +189,15 @@ class ExecutionMixin:
             track_globals: When True (and save_to_history), record created/loaded
                 user-global diffs into the runtime dependency tracker.
         """
-        declared = set(declared_outputs or [])
+        declared_raw = [
+            str(name).strip()
+            for name in (declared_outputs or [])
+            if str(name).strip()
+        ]
+        declared = {name for name in declared_raw if name.isidentifier()}
+        declared_not_names = sorted(
+            {name for name in declared_raw if not name.isidentifier()}
+        )
         confirmed_declared: set[str] = set()
         before: set[str] = set()
         should_track = bool(track_globals or declared) and save_to_history
@@ -199,6 +207,18 @@ class ExecutionMixin:
             result = await self._execute_unlocked(
                 code, save_to_history=save_to_history, skip_safety_check=skip_safety_check
             )
+            if declared_not_names:
+                result.output = (result.output or "") + (
+                    "\n[Kernel] Ignored persistent_outputs entries that are "
+                    "not Python variable names: "
+                    + ", ".join(declared_not_names)
+                    + ". persistent_outputs lists user-global names this cell "
+                    "assigns, not files it writes -- a name carrying a path "
+                    "or an extension can never appear in the namespace. Files "
+                    "written under the working directory are recorded by the "
+                    "host automatically; declare the in-memory object instead "
+                    "(e.g. 'adata', not 'adata.h5ad')."
+                )
             if should_track:
                 after = await self._snapshot_user_globals()
                 # A failed cell can still create or delete globals before the
