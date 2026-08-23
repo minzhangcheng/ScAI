@@ -25,7 +25,9 @@ class _AsyncSqliteShim:
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_compaction_keeps_latest_per_namespace(tmp_path):
+async def test_checkpoint_compaction_keeps_latest_per_namespace_and_pending_parent_writes(
+    tmp_path,
+):
     connection = _AsyncSqliteShim(tmp_path / "checkpoints.sqlite")
     connection.raw.executescript(
         """
@@ -78,8 +80,8 @@ async def test_checkpoint_compaction_keeps_latest_per_namespace(tmp_path):
     writes = cursor.fetchone()
     cursor.close()
     assert rows == [
-        ("", "05", None), ("", "06", "05"), ("", "07", "06"),
-        ("child", "05", None), ("child", "06", "05"), ("child", "07", "06"),
+        ("", "05", "04"), ("", "06", "05"), ("", "07", "06"),
+        ("child", "05", "04"), ("child", "06", "05"), ("child", "07", "06"),
     ]
-    assert writes[0] == 6
+    assert writes[0] == 8
     connection.raw.close()

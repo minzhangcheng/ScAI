@@ -8,6 +8,9 @@ import json
 import shutil
 import time
 
+import aiosqlite
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -62,7 +65,7 @@ def _populate(session_id, *, live_pkl: bool):
     (states / f"{session_id}_bioinfo_checkpoint.json").write_text(
         json.dumps({"step": 7}), encoding="utf-8"
     )
-    (states / "checkpoints.sqlite").write_bytes(b"SQLITE-CHECKPOINT")
+    asyncio.run(_create_checkpoint_fixture(states / "checkpoints.sqlite"))
     if live_pkl:
         _live_pkl(session_id).write_bytes(b"DILL-KERNEL-DUMP")
 
@@ -73,6 +76,14 @@ def _populate(session_id, *, live_pkl: bool):
     up = get_session_uploads(session_id)
     up.mkdir(parents=True, exist_ok=True)
     (up / "matrix.h5ad").write_bytes(b"H5AD-DATA")
+
+
+async def _create_checkpoint_fixture(path):
+    """Create the smallest saver-owned checkpoint database for E2E export."""
+    connection = await aiosqlite.connect(path)
+    saver = AsyncSqliteSaver(connection)
+    await saver.setup()
+    await connection.close()
 
 
 def _advance(session_id, round_=3):

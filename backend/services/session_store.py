@@ -29,6 +29,7 @@ from backend.models.schemas import AnalysisState, TaskStatus, DEFAULT_ROUND_WAIT
 from backend.utils.blob_store import externalize_blobs, inline_blobs
 from backend.utils.files import validate_session_id
 from backend.utils.asyncio_tasks import run_in_owned_thread
+from backend.utils.websocket_delivery import strip_nested_binary_payload
 from backend.state import (
     sessions, state_lock, session_access_times, last_save_times,
     session_locks,
@@ -174,8 +175,7 @@ def clear_recovery_blocked(
 async def _persist_recovery_marker(session_id: str, state: AnalysisState) -> None:
     """Persist recovery_blocked / cleared marker to session.json (best-effort)."""
     try:
-        dumped = state.model_dump(mode="json")
-        await _persist_dump_under_lifecycle(session_id, dumped)
+        await _persist_dump_under_lifecycle(session_id, state)
     except Exception:
         logger.exception(
             "Session %s: failed to persist recovery marker",
@@ -258,6 +258,39 @@ def _blob_dir_for(session_id: str) -> Path:
     return get_session_metadata_path(session_id).parent / "blobs"
 
 
+def _preserve_legacy_preview_digests(
+    source_dump: dict, durable_dump: dict
+) -> None:
+    """Carry a verifiable legacy preview identity across binary stripping."""
+    if source_dump.get("artifact_registry_version") is not None:
+        return
+    source_figures = source_dump.get("publication_figures")
+    durable_figures = durable_dump.get("publication_figures")
+    if not isinstance(source_figures, list) or not isinstance(durable_figures, list):
+        return
+    from backend.services.report.artifacts import preview_render_sha256
+
+    for source_figure, durable_figure in zip(source_figures, durable_figures):
+        if not isinstance(source_figure, dict) or not isinstance(durable_figure, dict):
+            continue
+        if str(durable_figure.get("preview_sha256") or "").strip():
+            continue
+        digest = preview_render_sha256(source_figure.get("png_base64"))
+        if digest:
+            durable_figure["preview_sha256"] = digest
+
+
+def _durable_state_dump(state: AnalysisState) -> dict:
+    """Create a detached, sanitized JSON dump without mutating live state."""
+    source_dump = state.model_dump(mode="python")
+    sanitized_state = strip_nested_binary_payload(state)
+    if not isinstance(sanitized_state, AnalysisState):
+        raise TypeError("durable state copier returned an unexpected model")
+    durable_dump = sanitized_state.model_dump(mode="json")
+    _preserve_legacy_preview_digests(source_dump, durable_dump)
+    return durable_dump
+
+
 def _externalize_and_write(session_id: str, dumped: dict) -> None:
     """Externalize blobs to disk and write the session JSON. Blocking I/O —
     async callers must invoke this via ``run_in_owned_thread`` so large base64
@@ -273,17 +306,20 @@ def _externalize_and_write(session_id: str, dumped: dict) -> None:
         _write_session_json(session_id, json.dumps(externalized, ensure_ascii=False))
 
 
-async def _persist_dump_under_lifecycle(session_id: str, dumped: dict) -> None:
+async def _persist_dump_under_lifecycle(
+    session_id: str, state: AnalysisState
+) -> None:
     """Unthrottled internal write serialized against delete and stale saves."""
     from backend.services.session_lifecycle import get_lifecycle_lock
 
+    dumped = _durable_state_dump(state)
     async with get_lifecycle_lock(session_id):
         await run_in_owned_thread(_externalize_and_write, session_id, dumped)
 
 
 def save_session_to_disk(session_id: str, state: AnalysisState) -> None:
     """Synchronous startup/test entrypoint guarded by the lifecycle file lock."""
-    _externalize_and_write(session_id, state.model_dump(mode="json"))
+    _externalize_and_write(session_id, _durable_state_dump(state))
 
 
 async def _async_save_session_under_lifecycle(
@@ -306,7 +342,7 @@ async def _async_save_session_under_lifecycle(
     last_save_times[session_id] = now
     # model_dump on the event loop (snapshot the mutable model here to avoid
     # racing with in-place mutation); offload the blob writes + JSON write.
-    dumped = state.model_dump(mode="json")
+    dumped = _durable_state_dump(state)
     await run_in_owned_thread(_externalize_and_write, session_id, dumped)
 
 
@@ -566,9 +602,7 @@ def _recover_publication_transactions_under_file_lock(
             or legacy_count_before != len(recovery_state.legacy_artifacts or [])
         )
         if mutated or inventory_migrated:
-            _externalize_and_write(
-                session_id, recovery_state.model_dump(mode="json")
-            )
+            _externalize_and_write(session_id, _durable_state_dump(recovery_state))
         if mutated:
             mark_figure_record_recovery_durable(
                 get_session_workspace(session_id) / "figures",
@@ -704,8 +738,7 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
             f"workflow-bound gate before restart."
         )
         # Save the cleaned-up state so PAUSED status persists
-        dumped = state.model_dump(mode="json")
-        await _persist_dump_under_lifecycle(session_id, dumped)
+        await _persist_dump_under_lifecycle(session_id, state)
 
     # Apply Snapshot V2 recovery or disabled-mode stale-state normalization.
     if not snapshot_v2_enabled:

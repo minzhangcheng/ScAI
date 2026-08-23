@@ -7,7 +7,6 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from backend.config import WS_RECEIVE_TIMEOUT
-from backend.constants import STRIPPED_FIGURE_PLACEHOLDER
 from backend.models.schemas import WebSocketMessage, AnalysisState, TaskStatus, AnalysisPhase
 from backend.workflow.direction_coverage import active_batch_incomplete
 from backend.state import (
@@ -27,11 +26,13 @@ from backend.utils.auth import (
 from backend.utils.asyncio_tasks import consume_current_cancellation_request
 from backend.utils.websocket_delivery import (
     WebSocketConnection,
+    append_durable_realtime_message,
     register_analysis_websocket,
     register_report_websocket,
     send_analysis_json,
     send_connection_json,
     unregister_websocket,
+    serialize_realtime_message,
 )
 from .serialization import serialize_round_results
 from backend.utils.config_resolver import resolve_config_for_user
@@ -297,16 +298,7 @@ def _preserve_realtime_stream(prev, new) -> None:
 
 def _serialize_realtime_messages(messages):
     """Serialize a list of WebSocketMessage to JSON-safe dicts."""
-    msg_data_list = []
-    for msg in messages:
-        msg_data_list.append({
-            "type": msg.type,
-            "agent": msg.agent.value if msg.agent else None,
-            "content": msg.content,
-            "timestamp": msg.timestamp.isoformat() if msg.timestamp else datetime.now().isoformat(),
-            "id": msg.id
-        })
-    return msg_data_list
+    return [serialize_realtime_message(msg, strip_binary=True) for msg in messages]
 
 
 def _pop_if_owned(registry: dict, session_id: str, owned: Any) -> bool:
@@ -721,25 +713,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         # vanished on refresh. _write_state_if_current carries this stream
         # forward across each swap so nothing is lost.
         target = _sessions.get(session_id) or state
-        # Strip base64 from figure messages before persisting to avoid memory bloat
-        if msg.type == "figure" and isinstance(msg.content, str) and len(msg.content) > 1000:
-            from copy import copy
-            stripped_msg = copy(msg)
-            stripped_msg.content = STRIPPED_FIGURE_PLACEHOLDER
-            target.realtime_messages.append(stripped_msg)
-        else:
-            target.realtime_messages.append(msg)
-        # Cap realtime_messages to prevent unbounded memory growth
-        if len(target.realtime_messages) > 1000:
-            target.realtime_messages = target.realtime_messages[-1000:]
-
-        msg_data = {
-            "type": msg.type,
-            "agent": msg.agent.value if msg.agent else None,
-            "content": msg.content,
-            "timestamp": msg.timestamp.isoformat() if msg.timestamp else datetime.now().isoformat(),
-            "id": msg.id  # Include message ID for deduplication on client
-        }
+        append_durable_realtime_message(target, msg)
+        msg_data = serialize_realtime_message(msg, strip_binary=False)
 
         if not await send_analysis_json(session_id, msg_data):
             logger.debug(

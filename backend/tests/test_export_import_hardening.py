@@ -9,6 +9,7 @@ import importlib
 import io
 import json
 import os
+import sqlite3
 import tarfile
 import uuid
 from pathlib import Path
@@ -1285,3 +1286,103 @@ class TestExportProducesImportableArchives:
         assert portable["agent_server_configs"]["pi"]["llm_base_url"] == ""
         assert portable["literature_config"]["deep_research_api_key"] == ""
         assert portable["literature_config"]["deep_research_llm_base_url"] == ""
+
+
+def test_runtime_export_contains_only_verified_standalone_checkpoint(tmp_path, monkeypatch):
+    from backend.routes.export_import_parts import tar_builders
+
+    session_id = "runtime-archive-checkpoint"
+    session_root = tmp_path / session_id
+    states = session_root / "states"
+    states.mkdir(parents=True)
+    source = states / "checkpoints.sqlite"
+    connection = sqlite3.connect(source)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA wal_autocheckpoint=0")
+    connection.execute("CREATE TABLE checkpoint_values (value TEXT)")
+    connection.execute("INSERT INTO checkpoint_values VALUES ('from-wal')")
+    connection.commit()
+    assert source.with_name("checkpoints.sqlite-wal").exists()
+
+    monkeypatch.setattr(tar_builders, "get_session_states", lambda _sid: states)
+    monkeypatch.setattr(tar_builders, "legacy_session_state_paths", lambda *_args: [])
+    monkeypatch.setattr(tar_builders, "UPLOAD_TEMP_DIR", tmp_path / "export-tmp")
+
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w") as tf:
+        tar_builders._add_states_to_tar(tf, session_id, include_runtime=True)
+    connection.close()
+
+    archive.seek(0)
+    with tarfile.open(fileobj=archive, mode="r") as tf:
+        names = tf.getnames()
+        checkpoint_name = f"{session_id}/states/checkpoints.sqlite"
+        assert names.count(checkpoint_name) == 1
+        assert f"{session_id}/states/checkpoints.sqlite-wal" not in names
+        assert f"{session_id}/states/checkpoints.sqlite-shm" not in names
+        payload = tf.extractfile(checkpoint_name).read()
+
+    extracted = tmp_path / "extracted.sqlite"
+    extracted.write_bytes(payload)
+    check = sqlite3.connect(extracted)
+    assert check.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    assert check.execute("SELECT value FROM checkpoint_values").fetchone()[0] == "from-wal"
+    assert check.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
+    check.close()
+
+
+def test_runtime_export_fails_if_verified_checkpoint_snapshot_cannot_be_added(
+    tmp_path, monkeypatch
+):
+    from backend.routes.export_import_parts import tar_builders
+
+    session_id = "runtime-archive-checkpoint-add-failure"
+    states = tmp_path / session_id / "states"
+    states.mkdir(parents=True)
+    source = states / "checkpoints.sqlite"
+    connection = sqlite3.connect(source)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA wal_autocheckpoint=0")
+    connection.execute("CREATE TABLE checkpoint_values (value TEXT)")
+    connection.execute("INSERT INTO checkpoint_values VALUES ('from-wal')")
+    connection.commit()
+    assert source.with_name("checkpoints.sqlite-wal").exists()
+
+    temp_dir = tmp_path / "export-tmp"
+    monkeypatch.setattr(tar_builders, "get_session_states", lambda _sid: states)
+    monkeypatch.setattr(tar_builders, "legacy_session_state_paths", lambda *_args: [])
+    monkeypatch.setattr(tar_builders, "UPLOAD_TEMP_DIR", temp_dir)
+    original_add = tar_builders._safe_add_file
+    attempted = []
+
+    def reject_checkpoint(tf, path, arcname):
+        attempted.append((Path(path), arcname))
+        if arcname == f"{session_id}/states/checkpoints.sqlite":
+            return False
+        return original_add(tf, path, arcname)
+
+    monkeypatch.setattr(tar_builders, "_safe_add_file", reject_checkpoint)
+    archive = io.BytesIO()
+    with pytest.raises((OSError, RuntimeError), match="checkpoint"):
+        with tarfile.open(fileobj=archive, mode="w") as tf:
+            tar_builders._add_states_to_tar(tf, session_id, include_runtime=True)
+    connection.close()
+
+    checkpoint_name = f"{session_id}/states/checkpoints.sqlite"
+    assert any(
+        path.parent == temp_dir and arcname == checkpoint_name
+        for path, arcname in attempted
+    )
+    live_paths = {
+        source,
+        source.with_name("checkpoints.sqlite-wal"),
+        source.with_name("checkpoints.sqlite-shm"),
+    }
+    assert live_paths.isdisjoint(path for path, _arcname in attempted)
+    assert f"{session_id}/states/checkpoints.sqlite-wal" not in {
+        arcname for _path, arcname in attempted
+    }
+    assert f"{session_id}/states/checkpoints.sqlite-shm" not in {
+        arcname for _path, arcname in attempted
+    }
+    assert not list(temp_dir.glob(".checkpoint-export-*"))

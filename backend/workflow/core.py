@@ -11,7 +11,6 @@ from typing import Callable, Dict, Any, List, Optional, Tuple
 from datetime import datetime
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 import aiosqlite
 
 # Configure logger
@@ -65,7 +64,15 @@ from ..utils.settings_provider import AgentSettingsProvider
 from ..utils.sandbox import LocalJupyterSandbox
 from ..utils.runtime_apply import is_forward_resume_blocked
 from ..utils.asyncio_tasks import consume_current_cancellation_request
+from ..utils.checkpoint import (
+    DurableJsonPlusSerializer,
+    compact_checkpoint_history,
+    configure_checkpoint_retention,
+)
 from ..config import SystemConfig, get_session_workspace, get_session_states
+
+# Keep the historical module-level name for tests and downstream importers.
+JsonPlusSerializer = DurableJsonPlusSerializer
 
 
 # Defined in helpers.py (dependency-free) and re-exported here for backward
@@ -1176,7 +1183,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             db_path = str(db_path_obj)
             self._db_conn = await aiosqlite.connect(db_path)
             os.chmod(db_path_obj, 0o600)
-            serde = JsonPlusSerializer(allowed_json_modules=[
+            serde = DurableJsonPlusSerializer(allowed_json_modules=[
                 ("backend.models.schemas", "AgentType"),
                 ("backend.models.schemas", "AnalysisState"),
                 ("backend.models.schemas", "AnalysisPhase"),
@@ -1187,6 +1194,19 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             self.checkpointer = AsyncSqliteSaver(self._db_conn, serde=serde)
             # Make sure tables are created
             await self.checkpointer.setup()
+            try:
+                await configure_checkpoint_retention(
+                    self._db_conn,
+                    keep=CHECKPOINTS_TO_KEEP_PER_NAMESPACE,
+                )
+            except Exception:
+                # A readable checkpoint remains resumable if maintenance cannot
+                # install its trigger; close-time compaction retries it.
+                logger.warning(
+                    "[%s] Failed to configure checkpoint retention",
+                    self.session_id,
+                    exc_info=True,
+                )
 
         # Initialize LLM manager with session context
         self.llm_manager = LLMManager(
@@ -3025,74 +3045,11 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         """Retain latest graph checkpoints; optionally reclaim the main DB."""
         if self._db_conn is None or keep < 1:
             return
-        async def _execute(sql: str, parameters: tuple = ()) -> None:
-            cursor = await self._db_conn.execute(sql, parameters)
-            await cursor.close()
-
-        await _execute(
-            """
-            DELETE FROM writes
-            WHERE EXISTS (
-                SELECT 1 FROM checkpoints AS c
-                WHERE c.thread_id = writes.thread_id
-                  AND c.checkpoint_ns = writes.checkpoint_ns
-                  AND c.checkpoint_id = writes.checkpoint_id
-                  AND c.checkpoint_id NOT IN (
-                      SELECT newest.checkpoint_id
-                      FROM checkpoints AS newest
-                      WHERE newest.thread_id = c.thread_id
-                        AND newest.checkpoint_ns = c.checkpoint_ns
-                      ORDER BY newest.checkpoint_id DESC
-                      LIMIT ?
-                  )
-            )
-            """,
-            (keep,),
+        await compact_checkpoint_history(
+            self._db_conn,
+            keep=keep,
+            vacuum=vacuum,
         )
-        await _execute(
-            """
-            DELETE FROM checkpoints AS c
-            WHERE c.checkpoint_id NOT IN (
-                SELECT newest.checkpoint_id
-                FROM checkpoints AS newest
-                WHERE newest.thread_id = c.thread_id
-                  AND newest.checkpoint_ns = c.checkpoint_ns
-                ORDER BY newest.checkpoint_id DESC
-                LIMIT ?
-            )
-            """,
-            (keep,),
-        )
-        await _execute(
-            """
-            DELETE FROM writes
-            WHERE NOT EXISTS (
-                SELECT 1 FROM checkpoints AS c
-                WHERE c.thread_id = writes.thread_id
-                  AND c.checkpoint_ns = writes.checkpoint_ns
-                  AND c.checkpoint_id = writes.checkpoint_id
-            )
-            """
-        )
-        # The oldest retained row may point to a pruned parent. Its state remains
-        # complete, so clear only that dangling history link.
-        await _execute(
-            """
-            UPDATE checkpoints
-            SET parent_checkpoint_id = NULL
-            WHERE parent_checkpoint_id IS NOT NULL
-              AND NOT EXISTS (
-                  SELECT 1 FROM checkpoints AS parent
-                  WHERE parent.thread_id = checkpoints.thread_id
-                    AND parent.checkpoint_ns = checkpoints.checkpoint_ns
-                    AND parent.checkpoint_id = checkpoints.parent_checkpoint_id
-              )
-            """
-        )
-        await self._db_conn.commit()
-        await _execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        if vacuum:
-            await _execute("VACUUM")
         logger.info(
             "[%s] Compacted LangGraph checkpoints to %d per namespace",
             self.session_id,

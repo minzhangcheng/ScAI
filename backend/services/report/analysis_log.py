@@ -109,6 +109,10 @@ class AnalysisLogMixin:
         # Use the same canonical path as sandbox and Snapshot V2 restore.
         from backend.config import get_session_states
         from backend.utils.live_paths import live_notebook_path
+        from backend.utils.notebook_media import (
+            NOTEBOOK_EXTERNAL_IMAGE_MIME,
+            is_verified_notebook_media_reference,
+        )
 
         notebook_path = live_notebook_path(get_session_states(state.id), state.id)
 
@@ -139,19 +143,37 @@ class AnalysisLogMixin:
                     # Extract text outputs
                     text_parts = []
                     has_inline_figure = False
+
+                    def _inspect_data_output(data):
+                        if not isinstance(data, dict):
+                            return False, []
+                        inline = "image/png" in data
+                        raw_external = data.get(NOTEBOOK_EXTERNAL_IMAGE_MIME)
+                        external_refs = (
+                            raw_external
+                            if isinstance(raw_external, list)
+                            else [raw_external]
+                        )
+                        inline = inline or any(
+                            isinstance(reference, dict)
+                            and is_verified_notebook_media_reference(
+                                notebook_path, reference
+                            )
+                            for reference in external_refs
+                        )
+                        text = []
+                        if "text/plain" in data:
+                            text.append(data["text/plain"])
+                        return inline, text
+
                     for out in cell.outputs:
                         if out.output_type == "stream":
                             text_parts.append(out.text)
-                        elif out.output_type == "execute_result":
-                            data = dict(out.data) if hasattr(out.data, '__iter__') else {}
-                            if "text/plain" in data:
-                                text_parts.append(data["text/plain"])
-                        elif out.output_type == "display_data":
-                            data = dict(out.data) if hasattr(out.data, '__iter__') else {}
-                            if "image/png" in data:
-                                has_inline_figure = True
-                            if "text/plain" in data:
-                                text_parts.append(data["text/plain"])
+                        elif out.output_type in {"execute_result", "display_data"}:
+                            data = dict(out.data) if hasattr(out.data, "__iter__") else {}
+                            output_has_figure, output_text = _inspect_data_output(data)
+                            has_inline_figure = has_inline_figure or output_has_figure
+                            text_parts.extend(output_text)
 
                     text_output = "\n".join(text_parts).strip()
 

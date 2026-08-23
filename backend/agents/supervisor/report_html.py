@@ -578,10 +578,14 @@ class ReportHtmlMixin:
         # Copy notebook to output for download
         if _analysis_state:
             from ...config import get_session_states
+            from ...utils.notebook_media import export_notebook_with_inline_media
             notebook_src = Path(get_session_states(_analysis_state.id)) / f"{_analysis_state.id}.ipynb"
             if notebook_src.exists():
                 try:
-                    shutil.copy2(notebook_src, output_path / f"{_analysis_state.id}.ipynb")
+                    export_notebook_with_inline_media(
+                        notebook_src,
+                        output_path / f"{_analysis_state.id}.ipynb",
+                    )
                 except Exception as e:
                     logger.warning(f"Could not copy notebook: {e}")
 

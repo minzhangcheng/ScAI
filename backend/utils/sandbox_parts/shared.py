@@ -10,6 +10,7 @@ import re
 import json
 import base64
 import asyncio
+import copy
 import time
 import hmac
 import hashlib
@@ -30,6 +31,14 @@ from backend.config._config import DATA_BASE_DIR
 # this often even while the kernel keeps streaming output (tqdm/scanpy verbose).
 IOPUB_POLL_CAP = 30.0
 _REGULAR_SAVE_COPY_CHUNK_BYTES: Final[int] = 8 * 1024 * 1024
+
+_NOTEBOOK_INLINE_IMAGE_LIMIT_BYTES: Final[int] = 64 * 1024
+_NOTEBOOK_TEXT_OUTPUT_LIMIT_CHARS: Final[int] = 256 * 1024
+_NOTEBOOK_HTML_OUTPUT_LIMIT_CHARS: Final[int] = 256 * 1024
+_NOTEBOOK_TRACEBACK_LIMIT_LINES: Final[int] = 200
+_NOTEBOOK_OUTPUT_OMISSION = "\n...[output omitted]...\n"
+_NOTEBOOK_HTML_OMISSION = "[HTML output omitted: exceeds limit]"
+_NOTEBOOK_TRACEBACK_OMISSION = "[... traceback omitted ...]"
 
 
 # ---------------------------------------------------------------------------
@@ -1516,6 +1525,7 @@ class NotebookState:
         self.session_id = session_id
         self.state_dir = Path(state_dir).absolute()  # Use absolute path
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.working_dir = self.state_dir.parent / "workspace"
         
         self.cells: List[Dict[str, Any]] = []  # List of {code, outputs, execution_count}
         self.execution_count: int = 0
@@ -1569,12 +1579,110 @@ class NotebookState:
     def session_path(self) -> Path:
         """Path for dill session dump"""
         return self.state_dir / f"{self.session_id}_session.pkl"
-    
+
+    @staticmethod
+    def _bound_notebook_text(value: Any, limit: int) -> Any:
+        if not isinstance(value, str) or len(value) <= limit:
+            return value
+        marker = _NOTEBOOK_OUTPUT_OMISSION
+        if limit <= len(marker):
+            return marker[:limit]
+        remaining = limit - len(marker)
+        head = (remaining + 1) // 2
+        tail = remaining - head
+        return value[:head] + marker + (value[-tail:] if tail else "")
+
+    def _compact_outputs_for_state(self, outputs: List[Dict]) -> List[Dict]:
+        """Compact outputs with this state's pinned workspace context."""
+        compacted = copy.deepcopy(outputs or [])
+        from backend.utils.notebook_media import (
+            EXTERNAL_IMAGE_PLACEHOLDER,
+            NOTEBOOK_EXTERNAL_IMAGE_MIME,
+            externalize_notebook_image,
+        )
+
+        def estimated_size(encoded: Any) -> int:
+            if not isinstance(encoded, str):
+                return 0
+            padding = len(encoded) - len(encoded.rstrip("="))
+            return max(0, (len(encoded) * 3) // 4 - padding)
+
+        for output in compacted:
+            if not isinstance(output, dict):
+                continue
+            for field in ("text", "evalue", "error"):
+                if isinstance(output.get(field), str):
+                    output[field] = self._bound_notebook_text(
+                        output[field], _NOTEBOOK_TEXT_OUTPUT_LIMIT_CHARS
+                    )
+            traceback = output.get("traceback")
+            if isinstance(traceback, list):
+                lines = [
+                    self._bound_notebook_text(line, _NOTEBOOK_TEXT_OUTPUT_LIMIT_CHARS)
+                    for line in traceback
+                ]
+                output["traceback"] = (
+                    lines[:100] + [_NOTEBOOK_TRACEBACK_OMISSION] + lines[-100:]
+                    if len(lines) > _NOTEBOOK_TRACEBACK_LIMIT_LINES
+                    else lines
+                )
+            data = output.get("data")
+            if not isinstance(data, dict):
+                continue
+            existing_external = data.pop(NOTEBOOK_EXTERNAL_IMAGE_MIME, None)
+            external_references: List[Any] = []
+            if isinstance(existing_external, list):
+                external_references.extend(existing_external)
+            elif existing_external is not None:
+                external_references.append(existing_external)
+            oversized_html = False
+            for key, value in list(data.items()):
+                if key == "text/plain":
+                    data[key] = self._bound_notebook_text(
+                        value, _NOTEBOOK_TEXT_OUTPUT_LIMIT_CHARS
+                    )
+                elif key == "text/html" and isinstance(value, str):
+                    if len(value) > _NOTEBOOK_HTML_OUTPUT_LIMIT_CHARS:
+                        data.pop(key, None)
+                        oversized_html = True
+                elif key in {"image/png", "image/jpeg"}:
+                    if estimated_size(value) <= _NOTEBOOK_INLINE_IMAGE_LIMIT_BYTES:
+                        continue
+                    reference = externalize_notebook_image(
+                        self.working_dir,
+                        self.notebook_path,
+                        value,
+                        media_type=key,
+                    )
+                    data.pop(key, None)
+                    if reference is None:
+                        data.setdefault("text/plain", EXTERNAL_IMAGE_PLACEHOLDER)
+                    else:
+                        external_references.append(reference)
+                        data.setdefault("text/plain", f"[external image: {reference['path']}]")
+            if external_references:
+                data[NOTEBOOK_EXTERNAL_IMAGE_MIME] = (
+                    external_references[0]
+                    if len(external_references) == 1
+                    else external_references
+                )
+            if oversized_html:
+                plain = data.get("text/plain")
+                if isinstance(plain, str) and plain:
+                    plain = f"{plain}\n{_NOTEBOOK_HTML_OMISSION}"
+                else:
+                    plain = _NOTEBOOK_HTML_OMISSION
+                data["text/plain"] = self._bound_notebook_text(
+                    plain,
+                    _NOTEBOOK_TEXT_OUTPUT_LIMIT_CHARS,
+                )
+        return compacted
+
     def add_cell(self, code: str, outputs: List[Dict], execution_count: int):
         """Add an executed cell to the history"""
         self.cells.append({
             "code": code,
-            "outputs": outputs,
+            "outputs": self._compact_outputs_for_state(outputs),
             "execution_count": execution_count,
             "executed_at": datetime.now().isoformat()
         })
@@ -1584,13 +1692,19 @@ class NotebookState:
     def save_notebook(self):
         """Save as Jupyter notebook format"""
         nb = new_notebook()
-        for cell in self.cells:
+        for index, cell in enumerate(self.cells):
             code_cell = new_code_cell(source=cell["code"])
+            # nbformat generates a random cell id when one is omitted.  A
+            # repeated save must be byte-stable so exports and checkpoints do
+            # not look changed merely because notebook metadata was rebuilt.
+            code_cell["id"] = hashlib.sha256(
+                f"{index}:{cell['code']}".encode("utf-8")
+            ).hexdigest()[:8]
             code_cell.execution_count = cell["execution_count"]
             
             # Convert outputs to notebook format
             cell_outputs = []
-            for out in cell["outputs"]:
+            for out in self._compact_outputs_for_state(cell["outputs"]):
                 if out["type"] == "stream":
                     cell_outputs.append(new_output(
                         output_type="stream",

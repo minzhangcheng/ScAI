@@ -1,14 +1,23 @@
 import asyncio
+import copy
+import math
 import threading
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
 
 import pytest
 
+from backend.models.schemas import WebSocketMessage
+from backend.routes import websockets as websocket_routes
 from backend.state import report_websockets, websockets
+from backend.constants import STRIPPED_FIGURE_PLACEHOLDER
 from backend.utils.websocket_delivery import (
     close_analysis_websocket,
     register_analysis_websocket,
     register_report_websocket,
     reset_websocket_delivery_for_tests,
+    serialize_realtime_message,
     send_analysis_json,
     send_connection_json,
     send_report_json,
@@ -74,6 +83,118 @@ async def test_send_failure_does_not_mutate_caller_durable_buffer():
     assert await send_analysis_json("session", durable_buffer[-1]) is False
     assert durable_buffer == [{"type": "status", "content": "persisted first"}]
     assert "session" not in websockets
+
+
+@pytest.mark.asyncio
+async def test_durable_history_strips_images_while_live_delivery_keeps_them():
+    image = "iVBORw0KGgo" + ("A" * 2048)
+    message = WebSocketMessage(
+        type="graphic_abstract",
+        content={
+            "image_base64": image,
+            "nested": {"png_base64": image, "raw": b"raw-binary"},
+        },
+    )
+    original = message.model_copy(deep=True)
+
+    durable = websocket_routes._serialize_realtime_messages([message])[0]
+    socket = _Socket()
+    connection = await register_analysis_websocket("session", socket)
+    assert await send_connection_json(connection, message.model_dump(mode="python")) is True
+    live = socket.sent[0]
+
+    assert durable["content"]["image_base64"] == STRIPPED_FIGURE_PLACEHOLDER
+    assert live["content"]["image_base64"] == image
+    assert durable["content"]["nested"]["raw"] == STRIPPED_FIGURE_PLACEHOLDER
+    assert live["content"]["nested"]["raw"] == STRIPPED_FIGURE_PLACEHOLDER
+    assert message == original
+
+
+@pytest.mark.asyncio
+async def test_durable_history_preserves_long_scientific_text_in_media_context():
+    image = "iVBORw0KGgo" + ("A" * 2048)
+    scientific_text = "marker " + ("gene-expression evidence; " * 80)
+    cycle: dict[str, object] = {}
+    cycle["self"] = cycle
+    message = WebSocketMessage(
+        type="graphic_abstract",
+        content={
+            "graphic_abstract": {
+                "caption": scientific_text,
+                "base64_summary": scientific_text,
+                "summary": cycle,
+                "image_base64": image,
+            }
+        },
+    )
+    original_content = copy.deepcopy(message.content)
+
+    durable = serialize_realtime_message(message, strip_binary=True)
+    live = serialize_realtime_message(message, strip_binary=False)
+    history = websocket_routes._serialize_realtime_messages([message])[0]
+
+    for payload in (durable, history):
+        graphic = payload["content"]["graphic_abstract"]
+        assert graphic["caption"] == scientific_text
+        assert graphic["base64_summary"] == scientific_text
+        assert graphic["image_base64"] == STRIPPED_FIGURE_PLACEHOLDER
+        assert graphic["summary"] == {"self": "[cycle]"}
+    graphic_live = live["content"]["graphic_abstract"]
+    assert graphic_live["caption"] == scientific_text
+    assert graphic_live["base64_summary"] == scientific_text
+    assert graphic_live["image_base64"] == image
+    assert graphic_live["summary"] == {"self": "[cycle]"}
+    assert message.content["graphic_abstract"]["summary"] is cycle
+    assert message.content["graphic_abstract"]["caption"] == original_content[
+        "graphic_abstract"
+    ]["caption"]
+    assert message.content["graphic_abstract"]["base64_summary"] == original_content[
+        "graphic_abstract"
+    ]["base64_summary"]
+    assert message.content["graphic_abstract"]["image_base64"] == original_content[
+        "graphic_abstract"
+    ]["image_base64"]
+
+
+@pytest.mark.asyncio
+async def test_live_delivery_normalizes_non_json_values_without_mutating_payload():
+    class Marker(Enum):
+        READY = "ready"
+
+    cycle: dict[str, object] = {}
+    cycle["self"] = cycle
+    payload = {
+        "timestamp": datetime(2026, 8, 23, 1, 2, 3, tzinfo=timezone.utc),
+        "marker": Marker.READY,
+        "path": Path("nested/file.txt"),
+        "set": {"b", "a"},
+        "nan": math.nan,
+        "raw": memoryview(b"raw"),
+        "cycle": cycle,
+    }
+    original = {
+        key: value
+        for key, value in payload.items()
+        if key != "cycle"
+    }
+    original["cycle"] = cycle
+    socket = _Socket()
+    connection = await register_analysis_websocket("json-values", socket)
+
+    assert await send_connection_json(connection, payload) is True
+
+    normalized = socket.sent[0]
+    assert normalized["timestamp"] == "2026-08-23T01:02:03+00:00"
+    assert normalized["marker"] == "ready"
+    assert normalized["path"] == "nested/file.txt"
+    assert normalized["set"] == ["a", "b"]
+    assert normalized["nan"] is None
+    assert normalized["raw"] == STRIPPED_FIGURE_PLACEHOLDER
+    assert "cycle" in normalized
+    assert payload.keys() == original.keys()
+    assert payload["timestamp"] == original["timestamp"]
+    assert payload["raw"].tobytes() == original["raw"].tobytes()
+    assert payload["cycle"] is cycle
 
 
 @pytest.mark.asyncio

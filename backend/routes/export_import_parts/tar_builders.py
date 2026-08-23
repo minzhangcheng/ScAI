@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import tarfile
+import tempfile
 import time
 import uuid
 import zipfile
@@ -46,6 +47,7 @@ from backend.state import (
 )
 from backend.utils.auth import require_session_ownership
 from backend.utils.blob_store import inline_blobs
+from backend.utils.checkpoint import create_checkpoint_export_snapshot
 from backend.utils.files import (
     legacy_session_state_paths,
     slugify_session_name,
@@ -316,7 +318,10 @@ def _add_states_to_tar(tf, session_id: str, include_runtime: bool = False):
     def _add(state_file: Path):
         if not include_runtime and is_sandbox_pickle(state_file.name):
             return
-        if not include_runtime and state_file.name.startswith("checkpoints.sqlite"):
+        # A live SQLite database is never archived by path. Runtime exports
+        # add exactly one verified standalone backup below, and portable
+        # exports omit the database plus its WAL/SHM companions entirely.
+        if state_file.name.startswith("checkpoints.sqlite"):
             return
         # The h5ad sidecar set is runtime too: a Snapshot V2 restore writes
         # `runtime_h5ad_manifest.json` plus the `<name>.h5ad` files it lists so a
@@ -332,14 +337,49 @@ def _add_states_to_tar(tf, session_id: str, include_runtime: bool = False):
         _safe_add_file(tf, state_file, f"{session_id}/states/{state_file.name}")
 
     states_dir = get_session_states(session_id)
-    if states_dir.exists():
-        for sf in sorted(states_dir.iterdir()):
-            if sf.is_file():
+    checkpoint_source = states_dir / "checkpoints.sqlite"
+    checkpoint_snapshot: Path | None = None
+    try:
+        if include_runtime and (
+            checkpoint_source.exists() or checkpoint_source.is_symlink()
+        ):
+            UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+            fd, temporary_name = tempfile.mkstemp(
+                prefix=".checkpoint-export-",
+                suffix=".sqlite",
+                dir=str(UPLOAD_TEMP_DIR),
+            )
+            os.close(fd)
+            checkpoint_snapshot = Path(temporary_name)
+            checkpoint_snapshot.unlink()
+            create_checkpoint_export_snapshot(
+                checkpoint_source,
+                checkpoint_snapshot,
+            )
+            added = _safe_add_file(
+                tf,
+                checkpoint_snapshot,
+                f"{session_id}/states/checkpoints.sqlite",
+            )
+            if not added:
+                raise OSError(
+                    f"failed to add verified checkpoint snapshot for {session_id}"
+                )
+
+        if states_dir.exists():
+            for sf in sorted(states_dir.iterdir()):
+                if sf.is_file() or sf.is_symlink():
+                    _add(sf)
+        # Legacy fallback (flat STATE_DIR layout)
+        for sf in legacy_session_state_paths(STATE_DIR, session_id):
+            if sf.is_file() or sf.is_symlink():
                 _add(sf)
-    # Legacy fallback (flat STATE_DIR layout)
-    for sf in legacy_session_state_paths(STATE_DIR, session_id):
-        if sf.is_file():
-            _add(sf)
+    finally:
+        if checkpoint_snapshot is not None:
+            try:
+                checkpoint_snapshot.unlink()
+            except FileNotFoundError:
+                pass
 
 def _add_session_blobs_to_tar(tf, session_id: str):
     """Add the session-level externalized blob store to tar archive.

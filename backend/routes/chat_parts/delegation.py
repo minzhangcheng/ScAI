@@ -27,7 +27,10 @@ from backend.utils.files import safe_filename, validate_session_id
 from backend.utils.upload import stream_save_file
 from backend.utils.settings_provider import AgentSettingsProvider
 from backend.utils.sandbox import _TPL_NOOP_INSTALL
-from backend.utils.websocket_delivery import send_analysis_json
+from backend.utils.websocket_delivery import (
+    append_durable_realtime_message,
+    send_analysis_json,
+)
 
 from .core import _build_chat_context
 
@@ -359,6 +362,9 @@ async def _run_chat_delegation(
 
         # 3. Create message callback that sends to WebSocket + persists
         async def chat_msg_callback(msg: WebSocketMessage):
+            # Persist before delivery so cancellation cannot lose history.
+            if hasattr(state, 'realtime_messages'):
+                append_durable_realtime_message(state, msg)
             await send_analysis_json(session_id, {
                         "type": msg.type,
                         "agent": msg.agent.value if msg.agent else None,
@@ -366,9 +372,6 @@ async def _run_chat_delegation(
                         "timestamp": msg.timestamp.isoformat(),
                         "id": msg.id,
             })
-            # Persist to realtime_messages
-            if hasattr(state, 'realtime_messages'):
-                state.realtime_messages.append(msg)
 
         # 4. Check for sandbox conflicts with running workflow
         workflow_running = session_id in workflows

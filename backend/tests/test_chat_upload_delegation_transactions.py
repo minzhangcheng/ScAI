@@ -2,12 +2,14 @@
 
 import asyncio
 import base64
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
 
-from backend.models.schemas import AnalysisState
+from backend.models.schemas import AnalysisState, WebSocketMessage
+from backend.routes.chat_parts import delegation as chat_delegation
 from backend.routes.chat_parts import endpoints as chat_endpoints
 from backend.services.session_lifecycle import SessionGenerationError
 from backend.state import chat_task_lock, chat_tasks
@@ -415,3 +417,94 @@ async def test_chat_delegation_stale_generation_publishes_nothing(monkeypatch):
     assert state.chat_messages == []
     async with chat_task_lock:
         assert state.id not in chat_tasks
+
+
+@pytest.mark.asyncio
+async def test_chat_delegation_callback_persists_durable_capped_history(
+    monkeypatch,
+):
+    from backend.constants import STRIPPED_FIGURE_PLACEHOLDER
+    from backend.utils import agent_llm, llm_client
+
+    state = AnalysisState(id="chat-delegation-durable", user_id="owner")
+    state.realtime_messages = [
+        WebSocketMessage(type="status", content=f"old-{index}")
+        for index in range(1000)
+    ]
+    image = "iVBORw0KGgo" + ("A" * 2048)
+    emitted = WebSocketMessage(
+        type="graphic_abstract",
+        content={"image_base64": image, "raw": b"raw-binary"},
+    )
+
+    class _Client:
+        async def close(self):
+            return None
+
+    class _Manager:
+        def __init__(self, **_kwargs):
+            self.openrouter = _Client()
+
+        async def close(self):
+            return None
+
+    async def resolve(_user_id):
+        return SimpleNamespace(
+            api=SimpleNamespace(api_key="", llm_base_url="", proxy_url=None)
+        )
+
+    async def execute(
+        _session_id,
+        _state,
+        _agent_name,
+        _instruction,
+        _agent_client,
+        message_callback,
+        _saved_files,
+    ):
+        await message_callback(emitted)
+        raise asyncio.CancelledError
+
+    async def cancel_after_durable_append(_session_id, live):
+        assert len(state.realtime_messages) == 1000
+        durable = state.realtime_messages[-1]
+        assert durable is not emitted
+        assert durable.content["image_base64"] == STRIPPED_FIGURE_PLACEHOLDER
+        assert durable.content["raw"] == STRIPPED_FIGURE_PLACEHOLDER
+        assert live["content"]["image_base64"] == image
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(llm_client, "LLMManager", _Manager)
+    monkeypatch.setattr(agent_llm, "get_agent_llm_client", lambda *_args: _Client())
+    monkeypatch.setattr(chat_delegation, "resolve_config_for_user", resolve)
+    monkeypatch.setattr(chat_delegation, "_execute_chat_agent", execute)
+    monkeypatch.setattr(chat_delegation, "_send_chat_ws", AsyncMock())
+    monkeypatch.setattr(
+        chat_delegation,
+        "send_analysis_json",
+        cancel_after_durable_append,
+    )
+    monkeypatch.setattr(chat_delegation, "update_session_cache", AsyncMock())
+    monkeypatch.setattr(chat_delegation, "async_save_session", AsyncMock())
+
+    with pytest.raises(asyncio.CancelledError):
+        await chat_delegation._run_chat_delegation(
+            state.id,
+            state,
+            {
+                "plan": "domain-neutral check",
+                "delegates": [
+                    {"agent": "literature", "instruction": "inspect evidence"}
+                ],
+            },
+            "inspect evidence",
+            [],
+            [],
+        )
+
+    assert len(state.realtime_messages) == 1000
+    durable = state.realtime_messages[-1]
+    assert durable is not emitted
+    assert durable.content["image_base64"] == STRIPPED_FIGURE_PLACEHOLDER
+    assert durable.content["raw"] == STRIPPED_FIGURE_PLACEHOLDER
+    assert emitted.content["image_base64"] == image

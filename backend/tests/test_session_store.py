@@ -1,6 +1,7 @@
 """Tests for session_store: save/load round-trip + list discovery."""
 import asyncio
 import base64
+import copy
 import json
 import os
 import time
@@ -18,15 +19,54 @@ from backend.models.schemas import (
     AnalysisState,
     FigureReviewStatus,
     PublicationFigure,
+    WebSocketMessage,
 )
 from backend.models.schemas import TaskStatus
+from backend.constants import STRIPPED_FIGURE_PLACEHOLDER
 from backend.state import last_save_times, sessions
-from backend.config import ensure_session_dirs, get_session_workspace
+from backend.config import ensure_session_dirs, get_session_states, get_session_workspace
 from backend.tests.figure_image_helpers import valid_image_bytes, valid_pdf_bytes
 
 
 def _make_state(session_id: str, user_id: str = "u-1") -> AnalysisState:
     return AnalysisState(id=session_id, user_id=user_id, name="t")
+
+
+def test_durable_save_strips_nested_binary_before_blob_write_without_mutation(tmp_path, monkeypatch):
+    """Session JSON and blob files receive a copy-only durable payload."""
+    sid = "durable-binary-session"
+    ensure_session_dirs(sid)
+    image = "iVBORw0KGgo" + ("A" * 4096)
+    state = _make_state(sid)
+    state.realtime_messages = [
+        WebSocketMessage(
+            type="graphic_abstract",
+            content={
+                "image_base64": image,
+                "nested": {
+                    "png_base64": image,
+                    "raw_valid": "utf8-bytes".encode("utf-8"),
+                    "raw_invalid": b"\xff\xfe",
+                },
+            },
+        )
+    ]
+    original = copy.deepcopy(state.model_dump(mode="python"))
+
+    save_session_to_disk(sid, state)
+
+    session_file = get_session_states(sid).parent / "session.json"
+    raw_session = session_file.read_text(encoding="utf-8")
+    persisted = json.loads(raw_session)
+    persisted_content = persisted["realtime_messages"][0]["content"]
+    blob_dir = session_file.parent / "blobs"
+    blob_payloads = [p.read_bytes() for p in blob_dir.glob("*.b64")] if blob_dir.exists() else []
+    assert image not in raw_session
+    assert persisted_content["nested"]["raw_valid"] == STRIPPED_FIGURE_PLACEHOLDER
+    assert persisted_content["nested"]["raw_invalid"] == STRIPPED_FIGURE_PLACEHOLDER
+    assert "utf8-bytes" not in raw_session
+    assert all(image.encode("utf-8") not in payload for payload in blob_payloads)
+    assert state.model_dump(mode="python") == original
 
 
 def test_save_and_load_roundtrip(tmp_path, monkeypatch):

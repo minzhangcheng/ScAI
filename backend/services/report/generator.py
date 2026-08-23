@@ -854,13 +854,16 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         report = _sanitize(report)
 
         # Copy notebook to report directory for download
-        import shutil as _shutil
         from backend.utils.live_paths import live_notebook_path
+        from backend.utils.notebook_media import export_notebook_with_inline_media
 
         notebook_src = live_notebook_path(get_session_states(report_state.id), report_state.id)
         if notebook_src.exists():
             try:
-                _shutil.copy2(str(notebook_src), str(self.output_dir / f"{report_state.id}.ipynb"))
+                export_notebook_with_inline_media(
+                    notebook_src,
+                    self.output_dir / f"{report_state.id}.ipynb",
+                )
             except Exception as e:
                 logger.warning(f"Could not copy notebook: {e}")
 
