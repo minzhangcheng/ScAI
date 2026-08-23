@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -46,8 +47,16 @@ def _clear_workflow_globals(monkeypatch):
     from backend.services import workflow_runner
     from backend.services.workflow_runner import _report_tasks
 
+    async def _noop_persist(*_args, **_kwargs):
+        return None
+
     monkeypatch.setattr(
         workflow_runner, "assert_generation_writable", lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        workflow_runner,
+        "_async_save_session_under_lifecycle",
+        _noop_persist,
     )
 
     sessions.clear()
@@ -131,6 +140,383 @@ async def test_headless_runner_resumes_existing_round_state(monkeypatch):
     assert workflow.resume_calls == [("s", state)]
     assert workflow.close_calls == 1
     assert workflows == {}
+
+
+@pytest.mark.asyncio
+async def test_headless_runner_runs_when_it_holds_the_reservation(monkeypatch):
+    from backend.services import workflow_runner
+    from backend.state import claim_initializing_session
+    import backend.workflow as workflow_module
+
+    state = AnalysisState(id="reserved", user_id="u", status=TaskStatus.RUNNING)
+    sessions[state.id] = state
+
+    async def _resolve(_user_id):
+        return SimpleNamespace(max_rounds=3)
+
+    async def _save(_session_id, _state):
+        return None
+
+    async def _update(session_id, current):
+        sessions[session_id] = current
+
+    monkeypatch.setattr(workflow_module, "SingleCellAnalysisWorkflow", _FakeWorkflow)
+    monkeypatch.setattr(workflow_runner, "resolve_config_for_user", _resolve)
+    monkeypatch.setattr(
+        workflow_runner, "_async_save_session_under_lifecycle", _save,
+    )
+    monkeypatch.setattr(workflow_runner, "_update_session_cache", _update)
+
+    token = claim_initializing_session(state.id)
+    _run_tasks[state.id] = asyncio.current_task()
+    await workflow_runner._headless_workflow_runner(
+        state.id, initializing_token=token,
+    )
+
+    workflow = _FakeWorkflow.instances[0]
+    assert workflow.run_calls == [(state, state.id)]
+    assert state.status is TaskStatus.COMPLETED
+    assert workflow.close_calls == 1
+    assert workflows == {}
+    assert state.id not in _run_tasks
+    assert state.id not in initializing_sessions
+
+
+@pytest.mark.asyncio
+async def test_headless_runner_registers_before_first_state_sync(monkeypatch):
+    from backend.services import workflow_runner
+    import backend.workflow as workflow_module
+
+    session_id = "headless-registration"
+    state = AnalysisState(id=session_id, user_id="u", status=TaskStatus.RUNNING)
+    observed = {}
+    saved = []
+
+    class _FirstNodeWorkflow:
+        def __init__(self, config, session_id, message_callback=None, state_callback=None):
+            self.state_callback = state_callback
+
+        async def run(self, initial_state, thread_id):
+            observed["registered"] = workflows.get(thread_id) is self
+            observed["written"] = await self.state_callback(
+                AnalysisState(
+                    id=thread_id,
+                    user_id="u",
+                    status=TaskStatus.RUNNING,
+                    current_round=1,
+                )
+            )
+            return initial_state
+
+        async def close(self):
+            return None
+
+    async def _resolve(_user_id):
+        return SimpleNamespace(max_rounds=3)
+
+    async def _save(_session_id, current):
+        saved.append(current)
+
+    async def _update(session, current):
+        sessions[session] = current
+
+    monkeypatch.setattr(workflow_module, "SingleCellAnalysisWorkflow", _FirstNodeWorkflow)
+    monkeypatch.setattr(workflow_runner, "resolve_config_for_user", _resolve)
+    monkeypatch.setattr(
+        workflow_runner, "_async_save_session_under_lifecycle", _save,
+    )
+    monkeypatch.setattr(workflow_runner, "_update_session_cache", _update)
+    sessions[session_id] = state
+
+    await workflow_runner._headless_workflow_runner(session_id)
+
+    assert observed == {"registered": True, "written": True}
+    assert saved and saved[0].current_round == 1
+
+
+@pytest.mark.asyncio
+async def test_headless_state_callback_accepts_graph_state_swap(monkeypatch):
+    from backend.services import workflow_runner
+    import backend.workflow as workflow_module
+
+    session_id = "headless-graph-swap"
+    original = AnalysisState(id=session_id, user_id="u", status=TaskStatus.RUNNING)
+    replacement = AnalysisState(
+        id=session_id, user_id="u", status=TaskStatus.WAITING_INPUT,
+    )
+    saved = []
+
+    class _GraphSwapWorkflow:
+        def __init__(self, config, session_id, message_callback=None, state_callback=None):
+            self.state_callback = state_callback
+
+        async def run(self, initial_state, thread_id):
+            graph_state = AnalysisState(
+                id=thread_id,
+                user_id="u",
+                status=TaskStatus.RUNNING,
+                current_round=4,
+            )
+            assert graph_state is not initial_state
+            assert await self.state_callback(graph_state) is True
+
+            # Exercise the commit-point recheck: a replacement that publishes
+            # while history is being carried must not be overwritten by the
+            # stale graph owner.
+            from backend.routes import websockets as websocket_routes
+
+            real_preserve = websocket_routes._preserve_realtime_stream
+
+            def _replace_during_carry(previous, incoming):
+                real_preserve(previous, incoming)
+                workflows[thread_id] = object()
+                sessions[thread_id] = replacement
+
+            monkeypatch.setattr(
+                websocket_routes,
+                "_preserve_realtime_stream",
+                _replace_during_carry,
+            )
+            try:
+                assert await self.state_callback(
+                    AnalysisState(
+                        id=thread_id,
+                        user_id="u",
+                        status=TaskStatus.RUNNING,
+                        current_round=5,
+                    )
+                ) is False
+            finally:
+                monkeypatch.setattr(
+                    websocket_routes,
+                    "_preserve_realtime_stream",
+                    real_preserve,
+                )
+            return graph_state
+
+        async def close(self):
+            return None
+
+    async def _resolve(_user_id):
+        return SimpleNamespace(max_rounds=5)
+
+    async def _save(_session_id, current):
+        saved.append(current)
+
+    async def _update(session, current):
+        sessions[session] = current
+
+    monkeypatch.setattr(workflow_module, "SingleCellAnalysisWorkflow", _GraphSwapWorkflow)
+    monkeypatch.setattr(workflow_runner, "resolve_config_for_user", _resolve)
+    monkeypatch.setattr(
+        workflow_runner, "_async_save_session_under_lifecycle", _save,
+    )
+    monkeypatch.setattr(workflow_runner, "_update_session_cache", _update)
+    sessions[session_id] = original
+
+    await workflow_runner._headless_workflow_runner(session_id)
+
+    assert sessions[session_id] is replacement
+    assert len(saved) == 1
+    assert saved[0].current_round == 4
+
+
+@pytest.mark.asyncio
+async def test_headless_state_callback_rejects_superseded_workflow(monkeypatch):
+    from backend.services import workflow_runner
+    import backend.workflow as workflow_module
+
+    session_id = "headless-superseded"
+    original = AnalysisState(id=session_id, user_id="u", status=TaskStatus.RUNNING)
+    restored = AnalysisState(
+        id=session_id, user_id="u", status=TaskStatus.WAITING_INPUT,
+    )
+    saved = []
+
+    class _SupersededWorkflow:
+        def __init__(self, config, session_id, message_callback=None, state_callback=None):
+            self.state_callback = state_callback
+
+        async def run(self, initial_state, thread_id):
+            workflows[thread_id] = object()
+            sessions[thread_id] = restored
+            assert await self.state_callback(initial_state) is False
+            raise RuntimeError("superseded workflow failure")
+
+        async def close(self):
+            return None
+
+    async def _resolve(_user_id):
+        return SimpleNamespace(max_rounds=3)
+
+    async def _save(_session_id, current):
+        saved.append(current)
+
+    async def _update(session, current):
+        sessions[session] = current
+
+    monkeypatch.setattr(workflow_module, "SingleCellAnalysisWorkflow", _SupersededWorkflow)
+    monkeypatch.setattr(workflow_runner, "resolve_config_for_user", _resolve)
+    monkeypatch.setattr(workflow_runner, "async_save_session", _save)
+    monkeypatch.setattr(workflow_runner, "_update_session_cache", _update)
+    sessions[session_id] = original
+
+    await workflow_runner._headless_workflow_runner(session_id)
+
+    assert sessions[session_id] is restored
+    assert restored.status is TaskStatus.WAITING_INPUT
+    assert saved == []
+
+
+async def _capture_headless_callbacks(
+    monkeypatch, state, *, owner_registry=None,
+):
+    from backend.services import workflow_runner
+    import backend.workflow as workflow_module
+
+    captured = {}
+
+    class _CapturingWorkflow:
+        def __init__(self, config, session_id, message_callback=None, state_callback=None):
+            captured["message_callback"] = message_callback
+            captured["state_callback"] = state_callback
+
+    async def _resolve(_user_id):
+        return SimpleNamespace(max_rounds=3)
+
+    async def _save(_session_id, _state):
+        return None
+
+    async def _update(session_id, current):
+        sessions[session_id] = current
+
+    monkeypatch.setattr(workflow_module, "SingleCellAnalysisWorkflow", _CapturingWorkflow)
+    monkeypatch.setattr(workflow_runner, "resolve_config_for_user", _resolve)
+    monkeypatch.setattr(workflow_runner, "async_save_session", _save)
+    monkeypatch.setattr(workflow_runner, "_update_session_cache", _update)
+    sessions[state.id] = state
+    workflow, built = await workflow_runner._build_workflow_for_session(
+        state.id, owner_registry=owner_registry,
+    )
+    assert built is state
+    captured["workflow"] = workflow
+    if owner_registry is not None:
+        owner_registry[state.id] = workflow
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_headless_message_callback_is_async_bounded_and_binary_free(monkeypatch):
+    from backend.constants import STRIPPED_FIGURE_PLACEHOLDER
+    from backend.models.schemas import WebSocketMessage
+
+    state = AnalysisState(id="headless-messages", user_id="u")
+    captured = await _capture_headless_callbacks(
+        monkeypatch, state, owner_registry=workflows,
+    )
+    callback = captured["message_callback"]
+    assert asyncio.iscoroutinefunction(callback)
+
+    for index in range(1001):
+        await callback(
+            WebSocketMessage(
+                type="status",
+                content={"index": index, "blob": b"binary"},
+            )
+        )
+
+    assert len(state.realtime_messages) == 1000
+    assert state.realtime_messages[0].content["index"] == 1
+    assert all(
+        message.content["blob"] == STRIPPED_FIGURE_PLACEHOLDER
+        for message in state.realtime_messages
+    )
+
+    before = len(state.realtime_messages)
+    sessions.pop(state.id)
+    assert await callback(
+        WebSocketMessage(type="status", content="missing")
+    ) is False
+    assert len(state.realtime_messages) == before
+
+    sessions[state.id] = state
+    workflows[state.id] = object()
+    assert await callback(
+        WebSocketMessage(type="status", content="superseded")
+    ) is False
+    assert len(state.realtime_messages) == before
+
+
+@pytest.mark.asyncio
+async def test_headless_state_swap_carries_and_persists_live_history(monkeypatch):
+    from backend.models.schemas import WebSocketMessage
+    from backend.services import workflow_runner
+    import backend.workflow as workflow_module
+
+    session_id = "headless-history"
+    original = AnalysisState(id=session_id, user_id="u", status=TaskStatus.RUNNING)
+    saved = []
+
+    class _HistoryWorkflow:
+        def __init__(self, config, session_id, message_callback=None, state_callback=None):
+            self.message_callback = message_callback
+            self.state_callback = state_callback
+
+        async def run(self, initial_state, thread_id):
+            await self.message_callback(
+                WebSocketMessage(type="status", content={"text": "live", "raw": b"x"})
+            )
+            graph_state = AnalysisState(
+                id=thread_id,
+                user_id="u",
+                status=TaskStatus.RUNNING,
+                current_round=2,
+            )
+            assert await self.state_callback(graph_state) is True
+            return graph_state
+
+        async def close(self):
+            return None
+
+    async def _resolve(_user_id):
+        return SimpleNamespace(max_rounds=3)
+
+    async def _save(_session_id, current):
+        saved.append(current)
+
+    async def _update(session, current):
+        sessions[session] = current
+
+    monkeypatch.setattr(workflow_module, "SingleCellAnalysisWorkflow", _HistoryWorkflow)
+    monkeypatch.setattr(workflow_runner, "resolve_config_for_user", _resolve)
+    monkeypatch.setattr(
+        workflow_runner, "_async_save_session_under_lifecycle", _save,
+    )
+    monkeypatch.setattr(workflow_runner, "_update_session_cache", _update)
+    sessions[session_id] = original
+
+    await workflow_runner._headless_workflow_runner(session_id)
+
+    assert sessions[session_id] is not original
+    assert sessions[session_id].current_round == 2
+    assert [m.content["text"] for m in sessions[session_id].realtime_messages] == ["live"]
+    assert sessions[session_id].realtime_messages[0].content["raw"] == "[image]"
+    assert saved and saved[-1] is sessions[session_id]
+
+
+@pytest.mark.asyncio
+async def test_report_callback_retains_object_identity_guard(monkeypatch):
+    state = AnalysisState(
+        id="report-identity", user_id="u", status=TaskStatus.GENERATING_REPORT,
+    )
+    captured = await _capture_headless_callbacks(monkeypatch, state)
+    from_graph = AnalysisState(
+        id=state.id, user_id="u", status=TaskStatus.WAITING_INPUT,
+    )
+    sessions[state.id] = from_graph
+
+    assert await captured["state_callback"](state) is False
+    assert sessions[state.id] is from_graph
 
 
 @pytest.mark.asyncio
@@ -386,7 +772,7 @@ async def test_old_headless_finally_cannot_clear_replacement_initializing_owner(
     build_started = asyncio.Event()
     release_build = asyncio.Event()
 
-    async def _delayed_empty_build(_session_id):
+    async def _delayed_empty_build(_session_id, **_kwargs):
         build_started.set()
         await release_build.wait()
         return None, None

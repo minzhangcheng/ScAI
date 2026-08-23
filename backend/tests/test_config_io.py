@@ -84,6 +84,34 @@ class TestConfigRoundtrip:
         exported = export_session_to_config(state)
         assert exported["agents"]["pi"]["model"] == "gpt-4o"
 
+    def test_disabled_agent_stays_disabled_across_roundtrip(self):
+        data = _config_dict()
+        data["agents"]["pi"]["model"] = ""
+        config = ConfigV1.model_validate(data)
+
+        state = apply_config_to_session(config, user_id="u1")
+        assert "pi" in state.custom_models
+        assert state.custom_models["pi"] == ""
+        assert state.agent_server_configs["pi"]["model"] == ""
+
+        exported = export_session_to_config(state)
+        assert exported["agents"]["pi"]["model"] == ""
+
+        restored = apply_config_to_session(
+            ConfigV1.model_validate(exported), user_id="u1"
+        )
+        assert restored.custom_models["pi"] == ""
+        assert restored.agent_server_configs["pi"]["model"] == ""
+
+    def test_absent_agent_keeps_installation_default(self):
+        data = _config_dict()
+        data["agents"] = {}
+        config = ConfigV1.model_validate(data)
+
+        state = apply_config_to_session(config, user_id="u1")
+        assert "pi" not in state.custom_models
+        assert "model" not in export_session_to_config(state)["agents"].get("pi", {})
+
     def test_all_agents_get_fallback_server_config(self):
         """Every agent gets server_config from default_llm if no override.
 

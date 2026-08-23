@@ -30,7 +30,7 @@ def build_agent_server_configs(config: ConfigV1) -> Dict[str, Dict[str, Any]]:
         result[name] = {
             "llm_base_url": ov.llm_base_url or default_llm.llm_base_url,
             "api_key": ov.api_key or default_llm.api_key,
-            "model": ov.model or default_llm.model,
+            "model": default_llm.model if ov.model is None else ov.model,
             "temperature": float(ov.temperature if ov.temperature is not None else 0.7),
         }
     return result
@@ -107,7 +107,7 @@ def apply_config_to_session(config: ConfigV1, user_id: str = "") -> AnalysisStat
 
     for name in AGENT_NAMES:
         ov = (config.agents or {}).get(name) or AgentOverride()
-        if ov.model:
+        if ov.model is not None:
             custom_models[name] = ov.model
         if ov.custom_prompt:
             custom_prompts[name] = ov.custom_prompt

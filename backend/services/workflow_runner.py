@@ -5,6 +5,7 @@ workflow management logic.
 """
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from backend.models.schemas import TaskStatus
 from backend.workflow.helpers import WorkflowSupersededError
@@ -12,14 +13,20 @@ from backend.state import (
     _run_tasks,
     detailed_report_tasks,
     report_workflows, sessions, workflows,
+    session_access_times,
     state_lock as _state_lock,
     initializing_sessions as _initializing_sessions,
     claim_initializing_session,
     release_initializing_session,
 )
-from backend.services.session_store import async_save_session, update_session_cache as _update_session_cache
+from backend.services.session_store import (
+    _async_save_session_under_lifecycle,
+    async_save_session,
+    update_session_cache as _update_session_cache,
+)
 from backend.services.session_lifecycle import (
     assert_generation_writable,
+    adopt_persisted_generation,
     get_lifecycle_lock,
     snapshot_operation_active,
 )
@@ -66,6 +73,7 @@ async def _build_workflow_for_session(
     session_id: str,
     *,
     fail_on_missing_config: bool = True,
+    owner_registry: dict | None = None,
 ):
     """Load state + resolve config + construct the workflow. Returns (workflow, state) or (None, state/None).
 
@@ -93,35 +101,71 @@ async def _build_workflow_for_session(
             return None, None
         return None, state
 
-    def message_callback(msg):
-        pass
+    # Filled after construction so state_callback can identify the workflow
+    # that owns graph writes without capturing a stale state object.
+    published: dict[str, object] = {}
+
+    def _owner_is_current(owner_registry, owner, current) -> bool:
+        if current is None:
+            return False
+        if owner_registry is not None:
+            return owner is not None and owner_registry.get(session_id) is owner
+        # Report-only generation never round-trips through the graph, so it
+        # retains the state-object identity guard.
+        return current is state
+
+    async def message_callback(msg):
+        """Append only to a live canonical state owned by this workflow."""
+        from backend.utils.websocket_delivery import append_durable_realtime_message
+
+        async with get_lifecycle_lock(session_id):
+            async with _state_lock:
+                current = sessions.get(session_id)
+                owner = published.get("workflow")
+                if not _owner_is_current(owner_registry, owner, current):
+                    return False
+                append_durable_realtime_message(current, msg)
+        return True
 
     async def state_callback(updated_state):
-        # Is-current guard, the headless counterpart of the WebSocket runner's
-        # `_write_state_if_current`. That one keys on workflow identity, which
-        # this runner cannot use: the report-only workflow is never registered
-        # in `workflows`, so it has no anchor there — and for the same reason
-        # `_retire_superseded_workflow` returns early on it and never sets the
-        # superseded flag it would otherwise observe. A restore that commits
-        # mid-run installs a NEW AnalysisState object in `sessions`, so object
-        # identity is the signal that survives: without this check the run
-        # finished on the state it started with and wrote it straight back over
-        # the cache entry and session.json the restore had just installed,
-        # silently undoing the restore.
-        #
-        # Checked under `state_lock` and released before writing —
-        # `_update_session_cache` takes the same (non-reentrant) lock.
-        async with _state_lock:
-            current = sessions.get(session_id)
-            superseded = current is not None and current is not updated_state
-        if superseded:
-            logger.info(
-                "[%s] Session state was replaced (restore); skipping stale write",
-                session_id,
+        """Atomically carry history, publish the graph state, and persist it."""
+        from backend.routes.websockets import _preserve_realtime_stream
+
+        # update_session_cache() and async_save_session() each acquire this
+        # lifecycle lock themselves. Keep the complete callback transaction on
+        # the same boundary, update the cache directly under state_lock, and
+        # use the under-lifecycle persistence primitive to avoid re-entry.
+        async with get_lifecycle_lock(session_id):
+            async with _state_lock:
+                current = sessions.get(session_id)
+                owner = published.get("workflow")
+                if not _owner_is_current(owner_registry, owner, current):
+                    return False
+                _preserve_realtime_stream(current, updated_state)
+                # History carry is synchronous, but a restore/replacement
+                # may have published while the incoming graph object was being
+                # prepared. Recheck before changing the canonical cache so a
+                # stale owner cannot overwrite that replacement.
+                if not _owner_is_current(
+                    owner_registry, owner, sessions.get(session_id)
+                ):
+                    return False
+                adopt_persisted_generation(updated_state)
+                sessions[session_id] = updated_state
+                session_access_times[session_id] = time.time()
+
+                # Reconfirm at the canonical commit point while the state lock
+                # still excludes ordinary restore/cache replacement writers.
+                if not _owner_is_current(
+                    owner_registry, owner, sessions.get(session_id)
+                ) or sessions.get(session_id) is not updated_state:
+                    return False
+
+            # The lifecycle lock excludes deletion/restore generation changes;
+            # no state_lock is held while persistence snapshots the model.
+            await _async_save_session_under_lifecycle(
+                session_id, updated_state,
             )
-            return False
-        await _update_session_cache(session_id, updated_state)
-        await async_save_session(session_id, updated_state)
         return True
 
     workflow = SingleCellAnalysisWorkflow(
@@ -130,6 +174,7 @@ async def _build_workflow_for_session(
         message_callback=message_callback,
         state_callback=state_callback,
     )
+    published["workflow"] = workflow
 
     return workflow, state
 
@@ -421,9 +466,17 @@ async def _headless_workflow_runner(
     initializing_token: object | None = None,
 ):
     """Run the analysis workflow without a WebSocket connection (for API usage)."""
+    # An import inside this function makes `_run_tasks` local for the whole
+    # function. Bind it before the reservation check; otherwise a reserved
+    # runner fails before reaching its first graph node.
+    from backend.state import _run_tasks
+
     workflow = None
     try:
-        workflow, state = await _build_workflow_for_session(session_id)
+        workflow, state = await _build_workflow_for_session(
+            session_id,
+            owner_registry=workflows,
+        )
         if workflow is None:
             return
 
@@ -479,11 +532,28 @@ async def _headless_workflow_runner(
             )
     except Exception:
         logger.exception(f"Headless workflow failed for session {session_id}")
-        state = sessions.get(session_id)
-        if state:
-            state.status = TaskStatus.FAILED
-            await _update_session_cache(session_id, state)
-            await async_save_session(session_id, state)
+        # A replaced/deleted workflow must not resurrect its old state as
+        # FAILED. Use the same lifecycle + workflow identity boundary as the
+        # normal graph callback, then persist without re-entering either lock.
+        async with get_lifecycle_lock(session_id):
+            failed_state = None
+            async with _state_lock:
+                state = sessions.get(session_id)
+                if (
+                    state is None
+                    or workflow is None
+                    or workflows.get(session_id) is not workflow
+                ):
+                    logger.info(
+                        "[%s] Failed workflow no longer owns the session; "
+                        "skipping stale FAILED write",
+                        session_id,
+                    )
+                else:
+                    state.status = TaskStatus.FAILED
+                    failed_state = state
+            if failed_state is not None:
+                await _async_save_session_under_lifecycle(session_id, failed_state)
     finally:
         close_complete = True
         if workflow is not None:
@@ -503,8 +573,6 @@ async def _headless_workflow_runner(
                 logger.exception(
                     "Headless workflow cleanup failed for session %s", session_id
                 )
-        from backend.state import _run_tasks
-
         async with _state_lock:
             if initializing_token is not None:
                 release_initializing_session(session_id, initializing_token)
