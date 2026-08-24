@@ -21,14 +21,14 @@ export const agentIcons: Record<AgentType, typeof Users> = {
 }
 
 export const agentBgColors: Record<AgentType, string> = {
-  pi: 'bg-violet-50 border-violet-200',
-  pathology: 'bg-rose-50 border-rose-200',
-  bioinformatics: 'bg-emerald-50 border-emerald-200',
-  biochemistry: 'bg-amber-50 border-amber-200',
-  literature: 'bg-blue-50 border-blue-200',
-  painter: 'bg-pink-50 border-pink-200',
-  supervisor: 'bg-cyan-50 border-cyan-200',
-  technique: 'bg-teal-50 border-teal-200',
+  pi: 'bg-violet-50 dark:bg-violet-950/40 border-violet-200 dark:border-violet-800',
+  pathology: 'bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-800',
+  bioinformatics: 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800',
+  biochemistry: 'bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800',
+  literature: 'bg-blue-50 dark:bg-blue-950/40 border-blue-200 dark:border-blue-800',
+  painter: 'bg-pink-50 dark:bg-pink-950/40 border-pink-200 dark:border-pink-800',
+  supervisor: 'bg-cyan-50 dark:bg-cyan-950/40 border-cyan-200 dark:border-cyan-800',
+  technique: 'bg-teal-50 dark:bg-teal-950/40 border-teal-200 dark:border-teal-800',
 }
 
 export const agentGradients: Record<AgentType, string> = {

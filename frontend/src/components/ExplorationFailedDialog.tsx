@@ -79,7 +79,7 @@ export default function ExplorationFailedDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="exploration-failed-title"
-        className="bg-white rounded-2xl shadow-modal w-full max-w-md mx-4 overflow-hidden animate-scale-in"
+        className="bg-white dark:bg-surface-900 rounded-2xl shadow-modal w-full max-w-md mx-4 overflow-hidden animate-scale-in"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -92,7 +92,7 @@ export default function ExplorationFailedDialog({
           </div>
           <button
             onClick={onContinue}
-            className="p-1 hover:bg-surface-100 rounded-lg transition-colors"
+            className="p-1 hover:bg-surface-100 dark:hover:bg-surface-800 rounded-lg transition-colors"
             aria-label="Close"
           >
             <X className="w-5 h-5 text-surface-400" />
@@ -108,7 +108,7 @@ export default function ExplorationFailedDialog({
             </p>
           </div>
           {info.reason && (
-            <div className="text-xs text-surface-500 bg-surface-50 rounded-lg px-3 py-2">
+            <div className="text-xs text-surface-500 dark:text-surface-400 bg-surface-50 dark:bg-surface-800 rounded-lg px-3 py-2">
               <span className="font-medium">{t('explorationFailedReasonLabel')}: </span>
               <span>{reasonText}</span>
               {typeof info.round === 'number' && (
@@ -119,7 +119,7 @@ export default function ExplorationFailedDialog({
         </div>
 
         {/* Actions */}
-        <div className="flex flex-col gap-2 px-6 py-4 border-t border-surface-200 bg-surface-50">
+        <div className="flex flex-col gap-2 px-6 py-4 border-t border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-800">
           <button
             data-autofocus
             onClick={onGoToData}

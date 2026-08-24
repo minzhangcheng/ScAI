@@ -718,7 +718,7 @@ export function ReportPanel() {
           // HTML Report - use src instead of srcDoc so relative paths work
           <iframe
             src={preview.html_url}
-            className="w-full flex-1 border-0 min-h-0"
+            className="publication-canvas w-full flex-1 border-0 min-h-0"
             title="Report"
           />
         ) : (

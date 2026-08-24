@@ -23,9 +23,9 @@ export function DataOverviewMatrix({
   if (groups.length === 0) return null
 
   const sections = [
-    { key: 'pathology', label: t('pathologySlides'), icon: Microscope, color: 'violet' },
-    { key: 'sequencing', label: t('sequencingData'), icon: Dna, color: 'blue' },
-    { key: 'biochemistry', label: t('biochemistryIndicators'), icon: FlaskConical, color: 'amber' },
+    { key: 'pathology', label: t('pathologySlides'), icon: Microscope, badgeClass: 'bg-violet-100 text-violet-700 dark:bg-violet-900/60 dark:text-violet-300' },
+    { key: 'sequencing', label: t('sequencingData'), icon: Dna, badgeClass: 'bg-blue-100 text-blue-700 dark:bg-blue-900/60 dark:text-blue-300' },
+    { key: 'biochemistry', label: t('biochemistryIndicators'), icon: FlaskConical, badgeClass: 'bg-amber-100 text-amber-700 dark:bg-amber-900/60 dark:text-amber-300' },
   ]
 
   const fileCounts = new Map<string | undefined, Map<string, number>>()
@@ -48,32 +48,32 @@ export function DataOverviewMatrix({
   return (
     <section className="mt-8">
       <div className="flex items-center gap-2 mb-3">
-        <Grid3X3 className="w-5 h-5 text-slate-500" />
+        <Grid3X3 className="w-5 h-5 text-slate-500 dark:text-slate-400" />
         <div>
-          <h3 className="font-display text-lg font-semibold text-slate-900">{t('dataOverview')}</h3>
-          <p className="text-sm text-slate-500">{t('dataOverviewDesc')}</p>
+          <h3 className="font-display text-lg font-semibold text-slate-900 dark:text-slate-100">{t('dataOverview')}</h3>
+          <p className="text-sm text-slate-500 dark:text-slate-400">{t('dataOverviewDesc')}</p>
         </div>
       </div>
 
-      <div className="border border-slate-200 rounded-xl overflow-hidden">
+      <div className="border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
         <table className="w-full text-sm">
-          <thead className="bg-slate-50">
+          <thead className="bg-slate-50 dark:bg-slate-800">
             <tr>
-              <th className="px-4 py-2.5 text-left font-medium text-slate-600">{t('group')}</th>
+              <th className="px-4 py-2.5 text-left font-medium text-slate-600 dark:text-slate-300">{t('group')}</th>
               {sections.map(s => (
-                <th key={s.key} className="px-4 py-2.5 text-center font-medium text-slate-600">
+                <th key={s.key} className="px-4 py-2.5 text-center font-medium text-slate-600 dark:text-slate-300">
                   {s.label}
                 </th>
               ))}
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100">
+          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
             {groups.map(group => {
               const groupFileCounts = fileCounts.get(group.id)
               const groupIndicatorCount = indicatorCounts.get(group.id) ?? 0
               return (
-                <tr key={group.id} className="hover:bg-slate-50">
-                  <td className="px-4 py-2.5 font-medium text-slate-900">
+                <tr key={group.id} className="hover:bg-slate-50 dark:hover:bg-slate-800">
+                  <td className="px-4 py-2.5 font-medium text-slate-900 dark:text-slate-100">
                     {group.name}
                     <span className="text-xs text-slate-400 ml-1">
                       ({group.sampleCount} {t('sample')}{group.sampleCount > 1 && language === 'en' ? 's' : ''})
@@ -86,7 +86,7 @@ export function DataOverviewMatrix({
                     return (
                       <td key={s.key} className="px-4 py-2.5 text-center">
                         {total > 0 ? (
-                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-${s.color}-100 text-${s.color}-700`}>
+                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${s.badgeClass}`}>
                             <Check className="w-3 h-3" />
                             {fileCount > 0 && t('filesCount', { n: fileCount })}
                             {fileCount > 0 && indCount > 0 && ' + '}
@@ -104,8 +104,8 @@ export function DataOverviewMatrix({
 
             {/* Ungrouped row */}
             {(ungroupedFileCounts || ungroupedIndicatorCount > 0) && (
-              <tr className="hover:bg-slate-50 bg-slate-50/50">
-                <td className="px-4 py-2.5 text-slate-500 italic text-xs">
+              <tr className="hover:bg-slate-50 dark:hover:bg-slate-800 bg-slate-50/50 dark:bg-slate-800/50">
+                <td className="px-4 py-2.5 text-slate-500 dark:text-slate-400 italic text-xs">
                   {t('noGroupDistinction')}
                 </td>
                 {sections.map(s => {
@@ -115,7 +115,7 @@ export function DataOverviewMatrix({
                   return (
                     <td key={s.key} className="px-4 py-2.5 text-center">
                       {total > 0 ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-slate-200 text-slate-600">
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
                           {fileCount > 0 && t('filesCount', { n: fileCount })}
                           {fileCount > 0 && indCount > 0 && ' + '}
                           {indCount > 0 && t('indicatorsCount', { n: indCount })}

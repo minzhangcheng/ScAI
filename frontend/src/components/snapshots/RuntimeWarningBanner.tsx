@@ -19,12 +19,12 @@ export function RuntimeWarningBanner({
     return (
       <div
         role="status"
-        className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900"
+        className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-sm text-amber-900 dark:text-amber-200"
       >
         <div className="font-medium">
           {isZh ? '已有意保留运行时（风险）' : 'Runtime intentionally kept (risk)'}
         </div>
-        <p className="text-xs mt-0.5 text-amber-800">
+        <p className="text-xs mt-0.5 text-amber-800 dark:text-amber-200">
           {warning ||
             (isZh
               ? '恢复后保留了当前内核，可能与业务状态不一致。该警告在重新加载后仍会显示。'
@@ -38,12 +38,12 @@ export function RuntimeWarningBanner({
   return (
     <div
       role="status"
-      className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700"
+      className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-2 text-sm text-slate-700 dark:text-slate-200"
     >
       <div className="font-medium">
         {isZh ? '运行时不可用 — 只读 / 需重新运行' : 'Runtime unavailable — read-only / re-run required'}
       </div>
-      <p className="text-xs mt-0.5 text-slate-600">
+      <p className="text-xs mt-0.5 text-slate-600 dark:text-slate-300">
         {warning ||
           (isZh
             ? '会话在无一致内核运行时的情况下恢复。继续分析已阻止；可只读查看，或点击“重新运行”从原始数据重新计算。'

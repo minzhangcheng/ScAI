@@ -1459,13 +1459,13 @@ export function AnalysisPanel() {
   if (!currentSession) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center">
-        <div className="p-6 bg-slate-100 rounded-full mb-6">
+        <div className="p-6 bg-slate-100 dark:bg-slate-800 rounded-full mb-6">
           <Users className="w-12 h-12 text-slate-400" />
         </div>
-        <h2 className="font-display text-xl font-semibold text-slate-900 mb-2">
+        <h2 className="font-display text-xl font-semibold text-slate-900 dark:text-slate-100 mb-2">
           {t('startNewAnalysis')}
         </h2>
-        <p className="text-slate-500 max-w-md">
+        <p className="text-slate-500 dark:text-slate-400 max-w-md">
           {t('welcomeDesc')}
         </p>
       </div>
@@ -1483,9 +1483,9 @@ export function AnalysisPanel() {
       {/* Validating spinner overlay */}
       {validating && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-          <div className="bg-white rounded-xl shadow-lg p-6 flex items-center gap-3">
-            <Loader2 className="w-5 h-5 animate-spin text-accent-600" />
-            <span className="text-slate-700 font-medium">
+          <div className="bg-white dark:bg-surface-900 rounded-xl shadow-lg p-6 flex items-center gap-3">
+            <Loader2 className="w-5 h-5 animate-spin text-accent-600 dark:text-accent-400" />
+            <span className="text-slate-700 dark:text-slate-200 font-medium">
               {t('validatingApiKey')}
             </span>
           </div>
@@ -1519,9 +1519,9 @@ export function AnalysisPanel() {
       )}
 
       {/* Header - Compact */}
-      <div className="flex items-center justify-between pb-2 border-b border-slate-200">
+      <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-slate-700">
         <div>
-          <h2 className="font-display text-lg font-semibold text-slate-900">{t('analysisControl')}</h2>
+          <h2 className="font-display text-lg font-semibold text-slate-900 dark:text-slate-100">{t('analysisControl')}</h2>
         </div>
 
         <div className="flex items-center gap-3 shrink-0">
@@ -1531,7 +1531,7 @@ export function AnalysisPanel() {
               disabled={readMode || isForwardResumeBlocked()}
               className={`flex items-center gap-2 px-4 py-1.5 text-white rounded-lg font-medium transition-colors ${
                 readMode || isForwardResumeBlocked()
-                  ? 'bg-slate-400 cursor-not-allowed'
+                  ? 'bg-slate-400 dark:bg-slate-600 cursor-not-allowed'
                   : 'bg-green-600 hover:bg-green-700'
               }`}
               title={
@@ -1553,8 +1553,8 @@ export function AnalysisPanel() {
               disabled={readMode}
               className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
                 readMode
-                  ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                  : 'bg-indigo-100 hover:bg-indigo-200 text-indigo-800'
+                  ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed'
+                  : 'bg-indigo-100 dark:bg-indigo-900/60 hover:bg-indigo-200 dark:hover:bg-indigo-800/70 text-indigo-800 dark:text-indigo-200'
               }`}
               title={language === 'zh' ? '从原始数据重新运行' : 'Re-run analysis from raw inputs'}
             >
@@ -1565,27 +1565,27 @@ export function AnalysisPanel() {
           
           {isRunning && (
             <div className="flex items-center gap-2">
-              <div className="flex items-center gap-2 px-3 py-1 bg-blue-100 text-blue-700 rounded-lg">
+              <div className="flex items-center gap-2 px-3 py-1 bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 rounded-lg">
                 <Loader2 className="w-4 h-4 animate-spin" />
                 <span className="font-medium">Round {currentSession.currentRound}</span>
               </div>
               <button
                 onClick={handlePause}
-                className="flex items-center gap-1.5 px-3 py-1 bg-amber-100 hover:bg-amber-200 text-amber-700 rounded-lg text-sm font-medium transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1 bg-amber-100 dark:bg-amber-900/60 hover:bg-amber-200 dark:hover:bg-amber-800/70 text-amber-700 dark:text-amber-300 rounded-lg text-sm font-medium transition-colors"
               >
                 <Pause className="w-4 h-4" />
                 {language === 'zh' ? '暂停' : 'Pause'}
               </button>
               <button
                 onClick={() => setShowStopDialog(true)}
-                className="flex items-center gap-1.5 px-3 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg text-sm font-medium transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1 bg-red-100 dark:bg-red-900/60 hover:bg-red-200 dark:hover:bg-red-800/70 text-red-700 dark:text-red-300 rounded-lg text-sm font-medium transition-colors"
               >
                 <Square className="w-3.5 h-3.5" />
                 {language === 'zh' ? '停止' : 'Stop'}
               </button>
               {snapshotV2Enabled && <button
                 onClick={() => setShowSnapshotPanel(true)}
-                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg text-sm font-medium transition-colors"
                 title={language === 'zh' ? '快照管理' : 'Snapshots'}
               >
                 <Camera className="w-3.5 h-3.5" />
@@ -1598,13 +1598,13 @@ export function AnalysisPanel() {
             <div className="flex items-center gap-2">
               {snapshotV2Enabled && <button
                 onClick={() => setShowSnapshotPanel(true)}
-                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg text-sm font-medium transition-colors"
                 title={language === 'zh' ? '快照管理' : 'Snapshots'}
               >
                 <Camera className="w-3.5 h-3.5" />
                 {language === 'zh' ? '快照' : 'Snapshot'}
               </button>}
-              <div className="flex items-center gap-2 px-3 py-1 bg-slate-100 text-slate-600 rounded-lg">
+              <div className="flex items-center gap-2 px-3 py-1 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-lg">
                 <Pause className="w-4 h-4" />
                 <span className="font-medium">
                   {language === 'zh' ? '已暂停' : 'Paused'}
@@ -1615,8 +1615,8 @@ export function AnalysisPanel() {
                 disabled={isForwardResumeBlocked()}
                 className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-sm font-medium transition-colors ${
                   isForwardResumeBlocked()
-                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                    : 'bg-green-100 hover:bg-green-200 text-green-700'
+                    ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-not-allowed'
+                    : 'bg-green-100 dark:bg-green-900/60 hover:bg-green-200 dark:hover:bg-green-800/70 text-green-700 dark:text-green-300'
                 }`}
                 title={
                   isForwardResumeBlocked()
@@ -1634,7 +1634,7 @@ export function AnalysisPanel() {
             <div className="flex items-center gap-2">
               {snapshotV2Enabled && <button
                 onClick={() => setShowSnapshotPanel(true)}
-                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg text-sm font-medium transition-colors"
                 title={language === 'zh' ? '快照管理' : 'Snapshots'}
               >
                 <Camera className="w-3.5 h-3.5" />
@@ -1643,7 +1643,7 @@ export function AnalysisPanel() {
               {llmFailureInfo ? (
                 <button
                   onClick={() => setShowLlmTimeoutDialog(true)}
-                  className="flex items-center gap-2 px-3 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg transition-colors"
+                  className="flex items-center gap-2 px-3 py-1 bg-red-100 dark:bg-red-900/60 hover:bg-red-200 dark:hover:bg-red-800/70 text-red-700 dark:text-red-300 rounded-lg transition-colors"
                   aria-label={t('llmCallFailedBadge')}
                 >
                   <AlertCircle className="w-4 h-4" aria-hidden="true" />
@@ -1656,8 +1656,8 @@ export function AnalysisPanel() {
                   onClick={handleReopenDialog}
                   className={`flex items-center gap-2 px-3 py-1 rounded-lg transition-colors cursor-pointer ${
                     currentSession.status === 'waiting_annotation'
-                      ? 'bg-accent-100 text-accent-700 hover:bg-accent-200'
-                      : 'bg-amber-100 text-amber-700 hover:bg-amber-200'
+                      ? 'bg-accent-100 dark:bg-accent-900/60 text-accent-700 dark:text-accent-300 hover:bg-accent-200 dark:hover:bg-accent-800/70'
+                      : 'bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300 hover:bg-amber-200 dark:hover:bg-amber-800/70'
                   }`}
                   title={language === 'zh' ? '点击重新打开交互窗口' : 'Click to reopen interaction dialog'}
                 >
@@ -1673,7 +1673,7 @@ export function AnalysisPanel() {
               )}
               <button
                 onClick={() => setShowStopDialog(true)}
-                className="flex items-center gap-1.5 px-3 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg text-sm font-medium transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1 bg-red-100 dark:bg-red-900/60 hover:bg-red-200 dark:hover:bg-red-800/70 text-red-700 dark:text-red-300 rounded-lg text-sm font-medium transition-colors"
               >
                 <Square className="w-3.5 h-3.5" />
                 {language === 'zh' ? '停止' : 'Stop'}
@@ -1685,13 +1685,13 @@ export function AnalysisPanel() {
             <div className="flex items-center gap-2">
               {snapshotV2Enabled && <button
                 onClick={() => setShowSnapshotPanel(true)}
-                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg text-sm font-medium transition-colors"
                 title={language === 'zh' ? '快照管理' : 'Snapshots'}
               >
                 <Camera className="w-3.5 h-3.5" />
                 {language === 'zh' ? '快照' : 'Snapshot'}
               </button>}
-              <div className="flex items-center gap-2 px-3 py-1 bg-green-100 text-green-700 rounded-lg">
+              <div className="flex items-center gap-2 px-3 py-1 bg-green-100 dark:bg-green-900/60 text-green-700 dark:text-green-300 rounded-lg">
                 <CheckCircle2 className="w-4 h-4" />
                 <span className="font-medium">{t('analysisComplete')}</span>
               </div>
@@ -1702,13 +1702,13 @@ export function AnalysisPanel() {
             <div className="flex items-center gap-2">
               {snapshotV2Enabled && <button
                 onClick={() => setShowSnapshotPanel(true)}
-                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg text-sm font-medium transition-colors"
                 title={language === 'zh' ? '快照管理' : 'Snapshots'}
               >
                 <Camera className="w-3.5 h-3.5" />
                 {language === 'zh' ? '快照' : 'Snapshot'}
               </button>}
-              <div className="flex items-center gap-2 px-3 py-1 bg-red-100 text-red-700 rounded-lg">
+              <div className="flex items-center gap-2 px-3 py-1 bg-red-100 dark:bg-red-900/60 text-red-700 dark:text-red-300 rounded-lg">
                 <AlertCircle className="w-4 h-4" />
                 <span className="font-medium">{language === 'zh' ? '分析失败' : 'Analysis Failed'}</span>
               </div>
@@ -1718,7 +1718,7 @@ export function AnalysisPanel() {
       </div>
 
       {/* Agent Status - Compact Row */}
-      <div className="py-3 border-b border-slate-200">
+      <div className="py-3 border-b border-slate-200 dark:border-slate-700">
         <div className="flex items-center gap-2 flex-wrap">
           {agents.map((agent) => {
             const status = getAgentStatus(agent.id)
@@ -1729,12 +1729,12 @@ export function AnalysisPanel() {
                 key={agent.id}
                 className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm whitespace-nowrap ${
                   status === 'working'
-                    ? 'bg-blue-100 text-blue-700'
+                    ? 'bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300'
                     : status === 'done'
-                    ? 'bg-green-100 text-green-700'
+                    ? 'bg-green-100 dark:bg-green-900/60 text-green-700 dark:text-green-300'
                     : status === 'error'
-                    ? 'bg-red-100 text-red-700'
-                    : 'bg-slate-100 text-slate-600'
+                    ? 'bg-red-100 dark:bg-red-900/60 text-red-700 dark:text-red-300'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
                 }`}
               >
                 {status === 'working' ? (
@@ -1754,10 +1754,10 @@ export function AnalysisPanel() {
         if (unresolvedErrors.length === 0) return null
 
         return (
-          <div className="py-3 border-b border-slate-200">
+          <div className="py-3 border-b border-slate-200 dark:border-slate-700">
             <div className="flex items-center gap-2 mb-2">
-              <AlertCircle className="w-4 h-4 text-red-500" />
-              <span className="text-sm font-medium text-red-700">
+              <AlertCircle className="w-4 h-4 text-red-500 dark:text-red-400" />
+              <span className="text-sm font-medium text-red-700 dark:text-red-300">
                 {language === 'zh' ? '分析错误' : 'Analysis Errors'} ({unresolvedErrors.length})
               </span>
             </div>
@@ -1767,29 +1767,29 @@ export function AnalysisPanel() {
                 return (
                   <div
                     key={error.id}
-                    className="flex items-start gap-2 p-2 bg-red-50 border border-red-200 rounded-lg text-sm"
+                    className="flex items-start gap-2 p-2 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 rounded-lg text-sm"
                   >
                     <div className="flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                          error.agent === 'pathology' ? 'bg-rose-100 text-rose-700' :
-                          error.agent === 'bioinformatics' ? 'bg-emerald-100 text-emerald-700' :
-                          error.agent === 'biochemistry' ? 'bg-amber-100 text-amber-700' :
-                          error.agent === 'literature' ? 'bg-blue-100 text-blue-700' :
-                          'bg-slate-100 text-slate-700'
+                          error.agent === 'pathology' ? 'bg-rose-100 dark:bg-rose-900/60 text-rose-700 dark:text-rose-300' :
+                          error.agent === 'bioinformatics' ? 'bg-emerald-100 dark:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300' :
+                          error.agent === 'biochemistry' ? 'bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300' :
+                          error.agent === 'literature' ? 'bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300' :
+                          'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
                         }`}>
                           {agentInfo?.name || error.agent}
                         </span>
-                        <span className="text-xs text-slate-500">Round {error.round}</span>
-                        <span className="text-xs text-slate-400">{error.errorType}</span>
+                        <span className="text-xs text-slate-500 dark:text-slate-400">Round {error.round}</span>
+                        <span className="text-xs text-slate-400 dark:text-slate-500">{error.errorType}</span>
                       </div>
-                      <p className="text-red-700 mt-1">{error.message}</p>
+                      <p className="text-red-700 dark:text-red-300 mt-1">{error.message}</p>
                       {error.details && (
                         <details className="mt-1">
-                          <summary className="text-xs text-red-500 cursor-pointer hover:text-red-700">
+                          <summary className="text-xs text-red-500 dark:text-red-400 cursor-pointer hover:text-red-700 dark:hover:text-red-300">
                             {language === 'zh' ? '查看详情' : 'View Details'}
                           </summary>
-                          <pre className="text-xs text-red-600 mt-1 whitespace-pre-wrap bg-red-100 p-2 rounded max-h-32 overflow-y-auto">
+                          <pre className="text-xs text-red-600 dark:text-red-300 mt-1 whitespace-pre-wrap bg-red-100 dark:bg-red-950/40 p-2 rounded max-h-32 overflow-y-auto">
                             {error.details}
                           </pre>
                         </details>
@@ -1816,12 +1816,12 @@ export function AnalysisPanel() {
 
         {/* Brief Analysis Result */}
         {currentSession.finalSummary && (
-          <div className="bg-gradient-to-br from-accent-50 to-accent-100 border border-accent-200 rounded-2xl p-6">
+          <div className="bg-gradient-to-br from-accent-50 dark:from-accent-950/40 to-accent-100 dark:to-accent-900/40 border border-accent-200 dark:border-accent-800 rounded-2xl p-6">
             <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 bg-accent-100 rounded-lg">
-                <CheckCircle2 className="w-5 h-5 text-accent-600" />
+              <div className="p-2 bg-accent-100 dark:bg-accent-900/60 rounded-lg">
+                <CheckCircle2 className="w-5 h-5 text-accent-600 dark:text-accent-400" />
               </div>
-              <h3 className="font-display font-semibold text-accent-900">{t('finalReport')}</h3>
+              <h3 className="font-display font-semibold text-accent-900 dark:text-accent-200">{t('finalReport')}</h3>
             </div>
             <div className="prose prose-slate prose-sm max-w-none">
               <ReactMarkdown>{currentSession.finalSummary}</ReactMarkdown>

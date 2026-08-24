@@ -42,20 +42,20 @@ export function UserMenu() {
         <button
           ref={buttonRef}
           onClick={() => setOpen(!open)}
-          className="flex items-center gap-2 px-3 py-2 text-sm text-surface-600 hover:bg-surface-100 rounded-lg transition-colors"
+          className="flex items-center gap-2 px-3 py-2 text-sm text-surface-600 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800 rounded-lg transition-colors"
           title={authUser.username}
         >
-          <div className="w-7 h-7 rounded-full bg-accent-100 flex items-center justify-center">
-            <User className="w-4 h-4 text-accent-600" />
+          <div className="w-7 h-7 rounded-full bg-accent-100 dark:bg-accent-900/60 flex items-center justify-center">
+            <User className="w-4 h-4 text-accent-600 dark:text-accent-400" />
           </div>
           <span className="hidden sm:inline text-xs font-medium truncate flex-1 min-w-0">{authUser.username}</span>
           <ChevronDown className={`w-3 h-3 transition-transform ${open ? 'rotate-180' : ''}`} />
         </button>
 
         {open && (
-          <div className="absolute bottom-full right-0 mb-1 w-48 bg-white rounded-lg shadow-lg border border-surface-200 py-1 z-50">
-            <div className="px-3 py-2 border-b border-surface-100">
-              <p className="text-xs text-surface-500 truncate">{authUser.username}</p>
+          <div className="absolute bottom-full right-0 mb-1 w-48 bg-white dark:bg-surface-900 rounded-lg shadow-lg border border-surface-200 dark:border-surface-700 py-1 z-50">
+            <div className="px-3 py-2 border-b border-surface-100 dark:border-surface-800">
+              <p className="text-xs text-surface-500 dark:text-surface-400 truncate">{authUser.username}</p>
               {authUser.email && (
                 <p className="text-[10px] text-surface-400 truncate">{authUser.email}</p>
               )}
@@ -66,7 +66,7 @@ export function UserMenu() {
 
             <button
               onClick={handleSettings}
-              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-surface-600 hover:bg-surface-50 transition-colors"
+              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-surface-600 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-950 transition-colors"
             >
               <Settings className="w-4 h-4" />
               {zh ? '设置' : 'Settings'}
@@ -75,18 +75,18 @@ export function UserMenu() {
             {!isReadOnly && (
               <button
                 onClick={handleApiKeys}
-                className="w-full flex items-center gap-2 px-4 py-2 text-sm text-surface-600 hover:bg-surface-50 transition-colors"
+                className="w-full flex items-center gap-2 px-4 py-2 text-sm text-surface-600 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-950 transition-colors"
               >
                 <Key className="w-4 h-4" />
                 API Keys
               </button>
             )}
 
-            <div className="border-t border-surface-100 my-1" />
+            <div className="border-t border-surface-100 dark:border-surface-800 my-1" />
 
             <button
               onClick={handleSignOut}
-              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
+              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
             >
               <LogOut className="w-4 h-4" />
               {zh ? '退出登录' : 'Sign Out'}

@@ -1,35 +1,29 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, type CSSProperties } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useSession, apiFetch, generateId, authHeaders } from '../hooks/useApi'
 import { useAppStore } from '../stores/appStore'
-import { getTargetTab, selectPrioritySession, selectCompletedSession, selectPendingSession } from '../utils/sessionPriority'
-import type { SessionListItem } from '../types'
+import { getTargetTab, hasCompletedSession, selectPrioritySession } from '../utils/sessionPriority'
 import { useTranslation, type TranslationKey } from '../i18n/translations'
 import { ROUND_WAIT_OPTIONS } from '../constants/roundWait'
 import { ProgressModal } from './sidebar/ProgressModal'
 import { SessionBrowserModal } from './sidebar/SessionBrowserModal'
 import { NewSessionForm } from './sidebar/NewSessionForm'
 import { DEFAULT_SESSION_NAME, DEFAULT_SESSION_INSTRUCTION } from '../constants/sessionDefaults'
+import { DEFAULT_SIDEBAR_WIDTH } from '../constants/layout'
 import { DataConfigMenu } from './DataConfigMenu'
 import { UserMenu } from './UserMenu'
 import { AboutDialog } from './AboutDialog'
+import { ScAIIcon } from './ScAIIcon'
 import {
   Plus,
   Settings,
   Shield,
-  Dna,
   Trash2,
   RefreshCw,
   FolderOpen,
   Clock,
   Pencil
 } from 'lucide-react'
-
-const PRIORITY_TIERS: { select: (s: SessionListItem[]) => SessionListItem | null; tab: 'data' | 'analysis' | 'report' }[] = [
-  { select: selectPrioritySession, tab: 'analysis' },
-  { select: selectCompletedSession, tab: 'report' },
-  { select: selectPendingSession, tab: 'data' },
-]
 
 function syncTabToSessionStatus(session: { status: string }) {
   useAppStore.getState().setActiveTab(getTargetTab(session.status))
@@ -51,9 +45,10 @@ const IMPORT_SKIP_LABELS: Record<string, TranslationKey> = {
 interface SidebarProps {
   isOpen: boolean
   onOpenConfig: () => void
+  width?: number
 }
 
-export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
+export function Sidebar({ isOpen, onOpenConfig, width = DEFAULT_SIDEBAR_WIDTH }: SidebarProps) {
   const navigate = useNavigate()
   const { currentSession, setCurrentSession, clearMessages, language, roundWaitSeconds, setRoundWaitSeconds, reportGenerated, setOpenSessionBrowserCallback, authUser, _hydrated } = useAppStore()
   const { createSession, loadSession, listSessions, deleteSession, updateSessionInfo, updateRoundWait } = useSession()
@@ -73,14 +68,11 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
   const [progressInfo, setProgressInfo] = useState<{ action: string; detail: string; percent?: number; closable?: boolean; success?: boolean; onConfirm?: () => void; onCancel?: () => void; cancelLabel?: string } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // Auto-reload session from API on page refresh to restore full data (images etc.)
-  // Uses currentSession?.id as dep so it fires after Zustand hydration restores the session.
-  // Other deps (loadSession, setCurrentSession, clearMessages) are intentionally omitted:
-  // the hasAutoReloaded ref guard ensures this runs at most once per mount, and including
-  // the hook-returned functions would cause unnecessary re-fires since their identity
-  // changes on every render.
-  const hasAutoReloaded = useRef(false)
-  const hasPriorityLoaded = useRef(false)
+  // Startup session resolution is server-authoritative. A persisted completed
+  // session can be very large, so it must never be reloaded merely because it
+  // was the last session viewed in this browser.
+  const hasResolvedInitialSession = useRef(false)
+  const hasPrefetchedBrowserSessions = useRef(false)
   const loadSessionRef = useRef(loadSession)
   loadSessionRef.current = loadSession
   const setCurrentSessionRef = useRef(setCurrentSession)
@@ -90,65 +82,57 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
   const listSessionsRef = useRef(listSessions)
   listSessionsRef.current = listSessions
 
-  const doPriorityLoad = useCallback(async () => {
-    if (hasPriorityLoaded.current) return
-    hasPriorityLoaded.current = true
-    try {
-      const sessions = await listSessionsRef.current()
-      for (const { select } of PRIORITY_TIERS) {
-        const candidate = select(sessions)
-        if (!candidate) continue
-        const session = await loadSessionRef.current(candidate.id)
-        if (session) {
-          hasAutoReloaded.current = true
-          syncTabToSessionStatus(session)
-        }
-        return
-      }
-    } catch (e) {
-      console.warn('Sidebar: Priority session loading failed:', e)
-    }
+  const openSessionBrowser = useCallback(() => {
+    useAppStore.getState().setSidebarOpen(true)
+    setShowSessionBrowser(true)
   }, [])
 
   useEffect(() => {
-    if (currentSession?.id && !hasAutoReloaded.current) {
-      hasAutoReloaded.current = true
-      loadSessionRef.current(currentSession.id).then(session => {
-        if (session) {
-          syncTabToSessionStatus(session)
-        }
-      }).catch(e => {
-        console.warn('Sidebar: Auto-reload session failed, clearing stale session:', e)
-        setCurrentSessionRef.current(null)
-        clearMessagesRef.current()
-        // Session no longer exists on server — fall through to priority loading
-        hasAutoReloaded.current = false
-        hasPriorityLoaded.current = false
-        doPriorityLoad()
-      })
-    }
-  }, [currentSession?.id, doPriorityLoad])
+    if (!_hydrated || hasResolvedInitialSession.current) return
+    hasResolvedInitialSession.current = true
 
-  // Priority-based session loading: when no persisted session exists, auto-load
-  // the best candidate from the server after Zustand hydration completes.
-  useEffect(() => {
-    if (!_hydrated || hasPriorityLoaded.current) return
-    if (hasAutoReloaded.current || currentSession?.id) {
-      hasPriorityLoaded.current = true
-      return
-    }
-    doPriorityLoad()
-  }, [_hydrated, doPriorityLoad])
+    // Discard the lightweight persisted snapshot before making the startup
+    // choice, so stale panels and sockets do not treat it as an opened session.
+    setCurrentSessionRef.current(null)
+    clearMessagesRef.current()
+
+    ;(async () => {
+      try {
+        const sessions = await listSessionsRef.current()
+        const runningSession = selectPrioritySession(sessions)
+        if (runningSession) {
+          const session = await loadSessionRef.current(runningSession.id)
+          if (session) {
+            useAppStore.getState().setActiveTab('analysis')
+          }
+          return
+        }
+
+        if (hasCompletedSession(sessions)) {
+          setSavedSessions(sessions)
+          setSessionListError(null)
+          hasPrefetchedBrowserSessions.current = true
+          openSessionBrowser()
+        }
+      } catch (e) {
+        console.warn('Sidebar: Initial session resolution failed:', e)
+      }
+    })()
+  }, [_hydrated, openSessionBrowser])
 
   // Register session browser callback for external components (e.g., ConfigPanel's Read Mode)
   useEffect(() => {
-    setOpenSessionBrowserCallback(() => setShowSessionBrowser(true))
+    setOpenSessionBrowserCallback(openSessionBrowser)
     return () => setOpenSessionBrowserCallback(null)
-  }, [setOpenSessionBrowserCallback])
+  }, [openSessionBrowser, setOpenSessionBrowserCallback])
 
   // Fetch sessions when browser is opened
   useEffect(() => {
     if (showSessionBrowser) {
+      if (hasPrefetchedBrowserSessions.current) {
+        hasPrefetchedBrowserSessions.current = false
+        return
+      }
       fetchSessions()
     }
   }, [showSessionBrowser])
@@ -681,7 +665,11 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
   if (!isOpen) return null
 
   return (
-    <div className="w-72 border-r border-surface-200 bg-accent-50 flex flex-col h-full shrink-0">
+    <div
+      id="app-sidebar"
+      className="w-72 max-w-[85vw] lg:w-[var(--sidebar-width)] lg:max-w-none border-r border-surface-200 dark:border-surface-700 bg-accent-50 dark:bg-surface-900 flex flex-col h-full shrink-0"
+      style={{ '--sidebar-width': `${width}px` } as CSSProperties}
+    >
       <ProgressModal
         progressInfo={progressInfo}
         setProgressInfo={setProgressInfo}
@@ -690,14 +678,12 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
       />
 
       {/* Logo */}
-      <div className="p-4 border-b border-surface-200">
+      <div className="p-4 border-b border-surface-200 dark:border-surface-700">
         <div className="flex items-center gap-3">
-          <div className="p-2 bg-gradient-to-br from-accent-500 to-accent-600 rounded-xl text-white shadow-glow-accent">
-            <Dna className="w-6 h-6" />
-          </div>
+          <ScAIIcon className="w-10 h-10 rounded-xl" />
           <div>
-            <h1 className="font-display font-bold text-surface-800">{t('appName')}</h1>
-            <p className="text-xs text-surface-500">{t('appSubtitle')}</p>
+            <h1 className="font-display font-bold text-surface-800 dark:text-surface-100">{t('appName')}</h1>
+            <p className="text-xs text-surface-500 dark:text-surface-400">{t('appSubtitle')}</p>
           </div>
         </div>
       </div>
@@ -715,8 +701,8 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
         )}
 
         <button
-          onClick={() => setShowSessionBrowser(true)}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-surface-100 text-surface-800 rounded-xl font-medium hover:bg-surface-200 transition-all"
+          onClick={openSessionBrowser}
+          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-surface-100 dark:bg-surface-800 text-surface-800 dark:text-surface-100 rounded-xl font-medium hover:bg-surface-200 dark:hover:bg-surface-700 transition-all"
         >
           <FolderOpen className="w-4 h-4" />
           {language === 'zh' ? '打开已有会话' : 'Open Saved Session'}
@@ -734,6 +720,11 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
         onLoadSession={handleLoadSession}
         currentSessionId={currentSession?.id}
         isReadOnly={isReadOnly}
+        onNewAnalysis={() => {
+          setShowSessionBrowser(false)
+          useAppStore.getState().setSidebarOpen(true)
+          setShowNewSession(true)
+        }}
         onDeleteSession={handleDeleteSavedSession}
       />
 
@@ -756,7 +747,7 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
       <div className="flex-1 min-h-0 flex flex-col">
         {currentSession && (
           <div className="px-3 pb-3 min-h-0 flex flex-col">
-            <div className="p-3 bg-surface-50 border border-surface-200 rounded-xl min-h-0 flex flex-col">
+            <div className="p-3 bg-surface-50 dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-xl min-h-0 flex flex-col">
               {editingSession ? (
                 <div className="space-y-2">
                   <input
@@ -766,7 +757,7 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
                       const val = e.target.value.trim()
                       if (val && val !== currentSession.name) updateSessionInfo({ name: val })
                     }}
-                    className="w-full px-2 py-1 border border-surface-200 rounded text-sm font-medium bg-white text-surface-800"
+                    className="w-full px-2 py-1 border border-surface-200 dark:border-surface-700 rounded text-sm font-medium bg-white dark:bg-surface-900 text-surface-800 dark:text-surface-100"
                     autoFocus
                   />
                   <textarea
@@ -775,7 +766,7 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
                       const val = e.target.value.trim()
                       if (val !== currentSession.instruction) updateSessionInfo({ instruction: val })
                     }}
-                    className="w-full px-2 py-1 border border-surface-200 rounded text-xs bg-white text-surface-800 resize-y"
+                    className="w-full px-2 py-1 border border-surface-200 dark:border-surface-700 rounded text-xs bg-white dark:bg-surface-900 text-surface-800 dark:text-surface-100 resize-y"
                     rows={8}
                   />
                   <div className="flex items-center gap-2">
@@ -790,7 +781,7 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
                           loadSession(currentSession.id)
                         })
                       }}
-                      className="flex-1 text-xs font-mono text-surface-700 bg-white px-2 py-1 rounded border border-surface-200 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+                      className="flex-1 text-xs font-mono text-surface-700 dark:text-surface-200 bg-white dark:bg-surface-900 px-2 py-1 rounded border border-surface-200 dark:border-surface-700 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
                     >
                       {ROUND_WAIT_OPTIONS.map(opt => (
                         <option key={opt.value} value={opt.value}>
@@ -809,14 +800,14 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
               ) : (
                 <>
                   <div className="flex items-center justify-between shrink-0">
-                    <span className="text-sm font-medium text-surface-800">
+                    <span className="text-sm font-medium text-surface-800 dark:text-surface-100">
                       {currentSession.name}
                     </span>
                     <div className="flex items-center gap-1">
                       {!isReadOnly && (
                         <button
                           onClick={() => setEditingSession(true)}
-                          className="p-1 hover:bg-surface-100 rounded"
+                          className="p-1 hover:bg-surface-100 dark:hover:bg-surface-700 rounded"
                           title={language === 'zh' ? '编辑' : 'Edit'}
                         >
                           <Pencil className="w-3.5 h-3.5 text-surface-500" />
@@ -824,7 +815,7 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
                       )}
                       <button
                         onClick={handleRefreshSession}
-                        className="p-1 hover:bg-surface-100 rounded"
+                        className="p-1 hover:bg-surface-100 dark:hover:bg-surface-700 rounded"
                         title={language === 'zh' ? '刷新状态' : 'Refresh status'}
                       >
                         <RefreshCw className="w-3.5 h-3.5 text-surface-500" />
@@ -840,7 +831,7 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
                       )}
                     </div>
                   </div>
-                  <p className="text-sm text-surface-700 mt-1 overflow-y-auto min-h-0">
+                  <p className="text-sm text-surface-700 dark:text-surface-200 mt-1 overflow-y-auto min-h-0">
                     {currentSession.instruction}
                   </p>
                 </>
@@ -867,7 +858,7 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
       </div>
 
       {/* Bottom Actions */}
-      <div className="p-3 border-t border-surface-200 space-y-1">
+      <div className="p-3 border-t border-surface-200 dark:border-surface-700 space-y-1">
         <DataConfigMenu
           sessionId={currentSession?.id}
           onImported={(sid) => {
@@ -892,7 +883,7 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
           <button
             onClick={onOpenConfig}
             aria-label={t('apiSettings')}
-            className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-surface-800 hover:bg-surface-100 rounded-lg"
+            className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-surface-800 dark:text-surface-100 hover:bg-surface-100 dark:hover:bg-surface-700 rounded-lg"
           >
             <Settings className="w-4 h-4" aria-hidden="true" />
             {t('apiSettings')}
@@ -904,7 +895,7 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
           {authUser?.role === 'admin' && (
             <button
               onClick={() => navigate('/admin')}
-              className="flex items-center gap-2 px-3 py-2 text-sm text-surface-600 hover:bg-surface-100 rounded-lg transition-colors"
+              className="flex items-center gap-2 px-3 py-2 text-sm text-surface-600 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-700 rounded-lg transition-colors"
             >
               <Shield className="w-4 h-4" aria-hidden="true" />
               {language === 'zh' ? '用户管理' : 'User Admin'}

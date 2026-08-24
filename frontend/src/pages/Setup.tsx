@@ -52,14 +52,14 @@ export function Setup() {
 
   return (
     <AuthLayout subtitle={zh ? '初始化管理员账号' : 'Initialize Admin Account'} onSubmit={handleSubmit}>
-      <h2 className="text-lg font-semibold text-surface-700">{zh ? '初始化' : 'Setup'}</h2>
+      <h2 className="text-lg font-semibold text-surface-700 dark:text-surface-200">{zh ? '初始化' : 'Setup'}</h2>
 
       {err && (
-        <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">{err}</div>
+        <div className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-300 text-sm">{err}</div>
       )}
 
       <div>
-        <label className="block text-sm font-medium text-surface-600 mb-1">{zh ? '用户名' : 'Username'}</label>
+        <label className="block text-sm font-medium text-surface-600 dark:text-surface-300 mb-1">{zh ? '用户名' : 'Username'}</label>
         <input
           type="text"
           value={username}
@@ -69,44 +69,44 @@ export function Setup() {
           maxLength={64}
           pattern="[a-zA-Z0-9_-]+"
           title={zh ? '只能包含字母、数字、下划线和连字符' : 'Only letters, numbers, underscore and hyphen are allowed'}
-          className="w-full px-3 py-2 border border-surface-300 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+          className="w-full px-3 py-2 border border-surface-300 dark:border-surface-600 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
           placeholder={zh ? '管理员用户名' : 'Admin username'}
         />
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-surface-600 mb-1">{zh ? '邮箱（可选）' : 'Email (optional)'}</label>
+        <label className="block text-sm font-medium text-surface-600 dark:text-surface-300 mb-1">{zh ? '邮箱（可选）' : 'Email (optional)'}</label>
         <input
           type="email"
           value={email}
           onChange={e => setEmail(e.target.value)}
-          className="w-full px-3 py-2 border border-surface-300 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+          className="w-full px-3 py-2 border border-surface-300 dark:border-surface-600 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
           placeholder="admin@example.com"
         />
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-surface-600 mb-1">{zh ? '密码' : 'Password'}</label>
+        <label className="block text-sm font-medium text-surface-600 dark:text-surface-300 mb-1">{zh ? '密码' : 'Password'}</label>
         <input
           type="password"
           value={password}
           onChange={e => setPassword(e.target.value)}
           required
           minLength={8}
-          className="w-full px-3 py-2 border border-surface-300 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+          className="w-full px-3 py-2 border border-surface-300 dark:border-surface-600 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
           placeholder="••••••••"
         />
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-surface-600 mb-1">{zh ? '确认密码' : 'Confirm Password'}</label>
+        <label className="block text-sm font-medium text-surface-600 dark:text-surface-300 mb-1">{zh ? '确认密码' : 'Confirm Password'}</label>
         <input
           type="password"
           value={confirm}
           onChange={e => setConfirm(e.target.value)}
           required
           minLength={8}
-          className="w-full px-3 py-2 border border-surface-300 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+          className="w-full px-3 py-2 border border-surface-300 dark:border-surface-600 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
           placeholder="••••••••"
         />
       </div>

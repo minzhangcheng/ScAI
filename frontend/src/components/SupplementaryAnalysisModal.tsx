@@ -31,12 +31,12 @@ export function SupplementaryAnalysisModal({
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg mx-4">
+      <div className="bg-white dark:bg-surface-900 rounded-2xl shadow-xl w-full max-w-lg mx-4">
         <div className="p-6">
-          <h3 className="text-lg font-semibold text-slate-900 mb-3">
+          <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-3">
             {isZh ? '请求补充分析' : 'Request Supplementary Analysis'}
           </h3>
-          <p className="text-sm text-slate-500 mb-4">
+          <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">
             {isZh
               ? '请描述您希望进行的补充分析，PI Agent将组织各Agent执行分析后更新报告。'
               : 'Describe the additional analysis you need. The PI Agent will coordinate agents to run the analysis and update the report.'}
@@ -45,7 +45,7 @@ export function SupplementaryAnalysisModal({
             value={text}
             onChange={e => setText(e.target.value)}
             placeholder={placeholder}
-            className="w-full h-32 px-4 py-3 border border-slate-300 rounded-xl text-sm resize-none focus:outline-none focus:ring-2 focus:ring-accent-500"
+            className="w-full h-32 px-4 py-3 border border-slate-300 dark:border-slate-600 rounded-xl bg-white dark:bg-surface-900 text-slate-800 dark:text-slate-100 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-accent-500"
             autoFocus
           />
           <div className="flex justify-end gap-3 mt-4">

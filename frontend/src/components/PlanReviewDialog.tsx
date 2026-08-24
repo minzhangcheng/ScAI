@@ -185,11 +185,11 @@ export function PlanReviewDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="bg-white rounded-2xl shadow-modal w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
+      <div className="bg-white dark:bg-surface-900 rounded-2xl shadow-modal w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-700">
           <div className="flex items-center gap-3">
-            <h2 className="text-lg font-semibold text-gray-900">
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
               {t('planReviewTitle')} — {phaseLabel} — Round {round} — {stageLabel}
             </h2>
           </div>
@@ -197,10 +197,10 @@ export function PlanReviewDialog({
             {hasCountdown && (
               <>
                 <div className="flex items-center gap-2">
-                  <Clock className={`w-4 h-4 ${timerUrgent ? 'text-red-500' : 'text-slate-500'}`} />
+                  <Clock className={`w-4 h-4 ${timerUrgent ? 'text-red-500' : 'text-slate-500 dark:text-slate-400'}`} />
                   <span className={`font-mono text-lg tabular-nums ${
                     timerUrgent ? 'text-red-600 animate-pulse' :
-                    isPaused ? 'text-amber-600' : 'text-slate-700'
+                    isPaused ? 'text-amber-600 dark:text-amber-400' : 'text-slate-700 dark:text-slate-200'
                   }`}>
                     {timerDisplay}
                   </span>
@@ -210,7 +210,7 @@ export function PlanReviewDialog({
                 </div>
                 <button
                   onClick={toggleTimerPause}
-                  className="p-1.5 rounded-lg hover:bg-gray-100 text-slate-600 hover:text-slate-800 transition-colors"
+                  className="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-slate-600 dark:text-slate-300 hover:text-slate-800 dark:hover:text-slate-100 transition-colors"
                   title={isPaused ? t('resumeTimer') : t('pauseTimer')}
                 >
                   {isPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
@@ -219,7 +219,7 @@ export function PlanReviewDialog({
             )}
             <button
               onClick={handleDownloadDialogue}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
             >
               <FileDown className="w-4 h-4" />
               {t('planReviewDownloadLog')}

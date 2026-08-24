@@ -63,7 +63,7 @@ export function DataConfigMenu({ sessionId, onImported, onExportSession, exporti
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-surface-800 hover:bg-surface-100 rounded-lg"
+        className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-surface-800 dark:text-surface-100 hover:bg-surface-100 dark:hover:bg-surface-800 rounded-lg"
       >
         <FolderOpen className="w-4 h-4" />
         <span>Data/Config</span>
@@ -71,13 +71,13 @@ export function DataConfigMenu({ sessionId, onImported, onExportSession, exporti
       </button>
 
       {open && (
-        <div className="absolute bottom-full left-0 mb-1 w-52 bg-white rounded-lg shadow-lg border border-surface-200 py-1 z-50">
+        <div className="absolute bottom-full left-0 mb-1 w-52 bg-white dark:bg-surface-900 rounded-lg shadow-lg border border-surface-200 dark:border-surface-700 py-1 z-50">
           {/* Import Session */}
           {!readOnly && (
             <button
               onClick={() => { setOpen(false); onImportSession?.() }}
               disabled={importing}
-              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-surface-600 hover:bg-surface-50 disabled:opacity-50"
+              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-surface-600 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 disabled:opacity-50"
             >
               {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
               Import session
@@ -87,17 +87,17 @@ export function DataConfigMenu({ sessionId, onImported, onExportSession, exporti
           <button
             onClick={() => { setOpen(false); onExportSession?.() }}
             disabled={!sessionId || exporting}
-            className="w-full flex items-center gap-2 px-4 py-2 text-sm text-surface-600 hover:bg-surface-50 disabled:opacity-50"
+            className="w-full flex items-center gap-2 px-4 py-2 text-sm text-surface-600 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 disabled:opacity-50"
           >
             {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
             Export session
           </button>
-          {!readOnly && <div className="border-t border-surface-100 my-1" />}
+          {!readOnly && <div className="border-t border-surface-100 dark:border-surface-700 my-1" />}
           {/* Import Configure */}
           {!readOnly && (
             <button
               onClick={() => { setOpen(false); fileInputRef.current?.click() }}
-              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-surface-600 hover:bg-surface-50"
+              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-surface-600 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800"
             >
               <Upload className="w-4 h-4" /> Import configure
             </button>
@@ -106,7 +106,7 @@ export function DataConfigMenu({ sessionId, onImported, onExportSession, exporti
           <button
             onClick={() => { setOpen(false); setShowExportWarning(true) }}
             disabled={!sessionId}
-            className="w-full flex items-center gap-2 px-4 py-2 text-sm text-surface-600 hover:bg-surface-50 disabled:opacity-40"
+            className="w-full flex items-center gap-2 px-4 py-2 text-sm text-surface-600 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 disabled:opacity-40"
           >
             <Download className="w-4 h-4" /> Export configure
           </button>
@@ -129,13 +129,13 @@ export function DataConfigMenu({ sessionId, onImported, onExportSession, exporti
       {/* Export Warning Dialog */}
       {showExportWarning && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl p-6 max-w-md shadow-xl">
-            <h3 className="text-lg font-semibold mb-3">Export Configuration</h3>
+          <div className="bg-white dark:bg-surface-900 rounded-xl p-6 max-w-md shadow-xl">
+            <h3 className="text-lg font-semibold text-surface-900 dark:text-surface-100 mb-3">Export Configuration</h3>
             <p className="text-red-600 text-sm mb-4">
               ⚠️ This file will contain all API keys. Do not share or commit it to version control.
             </p>
             <div className="flex justify-end gap-2">
-              <button onClick={() => setShowExportWarning(false)} className="px-4 py-2 text-sm text-surface-600 hover:bg-surface-100 rounded-lg">Cancel</button>
+              <button onClick={() => setShowExportWarning(false)} className="px-4 py-2 text-sm text-surface-600 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800 rounded-lg">Cancel</button>
               <button onClick={handleExport} className="px-4 py-2 text-sm bg-accent-600 text-white rounded-lg hover:bg-accent-700">Export</button>
             </div>
           </div>
@@ -145,14 +145,14 @@ export function DataConfigMenu({ sessionId, onImported, onExportSession, exporti
       {/* Import Confirm Dialog */}
       {showImportConfirm && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl p-6 max-w-md shadow-xl">
-            <h3 className="text-lg font-semibold mb-3">Import Configuration</h3>
-            <p className="text-sm text-surface-600 mb-2">This will create a new session with the imported configuration.</p>
-            <p className="text-sm text-surface-500 mb-4">Data files are not imported — you must upload them after creation.</p>
-            {importFile && <p className="text-sm font-mono bg-surface-50 p-2 rounded mb-4">{importFile.name}</p>}
+          <div className="bg-white dark:bg-surface-900 rounded-xl p-6 max-w-md shadow-xl">
+            <h3 className="text-lg font-semibold text-surface-900 dark:text-surface-100 mb-3">Import Configuration</h3>
+            <p className="text-sm text-surface-600 dark:text-surface-300 mb-2">This will create a new session with the imported configuration.</p>
+            <p className="text-sm text-surface-500 dark:text-surface-400 mb-4">Data files are not imported — you must upload them after creation.</p>
+            {importFile && <p className="text-sm font-mono bg-surface-50 dark:bg-surface-800 p-2 rounded mb-4">{importFile.name}</p>}
             {importError && <p className="text-red-600 text-sm mb-4">{importError}</p>}
             <div className="flex justify-end gap-2">
-              <button onClick={() => { setShowImportConfirm(false); setImportFile(null); setImportError('') }} className="px-4 py-2 text-sm text-surface-600 hover:bg-surface-100 rounded-lg">Cancel</button>
+              <button onClick={() => { setShowImportConfirm(false); setImportFile(null); setImportError('') }} className="px-4 py-2 text-sm text-surface-600 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800 rounded-lg">Cancel</button>
               <button onClick={handleImport} disabled={importingConfig} className="px-4 py-2 text-sm bg-accent-600 text-white rounded-lg hover:bg-accent-700 disabled:opacity-50">{importingConfig ? 'Importing...' : 'Import'}</button>
             </div>
           </div>

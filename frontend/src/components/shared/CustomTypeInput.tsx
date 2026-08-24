@@ -28,7 +28,7 @@ export function CustomTypeInput({ dataType, typeOptions, onCustomChange, languag
         onCustomChange(val || CUSTOM_TYPE_SENTINEL)
       }}
       placeholder={t('customTypePlaceholder')}
-      className="w-[90px] px-1 py-0.5 border border-slate-200 rounded text-[11px] bg-white"
+      className="w-[90px] px-1 py-0.5 border border-slate-200 dark:border-slate-700 rounded text-[11px] bg-white dark:bg-surface-900"
     />
   )
 }

@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, useMemo, memo } from 'react'
 import { useAppStore, Message, AgentType } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
+import { useSystemTheme } from './SystemThemeProvider'
 import type { GraphicAbstractContent } from '../types'
 import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter'
 import python from 'react-syntax-highlighter/dist/esm/languages/prism/python'
-import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import {
   Users,
   BookOpen,
@@ -80,6 +81,7 @@ function TruncatedText({ text, limit, className, language }: { text: string; lim
 const MessageItem = memo(function MessageItem({ message, language }: { message: Message; language: 'zh' | 'en' }) {
   const [expanded, setExpanded] = useState(true)
   const { t } = useTranslation(language)
+  const { isDark } = useSystemTheme()
 
   const agentNames: Record<AgentType, string> = {
     pi: 'PI Agent',
@@ -198,7 +200,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
               <div className="rounded-lg overflow-hidden border border-slate-200">
                 <SyntaxHighlighter
                   language="python"
-                  style={oneLight}
+                  style={isDark ? oneDark : oneLight}
                   customStyle={{ margin: 0, padding: '0.75rem', fontSize: '0.7rem' }}
                 >
                   {typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)}
@@ -234,7 +236,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
               <img
                 src={base64ToDataUri(message.content as string)}
                 alt="Analysis figure"
-                className="max-w-full rounded-lg border border-slate-200 shadow-sm"
+                className="publication-canvas max-w-full rounded-lg border border-slate-200 shadow-sm"
                 style={{ maxWidth: '800px', maxHeight: '600px' }}
               />
             )}
@@ -381,7 +383,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
                 <img
                   src={base64ToDataUri(figureContent.png_base64)}
                   alt={figureContent.figure_name || 'Figure'}
-                  className="mt-2 max-w-xs rounded border border-slate-200"
+                  className="publication-canvas mt-2 max-w-xs rounded border border-slate-200"
                 />
               )}
             </div>
@@ -435,14 +437,14 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
                 <p className="text-xs text-pink-700 mb-2">{gaContent.prompt}</p>
               )}
               {isTextMode && textDiagram ? (
-                <pre className="font-mono text-xs text-slate-800 bg-white border border-pink-200 rounded p-3 whitespace-pre overflow-auto leading-5">
+                <pre className="publication-canvas font-mono text-xs text-slate-800 bg-white border border-pink-200 rounded p-3 whitespace-pre overflow-auto leading-5">
                   {textDiagram}
                 </pre>
               ) : imageBase64 ? (
                 <img
                   src={base64ToDataUri(imageBase64)}
                   alt="Graphic Abstract"
-                  className="max-w-full rounded border border-pink-200"
+                  className="publication-canvas max-w-full rounded border border-pink-200"
                 />
               ) : null}
             </div>

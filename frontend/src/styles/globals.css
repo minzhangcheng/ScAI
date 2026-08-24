@@ -3,6 +3,8 @@
 @tailwind utilities;
 
 :root {
+  color-scheme: light;
+  --focus-ring: #0086C9;
   --color-pi: #7c3aed;
   --color-pi-light: #a78bfa;
   --color-pathology: #dc2626;
@@ -17,6 +19,8 @@
 
 body {
   font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  background: #f8fafc;
+  color: #0f172a;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -177,16 +181,68 @@ pre {
   border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --focus-ring: #4DB2E2;
+    --color-pi: #a78bfa;
+    --color-pi-light: #c4b5fd;
+    --color-pathology: #f87171;
+    --color-pathology-light: #fca5a5;
+    --color-bioinformatics: #34d399;
+    --color-bioinformatics-light: #6ee7b7;
+    --color-biochemistry: #fbbf24;
+    --color-biochemistry-light: #fcd34d;
+    --color-literature: #60a5fa;
+    --color-literature-light: #93c5fd;
+  }
+
+  body {
+    background: #020617;
+    color: #e2e8f0;
+  }
+
+  *,
+  ::before,
+  ::after {
+    border-color: #334155;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.35);
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(148, 163, 184, 0.55);
+  }
+
+  .bg-science-grid {
+    background-image:
+      radial-gradient(circle at 1px 1px, rgba(77, 178, 226, 0.12) 1px, transparent 0);
+  }
+
+  .glass {
+    background: rgba(15, 23, 42, 0.78);
+    border-color: rgba(148, 163, 184, 0.16);
+  }
+}
+
+/* Scientific and publication artifacts retain their authored light colors. */
+.publication-canvas {
+  background: #fff;
+  color-scheme: light;
+}
+
 /* Status badges */
-.status-pending { @apply bg-gray-100 text-gray-600 border border-gray-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
-.status-running { @apply bg-accent-50 text-accent-700 border border-accent-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
-.status-completed { @apply bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
-.status-failed { @apply bg-red-50 text-red-700 border border-red-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
-.status-paused { @apply bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
-.status-waiting_annotation { @apply bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
-.status-waiting_plan_review { @apply bg-purple-50 text-purple-700 border border-purple-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
-.status-waiting_input { @apply bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
-.status-generating_report { @apply bg-accent-50 text-accent-700 border border-accent-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
+.status-pending { @apply bg-gray-100 text-gray-600 border border-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:border-gray-700 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
+.status-running { @apply bg-accent-50 text-accent-700 border border-accent-200 dark:bg-accent-900/40 dark:text-accent-300 dark:border-accent-800 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
+.status-completed { @apply bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
+.status-failed { @apply bg-red-50 text-red-700 border border-red-200 dark:bg-red-950/40 dark:text-red-300 dark:border-red-800 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
+.status-paused { @apply bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
+.status-waiting_annotation { @apply bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
+.status-waiting_plan_review { @apply bg-purple-50 text-purple-700 border border-purple-200 dark:bg-purple-950/40 dark:text-purple-300 dark:border-purple-800 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
+.status-waiting_input { @apply bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
+.status-generating_report { @apply bg-accent-50 text-accent-700 border border-accent-200 dark:bg-accent-900/40 dark:text-accent-300 dark:border-accent-800 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
 
 /* Accessibility: focus-visible ring for keyboard navigation */
 button:focus-visible,
@@ -195,7 +251,7 @@ a:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
-  outline: 2px solid #0086C9;
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -203,9 +259,10 @@ textarea:focus-visible {
 @layer components {
   .input-science {
     @apply w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg
+           dark:bg-slate-900 dark:border-slate-700 dark:text-slate-100
            transition-all duration-200
            focus:ring-2 focus:ring-accent-500/20 focus:border-accent-400
-           placeholder:text-slate-400;
+           placeholder:text-slate-400 dark:placeholder:text-slate-400;
   }
 }
 

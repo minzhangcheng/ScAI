@@ -91,9 +91,9 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget) handleClose() }}
     >
-      <div className="bg-white rounded-2xl shadow-modal w-full max-w-md mx-4 max-h-[85vh] flex flex-col overflow-hidden animate-scale-in">
+      <div className="bg-white dark:bg-surface-900 rounded-2xl shadow-modal w-full max-w-md mx-4 max-h-[85vh] flex flex-col overflow-hidden animate-scale-in">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-surface-200 bg-gradient-to-r from-accent-50 to-accent-100">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-surface-200 dark:border-surface-700 bg-gradient-to-r from-accent-50 dark:from-accent-900/40 to-accent-100 dark:to-accent-900/60">
           <h2 className="text-lg font-display font-semibold text-surface-900">
             {zh ? '设置' : 'Settings'}
           </h2>

@@ -24,21 +24,21 @@ export function SnapshotPreview({ record, isZh = false }: SnapshotPreviewProps) 
   if (record.failure) {
     return (
       <div className="space-y-3">
-        <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+        <div className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">
           Snapshot {record.snapshot_id}
         </div>
-        <div className="bg-red-50 border border-red-200 rounded-xl p-3 space-y-2">
-          <div className="text-xs font-semibold text-red-700 uppercase tracking-wide">
+        <div className="bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 rounded-xl p-3 space-y-2">
+          <div className="text-xs font-semibold text-red-700 dark:text-red-300 uppercase tracking-wide">
             {isZh ? '快照已损坏' : 'Corrupt Snapshot'}
           </div>
-          <div className="text-xs text-red-700">
+          <div className="text-xs text-red-700 dark:text-red-300">
             <span className="font-medium">{isZh ? '错误码：' : 'Code: '}</span>
             <code className="text-[10px]">{record.failure.code}</code>
           </div>
           {record.failure.message && (
-            <div className="text-xs text-red-700 break-words">{record.failure.message}</div>
+            <div className="text-xs text-red-700 dark:text-red-300 break-words">{record.failure.message}</div>
           )}
-          <div className="text-xs text-red-600">
+          <div className="text-xs text-red-600 dark:text-red-400">
             {isZh
               ? '完整性校验未通过，该快照无法恢复；可将其删除后使用其他快照。'
               : 'Integrity verification failed. This snapshot cannot be restored; delete it and use another one.'}
@@ -50,53 +50,53 @@ export function SnapshotPreview({ record, isZh = false }: SnapshotPreviewProps) 
 
   return (
     <div className="space-y-3">
-      <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+      <div className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">
         Snapshot {record.snapshot_id}
       </div>
 
-      <div className="bg-slate-50 rounded-xl p-3 space-y-2">
-        <div className="text-xs text-slate-600">
-          <span className="font-medium text-slate-800">Captured: </span>
+      <div className="bg-slate-50 dark:bg-slate-800 rounded-xl p-3 space-y-2">
+        <div className="text-xs text-slate-600 dark:text-slate-300">
+          <span className="font-medium text-slate-800 dark:text-slate-100">Captured: </span>
           {new Date(m.captured_at).toLocaleString()}
         </div>
-        <div className="text-xs text-slate-600">
-          <span className="font-medium text-slate-800">Branch: </span>
+        <div className="text-xs text-slate-600 dark:text-slate-300">
+          <span className="font-medium text-slate-800 dark:text-slate-100">Branch: </span>
           {m.branch}
         </div>
-        <div className="text-xs text-slate-600">
-          <span className="font-medium text-slate-800">Generation: </span>
+        <div className="text-xs text-slate-600 dark:text-slate-300">
+          <span className="font-medium text-slate-800 dark:text-slate-100">Generation: </span>
           {m.generation}
         </div>
-        <div className="text-xs text-slate-600">
-          <span className="font-medium text-slate-800">Root Hash: </span>
+        <div className="text-xs text-slate-600 dark:text-slate-300">
+          <span className="font-medium text-slate-800 dark:text-slate-100">Root Hash: </span>
           <code className="text-[10px]">{m.root_hash}</code>
         </div>
       </div>
 
-      <div className="bg-slate-50 rounded-xl p-3">
-        <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Capsule</div>
-        <div className="text-xs text-slate-700">
+      <div className="bg-slate-50 dark:bg-slate-800 rounded-xl p-3">
+        <div className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">Capsule</div>
+        <div className="text-xs text-slate-700 dark:text-slate-200">
           <div>
-            <span className="font-medium text-slate-800">Kind: </span>
+            <span className="font-medium text-slate-800 dark:text-slate-100">Kind: </span>
             {m.capsule.kind}
           </div>
           {capsuleDetail(m.capsule) && (
-            <div className="mt-1 text-accent-700">{capsuleDetail(m.capsule)}</div>
+            <div className="mt-1 text-accent-700 dark:text-accent-300">{capsuleDetail(m.capsule)}</div>
           )}
           {m.capsule.kind === 'graph_node' && (
-            <div className="mt-1 text-xs text-slate-500">Graph v{m.capsule.graph_version}</div>
+            <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">Graph v{m.capsule.graph_version}</div>
           )}
         </div>
       </div>
 
       {m.workspace && m.workspace.length > 0 && (
-        <div className="bg-slate-50 rounded-xl p-3">
-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
+        <div className="bg-slate-50 dark:bg-slate-800 rounded-xl p-3">
+          <div className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">
             Workspace ({m.workspace.length})
           </div>
           <div className="space-y-1 max-h-40 overflow-y-auto">
             {m.workspace.map((entry) => (
-              <div key={entry.path} className="flex items-center justify-between text-xs text-slate-600">
+              <div key={entry.path} className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
                 <div className="flex items-center gap-1 min-w-0">
                   <span className="truncate font-mono text-[10px]">{entry.path}</span>
                   <span className="text-slate-400">({formatBytes(entry.size)})</span>
@@ -109,13 +109,13 @@ export function SnapshotPreview({ record, isZh = false }: SnapshotPreviewProps) 
       )}
 
       {m.objects && Object.keys(m.objects).length > 0 && (
-        <div className="bg-slate-50 rounded-xl p-3">
-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
+        <div className="bg-slate-50 dark:bg-slate-800 rounded-xl p-3">
+          <div className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">
             Objects ({Object.keys(m.objects).length})
           </div>
           <div className="space-y-1 max-h-32 overflow-y-auto">
             {Object.entries(m.objects).map(([hash, obj]) => (
-              <div key={hash} className="flex items-center justify-between text-xs text-slate-600">
+              <div key={hash} className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
                 <code className="text-[10px] truncate">{hash}</code>
                 <span className="shrink-0 ml-2">{formatBytes(obj.size)}</span>
               </div>
@@ -125,22 +125,22 @@ export function SnapshotPreview({ record, isZh = false }: SnapshotPreviewProps) 
       )}
 
       {m.runtime && (
-        <div className="bg-slate-50 rounded-xl p-3">
-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Runtime</div>
-          <div className="space-y-1 text-xs text-slate-600">
+        <div className="bg-slate-50 dark:bg-slate-800 rounded-xl p-3">
+          <div className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">Runtime</div>
+          <div className="space-y-1 text-xs text-slate-600 dark:text-slate-300">
             <div>
-              <span className="font-medium text-slate-800">Status: </span>
+              <span className="font-medium text-slate-800 dark:text-slate-100">Status: </span>
               {m.runtime.status}
             </div>
             {Object.entries(m.runtime.dependencies?.required ?? {}).map(([name, dep]) => (
               <div key={name}>
-                <span className="font-medium text-slate-800">{name}: </span>
+                <span className="font-medium text-slate-800 dark:text-slate-100">{name}: </span>
                 {dep.serializer}
                 {dep.type_name ? ` (${dep.type_name})` : ''}
               </div>
             ))}
             {(m.runtime.dependencies?.incidental_skips ?? []).map((skip) => (
-              <div key={`skip-${skip.name}`} className="text-amber-700">
+              <div key={`skip-${skip.name}`} className="text-amber-700 dark:text-amber-300">
                 <span className="font-medium">{skip.name}: </span>
                 skipped{skip.reason ? ` — ${skip.reason}` : ''}
               </div>

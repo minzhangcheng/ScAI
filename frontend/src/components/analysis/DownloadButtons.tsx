@@ -138,7 +138,7 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
 
   return (
     <div className="mt-6">
-      <h3 className="text-sm font-medium text-slate-500 uppercase tracking-wide mb-3 flex items-center gap-2">
+      <h3 className="text-sm font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-3 flex items-center gap-2">
         <Download className="w-4 h-4" />
         {language === 'zh' ? '批量下载' : 'Batch Download'}
       </h3>
@@ -149,7 +149,7 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
           <button
             onClick={downloadAllFigures}
             disabled={downloading !== null}
-            className="flex items-center gap-2 px-4 py-2.5 bg-white border border-slate-200 hover:bg-slate-50 disabled:opacity-50 text-slate-700 rounded-lg transition-colors"
+            className="flex items-center gap-2 px-4 py-2.5 bg-white dark:bg-surface-900 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 text-slate-700 dark:text-slate-200 rounded-lg transition-colors"
           >
             {getButtonContent(
               'figures',
@@ -164,7 +164,7 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
           <button
             onClick={downloadAllTables}
             disabled={downloading !== null}
-            className="flex items-center gap-2 px-4 py-2.5 bg-white border border-slate-200 hover:bg-slate-50 disabled:opacity-50 text-slate-700 rounded-lg transition-colors"
+            className="flex items-center gap-2 px-4 py-2.5 bg-white dark:bg-surface-900 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 text-slate-700 dark:text-slate-200 rounded-lg transition-colors"
           >
             {getButtonContent(
               'tables',

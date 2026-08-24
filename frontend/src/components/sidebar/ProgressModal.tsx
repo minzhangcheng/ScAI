@@ -25,15 +25,15 @@ export function ProgressModal({ progressInfo, setProgressInfo, t, language }: Pr
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-modal p-6 w-80 text-center space-y-4 animate-scale-in">
+      <div className="bg-white dark:bg-surface-900 rounded-2xl shadow-modal p-6 w-80 text-center space-y-4 animate-scale-in">
         {/* 加载动画 - 进行中时显示 */}
         {!progressInfo.closable && (
-          <Loader2 className="w-8 h-8 animate-spin text-accent-600 mx-auto" />
+          <Loader2 className="w-8 h-8 animate-spin text-accent-600 dark:text-accent-400 mx-auto" />
         )}
 
         {/* 成功图标 */}
         {progressInfo.closable && progressInfo.success && (
-          <CheckCircle className="w-8 h-8 text-green-600 mx-auto" />
+          <CheckCircle className="w-8 h-8 text-green-600 dark:text-green-400 mx-auto" />
         )}
 
         {/* 失败/完成图标（导出完成或导入失败） */}
@@ -43,13 +43,13 @@ export function ProgressModal({ progressInfo, setProgressInfo, t, language }: Pr
 
         {/* 文本信息 */}
         <div>
-          <p className="text-sm font-semibold text-surface-800">{progressInfo.action}</p>
-          <p className="text-xs text-surface-500 mt-1">{progressInfo.detail}</p>
+          <p className="text-sm font-semibold text-surface-800 dark:text-surface-100">{progressInfo.action}</p>
+          <p className="text-xs text-surface-500 dark:text-surface-400 mt-1">{progressInfo.detail}</p>
         </div>
 
         {/* 进度条（如需要） */}
         {progressInfo.percent != null && (
-          <div className="w-full bg-surface-200 rounded-full h-2 overflow-hidden">
+          <div className="w-full bg-surface-200 dark:bg-surface-700 rounded-full h-2 overflow-hidden">
             <div
               className="bg-accent-600 h-full rounded-full transition-all duration-300"
               style={{ width: `${progressInfo.percent}%` }}

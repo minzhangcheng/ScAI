@@ -248,15 +248,15 @@ export function AnnotationConfirmationDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-modal max-w-[95vw] w-[1120px] mx-4 max-h-[85vh] flex flex-col animate-scale-in">
+      <div className="bg-white dark:bg-surface-900 rounded-2xl shadow-modal max-w-[95vw] w-[1120px] mx-4 max-h-[85vh] flex flex-col animate-scale-in">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b">
           <div className="flex items-center gap-4">
             <div>
-              <h2 className="text-lg font-display font-semibold text-slate-800">
+              <h2 className="text-lg font-display font-semibold text-slate-800 dark:text-slate-100">
                 {language === 'zh' ? '细胞注释确认' : 'Cell Annotation Confirmation'}
               </h2>
-              <p className="text-sm text-slate-500 mt-1">
+              <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
                 {organism} — {tissue}
                 {tissueSummary && ` | ${tissueSummary.substring(0, 100)}`}
               </p>

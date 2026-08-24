@@ -36,68 +36,68 @@ const colorStyles: Record<string, {
   textIconSelected: string
 }> = {
   violet: {
-    bgSelected: 'bg-violet-50',
-    borderSelected: 'border-violet-200',
-    bgIcon: 'bg-slate-100',
-    bgIconSelected: 'bg-violet-100',
-    textIcon: 'text-slate-500',
-    textIconSelected: 'text-violet-600'
+    bgSelected: 'bg-violet-50 dark:bg-violet-950/40',
+    borderSelected: 'border-violet-200 dark:border-violet-800',
+    bgIcon: 'bg-slate-100 dark:bg-slate-800',
+    bgIconSelected: 'bg-violet-100 dark:bg-violet-900/60',
+    textIcon: 'text-slate-500 dark:text-slate-400',
+    textIconSelected: 'text-violet-600 dark:text-violet-400'
   },
   red: {
-    bgSelected: 'bg-red-50',
-    borderSelected: 'border-red-200',
-    bgIcon: 'bg-slate-100',
-    bgIconSelected: 'bg-red-100',
-    textIcon: 'text-slate-500',
-    textIconSelected: 'text-red-600'
+    bgSelected: 'bg-red-50 dark:bg-red-950/40',
+    borderSelected: 'border-red-200 dark:border-red-800',
+    bgIcon: 'bg-slate-100 dark:bg-slate-800',
+    bgIconSelected: 'bg-red-100 dark:bg-red-900/60',
+    textIcon: 'text-slate-500 dark:text-slate-400',
+    textIconSelected: 'text-red-600 dark:text-red-400'
   },
   green: {
-    bgSelected: 'bg-green-50',
-    borderSelected: 'border-green-200',
-    bgIcon: 'bg-slate-100',
-    bgIconSelected: 'bg-green-100',
-    textIcon: 'text-slate-500',
-    textIconSelected: 'text-green-600'
+    bgSelected: 'bg-green-50 dark:bg-green-950/40',
+    borderSelected: 'border-green-200 dark:border-green-800',
+    bgIcon: 'bg-slate-100 dark:bg-slate-800',
+    bgIconSelected: 'bg-green-100 dark:bg-green-900/60',
+    textIcon: 'text-slate-500 dark:text-slate-400',
+    textIconSelected: 'text-green-600 dark:text-green-400'
   },
   amber: {
-    bgSelected: 'bg-amber-50',
-    borderSelected: 'border-amber-200',
-    bgIcon: 'bg-slate-100',
-    bgIconSelected: 'bg-amber-100',
-    textIcon: 'text-slate-500',
-    textIconSelected: 'text-amber-600'
+    bgSelected: 'bg-amber-50 dark:bg-amber-950/40',
+    borderSelected: 'border-amber-200 dark:border-amber-800',
+    bgIcon: 'bg-slate-100 dark:bg-slate-800',
+    bgIconSelected: 'bg-amber-100 dark:bg-amber-900/60',
+    textIcon: 'text-slate-500 dark:text-slate-400',
+    textIconSelected: 'text-amber-600 dark:text-amber-400'
   },
   blue: {
-    bgSelected: 'bg-blue-50',
-    borderSelected: 'border-blue-200',
-    bgIcon: 'bg-slate-100',
-    bgIconSelected: 'bg-blue-100',
-    textIcon: 'text-slate-500',
-    textIconSelected: 'text-blue-600'
+    bgSelected: 'bg-blue-50 dark:bg-blue-950/40',
+    borderSelected: 'border-blue-200 dark:border-blue-800',
+    bgIcon: 'bg-slate-100 dark:bg-slate-800',
+    bgIconSelected: 'bg-blue-100 dark:bg-blue-900/60',
+    textIcon: 'text-slate-500 dark:text-slate-400',
+    textIconSelected: 'text-blue-600 dark:text-blue-400'
   },
   pink: {
-    bgSelected: 'bg-pink-50',
-    borderSelected: 'border-pink-200',
-    bgIcon: 'bg-slate-100',
-    bgIconSelected: 'bg-pink-100',
-    textIcon: 'text-slate-500',
-    textIconSelected: 'text-pink-600'
+    bgSelected: 'bg-pink-50 dark:bg-pink-950/40',
+    borderSelected: 'border-pink-200 dark:border-pink-800',
+    bgIcon: 'bg-slate-100 dark:bg-slate-800',
+    bgIconSelected: 'bg-pink-100 dark:bg-pink-900/60',
+    textIcon: 'text-slate-500 dark:text-slate-400',
+    textIconSelected: 'text-pink-600 dark:text-pink-400'
   },
   cyan: {
-    bgSelected: 'bg-cyan-50',
-    borderSelected: 'border-cyan-200',
-    bgIcon: 'bg-slate-100',
-    bgIconSelected: 'bg-cyan-100',
-    textIcon: 'text-slate-500',
-    textIconSelected: 'text-cyan-600'
+    bgSelected: 'bg-cyan-50 dark:bg-cyan-950/40',
+    borderSelected: 'border-cyan-200 dark:border-cyan-800',
+    bgIcon: 'bg-slate-100 dark:bg-slate-800',
+    bgIconSelected: 'bg-cyan-100 dark:bg-cyan-900/60',
+    textIcon: 'text-slate-500 dark:text-slate-400',
+    textIconSelected: 'text-cyan-600 dark:text-cyan-400'
   },
   teal: {
-    bgSelected: 'bg-teal-50',
-    borderSelected: 'border-teal-200',
-    bgIcon: 'bg-slate-100',
-    bgIconSelected: 'bg-teal-100',
-    textIcon: 'text-slate-500',
-    textIconSelected: 'text-teal-600'
+    bgSelected: 'bg-teal-50 dark:bg-teal-950/40',
+    borderSelected: 'border-teal-200 dark:border-teal-800',
+    bgIcon: 'bg-slate-100 dark:bg-slate-800',
+    bgIconSelected: 'bg-teal-100 dark:bg-teal-900/60',
+    textIcon: 'text-slate-500 dark:text-slate-400',
+    textIconSelected: 'text-teal-600 dark:text-teal-400'
   }
 }
 
@@ -378,7 +378,7 @@ export function PromptsPanel() {
     <div className="flex gap-6 h-full">
       {/* Agent List */}
       <div className="w-64 shrink-0">
-        <h3 className="text-sm font-medium text-slate-500 uppercase tracking-wide mb-3">
+        <h3 className="text-sm font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-3">
           {t('selectAgent')}
         </h3>
         <div className="space-y-2">
@@ -394,7 +394,7 @@ export function PromptsPanel() {
                 className={`w-full flex items-start gap-3 p-3 rounded-xl text-left transition-all ${
                   isSelected
                     ? `${styles.bgSelected} border-2 ${styles.borderSelected}`
-                    : 'hover:bg-slate-50 border-2 border-transparent'
+                    : 'hover:bg-slate-50 dark:hover:bg-slate-800 border-2 border-transparent'
                 }`}
               >
                 <div className={`p-2 rounded-lg ${
@@ -406,11 +406,11 @@ export function PromptsPanel() {
                 </div>
                 <div>
                   <p className={`font-medium ${
-                    isSelected ? 'text-slate-900' : 'text-slate-700'
+                    isSelected ? 'text-slate-900 dark:text-slate-100' : 'text-slate-700 dark:text-slate-200'
                   }`}>
                     {agent.name}
                   </p>
-                  <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 line-clamp-2">
                     {agent.description}
                   </p>
                 </div>
@@ -428,15 +428,15 @@ export function PromptsPanel() {
               <Icon className={`w-5 h-5 ${selectedStyles.textIconSelected}`} />
             </div>
             <div>
-              <h3 className="font-display font-semibold text-slate-900">{selectedConfig.name}</h3>
-              <p className="text-sm text-slate-500">{selectedConfig.description}</p>
+              <h3 className="font-display font-semibold text-slate-900 dark:text-slate-100">{selectedConfig.name}</h3>
+              <p className="text-sm text-slate-500 dark:text-slate-400">{selectedConfig.description}</p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
             <button
               onClick={handleReset}
-              className="flex items-center gap-2 px-3 py-2 text-slate-600 hover:bg-slate-100 rounded-lg text-sm"
+              className="flex items-center gap-2 px-3 py-2 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg text-sm"
             >
               <RotateCcw className="w-4 h-4" />
               {t('reset')}
@@ -446,7 +446,7 @@ export function PromptsPanel() {
               disabled={saving}
               className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
                 saved
-                  ? 'bg-green-100 text-green-700'
+                  ? 'bg-green-100 dark:bg-green-900/60 text-green-700 dark:text-green-300'
                   : 'bg-accent-600 text-white hover:bg-accent-700'
               }`}
             >
@@ -455,7 +455,7 @@ export function PromptsPanel() {
             </button>
           </div>
           {saveError && (
-            <p className="text-red-600 text-xs mt-1">{saveError}</p>
+            <p className="text-red-600 dark:text-red-400 text-xs mt-1">{saveError}</p>
           )}
         </div>
 
@@ -463,10 +463,10 @@ export function PromptsPanel() {
         {selectedAgent === 'literature' && (
           <>
             {/* Research Mode Selector */}
-            <div className="mb-4 p-4 bg-blue-50/50 rounded-xl border border-blue-100">
+            <div className="mb-4 p-4 bg-blue-50/50 dark:bg-blue-950/40 rounded-xl border border-blue-100 dark:border-blue-900">
               <div className="flex items-center gap-2 mb-3">
-                <Search className="w-4 h-4 text-blue-600" />
-                <label className="text-sm font-medium text-slate-700">
+                <Search className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                <label className="text-sm font-medium text-slate-700 dark:text-slate-200">
                   {t('literatureResearchMode')}
                 </label>
               </div>
@@ -474,7 +474,7 @@ export function PromptsPanel() {
               <div className="space-y-2">
                 {/* Disabled */}
                 <div className={`rounded-lg transition-all ${
-                  literatureMode === 'disabled' ? 'bg-white border border-blue-200 shadow-sm' : 'hover:bg-white/50'
+                  literatureMode === 'disabled' ? 'bg-white dark:bg-surface-900 border border-blue-200 dark:border-blue-800 shadow-sm' : 'hover:bg-white/50 dark:hover:bg-surface-900/50'
                 }`}>
                   <label className="flex items-start gap-3 p-3 cursor-pointer">
                     <input
@@ -486,15 +486,15 @@ export function PromptsPanel() {
                       className="mt-0.5 accent-blue-600"
                     />
                     <div className="flex-1">
-                      <span className="text-sm font-medium text-slate-800">{language === 'zh' ? '不启用' : 'Disabled'}</span>
-                      <p className="text-xs text-slate-500 mt-0.5">{language === 'zh' ? '不使用文献 Agent 进行文献检索' : 'Do not use Literature Agent for literature search'}</p>
+                      <span className="text-sm font-medium text-slate-800 dark:text-slate-100">{language === 'zh' ? '不启用' : 'Disabled'}</span>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{language === 'zh' ? '不使用文献 Agent 进行文献检索' : 'Do not use Literature Agent for literature search'}</p>
                     </div>
                   </label>
                 </div>
 
                 {/* Gemini Deep Research */}
                 <div className={`rounded-lg transition-all ${
-                  literatureMode === 'gemini_deep_research' ? 'bg-white border border-blue-200 shadow-sm' : 'hover:bg-white/50'
+                  literatureMode === 'gemini_deep_research' ? 'bg-white dark:bg-surface-900 border border-blue-200 dark:border-blue-800 shadow-sm' : 'hover:bg-white/50 dark:hover:bg-surface-900/50'
                 }`}>
                   <label className="flex items-start gap-3 p-3 cursor-pointer">
                     <input
@@ -506,27 +506,27 @@ export function PromptsPanel() {
                       className="mt-0.5 accent-blue-600"
                     />
                     <div className="flex-1">
-                      <span className="text-sm font-medium text-slate-800">{t('literatureGeminiDeepResearch')}</span>
-                      <p className="text-xs text-slate-500 mt-0.5">{t('literatureGeminiDesc')}</p>
+                      <span className="text-sm font-medium text-slate-800 dark:text-slate-100">{t('literatureGeminiDeepResearch')}</span>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{t('literatureGeminiDesc')}</p>
                       {!googleApiKey && (
-                        <p className="text-xs text-amber-600 mt-1">
+                        <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
                           {t('literatureGeminiNote')}
                         </p>
                       )}
-                      <div className="flex items-start gap-2 mt-2 p-2 bg-amber-50 border border-amber-200 rounded-lg">
+                      <div className="flex items-start gap-2 mt-2 p-2 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-lg">
                         <AlertCircle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
-                        <p className="text-xs text-amber-700">
+                        <p className="text-xs text-amber-700 dark:text-amber-300">
                           {language === 'zh'
                             ? 'Deep Research 每次检索耗时较长（数分钟至最多60分钟），费用约 $2-5/次。'
                             : 'Deep Research takes minutes to complete (up to 60 min) and costs ~$2-5 per task.'}{' '}
-                          <a href="https://ai.google.dev/gemini-api/docs/deep-research" target="_blank" rel="noopener noreferrer" className="text-amber-800 underline hover:text-amber-900">
+                          <a href="https://ai.google.dev/gemini-api/docs/deep-research" target="_blank" rel="noopener noreferrer" className="text-amber-800 dark:text-amber-200 underline hover:text-amber-900 dark:hover:text-amber-200">
                             {language === 'zh' ? '参考 Google 文档' : 'See Google docs'}
                           </a>
                         </p>
                       </div>
                       {literatureMode === 'gemini_deep_research' && (
                         <div className="mt-2 space-y-1.5">
-                          <label className="block text-xs font-medium text-slate-600">
+                          <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">
                             {t('literatureGoogleApiKey')}
                           </label>
                           <div className="relative">
@@ -535,18 +535,18 @@ export function PromptsPanel() {
                               value={googleApiKey}
                               onChange={(e) => { setGoogleApiKey(e.target.value); setSaved(false) }}
                               placeholder="AIza..."
-                              className="w-full px-3 py-1.5 pr-10 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                              className="w-full px-3 py-1.5 pr-10 border border-slate-300 dark:border-slate-600 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                             />
                             <button
                               type="button"
                               onClick={() => setShowGoogleKey(!showGoogleKey)}
-                              className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600"
+                              className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
                             >
                               {showGoogleKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                             </button>
                           </div>
                           <p className="text-xs text-slate-400">
-                            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-blue-600 dark:text-blue-400 hover:underline">
                               {language === 'zh' ? '获取 Google AI API Key' : 'Get Google AI API Key'}
                             </a>
                           </p>
@@ -558,7 +558,7 @@ export function PromptsPanel() {
 
                 {/* Deep Research (OpenRouter) */}
                 <div className={`rounded-lg transition-all ${
-                  literatureMode === 'deep_research' ? 'bg-white border border-blue-200 shadow-sm' : 'hover:bg-white/50'
+                  literatureMode === 'deep_research' ? 'bg-white dark:bg-surface-900 border border-blue-200 dark:border-blue-800 shadow-sm' : 'hover:bg-white/50 dark:hover:bg-surface-900/50'
                 }`}>
                   <label className="flex items-start gap-3 p-3 cursor-pointer">
                     <input
@@ -570,12 +570,12 @@ export function PromptsPanel() {
                       className="mt-0.5 accent-blue-600"
                     />
                     <div className="flex-1">
-                      <span className="text-sm font-medium text-slate-800">{t('literatureDeepResearch')}</span>
-                      <p className="text-xs text-slate-500 mt-0.5">{t('literatureDeepResearchDesc')}</p>
+                      <span className="text-sm font-medium text-slate-800 dark:text-slate-100">{t('literatureDeepResearch')}</span>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{t('literatureDeepResearchDesc')}</p>
                       {literatureMode === 'deep_research' && (
                         <div className="mt-2 space-y-2.5">
                           <div className="space-y-1.5">
-                            <label className="block text-xs font-medium text-slate-600">
+                            <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">
                               {t('literatureDeepResearchModel')}
                             </label>
                             <input
@@ -583,24 +583,24 @@ export function PromptsPanel() {
                               value={deepResearchModel}
                               placeholder={t('literatureDeepResearchModelPlaceholder')}
                               onChange={(e) => { setDeepResearchModel(e.target.value); setSaved(false) }}
-                              className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                              className="w-full px-3 py-1.5 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                             />
                             <p className="text-xs text-slate-400">{t('literatureDeepResearchNote')}</p>
                           </div>
                           {/* Collapsible server/key for deep research */}
-                          <div className="border border-slate-200 rounded-lg">
+                          <div className="border border-slate-200 dark:border-slate-700 rounded-lg">
                             <button
                               type="button"
                               onClick={() => setServerExpanded(!serverExpanded)}
                               className="flex items-center gap-2 w-full text-left p-2"
                             >
-                              {serverExpanded ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronRight className="w-3.5 h-3.5 text-slate-500" />}
-                              <Server className="w-3.5 h-3.5 text-slate-500" />
-                              <span className="text-xs font-medium text-slate-700">
+                              {serverExpanded ? <ChevronDown className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" /> : <ChevronRight className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />}
+                              <Server className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />
+                              <span className="text-xs font-medium text-slate-700 dark:text-slate-200">
                                 {t('literatureDeepResearchServer')} / {t('literatureDeepResearchApiKey')}
                               </span>
                               {!serverExpanded && (
-                                <span className="text-xs text-slate-500 ml-auto truncate max-w-[200px]">
+                                <span className="text-xs text-slate-500 dark:text-slate-400 ml-auto truncate max-w-[200px]">
                                   {resolvedDeepResearch.deepResearchLlmBaseUrl}
                                 </span>
                               )}
@@ -611,19 +611,19 @@ export function PromptsPanel() {
                                   type="text"
                                   value={resolvedDeepResearch.deepResearchLlmBaseUrl}
                                   onChange={(e) => { setDeepResearchLlmBaseUrl(e.target.value); setSaved(false) }}
-                                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                  className="w-full px-3 py-1.5 border border-slate-300 dark:border-slate-600 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                 />
                                 <div className="relative">
                                   <input
                                     type={showDeepResearchApiKey ? 'text' : 'password'}
                                     value={resolvedDeepResearch.deepResearchApiKey}
                                     onChange={(e) => { setDeepResearchApiKey(e.target.value); setSaved(false) }}
-                                    className="w-full px-3 py-1.5 pr-10 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                    className="w-full px-3 py-1.5 pr-10 border border-slate-300 dark:border-slate-600 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                   />
                                   <button
                                     type="button"
                                     onClick={() => setShowDeepResearchApiKey(!showDeepResearchApiKey)}
-                                    className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600"
+                                    className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
                                   >
                                     {showDeepResearchApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                                   </button>
@@ -640,7 +640,7 @@ export function PromptsPanel() {
 
                 {/* PubMed Search Only */}
                 <div className={`rounded-lg transition-all ${
-                  literatureMode === 'pubmed_llm' ? 'bg-white border border-blue-200 shadow-sm' : 'hover:bg-white/50'
+                  literatureMode === 'pubmed_llm' ? 'bg-white dark:bg-surface-900 border border-blue-200 dark:border-blue-800 shadow-sm' : 'hover:bg-white/50 dark:hover:bg-surface-900/50'
                 }`}>
                   <label className="flex items-start gap-3 p-3 cursor-pointer">
                     <input
@@ -652,8 +652,8 @@ export function PromptsPanel() {
                       className="mt-0.5 accent-blue-600"
                     />
                     <div className="flex-1">
-                      <span className="text-sm font-medium text-slate-800">{t('literaturePubmedLlm')}</span>
-                      <p className="text-xs text-slate-500 mt-0.5">{t('literaturePubmedDesc')}</p>
+                      <span className="text-sm font-medium text-slate-800 dark:text-slate-100">{t('literaturePubmedLlm')}</span>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{t('literaturePubmedDesc')}</p>
                     </div>
                   </label>
                 </div>
@@ -663,11 +663,11 @@ export function PromptsPanel() {
             {/* PubMed Search Settings - includes LLM config, greyed out when disabled */}
             <div className={`mb-4 p-4 rounded-xl border transition-all ${
               literatureMode === 'disabled'
-                ? 'bg-slate-100 border-slate-200 opacity-50 pointer-events-none'
-                : 'bg-slate-50 border-slate-200'
+                ? 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 opacity-50 pointer-events-none'
+                : 'bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700'
             }`}>
               <div className="flex items-center justify-between mb-3">
-                <label className="text-sm font-medium text-slate-700">
+                <label className="text-sm font-medium text-slate-700 dark:text-slate-200">
                   {t('literaturePubmedSettings')}
                 </label>
                 <span className="text-xs text-slate-400">{t('literaturePubmedSettingsNote')}</span>
@@ -675,7 +675,7 @@ export function PromptsPanel() {
               <div className="space-y-3">
                 {/* Max Search Rounds */}
                 <div className="space-y-1.5">
-                  <label className="block text-xs font-medium text-slate-600">
+                  <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">
                     {t('literatureMaxSearchRounds')}
                   </label>
                   <input
@@ -688,7 +688,7 @@ export function PromptsPanel() {
                       setLiteratureMaxSearchRounds(parseInt(e.target.value) || 20)
                       setSaved(false)
                     }}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-100 disabled:text-slate-400"
+                    className="w-full px-3 py-2 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-100 dark:disabled:bg-slate-800 disabled:text-slate-400"
                   />
                   <p className="text-xs text-slate-400">{t('literatureMaxSearchRoundsNote')}</p>
                 </div>
@@ -696,8 +696,8 @@ export function PromptsPanel() {
                 {/* Model */}
                 <div className="space-y-1.5">
                   <div className="flex items-center gap-2">
-                    <Cpu className="w-4 h-4 text-slate-500" />
-                    <label className="block text-xs font-medium text-slate-600">
+                    <Cpu className="w-4 h-4 text-slate-500 dark:text-slate-400" />
+                    <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">
                       {language === 'zh' ? '模型' : 'Model'}
                     </label>
                   </div>
@@ -709,7 +709,7 @@ export function PromptsPanel() {
                       setEditedModel(e.target.value)
                       setSaved(false)
                     }}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-100 disabled:text-slate-400"
+                    className="w-full px-3 py-1.5 border border-slate-300 dark:border-slate-600 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-100 dark:disabled:bg-slate-800 disabled:text-slate-400"
                     placeholder="e.g., gpt-5.4-mini"
                   />
                   <p className="text-xs text-slate-400">
@@ -720,19 +720,19 @@ export function PromptsPanel() {
                 </div>
 
                 {/* Collapsible LLM Server / API Key */}
-                <div className="border border-slate-200 rounded-lg">
+                <div className="border border-slate-200 dark:border-slate-700 rounded-lg">
                   <button
                     type="button"
                     onClick={() => { if (literatureMode !== 'disabled') setServerExpanded(!serverExpanded) }}
                     className="flex items-center gap-2 w-full text-left p-2"
                   >
-                    {serverExpanded ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronRight className="w-3.5 h-3.5 text-slate-500" />}
-                    <Server className="w-3.5 h-3.5 text-slate-500" />
-                    <span className="text-xs font-medium text-slate-700">
+                    {serverExpanded ? <ChevronDown className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" /> : <ChevronRight className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />}
+                    <Server className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />
+                    <span className="text-xs font-medium text-slate-700 dark:text-slate-200">
                       {t('agentLlmServer')} / {t('agentApiKey')}
                     </span>
                     {!serverExpanded && (
-                      <span className="text-xs text-slate-500 ml-auto truncate max-w-[180px]">
+                      <span className="text-xs text-slate-500 dark:text-slate-400 ml-auto truncate max-w-[180px]">
                         {editedLlmBaseUrl || apiConfig.llmBaseUrl || 'https://openrouter.ai/api/v1'}
                       </span>
                     )}
@@ -746,7 +746,7 @@ export function PromptsPanel() {
                           setEditedLlmBaseUrl(e.target.value)
                           setSaved(false)
                         }}
-                        className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        className="w-full px-3 py-1.5 border border-slate-300 dark:border-slate-600 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                         placeholder="https://openrouter.ai/api/v1"
                       />
                       <div className="relative">
@@ -757,13 +757,13 @@ export function PromptsPanel() {
                             setEditedApiKey(e.target.value)
                             setSaved(false)
                           }}
-                          className="w-full px-3 py-1.5 pr-10 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                          className="w-full px-3 py-1.5 pr-10 border border-slate-300 dark:border-slate-600 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                           placeholder="sk-..."
                         />
                         <button
                           type="button"
                           onClick={() => setShowAgentApiKey(!showAgentApiKey)}
-                          className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600"
+                          className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
                         >
                           {showAgentApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                         </button>
@@ -779,10 +779,10 @@ export function PromptsPanel() {
 
         {/* Model + Vision Selection - hidden for literature agent (shown in PubMed settings) */}
         {selectedAgent !== 'literature' && (
-        <div className="mb-4 p-4 bg-slate-50 rounded-xl">
+        <div className="mb-4 p-4 bg-slate-50 dark:bg-slate-800 rounded-xl">
           <div className="flex items-center gap-3">
-            <Cpu className="w-5 h-5 text-slate-500" />
-            <label className="text-sm font-medium text-slate-700">
+            <Cpu className="w-5 h-5 text-slate-500 dark:text-slate-400" />
+            <label className="text-sm font-medium text-slate-700 dark:text-slate-200">
               {language === 'zh' ? '模型' : 'Model'}
             </label>
             <input
@@ -792,7 +792,7 @@ export function PromptsPanel() {
                 setEditedModel(e.target.value)
                 setSaved(false)
               }}
-              className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+              className="flex-1 px-3 py-2 border border-slate-300 dark:border-slate-600 rounded-lg text-sm font-mono focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
               placeholder={`e.g., ${DEFAULT_MODELS[selectedAgent]}`}
             />
           </div>
@@ -800,8 +800,8 @@ export function PromptsPanel() {
           {/* Vision Support Toggle - between model input and description */}
           {['pi', 'bioinformatics', 'biochemistry', 'painter', 'supervisor'].includes(selectedAgent) && (
             <div className="flex items-center gap-3 mt-2 ml-8">
-              <Eye className="w-4 h-4 text-slate-500" />
-              <label className="text-xs font-medium text-slate-600">
+              <Eye className="w-4 h-4 text-slate-500 dark:text-slate-400" />
+              <label className="text-xs font-medium text-slate-600 dark:text-slate-300">
                 {t('visionSupport')}
               </label>
               <button
@@ -811,7 +811,7 @@ export function PromptsPanel() {
                   setSaved(false)
                 }}
                 className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                  editedVisionEnabled ? 'bg-accent-600' : 'bg-slate-300'
+                  editedVisionEnabled ? 'bg-accent-600' : 'bg-slate-300 dark:bg-slate-600'
                 }`}
               >
                 <span
@@ -823,7 +823,7 @@ export function PromptsPanel() {
             </div>
           )}
 
-          <p className="text-xs text-slate-500 mt-2 ml-8">
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 ml-8">
             {language === 'zh' ? (
               selectedAgent === 'pi' ? '推荐支持 Vision（图片识别）的模型用于审核图片质量。推荐: gemini-3.1-pro-preview、gpt-5.6-sol、deepseek-v4-pro' :
               selectedAgent === 'pathology' ? '推荐具有病理图片识别能力的模型。推荐: gemini-3.1-pro-preview、gpt-5.6-sol' :
@@ -845,7 +845,7 @@ export function PromptsPanel() {
             )}
           </p>
           {['pathology', 'biochemistry', 'painter', 'supervisor'].includes(selectedAgent) && (
-            <p className="text-xs text-amber-600 mt-1 ml-8">
+            <p className="text-xs text-amber-600 dark:text-amber-400 mt-1 ml-8">
               {t('agentDisableHint')}
             </p>
           )}
@@ -854,15 +854,15 @@ export function PromptsPanel() {
 
         {/* Per-Agent LLM Server - collapsible, hidden for literature agent */}
         {selectedAgent !== 'literature' && (
-        <div className="mb-4 p-4 bg-slate-50 rounded-xl">
+        <div className="mb-4 p-4 bg-slate-50 dark:bg-slate-800 rounded-xl">
           <button
             type="button"
             onClick={() => setServerExpanded(!serverExpanded)}
             className="flex items-center gap-2 w-full text-left"
           >
             {serverExpanded ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
-            <Server className="w-4 h-4 text-slate-500" />
-            <span className="text-sm font-medium text-slate-700">
+            <Server className="w-4 h-4 text-slate-500 dark:text-slate-400" />
+            <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
               {t('agentLlmServer')} / {t('agentApiKey')}
             </span>
             {!serverExpanded && (
@@ -882,7 +882,7 @@ export function PromptsPanel() {
                     setEditedLlmBaseUrl(e.target.value)
                     setSaved(false)
                   }}
-                  className="flex-1 px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+                  className="flex-1 px-3 py-1.5 border border-slate-300 dark:border-slate-600 rounded-lg text-sm font-mono focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
                   placeholder="https://openrouter.ai/api/v1"
                 />
               </div>
@@ -896,13 +896,13 @@ export function PromptsPanel() {
                       setEditedApiKey(e.target.value)
                       setSaved(false)
                     }}
-                    className="w-full px-3 py-1.5 pr-10 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+                    className="w-full px-3 py-1.5 pr-10 border border-slate-300 dark:border-slate-600 rounded-lg text-sm font-mono focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
                     placeholder="sk-..."
                   />
                   <button
                     type="button"
                     onClick={() => setShowAgentApiKey(!showAgentApiKey)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
                   >
                     {showAgentApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                   </button>
@@ -917,10 +917,10 @@ export function PromptsPanel() {
         )}
 
         {/* Temperature Control */}
-        <div className="mb-4 p-4 bg-slate-50 rounded-xl">
+        <div className="mb-4 p-4 bg-slate-50 dark:bg-slate-800 rounded-xl">
           <div className="flex items-center gap-3">
-            <Thermometer className="w-5 h-5 text-slate-500" />
-            <label className="text-sm font-medium text-slate-700">
+            <Thermometer className="w-5 h-5 text-slate-500 dark:text-slate-400" />
+            <label className="text-sm font-medium text-slate-700 dark:text-slate-200">
               {language === 'zh' ? '温度' : 'Temperature'}
             </label>
             <input
@@ -933,9 +933,9 @@ export function PromptsPanel() {
                 setEditedTemperature(parseFloat(e.target.value))
                 setSaved(false)
               }}
-              className="flex-1 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-accent-600"
+              className="flex-1 h-2 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-accent-600"
             />
-            <span className="w-12 text-center text-sm font-mono text-slate-600 bg-white px-2 py-1 rounded border border-slate-200">
+            <span className="w-12 text-center text-sm font-mono text-slate-600 dark:text-slate-300 bg-white dark:bg-surface-900 px-2 py-1 rounded border border-slate-200 dark:border-slate-700">
               {editedTemperature.toFixed(1)}
             </span>
           </div>
@@ -952,7 +952,7 @@ export function PromptsPanel() {
 
         <div className="flex-1 relative">
           {selectedAgent === 'supervisor' ? (
-            <div className="w-full h-full p-4 border border-slate-200 rounded-xl bg-slate-50 flex items-center justify-center">
+            <div className="w-full h-full p-4 border border-slate-200 dark:border-slate-700 rounded-xl bg-slate-50 dark:bg-slate-800 flex items-center justify-center">
               <p className="text-sm text-slate-400 text-center">
                 {language === 'zh'
                   ? 'Supervisor Agent 使用内置监控逻辑，不支持自定义 Prompt。可通过上方调整模型和温度。'
@@ -966,15 +966,15 @@ export function PromptsPanel() {
                 setEditedPrompt(e.target.value)
                 setSaved(false)
               }}
-              className="w-full h-full p-4 border border-slate-300 rounded-xl font-mono text-sm resize-none focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+              className="w-full h-full p-4 border border-slate-300 dark:border-slate-600 rounded-xl font-mono text-sm resize-none focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
               placeholder={language === 'zh' ? '输入 Agent 的系统提示词...' : 'Enter the agent system prompt...'}
             />
           )}
         </div>
 
-        <div className="mt-4 p-4 bg-slate-50 rounded-xl">
-          <h4 className="text-sm font-medium text-slate-700 mb-2">{t('promptTips')}</h4>
-          <ul className="text-sm text-slate-500 space-y-1">
+        <div className="mt-4 p-4 bg-slate-50 dark:bg-slate-800 rounded-xl">
+          <h4 className="text-sm font-medium text-slate-700 dark:text-slate-200 mb-2">{t('promptTips')}</h4>
+          <ul className="text-sm text-slate-500 dark:text-slate-400 space-y-1">
             <li>• {t('promptTip1')}</li>
             <li>• {t('promptTip2')}</li>
             <li>• {t('promptTip3')}</li>

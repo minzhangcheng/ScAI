@@ -31,13 +31,13 @@ export function DataPanel() {
   if (!currentSession) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center">
-        <div className="p-6 bg-slate-100 rounded-full mb-6">
+        <div className="p-6 bg-slate-100 dark:bg-slate-800 rounded-full mb-6">
           <Upload className="w-12 h-12 text-slate-400" />
         </div>
-        <h2 className="font-display text-xl font-semibold text-slate-900 mb-2">
+        <h2 className="font-display text-xl font-semibold text-slate-900 dark:text-slate-100 mb-2">
           {t('uploadData')}
         </h2>
-        <p className="text-slate-500 max-w-md">
+        <p className="text-slate-500 dark:text-slate-400 max-w-md">
           {t('uploadDataDesc')}
         </p>
       </div>

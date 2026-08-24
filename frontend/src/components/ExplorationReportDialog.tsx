@@ -321,11 +321,11 @@ export function ExplorationReportDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-modal max-w-4xl w-full mx-4 max-h-[90vh] flex flex-col animate-scale-in">
+      <div className="bg-white dark:bg-surface-900 rounded-2xl shadow-modal max-w-4xl w-full mx-4 max-h-[90vh] flex flex-col animate-scale-in">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b bg-gradient-to-r from-accent-50 to-accent-100 rounded-t-2xl">
           <div className="flex-1">
-            <h2 className="text-lg font-display font-semibold text-slate-800">
+            <h2 className="text-lg font-display font-semibold text-slate-800 dark:text-surface-100">
               {isZh ? '探索期分析完成 — 选择研究方向' : 'Exploration Complete — Choose Research Directions'}
             </h2>
             <p className="text-sm text-slate-500 mt-1">

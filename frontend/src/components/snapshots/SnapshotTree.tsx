@@ -62,32 +62,32 @@ export function SnapshotTree({ snapshots, selectedId, onSelect, isZh = false }: 
             onClick={() => onSelect(record.snapshot_id)}
             className={`border rounded-xl p-3 cursor-pointer transition-colors ${
               failure
-                ? (isSelected ? 'border-red-500 bg-red-100' : 'border-red-200 hover:border-red-300 bg-red-50')
+                ? (isSelected ? 'border-red-500 bg-red-100 dark:bg-red-900/60' : 'border-red-200 dark:border-red-800 hover:border-red-300 dark:hover:border-red-700 bg-red-50 dark:bg-red-950/40')
                 : isSelected
-                  ? 'border-accent-500 bg-accent-50'
-                  : 'border-slate-200 hover:border-accent-300 bg-white'
+                  ? 'border-accent-500 bg-accent-50 dark:bg-accent-900/40'
+                  : 'border-slate-200 dark:border-slate-700 hover:border-accent-300 dark:hover:border-accent-700 bg-white dark:bg-surface-900'
             }`}
           >
             <div className="flex items-center justify-between">
               <div className="min-w-0 flex-1">
-                <div className="font-medium text-sm text-slate-900 truncate">{record.snapshot_id}</div>
+                <div className="font-medium text-sm text-slate-900 dark:text-slate-100 truncate">{record.snapshot_id}</div>
                 {failure ? (
-                  <div className="flex items-center gap-2 mt-1 text-xs text-red-700 flex-wrap">
-                    <span className="px-2 py-0.5 bg-red-100 rounded-full">
+                  <div className="flex items-center gap-2 mt-1 text-xs text-red-700 dark:text-red-300 flex-wrap">
+                    <span className="px-2 py-0.5 bg-red-100 dark:bg-red-900/60 rounded-full">
                       {isZh ? '已损坏' : 'Corrupt'}
                     </span>
                     <span className="font-mono">{failure.code}</span>
                     {failure.message && <span className="truncate">{failure.message}</span>}
                   </div>
                 ) : (
-                <div className="flex items-center gap-2 mt-1 text-xs text-slate-500 flex-wrap">
-                  <span className="px-2 py-0.5 bg-slate-100 rounded-full">{capsuleLabel(m.capsule.kind)}</span>
+                <div className="flex items-center gap-2 mt-1 text-xs text-slate-500 dark:text-slate-400 flex-wrap">
+                  <span className="px-2 py-0.5 bg-slate-100 dark:bg-slate-800 rounded-full">{capsuleLabel(m.capsule.kind)}</span>
                   <span>{new Date(m.captured_at).toLocaleString()}</span>
                   <span>
                     {workspaceCount} {workspaceCount === 1 ? 'file' : 'files'}
                   </span>
                   {m.capsule.kind === 'graph_node' && (
-                    <span className="text-accent-600">Next: {m.capsule.next_node}</span>
+                    <span className="text-accent-600 dark:text-accent-400">Next: {m.capsule.next_node}</span>
                   )}
                   {/* The runtime status is what decides whether restoring this
                       snapshot bounces the user into the reset/keep dialog, so
@@ -96,8 +96,8 @@ export function SnapshotTree({ snapshots, selectedId, onSelect, isZh = false }: 
                     <span
                       className={
                         m.runtime.status === 'complete'
-                          ? 'text-emerald-600'
-                          : 'text-amber-600'
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : 'text-amber-600 dark:text-amber-400'
                       }
                     >
                       runtime: {m.runtime.status}

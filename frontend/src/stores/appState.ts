@@ -104,6 +104,9 @@ export interface AppState {
   sidebarOpen: boolean
   setSidebarOpen: (open: boolean) => void
 
+  sidebarWidth: number
+  setSidebarWidth: (width: number) => void
+
   // Message panel width (percentage)
   messagePanelWidth: number
   setMessagePanelWidth: (width: number) => void

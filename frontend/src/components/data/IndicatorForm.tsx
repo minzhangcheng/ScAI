@@ -61,12 +61,12 @@ export function IndicatorForm({
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h4 className="text-sm font-medium text-slate-700">
+        <h4 className="text-sm font-medium text-slate-700 dark:text-slate-200">
           {language === 'zh' ? '手动输入指标' : 'Manual Indicators'}
         </h4>
         <button
           onClick={() => setShowForm(!showForm)}
-          className="flex items-center gap-1 px-2 py-1 bg-amber-100 text-amber-700 rounded text-xs font-medium hover:bg-amber-200 transition-colors"
+          className="flex items-center gap-1 px-2 py-1 bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300 rounded text-xs font-medium hover:bg-amber-200 dark:hover:bg-amber-800/70 transition-colors"
         >
           <Plus className="w-3 h-3" />
           {t('addIndicator')}
@@ -74,7 +74,7 @@ export function IndicatorForm({
       </div>
 
       {showForm && (
-        <div className="p-3 bg-slate-50 rounded-lg space-y-2">
+        <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg space-y-2">
           <div className="flex flex-wrap gap-2">
             <select
               value={groupId}
@@ -82,7 +82,7 @@ export function IndicatorForm({
                 setGroupId(e.target.value)
                 if (e.target.value === '_none') setSampleNum('_none')
               }}
-              className="px-2 py-1.5 border border-slate-300 rounded text-xs bg-white"
+              className="px-2 py-1.5 border border-slate-300 dark:border-slate-600 rounded text-xs bg-white dark:bg-surface-900"
             >
               <option value="_none">{t('noGroupDistinction')}</option>
               {groups.map(g => (
@@ -93,7 +93,7 @@ export function IndicatorForm({
               value={sampleNum}
               onChange={(e) => setSampleNum(e.target.value)}
               disabled={isNoGroup}
-              className="px-2 py-1.5 border border-slate-300 rounded text-xs bg-white disabled:opacity-50"
+              className="px-2 py-1.5 border border-slate-300 dark:border-slate-600 rounded text-xs bg-white dark:bg-surface-900 disabled:opacity-50"
             >
               <option value="_none">{t('noSampleDistinction')}</option>
               {!isNoGroup && selectedGroup && Array.from({ length: selectedGroup.sampleCount }, (_, i) => (
@@ -107,27 +107,27 @@ export function IndicatorForm({
               value={indicator}
               onChange={(e) => setIndicator(e.target.value)}
               placeholder={t('indicatorName')}
-              className="px-2 py-1.5 border border-slate-300 rounded text-sm"
+              className="px-2 py-1.5 border border-slate-300 dark:border-slate-600 rounded text-sm"
             />
             <input
               type="number"
               value={value}
               onChange={(e) => setValue(e.target.value)}
               placeholder={t('value')}
-              className="px-2 py-1.5 border border-slate-300 rounded text-sm"
+              className="px-2 py-1.5 border border-slate-300 dark:border-slate-600 rounded text-sm"
             />
             <input
               type="text"
               value={unit}
               onChange={(e) => setUnit(e.target.value)}
               placeholder={t('unit')}
-              className="px-2 py-1.5 border border-slate-300 rounded text-sm"
+              className="px-2 py-1.5 border border-slate-300 dark:border-slate-600 rounded text-sm"
             />
           </div>
           <div className="flex justify-end gap-2">
             <button
               onClick={() => setShowForm(false)}
-              className="px-3 py-1 text-xs text-slate-600 hover:bg-slate-200 rounded"
+              className="px-3 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 rounded"
             >
               {t('cancel')}
             </button>
@@ -144,32 +144,32 @@ export function IndicatorForm({
 
       {/* Indicators table */}
       {indicators.length > 0 && (
-        <div className="border border-slate-200 rounded-lg overflow-hidden">
+        <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
           <table className="w-full text-sm">
-            <thead className="bg-slate-50">
+            <thead className="bg-slate-50 dark:bg-slate-800">
               <tr>
-                <th className="px-3 py-2 text-left font-medium text-slate-600">{t('indicator')}</th>
-                <th className="px-3 py-2 text-left font-medium text-slate-600">{t('value')}</th>
-                <th className="px-3 py-2 text-left font-medium text-slate-600">{t('unit')}</th>
-                <th className="px-3 py-2 text-left font-medium text-slate-600">{t('group')}</th>
-                <th className="px-3 py-2 text-left font-medium text-slate-600">{t('sample')}</th>
-                <th className="px-3 py-2 text-right font-medium text-slate-600 w-12"></th>
+                <th className="px-3 py-2 text-left font-medium text-slate-600 dark:text-slate-300">{t('indicator')}</th>
+                <th className="px-3 py-2 text-left font-medium text-slate-600 dark:text-slate-300">{t('value')}</th>
+                <th className="px-3 py-2 text-left font-medium text-slate-600 dark:text-slate-300">{t('unit')}</th>
+                <th className="px-3 py-2 text-left font-medium text-slate-600 dark:text-slate-300">{t('group')}</th>
+                <th className="px-3 py-2 text-left font-medium text-slate-600 dark:text-slate-300">{t('sample')}</th>
+                <th className="px-3 py-2 text-right font-medium text-slate-600 dark:text-slate-300 w-12"></th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100">
+            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
               {indicators.map(ind => (
-                <tr key={ind.id} className="hover:bg-slate-50">
-                  <td className="px-3 py-2 font-medium text-slate-900">{ind.indicator}</td>
-                  <td className="px-3 py-2 text-slate-600">{ind.value}</td>
-                  <td className="px-3 py-2 text-slate-500">{ind.unit}</td>
-                  <td className="px-3 py-2 text-xs text-slate-500">{getGroupName(ind.groupId)}</td>
-                  <td className="px-3 py-2 text-xs text-slate-500">
+                <tr key={ind.id} className="hover:bg-slate-50 dark:hover:bg-slate-800">
+                  <td className="px-3 py-2 font-medium text-slate-900 dark:text-slate-100">{ind.indicator}</td>
+                  <td className="px-3 py-2 text-slate-600 dark:text-slate-300">{ind.value}</td>
+                  <td className="px-3 py-2 text-slate-500 dark:text-slate-400">{ind.unit}</td>
+                  <td className="px-3 py-2 text-xs text-slate-500 dark:text-slate-400">{getGroupName(ind.groupId)}</td>
+                  <td className="px-3 py-2 text-xs text-slate-500 dark:text-slate-400">
                     {ind.sampleNumber ? `${t('sample')} ${ind.sampleNumber}` : '-'}
                   </td>
                   <td className="px-3 py-2 text-right">
                     <button
                       onClick={() => onDelete(ind.id)}
-                      className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                      className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 rounded transition-colors"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>

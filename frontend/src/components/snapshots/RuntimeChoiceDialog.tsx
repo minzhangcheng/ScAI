@@ -24,11 +24,11 @@ export function RuntimeChoiceDialog({
       aria-label="Runtime choice"
       aria-modal="true"
     >
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-5 space-y-4">
-        <h3 className="text-base font-semibold text-slate-900">
+      <div className="bg-white dark:bg-surface-900 rounded-xl shadow-xl w-full max-w-md mx-4 p-5 space-y-4">
+        <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
           {isZh ? '运行时不可用' : 'Runtime Unavailable'}
         </h3>
-        <p className="text-sm text-slate-600">
+        <p className="text-sm text-slate-600 dark:text-slate-300">
           {isZh
             ? `快照运行时状态为「${runtimeStatus}」。必须显式选择重置或保留当前内核，不会静默默认。`
             : `Snapshot runtime status is “${runtimeStatus}”. Choose reset or keep explicitly — there is no silent default.`}
@@ -38,7 +38,7 @@ export function RuntimeChoiceDialog({
           <button
             type="button"
             onClick={() => onChoose('reset')}
-            className="w-full text-left px-3 py-2.5 rounded-lg border border-slate-200 hover:bg-slate-50"
+            className="w-full text-left px-3 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800"
           >
             <div className="text-sm font-medium text-slate-800">
               {isZh ? '重置为空内核' : 'Reset to empty kernel'}

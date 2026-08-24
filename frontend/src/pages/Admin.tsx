@@ -75,18 +75,18 @@ function PasswordPrompt({ open, onClose, onConfirm }: PasswordPromptProps) {
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget) handleClose() }}
     >
-      <div className="bg-white rounded-2xl shadow-modal w-full max-w-sm mx-4 overflow-hidden animate-scale-in">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-surface-200">
-          <h2 className="text-lg font-display font-semibold text-surface-900">
+      <div className="bg-white dark:bg-surface-900 rounded-2xl shadow-modal w-full max-w-sm mx-4 overflow-hidden animate-scale-in">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-surface-200 dark:border-surface-700">
+          <h2 className="text-lg font-display font-semibold text-surface-900 dark:text-surface-100">
             {zh ? '修改密码' : 'Change My Password'}
           </h2>
-          <button onClick={handleClose} className="p-1 hover:bg-surface-100 rounded-lg transition-colors">
+          <button onClick={handleClose} className="p-1 hover:bg-surface-100 dark:hover:bg-surface-800 rounded-lg transition-colors">
             <X className="w-5 h-5 text-surface-400" />
           </button>
         </div>
         <div className="px-6 py-5 space-y-4">
           <div>
-            <label className="block text-sm font-medium text-surface-700 mb-1.5">
+            <label className="block text-sm font-medium text-surface-700 dark:text-surface-200 mb-1.5">
               {zh ? '当前密码' : 'Current Password'}
             </label>
             <input
@@ -94,11 +94,11 @@ function PasswordPrompt({ open, onClose, onConfirm }: PasswordPromptProps) {
               value={currentPassword}
               onChange={(e) => setCurrentPassword(e.target.value)}
               placeholder={zh ? '输入当前密码' : 'Enter current password'}
-              className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+              className="w-full px-3 py-2 text-sm border border-surface-200 dark:border-surface-700 rounded-lg bg-white dark:bg-surface-900 text-surface-800 dark:text-surface-100 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-surface-700 mb-1.5">
+            <label className="block text-sm font-medium text-surface-700 dark:text-surface-200 mb-1.5">
               {zh ? '新密码' : 'New Password'}
             </label>
             <input
@@ -106,11 +106,11 @@ function PasswordPrompt({ open, onClose, onConfirm }: PasswordPromptProps) {
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
               placeholder={zh ? '至少8位' : 'Min 8 characters'}
-              className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+              className="w-full px-3 py-2 text-sm border border-surface-200 dark:border-surface-700 rounded-lg bg-white dark:bg-surface-900 text-surface-800 dark:text-surface-100 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-surface-700 mb-1.5">
+            <label className="block text-sm font-medium text-surface-700 dark:text-surface-200 mb-1.5">
               {zh ? '确认新密码' : 'Confirm New Password'}
             </label>
             <input
@@ -118,17 +118,17 @@ function PasswordPrompt({ open, onClose, onConfirm }: PasswordPromptProps) {
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               placeholder={zh ? '再次输入新密码' : 'Confirm new password'}
-              className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+              className="w-full px-3 py-2 text-sm border border-surface-200 dark:border-surface-700 rounded-lg bg-white dark:bg-surface-900 text-surface-800 dark:text-surface-100 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
             />
           </div>
           {error && (
-            <div className="text-sm text-red-600 py-2 px-3 bg-red-50 rounded-lg">{error}</div>
+            <div className="text-sm text-red-600 dark:text-red-400 py-2 px-3 bg-red-50 dark:bg-red-950/40 rounded-lg">{error}</div>
           )}
         </div>
-        <div className="flex justify-end gap-3 px-6 py-4 border-t border-surface-200 bg-surface-50">
+        <div className="flex justify-end gap-3 px-6 py-4 border-t border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-950">
           <button
             onClick={handleClose}
-            className="px-4 py-2 text-sm font-medium text-surface-600 hover:bg-surface-100 rounded-lg transition-colors"
+            className="px-4 py-2 text-sm font-medium text-surface-600 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800 rounded-lg transition-colors"
           >
             {zh ? '取消' : 'Cancel'}
           </button>
@@ -203,18 +203,18 @@ function CreateUserPrompt({ open, onClose, onConfirm }: CreateUserPromptProps) {
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget) handleClose() }}
     >
-      <div className="bg-white rounded-2xl shadow-modal w-full max-w-sm mx-4 overflow-hidden animate-scale-in">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-surface-200">
-          <h2 className="text-lg font-display font-semibold text-surface-900">
+      <div className="bg-white dark:bg-surface-900 rounded-2xl shadow-modal w-full max-w-sm mx-4 overflow-hidden animate-scale-in">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-surface-200 dark:border-surface-700">
+          <h2 className="text-lg font-display font-semibold text-surface-900 dark:text-surface-100">
             {zh ? '创建用户' : 'Create User'}
           </h2>
-          <button onClick={handleClose} className="p-1 hover:bg-surface-100 rounded-lg transition-colors">
+          <button onClick={handleClose} className="p-1 hover:bg-surface-100 dark:hover:bg-surface-800 rounded-lg transition-colors">
             <X className="w-5 h-5 text-surface-400" />
           </button>
         </div>
         <div className="px-6 py-5 space-y-4">
           <div>
-            <label className="block text-sm font-medium text-surface-700 mb-1.5">
+            <label className="block text-sm font-medium text-surface-700 dark:text-surface-200 mb-1.5">
               {zh ? '用户名' : 'Username'}
             </label>
             <input
@@ -222,11 +222,11 @@ function CreateUserPrompt({ open, onClose, onConfirm }: CreateUserPromptProps) {
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               placeholder={zh ? '输入用户名' : 'Enter username'}
-              className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+              className="w-full px-3 py-2 text-sm border border-surface-200 dark:border-surface-700 rounded-lg bg-white dark:bg-surface-900 text-surface-800 dark:text-surface-100 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-surface-700 mb-1.5">
+            <label className="block text-sm font-medium text-surface-700 dark:text-surface-200 mb-1.5">
               {zh ? '邮箱（可选）' : 'Email (optional)'}
             </label>
             <input
@@ -234,11 +234,11 @@ function CreateUserPrompt({ open, onClose, onConfirm }: CreateUserPromptProps) {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="user@example.com"
-              className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+              className="w-full px-3 py-2 text-sm border border-surface-200 dark:border-surface-700 rounded-lg bg-white dark:bg-surface-900 text-surface-800 dark:text-surface-100 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-surface-700 mb-1.5">
+            <label className="block text-sm font-medium text-surface-700 dark:text-surface-200 mb-1.5">
               {zh ? '密码' : 'Password'}
             </label>
             <input
@@ -246,17 +246,17 @@ function CreateUserPrompt({ open, onClose, onConfirm }: CreateUserPromptProps) {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder={zh ? '至少8位' : 'Min 8 characters'}
-              className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+              className="w-full px-3 py-2 text-sm border border-surface-200 dark:border-surface-700 rounded-lg bg-white dark:bg-surface-900 text-surface-800 dark:text-surface-100 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
             />
           </div>
           {error && (
-            <div className="text-sm text-red-600 py-2 px-3 bg-red-50 rounded-lg">{error}</div>
+            <div className="text-sm text-red-600 dark:text-red-400 py-2 px-3 bg-red-50 dark:bg-red-950/40 rounded-lg">{error}</div>
           )}
         </div>
-        <div className="flex justify-end gap-3 px-6 py-4 border-t border-surface-200 bg-surface-50">
+        <div className="flex justify-end gap-3 px-6 py-4 border-t border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-950">
           <button
             onClick={handleClose}
-            className="px-4 py-2 text-sm font-medium text-surface-600 hover:bg-surface-100 rounded-lg transition-colors"
+            className="px-4 py-2 text-sm font-medium text-surface-600 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800 rounded-lg transition-colors"
           >
             {zh ? '取消' : 'Cancel'}
           </button>
@@ -285,7 +285,7 @@ function EnumCell({ readOnly, value, options, onChange }: {
 }) {
   if (readOnly) {
     return (
-      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
+      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 dark:bg-purple-900/60 text-purple-700 dark:text-purple-300">
         {value}
       </span>
     )
@@ -294,7 +294,7 @@ function EnumCell({ readOnly, value, options, onChange }: {
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="text-sm border border-surface-200 rounded-lg px-2 py-1 bg-white focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+      className="text-sm border border-surface-200 dark:border-surface-700 rounded-lg px-2 py-1 bg-white dark:bg-surface-900 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
     >
       {options.map((o) => <option key={o} value={o}>{o}</option>)}
     </select>
@@ -402,35 +402,35 @@ export function Admin() {
   }
 
   return (
-    <div className="min-h-screen bg-surface-50">
+    <div className="min-h-screen bg-surface-50 dark:bg-surface-950">
       {/* Header */}
-      <header className="bg-white border-b border-surface-200 px-6 py-4">
+      <header className="bg-white dark:bg-surface-900 border-b border-surface-200 dark:border-surface-700 px-6 py-4">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-accent-500 to-accent-700 flex items-center justify-center">
               <User className="w-5 h-5 text-white" />
             </div>
-            <h1 className="text-xl font-display font-semibold text-surface-900">
+            <h1 className="text-xl font-display font-semibold text-surface-900 dark:text-surface-100">
               {zh ? '管理员面板' : 'Admin Panel'}
             </h1>
           </div>
           <div className="flex items-center gap-3">
             <button
               onClick={() => navigate('/')}
-              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-surface-600 hover:bg-surface-100 rounded-lg transition-colors"
+              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-surface-600 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800 rounded-lg transition-colors"
             >
               {zh ? '返回' : 'Back'}
             </button>
             <button
               onClick={() => setShowPasswordPrompt(true)}
-              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-surface-600 hover:bg-surface-100 rounded-lg transition-colors"
+              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-surface-600 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800 rounded-lg transition-colors"
             >
               <Key className="w-4 h-4" />
               {zh ? '修改我的密码' : 'Change My Password'}
             </button>
             <button
               onClick={handleSignOut}
-              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-lg transition-colors"
             >
               <LogOut className="w-4 h-4" />
               {zh ? '退出登录' : 'Sign Out'}
@@ -442,7 +442,7 @@ export function Admin() {
       {/* Content */}
       <main className="max-w-6xl mx-auto px-6 py-8">
         <div className="flex items-center justify-between mb-6">
-          <h2 className="text-lg font-semibold text-surface-800">
+          <h2 className="text-lg font-semibold text-surface-800 dark:text-surface-100">
             {zh ? '用户管理' : 'User Management'}
           </h2>
           <button
@@ -455,34 +455,34 @@ export function Admin() {
         </div>
 
         {error && (
-          <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">
+          <div className="mb-4 p-4 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 rounded-xl text-red-700 dark:text-red-300 text-sm">
             {error}
           </div>
         )}
 
         {/* Users Table */}
-        <div className="bg-white rounded-xl border border-surface-200 overflow-hidden">
+        <div className="bg-white dark:bg-surface-900 rounded-xl border border-surface-200 dark:border-surface-700 overflow-hidden">
           <table className="w-full">
             <thead>
-              <tr className="bg-surface-50 border-b border-surface-200">
-                <th className="text-left px-6 py-3 text-xs font-semibold text-surface-500 uppercase tracking-wider">
+              <tr className="bg-surface-50 dark:bg-surface-950 border-b border-surface-200 dark:border-surface-700">
+                <th className="text-left px-6 py-3 text-xs font-semibold text-surface-500 dark:text-surface-400 uppercase tracking-wider">
                   {zh ? '用户名' : 'Username'}
                 </th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-surface-500 uppercase tracking-wider">
+                <th className="text-left px-6 py-3 text-xs font-semibold text-surface-500 dark:text-surface-400 uppercase tracking-wider">
                   Role
                 </th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-surface-500 uppercase tracking-wider">
+                <th className="text-left px-6 py-3 text-xs font-semibold text-surface-500 dark:text-surface-400 uppercase tracking-wider">
                   Status
                 </th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-surface-500 uppercase tracking-wider">
+                <th className="text-left px-6 py-3 text-xs font-semibold text-surface-500 dark:text-surface-400 uppercase tracking-wider">
                   {zh ? '创建时间' : 'Created'}
                 </th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-surface-500 uppercase tracking-wider">
+                <th className="text-left px-6 py-3 text-xs font-semibold text-surface-500 dark:text-surface-400 uppercase tracking-wider">
                   {zh ? '操作' : 'Actions'}
                 </th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-surface-100">
+            <tbody className="divide-y divide-surface-100 dark:divide-surface-800">
               {loading ? (
                 <tr>
                   <td colSpan={5} className="px-6 py-12 text-center text-surface-400">
@@ -501,12 +501,12 @@ export function Admin() {
                   const isSelf = user.id === authUser?.id
                   const isDeleting = user.status === 'deleting'
                   return (
-                    <tr key={user.id} className="hover:bg-surface-50 transition-colors">
+                    <tr key={user.id} className="hover:bg-surface-50 dark:hover:bg-surface-950 transition-colors">
                       <td className="px-6 py-4">
                         <div>
-                          <p className="text-sm font-medium text-surface-900">{user.username}</p>
+                          <p className="text-sm font-medium text-surface-900 dark:text-surface-100">{user.username}</p>
                           {user.email && (
-                            <p className="text-xs text-surface-500">{user.email}</p>
+                            <p className="text-xs text-surface-500 dark:text-surface-400">{user.email}</p>
                           )}
                         </div>
                       </td>
@@ -526,7 +526,7 @@ export function Admin() {
                           onChange={(status) => handleStatusChange(user.id, status)}
                         />
                       </td>
-                      <td className="px-6 py-4 text-sm text-surface-600">
+                      <td className="px-6 py-4 text-sm text-surface-600 dark:text-surface-300">
                         {formatDate(user.created_at)}
                       </td>
                       <td className="px-6 py-4">
@@ -536,12 +536,12 @@ export function Admin() {
                           </span>
                         ) : isDeleting ? (
                           <div className="flex items-center gap-4">
-                            <span className="text-xs text-amber-700">
+                            <span className="text-xs text-amber-700 dark:text-amber-300">
                               {zh ? '删除清理中' : 'Deletion in progress'}
                             </span>
                             <button
                               onClick={() => setDeleteTarget(user)}
-                              className="text-sm text-red-600 hover:text-red-700 font-medium transition-colors"
+                              className="text-sm text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 font-medium transition-colors"
                             >
                               {zh ? '重试清理' : 'Retry cleanup'}
                             </button>
@@ -550,13 +550,13 @@ export function Admin() {
                           <div className="flex items-center gap-4">
                             <button
                               onClick={() => setChangePasswordTarget(user)}
-                              className="text-sm text-blue-600 hover:text-blue-700 font-medium transition-colors"
+                              className="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium transition-colors"
                             >
                               {zh ? '改密' : 'Password'}
                             </button>
                             <button
                               onClick={() => setDeleteTarget(user)}
-                              className="text-sm text-red-600 hover:text-red-700 font-medium transition-colors"
+                              className="text-sm text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 font-medium transition-colors"
                             >
                               {zh ? '删除' : 'Delete'}
                             </button>
@@ -661,18 +661,18 @@ function AdminPasswordPrompt({ open, user, onClose, onConfirm }: AdminPasswordPr
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget) handleClose() }}
     >
-      <div className="bg-white rounded-2xl shadow-modal w-full max-w-sm mx-4 overflow-hidden animate-scale-in">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-surface-200">
-          <h2 className="text-lg font-display font-semibold text-surface-900">
+      <div className="bg-white dark:bg-surface-900 rounded-2xl shadow-modal w-full max-w-sm mx-4 overflow-hidden animate-scale-in">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-surface-200 dark:border-surface-700">
+          <h2 className="text-lg font-display font-semibold text-surface-900 dark:text-surface-100">
             {zh ? `修改 ${user.username} 的密码` : `Change Password for ${user.username}`}
           </h2>
-          <button onClick={handleClose} className="p-1 hover:bg-surface-100 rounded-lg transition-colors">
+          <button onClick={handleClose} className="p-1 hover:bg-surface-100 dark:hover:bg-surface-800 rounded-lg transition-colors">
             <X className="w-5 h-5 text-surface-400" />
           </button>
         </div>
         <div className="px-6 py-5 space-y-4">
           <div>
-            <label className="block text-sm font-medium text-surface-700 mb-1.5">
+            <label className="block text-sm font-medium text-surface-700 dark:text-surface-200 mb-1.5">
               {zh ? '新密码' : 'New Password'}
             </label>
             <input
@@ -680,11 +680,11 @@ function AdminPasswordPrompt({ open, user, onClose, onConfirm }: AdminPasswordPr
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
               placeholder={zh ? '至少8位' : 'Min 8 characters'}
-              className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+              className="w-full px-3 py-2 text-sm border border-surface-200 dark:border-surface-700 rounded-lg bg-white dark:bg-surface-900 text-surface-800 dark:text-surface-100 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-surface-700 mb-1.5">
+            <label className="block text-sm font-medium text-surface-700 dark:text-surface-200 mb-1.5">
               {zh ? '确认新密码' : 'Confirm New Password'}
             </label>
             <input
@@ -692,17 +692,17 @@ function AdminPasswordPrompt({ open, user, onClose, onConfirm }: AdminPasswordPr
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               placeholder={zh ? '再次输入新密码' : 'Confirm new password'}
-              className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+              className="w-full px-3 py-2 text-sm border border-surface-200 dark:border-surface-700 rounded-lg bg-white dark:bg-surface-900 text-surface-800 dark:text-surface-100 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
             />
           </div>
           {error && (
-            <div className="text-sm text-red-600 py-2 px-3 bg-red-50 rounded-lg">{error}</div>
+            <div className="text-sm text-red-600 dark:text-red-400 py-2 px-3 bg-red-50 dark:bg-red-950/40 rounded-lg">{error}</div>
           )}
         </div>
-        <div className="flex justify-end gap-3 px-6 py-4 border-t border-surface-200 bg-surface-50">
+        <div className="flex justify-end gap-3 px-6 py-4 border-t border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-950">
           <button
             onClick={handleClose}
-            className="px-4 py-2 text-sm font-medium text-surface-600 hover:bg-surface-100 rounded-lg transition-colors"
+            className="px-4 py-2 text-sm font-medium text-surface-600 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800 rounded-lg transition-colors"
           >
             {zh ? '取消' : 'Cancel'}
           </button>

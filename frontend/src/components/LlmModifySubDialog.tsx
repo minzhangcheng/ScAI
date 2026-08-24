@@ -23,20 +23,20 @@ export default function LlmModifySubDialog({
       aria-modal="true"
       aria-label={t('configModified')}
     >
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4">
+      <div className="bg-white dark:bg-surface-900 rounded-2xl shadow-2xl w-full max-w-sm mx-4">
         {/* Header */}
-        <div className="flex items-center gap-3 px-6 py-4 border-b border-gray-100">
-          <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center">
-            <AlertCircle className="w-5 h-5 text-amber-600" aria-hidden="true" />
+        <div className="flex items-center gap-3 px-6 py-4 border-b border-gray-100 dark:border-gray-700">
+          <div className="w-10 h-10 rounded-full bg-amber-100 dark:bg-amber-900/60 flex items-center justify-center">
+            <AlertCircle className="w-5 h-5 text-amber-600 dark:text-amber-400" aria-hidden="true" />
           </div>
-          <h2 className="text-lg font-semibold text-gray-900">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
             {t('configModified')}
           </h2>
         </div>
 
         {/* Info */}
         <div className="px-6 py-4">
-          <p className="text-sm text-gray-600">
+          <p className="text-sm text-gray-600 dark:text-gray-300">
             {t('configModifiedDesc')}
           </p>
         </div>
@@ -53,7 +53,7 @@ export default function LlmModifySubDialog({
 
           <button
             onClick={onReturnToSettings}
-            className="w-full flex items-center gap-3 px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-medium transition-colors"
+            className="w-full flex items-center gap-3 px-4 py-3 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-xl font-medium transition-colors"
           >
             <Settings className="w-4 h-4" aria-hidden="true" />
             {t('returnToSettings')}
@@ -61,7 +61,7 @@ export default function LlmModifySubDialog({
 
           <button
             onClick={onReturnToTimeout}
-            className="w-full flex items-center gap-3 px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-medium transition-colors"
+            className="w-full flex items-center gap-3 px-4 py-3 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-xl font-medium transition-colors"
           >
             <Clock className="w-4 h-4" aria-hidden="true" />
             {t('backToTimeoutDialog')}

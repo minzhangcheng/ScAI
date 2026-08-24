@@ -16,6 +16,9 @@ export const zh = {
     tabChat: '对话',
     
     // Sidebar
+    expandSidebar: '展开侧边栏',
+    collapseSidebar: '收起侧边栏',
+    resizeSidebar: '调整侧边栏宽度',
     newAnalysis: '新建分析',
     defaultProjectName: '新分析项目',
     defaultProjectDescription: '请描述您的研究目标和实验设计...',

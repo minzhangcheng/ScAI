@@ -100,8 +100,8 @@ export function SnapshotFailureDialog({
       aria-label={t('snapshotFailureAria')}
       aria-modal="true"
     >
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[85vh] flex flex-col">
-        <div className="flex items-start justify-between gap-3 p-5 pb-3 shrink-0 border-b border-slate-100">
+      <div className="bg-white dark:bg-surface-900 rounded-xl shadow-xl w-full max-w-md max-h-[85vh] flex flex-col">
+        <div className="flex items-start justify-between gap-3 p-5 pb-3 shrink-0 border-b border-slate-100 dark:border-slate-800">
           <h3 className="text-base font-semibold text-red-700">
             {isRuntimePersistence
               ? t('snapshotFailureRuntimeTitle')
@@ -119,7 +119,7 @@ export function SnapshotFailureDialog({
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 py-4 space-y-4">
-          <div className="space-y-2 text-sm text-slate-700">
+          <div className="space-y-2 text-sm text-slate-700 dark:text-slate-200">
             <div>
               <span className="font-medium text-slate-500">{t('snapshotFailureCode')}: </span>
               <code className="text-red-700 font-mono text-xs break-all">{record.code}</code>

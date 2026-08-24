@@ -345,11 +345,11 @@ export function SnapshotPanel({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl mx-4 max-h-[80vh] flex flex-col" role="dialog" aria-label="Analysis Snapshots">
-        <div className="flex items-center justify-between px-6 py-4 border-b">
+      <div className="bg-white dark:bg-surface-900 rounded-2xl shadow-2xl w-full max-w-3xl mx-4 max-h-[80vh] flex flex-col" role="dialog" aria-label="Analysis Snapshots">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-700">
           <div className="flex items-center gap-2">
             <Camera className="w-5 h-5 text-accent-600" />
-            <h2 className="text-lg font-semibold text-slate-900">
+            <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
               {isZh ? '分析快照' : 'Analysis Snapshots'}
             </h2>
             {/*
@@ -368,15 +368,15 @@ export function SnapshotPanel({
               {isZh ? '实验性' : 'Experimental'}
             </span>
             {snapshots.length > 0 && (
-              <span className="text-xs text-slate-400 ml-1">({snapshots.length})</span>
+            <span className="text-xs text-slate-400 dark:text-slate-500 ml-1">({snapshots.length})</span>
             )}
           </div>
-          <button onClick={onClose} className="p-1 hover:bg-slate-100 rounded-lg" aria-label="Close">
+          <button onClick={onClose} className="p-1 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg" aria-label="Close">
             <X className="w-5 h-5 text-slate-400" />
           </button>
         </div>
 
-        <div className="px-6 py-2 bg-amber-50/60 border-b border-amber-100 text-[11px] text-amber-800">
+        <div className="px-6 py-2 bg-amber-50/60 dark:bg-amber-950/30 border-b border-amber-100 dark:border-amber-800 text-[11px] text-amber-800 dark:text-amber-200">
           {isZh
             ? '此功能仍在开发中，尚不稳定：快照格式可能在后续版本中变更，旧快照不保证能被恢复。请勿将其作为唯一的成果保护手段。'
             : 'This feature is in development and not yet stable: the snapshot format may change in a later build, and older snapshots are not guaranteed to restore. Do not rely on it as your only safeguard.'}
@@ -384,9 +384,9 @@ export function SnapshotPanel({
 
         <div className="flex-1 overflow-auto p-4">
           {loading ? (
-            <div className="text-center text-slate-400 py-8">{isZh ? '加载中...' : 'Loading...'}</div>
+            <div className="text-center text-slate-400 dark:text-slate-500 py-8">{isZh ? '加载中...' : 'Loading...'}</div>
           ) : snapshots.length === 0 ? (
-            <div className="text-center text-slate-400 py-8">
+            <div className="text-center text-slate-400 dark:text-slate-500 py-8">
               {isZh ? '暂无快照（快照会在分析关键节点自动创建）' : 'No snapshots (snapshots are created automatically at key analysis points)'}
             </div>
           ) : (

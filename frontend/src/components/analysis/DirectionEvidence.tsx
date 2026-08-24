@@ -42,37 +42,37 @@ export default function DirectionEvidence({
     <>
       <div className="px-4 pb-1 pl-12 flex flex-wrap gap-1.5">
         {evidence.status === 'completed' && (
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700">
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 dark:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300">
             {isZh ? '证据已验证' : 'Evidence verified'}
           </span>
         )}
         {partialWithEvidence && (
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300">
             {isZh ? '部分证据' : 'Partial evidence'}
           </span>
         )}
         {timedOutWithoutEvidence && (
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-200 text-slate-700">
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200">
             {isZh ? '检索超时' : 'Search timed out'}
           </span>
         )}
         {(evidence.status === 'failed' || evidence.status === 'skipped') && (
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900/60 text-red-700 dark:text-red-300">
             {isZh ? '文献验证失败' : 'Literature verification failed'}
           </span>
         )}
         {evidence.search_tier === 'deep' && (
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300">
             {isZh ? '深度搜索' : 'Deep search used'}
           </span>
         )}
         {qualPair && (
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 dark:bg-purple-900/60 text-purple-700 dark:text-purple-300">
             {qualPair[isZh ? 0 : 1]}
           </span>
         )}
         {(evidence.negative_validation_confidence === 'medium' || evidence.negative_validation_confidence === 'high') && (
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-cyan-100 text-cyan-700">
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-cyan-100 dark:bg-cyan-900/60 text-cyan-700 dark:text-cyan-300">
             {isZh ? '负向验证' : 'Negative validation'}
           </span>
         )}
@@ -80,7 +80,7 @@ export default function DirectionEvidence({
       {c.risk_flags && c.risk_flags.length > 0 && (
         <div className="px-4 pb-1 pl-12 flex flex-wrap gap-1.5">
           {c.risk_flags.map((flag: string, fi: number) => (
-            <span key={fi} className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-700">
+            <span key={fi} className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 dark:bg-orange-900/60 text-orange-700 dark:text-orange-300">
               {flag === 'requires_new_experiment'
                 ? (isZh ? '需新实验' : 'Requires new experiment')
                 : flag}
@@ -90,7 +90,7 @@ export default function DirectionEvidence({
       )}
       {c.prerequisite_dependencies && c.prerequisite_dependencies.length > 0 && (
         <div className="px-4 pb-1 pl-12 flex flex-wrap gap-1.5">
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-200 text-slate-600">
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
             {isZh ? '未满足的前提条件' : 'Unmet prerequisite'}
           </span>
         </div>
@@ -99,31 +99,31 @@ export default function DirectionEvidence({
         <button
           type="button"
           onClick={e => { e.stopPropagation(); onToggle() }}
-          className="text-xs text-accent-600 hover:text-accent-700 flex items-center gap-1"
+          className="text-xs text-accent-600 dark:text-accent-400 hover:text-accent-700 dark:hover:text-accent-300 flex items-center gap-1"
         >
           {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
           {isZh ? '查看文献证据' : 'View evidence'}
         </button>
       </div>
       {expanded && (
-        <div className="mx-4 mb-4 ml-12 p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-600 space-y-2">
+        <div className="mx-4 mb-4 ml-12 p-3 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-slate-600 dark:text-slate-300 space-y-2">
           {timedOutWithoutEvidence && (
-            <div className="text-slate-700 bg-slate-100 border border-slate-200 rounded p-2">
+            <div className="text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded p-2">
               {isZh ? '文献检索在保留引用前超时；该方向已保守评分。' : 'Literature search timed out before references could be retained; this direction was scored conservatively.'}
             </div>
           )}
           {partialWithEvidence && (
-            <div className="text-amber-700 bg-amber-50 border border-amber-100 rounded p-2">
+            <div className="text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-100 dark:border-amber-900 rounded p-2">
               {isZh ? '文献检索仅部分完成；下方引用是不完整结果。' : 'Literature search partially completed; references below are partial.'}
             </div>
           )}
           {evidenceFailed && (
-            <div className="text-red-700 bg-red-50 border border-red-100 rounded p-2">
+            <div className="text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-950/40 border border-red-100 dark:border-red-900 rounded p-2">
               {isZh ? '文献验证失败或已跳过；该方向已保守评分。' : 'Literature verification failed or was skipped; this direction was scored conservatively.'}
             </div>
           )}
           {evidence.summary && <div>{evidence.summary}</div>}
-          <div className="grid grid-cols-2 gap-2 text-slate-500">
+          <div className="grid grid-cols-2 gap-2 text-slate-500 dark:text-slate-400">
             {evidence.support_level && <div>{isZh ? '支持强度' : 'Support level'}: {evidence.support_level}</div>}
             {evidence.contradiction_level && <div>{isZh ? '反证强度' : 'Contradiction level'}: {evidence.contradiction_level}</div>}
             {evidence.prior_art_level && <div>{isZh ? '已有研究' : 'Prior art'}: {evidence.prior_art_level}</div>}
@@ -131,12 +131,12 @@ export default function DirectionEvidence({
             {evidence.fallback_tier && <div>{isZh ? '降级层级' : 'Fallback tier'}: {evidence.fallback_tier}</div>}
           </div>
           {evidence.knowledge_gap_summary && (
-            <div className="text-slate-700 bg-white border border-slate-200 rounded p-2">
+            <div className="text-slate-700 dark:text-slate-200 bg-white dark:bg-surface-900 border border-slate-200 dark:border-slate-700 rounded p-2">
               {evidence.knowledge_gap_summary}
             </div>
           )}
           {evidence.scheduler_limitation && (
-            <div className="text-amber-700 bg-amber-50 border border-amber-100 rounded p-2">
+            <div className="text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-100 dark:border-amber-900 rounded p-2">
               {evidence.scheduler_limitation}
             </div>
           )}
@@ -152,26 +152,26 @@ export default function DirectionEvidence({
             ...(evidence.contradictory_evidence || []),
             ...(evidence.methodological_precedent || []),
           ].slice(0, 5).map(item => (
-            <div key={item.pmid} className="border-t border-slate-200 pt-2">
+            <div key={item.pmid} className="border-t border-slate-200 dark:border-slate-700 pt-2">
               PMID: {item.pmid} — {item.title}
               {item.why_it_matters ? <span className="block text-slate-400">{item.why_it_matters}</span> : null}
             </div>
           ))}
           {(evidence.similar_published_directions || []).length > 0 && (
-            <div className="border-t border-slate-200 pt-2">
+            <div className="border-t border-slate-200 dark:border-slate-700 pt-2">
               <div className="font-medium">{isZh ? '相似已发表方向' : 'Similar published directions'}</div>
               {(evidence.similar_published_directions || []).slice(0, 5).map((item, idx) => (
-                <div key={idx} className="text-slate-500">
+                <div key={idx} className="text-slate-500 dark:text-slate-400">
                   {item.pmid ? `PMID: ${item.pmid} — ` : ''}{item.title || item.url || 'Untitled reference'}
                 </div>
               ))}
             </div>
           )}
           {evidence.confidence && (
-            <div className="text-slate-500">{isZh ? '文献置信度' : 'Literature confidence'}: {evidence.confidence}</div>
+            <div className="text-slate-500 dark:text-slate-400">{isZh ? '文献置信度' : 'Literature confidence'}: {evidence.confidence}</div>
           )}
           {(evidence.queries || []).length > 0 && (
-            <div className="border-t border-slate-200 pt-2">
+            <div className="border-t border-slate-200 dark:border-slate-700 pt-2">
               <div className="font-medium">{isZh ? '检索式' : 'Queries'}</div>
               {(evidence.queries || []).slice(0, 5).map((q, qi) => (
                 <div key={qi} className="text-slate-400 truncate">{q.category}: {q.query}</div>
@@ -179,14 +179,14 @@ export default function DirectionEvidence({
             </div>
           )}
           {(evidence.limitations || []).length > 0 && (
-            <div className="border-t border-slate-200 pt-2">
+            <div className="border-t border-slate-200 dark:border-slate-700 pt-2">
               <div className="font-medium">{isZh ? '局限' : 'Limitations'}</div>
               {(evidence.limitations || []).map((lim, li) => (
                 <div key={li} className="text-slate-400">{lim}</div>
               ))}
             </div>
           )}
-          <div className="border-t border-slate-200 pt-2 grid grid-cols-2 gap-1 text-slate-500">
+          <div className="border-t border-slate-200 dark:border-slate-700 pt-2 grid grid-cols-2 gap-1 text-slate-500 dark:text-slate-400">
             <div>{isZh ? '生物学预期' : 'Biology expectedness'}: {c.biology_expectedness || 'N/A'}</div>
             <div>{isZh ? '数据新颖性' : 'Data novelty'}: {c.data_novelty || 'N/A'}</div>
             <div>{isZh ? '机制重要性' : 'Mechanistic importance'}: {c.mechanistic_importance || 'N/A'}</div>

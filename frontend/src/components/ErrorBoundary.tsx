@@ -33,21 +33,21 @@ export class ErrorBoundary extends React.Component<React.PropsWithChildren, Stat
   render() {
     if (this.state.hasError) {
       return (
-        <div role="alert" style={{ maxWidth: 480, margin: '15vh auto', padding: 24, textAlign: 'center', fontFamily: 'system-ui, sans-serif' }}>
-          <p style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>Something went wrong. Please reload.</p>
-          <p style={{ fontSize: 13, color: '#64748b', marginBottom: 16 }}>
+        <div role="alert" className="mx-auto mt-[15vh] max-w-[480px] p-6 text-center font-sans text-slate-900 dark:text-slate-100">
+          <p className="mb-2 text-base font-semibold">Something went wrong. Please reload.</p>
+          <p className="mb-4 text-[13px] text-slate-500 dark:text-slate-400">
             If reloading doesn&apos;t help, reset local data to clear cached app state (you&apos;ll need to sign in again).
           </p>
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
+          <div className="flex justify-center gap-2">
             <button
               onClick={this.reload}
-              style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid #cbd5e1', background: '#fff', cursor: 'pointer' }}
+              className="cursor-pointer rounded-lg border border-slate-300 bg-white px-4 py-2 dark:border-slate-600 dark:bg-slate-900"
             >
               Reload
             </button>
             <button
               onClick={this.resetLocalData}
-              style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: '#dc2626', color: '#fff', cursor: 'pointer' }}
+              className="cursor-pointer rounded-lg border-0 bg-red-600 px-4 py-2 text-white hover:bg-red-700"
             >
               Reset local data
             </button>

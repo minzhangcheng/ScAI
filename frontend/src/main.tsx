@@ -6,6 +6,7 @@ import { ProtectedAdminRoute } from './components/ProtectedAdminRoute'
 import { AuthInitializer } from './components/AuthInitializer'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import './styles/globals.css'
+import { SystemThemeProvider } from './components/SystemThemeProvider'
 
 const App = lazy(() => import('./App'))
 const Login = lazy(() => import('./pages/Login').then(module => ({ default: module.Login })))
@@ -16,21 +17,23 @@ const Admin = lazy(() => import('./pages/Admin').then(module => ({ default: modu
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <ErrorBoundary>
-      <BrowserRouter>
-      <AuthInitializer>
-        <Suspense fallback={<div className="min-h-screen bg-surface-900" />}>
-        <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/register" element={<Register />} />
-        <Route path="/setup" element={<Setup />} />
-        <Route path="/api-keys" element={<ProtectedRoute><ApiKeys /></ProtectedRoute>} />
-        <Route path="/admin" element={<ProtectedAdminRoute><Admin /></ProtectedAdminRoute>} />
-        <Route path="/*" element={<ProtectedRoute><App /></ProtectedRoute>} />
-        </Routes>
-        </Suspense>
-      </AuthInitializer>
-      </BrowserRouter>
-    </ErrorBoundary>
+    <SystemThemeProvider>
+      <ErrorBoundary>
+        <BrowserRouter>
+        <AuthInitializer>
+          <Suspense fallback={<div className="min-h-screen bg-surface-50 dark:bg-surface-950" />}>
+          <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
+          <Route path="/setup" element={<Setup />} />
+          <Route path="/api-keys" element={<ProtectedRoute><ApiKeys /></ProtectedRoute>} />
+          <Route path="/admin" element={<ProtectedAdminRoute><Admin /></ProtectedAdminRoute>} />
+          <Route path="/*" element={<ProtectedRoute><App /></ProtectedRoute>} />
+          </Routes>
+          </Suspense>
+        </AuthInitializer>
+        </BrowserRouter>
+      </ErrorBoundary>
+    </SystemThemeProvider>
   </React.StrictMode>,
 )

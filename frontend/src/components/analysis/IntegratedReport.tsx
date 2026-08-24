@@ -65,7 +65,7 @@ export function IntegratedReport({ report }: IntegratedReportProps) {
       <div className="flex items-center justify-between mb-3">
         <button
           onClick={() => setExpanded(!expanded)}
-          className="flex items-center gap-2 text-sm font-medium text-slate-500 uppercase tracking-wide hover:text-slate-700 transition-colors"
+          className="flex items-center gap-2 text-sm font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide hover:text-slate-700 dark:hover:text-slate-200 transition-colors"
         >
           <FileText className="w-4 h-4" />
           {t('integratedReport')}
@@ -79,7 +79,7 @@ export function IntegratedReport({ report }: IntegratedReportProps) {
         <div className="flex items-center gap-2">
           <button
             onClick={copyToClipboard}
-            className="flex items-center gap-1 px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 text-slate-600 rounded transition-colors"
+            className="flex items-center gap-1 px-2 py-1 text-xs bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded transition-colors"
             title={language === 'zh' ? '复制到剪贴板' : 'Copy to clipboard'}
           >
             {copied ? (
@@ -96,14 +96,14 @@ export function IntegratedReport({ report }: IntegratedReportProps) {
           </button>
           <button
             onClick={downloadAsMarkdown}
-            className="flex items-center gap-1 px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 text-slate-600 rounded transition-colors"
+            className="flex items-center gap-1 px-2 py-1 text-xs bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded transition-colors"
           >
             <Download className="w-3 h-3" />
             MD
           </button>
           <button
             onClick={downloadAsHTML}
-            className="flex items-center gap-1 px-2 py-1 text-xs bg-violet-100 hover:bg-violet-200 text-violet-600 rounded transition-colors"
+            className="flex items-center gap-1 px-2 py-1 text-xs bg-violet-100 dark:bg-violet-900/60 hover:bg-violet-200 dark:hover:bg-violet-800/70 text-violet-600 dark:text-violet-400 rounded transition-colors"
           >
             <Download className="w-3 h-3" />
             HTML
@@ -113,7 +113,7 @@ export function IntegratedReport({ report }: IntegratedReportProps) {
 
       {/* Report Content */}
       {expanded && (
-        <div className="bg-white border border-slate-200 rounded-xl p-6 prose prose-slate prose-sm max-w-none">
+        <div className="bg-white dark:bg-surface-900 border border-slate-200 dark:border-slate-700 rounded-xl p-6 prose prose-slate prose-sm max-w-none">
           <ReactMarkdown
             components={{
               // Custom rendering for figure references
@@ -123,7 +123,7 @@ export function IntegratedReport({ report }: IntegratedReportProps) {
                   return (
                     <a
                       href={href}
-                      className="text-violet-600 hover:text-violet-800 font-medium no-underline hover:underline"
+                      className="text-violet-600 dark:text-violet-400 hover:text-violet-800 dark:hover:text-violet-200 font-medium no-underline hover:underline"
                       onClick={(e) => {
                         e.preventDefault()
                         // Could scroll to figure in gallery
@@ -143,7 +143,7 @@ export function IntegratedReport({ report }: IntegratedReportProps) {
                     href={href}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-blue-600 hover:text-blue-800"
+                    className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200"
                   >
                     {children}
                   </a>
@@ -152,18 +152,18 @@ export function IntegratedReport({ report }: IntegratedReportProps) {
               // Style tables
               table: ({ children }) => (
                 <div className="overflow-x-auto my-4">
-                  <table className="min-w-full border-collapse border border-slate-200">
+                  <table className="min-w-full border-collapse border border-slate-200 dark:border-slate-700">
                     {children}
                   </table>
                 </div>
               ),
               th: ({ children }) => (
-                <th className="border border-slate-200 bg-slate-100 px-3 py-2 text-left text-sm font-medium">
+                <th className="border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-3 py-2 text-left text-sm font-medium">
                   {children}
                 </th>
               ),
               td: ({ children }) => (
-                <td className="border border-slate-200 px-3 py-2 text-sm">
+                <td className="border border-slate-200 dark:border-slate-700 px-3 py-2 text-sm">
                   {children}
                 </td>
               ),
@@ -172,7 +172,7 @@ export function IntegratedReport({ report }: IntegratedReportProps) {
                 const isInline = !className
                 if (isInline) {
                   return (
-                    <code className="bg-slate-100 text-slate-800 px-1 py-0.5 rounded text-sm">
+                    <code className="bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 px-1 py-0.5 rounded text-sm">
                       {children}
                     </code>
                   )
@@ -185,17 +185,17 @@ export function IntegratedReport({ report }: IntegratedReportProps) {
               },
               // Style headings
               h1: ({ children }) => (
-                <h1 className="text-2xl font-bold text-slate-900 mt-6 mb-4 pb-2 border-b border-slate-200">
+                <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100 mt-6 mb-4 pb-2 border-b border-slate-200 dark:border-slate-700">
                   {children}
                 </h1>
               ),
               h2: ({ children }) => (
-                <h2 className="text-xl font-semibold text-slate-900 mt-5 mb-3">
+                <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100 mt-5 mb-3">
                   {children}
                 </h2>
               ),
               h3: ({ children }) => (
-                <h3 className="text-lg font-medium text-slate-800 mt-4 mb-2">
+                <h3 className="text-lg font-medium text-slate-800 dark:text-slate-100 mt-4 mb-2">
                   {children}
                 </h3>
               ),
@@ -212,7 +212,7 @@ export function IntegratedReport({ report }: IntegratedReportProps) {
               ),
               // Style blockquotes
               blockquote: ({ children }) => (
-                <blockquote className="border-l-4 border-violet-300 pl-4 my-4 italic text-slate-600">
+                <blockquote className="border-l-4 border-violet-300 dark:border-violet-700 pl-4 my-4 italic text-slate-600 dark:text-slate-300">
                   {children}
                 </blockquote>
               ),

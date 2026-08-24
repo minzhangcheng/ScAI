@@ -57,13 +57,13 @@ export function GroupManager({
         <div className="flex items-center gap-2">
           <Users className="w-5 h-5 text-accent-500" />
           <div>
-            <h3 className="font-display text-lg font-semibold text-slate-900">{t('treatmentGroups')}</h3>
-            <p className="text-sm text-slate-500">{t('treatmentGroupsDesc')}</p>
+            <h3 className="font-display text-lg font-semibold text-slate-900 dark:text-slate-100">{t('treatmentGroups')}</h3>
+            <p className="text-sm text-slate-500 dark:text-slate-400">{t('treatmentGroupsDesc')}</p>
           </div>
         </div>
         <button
           onClick={() => setAdding(true)}
-          className="flex items-center gap-1.5 px-3 py-2 bg-accent-100 text-accent-700 rounded-lg text-sm font-medium hover:bg-accent-200 transition-colors"
+          className="flex items-center gap-1.5 px-3 py-2 bg-accent-100 dark:bg-accent-900/60 text-accent-700 dark:text-accent-300 rounded-lg text-sm font-medium hover:bg-accent-200 dark:hover:bg-accent-800/70 transition-colors"
         >
           <Plus className="w-4 h-4" />
           {t('addGroup')}
@@ -75,7 +75,7 @@ export function GroupManager({
         {groups.map((group) => (
           <div
             key={group.id}
-            className="border border-slate-200 rounded-xl p-4 bg-white hover:border-accent-200 transition-colors"
+            className="border border-slate-200 dark:border-slate-700 rounded-xl p-4 bg-white dark:bg-surface-900 hover:border-accent-200 dark:hover:border-accent-800 transition-colors"
           >
             {editingId === group.id ? (
               <div className="space-y-2">
@@ -86,7 +86,7 @@ export function GroupManager({
                     const val = e.target.value.trim()
                     if (val && val !== group.name) onUpdate(group.id, { name: val })
                   }}
-                  className="w-full px-2 py-1 border border-slate-300 rounded text-sm font-medium"
+                  className="w-full px-2 py-1 border border-slate-300 dark:border-slate-600 rounded text-sm font-medium"
                   autoFocus
                 />
                 <input
@@ -97,10 +97,10 @@ export function GroupManager({
                     if (val !== group.description) onUpdate(group.id, { description: val })
                   }}
                   placeholder={t('groupDescPlaceholder')}
-                  className="w-full px-2 py-1 border border-slate-300 rounded text-xs"
+                  className="w-full px-2 py-1 border border-slate-300 dark:border-slate-600 rounded text-xs"
                 />
                 <div className="flex items-center gap-2">
-                  <label className="text-xs text-slate-500">{t('sampleCount')}:</label>
+                  <label className="text-xs text-slate-500 dark:text-slate-400">{t('sampleCount')}:</label>
                   <input
                     type="number"
                     defaultValue={group.sampleCount}
@@ -117,12 +117,12 @@ export function GroupManager({
                         }
                       }
                     }}
-                    className="w-16 px-2 py-1 border border-slate-300 rounded text-xs"
+                    className="w-16 px-2 py-1 border border-slate-300 dark:border-slate-600 rounded text-xs"
                   />
                 </div>
                 <button
                   onClick={() => setEditingId(null)}
-                  className="text-xs text-accent-600 hover:underline"
+                  className="text-xs text-accent-600 dark:text-accent-400 hover:underline"
                 >
                   {language === 'zh' ? '完成' : 'Done'}
                 </button>
@@ -130,30 +130,30 @@ export function GroupManager({
             ) : (
               <>
                 <div className="flex items-center justify-between mb-1">
-                  <h4 className="font-semibold text-sm text-slate-900">
+                  <h4 className="font-semibold text-sm text-slate-900 dark:text-slate-100">
                     {group.name}
                   </h4>
                   <div className="flex items-center gap-1">
                     <button
                       onClick={() => setEditingId(group.id)}
-                      className="p-1 text-slate-400 hover:text-accent-500 hover:bg-accent-50 rounded transition-colors"
+                      className="p-1 text-slate-400 hover:text-accent-500 hover:bg-accent-50 dark:hover:bg-accent-900/40 rounded transition-colors"
                       title={language === 'zh' ? '编辑' : 'Edit'}
                     >
                       <Pencil className="w-3.5 h-3.5" />
                     </button>
                     <button
                       onClick={() => handleDelete(group.id)}
-                      className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                      className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 rounded transition-colors"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 </div>
                 {group.description && (
-                  <p className="text-xs text-slate-500 mb-2 line-clamp-2">{group.description}</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mb-2 line-clamp-2">{group.description}</p>
                 )}
-                <div className="flex items-center gap-1 text-xs text-slate-500">
-                  <span className="px-1.5 py-0.5 bg-accent-50 text-accent-600 rounded font-medium">
+                <div className="flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400">
+                  <span className="px-1.5 py-0.5 bg-accent-50 dark:bg-accent-900/40 text-accent-600 dark:text-accent-400 rounded font-medium">
                     {group.sampleCount} {t('sample')}{group.sampleCount > 1 && language === 'en' ? 's' : ''}
                   </span>
                 </div>
@@ -164,14 +164,14 @@ export function GroupManager({
 
         {/* Add New Group Card */}
         {adding && (
-          <div className="border-2 border-dashed border-accent-300 rounded-xl p-4 bg-accent-50/50">
+          <div className="border-2 border-dashed border-accent-300 dark:border-accent-700 rounded-xl p-4 bg-accent-50/50 dark:bg-accent-900/40">
             <div className="space-y-2">
               <input
                 type="text"
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
                 placeholder={t('groupNamePlaceholder')}
-                className="w-full px-2 py-1.5 border border-slate-300 rounded text-sm"
+                className="w-full px-2 py-1.5 border border-slate-300 dark:border-slate-600 rounded text-sm"
                 autoFocus
                 onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
               />
@@ -180,23 +180,23 @@ export function GroupManager({
                 value={newDesc}
                 onChange={(e) => setNewDesc(e.target.value)}
                 placeholder={t('groupDescPlaceholder')}
-                className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs"
+                className="w-full px-2 py-1.5 border border-slate-300 dark:border-slate-600 rounded text-xs"
               />
               <div className="flex items-center gap-2">
-                <label className="text-xs text-slate-600">{t('sampleCount')}:</label>
+                <label className="text-xs text-slate-600 dark:text-slate-300">{t('sampleCount')}:</label>
                 <input
                   type="number"
                   value={newSampleCount}
                   onChange={(e) => setNewSampleCount(Math.max(1, parseInt(e.target.value) || 1))}
                   min={1}
                   max={100}
-                  className="w-16 px-2 py-1 border border-slate-300 rounded text-xs"
+                  className="w-16 px-2 py-1 border border-slate-300 dark:border-slate-600 rounded text-xs"
                 />
               </div>
               <div className="flex justify-end gap-2">
                 <button
                   onClick={() => setAdding(false)}
-                  className="px-3 py-1 text-xs text-slate-600 hover:bg-slate-200 rounded"
+                  className="px-3 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 rounded"
                 >
                   {t('cancel')}
                 </button>

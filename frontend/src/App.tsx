@@ -5,7 +5,9 @@ import { useTranslation } from './i18n/translations'
 import { devWarn } from './utils/logger'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { Sidebar } from './components/Sidebar'
+import { SidebarResizeHandle } from './components/SidebarResizeHandle'
 import { LanguageSelector } from './components/LanguageSelector'
+import { ScAIIcon } from './components/ScAIIcon'
 import {
   Beaker,
   FileText,
@@ -18,7 +20,8 @@ import {
   Wifi,
   WifiOff,
   GripVertical,
-  Dna,
+  PanelLeftClose,
+  PanelLeftOpen,
   AlertTriangle
 } from 'lucide-react'
 
@@ -36,7 +39,7 @@ function PanelFallback() {
 }
 
 function App() {
-  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks, authUser, sessionLoading } = useAppStore()
+  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, sidebarWidth, setSidebarWidth, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks, authUser, sessionLoading } = useAppStore()
   const { checkStatus } = useConfig()
   const { getUserConfigStatus, getUserConfig } = useUserConfig()
   const { connect, disconnect } = useWebSocket()
@@ -156,11 +159,9 @@ function App() {
 
   if (configured === null) {
     return (
-      <div className="min-h-screen bg-surface-900 flex flex-col items-center justify-center gap-4">
-        <div className="p-4 bg-gradient-to-br from-accent-500 to-accent-700 rounded-2xl shadow-glow-accent">
-          <Dna className="w-8 h-8 text-white animate-spin" />
-        </div>
-        <p className="text-surface-400 text-sm font-medium tracking-wide">Loading ScAI...</p>
+      <div className="min-h-screen bg-surface-50 dark:bg-surface-950 flex flex-col items-center justify-center gap-4">
+        <ScAIIcon className="w-16 h-16 animate-pulse" />
+        <p className="text-surface-500 dark:text-surface-400 text-sm font-medium tracking-wide">Loading ScAI...</p>
       </div>
     )
   }
@@ -176,13 +177,11 @@ function App() {
 
   return (
     <ErrorBoundary>
-    <div className="min-h-screen bg-surface-50">
+    <div className="min-h-screen bg-surface-50 dark:bg-surface-950">
       {/* Session loading overlay — shown while loadSession fetches, auto-closes on completion */}
       {sessionLoading && (
         <div className="fixed inset-0 z-[60] flex flex-col items-center justify-center gap-4 bg-surface-900/70 backdrop-blur-sm">
-          <div className="p-4 bg-gradient-to-br from-accent-500 to-accent-700 rounded-2xl shadow-glow-accent">
-            <Dna className="w-8 h-8 text-white animate-spin" />
-          </div>
+          <ScAIIcon className="w-16 h-16 animate-pulse" />
           <p className="text-white text-sm font-medium tracking-wide">{t('loadingAnalysis')}</p>
         </div>
       )}
@@ -216,38 +215,56 @@ function App() {
         <Sidebar 
           isOpen={sidebarOpen} 
           onOpenConfig={() => setShowConfig(true)}
+          width={sidebarWidth}
         />
+        {sidebarOpen && (
+          <SidebarResizeHandle
+            width={sidebarWidth}
+            onWidthChange={setSidebarWidth}
+            label={t('resizeSidebar')}
+          />
+        )}
 
         {/* Main Content */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {/* Header */}
-          <header className="h-14 border-b border-surface-200/60 bg-white/90 backdrop-blur-md flex items-center justify-between px-4 shrink-0" style={{ boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.04)' }}>
+          <header className="h-14 border-b border-surface-200/60 dark:border-surface-700/60 bg-white/90 dark:bg-surface-900/90 backdrop-blur-md flex items-center justify-between px-4 shrink-0" style={{ boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.04)' }}>
             <div className="flex items-center gap-4">
               <button
+                type="button"
                 onClick={() => setSidebarOpen(!sidebarOpen)}
-                className="p-2 hover:bg-surface-100 rounded-lg transition-colors lg:hidden"
+                className="p-2 hover:bg-surface-100 dark:hover:bg-surface-800 rounded-lg transition-colors"
+                aria-label={sidebarOpen ? t('collapseSidebar') : t('expandSidebar')}
+                aria-controls="app-sidebar"
+                aria-expanded={sidebarOpen}
+                title={sidebarOpen ? t('collapseSidebar') : t('expandSidebar')}
               >
-                {sidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+                <span className="lg:hidden">
+                  {sidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+                </span>
+                <span className="hidden lg:block">
+                  {sidebarOpen ? <PanelLeftClose className="w-5 h-5" /> : <PanelLeftOpen className="w-5 h-5" />}
+                </span>
               </button>
 
               <div>
-                <h1 className="font-display font-semibold text-surface-800 tracking-tight">
+                <h1 className="font-display font-semibold text-surface-800 dark:text-surface-100 tracking-tight">
                   {currentSession?.name || t('appFullName')}
                 </h1>
                 {currentSession && (
-                  <div className="flex items-center gap-2 text-xs text-surface-500">
+                  <div className="flex items-center gap-2 text-xs text-surface-500 dark:text-surface-400">
                     <span>Round {currentSession.currentRound}</span>
-                    <span className="text-surface-300">·</span>
+                    <span className="text-surface-300 dark:text-surface-600">·</span>
                     <span className={`status-${currentSession.status}`}>
                       {currentSession.status}
                     </span>
                     {wsConnected ? (
-                      <span className="flex items-center gap-1 text-emerald-600">
+                      <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
                         <Wifi className="w-3 h-3" />
                         <span>{language === 'zh' ? '已连接' : 'Connected'}</span>
                       </span>
                     ) : currentSession.status === 'running' ? (
-                      <span className="flex items-center gap-1 text-amber-600">
+                      <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
                         <WifiOff className="w-3 h-3" />
                         <span>{language === 'zh' ? '断开' : 'Disconnected'}</span>
                       </span>
@@ -266,8 +283,8 @@ function App() {
                     onClick={() => setActiveTab(tab.id)}
                     className={`relative flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-all duration-200 ${
                       activeTab === tab.id
-                        ? 'text-accent-600'
-                        : 'text-surface-500 hover:text-surface-700'
+                        ? 'text-accent-600 dark:text-accent-400'
+                        : 'text-surface-500 dark:text-surface-400 hover:text-surface-700 dark:hover:text-surface-200'
                     }`}
                   >
                     <tab.icon className="w-4 h-4" />
@@ -286,7 +303,7 @@ function App() {
 
           {/* Read-only banner */}
           {authUser?.status === 'readonly' && (
-            <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-sm text-amber-800 flex items-center gap-2">
+            <div className="bg-amber-50 dark:bg-amber-950/40 border-b border-amber-200 dark:border-amber-800 px-4 py-2 text-sm text-amber-800 dark:text-amber-200 flex items-center gap-2">
               <AlertTriangle className="w-4 h-4" />
               Read-only mode — you can view analysis results but cannot create or modify sessions.
             </div>
@@ -322,10 +339,10 @@ function App() {
             {/* Resizable Divider */}
             {currentSession && (
               <div
-                className="hidden lg:flex items-center justify-center w-[3px] bg-surface-200 hover:bg-accent-400 cursor-col-resize transition-colors duration-200 group"
+                className="hidden lg:flex items-center justify-center w-[3px] bg-surface-200 dark:bg-surface-700 hover:bg-accent-400 cursor-col-resize transition-colors duration-200 group"
                 onMouseDown={() => setIsResizing(true)}
               >
-                <div className="absolute p-1 bg-surface-300 group-hover:bg-accent-500 rounded opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="absolute p-1 bg-surface-300 dark:bg-surface-600 group-hover:bg-accent-500 rounded opacity-0 group-hover:opacity-100 transition-opacity">
                   <GripVertical className="w-3 h-3 text-white" />
                 </div>
               </div>
@@ -334,7 +351,7 @@ function App() {
             {/* Right Panel - Message Stream */}
             {currentSession && (
               <div
-                className="hidden lg:flex border-l border-surface-200/60 bg-white overflow-hidden flex-col"
+                className="hidden lg:flex border-l border-surface-200/60 bg-white dark:bg-surface-900 overflow-hidden flex-col"
                 style={{ width: `${messagePanelWidth}%` }}
               >
                 <Suspense fallback={<PanelFallback />}><MessageStream /></Suspense>
@@ -343,15 +360,15 @@ function App() {
           </div>
 
           {/* Mobile Tabs */}
-          <nav className="md:hidden border-t border-surface-200 bg-white flex">
+          <nav className="md:hidden border-t border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-900 flex">
             {tabs.map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
                 className={`flex-1 flex flex-col items-center gap-1 py-3 text-xs font-medium transition-all ${
                   activeTab === tab.id
-                    ? 'text-accent-600'
-                    : 'text-surface-500'
+                    ? 'text-accent-600 dark:text-accent-400'
+                    : 'text-surface-500 dark:text-surface-400'
                 }`}
               >
                 <tab.icon className="w-5 h-5" />
@@ -361,7 +378,7 @@ function App() {
           </nav>
 
           {/* Footer */}
-          <footer className="shrink-0 border-t border-surface-100 bg-white/60 backdrop-blur-sm px-4 py-1.5 text-center">
+          <footer className="shrink-0 border-t border-surface-100 dark:border-surface-800 bg-white/60 dark:bg-surface-900/60 backdrop-blur-sm px-4 py-1.5 text-center">
             <p className="text-[10px] text-surface-400 select-none tracking-wider uppercase">
               {language === 'zh'
                 ? 'ScAI · 单细胞测序AI分析 · © 2025–2026 程敏章 版权所有'

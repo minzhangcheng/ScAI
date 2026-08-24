@@ -1,10 +1,11 @@
 // Saved-session picker modal. Split out of Sidebar.tsx; JSX copied verbatim.
-import { X, RefreshCw, AlertCircle, FolderOpen, Clock, Trash2 } from 'lucide-react'
+import { X, RefreshCw, AlertCircle, FolderOpen, Clock, Trash2, Plus } from 'lucide-react'
+import { useTranslation, type Language } from '../../i18n/translations'
 
 interface SessionBrowserModalProps {
   show: boolean
   onClose: () => void
-  language: string
+  language: Language
   loadingSessions: boolean
   sessionListError: string | null
   fetchSessions: () => void
@@ -12,6 +13,7 @@ interface SessionBrowserModalProps {
   onLoadSession: (sessionId: string) => void
   currentSessionId?: string
   isReadOnly: boolean
+  onNewAnalysis: () => void
   onDeleteSession: (sessionId: string, e: React.MouseEvent) => void
 }
 
@@ -26,28 +28,48 @@ export function SessionBrowserModal({
   onLoadSession,
   currentSessionId,
   isReadOnly,
+  onNewAnalysis,
   onDeleteSession,
 }: SessionBrowserModalProps) {
+  const { t } = useTranslation(language)
   if (!show) return null
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-2xl shadow-modal w-full max-w-lg mx-4 max-h-[80vh] flex flex-col animate-scale-in">
-        <div className="p-4 border-b border-surface-200 flex items-center justify-between">
-          <h2 className="text-lg font-display font-semibold text-surface-800">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="session-browser-title"
+        className="bg-white dark:bg-surface-900 rounded-2xl shadow-modal w-full max-w-lg mx-4 max-h-[80vh] flex flex-col animate-scale-in"
+      >
+        <div className="p-4 border-b border-surface-200 dark:border-surface-700 flex items-center justify-between">
+          <h2 id="session-browser-title" className="text-lg font-display font-semibold text-surface-800 dark:text-surface-100">
             {language === 'zh' ? '选择会话' : 'Select Session'}
           </h2>
           <button
             onClick={onClose}
-            className="p-1 text-surface-400 hover:text-surface-600 rounded"
+            className="p-1 text-surface-400 hover:text-surface-600 dark:hover:text-surface-200 rounded"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
+        {!isReadOnly && (
+          <div className="p-4 border-b border-surface-200 dark:border-surface-700">
+            <button
+              type="button"
+              onClick={onNewAnalysis}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-accent-600 text-white rounded-xl font-medium hover:bg-accent-700 transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              {t('newAnalysis')}
+            </button>
+          </div>
+        )}
+
         <div className="p-4 flex-1 overflow-auto">
           {loadingSessions ? (
-            <div className="text-center py-8 text-surface-500">
+            <div className="text-center py-8 text-surface-500 dark:text-surface-400">
               <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2" />
               {language === 'zh' ? '加载中...' : 'Loading...'}
             </div>
@@ -60,7 +82,7 @@ export function SessionBrowserModal({
               </button>
             </div>
           ) : savedSessions.length === 0 ? (
-            <div className="text-center py-8 text-surface-500">
+            <div className="text-center py-8 text-surface-500 dark:text-surface-400">
               <FolderOpen className="w-10 h-10 mx-auto mb-2 opacity-50" />
               <p>{language === 'zh' ? '没有已保存的会话' : 'No saved sessions'}</p>
             </div>
@@ -70,15 +92,15 @@ export function SessionBrowserModal({
                 <div
                   key={session.id}
                   onClick={() => onLoadSession(session.id)}
-                  className={`p-3 rounded-xl border cursor-pointer transition-all hover:border-accent-300 hover:bg-accent-50 ${
+                  className={`p-3 rounded-xl border cursor-pointer transition-all hover:border-accent-300 hover:bg-accent-50 dark:hover:bg-accent-900/30 ${
                     currentSessionId === session.id
-                      ? 'border-accent-500 bg-accent-50'
-                      : 'border-surface-200'
+                      ? 'border-accent-500 bg-accent-50 dark:bg-accent-900/40'
+                      : 'border-surface-200 dark:border-surface-700'
                   }`}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex-1 min-w-0">
-                      <h3 className="font-medium text-surface-800 truncate">
+                      <h3 className="font-medium text-surface-800 dark:text-surface-100 truncate">
                         {session.name}
                       </h3>
                       <p
@@ -87,7 +109,7 @@ export function SessionBrowserModal({
                       >
                         {session.id}
                       </p>
-                      <div className="flex items-center gap-3 mt-1 text-xs text-surface-500">
+                      <div className="flex items-center gap-3 mt-1 text-xs text-surface-500 dark:text-surface-400">
                         <span className="flex items-center gap-1">
                           <Clock className="w-3 h-3" />
                           {session.updated_at

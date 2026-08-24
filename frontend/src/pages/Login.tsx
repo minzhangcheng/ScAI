@@ -42,40 +42,40 @@ export function Login() {
 
   return (
     <AuthLayout subtitle="Single Cell Sequencing Analysis Driven by AI" onSubmit={handleSubmit}>
-      <h2 className="text-lg font-semibold text-surface-700">{zh ? '登录' : 'Sign In'}</h2>
+      <h2 className="text-lg font-semibold text-surface-700 dark:text-surface-200">{zh ? '登录' : 'Sign In'}</h2>
 
       {err && (
-        <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">{err}</div>
+        <div className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-300 text-sm">{err}</div>
       )}
 
       {registered === 'pending' && (
-        <div className="p-3 bg-green-50 border border-green-200 rounded-lg text-green-700 text-sm">
+        <div className="p-3 bg-green-50 dark:bg-green-950/40 border border-green-200 dark:border-green-800 rounded-lg text-green-700 dark:text-green-300 text-sm">
           {zh ? '账号创建成功，请登录。' : 'Account created successfully. Please sign in.'}
         </div>
       )}
 
       <div>
-        <label className="block text-sm font-medium text-surface-600 mb-1">{zh ? '用户名' : 'Username'}</label>
+        <label className="block text-sm font-medium text-surface-600 dark:text-surface-300 mb-1">{zh ? '用户名' : 'Username'}</label>
         <input
           type="text"
           name="username"
           value={username}
           onChange={e => setUsername(e.target.value)}
           required
-          className="w-full px-3 py-2 border border-surface-300 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+          className="w-full px-3 py-2 border border-surface-300 dark:border-surface-600 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
           placeholder={zh ? '输入用户名' : 'Enter your username'}
         />
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-surface-600 mb-1">{zh ? '密码' : 'Password'}</label>
+        <label className="block text-sm font-medium text-surface-600 dark:text-surface-300 mb-1">{zh ? '密码' : 'Password'}</label>
         <input
           type="password"
           value={password}
           onChange={e => setPassword(e.target.value)}
           required
           minLength={8}
-          className="w-full px-3 py-2 border border-surface-300 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+          className="w-full px-3 py-2 border border-surface-300 dark:border-surface-600 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
           placeholder="••••••••"
         />
       </div>
@@ -88,9 +88,9 @@ export function Login() {
         {loading ? (zh ? '登录中...' : 'Signing in...') : (zh ? '登录' : 'Sign In')}
       </button>
 
-      <p className="text-center text-sm text-surface-500">
+      <p className="text-center text-sm text-surface-500 dark:text-surface-400">
         {zh ? '没有账号？' : "Don't have an account?"}{' '}
-        <Link to="/register" className="text-accent-600 hover:text-accent-700 font-medium">
+        <Link to="/register" className="text-accent-600 dark:text-accent-400 hover:text-accent-700 dark:hover:text-accent-300 font-medium">
           {zh ? '注册' : 'Register'}
         </Link>
       </p>

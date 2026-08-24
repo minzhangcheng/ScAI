@@ -162,10 +162,10 @@ export function IntegrationGatePanel({
         aria-labelledby={titleId}
         ref={dialogRef}
         onKeyDown={handleKeyDown}
-        className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+        className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white dark:bg-surface-900 shadow-2xl"
       >
-        <div className="flex items-start justify-between border-b border-slate-200 px-6 py-4">
-          <h2 id={titleId} className="text-xl font-semibold text-slate-900">
+        <div className="flex items-start justify-between border-b border-slate-200 dark:border-slate-700 px-6 py-4">
+          <h2 id={titleId} className="text-xl font-semibold text-slate-900 dark:text-slate-100">
             {t('integrationGateTitle', { cycle })}
           </h2>
           <button
@@ -173,7 +173,7 @@ export function IntegrationGatePanel({
             onClick={onClose}
             aria-label={language === 'zh' ? '关闭' : 'Close'}
             data-autofocus
-            className="rounded-lg p-2 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700"
+            className="rounded-lg p-2 text-slate-500 dark:text-slate-400 transition-colors hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200"
           >
             <X className="h-5 w-5" aria-hidden="true" />
           </button>
@@ -190,7 +190,7 @@ export function IntegrationGatePanel({
             </a>
           )}
           {timerDisplay && (
-            <div className="text-sm text-slate-500">
+            <div className="text-sm text-slate-500 dark:text-slate-400">
               {t('integrationGateCountdown')} {timerDisplay}
             </div>
           )}
@@ -202,26 +202,26 @@ export function IntegrationGatePanel({
               const id = candidate.direction_id ?? String(index)
               return (
                 <li key={id}>
-                  <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 p-4 transition-colors hover:border-primary-300 hover:bg-primary-50/40">
+                  <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 dark:border-slate-700 p-4 transition-colors hover:border-primary-300 hover:bg-primary-50/40 dark:hover:bg-primary-950/30">
                     <input
                       type="checkbox"
                       checked={!!sel[id]}
                       onChange={() => toggle(id)}
                       className="mt-1 h-4 w-4 rounded border-slate-300 text-primary-600 focus:ring-primary-500"
                     />
-                    <span className="text-sm leading-6 text-slate-700">{candidate.direction}</span>
+                    <span className="text-sm leading-6 text-slate-700 dark:text-slate-200">{candidate.direction}</span>
                   </label>
                 </li>
               )
             })}
           </ul>
         </div>
-        <div className="flex flex-wrap justify-end gap-3 border-t border-slate-200 bg-slate-50 px-6 py-4">
+        <div className="flex flex-wrap justify-end gap-3 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-surface-950 px-6 py-4">
           <button
             type="button"
             onClick={handleLetPiDecide}
             disabled={submitting}
-            className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-surface-900 px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {t('integrationGateLetPiDecide')}
           </button>
@@ -229,7 +229,7 @@ export function IntegrationGatePanel({
             type="button"
             onClick={handleFinalize}
             disabled={submitting}
-            className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-surface-900 px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {t('integrationGateFinalize')}
           </button>

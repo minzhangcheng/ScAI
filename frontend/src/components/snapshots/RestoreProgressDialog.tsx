@@ -25,16 +25,16 @@ export function RestoreProgressDialog({
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40" role="dialog" aria-label="Restore progress">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-5 space-y-3">
-        <h3 className="text-base font-semibold text-slate-900">
+      <div className="bg-white dark:bg-surface-900 rounded-xl shadow-xl w-full max-w-md mx-4 p-5 space-y-3">
+        <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
           {isZh ? '恢复进度' : 'Restore Progress'}
         </h3>
-        <div className="text-sm text-slate-700">
-          <span className="text-slate-500">{isZh ? '状态：' : 'Status: '}</span>
+        <div className="text-sm text-slate-700 dark:text-slate-200">
+          <span className="text-slate-500 dark:text-slate-400">{isZh ? '状态：' : 'Status: '}</span>
           <span className="font-medium capitalize">{status.replace(/_/g, ' ')}</span>
         </div>
         {transaction.recovery_mode && (
-          <div className="text-xs text-slate-500">
+          <div className="text-xs text-slate-500 dark:text-slate-400">
             {isZh ? '恢复模式：' : 'Recovery mode: '}
             {transaction.recovery_mode}
           </div>

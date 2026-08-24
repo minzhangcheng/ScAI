@@ -16,6 +16,9 @@ export const en = {
     tabChat: 'Chat',
 
     // Sidebar
+    expandSidebar: 'Expand sidebar',
+    collapseSidebar: 'Collapse sidebar',
+    resizeSidebar: 'Resize sidebar',
     newAnalysis: 'New Analysis',
     defaultProjectName: 'New Analysis Project',
     defaultProjectDescription: 'Describe your research goals and experimental design...',

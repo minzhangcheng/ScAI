@@ -60,15 +60,15 @@ export function TextInputDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full mx-4 max-h-[80vh] flex flex-col">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+      <div className="bg-white dark:bg-surface-900 rounded-2xl shadow-2xl max-w-lg w-full mx-4 max-h-[80vh] flex flex-col">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-700">
           <div className="flex items-center gap-2">
             <MessageSquare className="w-5 h-5 text-accent-600" />
-            <h3 className="font-display font-semibold text-slate-900">{title}</h3>
+            <h3 className="font-display font-semibold text-slate-900 dark:text-slate-100">{title}</h3>
           </div>
           <div className="flex items-center gap-3">
             {hasCountdown && (
-              <div className="flex items-center gap-1 text-sm text-slate-500">
+              <div className="flex items-center gap-1 text-sm text-slate-500 dark:text-slate-400">
                 <Clock className="w-4 h-4" />
                 <span>{timeRemaining}s</span>
               </div>

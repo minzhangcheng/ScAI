@@ -11,39 +11,39 @@ export function StorageSummary({ status }: StorageSummaryProps) {
     : 0
 
   return (
-    <div className="bg-slate-50 rounded-xl p-4 space-y-3">
-      <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Store Status</div>
-      <div className="flex items-center gap-4 text-xs text-slate-600">
+    <div className="bg-slate-50 dark:bg-slate-800 rounded-xl p-4 space-y-3">
+      <div className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Store Status</div>
+      <div className="flex items-center gap-4 text-xs text-slate-600 dark:text-slate-300">
         <div>
-          <span className="font-medium text-slate-800">Logical: </span>
+          <span className="font-medium text-slate-800 dark:text-slate-100">Logical: </span>
           {formatBytes(status.logical_bytes)}
         </div>
         <div>
-          <span className="font-medium text-slate-800">Physical: </span>
+          <span className="font-medium text-slate-800 dark:text-slate-100">Physical: </span>
           {formatBytes(status.physical_bytes)}
         </div>
         <div>
-          <span className="font-medium text-slate-800">Saved: </span>
+          <span className="font-medium text-slate-800 dark:text-slate-100">Saved: </span>
           {formatBytes(status.dedup_savings)}
         </div>
       </div>
       <div className="flex items-center gap-3">
-        <div className="flex-1 bg-slate-200 rounded-full h-2 overflow-hidden">
+        <div className="flex-1 bg-slate-200 dark:bg-slate-700 rounded-full h-2 overflow-hidden">
           <div
             role="progressbar"
             className="bg-accent-500 h-2 rounded-full transition-all"
             style={{ width: `${Math.min(savingsPct, 100)}%` }}
           />
         </div>
-        <span className="text-xs text-slate-500">{savingsPct}% dedup</span>
+        <span className="text-xs text-slate-500 dark:text-slate-400">{savingsPct}% dedup</span>
       </div>
-      <div className="flex items-center gap-4 text-xs text-slate-600">
+      <div className="flex items-center gap-4 text-xs text-slate-600 dark:text-slate-300">
         <div>
-          <span className="font-medium text-slate-800">Objects: </span>
+          <span className="font-medium text-slate-800 dark:text-slate-100">Objects: </span>
           {status.object_count}
         </div>
         <div>
-          <span className="font-medium text-slate-800">Manifests: </span>
+          <span className="font-medium text-slate-800 dark:text-slate-100">Manifests: </span>
           {status.manifest_count}
         </div>
       </div>

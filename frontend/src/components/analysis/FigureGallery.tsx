@@ -76,17 +76,17 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
 
   const getStatusColor = (status: FigureReviewStatus, diagnostic?: boolean) => {
     if (diagnostic && status === 'pending') {
-      return 'bg-sky-100 text-sky-700 border-sky-200'
+      return 'bg-sky-100 dark:bg-sky-900/60 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-800'
     }
     switch (status) {
       case 'approved':
-        return 'bg-green-100 text-green-700 border-green-200'
+        return 'bg-green-100 dark:bg-green-900/60 text-green-700 dark:text-green-300 border-green-200 dark:border-green-800'
       case 'accepted_with_reservations':
-        return 'bg-yellow-100 text-yellow-700 border-yellow-200'
+        return 'bg-yellow-100 dark:bg-yellow-900/60 text-yellow-700 dark:text-yellow-300 border-yellow-200 dark:border-yellow-800'
       case 'pending':
-        return 'bg-amber-100 text-amber-700 border-amber-200'
+        return 'bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800'
       case 'revision_requested':
-        return 'bg-red-100 text-red-700 border-red-200'
+        return 'bg-red-100 dark:bg-red-900/60 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800'
     }
   }
 
@@ -118,7 +118,7 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
     <div className="mt-6">
       <button
         onClick={() => setCollapsed(c => !c)}
-        className="w-full text-sm font-medium text-slate-500 uppercase tracking-wide mb-3 flex items-center gap-2 hover:text-slate-700 transition-colors"
+        className="w-full text-sm font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-3 flex items-center gap-2 hover:text-slate-700 dark:hover:text-slate-200 transition-colors"
       >
         {collapsed ? (
           <ChevronRight className="w-4 h-4" />
@@ -143,11 +143,11 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
         {visibleFigures.map((figure) => (
           <div
             key={figure.id}
-            className="bg-white border border-slate-200 rounded-lg overflow-hidden hover:shadow-md transition-shadow"
+            className="bg-white dark:bg-surface-900 border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden hover:shadow-md transition-shadow"
           >
             {/* Image Preview */}
             <div
-              className="relative aspect-square bg-slate-100 cursor-pointer group"
+              className="publication-canvas relative aspect-square cursor-pointer group"
               onClick={() => setSelectedFigure(figure)}
             >
               {figure.pngBase64 ? (
@@ -201,29 +201,29 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
 
             {/* Info */}
             <div className="p-3">
-              <h4 className="font-medium text-slate-900 text-sm truncate" title={figure.name}>
+              <h4 className="font-medium text-slate-900 dark:text-slate-100 text-sm truncate" title={figure.name}>
                 {figure.name}
               </h4>
-              <p className="text-xs text-slate-500 mt-1 line-clamp-2" title={figure.description}>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 line-clamp-2" title={figure.description}>
                 {figure.description}
               </p>
               <div className="flex flex-wrap items-center gap-1 mt-2">
-                <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded">
+                <span className="text-xs text-slate-400 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded">
                   {figure.figureType}
                 </span>
                 {figure.round ? (
-                  <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded">
+                  <span className="text-xs text-slate-400 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded">
                     {language === 'zh' ? `第 ${figure.round} 轮` : `Round ${figure.round}`}
                   </span>
                 ) : null}
                 {figure.diagnostic && (
-                  <span className="text-xs text-slate-500 bg-slate-200 px-2 py-0.5 rounded">
+                  <span className="text-xs text-slate-500 dark:text-slate-400 bg-slate-200 dark:bg-slate-700 px-2 py-0.5 rounded">
                     {language === 'zh' ? '诊断图' : 'Diagnostic'}
                   </span>
                 )}
                 {figure.planStepId !== undefined && (
                   <span
-                    className="text-xs text-violet-600 bg-violet-50 px-2 py-0.5 rounded"
+                    className="text-xs text-violet-600 dark:text-violet-400 bg-violet-50 dark:bg-violet-950/40 px-2 py-0.5 rounded"
                     title={figure.planId
                       ? `${language === 'zh' ? '计划' : 'Plan'} ${figure.planId}`
                       : undefined}
@@ -234,7 +234,7 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
                   </span>
                 )}
                 {figure.purpose && figure.purpose !== 'result' && (
-                  <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded">
+                  <span className="text-xs text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded">
                     {figure.purpose}
                   </span>
                 )}
@@ -243,7 +243,7 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
                     travels with it. */}
                 {figure.layoutBlocking && (
                   <span
-                    className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded"
+                    className="text-xs text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-900/60 px-2 py-0.5 rounded"
                     title={language === 'zh' ? '渲染引擎测得文字被遮挡' : 'The renderer measured overlapping text'}
                   >
                     {language === 'zh' ? '排版待修' : 'Layout defect'}
@@ -258,7 +258,7 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
                     e.stopPropagation()
                     downloadJPG(figure)
                   }}
-                  className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded transition-colors"
+                  className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded transition-colors"
                 >
                   <Download className="w-3 h-3" />
                   JPG
@@ -268,7 +268,7 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
                     e.stopPropagation()
                     downloadPDF(figure)
                   }}
-                  className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs bg-violet-100 hover:bg-violet-200 text-violet-700 rounded transition-colors"
+                  className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs bg-violet-100 dark:bg-violet-900/60 hover:bg-violet-200 dark:hover:bg-violet-800/70 text-violet-700 dark:text-violet-300 rounded transition-colors"
                 >
                   <Download className="w-3 h-3" />
                   PDF
@@ -283,7 +283,7 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
         <div className="mt-3 flex justify-center">
           <button
             onClick={() => setShowAll(s => !s)}
-            className="flex items-center gap-1 px-4 py-1.5 text-sm text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+            className="flex items-center gap-1 px-4 py-1.5 text-sm text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition-colors"
           >
             {showAll ? (
               <>
@@ -309,25 +309,25 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
           onClick={() => setSelectedFigure(null)}
         >
           <div
-            className="bg-white rounded-xl max-w-4xl max-h-[90vh] overflow-hidden"
+            className="bg-white dark:bg-surface-900 rounded-xl max-w-4xl max-h-[90vh] overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Modal Header */}
-            <div className="flex items-center justify-between p-4 border-b border-slate-200">
+            <div className="flex items-center justify-between p-4 border-b border-slate-200 dark:border-slate-700">
               <div>
-                <h3 className="font-semibold text-slate-900">{selectedFigure.name}</h3>
-                <p className="text-sm text-slate-500">{selectedFigure.description}</p>
+                <h3 className="font-semibold text-slate-900 dark:text-slate-100">{selectedFigure.name}</h3>
+                <p className="text-sm text-slate-500 dark:text-slate-400">{selectedFigure.description}</p>
               </div>
               <button
                 onClick={() => setSelectedFigure(null)}
-                className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+                className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             {/* Modal Body */}
-            <div className="p-4 max-h-[60vh] overflow-auto bg-slate-50">
+            <div className="publication-canvas p-4 max-h-[60vh] overflow-auto">
               {selectedFigure.pngBase64 ? (
                 <img
                   src={`data:image/jpeg;base64,${selectedFigure.pngBase64}`}
@@ -357,14 +357,14 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
             </div>
 
             {/* Modal Footer */}
-            <div className="p-4 border-t border-slate-200 flex items-center justify-between">
+            <div className="p-4 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <span className={`px-3 py-1 rounded-full text-sm font-medium border ${getStatusColor(selectedFigure.reviewStatus, selectedFigure.diagnostic)}`}>
                   {getStatusIcon(selectedFigure.reviewStatus, selectedFigure.diagnostic)}
                   <span className="ml-1">{getStatusLabel(selectedFigure.reviewStatus, selectedFigure.diagnostic)}</span>
                 </span>
                 {selectedFigure.piFeedback && (
-                  <span className="text-sm text-slate-500 italic">
+                  <span className="text-sm text-slate-500 dark:text-slate-400 italic">
                     {language === 'zh' ? 'PI反馈: ' : 'PI Feedback: '}
                     {selectedFigure.piFeedback}
                   </span>
@@ -373,7 +373,7 @@ export function FigureGallery({ figures, curatedCount }: FigureGalleryProps) {
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => downloadJPG(selectedFigure)}
-                  className="flex items-center gap-2 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors"
+                  className="flex items-center gap-2 px-4 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-lg transition-colors"
                 >
                   <Download className="w-4 h-4" />
                   JPG

@@ -15,17 +15,17 @@ export function StopDialog({ onStopImmediate, onStopSummarize, onClose, stopping
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4">
+      <div className="bg-white dark:bg-surface-900 rounded-2xl shadow-2xl w-full max-w-md mx-4">
         <div className="p-6">
           <div className="flex items-center gap-3 mb-4">
             <div className="p-2 bg-red-100 rounded-full">
               <Square className="w-5 h-5 text-red-600" />
             </div>
-            <h3 className="text-lg font-semibold text-slate-900">
+            <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
               {language === 'zh' ? '停止分析' : 'Stop Analysis'}
             </h3>
           </div>
-          <p className="text-sm text-slate-600 mb-4">
+          <p className="text-sm text-slate-600 dark:text-slate-300 mb-4">
             {language === 'zh' ? '请选择停止方式：' : 'Choose how to stop:'}
           </p>
         </div>
@@ -67,7 +67,7 @@ export function StopDialog({ onStopImmediate, onStopSummarize, onClose, stopping
           <button
             onClick={onClose}
             disabled={stopping}
-            className="w-full px-4 py-3 text-slate-600 hover:bg-slate-100 rounded-xl font-medium transition-colors text-center disabled:opacity-50"
+            className="w-full px-4 py-3 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl font-medium transition-colors text-center disabled:opacity-50"
           >
             {language === 'zh' ? '按错了，继续' : 'Cancel, Continue'}
           </button>

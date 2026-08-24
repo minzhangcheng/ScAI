@@ -7,6 +7,7 @@ import { Language, getDefaultPrompts } from '../i18n/translations'
 import { getToken, setToken, clearToken } from '../utils/authStorage'
 import { PERSIST_STORAGE_KEY, PERSIST_VERSION } from '../constants/storage'
 import { resolveSnapshotFailureActions } from '../utils/snapshotV2'
+import { DEFAULT_SIDEBAR_WIDTH, clampSidebarWidth } from '../constants/layout'
 import { AppState } from './appState'
 import { DEFAULT_MODELS, DEFAULT_TEMPERATURES, DEFAULT_VISION_SETTINGS } from './domain'
 import { migratePersistedState, partialize, quotaSafeLocalStorage, scrubAgentServerConfigs } from './persistence'
@@ -196,6 +197,9 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
       
       sidebarOpen: true,
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
+
+      sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+      setSidebarWidth: (width) => set({ sidebarWidth: clampSidebarWidth(width) }),
 
       // Message panel width (percentage, 20-80)
       messagePanelWidth: 50,
@@ -506,6 +510,16 @@ export const useAppStore = create<AppState>()(
         ps.agentServerConfigs = scrubAgentServerConfigs(ps.agentServerConfigs)
         if (ps.language && typeof ps.language !== 'string') delete ps.language
         if (ps.maxRounds && typeof ps.maxRounds !== 'number') delete ps.maxRounds
+        if (Object.prototype.hasOwnProperty.call(ps, 'sidebarWidth')) {
+          if (typeof ps.sidebarWidth !== 'number' || !Number.isFinite(ps.sidebarWidth)) {
+            delete ps.sidebarWidth
+          } else {
+            ps.sidebarWidth = clampSidebarWidth(ps.sidebarWidth)
+          }
+        }
+        if (Object.prototype.hasOwnProperty.call(ps, 'sidebarOpen') && typeof ps.sidebarOpen !== 'boolean') {
+          delete ps.sidebarOpen
+        }
         // Realtime messages are server-authoritative and re-hydrated from /load on
         // every open/refresh/reconnect, so never trust a persisted copy: drop any
         // legacy `messages` left by older releases (prevents stale/crash-prone shapes).

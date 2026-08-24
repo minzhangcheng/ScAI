@@ -45,20 +45,20 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
   return (
     <div className="mt-6">
       {/* Header */}
-      <h3 className="text-sm font-medium text-slate-500 uppercase tracking-wide mb-3 flex items-center gap-2">
+      <h3 className="text-sm font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-3 flex items-center gap-2">
         <Sparkles className="w-4 h-4 text-amber-500" />
         {isTextMode ? t('graphicAbstractTextMode') : t('graphicAbstract')}
       </h3>
 
       {/* Card */}
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+      <div className="bg-white dark:bg-surface-900 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
         {/* Preview */}
         {isTextMode ? (
           <div
-            className="relative bg-slate-50 cursor-pointer group p-4"
+            className="relative bg-slate-50 dark:bg-slate-800 cursor-pointer group p-4"
             onClick={() => setShowModal(true)}
           >
-            <pre className="font-mono text-xs text-slate-800 whitespace-pre overflow-auto max-h-96 leading-5">
+            <pre className="font-mono text-xs text-slate-800 dark:text-slate-100 whitespace-pre overflow-auto max-h-96 leading-5">
               {textDiagram}
             </pre>
             <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
@@ -72,7 +72,7 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
           </div>
         ) : (
         <div
-          className="relative bg-slate-50 cursor-pointer group"
+          className="publication-canvas relative cursor-pointer group"
           onClick={() => setShowModal(true)}
         >
           <img
@@ -94,11 +94,11 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
         )}
 
         {/* Info & Actions */}
-        <div className="p-4 border-t border-slate-200">
+        <div className="p-4 border-t border-slate-200 dark:border-slate-700">
           <div className="flex items-start justify-between gap-4">
             <div className="flex-1">
-              <p className="text-sm text-slate-600">
-                <span className="font-medium text-slate-700">
+              <p className="text-sm text-slate-600 dark:text-slate-300">
+                <span className="font-medium text-slate-700 dark:text-slate-200">
                   {t('graphicAbstractPrompt')}
                 </span>
                 {graphicAbstract.prompt}
@@ -147,7 +147,7 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
               <img
                 src={base64ToDataUri(imageB64)}
                 alt="Graphic Abstract"
-                className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl"
+                className="publication-canvas max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl"
               />
             )}
 

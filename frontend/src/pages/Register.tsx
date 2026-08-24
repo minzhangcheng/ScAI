@@ -37,14 +37,14 @@ export function Register() {
 
   return (
     <AuthLayout subtitle={zh ? '创建账号' : 'Create an account'} onSubmit={handleSubmit}>
-      <h2 className="text-lg font-semibold text-surface-700">{zh ? '注册' : 'Register'}</h2>
+      <h2 className="text-lg font-semibold text-surface-700 dark:text-surface-200">{zh ? '注册' : 'Register'}</h2>
 
       {err && (
-        <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">{err}</div>
+        <div className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-300 text-sm">{err}</div>
       )}
 
       <div>
-        <label className="block text-sm font-medium text-surface-600 mb-1">{zh ? '用户名' : 'Username'}</label>
+        <label className="block text-sm font-medium text-surface-600 dark:text-surface-300 mb-1">{zh ? '用户名' : 'Username'}</label>
         <input
           type="text"
           value={username}
@@ -53,56 +53,56 @@ export function Register() {
           minLength={3}
           maxLength={64}
           pattern="[a-zA-Z0-9_-]+"
-          className="w-full px-3 py-2 border border-surface-300 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+          className="w-full px-3 py-2 border border-surface-300 dark:border-surface-600 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
           placeholder={zh ? '选择用户名' : 'Choose a username'}
         />
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-surface-600 mb-1">{zh ? '邮箱（可选）' : 'Email (optional)'}</label>
+        <label className="block text-sm font-medium text-surface-600 dark:text-surface-300 mb-1">{zh ? '邮箱（可选）' : 'Email (optional)'}</label>
         <input
           type="email"
           value={email}
           onChange={e => setEmail(e.target.value)}
-          className="w-full px-3 py-2 border border-surface-300 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+          className="w-full px-3 py-2 border border-surface-300 dark:border-surface-600 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
           placeholder="you@example.com"
         />
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-surface-600 mb-1">{zh ? '密码' : 'Password'}</label>
+        <label className="block text-sm font-medium text-surface-600 dark:text-surface-300 mb-1">{zh ? '密码' : 'Password'}</label>
         <input
           type="password"
           value={password}
           onChange={e => setPassword(e.target.value)}
           required
           minLength={8}
-          className="w-full px-3 py-2 border border-surface-300 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+          className="w-full px-3 py-2 border border-surface-300 dark:border-surface-600 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
           placeholder="••••••••"
         />
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-surface-600 mb-1">{zh ? '确认密码' : 'Confirm Password'}</label>
+        <label className="block text-sm font-medium text-surface-600 dark:text-surface-300 mb-1">{zh ? '确认密码' : 'Confirm Password'}</label>
         <input
           type="password"
           value={confirm}
           onChange={e => setConfirm(e.target.value)}
           required
           minLength={8}
-          className="w-full px-3 py-2 border border-surface-300 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+          className="w-full px-3 py-2 border border-surface-300 dark:border-surface-600 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
           placeholder="••••••••"
         />
       </div>
 
       <DisclaimerContent />
 
-      <label className="flex items-start gap-2 text-sm text-surface-600">
+      <label className="flex items-start gap-2 text-sm text-surface-600 dark:text-surface-300">
         <input
           type="checkbox"
           checked={accepted}
           onChange={e => setAccepted(e.target.checked)}
-          className="mt-0.5 rounded border-surface-300 text-accent-600 focus:ring-accent-500"
+          className="mt-0.5 rounded border-surface-300 dark:border-surface-600 text-accent-600 dark:text-accent-400 focus:ring-accent-500"
         />
         <span>I have read and agree to the AI risk warning above</span>
       </label>
@@ -115,9 +115,9 @@ export function Register() {
         {loading ? (zh ? '创建中...' : 'Creating account...') : (zh ? '创建账号' : 'Create Account')}
       </button>
 
-      <p className="text-center text-sm text-surface-500">
+      <p className="text-center text-sm text-surface-500 dark:text-surface-400">
         {zh ? '已有账号？' : 'Already have an account?'}{' '}
-        <Link to="/login" className="text-accent-600 hover:text-accent-700 font-medium">
+        <Link to="/login" className="text-accent-600 dark:text-accent-400 hover:text-accent-700 dark:hover:text-accent-300 font-medium">
           {zh ? '登录' : 'Sign In'}
         </Link>
       </p>

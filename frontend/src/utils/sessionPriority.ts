@@ -2,7 +2,7 @@ import type { SessionListItem } from '../types'
 
 const RUNNING_STATUSES = new Set([
   'running', 'waiting_input', 'waiting_annotation', 'waiting_plan_review',
-  'generating_report', 'paused',
+  'waiting_species_input', 'generating_report', 'paused',
 ])
 
 export function isRunningStatus(status: string): boolean {
@@ -35,6 +35,7 @@ export function selectPrioritySession(
         waitingInput.push(s); break
       case 'waiting_annotation':
       case 'waiting_plan_review':
+      case 'waiting_species_input':
       case 'running':
       case 'generating_report':
         normal.push(s); break
@@ -87,3 +88,5 @@ export const selectCompletedSession = (sessions: SessionListItem[]) =>
 export const selectPendingSession = (sessions: SessionListItem[]) =>
   selectLatestByStatus(sessions, PENDING_STATUSES, 'created_at')
 
+export const hasCompletedSession = (sessions: SessionListItem[]) =>
+  sessions.some((session) => session.status === 'completed')

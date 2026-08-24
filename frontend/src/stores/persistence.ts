@@ -107,6 +107,8 @@ export function partialize(state: AppState) {
     deepResearchLlmBaseUrl: state.deepResearchLlmBaseUrl,
     pubmedEmail: state.pubmedEmail,
     literatureMaxSearchRounds: state.literatureMaxSearchRounds,
+    sidebarOpen: state.sidebarOpen,
+    sidebarWidth: state.sidebarWidth,
     messagePanelWidth: state.messagePanelWidth,
     // Persist session with base64 stripped
     currentSession: state.currentSession ? {

@@ -514,7 +514,7 @@ export function ChatPanel() {
   return (
     <div className="flex-1 flex flex-col h-full">
       {/* Messages area */}
-      <div className="flex-1 overflow-auto p-4 space-y-4">
+      <div className="flex-1 overflow-auto p-4 space-y-4 bg-surface-50 dark:bg-surface-950">
         {chatMessages.length === 0 ? (
           <div className="flex-1 flex items-center justify-center h-full min-h-[300px]">
             <div className="text-center text-slate-400">
@@ -530,15 +530,15 @@ export function ChatPanel() {
               className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
             >
               {msg.role === 'assistant' && (
-                <div className="shrink-0 w-8 h-8 rounded-full bg-accent-100 flex items-center justify-center">
-                  <Bot className="w-4 h-4 text-accent-600" />
+                <div className="shrink-0 w-8 h-8 rounded-full bg-accent-100 dark:bg-accent-900/60 flex items-center justify-center">
+                  <Bot className="w-4 h-4 text-accent-600 dark:text-accent-400" />
                 </div>
               )}
               <div
                 className={`max-w-[80%] rounded-2xl px-4 py-3 ${
                   msg.role === 'user'
                     ? 'bg-accent-600 text-white'
-                    : 'bg-slate-100 text-slate-800'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100'
                 }`}
               >
                 {/* File attachments */}
@@ -548,7 +548,7 @@ export function ChatPanel() {
                       <div
                         key={j}
                         className={`flex items-center gap-1.5 text-xs rounded-lg px-2 py-1 ${
-                          msg.role === 'user' ? 'bg-accent-500/30' : 'bg-slate-200'
+                          msg.role === 'user' ? 'bg-accent-500/30' : 'bg-slate-200 dark:bg-slate-700'
                         }`}
                       >
                         {isImageFile(f.filename) ? (
@@ -559,7 +559,7 @@ export function ChatPanel() {
                         <span className="truncate">{f.filename}</span>
                         {f.target_agent && f.target_agent !== 'pi' && (
                           <span className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                            msg.role === 'user' ? 'bg-accent-400/40' : 'bg-accent-100 text-accent-700'
+                            msg.role === 'user' ? 'bg-accent-400/40' : 'bg-accent-100 dark:bg-accent-900/60 text-accent-700 dark:text-accent-300'
                           }`}>
                             {f.target_agent}
                           </span>
@@ -579,7 +579,7 @@ export function ChatPanel() {
                   )
                 )}
                 {msg.pending_figures && (
-                  <div className="mt-2 flex items-center gap-2 text-xs text-slate-500">
+                  <div className="mt-2 flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
                     <Loader2 className="w-3.5 h-3.5 animate-spin text-accent-500" />
                     <span>Generating figures...</span>
                   </div>
@@ -588,24 +588,24 @@ export function ChatPanel() {
                 {msg.figures && msg.figures.length > 0 && (
                   <div className="mt-3 space-y-3">
                     {msg.figures.map((fig, idx) => (
-                      <div key={idx} className="border border-slate-200 rounded-lg overflow-hidden bg-white">
+                      <div key={idx} className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden bg-white dark:bg-surface-900">
                         <img
                           src={fig.base64
                             ? base64ToDataUri(fig.base64)
                             : `/api/file?path=${encodeURIComponent(fig.path || '')}`}
                           alt={fig.name}
-                          className="w-full h-auto"
+                          className="publication-canvas w-full h-auto"
                           loading="lazy"
                           onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
                         />
-                        <div className="px-3 py-2 border-t border-slate-100 flex items-center justify-between">
-                          <p className="text-xs font-medium text-slate-700">{fig.name}</p>
+                        <div className="px-3 py-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
+                          <p className="text-xs font-medium text-slate-700 dark:text-slate-200">{fig.name}</p>
                           <div className="flex gap-1.5">
                             {fig.pdfPath && (
                               <a
                                 href={`/api/file?path=${encodeURIComponent(fig.pdfPath)}`}
                                 download={`${fig.name}.pdf`}
-                                className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-accent-700 bg-accent-50 hover:bg-accent-100 rounded-md transition-colors"
+                                className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-accent-700 dark:text-accent-300 bg-accent-50 dark:bg-accent-900/40 hover:bg-accent-100 dark:hover:bg-accent-900/60 rounded-md transition-colors"
                               >
                                 <Download className="w-3 h-3" />
                                 PDF
@@ -615,7 +615,7 @@ export function ChatPanel() {
                               <a
                                 href={`/api/file?path=${encodeURIComponent(fig.path)}`}
                                 download={`${fig.name}.png`}
-                                className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-slate-600 bg-slate-50 hover:bg-slate-100 rounded-md transition-colors"
+                                className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-md transition-colors"
                               >
                                 <Download className="w-3 h-3" />
                                 PNG
@@ -644,15 +644,15 @@ export function ChatPanel() {
             && chatMessages[chatMessages.length - 1]?.pending_figures
           ) && (
           <div className="flex gap-3 justify-start">
-            <div className="shrink-0 w-8 h-8 rounded-full bg-accent-100 flex items-center justify-center">
-              <Bot className="w-4 h-4 text-accent-600" />
+            <div className="shrink-0 w-8 h-8 rounded-full bg-accent-100 dark:bg-accent-900/60 flex items-center justify-center">
+              <Bot className="w-4 h-4 text-accent-600 dark:text-accent-400" />
             </div>
-            <div className="bg-slate-100 rounded-2xl px-4 py-3">
+            <div className="bg-slate-100 dark:bg-slate-800 rounded-2xl px-4 py-3">
               {chatDelegationActive ? (
-                <div className="flex items-center gap-2 text-sm text-slate-600">
+                <div className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
                   <Loader2 className="w-4 h-4 animate-spin text-accent-500 shrink-0" />
                   <div>
-                    <div className="font-medium text-accent-700">{chatDelegationPlan || 'Coordinating agents...'}</div>
+                    <div className="font-medium text-accent-700 dark:text-accent-300">{chatDelegationPlan || 'Coordinating agents...'}</div>
                     <div className="text-xs text-slate-400 mt-0.5">{language === 'zh' ? '分析进度请查看 Analysis 标签页' : 'Progress in Analysis tab'}</div>
                   </div>
                 </div>
@@ -667,7 +667,7 @@ export function ChatPanel() {
 
       {/* Error */}
       {error && (
-        <div className="mx-4 mb-2 flex items-center gap-2 p-2 bg-red-50 border border-red-200 rounded-lg text-red-600 text-xs">
+        <div className="mx-4 mb-2 flex items-center gap-2 p-2 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 rounded-lg text-red-600 dark:text-red-400 text-xs">
           <AlertCircle className="w-3 h-3 shrink-0" />
           {error}
         </div>
@@ -687,7 +687,7 @@ export function ChatPanel() {
             return (
               <div
                 key={i}
-                className="bg-slate-100 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-700 space-y-1"
+                className="bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-700 dark:text-slate-200 space-y-1"
               >
                 {/* Row 1: preview + filename + agent + delete */}
                 <div className="flex items-center gap-2">
@@ -700,7 +700,7 @@ export function ChatPanel() {
                   <select
                     value={sf.targetAgent}
                     onChange={(e) => handleFileAgentChange(i, e.target.value)}
-                    className="ml-auto shrink-0 px-1.5 py-0.5 border border-slate-300 rounded text-[11px] text-slate-600 bg-white focus:ring-1 focus:ring-accent-500"
+                    className="ml-auto shrink-0 px-1.5 py-0.5 border border-slate-300 dark:border-slate-600 rounded text-[11px] text-slate-600 dark:text-slate-300 bg-white dark:bg-surface-900 focus:ring-1 focus:ring-accent-500"
                   >
                     {AGENT_OPTIONS.map((opt) => (
                       <option key={opt.value} value={opt.value}>
@@ -710,7 +710,7 @@ export function ChatPanel() {
                   </select>
                   <button
                     onClick={() => handleRemoveFile(i)}
-                    className="p-0.5 hover:bg-slate-200 rounded shrink-0"
+                    className="p-0.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded shrink-0"
                   >
                     <X className="w-3 h-3" />
                   </button>
@@ -723,7 +723,7 @@ export function ChatPanel() {
                     <select
                       value={sf.groupId || '_none'}
                       onChange={(e) => handleFileGroupChange(i, e.target.value === '_none' ? undefined : e.target.value)}
-                      className="px-1 py-0.5 border border-slate-200 rounded text-[11px] bg-white max-w-[100px]"
+                      className="px-1 py-0.5 border border-slate-200 dark:border-slate-700 rounded text-[11px] bg-white dark:bg-surface-900 max-w-[100px]"
                     >
                       <option value="_none">{language === 'zh' ? '无分组' : 'No Group'}</option>
                       {groups.map(g => (
@@ -736,7 +736,7 @@ export function ChatPanel() {
                       value={sf.sampleNumber != null ? String(sf.sampleNumber) : '_none'}
                       disabled={!sf.groupId}
                       onChange={(e) => handleFileSampleChange(i, e.target.value === '_none' ? undefined : parseInt(e.target.value))}
-                      className="px-1 py-0.5 border border-slate-200 rounded text-[11px] bg-white disabled:opacity-40 max-w-[60px]"
+                      className="px-1 py-0.5 border border-slate-200 dark:border-slate-700 rounded text-[11px] bg-white dark:bg-surface-900 disabled:opacity-40 max-w-[60px]"
                     >
                       <option value="_none">-</option>
                       {Array.from({ length: maxSamples }, (_, j) => (
@@ -748,7 +748,7 @@ export function ChatPanel() {
                     <select
                       value={hasCustomOption(typeOptions) ? selectValueForDataType(sf.dataType, typeOptions) : (sf.dataType || typeOptions[0] || '')}
                       onChange={(e) => handleFileTypeChange(i, e.target.value)}
-                      className="px-1 py-0.5 border border-slate-200 rounded text-[11px] bg-white max-w-[90px]"
+                      className="px-1 py-0.5 border border-slate-200 dark:border-slate-700 rounded text-[11px] bg-white dark:bg-surface-900 max-w-[90px]"
                     >
                       {typeOptions.map(opt => (
                         <option key={opt} value={opt}>{opt}</option>
@@ -771,7 +771,7 @@ export function ChatPanel() {
       )}
 
       {/* Input area */}
-      <div className="border-t border-slate-200 p-4">
+      <div className="border-t border-slate-200 dark:border-slate-700 p-4 bg-white dark:bg-surface-900">
         <div className="flex items-end gap-2">
           {/* Attach button */}
           <input
@@ -785,7 +785,7 @@ export function ChatPanel() {
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={chatLoading || authUser?.status === 'readonly'}
-            className="shrink-0 p-3 text-slate-500 hover:text-accent-600 hover:bg-slate-100 rounded-xl transition-colors disabled:opacity-50"
+            className="shrink-0 p-3 text-slate-500 dark:text-slate-400 hover:text-accent-600 dark:hover:text-accent-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors disabled:opacity-50"
             title={t('chatAttach')}
           >
             <Paperclip className="w-5 h-5" />
@@ -796,7 +796,7 @@ export function ChatPanel() {
             value={defaultAgent}
             onChange={(e) => setDefaultAgent(e.target.value)}
             disabled={chatLoading || authUser?.status === 'readonly'}
-            className="shrink-0 px-2 py-3 border border-slate-300 rounded-xl text-xs text-slate-600 bg-white focus:ring-2 focus:ring-accent-500 focus:border-accent-500 disabled:opacity-50"
+            className="shrink-0 px-2 py-3 border border-slate-300 dark:border-slate-600 rounded-xl text-xs text-slate-600 dark:text-slate-300 bg-white dark:bg-surface-900 focus:ring-2 focus:ring-accent-500 focus:border-accent-500 disabled:opacity-50"
             title={language === 'zh' ? '新文件默认Agent' : 'Default agent for new files'}
           >
             {AGENT_OPTIONS.map((opt) => (
@@ -813,7 +813,7 @@ export function ChatPanel() {
               onMouseDown={handleResizeMouseDown}
               className="flex justify-center py-1 cursor-ns-resize group"
             >
-              <div className="w-8 h-1 rounded-full bg-slate-300 group-hover:bg-accent-400 transition-colors" />
+              <div className="w-8 h-1 rounded-full bg-slate-300 dark:bg-slate-600 group-hover:bg-accent-400 transition-colors" />
             </div>
             <textarea
               ref={textareaRef}
@@ -821,7 +821,7 @@ export function ChatPanel() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={authUser?.status === 'readonly' ? 'Read-only mode' : t('chatPlaceholder')}
-              className="w-full resize-none px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-accent-500 focus:border-accent-500 text-sm"
+              className="w-full resize-none px-4 py-3 border border-slate-300 dark:border-slate-600 rounded-xl bg-white dark:bg-surface-900 text-surface-800 dark:text-surface-100 focus:ring-2 focus:ring-accent-500 focus:border-accent-500 text-sm"
               style={{ height: textareaHeight + 'px' }}
               disabled={chatLoading || authUser?.status === 'readonly'}
             />

@@ -103,21 +103,21 @@ export default function LlmTimeoutDialog({
       <div
         ref={dialogRef}
         tabIndex={-1}
-        className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 outline-none"
+        className="bg-white dark:bg-surface-900 rounded-2xl shadow-2xl w-full max-w-md mx-4 outline-none"
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 dark:border-gray-700">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
-              <AlertTriangle className="w-5 h-5 text-red-600" aria-hidden="true" />
+            <div className="w-10 h-10 rounded-full bg-red-100 dark:bg-red-900/60 flex items-center justify-center">
+              <AlertTriangle className="w-5 h-5 text-red-600 dark:text-red-400" aria-hidden="true" />
             </div>
-              <h2 className="text-lg font-semibold text-gray-900">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
                 {title}
               </h2>
           </div>
           <button
             onClick={onClose}
-            className="p-1 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+            className="p-1 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
             aria-label={t('llmClose')}
           >
             <X className="w-5 h-5" aria-hidden="true" />
