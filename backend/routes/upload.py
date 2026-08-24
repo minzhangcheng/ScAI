@@ -43,7 +43,7 @@ _LEGACY_CHUNK_FILE_TYPES = {
     "file",
 }
 _LEGACY_CHUNK_GROUPS = {None, "control", "treatment"}
-_GENERIC_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+_GENERIC_UPLOAD_MAX_BYTES = MAX_UPLOAD_SIZE
 
 
 def _open_upload_destination(dest: Path) -> int:
@@ -110,7 +110,7 @@ def _upload_validation_error(
 async def _stream_generic_upload(
     upload_file,
     dest: Path,
-    max_bytes: int | None = 100 * 1024 * 1024,
+    max_bytes: int | None = MAX_UPLOAD_SIZE,
     chunk_size: int = 1024 * 1024,
 ) -> Path:
     """Stream into one operation-owned path without clobbering a prior file."""
@@ -415,10 +415,7 @@ async def upload_data(
             await _stream_generic_upload(
                 file,
                 staging_path,
-                max_bytes=(
-                    None if section == "sequencing"
-                    else _GENERIC_UPLOAD_MAX_BYTES
-                ),
+                max_bytes=_GENERIC_UPLOAD_MAX_BYTES,
             )
             await _publish_upload_staging(staging_path, file_path)
             published = True

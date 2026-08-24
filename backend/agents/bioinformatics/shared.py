@@ -39,8 +39,6 @@ from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 # Configure logger
 logger = logging.getLogger(__name__)
 
-MAX_WORKSPACE_H5AD_FILES = 2
-
 # Implementations live in ./bioinformatics/; re-exported here so existing
 # importers and tests keep resolving them from this module.
 from ..bioinformatics.kernel_templates import (  # noqa: F401
@@ -48,10 +46,6 @@ from ..bioinformatics.kernel_templates import (  # noqa: F401
     _TPL_PLT_RESTORE_BASELINE,
     _build_exec_autosave_wrapper,
     _build_publication_figure_wrapper,
-)
-from ..bioinformatics.workspace_guards import (  # noqa: F401
-    _static_h5ad_path,
-    workspace_h5ad_write_guard,
 )
 from ..bioinformatics.mechanism_validation import (  # noqa: F401
     _OVERCLAIM_WORDS,

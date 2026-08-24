@@ -264,10 +264,9 @@ def test_branch_report_rejects_unowned_log_and_workspace_figures(tmp_path):
     assert {main_path.stem, orphan_path.stem}.issubset(
         set(branch_state.invalidated_artifact_stems)
     )
-    # This depth exceeds bounded workspace discovery and the filename was not in
-    # AnalysisState.analysis_log. Only the collector's strict lineage rule can
-    # stop the Supervisor's independent record tier from finding it via rglob.
-    assert deep_unlogged_path.stem not in branch_state.invalidated_artifact_stems
+    # Recursive discovery now reaches this depth, so the branch snapshot records
+    # the unowned stem before the Supervisor's independent scan sees it.
+    assert deep_unlogged_path.stem in branch_state.invalidated_artifact_stems
 
     # Exercise the recursive discovery guard without precomputing workspace
     # invalidations: an unregistered scan-only image is still not branch-owned.

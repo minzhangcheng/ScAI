@@ -78,11 +78,11 @@ export function SidebarResizeHandle({ width, onWidthChange, label }: SidebarResi
       onKeyDown={handleKeyDown}
       className={`hidden lg:flex w-1.5 shrink-0 items-center justify-center cursor-col-resize outline-none transition-colors group ${
         isResizing
-          ? 'bg-accent-100'
-          : 'bg-surface-50 hover:bg-accent-100 focus-visible:bg-accent-100 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-500'
+          ? 'bg-accent-100 dark:bg-accent-900/60'
+          : 'bg-surface-50 dark:bg-surface-950 hover:bg-accent-100 dark:hover:bg-accent-900/60 focus-visible:bg-accent-100 dark:focus-visible:bg-accent-900/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-500'
       }`}
     >
-      <span className="h-full w-px bg-surface-200 group-hover:bg-accent-400 group-focus-visible:bg-accent-500" />
+      <span className="h-full w-px bg-surface-200 dark:bg-surface-700 group-hover:bg-accent-400 group-focus-visible:bg-accent-500" />
     </div>
   )
 }

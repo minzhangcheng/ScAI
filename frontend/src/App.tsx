@@ -351,7 +351,7 @@ function App() {
             {/* Right Panel - Message Stream */}
             {currentSession && (
               <div
-                className="hidden lg:flex border-l border-surface-200/60 bg-white dark:bg-surface-900 overflow-hidden flex-col"
+                className="hidden lg:flex border-l border-surface-200/60 dark:border-surface-700/60 bg-white dark:bg-surface-900 overflow-hidden flex-col"
                 style={{ width: `${messagePanelWidth}%` }}
               >
                 <Suspense fallback={<PanelFallback />}><MessageStream /></Suspense>

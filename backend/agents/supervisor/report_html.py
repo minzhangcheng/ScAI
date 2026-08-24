@@ -1008,7 +1008,7 @@ class ReportHtmlMixin:
                     fname = fig_path.name
                     figure_map[fname] = fig_path
 
-        # Fallback: use the shared bounded recursive discovery. This reaches
+        # Fallback: use the shared recursive discovery. This reaches
         # nested agent output consistently, including eligible registered
         # annotation-validation figures, without letting a stale/rejected record
         # return through its on-disk file. Unregistered validation diagnostics

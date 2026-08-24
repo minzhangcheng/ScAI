@@ -62,16 +62,6 @@ _SKIP_DIRS = frozenset({
 # diagnostic rather than a result, so it sorts last and is tagged for the caller.
 _DIAGNOSTIC_DIRS = frozenset({"annotation_validation"})
 
-# How many directory levels below the workspace a candidate may sit. Across 27
-# real sessions the deepest image was at depth 3, so the bound admits exactly
-# that tier; it exists so an unforeseen tool that writes a deep tree cannot turn
-# discovery into a full-disk walk. It is counted over the directories alone --
-# ``relative_to(workspace).parts`` also carries the filename, and measuring
-# against that admitted only two levels, excluding the very tier the corpus said
-# was needed.
-_MAX_SCAN_DEPTH = 3
-
-
 def _legacy_record_path_candidates(
     declared: Any,
     workspace: Path,
@@ -244,8 +234,6 @@ def discover_figures_in_workspace(workspace: Path) -> List[Dict[str, Any]]:
             except ValueError:
                 continue
             dirs = parts[:-1]
-            if len(dirs) > _MAX_SCAN_DEPTH:
-                continue
             if any(d.startswith(".") or d in _SKIP_DIRS for d in dirs):
                 continue
             if not dirs:

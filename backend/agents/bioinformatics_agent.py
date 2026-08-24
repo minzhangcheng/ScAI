@@ -243,13 +243,10 @@ from .bioinformatics.shared import (  # noqa: F401
     format_revision_history,
     truncate_for_llm,
     MECHANISM_EVIDENCE_POLICY,
-    MAX_WORKSPACE_H5AD_FILES,
     _TPL_SAFE_CLOSE_ALL,
     _TPL_PLT_RESTORE_BASELINE,
     _build_exec_autosave_wrapper,
     _build_publication_figure_wrapper,
-    _static_h5ad_path,
-    workspace_h5ad_write_guard,
     _OVERCLAIM_WORDS,
     _NEGATION_WORDS,
     _MAX_PROGRAMS,
@@ -680,7 +677,6 @@ WORKFLOW GUIDELINES:
 - **Serendipity Check (Variance Partitioning)**: Before executing a highly targeted task, run a quick global variance check (e.g. correlate top PCs with each metadata column). If an unmentioned covariate (batch, technical artifact, unexpected cell state) drives variance far exceeding the chosen hypothesis, `print()` it and flag it as a "Counter-intuitive Finding" in the same cell.
 - **MEMORY MANAGEMENT (CRITICAL to avoid OOM crashes)**:
   The adata object persists in the Jupyter kernel between code cells. Do NOT reload adata from .h5ad files unless absolutely necessary (e.g., after a kernel restart). Reuse the in-memory adata object. When you no longer need a large intermediate object (e.g., a subset), delete it with `del variable_name` and call `import gc; gc.collect()`.
-  When saving checkpoints with adata.write(), keep at most 1-2 checkpoint files — do NOT accumulate many large .h5ad files.
 - **REUSE EXISTING RESULTS (CRITICAL for chat follow-up analyses)**:
   Before running any analysis step, CHECK if the result already exists in the current session.
   The notebook environment may already contain results from previous analyses.
@@ -2113,27 +2109,6 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 agent_reasoning=agent_reasoning,
                                 code=code, code_error=error_msg,
                                 code_description=description, code_step_type=step_type,
-                            ))
-                            continue
-
-                        h5ad_guard_error = workspace_h5ad_write_guard(
-                            code, self.sandbox.working_dir
-                        )
-                        if h5ad_guard_error:
-                            logger.warning("[Bioinformatics] %s", h5ad_guard_error)
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": f"Execution blocked: {h5ad_guard_error}",
-                            })
-                            analysis_log.append(AnalysisStep(
-                                step_number=step_count,
-                                step_type="execute_code",
-                                agent_reasoning=agent_reasoning,
-                                code=code,
-                                code_error=h5ad_guard_error,
-                                code_description=description,
-                                code_step_type=step_type,
                             ))
                             continue
 

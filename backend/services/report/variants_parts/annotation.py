@@ -112,7 +112,7 @@ def generate_annotation_context_report_html(
             eligible_records_by_stem.setdefault(stem, figure)
 
     def _resolve_fig_path(fname: str) -> Optional[Path]:
-        """Resolve through the shared bounded recursive discovery index."""
+        """Resolve through the shared recursive discovery index."""
         if not workspace_dir:
             return None
         record = eligible_records_by_stem.get(Path(fname).stem)

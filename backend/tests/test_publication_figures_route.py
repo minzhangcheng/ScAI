@@ -295,6 +295,10 @@ def test_verified_artifact_reader_has_an_exact_size_boundary(
     assert artifacts._read_regular_file_nofollow(oversized) is None
 
 
+def test_verified_artifact_default_size_limit_is_one_gibibyte():
+    assert artifacts.MAX_VERIFIED_ARTIFACT_BYTES == 1024 ** 3
+
+
 @pytest.mark.parametrize(
     ("pixel_limit", "accepted"),
     [(256, True), (255, False)],
