@@ -222,9 +222,41 @@ class ClientContentMixin:
                 "total_tokens": response.usage.total_tokens or 0,
             }
             details = getattr(response.usage, 'prompt_tokens_details', None)
-            cached = getattr(details, 'cached_tokens', 0) if details else 0
-            if cached:
-                result["cached_tokens"] = cached
+            missing = object()
+
+            def reported_value(container, key):
+                """Read only fields explicitly present in the provider payload."""
+                if container is None:
+                    return missing
+                if isinstance(container, dict):
+                    return container.get(key, missing)
+                model_fields_set = getattr(container, "model_fields_set", missing)
+                if model_fields_set is not missing:
+                    if key not in model_fields_set:
+                        return missing
+                    return getattr(container, key, missing)
+                model_dump = getattr(type(container), "model_dump", None)
+                if callable(model_dump):
+                    try:
+                        payload = model_dump(container)
+                    except (TypeError, ValueError):
+                        payload = None
+                    if isinstance(payload, dict) and key in payload:
+                        return payload[key]
+                attributes = getattr(container, "__dict__", {})
+                return attributes.get(key, missing)
+
+            cached = reported_value(details, "cached_tokens")
+            top_level_cached = reported_value(
+                response.usage, "cache_read_input_tokens"
+            )
+            if top_level_cached is not missing and top_level_cached is not None:
+                if cached is missing or cached is None:
+                    cached = top_level_cached
+            if cached is not missing and cached is not None:
+                # Preserve an explicitly reported zero so report generation can
+                # distinguish a measured 0% hit rate from unavailable metrics.
+                result["cached_tokens"] = cached or 0
             return result
         return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 

@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.39.31 · **Last updated**: 2026-08-24
+**Version**: 0.39.32 · **Last updated**: 2026-08-24
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,7 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.39.x — (2026-08-04 onward)**
 
+- `0.39.32` — X2 cache telemetry and stable prompt prefixes: Chat Completions, Responses and Anthropic cache metrics now distinguish absent/null/default values from explicit zero, Anthropic input accounting includes cache creation/read tokens, and figure revision keeps invariant instructions ahead of variable context without changing request behavior. The frozen backend-full checkpoint recorded `5749 collected / 5576 passed / 79 failed / 94 skipped` at `test-results/20260824T063715Z-20266/evidence.json`, with no failed-node delta from X1. Frontend, client, and kernel were not run.
 - `0.39.31` — X1 pathology coverage observation and disclosure: bounded per-image tile coverage and diagnostics now cross round state, persistence/API, WebSocket summaries, report prompts and rendered limitations, while reload preserves the wire record and scalar review instructions remain bounded. The frozen backend-full checkpoint recorded `5745 collected / 5572 passed / 79 failed / 94 skipped` at `test-results/20260824T061118Z-4105133/evidence.json`, with no failed-node delta from A3; the frozen frontend checkpoint passed `333/333` at `test-results/20260824T061105Z-547d3b54c048-frontend/evidence.json`. Client and kernel were not run.
 - `0.39.30` — A3 model-output shape and bounded planning tolerance: closed renderer aliases, shared scalar/mapping/list/null normalization, reserved parser-sentinel handling, one bounded schema repair, typed plan-generation failure, and last-valid-seed fallback without new planning routes or gates. The frozen backend-full checkpoint recorded `5737 collected / 5564 passed / 79 failed / 94 skipped` at `test-results/20260824T053052Z-3938286/evidence.json`; all 79 failures match the accepted A2 baseline, leaving no A3 failed-node delta. Frontend, client, and kernel were not run.
 - `0.39.29` — A2 bounded agent work and failure handling: bounded PubMed work and cache reuse, explicit biochemistry image states, typed tool-protocol failures, advisory cycle repair, normalized supervisor evaluation, domain-neutral API guidance, and complete upload inventory propagation. The frozen backend-full checkpoint recorded `5721 collected / 5542 passed / 85 failed / 94 skipped` at `test-results/20260824T045007Z-3795021/evidence.json`; all six A2/A1 post-freeze deltas were closed by the directed `6/6` pass at `test-results/20260824T045806Z-3820716/evidence.json`, leaving 79 unrelated baseline failures and no accepted failed-node delta from A1. Frontend, client, and kernel were not run.

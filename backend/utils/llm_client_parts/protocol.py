@@ -351,9 +351,18 @@ def _parse_anthropic_dump(dump: Dict[str, Any]):
             ))
 
     u = dump.get("usage") or {}
-    inp = u.get("input_tokens", 0) or 0
+    uncached_input = u.get("input_tokens", 0) or 0
+    cache_creation_input = u.get("cache_creation_input_tokens", 0) or 0
+    cache_read_input = u.get("cache_read_input_tokens", 0) or 0
+    inp = uncached_input + cache_creation_input + cache_read_input
     outp = u.get("output_tokens", 0) or 0
     usage = {"prompt_tokens": inp, "completion_tokens": outp, "total_tokens": inp + outp}
+    has_cache_telemetry = any(
+        u.get(key) is not None
+        for key in ("cache_read_input_tokens", "cache_creation_input_tokens")
+    )
+    if has_cache_telemetry:
+        usage["cached_tokens"] = cache_read_input
 
     return "\n".join(text_parts), tool_calls, (thinking_blocks or None), usage
 
@@ -427,7 +436,7 @@ def _parse_responses_dump(dump: Dict[str, Any]):
         "total_tokens": u.get("total_tokens", 0) or 0,
     }
     details = u.get("input_tokens_details") or {}
-    if details.get("cached_tokens"):
-        usage["cached_tokens"] = details["cached_tokens"]
+    if details.get("cached_tokens") is not None:
+        usage["cached_tokens"] = details["cached_tokens"] or 0
 
     return "\n".join(text_parts), tool_calls, (citations or None), usage

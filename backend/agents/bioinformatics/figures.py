@@ -1717,8 +1717,6 @@ You must ONLY use data from these groups. Do NOT create or reference groups that
 If the PI feedback asks you to add groups not in the experimental design, IGNORE that part of the feedback and only plot data for the actual groups.
 """
 
-        figure_context = "**Current Figure:** An image of the current figure is attached. Review it carefully to understand what needs to be changed.\n\n" if image_base64 else ""
-
         layout_section = _layout_feedback_block(layout_violations)
 
         # Build revision history section (show previous rounds, exclude current which is shown below)
@@ -1748,26 +1746,24 @@ If the PI feedback asks you to add groups not in the experimental design, IGNORE
                 + "\n".join(history_parts) + "\n"
             )
 
-        prompt = f"""Please revise the following plotting code based on PI feedback.
+        def build_prompt(with_image: bool) -> str:
+            """Assemble the request with the invariant half in front.
 
-{figure_context}**Original Code:**
-```python
-{original_code}
-```
-
-**Figure Type:** {figure_type}
-{exp_design_constraint}
-{history_section}**PI Feedback (Current Round):** {feedback}
-{layout_section}
-**Improvement Suggestions (Current Round):**
-{suggestions_text}
-
-**Critical Issues (MUST FIX - Current Round):**
-{must_fix_text}
+            Prompt caching matches an exact token prefix, so a variable fragment
+            near the top truncates the cache for everything behind it. The
+            standing instructions remain byte-stable across revisions; code,
+            feedback, history, and render diagnostics do not.
+            """
+            note = (
+                "\n**Current Figure:** An image of the current figure is attached. "
+                "Review it carefully to understand what needs to be changed.\n\n"
+                if with_image else ""
+            )
+            return f"""Please revise the following plotting code based on PI feedback.
 
 **Requirements:**
-1. Fix all critical issues listed above
-2. Address as many suggestions as possible
+1. Fix every critical issue listed below under "Critical Issues (MUST FIX)"
+2. Address as many of the improvement suggestions below as possible
 3. CRITICAL: Do NOT revert previously applied fixes. If Round 1 changed grid lines to dashed, keep them dashed. If Round 2 added axis labels, keep them.
 4. You MAY change the figure size, the GridSpec, the number of rows/columns, and where legends and annotations sit — resolving a collision usually requires exactly that. Do NOT change which data is plotted.
 5. Keep using the same data variables (assume they exist), but REMOVE any fabricated/dummy data for groups not in the experimental design
@@ -1794,7 +1790,26 @@ If the PI feedback asks you to add groups not in the experimental design, IGNORE
 - Improve color contrast
 - Remove unnecessary elements
 
-Return only the Python code:"""
+---
+
+**Original Code:**
+```python
+{original_code}
+```
+
+**Figure Type:** {figure_type}
+{exp_design_constraint}
+{history_section}**PI Feedback (Current Round):** {feedback}
+{layout_section}
+**Improvement Suggestions (Current Round):**
+{suggestions_text}
+
+**Critical Issues (MUST FIX - Current Round):**
+{must_fix_text}
+
+Return only the Python code:{note}"""
+
+        prompt = build_prompt(bool(image_base64))
 
         self._set_llm_context()
         # Use slightly lower temperature for code revision (needs precision)

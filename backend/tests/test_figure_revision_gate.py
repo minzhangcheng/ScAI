@@ -760,3 +760,147 @@ async def test_approved_redraw_advances_explicit_logical_head(tmp_path):
     assert prior.is_published_head is False
     assert eligible_artifacts(state.publication_figures) == [head]
     assert Path(prior.png_path).read_bytes() == old_bytes
+
+
+class _PromptLLM:
+    def __init__(self):
+        self.calls = []
+
+    async def chat(self, **kwargs):
+        self.calls.append(("chat", kwargs))
+        return SimpleNamespace(content="revised plain code")
+
+    async def chat_with_vision(self, **kwargs):
+        self.calls.append(("vision", kwargs))
+        return SimpleNamespace(content="revised vision code")
+
+
+class _PromptAgent(FiguresMixin):
+    def __init__(self):
+        self.llm_client = _PromptLLM()
+        self.config = SimpleNamespace(temperature=0.4)
+        self.model = "prompt-model"
+        self.system_prompt = "prompt-system"
+        self.has_vision = True
+
+    def _set_llm_context(self):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_figure_revision_prompt_has_shared_stable_prefix_and_unchanged_dynamic_contract():
+    agent = _PromptAgent()
+    state_one = SimpleNamespace(
+        treatment_groups=[SimpleNamespace(name="Group-A")]
+    )
+    state_two = SimpleNamespace(
+        treatment_groups=[SimpleNamespace(name="Group-B")]
+    )
+    history_one = [
+        {
+            "round": 1,
+            "feedback": "history feedback one",
+            "suggestions": ["history suggestion one"],
+            "must_fix": ["history fix one"],
+        },
+        {"round": 2, "feedback": "current history marker one"},
+    ]
+    history_two = [
+        {
+            "round": 1,
+            "feedback": "history feedback two",
+            "suggestions": ["history suggestion two"],
+            "must_fix": ["history fix two"],
+        },
+        {"round": 2, "feedback": "current history marker two"},
+    ]
+
+    await agent._revise_figure_code(
+        "CODE_ONE",
+        "FEEDBACK_ONE",
+        ["SUGGESTION_ONE"],
+        ["MUST_ONE"],
+        "heatmap",
+        state=state_one,
+        image_base64=None,
+        revision_history=history_one,
+        layout_violations=BLOCKING,
+    )
+    await agent._revise_figure_code(
+        "CODE_TWO",
+        "FEEDBACK_TWO",
+        ["SUGGESTION_TWO"],
+        ["MUST_TWO"],
+        "violin",
+        state=state_two,
+        image_base64="IMAGE_TWO",
+        revision_history=history_two,
+        layout_violations=BLOCKING,
+    )
+
+    calls = agent.llm_client.calls
+    assert [kind for kind, _ in calls] == ["chat", "vision"]
+    plain_prompt = calls[0][1]["messages"][0]["content"]
+    vision_prompt = calls[1][1]["text_prompt"]
+    original_marker = "**Original Code:**"
+    plain_prefix = plain_prompt.split(original_marker, 1)[0]
+    vision_prefix = vision_prompt.split(original_marker, 1)[0]
+    assert plain_prefix == vision_prefix
+    assert "**Requirements:**" in plain_prefix
+    assert 'listed below under "Critical Issues (MUST FIX)"' in plain_prefix
+    assert "improvement suggestions below" in plain_prefix
+    assert "**Layout rules" in plain_prefix
+    assert "**Other common fixes:**" in plain_prefix
+
+    variable_markers = [
+        original_marker,
+        "**Figure Type:**",
+        "**Previous Revision History",
+        "**PI Feedback (Current Round):**",
+        "**Measured layout defects",
+        "**Improvement Suggestions (Current Round):**",
+        "**Critical Issues (MUST FIX - Current Round):**",
+        "Return only the Python code:",
+    ]
+    for prompt, dynamic_values in (
+        (
+            plain_prompt,
+            (
+                "CODE_ONE",
+                "heatmap",
+                "Group-A",
+                "history feedback one",
+                "FEEDBACK_ONE",
+                "SUGGESTION_ONE",
+                "MUST_ONE",
+                "Con FXR/bile",
+            ),
+        ),
+        (
+            vision_prompt,
+            (
+                "CODE_TWO",
+                "violin",
+                "Group-B",
+                "history feedback two",
+                "FEEDBACK_TWO",
+                "SUGGESTION_TWO",
+                "MUST_TWO",
+                "Con FXR/bile",
+            ),
+        ),
+    ):
+        assert all(value in prompt for value in dynamic_values)
+        positions = [prompt.index(marker) for marker in variable_markers]
+        assert positions == sorted(positions)
+
+    assert "**Current Figure:**" not in plain_prompt
+    assert vision_prompt.index("**Current Figure:**") > vision_prompt.rindex(
+        "Return only the Python code:"
+    )
+    assert "IMAGE_TWO" not in vision_prompt
+    for kind, kwargs in calls:
+        assert kwargs["temperature"] == 0.2
+        assert kwargs["max_tokens"] == 32768
+        if kind == "vision":
+            assert kwargs["system_prompt"] == "prompt-system"
