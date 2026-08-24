@@ -547,6 +547,22 @@ async def test_data_level_objection_carries_layout_defects_forward(tmp_path):
     assert figure.unresolved_must_fix
 
 
+@pytest.mark.asyncio
+async def test_scalar_must_fix_stays_one_item_when_reanalysis_is_deferred(tmp_path):
+    """A scalar review instruction must not be persisted one character at a time."""
+    _, state, _ = await _run(
+        tmp_path,
+        [CLEAN],
+        [_review(
+            requires_reanalysis=True,
+            must_fix="recheck the grouped comparison",
+        )],
+    )
+
+    figure = state.publication_figures[0]
+    assert figure.unresolved_must_fix == ["recheck the grouped comparison"]
+
+
 def _approved_prior_figure(tmp_path: Path) -> tuple[PublicationFigure, bytes]:
     figures = tmp_path / "figures"
     figures.mkdir(parents=True, exist_ok=True)

@@ -17,6 +17,36 @@ _FIGURE_PROVENANCE_FIELDS = (
 )
 
 
+def _pathology_coverage_context(analysis_record: Dict[str, Any]) -> str:
+    """Build a bounded, non-scientific coverage qualification for report prompts."""
+    lines: List[str] = []
+    rounds = list(analysis_record.get("round_summaries") or [])[-10:]
+    for result in rounds:
+        if not isinstance(result, dict):
+            continue
+        number = result.get("round_number", 0)
+        for coverage in list(result.get("pathology_coverage") or [])[:10]:
+            if not isinstance(coverage, dict):
+                continue
+            image_label = str(
+                coverage.get("image_type") or coverage.get("image_id") or "pathology image"
+            )[:200]
+            status = str(coverage.get("status") or "error")[:32]
+            expected = coverage.get("expected_tiles")
+            valid = coverage.get("valid_tiles")
+            if isinstance(expected, int) and isinstance(valid, int):
+                lines.append(
+                    f"Round {number} {image_label}: {valid}/{expected} validated "
+                    f"tiles (status={status}); omitted tiles were not assessed."
+                )
+            else:
+                lines.append(
+                    f"Round {number} {image_label}: pathology coverage status={status}; "
+                    "omitted tiles were not assessed."
+                )
+    return "\n".join(lines[:100])
+
+
 def _bind_figure_reference(
     reference: Any, authoritative: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -226,8 +256,9 @@ class PlanningMixin:
         methodology_text = analysis_summary.get("methodology_overview", "")
         workflow_text = analysis_summary.get("workflow_summary", "")
         key_results_text = analysis_summary.get("key_results", "")
+        coverage_context = _pathology_coverage_context(analysis_record)
 
-        if methodology_text or workflow_text:
+        if methodology_text or workflow_text or key_results_text:
             analysis_context = f"""## Analysis Methodology (from code review)
 {methodology_text}
 
@@ -280,6 +311,14 @@ class PlanningMixin:
 ## Key Analysis Steps (code cells that generated figures)
 {steps_text}
 """
+
+        if coverage_context:
+            analysis_context += (
+                "\n## Pathology Tile Coverage (host observation)\n"
+                f"{coverage_context}\n"
+                "This is a coverage observation only. Do not infer findings for "
+                "omitted tiles.\n"
+            )
 
         evidence_warnings = []
         for rs in analysis_record.get("round_summaries", []):

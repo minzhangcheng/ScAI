@@ -124,6 +124,7 @@ from .schema_parts.session import (  # noqa: F401
 )
 from .schema_parts.outputs import (  # noqa: F401
     ExplorationReport,
+    PathologyCoverageRecord,
     RoundResult,
     PublicationFigure,
     LegacyArtifactRecord,
@@ -864,6 +865,7 @@ class AnalysisState(BaseModel):
             {"round": r["round_number"], "pi_summary": r["pi_summary"],
              "phase": r.get("phase", "exploration"),
              "pathology_findings": r["pathology_findings"],
+             "pathology_coverage": r.get("pathology_coverage", []),
              "bioinformatics_findings": r["bioinformatics_findings"],
              "biochemistry_findings": r["biochemistry_findings"],
              "literature_findings": r["literature_findings"],

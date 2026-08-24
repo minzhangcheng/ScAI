@@ -130,6 +130,34 @@ async def test_process_skips_one_image_and_continues(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_process_skipped_and_failed_images_preserve_image_type(monkeypatch):
+    """Per-image failure records retain the stain label for later disclosure."""
+    agent = _bare_agent()
+
+    class FakeImg:
+        def __init__(self, name, data_type):
+            self.id = name
+            self.filename = name
+            self.data_type = data_type
+
+    images = [FakeImg("skip.tif", "H&E"), FakeImg("failed.tif", "IHC")]
+
+    async def fake_analyze(img_info, instruction):
+        if img_info.filename == "skip.tif":
+            raise _ImageSkipRequested(img_info.filename, last_error=_make_error())
+        raise RuntimeError("image decoder failed")
+
+    monkeypatch.setattr(agent, "_analyze_image", fake_analyze)
+    state = type("S", (), {"get_files_by_section": lambda self, section: images})()
+
+    result = await agent.process(state, "analyze", images=images)
+
+    by_id = {item["image_id"]: item for item in result["detailed_results"]}
+    assert by_id["skip.tif"]["image_type"] == "H&E"
+    assert by_id["failed.tif"]["image_type"] == "IHC"
+
+
+@pytest.mark.asyncio
 async def test_process_propagates_terminate(monkeypatch):
     """TERMINATE inside image analysis must abort process(), not be swallowed."""
     agent = _bare_agent()

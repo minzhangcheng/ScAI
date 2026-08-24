@@ -41,10 +41,25 @@ class ExplorationReport(BaseModel):
         """
         return tolerant_from_llm_dict(cls, data)
 
+
+class PathologyCoverageRecord(BaseModel):
+    """Host-retained tile coverage for one pathology image."""
+
+    image_id: str = ""
+    image_type: str = ""
+    status: Literal["completed", "partial", "error", "failed", "skipped"] = "error"
+    expected_tiles: Optional[int] = Field(default=None, ge=0)
+    valid_tiles: Optional[int] = Field(default=None, ge=0)
+    coverage_ratio: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    invalid_batches: List[Dict[str, Any]] = Field(default_factory=list)
+    error: str = ""
+
+
 class RoundResult(BaseModel):
     """Result from one analysis round"""
     round_number: int
     pathology_findings: List[str] = Field(default_factory=list)
+    pathology_coverage: List[PathologyCoverageRecord] = Field(default_factory=list)
     bioinformatics_findings: List[str] = Field(default_factory=list)
     biochemistry_findings: List[str] = Field(default_factory=list)
     literature_findings: List[str] = Field(default_factory=list)

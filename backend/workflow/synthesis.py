@@ -2,6 +2,8 @@
 import asyncio
 import json
 import logging
+import math
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..constants import (
@@ -14,7 +16,14 @@ from ..constants import (
     StateSyncChangeType,
     WaitInputReason,
 )
-from ..models.schemas import AgentType, AnalysisPhase, AnalysisState, RoundResult, TaskStatus
+from ..models.schemas import (
+    AgentType,
+    AnalysisPhase,
+    AnalysisState,
+    PathologyCoverageRecord,
+    RoundResult,
+    TaskStatus,
+)
 from ..services.interaction_record_capture import get_or_open_direction_record
 from ..utils.direction_evidence import build_fallback_direction_evidence
 from ..utils.llm_client import UpstreamExhaustedError
@@ -37,6 +46,110 @@ else:
     WorkflowState = dict
 
 logger = logging.getLogger(__name__)
+
+
+def _bounded_coverage_json(value: Any, *, depth: int = 0) -> Any:
+    """Convert one diagnostic value to a small JSON-safe representation."""
+    if value is None or isinstance(value, (bool, int, str)):
+        return value if not isinstance(value, str) else value[:1000]
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if depth >= 2:
+        return str(value)[:1000]
+    if isinstance(value, Mapping):
+        return {
+            str(key)[:100]: _bounded_coverage_json(item, depth=depth + 1)
+            for key, item in list(value.items())[:20]
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [
+            _bounded_coverage_json(item, depth=depth + 1)
+            for item in list(value)[:20]
+        ]
+    return str(value)[:1000]
+
+
+def extract_pathology_coverage(
+    pathology_result: Any,
+) -> List[PathologyCoverageRecord]:
+    """Retain bounded per-image tile validation from a pathology result.
+
+    This is a host observation: malformed or absent coverage is represented as
+    an empty/errored record and never changes round completion policy.
+    """
+    if not isinstance(pathology_result, dict):
+        return []
+    raw_details = pathology_result.get("detailed_results")
+    if not isinstance(raw_details, list):
+        return []
+
+    def optional_nonnegative_int(value: Any) -> Optional[int]:
+        if isinstance(value, bool):
+            return None
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    coverage: List[PathologyCoverageRecord] = []
+    for raw in raw_details[:100]:
+        if not isinstance(raw, dict):
+            continue
+        validation = raw.get("tile_validation")
+        validation = validation if isinstance(validation, dict) else {}
+        expected = optional_nonnegative_int(validation.get("expected_tiles"))
+        valid = optional_nonnegative_int(validation.get("valid_tiles"))
+
+        ratio: Optional[float]
+        raw_ratio = validation.get("coverage_ratio")
+        try:
+            ratio = float(raw_ratio) if raw_ratio is not None else None
+        except (TypeError, ValueError, OverflowError):
+            ratio = None
+        if ratio is None or not math.isfinite(ratio):
+            ratio = (
+                valid / expected
+                if expected and valid is not None
+                else 0.0 if expected == 0 and valid is not None
+                else None
+            )
+        if ratio is not None:
+            ratio = max(0.0, min(1.0, ratio))
+
+        status_raw = (
+            validation.get("status")
+            or raw.get("status")
+            or (
+                "skipped" if raw.get("skipped")
+                else "failed" if raw.get("error")
+                else "completed"
+            )
+        )
+        status = str(status_raw).strip().lower()
+        if status not in {"completed", "partial", "error", "failed", "skipped"}:
+            status = "error"
+
+        raw_batches = validation.get("invalid_batches")
+        invalid_batches: List[Dict[str, Any]] = []
+        if isinstance(raw_batches, (list, tuple)):
+            for item in list(raw_batches)[:20]:
+                if isinstance(item, Mapping):
+                    invalid_batches.append({
+                        str(key)[:100]: _bounded_coverage_json(value)
+                        for key, value in list(item.items())[:20]
+                    })
+
+        coverage.append(PathologyCoverageRecord(
+            image_id=str(raw.get("image_id") or "")[:200],
+            image_type=str(raw.get("image_type") or "")[:200],
+            status=status,
+            expected_tiles=expected,
+            valid_tiles=valid,
+            coverage_ratio=ratio,
+            invalid_batches=invalid_batches,
+            error=str(raw.get("error") or validation.get("error") or "")[:1000],
+        ))
+    return coverage
 
 
 def build_disabled_pathology_warning(files: list[dict], pathology_enabled: bool) -> str:
@@ -384,6 +497,11 @@ def build_round_summary_payload(
         "max_rounds": effective_max_rounds,
         "summary": round_result.pi_summary,
         "pathology_findings": round_result.pathology_findings,
+        "pathology_coverage": [
+            item.model_dump(mode="json")
+            if hasattr(item, "model_dump") else dict(item)
+            for item in (round_result.pathology_coverage or [])
+        ],
         "bioinformatics_findings": round_result.bioinformatics_findings,
         "biochemistry_findings": round_result.biochemistry_findings,
         "literature_findings": round_result.literature_findings,
@@ -681,6 +799,9 @@ class SynthesisMixin:
         )
         if cms is not None:
             round_result.cross_modal_synthesis = cms
+        round_result.pathology_coverage = extract_pathology_coverage(
+            state.get("pathology_result")
+        )
 
         logger.info(f"[{self.session_id}] Round {round_result.round_number} synthesis complete: new_findings={round_result.new_findings}, {len(round_result.next_steps)} next steps")
 

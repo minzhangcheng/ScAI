@@ -182,12 +182,24 @@ export interface CrossModalCandidate {
   report_recommendation: 'headline' | 'secondary' | 'future_direction' | 'do_not_emphasize'
 }
 
+export interface PathologyCoverage {
+  image_id: string
+  image_type: string
+  status: 'completed' | 'partial' | 'error' | 'failed' | 'skipped'
+  expected_tiles?: number | null
+  valid_tiles?: number | null
+  coverage_ratio?: number | null
+  invalid_batches?: Record<string, unknown>[]
+  error?: string
+}
+
 export interface RawRoundResult {
   round?: number
   pi_summary?: string
   summary?: string
   phase?: string
   pathology_findings?: string[]
+  pathology_coverage?: PathologyCoverage[]
   bioinformatics_findings?: string[]
   biochemistry_findings?: string[]
   literature_findings?: string[]

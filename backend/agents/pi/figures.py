@@ -6,7 +6,7 @@ from typing import Dict, Any, List
 import asyncio
 import logging
 
-from ...utils.formatting import safe_parse_json_array
+from ...utils.formatting import normalize_text_list, safe_parse_json_array
 from ...services.figure_layout import format_violations_for_prompt
 
 # Configure logger
@@ -248,7 +248,7 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
                 "strengths": data.get("strengths", []),
                 "issues": data.get("issues", []),
                 "suggestions": data.get("suggestions", []),
-                "must_fix": data.get("must_fix", []),
+                "must_fix": normalize_text_list(data.get("must_fix"), limit=20),
                 "requires_reanalysis": bool(data.get("requires_reanalysis", False))
             }
             logger.info(f"[PI] Figure review result: approved={result['approved']}, score={result['quality_score']}, requires_reanalysis={result['requires_reanalysis']}")
@@ -385,7 +385,7 @@ Objective: {state.initial_instruction[:500] if state.initial_instruction else 'B
                 "strengths": data.get("strengths", []),
                 "issues": data.get("issues", []),
                 "suggestions": data.get("suggestions", []),
-                "must_fix": data.get("must_fix", [])
+                "must_fix": normalize_text_list(data.get("must_fix"), limit=20)
             }
             logger.info(f"[PI] Graphic abstract review: score={result['quality_score']}")
             return result
@@ -700,7 +700,7 @@ Describe edits in terms of nodes and arrows, NOT visual styling (color, size, et
             "strengths": data.get("strengths", []),
             "issues": data.get("issues", []),
             "suggestions": data.get("suggestions", []),
-            "must_fix": data.get("must_fix", [])
+            "must_fix": normalize_text_list(data.get("must_fix"), limit=20)
         }
         logger.info(f"[PI] Text diagram review: score={result['quality_score']}")
         return result

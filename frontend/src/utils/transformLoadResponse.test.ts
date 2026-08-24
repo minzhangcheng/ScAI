@@ -71,6 +71,27 @@ describe('transformLoadResponse', () => {
     expect(result.sessionUpdates.roundResults![1].bioinformaticsFindings).toEqual(['finding b'])
   })
 
+  it('preserves pathology coverage across reload', () => {
+    const coverage = [{
+      image_id: 'slide-1', image_type: 'Stain A', status: 'partial',
+      expected_tiles: 45, valid_tiles: 25, coverage_ratio: 25 / 45,
+      invalid_batches: [{ batch_index: 5 }], error: '',
+    }]
+    const data: SessionLoadResponse = {
+      ...MINIMAL_RESPONSE,
+      round_results: [{
+        round: 1,
+        pi_summary: 'Round 1 summary',
+        pathology_findings: ['finding a'],
+        pathology_coverage: coverage,
+        bioinformatics_findings: [], biochemistry_findings: [], literature_findings: [],
+      } as any],
+    }
+
+    const result = transformLoadResponse(data)
+    expect((result.sessionUpdates.roundResults![0] as any).pathologyCoverage).toEqual(coverage)
+  })
+
   it('falls back to unknown status as pending', () => {
     const data: SessionLoadResponse = { ...MINIMAL_RESPONSE, status: 'gibberish' }
     const result = transformLoadResponse(data)

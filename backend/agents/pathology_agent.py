@@ -252,6 +252,9 @@ class PathologyAgent(BaseAgent):
                 )
                 detailed_results.append({
                     "image_id": img_info.id,
+                    "image_type": getattr(img_info, "data_type", "") or "",
+                    "status": "skipped",
+                    "tile_validation": {"status": "skipped"},
                     "error": f"Skipped by user after LLM failure: {skip.last_error}",
                     "skipped": True,
                     "findings": []
@@ -265,6 +268,9 @@ class PathologyAgent(BaseAgent):
                 logger.exception(f"[PathologyAgent] Failed to analyze image {img_info.filename}")
                 detailed_results.append({
                     "image_id": img_info.id,
+                    "image_type": getattr(img_info, "data_type", "") or "",
+                    "status": "failed",
+                    "tile_validation": {"status": "failed"},
                     "error": str(e),
                     "findings": []
                 })
@@ -381,6 +387,9 @@ class PathologyAgent(BaseAgent):
             logger.error(f"[PathologyAgent] Image file not found: {image_info.file_path}")
             return {
                 "image_id": image_info.id,
+                "image_type": image_info.data_type,
+                "status": "failed",
+                "tile_validation": {"status": "failed"},
                 "error": f"Image file not found: {image_info.file_path}",
                 "findings": []
             }
@@ -404,6 +413,15 @@ class PathologyAgent(BaseAgent):
             if not tiles:
                 return {
                     "image_id": image_info.id,
+                    "image_type": image_info.data_type,
+                    "status": "error",
+                    "tile_validation": {
+                        "status": "error",
+                        "expected_tiles": 0,
+                        "valid_tiles": 0,
+                        "coverage_ratio": 0.0,
+                        "invalid_batches": [],
+                    },
                     "error": "No valid tiles generated from image (image may be too small or blank)",
                     "findings": []
                 }
@@ -662,6 +680,9 @@ Reply in JSON format:
             logger.error(f"[PathologyAgent] Failed to analyze image {image_info.id}: {error_detail}")
             return {
                 "image_id": image_info.id if image_info else "unknown",
+                "image_type": getattr(image_info, "data_type", "") if image_info else "",
+                "status": "failed",
+                "tile_validation": {"status": "failed"},
                 "error": str(e),
                 "findings": []
             }

@@ -2,6 +2,7 @@
 
 import json
 import logging
+from collections.abc import Iterable, Mapping
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -25,6 +26,34 @@ def as_list(value: Any) -> List[Any]:
     if isinstance(value, (tuple, set)):
         return list(value)
     return [value]
+
+
+def normalize_text_list(
+    value: Any,
+    *,
+    limit: int = 20,
+    max_chars: Optional[int] = 1000,
+) -> List[str]:
+    """Normalize a scalar-or-iterable text field without iterating strings."""
+    item_limit = max(0, int(limit))
+    if item_limit == 0:
+        return []
+    if isinstance(value, Iterable) and not isinstance(
+        value, (str, bytes, bytearray, Mapping)
+    ):
+        raw_items = list(value)
+    else:
+        raw_items = as_list(value)
+    normalized: List[str] = []
+    for item in raw_items:
+        text = str(item or "").strip()
+        if max_chars is not None:
+            text = text[:max(0, int(max_chars))]
+        if text and text not in normalized:
+            normalized.append(text)
+        if len(normalized) >= item_limit:
+            break
+    return normalized
 
 
 def coerce_json_text(value: Any, *, default: str = "") -> str:

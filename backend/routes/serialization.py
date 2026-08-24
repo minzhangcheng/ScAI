@@ -15,6 +15,11 @@ def serialize_round_results(round_results: List[RoundResult]) -> List[Dict[str, 
             "summary": r.pi_summary,
             "phase": r.phase,
             "pathology_findings": r.pathology_findings,
+            "pathology_coverage": [
+                item.model_dump(mode="json")
+                if hasattr(item, "model_dump") else dict(item)
+                for item in (r.pathology_coverage or [])
+            ],
             "bioinformatics_findings": r.bioinformatics_findings,
             "biochemistry_findings": r.biochemistry_findings,
             "literature_findings": r.literature_findings,

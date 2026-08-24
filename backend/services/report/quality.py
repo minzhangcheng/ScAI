@@ -4,6 +4,8 @@ from __future__ import annotations
 import html
 from typing import Any, Dict, Iterable, List, Optional
 
+from backend.utils.formatting import normalize_text_list
+
 
 _SUPPORTED_EVIDENCE_SCHEMA_VERSIONS = {1}
 _ROUND_STATUSES = {"completed", "partial", "failed", "skipped"}
@@ -29,12 +31,7 @@ def _value(item: Any, key: str, default: Any = None) -> Any:
 
 
 def _texts(values: Iterable[Any] | None, *, limit: int = 20) -> List[str]:
-    result: List[str] = []
-    for value in values or []:
-        text = str(value or "").strip()
-        if text and text not in result:
-            result.append(text)
-    return result[:limit]
+    return normalize_text_list(values, limit=limit)
 
 
 def _integer(value: Any, default: int = 0) -> int:
@@ -77,6 +74,28 @@ def _round_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Lis
         phase = str(_value(result, "phase", "exploration") or "exploration")
         verified = _value(result, "bioinformatics_evidence_verified", None)
         notes = _texts(_value(result, "evidence_notes", []))
+        pathology_coverage: List[Dict[str, Any]] = []
+        for raw_coverage in list(
+            _value(result, "pathology_coverage", []) or []
+        )[:100]:
+            expected_tiles = _value(raw_coverage, "expected_tiles", None)
+            valid_tiles = _value(raw_coverage, "valid_tiles", None)
+            pathology_coverage.append({
+                "image_id": str(_value(raw_coverage, "image_id", "") or ""),
+                "image_type": str(_value(raw_coverage, "image_type", "") or ""),
+                "status": str(_value(raw_coverage, "status", "error") or "error"),
+                "expected_tiles": (
+                    _integer(expected_tiles) if expected_tiles is not None else None
+                ),
+                "valid_tiles": (
+                    _integer(valid_tiles) if valid_tiles is not None else None
+                ),
+                "coverage_ratio": _value(raw_coverage, "coverage_ratio", None),
+                "invalid_batch_count": len(
+                    list(_value(raw_coverage, "invalid_batches", []) or [])
+                ),
+                "error": str(_value(raw_coverage, "error", "") or "")[:1000],
+            })
         entry = {
             "round_number": number,
             "phase": phase,
@@ -90,6 +109,7 @@ def _round_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Lis
                 _value(result, "evidence_execution_ids", []), limit=100
             ),
             "evidence_notes": notes,
+            "pathology_coverage": pathology_coverage,
         }
         rounds.append(entry)
         label = f"Round {number}"
@@ -128,6 +148,30 @@ def _round_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Lis
             cautions.append(
                 f"{label} predates explicit execution-derived evidence verdicts."
             )
+        for coverage_entry in pathology_coverage:
+            expected_tiles = coverage_entry["expected_tiles"]
+            valid_tiles = coverage_entry["valid_tiles"]
+            image_label = (
+                coverage_entry["image_type"]
+                or coverage_entry["image_id"]
+                or "pathology image"
+            )
+            if (
+                isinstance(expected_tiles, int)
+                and isinstance(valid_tiles, int)
+                and valid_tiles < expected_tiles
+            ):
+                ratio = (100.0 * valid_tiles / expected_tiles) if expected_tiles else 0.0
+                cautions.append(
+                    f"{label} pathology coverage for {image_label} was "
+                    f"{valid_tiles}/{expected_tiles} validated tiles "
+                    f"({ratio:.1f}%); omitted tiles were not assessed."
+                )
+            elif coverage_entry["status"] in {"error", "failed", "skipped"}:
+                cautions.append(
+                    f"{label} pathology coverage for {image_label} ended with "
+                    f"status {coverage_entry['status']}."
+                )
         cautions.extend(f"{label}: {note}" for note in notes)
     return rounds, blocking, cautions
 

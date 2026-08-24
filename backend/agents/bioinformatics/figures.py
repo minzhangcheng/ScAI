@@ -36,7 +36,11 @@ import json as _json
 from backend.services import ora_kernel
 from backend.services.marker_priors import MarkerDB, summarize_database_priors
 
-from ...utils.formatting import format_revision_history, truncate_for_llm
+from ...utils.formatting import (
+    format_revision_history,
+    normalize_text_list,
+    truncate_for_llm,
+)
 from ...utils.error_parsing import compact_traceback
 from ...utils.llm_client import is_vision_capability_mismatch
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
@@ -1000,12 +1004,7 @@ class FiguresMixin:
             best_snapshot = None
 
             def _record_unresolved(items) -> None:
-                seen = []
-                for item in items or []:
-                    text = str(item).strip()
-                    if text and text not in seen:
-                        seen.append(text)
-                figure.unresolved_must_fix = seen[:20]
+                figure.unresolved_must_fix = normalize_text_list(items, limit=20)
                 # A figure held back by measured collisions is dropped from
                 # every report, and nothing else on the record would say why:
                 # the review status reads "accepted with reservations" and the
@@ -1102,7 +1101,7 @@ class FiguresMixin:
                         "collisions must be resolved before the figure can be used."
                     )
                     review['must_fix'] = (
-                        list(review.get('must_fix') or [])
+                        normalize_text_list(review.get('must_fix'), limit=20)
                         + _violation_must_fix_items(blocking)
                     )
 
@@ -1139,7 +1138,9 @@ class FiguresMixin:
                 # PI requested revision
                 feedback = review.get('feedback', '')
                 suggestions = review.get('suggestions', [])
-                must_fix = review.get('must_fix', [])
+                must_fix = normalize_text_list(review.get('must_fix'), limit=20)
+                review = dict(review)
+                review['must_fix'] = must_fix
 
                 # If PI flagged a data/analysis issue that can't be fixed by revising plot code,
                 # break out of the revision loop and defer to the main analysis flow
@@ -1153,7 +1154,7 @@ class FiguresMixin:
                     figure.pi_feedback = f"[REQUIRES REANALYSIS] {feedback}"
                     figure.revision_history = revision_history
                     _record_unresolved(
-                        list(must_fix) + _violation_must_fix_items(blocking)
+                        must_fix + _violation_must_fix_items(blocking)
                     )
                     publish_error = await _finalize_render()
                     if publish_error:
@@ -1437,7 +1438,8 @@ class FiguresMixin:
             figure.review_status = FigureReviewStatus.REVISION_REQUESTED
             remaining_blocking = blocking_violations(figure.layout_violations)
             _record_unresolved(
-                list(must_fix or []) + _violation_must_fix_items(remaining_blocking)
+                normalize_text_list(must_fix, limit=20)
+                + _violation_must_fix_items(remaining_blocking)
             )
             publish_error = await _finalize_render()
             if publish_error:
@@ -1518,7 +1520,8 @@ class FiguresMixin:
         which revision bytes are current.  Keep the event compact; the record is
         already upserted, so the image endpoint can serve the bound render.
         """
-        review = review or {}
+        review = dict(review or {})
+        review["must_fix"] = normalize_text_list(review.get("must_fix"), limit=20)
         status = getattr(figure.review_status, "value", figure.review_status)
         await self._notify(
             event_type,

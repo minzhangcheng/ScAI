@@ -40,6 +40,12 @@ def build_round_summaries(state):
             "evidence_gate_findings": list(r.evidence_gate_findings or []),
             "pi_summary": r.pi_summary or "",
             "pathology_findings": r.pathology_findings or [],
+            "pathology_coverage": [
+                item.model_dump(mode="json")
+                if hasattr(item, "model_dump") else dict(item)
+                for item in (getattr(r, "pathology_coverage", None) or [])
+                if hasattr(item, "model_dump") or isinstance(item, dict)
+            ],
             "bioinformatics_findings": r.bioinformatics_findings or [],
             "biochemistry_findings": r.biochemistry_findings or [],
             "literature_findings": r.literature_findings or [],

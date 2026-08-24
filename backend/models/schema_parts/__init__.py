@@ -51,6 +51,7 @@ from .session import (  # noqa: F401
 )
 from .outputs import (  # noqa: F401
     ExplorationReport,
+    PathologyCoverageRecord,
     RoundResult,
     PublicationFigure,
     PublicationTable,

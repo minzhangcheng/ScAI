@@ -126,6 +126,7 @@ export interface RoundResult {
   summary: string
   phase: 'exploration' | 'innovation' | 'integration' | ''
   pathologyFindings: string[]
+  pathologyCoverage?: import('../types').PathologyCoverage[]
   bioinformaticsFindings: string[]
   biochemistryFindings: string[]
   literatureFindings: string[]

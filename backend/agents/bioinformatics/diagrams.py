@@ -34,7 +34,11 @@ import json as _json
 from backend.services import ora_kernel
 from backend.services.marker_priors import MarkerDB, summarize_database_priors
 
-from ...utils.formatting import format_revision_history, truncate_for_llm
+from ...utils.formatting import (
+    format_revision_history,
+    normalize_text_list,
+    truncate_for_llm,
+)
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 
 # Configure logger
@@ -205,7 +209,7 @@ Draw the diagram now.
         """
         feedback = review.get("feedback", "")
         suggestions = review.get("suggestions", [])
-        must_fix = review.get("must_fix", [])
+        must_fix = normalize_text_list(review.get("must_fix"), limit=20)
 
         logger.info(f"[{getattr(self, 'session_id', '')}][Bio] Revising text diagram (round {len(revision_history)})")
 
@@ -308,5 +312,5 @@ correctness. Respond in JSON:
             "strengths": data.get("strengths", []),
             "issues": data.get("issues", []),
             "suggestions": data.get("suggestions", []),
-            "must_fix": data.get("must_fix", [])
+            "must_fix": normalize_text_list(data.get("must_fix"), limit=20)
         }
