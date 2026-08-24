@@ -325,7 +325,7 @@ describe('WebSocket async response ownership', () => {
     vi.useFakeTimers()
     setToken('test-token')
     const resolvers: Array<(response: Response) => void> = []
-    const fetchMock = vi.fn(() => new Promise<Response>(resolve => {
+    const fetchMock = vi.fn<typeof fetch>(() => new Promise<Response>(resolve => {
       resolvers.push(resolve)
     }))
     vi.stubGlobal('fetch', fetchMock)

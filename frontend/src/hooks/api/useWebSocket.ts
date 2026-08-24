@@ -163,12 +163,12 @@ export function useWebSocket() {
       // disconnected realtime gap.
       if (isReconnect && freshSession) {
         const loadingSessionId = freshSession.id
+        const ownsReconnectLoad = () => (
+          isCurrentAttempt()
+          && useAppStore.getState().currentSession?.id === loadingSessionId
+        )
         try {
           devLog('WebSocket: Reconnect detected, reloading session state...')
-          const ownsReconnectLoad = () => (
-            isCurrentAttempt()
-            && useAppStore.getState().currentSession?.id === loadingSessionId
-          )
           const data = await apiFetch<any>(
             `/session/${freshSession.id}/load`,
             undefined,
