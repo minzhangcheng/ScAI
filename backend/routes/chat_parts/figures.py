@@ -7,6 +7,7 @@ import logging
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,7 +20,8 @@ from backend.models.schemas import WebSocketMessage, AgentType, DataFile, Analys
 from backend.services.session_store import ensure_session_loaded, async_save_session, update_session_cache
 from backend.state import (
     chat_tasks, chat_task_lock, chat_sandboxes,
-    websockets, workflows, state_lock,
+    websockets, workflows, report_workflows, state_lock,
+    has_live_session_task,
 )
 from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.auth import require_session_ownership
@@ -30,6 +32,101 @@ from backend.utils.sandbox import _TPL_NOOP_INSTALL
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _ChatRuntimeReservation:
+    """Exact owners installed at the shared workflow/runtime start barrier."""
+
+    task: asyncio.Task
+    initializing_token: object
+    claimed_chat_task: bool
+
+
+def _session_runtime_is_busy(
+    session_id: str,
+    *,
+    allow_existing_chat_owner: bool = False,
+) -> bool:
+    from backend.state import initializing_sessions
+
+    if (
+        session_id in workflows
+        or session_id in report_workflows
+        or session_id in initializing_sessions
+    ):
+        return True
+    live_sandbox = chat_sandboxes.get(session_id)
+    if live_sandbox is not None and getattr(live_sandbox, "km", None) is not None:
+        return True
+    owner = chat_tasks.get(session_id)
+    if owner is asyncio.current_task() or (owner is not None and allow_existing_chat_owner):
+        return False
+    return has_live_session_task(session_id)
+
+
+async def _reserve_chat_runtime(
+    session_id: str,
+    *,
+    allow_existing_chat_owner: bool = False,
+) -> Optional[_ChatRuntimeReservation]:
+    owner = asyncio.current_task()
+    if owner is None:
+        return None
+
+    from backend.services.session_lifecycle import get_lifecycle_lock
+    from backend.state import claim_initializing_session
+
+    async with get_lifecycle_lock(session_id):
+        async with chat_task_lock:
+            existing = chat_tasks.get(session_id)
+            owns_chat_task = existing is owner
+            if _session_runtime_is_busy(
+                session_id,
+                allow_existing_chat_owner=allow_existing_chat_owner,
+            ):
+                return None
+            token = claim_initializing_session(session_id)
+            claimed_chat_task = existing is None or existing.done()
+            if claimed_chat_task:
+                chat_tasks[session_id] = owner
+            return _ChatRuntimeReservation(
+                task=owner,
+                initializing_token=token,
+                claimed_chat_task=claimed_chat_task and not owns_chat_task,
+            )
+
+
+async def _release_chat_runtime(
+    session_id: str,
+    reservation: Optional[_ChatRuntimeReservation],
+) -> None:
+    if reservation is None:
+        return
+    from backend.services.session_lifecycle import get_lifecycle_lock
+    from backend.state import release_initializing_session
+
+    async with get_lifecycle_lock(session_id):
+        async with chat_task_lock:
+            if (
+                reservation.claimed_chat_task
+                and chat_tasks.get(session_id) is reservation.task
+            ):
+                chat_tasks.pop(session_id, None)
+            release_initializing_session(
+                session_id,
+                reservation.initializing_token,
+            )
+
+
+async def _release_chat_runtime_deferred(
+    session_id: str,
+    reservation: Optional[_ChatRuntimeReservation],
+) -> None:
+    from backend.utils.asyncio_tasks import await_with_deferred_cancellation
+
+    task = asyncio.create_task(_release_chat_runtime(session_id, reservation))
+    await await_with_deferred_cancellation(task)
 
 
 def _build_figure_setup_code(fig_dir, ts="test_ts", code="pass") -> str:
@@ -72,19 +169,31 @@ async def _generate_figures_in_chat(
     from backend.utils.sandbox import LocalJupyterSandbox
     from backend.utils.agent_llm import get_agent_llm_client
 
-    user_id = getattr(state, "user_id", "") if state else ""
-    config = await resolve_config_for_user(user_id)
+    reservation = await _reserve_chat_runtime(session_id)
+    if reservation is None:
+        logger.warning(
+            "Chat figure generation skipped for %s: another owner holds the session runtime",
+            session_id,
+        )
+        return []
 
     generated_figures: List[Dict[str, str]] = []
-
-    sandbox = LocalJupyterSandbox(
-        session_id=session_id,
-        state_dir=str(get_session_states(session_id)),
-        working_dir=str(get_session_workspace(session_id)),
-    )
+    try:
+        user_id = getattr(state, "user_id", "") if state else ""
+        config = await resolve_config_for_user(user_id)
+        sandbox = LocalJupyterSandbox(
+            session_id=session_id,
+            state_dir=str(get_session_states(session_id)),
+            working_dir=str(get_session_workspace(session_id)),
+        )
+    except BaseException:
+        await _release_chat_runtime_deferred(session_id, reservation)
+        raise
     chat_sandboxes[session_id] = sandbox
+    started = False
     try:
         start_info = await sandbox.start()
+        started = True
         if not start_info.get("session_restored"):
             logger.warning("Chat sandbox: session not restored, figure generation may fail")
 
@@ -101,19 +210,25 @@ async def _generate_figures_in_chat(
             )
 
             llm_client = get_agent_llm_client(state, config, "bioinformatics", session_id)
-            provider = AgentSettingsProvider(state, config, None, session_id)
-            bio_model = provider.get_model("bioinformatics")
-            if not bio_model:
-                raise HTTPException(
-                    status_code=500,
-                    detail="Bioinformatics model not configured for this session.",
+            try:
+                provider = AgentSettingsProvider(state, config, None, session_id)
+                bio_model = provider.get_model("bioinformatics")
+                if not bio_model:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Bioinformatics model not configured for this session.",
+                    )
+                code_resp = await llm_client.chat(
+                    model=bio_model,
+                    messages=[{"role": "user", "content": code_prompt}],
+                    temperature=0.1,
+                    max_tokens=32768,
                 )
-            code_resp = await llm_client.chat(
-                model=bio_model,
-                messages=[{"role": "user", "content": code_prompt}],
-                temperature=0.1,
-                max_tokens=32768,
-            )
+            finally:
+                try:
+                    await llm_client.close()
+                except Exception:
+                    logger.warning("Failed to close chat figure LLM client", exc_info=True)
 
             code_text = code_resp.content or ""
             from backend.utils.sandbox import extract_code_from_markdown
@@ -170,7 +285,7 @@ async def _generate_figures_in_chat(
             from backend.services.session_lifecycle import is_session_tombstoned
 
             await sandbox.stop(
-                save=not is_session_tombstoned(session_id)
+                save=started and not is_session_tombstoned(session_id)
             )
         except Exception:
             logger.warning("Failed to stop chat code sandbox during cleanup", exc_info=True)
@@ -180,6 +295,7 @@ async def _generate_figures_in_chat(
             if getattr(sandbox, "km", None) is None:
                 if chat_sandboxes.get(session_id) is sandbox:
                     chat_sandboxes.pop(session_id, None)
+            await _release_chat_runtime_deferred(session_id, reservation)
 
     return generated_figures
 

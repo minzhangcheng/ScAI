@@ -142,7 +142,69 @@ async def test_vision_responses_not_implemented_500_falls_back_to_chat():
     messages = c.client.chat.completions.create.call_args.kwargs["messages"]
     assert "PATHOLOGY ROLE" in messages[0]["content"]
     assert "respond exclusively in English" in messages[0]["content"]
-    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "gemini-3.1-pro-preview")] == "chat"
+    assert llm_mod._PROBE_CACHE[(
+        "https://api.n1n.ai/v1", "gemini-3.1-pro-preview", "vision"
+    )] == "chat"
+    assert llm_mod._PROBE_CACHE.get((
+        "https://api.n1n.ai/v1", "gemini-3.1-pro-preview"
+    )) is None
+
+
+@pytest.mark.asyncio
+async def test_vision_shape_400_reroutes_only_vision():
+    c = _client("https://x/v1")
+    shape_error = BadRequestError(
+        message=(
+            "Error code: 400 - {'error': {'message': "
+            "'image_url should be a valid dictionary', "
+            "'param': 'messages[0].content[1].image_url'}}"
+        ),
+        response=MagicMock(status_code=400),
+        body={
+            "error": {
+                "message": "image_url should be a valid dictionary",
+                "param": "messages[0].content[1].image_url",
+            }
+        },
+    )
+    responses = MagicMock()
+    responses.complete_vision = AsyncMock(side_effect=shape_error)
+    c._responses_adapter = responses
+
+    inline = MagicMock()
+    inline.choices = [MagicMock(message=MagicMock(content="CHAT_VISION", tool_calls=None))]
+    inline.model = "vision-model"
+    inline.usage = MagicMock(
+        prompt_tokens=1,
+        completion_tokens=1,
+        total_tokens=2,
+        prompt_tokens_details=None,
+    )
+    c.client.chat.completions.create = AsyncMock(return_value=inline)
+
+    result = await c.chat_with_vision(
+        model="vision-model",
+        text_prompt="describe",
+        images=["aW1hZ2U="],
+        max_tokens=10,
+    )
+
+    assert result.content == "CHAT_VISION"
+    responses.complete_vision.assert_awaited_once()
+    c.client.chat.completions.create.assert_awaited_once()
+    assert llm_mod._PROBE_CACHE[("https://x/v1", "vision-model", "vision")] == "chat"
+    assert llm_mod._PROBE_CACHE.get(("https://x/v1", "vision-model")) is None
+
+
+def test_unrelated_400_is_not_vision_shape_mismatch():
+    error = BadRequestError(
+        message="Error code: 400 - context length exceeded",
+        response=MagicMock(status_code=400),
+        body={"error": {"message": "context length exceeded", "param": "messages"}},
+    )
+    classifier = getattr(llm_mod, "is_responses_vision_shape_error", None)
+    assert classifier is not None
+    assert classifier(error) is False
 
 
 @pytest.mark.asyncio
@@ -524,7 +586,12 @@ async def test_stream_chat_reactive_chat_to_responses_fallback_before_first_chun
         chunks.append(ch)
 
     assert "".join(chunks) == "Resp"
-    assert llm_mod._PROBE_CACHE[("https://x/v1/chat/completions", "responses-only")] == "responses"
+    assert llm_mod._PROBE_CACHE[(
+        "https://x/v1/chat/completions", "responses-only", "vision"
+    )] == "responses"
+    assert llm_mod._PROBE_CACHE.get((
+        "https://x/v1/chat/completions", "responses-only"
+    )) is None
 
 
 @pytest.mark.asyncio
@@ -541,7 +608,12 @@ async def test_vision_chat_reactive_chat_to_responses_fallback():
                                  images=[], temperature=0.5, max_tokens=10)
 
     assert r.content == "VR"
-    assert llm_mod._PROBE_CACHE[("https://x/v1/chat/completions", "responses-only")] == "responses"
+    assert llm_mod._PROBE_CACHE[(
+        "https://x/v1/chat/completions", "responses-only", "vision"
+    )] == "responses"
+    assert llm_mod._PROBE_CACHE.get((
+        "https://x/v1/chat/completions", "responses-only"
+    )) is None
     fake.complete_vision.assert_awaited_once()
 
 

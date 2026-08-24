@@ -43,7 +43,12 @@ from backend.utils.websocket_delivery import (
 
 from .core import _build_chat_context
 
-from .figures import _collect_session_figures, _generate_figures_in_chat
+from .figures import (
+    _collect_session_figures,
+    _generate_figures_in_chat,
+    _release_chat_runtime_deferred,
+    _reserve_chat_runtime,
+)
 from .snapshots import _create_chat_snapshot
 
 
@@ -218,18 +223,55 @@ async def _execute_chat_agent(
     message_callback,
     saved_files: List[Dict[str, Any]],
 ) -> Tuple[Dict[str, Any], List[Any]]:
+    """Reserve the shared runtime; the inner path enforces is_forward_resume_blocked."""
+    reservation = None
+    if agent_name == "bioinformatics":
+        reservation = await _reserve_chat_runtime(
+            session_id,
+            allow_existing_chat_owner=True,
+        )
+        if reservation is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Another owner already holds this session runtime",
+            )
+    try:
+        return await _execute_chat_agent_inner(
+            session_id,
+            state,
+            agent_name,
+            instruction,
+            llm_client,
+            message_callback,
+            saved_files,
+        )
+    finally:
+        if reservation is not None:
+            await _release_chat_runtime_deferred(session_id, reservation)
+
+
+async def _execute_chat_agent_inner(
+    session_id: str,
+    state: Any,
+    agent_name: str,
+    instruction: str,
+    llm_client: Any,
+    message_callback,
+    saved_files: List[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], List[Any]]:
     """Execute a single agent in chat delegation context."""
     from backend.utils.sandbox import LocalJupyterSandbox
     from backend.utils.agent_llm import get_agent_llm_client
 
     user_id = getattr(state, "user_id", "") if state else ""
+    extra_clients: List[Any] = []
     config = await resolve_config_for_user(user_id)
 
-    extra_clients: List[Any] = []
-
-    # Provider for hot-reloadable settings; global_client is the per-agent client
-    # already resolved by the caller via get_agent_llm_client.
-    provider = AgentSettingsProvider(state, config, global_client=llm_client, session_id=session_id)
+    # Provider for hot-reloadable settings; global_client is the per-agent
+    # client already resolved by the caller via get_agent_llm_client.
+    provider = AgentSettingsProvider(
+        state, config, global_client=llm_client, session_id=session_id
+    )
 
     async def _send_agent_msg(msg_type: str, content: Any, agent_type: AgentType):
         msg = WebSocketMessage(type=msg_type, agent=agent_type, content=content)
@@ -274,7 +316,6 @@ async def _execute_chat_agent(
             working_dir=str(get_session_workspace(session_id)),
             timeout=config.sandbox_timeout if hasattr(config, 'sandbox_timeout') else 120
         )
-        chat_sandboxes[session_id] = sandbox
 
         # Create literature agent for callbacks
         lit_config = state.literature_config or {}
@@ -337,9 +378,12 @@ async def _execute_chat_agent(
             message_callback=agent_msg_callback,
         )
 
+        chat_sandboxes[session_id] = sandbox
+        started = False
         try:
             analysis_start_time = time.time()
             await sandbox.start()
+            started = True
             result = await bio_agent.run_autonomous_analysis(
                 state, instruction, max_steps=30
             )
@@ -353,7 +397,7 @@ async def _execute_chat_agent(
                 )
 
                 await sandbox.stop(
-                    save=not is_session_tombstoned(session_id)
+                    save=started and not is_session_tombstoned(session_id)
                 )
             except Exception:
                 logger.warning("Failed to stop delegation sandbox during cleanup", exc_info=True)

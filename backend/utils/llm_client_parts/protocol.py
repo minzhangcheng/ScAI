@@ -36,10 +36,18 @@ _NO_BACKGROUND_ENDPOINT: set = set()
 # 第一级：整站无 Responses 端点（base_url 级，与 model 无关）。
 _NO_RESPONSES_ENDPOINT: set = set()
 
-# 第二级：模型级协议选择。value ∈ {"responses","chat","anthropic"}
-_PROBE_CACHE: Dict[Tuple[str, str], str] = {}
+# 第二级：模型级协议选择。文本沿用二元 key；vision 使用独立三元 key，
+# 这样一次图像协议降级不会把文本请求永久钉在 Chat Completions。
+_PROBE_CACHE: Dict[Tuple[Any, ...], str] = {}
 
-_PROBE_LOCKS: Dict[Tuple[str, str], asyncio.Lock] = {}
+_PROBE_LOCKS: Dict[Tuple[Any, ...], asyncio.Lock] = {}
+
+TEXT_MODALITY = "text"
+VISION_MODALITY = "vision"
+
+
+def _probe_key(base_url: str, model: str, modality: str = TEXT_MODALITY):
+    return (base_url, model) if modality == TEXT_MODALITY else (base_url, model, modality)
 
 def _url_path_suffix_protocol(base_url: str):
     """Explicit endpoint override by URL path tail. Returns protocol or None.
@@ -81,7 +89,24 @@ def _keyword_protocol_hints(base_url: str) -> List[str]:
         hints.append("chat")
     return hints
 
-def _route_protocol_order(base_url: str, model: str) -> List[str]:
+def _base_protocol_order(base_url: str) -> List[str]:
+    order = list(_DEFAULT_PROTOCOL_ORDER)
+    if "/v1" not in base_url:
+        order = ["anthropic", "responses", "chat"]
+    for proto in reversed(_keyword_protocol_hints(base_url)):
+        if proto in order:
+            order.remove(proto)
+            order.insert(0, proto)
+    if base_url in _NO_RESPONSES_ENDPOINT and "responses" in order:
+        order.remove("responses")
+    return order
+
+
+def _route_protocol_order(
+    base_url: str,
+    model: str,
+    modality: str = TEXT_MODALITY,
+) -> List[str]:
     """Ordered list of protocols to try for (base_url, model).
 
     Priority:
@@ -95,27 +120,30 @@ def _route_protocol_order(base_url: str, model: str) -> List[str]:
     explicit = _url_path_suffix_protocol(base_url)
     if explicit is not None:
         return [explicit]
-    cached = _PROBE_CACHE.get((base_url, model))
+    cached = _PROBE_CACHE.get(_probe_key(base_url, model, modality))
     if cached is not None:
         return [cached]
-    if _is_deep_research_model(model):
+    if modality == TEXT_MODALITY and _is_deep_research_model(model):
         return ["responses", "chat"]
 
-    order = list(_DEFAULT_PROTOCOL_ORDER)
-    if "/v1" not in base_url:
-        order = ["anthropic", "responses", "chat"]
-    for proto in reversed(_keyword_protocol_hints(base_url)):
-        if proto in order:
-            order.remove(proto)
-            order.insert(0, proto)
-    if base_url in _NO_RESPONSES_ENDPOINT and "responses" in order:
-        order.remove("responses")
+    order = _base_protocol_order(base_url)
+    # Vision discovery may follow the already-proven text protocol, but its
+    # result is cached independently under the modality key.
+    if modality != TEXT_MODALITY:
+        text_choice = _PROBE_CACHE.get(_probe_key(base_url, model, TEXT_MODALITY))
+        if text_choice in order:
+            order.remove(text_choice)
+            order.insert(0, text_choice)
     return order
 
-def _route_protocol(base_url: str, model: str) -> str:
+def _route_protocol(
+    base_url: str,
+    model: str,
+    modality: str = TEXT_MODALITY,
+) -> str:
     """Primary protocol for (base_url, model) — head of the probe order. Retained
     for streaming dispatch and callers/tests that need a single value."""
-    return _route_protocol_order(base_url, model)[0]
+    return _route_protocol_order(base_url, model, modality)[0]
 
 def _strip_path_suffix(base_url: str, suffixes: tuple) -> str:
     """Strip the first matching endpoint suffix from a URL's path (case-insensitive),

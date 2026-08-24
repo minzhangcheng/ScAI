@@ -49,6 +49,8 @@ async def set_config(request: ConfigRequest, _: str = Depends(require_admin)):
 
     from backend.utils.config_resolver import invalidate_all
     invalidate_all()
+    from backend.utils.settings_provider import refresh_active_providers
+    await refresh_active_providers()
 
     logger.info(f"Config saved: base_url={cfg.api.llm_base_url}, proxy={'configured' if cfg.api.proxy_url else 'none'}")
     return APIResponse(

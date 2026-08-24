@@ -554,28 +554,36 @@ class ClientChatMixin:
                 recovered = _recover_stringified_tool_call(content)
                 if recovered is not None:
                     rec_name, rec_args = recovered
-                    rec_id = f"recovered_{uuid4().hex[:8]}"
-                    logger.warning(
-                        f"[{self.agent_name}] Recovered stringified tool_call "
-                        f"name={rec_name!r} from content at {self.base_url} "
-                        f"(model={model}); upstream gateway lost tool_calls field"
-                    )
-                    tool_calls.append(ToolCall(
-                        id=rec_id, name=rec_name, arguments=rec_args,
-                    ))
-                    tool_calls_log.append({
-                        "id": rec_id, "name": rec_name,
-                        "arguments": rec_args, "parse_error": None,
-                        "recovered": True,
-                    })
-                    content = None
-                    if raw_assistant_message is not None:
-                        raw_assistant_message["content"] = None
-                        raw_assistant_message["tool_calls"] = [{
-                            "id": rec_id,
-                            "function": {"name": rec_name, "arguments": json.dumps(rec_args)},
-                            "type": "function",
-                        }]
+                    offered_names = {
+                        item.get("function", {}).get("name")
+                        for item in (tools or [])
+                        if isinstance(item, dict)
+                        and item.get("type") == "function"
+                        and isinstance(item.get("function"), dict)
+                    }
+                    if rec_name in offered_names:
+                        rec_id = f"recovered_{uuid4().hex[:8]}"
+                        logger.warning(
+                            f"[{self.agent_name}] Recovered stringified tool_call "
+                            f"name={rec_name!r} from content at {self.base_url} "
+                            f"(model={model}); upstream gateway lost tool_calls field"
+                        )
+                        tool_calls.append(ToolCall(
+                            id=rec_id, name=rec_name, arguments=rec_args,
+                        ))
+                        tool_calls_log.append({
+                            "id": rec_id, "name": rec_name,
+                            "arguments": rec_args, "parse_error": None,
+                            "recovered": True,
+                        })
+                        content = None
+                        if raw_assistant_message is not None:
+                            raw_assistant_message["content"] = None
+                            raw_assistant_message["tool_calls"] = [{
+                                "id": rec_id,
+                                "function": {"name": rec_name, "arguments": json.dumps(rec_args)},
+                                "type": "function",
+                            }]
 
             result = LLMToolResponse(
                 content=content,

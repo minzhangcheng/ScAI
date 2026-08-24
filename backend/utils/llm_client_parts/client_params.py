@@ -91,6 +91,8 @@ from .shared import (  # noqa: F401
     is_responses_chat_only_model,
     is_endpoint_absent,
     is_responses_only_model,
+    is_max_tokens_field_error,
+    max_tokens_field_from_error,
     _is_protocol_adaptation_signal,
     _RESPONSES_INPUT_PARAMETER_RE,
     is_responses_input_shape_error,
@@ -167,13 +169,7 @@ class ClientParamsMixin:
                 model_name = _extract_model_name(model)
                 # P3-4: honor previously discovered field override before falling
                 # back to the static _is_o_series heuristic.
-                override = self._max_tokens_field_overrides.get(model_name)
-                if override:
-                    field = override
-                elif _is_o_series(model_name):
-                    field = "max_completion_tokens"
-                else:
-                    field = "max_tokens"
+                field = self._max_tokens_field(model_name)
                 params[field] = max_tokens
             logger.info(f"[{self.agent_name}] Temperature skipped for {model} (using server default)")
             return
@@ -191,17 +187,17 @@ class ClientParamsMixin:
             # back to the static _is_o_series heuristic. This lets the client
             # adapt to provider routes (e.g. openrouter/openai/o3-mini) that
             # the heuristic misclassifies.
-            override = self._max_tokens_field_overrides.get(model_name)
-            if override:
-                field = override
-            elif _is_o_series(model_name):
-                field = "max_completion_tokens"
-            else:
-                field = "max_tokens"
+            field = self._max_tokens_field(model_name)
             params[field] = max_tokens
 
         if effective_temp is not None and effective_temp != temperature:
             logger.info(f"[{self.agent_name}] Temperature overridden: {temperature} -> {effective_temp} for {model}")
+
+    def _max_tokens_field(self, model_name: str) -> str:
+        override = self._max_tokens_field_overrides.get(model_name)
+        if override:
+            return override
+        return "max_completion_tokens" if _is_o_series(model_name) else "max_tokens"
 
     async def _call_with_temp_fallback(
         self,
@@ -217,26 +213,75 @@ class ClientParamsMixin:
         parameter, the model is added to _temp_unsupported_models and the request
         is retried without the temperature parameter.
         """
-        # If model is already known to reject temperature, skip directly.
-        # P2-1: serialize read under the lock to avoid racing with a writer.
+        # Hold one lock for the complete first attempt and any bounded
+        # adaptation probes.  This is intentionally per model: concurrent
+        # calls for unrelated models remain independent, while only one call
+        # can discover a provider's spelling for this model.
         self._ensure_cache_locks()
-        async with self._temp_cache_lock:
-            cached_no_temp = model_key in self._temp_unsupported_models
-        if cached_no_temp:
-            return await retry_with_backoff(make_request_no_temp, **retry_kwargs)
-        try:
-            return await retry_with_backoff(make_request, **retry_kwargs)
-        except BadRequestError as e:
-            if is_temperature_error(e):
-                logger.warning(
-                    f"[{self.agent_name}] Temperature rejected by {model_key}, "
-                    f"retrying without temperature..."
+        lock = self._parameter_adaptation_locks.get(model_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._parameter_adaptation_locks[model_key] = lock
+
+        async with lock:
+            async with self._temp_cache_lock:
+                no_temp = model_key in self._temp_unsupported_models
+            max_adapted = False
+            tentative_field: Optional[str] = None
+            previous_field: Optional[str] = None
+
+            async def _request() -> Any:
+                return await retry_with_backoff(
+                    make_request_no_temp if no_temp else make_request,
+                    **retry_kwargs,
                 )
-                async with self._temp_cache_lock:
-                    if model_key not in self._temp_unsupported_models:
-                        self._temp_unsupported_models.add(model_key)
-                return await retry_with_backoff(make_request_no_temp, **retry_kwargs)
-            else:
+
+            try:
+                while True:
+                    try:
+                        return await _request()
+                    except BadRequestError as error:
+                        if is_temperature_error(error) and not no_temp:
+                            logger.warning(
+                                "[%s] Temperature rejected by %s; retrying "
+                                "without temperature",
+                                self.agent_name,
+                                model_key,
+                            )
+                            async with self._temp_cache_lock:
+                                self._temp_unsupported_models.add(model_key)
+                            no_temp = True
+                            continue
+
+                        if not is_max_tokens_field_error(error) or max_adapted:
+                            raise
+
+                        accepted = max_tokens_field_from_error(error)
+                        previous_field = self._max_tokens_field_overrides.get(model_key)
+                        current = previous_field or (
+                            "max_completion_tokens"
+                            if _is_o_series(model_key)
+                            else "max_tokens"
+                        )
+                        if accepted is None or accepted == current:
+                            raise
+                        tentative_field = accepted
+                        self._max_tokens_field_overrides[model_key] = accepted
+                        max_adapted = True
+                        continue
+            except BaseException:
+                # Never erase a newer choice made by another owner.  The
+                # per-model lock normally serializes this path; the identity
+                # check also protects tests/fixtures that replace the cache.
+                if (
+                    tentative_field is not None
+                    and self._max_tokens_field_overrides.get(model_key)
+                    == tentative_field
+                ):
+                    if previous_field is None:
+                        self._max_tokens_field_overrides.pop(model_key, None)
+                    else:
+                        self._max_tokens_field_overrides[model_key] = previous_field
                 raise
 
     def _build_retry_kwargs(

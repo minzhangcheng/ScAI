@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.39.27 · **Last updated**: 2026-08-24
+**Version**: 0.39.28 · **Last updated**: 2026-08-24
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,7 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.39.x — (2026-08-04 onward)**
 
+- `0.39.28` — A1 provider and chat-runtime reliability: modality-scoped protocol decisions, request-scoped retry and parameter negotiation, exact tool recovery, credential/proxy isolation, safe active-provider rotation, and exact chat-runtime ownership with failed-start preservation. The frozen backend-full checkpoint recorded `5697 collected / 5519 passed / 84 failed / 94 skipped` at `test-results/20260824T034219Z-3560690/evidence.json`; its five new failures were closed by the directed `5/5` pass at `test-results/20260824T035219Z-3602184/evidence.json`, leaving no accepted failed-node delta from P4. Frontend, client, and kernel were not run.
 - `0.39.27` — P4 unified Python client and `scai` CLI: one escaped endpoint registry, strict ordered placeholder binding with post-upload verification, separately callable create/upload/start operations, `max_rounds` configuration round-trip, retained-route commands, and open-time mode-`0600` credentials with non-persistent JWT printing. Accepted checkpoints: backend-full `5679 collected / 5506 passed / 79 failed / 94 skipped` at `test-results/20260824T023736Z-3313353/evidence.json`, with no new failed-node delta from the accepted P3 baseline, plus client `40/40` at `test-results/20260824T023736Z-3313376/evidence.json`; the 79 unrelated backend failures remain baseline.
 - `0.39.26` — P3 stable chat identity and durable paged realtime history: optimistic chat messages retain one client identity through terminal and figure updates, history reload/reconnect is session-owned and retryable, and headless/live delivery persists a JSON-safe capped copy without leaking secrets. Accepted checkpoints: frontend `332/332` at `test-results/20260824T015217Z-d995d01f9dfa-frontend/evidence.json`; backend-full `5674 collected / 5500 passed / 80 failed / 94 skipped` at `test-results/20260824T015232Z-3149869/evidence.json`, whose only P3-related failed-node delta was repaired and passed `1/1` at `test-results/20260824T015950Z-3177091/evidence.json`; the 79 unrelated backend failures remain baseline.
 - `0.39.25` — P2 headless lifecycle continuity: reserved runs reach the graph, explicit empty agent models survive configuration round-trips, and owner-guarded async callbacks preserve canonical state and durable realtime history across reload. Accepted checkpoints: backend-full `5664 collected / 5491 passed / 79 failed / 94 skipped` at `test-results/20260823T232956Z-2769934/evidence.json`, with no failed-node delta from P1 and all P2 nodes passing, plus client `32/32` at `test-results/20260823T233713Z-2792927/evidence.json`; the 79 unrelated backend failures remain baseline.

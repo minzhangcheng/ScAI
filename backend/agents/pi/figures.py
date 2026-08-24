@@ -13,6 +13,7 @@ from ...services.figure_layout import format_violations_for_prompt
 logger = logging.getLogger(__name__)
 from ...models.schemas import AnalysisState, PublicationFigure
 from ...constants import REASONING_MODEL_MIN_TOKENS
+from ...utils.llm_client import is_vision_capability_mismatch
 
 from .shared import (  # noqa: F401
     _CONTROL_SIGNAL_RESULTS,
@@ -214,10 +215,16 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
                 )
                 response_text = response.content if response and response.content else ""
             except Exception as e:
-                # Vision call failed — disable vision for the rest of this session to avoid
-                # repeated failures (e.g. model does not support multimodal input)
-                logger.warning(f"[PI] Vision API failed, disabling vision for this session: {e}")
-                self.has_vision = False
+                # Only a host-classified capability mismatch changes the
+                # session setting.  Transport, quota, and transient upstream
+                # failures retain vision for the next call.
+                if is_vision_capability_mismatch(e):
+                    logger.warning(
+                        f"[PI] Vision API capability mismatch, disabling vision for this session: {e}"
+                    )
+                    self.has_vision = False
+                else:
+                    logger.warning(f"[PI] Vision API transient failure; retaining vision: {e}")
                 response_text = await self.chat(
                     f"{prompt}\n\n[Note: Unable to view image directly. Please provide general guidance based on figure type and description.]",
                     temperature=0.3

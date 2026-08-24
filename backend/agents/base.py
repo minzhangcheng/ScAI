@@ -90,9 +90,12 @@ class BaseAgent(ABC):
             )
         return {"raw_response": response, "parse_error": "Failed to extract valid JSON from response"}
     
-    def _set_llm_context(self):
+    def _set_llm_context(self, client: Optional[OpenAICompatibleClient] = None):
         """Set LLM client context before each call (since client is shared)"""
-        self.llm_client.set_context(self.session_id, self.agent_type.value)
+        (client if client is not None else self.llm_client).set_context(
+            self.session_id,
+            self.agent_type.value,
+        )
     
     def set_session(self, session_id: str):
         """Update session ID for logging"""
@@ -181,30 +184,35 @@ class BaseAgent(ABC):
         """
         # Set context before each call (client is shared between agents)
         self.refresh_runtime_config_if_needed()
-        self._set_llm_context()
+        client = self.llm_client
+        self._provider.lease_client(client)
 
-        messages = self.get_messages_for_llm(message)
+        try:
+            self._set_llm_context(client)
+            messages = self.get_messages_for_llm(message)
 
-        # Use provided temperature or fall back to config default
-        actual_temp = temperature if temperature is not None else self.config.temperature
+            # Use provided temperature or fall back to config default
+            actual_temp = temperature if temperature is not None else self.config.temperature
 
-        response = await self.llm_client.chat(
-            model=self.model,
-            messages=messages,
-            temperature=actual_temp
-        )
+            response = await client.chat(
+                model=self.model,
+                messages=messages,
+                temperature=actual_temp
+            )
 
-        # Handle empty response - return empty string instead of None
-        content = response.content if response and response.content else ""
+            # Handle empty response - return empty string instead of None
+            content = response.content if response and response.content else ""
 
-        if not content:
-            logger.warning(f"[{self.agent_type.value}] LLM returned empty response")
+            if not content:
+                logger.warning(f"[{self.agent_type.value}] LLM returned empty response")
 
-        # Add to history
-        self.add_to_history("user", message)
-        self.add_to_history("assistant", content)
+            # Add to history
+            self.add_to_history("user", message)
+            self.add_to_history("assistant", content)
 
-        return content
+            return content
+        finally:
+            self._provider.release_client(client)
 
     async def chat_without_history(self, message: str, temperature: Optional[float] = None, system_prompt: Optional[str] = None, timeout: Optional[float] = None, max_retries: Optional[int] = None) -> str:
         """Send a message and get a response without using or modifying message history.
@@ -220,33 +228,38 @@ class BaseAgent(ABC):
             max_retries: Override retry count (uses client default if None)
         """
         self.refresh_runtime_config_if_needed()
-        self._set_llm_context()
+        client = self.llm_client
+        self._provider.lease_client(client)
 
-        prompt = system_prompt or self.system_prompt
-        messages = [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": message}
-        ]
+        try:
+            self._set_llm_context(client)
+            prompt = system_prompt or self.system_prompt
+            messages = [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": message}
+            ]
 
-        actual_temp = temperature if temperature is not None else self.config.temperature
+            actual_temp = temperature if temperature is not None else self.config.temperature
 
-        kwargs: dict = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": actual_temp,
-        }
-        if timeout is not None:
-            kwargs["timeout"] = timeout
-        if max_retries is not None:
-            kwargs["max_retries"] = max_retries
+            kwargs: dict = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": actual_temp,
+            }
+            if timeout is not None:
+                kwargs["timeout"] = timeout
+            if max_retries is not None:
+                kwargs["max_retries"] = max_retries
 
-        response = await self.llm_client.chat(**kwargs)
+            response = await client.chat(**kwargs)
 
-        content = response.content if response and response.content else ""
-        if not content:
-            logger.warning(f"[{self.agent_type.value}] LLM returned empty response (standalone)")
+            content = response.content if response and response.content else ""
+            if not content:
+                logger.warning(f"[{self.agent_type.value}] LLM returned empty response (standalone)")
 
-        return content
+            return content
+        finally:
+            self._provider.release_client(client)
 
     async def chat_stream(
         self,
@@ -268,25 +281,30 @@ class BaseAgent(ABC):
         """
         # Set context before each call (client is shared between agents)
         self.refresh_runtime_config_if_needed()
-        self._set_llm_context()
+        client = self.llm_client
+        self._provider.lease_client(client)
 
-        messages = self.get_messages_for_llm(message)
+        try:
+            self._set_llm_context(client)
+            messages = self.get_messages_for_llm(message)
 
-        # Use provided temperature or fall back to config default
-        actual_temp = temperature if temperature is not None else self.config.temperature
+            # Use provided temperature or fall back to config default
+            actual_temp = temperature if temperature is not None else self.config.temperature
 
-        full_response = ""
-        async for chunk in self.llm_client.chat_stream(
-            model=self.model,
-            messages=messages,
-            temperature=actual_temp
-        ):
-            full_response += chunk
-            yield chunk
-        
-        # Add to history
-        self.add_to_history("user", message)
-        self.add_to_history("assistant", full_response)
+            full_response = ""
+            async for chunk in client.chat_stream(
+                model=self.model,
+                messages=messages,
+                temperature=actual_temp
+            ):
+                full_response += chunk
+                yield chunk
+
+            # Add to history
+            self.add_to_history("user", message)
+            self.add_to_history("assistant", full_response)
+        finally:
+            self._provider.release_client(client)
     
     @abstractmethod
     async def process(

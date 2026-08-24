@@ -199,3 +199,25 @@ def test_chat_with_tools_native_tool_calls_unaffected(monkeypatch, client):
     assert len(result.tool_calls) == 1
     assert result.tool_calls[0].id == "call_native_1"
     assert not result.tool_calls[0].id.startswith("recovered_")
+
+
+def test_stringified_unknown_tool_remains_text(monkeypatch, client):
+    """A JSON-looking response is a tool call only when its name was offered."""
+    payload = '{"tool":"not_offered","parameters":{"value":1}}'
+    fake_response = _make_fake_response(payload, tool_calls=None)
+
+    async def fake_call(*args, **kwargs):
+        return fake_response
+
+    monkeypatch.setattr(client, "_call_with_temp_fallback", fake_call)
+    result = asyncio.run(client.chat_with_tools(
+        model="x",
+        messages=[{"role": "user", "content": "go"}],
+        tools=[{
+            "type": "function",
+            "function": {"name": "offered", "parameters": {"type": "object"}},
+        }],
+    ))
+
+    assert not result.has_tool_calls
+    assert result.content == payload

@@ -1,10 +1,11 @@
 import asyncio
 
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from backend.utils.llm_client import (
     retry_with_backoff,
     BadRequestError,
+    InternalServerError,
     UpstreamExhaustedError,
     MAX_RETRIES,
 )
@@ -55,6 +56,32 @@ async def test_temperature_400_not_retried_propagates():
     # Called only once — temperature signal is not retried
     assert call_count == 1
 
+
+@pytest.mark.asyncio
+async def test_5xx_budget_does_not_stick_to_deterministic_failure(monkeypatch):
+    calls = 0
+    first = _err(
+        InternalServerError,
+        "temporary upstream failure",
+        500,
+    )
+    later = _err(BadRequestError, "invalid request", 400)
+
+    async def failing_func():
+        nonlocal calls
+        calls += 1
+        raise first if calls == 1 else later
+
+    monkeypatch.setattr("backend.utils.llm_client_parts.retry.asyncio.sleep", AsyncMock())
+    with pytest.raises(UpstreamExhaustedError):
+        await retry_with_backoff(
+            failing_func,
+            max_retries=1,
+            retry_delay_base=0,
+            agent_name="test",
+        )
+
+    assert calls == 2
 
 @pytest.mark.asyncio
 async def test_tool_choice_400_not_retried_propagates():

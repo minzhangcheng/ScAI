@@ -160,6 +160,8 @@ async def set_user_config(
     )
 
     invalidate_cache(user_id)
+    from backend.utils.settings_provider import refresh_active_providers
+    await refresh_active_providers(user_id=user_id)
 
     return APIResponse(success=True, message="Config saved")
 
@@ -173,6 +175,8 @@ async def delete_user_config(
     await db.delete_user_llm_config(user_id)
 
     invalidate_cache(user_id)
+    from backend.utils.settings_provider import refresh_active_providers
+    await refresh_active_providers(user_id=user_id)
 
     return APIResponse(success=True, message="Config deleted")
 

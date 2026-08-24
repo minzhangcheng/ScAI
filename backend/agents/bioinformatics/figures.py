@@ -38,6 +38,7 @@ from backend.services.marker_priors import MarkerDB, summarize_database_priors
 
 from ...utils.formatting import format_revision_history, truncate_for_llm
 from ...utils.error_parsing import compact_traceback
+from ...utils.llm_client import is_vision_capability_mismatch
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ...services.figure_layout import (
     blocking_violations,
@@ -1761,11 +1762,7 @@ Return only the Python code:"""
                     system_prompt=self.system_prompt,
                 )
             except Exception as vision_err:
-                _is_vision_unsupported = (
-                    "NotFoundError" in type(vision_err).__name__
-                    or "404" in str(vision_err)
-                    or "1210" in str(vision_err)  # ZhipuAI: API params error (non-vision model)
-                )
+                _is_vision_unsupported = is_vision_capability_mismatch(vision_err)
                 if _is_vision_unsupported:
                     # Model does not support vision input — disable for this session and fall back
                     logger.warning(

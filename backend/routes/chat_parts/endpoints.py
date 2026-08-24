@@ -704,6 +704,7 @@ async def chat_with_pi(
     chat_messages_list.append({"role": "user", "content": user_content})
 
     # --- Call LLM ---
+    llm_client = None
     try:
         llm_client = get_agent_llm_client(state, config, PI_AGENT_NAME, session_id)
 
@@ -734,6 +735,12 @@ async def chat_with_pi(
     except Exception as e:
         logger.exception("Chat LLM error")
         assistant_content = f"Error communicating with LLM: {str(e)}"
+    finally:
+        if llm_client is not None:
+            try:
+                await llm_client.close()
+            except Exception:
+                logger.warning("Failed to close main chat LLM client", exc_info=True)
 
     # --- Check for delegation ---
     delegation = _try_parse_delegation(assistant_content)

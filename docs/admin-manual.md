@@ -265,8 +265,8 @@ The release helper always builds both the selected tag and `latest`:
 ```
 
 ```bash
-./build.sh --version 0.39.27
-./build.sh --version 0.39.27 --push
+./build.sh --version 0.39.28
+./build.sh --version 0.39.28 --push
 ```
 
 Without `--version`, the helper uses the newest Git tag returned by `git describe --tags --abbrev=0`, or `latest` if none exists. `--push` pushes both tags to `ghcr.io/minzhangcheng/scai`; authenticate Docker to that registry before using it. The helper does not accept registry, image-name, platform, or build-argument flags.

@@ -148,6 +148,123 @@ def is_responses_only_model(error: Exception) -> bool:
     via the Responses API (reactive chat -> responses fallback)."""
     return "only supported in v1/responses" in str(error).lower()
 
+
+_VISION_SHAPE_MARKERS = (
+    "should be a valid dictionary",
+    "chatcompletioncontentpartimageparam",
+    "dict_type",
+    "is invalid",
+)
+
+
+def is_responses_vision_shape_error(error: Exception) -> bool:
+    """Recognize the one deterministic Responses image-shape incompatibility.
+
+    A provider may expose a Responses endpoint while rejecting the image item
+    shape that this client sends.  That is a protocol-local vision fallback,
+    not evidence that the model or endpoint is unavailable.  Match only HTTP
+    400 errors whose structured message names ``image_url``/``image url`` and
+    one of the known schema markers; unrelated 400s must not be rerouted.
+    """
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    # This is deliberately a protocol signal, not a prose heuristic.  A
+    # missing status (as on many locally-created SDK exceptions) must not
+    # reroute a request or alter the session's vision capability.
+    if status_code != 400:
+        return False
+
+    body = getattr(error, "body", None)
+    if not isinstance(body, dict):
+        return False
+    err = body.get("error") or {}
+    if not isinstance(err, dict):
+        return False
+    # Read only structured fields from the provider response.  The SDK's
+    # string rendering may repeat arbitrary user/model prose and is not a
+    # stable indication of the rejected schema.
+    message = " ".join(
+        str(err.get(key, "")).lower()
+        for key in ("message", "param", "code", "type")
+    )
+    if "image_url" not in message and "image url" not in message:
+        return False
+    return any(marker in message for marker in _VISION_SHAPE_MARKERS)
+
+
+def is_vision_capability_mismatch(error: Exception) -> bool:
+    """Return true only for an explicit lack of image-input capability."""
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    text = str(error).lower()
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error") or {}
+        if isinstance(err, dict):
+            text = " ".join(
+                [text]
+                + [str(err.get(key, "")).lower() for key in ("message", "code", "type")]
+            )
+    if "1210" in text:
+        return True
+    if status_code != 404 and type(error).__name__ != "NotFoundError":
+        return False
+    return any(marker in text for marker in ("vision", "image", "multimodal"))
+
+
+_MAX_TOKEN_FIELDS = ("max_completion_tokens", "max_tokens")
+_MAX_TOKEN_REJECTION_MARKERS = (
+    "unsupported parameter",
+    "unsupported_parameter",
+    "not supported",
+    "unknown parameter",
+    "unrecognized parameter",
+    "unrecognized request argument",
+    "unexpected parameter",
+    "invalid parameter",
+    "extra inputs are not permitted",
+)
+_MAX_TOKEN_REPLACEMENT_RE = re.compile(
+    r"use\s+\W{0,2}(max_completion_tokens|max_tokens)\W{0,2}\s*instead"
+)
+
+
+def max_tokens_field_from_error(error: Exception) -> Optional[str]:
+    """Return the field a provider explicitly says this route accepts."""
+    if not isinstance(error, BadRequestError):
+        return None
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code is not None and status_code != 400:
+        return None
+    text = str(error).lower()
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error") or {}
+        if isinstance(err, dict):
+            text = " ".join(
+                [text]
+                + [str(err.get(key, "")).lower() for key in ("message", "param", "code", "type")]
+            )
+    if not any(marker in text for marker in _MAX_TOKEN_REJECTION_MARKERS):
+        return None
+    replacement = _MAX_TOKEN_REPLACEMENT_RE.search(text)
+    if replacement:
+        return replacement.group(1)
+    mentioned = [field for field in _MAX_TOKEN_FIELDS if field in text]
+    if len(mentioned) != 1:
+        return None
+    return (
+        "max_tokens"
+        if mentioned[0] == "max_completion_tokens"
+        else "max_completion_tokens"
+    )
+
+
+def is_max_tokens_field_error(error: Exception) -> bool:
+    """Match only an explicit unsupported-field/replacement signal."""
+    return max_tokens_field_from_error(error) is not None
+
 def _is_protocol_adaptation_signal(error: Exception) -> bool:
     """Errors that the protocol dispatcher adapts to (switch protocol / drop a
     parameter) rather than retrying — they must always propagate to their
@@ -155,6 +272,8 @@ def _is_protocol_adaptation_signal(error: Exception) -> bool:
     return (is_responses_endpoint_absent(error)
             or is_responses_chat_only_model(error)
             or is_responses_only_model(error)
+            or is_responses_vision_shape_error(error)
+            or is_max_tokens_field_error(error)
             or is_temperature_error(error)
             or is_tool_choice_error(error))
 

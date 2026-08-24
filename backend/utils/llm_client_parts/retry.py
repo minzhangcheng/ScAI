@@ -23,7 +23,11 @@ from ..llm_logger import get_llm_logger, LLMInteraction
 
 logger = logging.getLogger(__name__)
 
-from .error_signals import _is_hard_quota_error, _is_protocol_adaptation_signal, is_responses_input_shape_error
+from .error_signals import (
+    _is_hard_quota_error,
+    _is_protocol_adaptation_signal,
+    is_responses_input_shape_error,
+)
 from .errors import UpstreamExhaustedError
 
 
@@ -128,7 +132,8 @@ async def retry_with_backoff(
         The last exception if all retries fail
     """
     last_exception = None
-    effective_max = max_retries
+    caller_max = max(0, max_retries)
+    effective_max = caller_max
 
     json_error_count = 0
     rate_limit_attempt = 0  # independent 429 counter (see compute_rate_limit_delay)
@@ -249,8 +254,14 @@ async def retry_with_backoff(
                 raise
             last_exception = e
             is_5xx = isinstance(e, InternalServerError)
-            if is_5xx:
-                effective_max = max(effective_max, MAX_RETRIES_UPSTREAM_5XX)
+            # A 5xx episode gets its own enlarged budget.  The enlarged
+            # budget must not leak into a later deterministic error, and a
+            # caller that explicitly asked for zero retries never gets an
+            # implicit retry.
+            if is_5xx and caller_max > 0:
+                effective_max = max(caller_max, MAX_RETRIES_UPSTREAM_5XX)
+            elif not is_5xx:
+                effective_max = caller_max
             current_max = effective_max
             if attempt < current_max:
                 delay = retry_delay_base * (attempt + 1)

@@ -5,6 +5,7 @@ Supports OpenRouter, OpenAI, and other compatible endpoints
 import base64
 import html
 import httpx
+import ipaddress
 import inspect
 import asyncio
 import json
@@ -21,6 +22,30 @@ from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitEr
 from .llm_logger import get_llm_logger, LLMInteraction
 
 logger = logging.getLogger(__name__)
+
+
+def _proxy_bypass_for_url(base_url: str) -> bool:
+    """Do not send loopback/private/link-local or explicit local hosts via proxy."""
+    host = (urlparse(base_url).hostname or "").strip(".").lower()
+    if not host:
+        return False
+    if host in {"localhost", "localhost.localdomain", "ip6-localhost"}:
+        return True
+    if (
+        host.endswith((".localhost", ".internal", ".local"))
+        or "." not in host
+    ):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return bool(
+        address.is_loopback
+        or address.is_private
+        or address.is_link_local
+        or address.is_unspecified
+    )
 
 # Implementations live in ./llm_client_parts/; re-exported here so existing
 # importers and tests keep resolving them from this module.
@@ -92,6 +117,10 @@ from .llm_client_parts.shared import (  # noqa: F401
     is_responses_chat_only_model,
     is_endpoint_absent,
     is_responses_only_model,
+    is_responses_vision_shape_error,
+    is_vision_capability_mismatch,
+    is_max_tokens_field_error,
+    max_tokens_field_from_error,
     _is_protocol_adaptation_signal,
     _RESPONSES_INPUT_PARAMETER_RE,
     is_responses_input_shape_error,
@@ -118,6 +147,9 @@ from .llm_client_parts.shared import (  # noqa: F401
     _url_path_suffix_protocol,
     _DEFAULT_PROTOCOL_ORDER,
     PROBE_RETRY_DELAYS,
+    TEXT_MODALITY,
+    VISION_MODALITY,
+    _probe_key,
     _keyword_protocol_hints,
     _route_protocol_order,
     _route_protocol,
@@ -177,6 +209,7 @@ class OpenAICompatibleClient(
         if not self.api_key:
             raise ValueError("LLM api_key is not configured; set it in Config")
         self.base_url = base_url or self.DEFAULT_BASE_URL
+        self.proxy_url = proxy_url
         self.session_id = session_id
         self.agent_name = agent_name
         self.llm_logger = get_llm_logger()
@@ -195,6 +228,7 @@ class OpenAICompatibleClient(
         # was sent (e.g. an o-series variant routed through OpenRouter that the
         # static _is_o_series check missed, or vice versa).
         self._max_tokens_field_overrides: dict[str, str] = {}
+        self._parameter_adaptation_locks: dict[str, asyncio.Lock] = {}
 
         # Session-level cache of models that rejected non-"auto" tool_choice.
         # Key is the extracted model name; when present, chat_with_tools demotes
@@ -206,6 +240,7 @@ class OpenAICompatibleClient(
         # otherwise both proceed past the membership check before either adds.
         self._temp_cache_lock: asyncio.Lock = asyncio.Lock()
         self._toolchoice_cache_lock: asyncio.Lock = asyncio.Lock()
+        self._max_tokens_cache_lock: asyncio.Lock = asyncio.Lock()
 
         # Always create an explicit HTTP client with tuned timeouts and pool settings,
         # so both proxy and non-proxy scenarios get the same configuration.
@@ -214,7 +249,7 @@ class OpenAICompatibleClient(
                 connect=10.0, read=DEFAULT_REQUEST_TIMEOUT, write=30.0, pool=10.0
             ),
         }
-        if proxy_url:
+        if proxy_url and not _proxy_bypass_for_url(self.base_url):
             http_client_kwargs["proxy"] = proxy_url
         self.http_client = httpx.AsyncClient(**http_client_kwargs)
         logger.info(f"[{agent_name}] LLM client initialized (session={session_id}, proxy={'set' if proxy_url else 'none'})")
@@ -263,6 +298,10 @@ class OpenAICompatibleClient(
             self._temp_cache_lock = asyncio.Lock()
         if getattr(self, "_toolchoice_cache_lock", None) is None:
             self._toolchoice_cache_lock = asyncio.Lock()
+        if getattr(self, "_max_tokens_cache_lock", None) is None:
+            self._max_tokens_cache_lock = asyncio.Lock()
+        if getattr(self, "_parameter_adaptation_locks", None) is None:
+            self._parameter_adaptation_locks = {}
 
     def _ensure_lifecycle_state(self) -> None:
         if not hasattr(self, "_closed"):

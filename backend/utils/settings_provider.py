@@ -9,11 +9,13 @@ visible on the next get_* call.
 """
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 from typing import Any, Callable, Dict, Optional, Tuple
+from urllib.parse import urlparse
 
-from backend.config._config import SystemConfig
+from backend.config._config import APIConfig, SystemConfig
 from backend.models.schemas import AnalysisState
 from backend.utils.llm_client import OpenAICompatibleClient
 from backend.state import sessions
@@ -24,7 +26,12 @@ logger = logging.getLogger(__name__)
 # frontend/src/utils/literatureConfig.ts — secrets masked with this sentinel on
 # the way out are detected and preserved (not overwritten) on the way back in.
 MASKED_SECRET_VALUE = "********"
-_SECRET_FIELD_NAMES = {"api_key", "deep_research_api_key", "google_api_key"}
+_SECRET_FIELD_NAMES = {
+    "api_key",
+    "deep_research_api_key",
+    "google_api_key",
+    "proxy_url",
+}
 
 
 def agent_endpoint_lacks_credential(
@@ -36,6 +43,32 @@ def agent_endpoint_lacks_credential(
     """Report a custom endpoint whose key is absent or installation-owned."""
     return bool(agent_url) and agent_url != global_url and (
         not agent_key or agent_key == global_key
+    )
+
+
+_UNROUTABLE_HOST_SUFFIXES = (".local", ".localhost", ".internal")
+
+
+def endpoint_bypasses_global_proxy(url: str) -> bool:
+    """Return whether a per-agent endpoint must remain directly reachable."""
+    try:
+        parsed = urlparse(url if "://" in url else f"//{url}")
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(_UNROUTABLE_HOST_SUFFIXES):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return "." not in host
+    return bool(
+        address.is_loopback
+        or address.is_private
+        or address.is_link_local
+        or address.is_unspecified
     )
 
 
@@ -61,8 +94,9 @@ class AgentSettingsProvider:
         self._session_id = session_id
         self._config = config
         self._global_client = global_client
+        self._global_client_signature = _api_transport_signature(config.api)
         self._retry_callback = retry_callback
-        self._client_cache: Dict[Tuple[str, str, str], OpenAICompatibleClient] = {}
+        self._client_cache: Dict[Tuple[str, ...], OpenAICompatibleClient] = {}
         self._retired_clients: set[OpenAICompatibleClient] = set()
         self._client_close_tasks: set[asyncio.Task[None]] = set()
         self._client_close_task_ids: set[int] = set()
@@ -74,6 +108,8 @@ class AgentSettingsProvider:
     def set_retry_callback(self, callback: Optional[Callable]) -> None:
         """Set or update the retry callback for newly created LLM clients."""
         self._retry_callback = callback
+        if self._global_client is not None:
+            self._global_client.on_retry = callback
         for client in self._client_cache.values():
             client.on_retry = callback
 
@@ -117,6 +153,57 @@ class AgentSettingsProvider:
     def get_vision_setting(self, agent_name: str) -> bool:
         return (self._get_state().agent_vision_settings or {}).get(agent_name, True)
 
+    def _live_api_config(self) -> APIConfig:
+        return self._config.api
+
+    def refresh_resolved_config(
+        self,
+        config: Optional[SystemConfig],
+    ) -> Optional[OpenAICompatibleClient]:
+        """Publish a resolved replacement before retiring the old transport."""
+        if self._closing:
+            return self._global_client
+
+        resolved = config or self._config.model_copy(update={"api": APIConfig()})
+        new_signature = _api_transport_signature(resolved.api)
+        old_client = self._global_client
+        old_signature = self._global_client_signature
+        self._config = resolved
+
+        if not resolved.api.api_key:
+            self._global_client = None
+            self._global_client_signature = new_signature
+            self.clear_client_cache()
+            if old_client is not None:
+                self._retire_client(old_client)
+            return None
+        if new_signature == old_signature and _client_is_usable(old_client):
+            return old_client
+
+        try:
+            replacement = OpenAICompatibleClient(
+                api_key=resolved.api.api_key,
+                base_url=resolved.api.llm_base_url,
+                proxy_url=resolved.api.proxy_url,
+                session_id=self._session_id,
+                agent_name="workflow",
+            )
+            replacement.on_retry = self._retry_callback
+        except Exception:
+            self._global_client = None
+            self._global_client_signature = new_signature
+            self.clear_client_cache()
+            if old_client is not None:
+                self._retire_client(old_client)
+            raise
+
+        self._global_client = replacement
+        self._global_client_signature = new_signature
+        self.clear_client_cache()
+        if old_client is not None and old_client is not replacement:
+            self._retire_client(old_client)
+        return replacement
+
     def get_llm_client(self, agent_name: str) -> Optional[OpenAICompatibleClient]:
         if self._closing:
             raise RuntimeError("settings provider is closing")
@@ -124,15 +211,16 @@ class AgentSettingsProvider:
         agent_url = agent_cfg.get("llm_base_url", "")
         agent_key = agent_cfg.get("api_key", "")
 
-        if (not agent_url or agent_url == self._config.api.llm_base_url) and \
-           (not agent_key or agent_key == self._config.api.api_key):
-            return self._global_client
+        live_api = self._live_api_config()
+        if (not agent_url or agent_url == live_api.llm_base_url) and \
+           (not agent_key or agent_key == live_api.api_key):
+            return self._usable_global_client()
 
         if agent_endpoint_lacks_credential(
             agent_url,
             agent_key,
-            self._config.api.llm_base_url,
-            self._config.api.api_key,
+            live_api.llm_base_url,
+            live_api.api_key,
         ):
             # A custom endpoint whose credential is gone — the state of every
             # session that arrives through export/import, because export blanks
@@ -148,18 +236,22 @@ class AgentSettingsProvider:
                 self._session_id,
                 agent_name,
             )
-            return self._global_client
+            return self._usable_global_client()
 
+        effective_url = agent_url or live_api.llm_base_url
+        effective_key = agent_key or live_api.api_key
+        effective_proxy = self._effective_proxy(effective_url)
         cache_key = (
             agent_name,
-            agent_url or self._config.api.llm_base_url,
-            agent_key or self._config.api.api_key,
+            effective_url,
+            effective_key,
+            effective_proxy or "",
         )
         if cache_key not in self._client_cache:
             client = OpenAICompatibleClient(
                 api_key=cache_key[2],
                 base_url=cache_key[1],
-                proxy_url=self._config.api.proxy_url,
+                proxy_url=effective_proxy,
                 session_id=self._session_id,
                 agent_name=agent_name,
             )
@@ -167,6 +259,23 @@ class AgentSettingsProvider:
                 client.on_retry = self._retry_callback
             self._client_cache[cache_key] = client
         return self._client_cache[cache_key]
+
+    def _usable_global_client(self) -> Optional[OpenAICompatibleClient]:
+        client = self._global_client
+        if client is None:
+            raise ValueError("LLM api_key is not configured; set it in Config")
+        if not _client_is_usable(client):
+            raise RuntimeError("resolved global LLM client is closing")
+        return client
+
+    def _effective_proxy(self, effective_url: str) -> Optional[str]:
+        live_api = self._live_api_config()
+        proxy = live_api.proxy_url
+        if not proxy:
+            return None
+        if effective_url == live_api.llm_base_url:
+            return proxy
+        return None if endpoint_bypasses_global_proxy(effective_url) else proxy
 
     # ------------------------------------------------------------------
     # Client management
@@ -331,6 +440,17 @@ class AgentSettingsProvider:
             "system_prompt": self.get_system_prompt(agent_name),
             "vision_enabled": self.get_vision_setting(agent_name),
             "server": (state.agent_server_configs or {}).get(agent_name, {}),
+            "resolved_api": {
+                "llm_base_url": self._live_api_config().llm_base_url,
+                "api_key": self._live_api_config().api_key,
+                "proxy_url": self._live_api_config().proxy_url,
+            },
+            "proxy_url": self._effective_proxy(
+                (state.agent_server_configs or {}).get(agent_name, {}).get(
+                    "llm_base_url"
+                )
+                or self._live_api_config().llm_base_url
+            ),
         }
         signature.update(self._agent_extra_signature(agent_name, state))
         return tuple(sorted(_secret_safe_signature(signature).items()))
@@ -421,3 +541,78 @@ def _secret_safe_signature(value: Any, key_name: str = "") -> Any:
         digest = hashlib.sha256(str(value).encode("utf-8")).hexdigest()
         return {"sha256": digest}
     return value
+
+
+def _api_transport_signature(api: APIConfig) -> Tuple[str, str, str]:
+    """Return a transport comparison key without retaining raw credentials."""
+
+    def _digest(value: Any) -> str:
+        if not value:
+            return ""
+        return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+    return (
+        str(api.llm_base_url or ""),
+        _digest(api.api_key),
+        _digest(api.proxy_url),
+    )
+
+
+def _client_is_usable(client: Optional[OpenAICompatibleClient]) -> bool:
+    return bool(
+        client is not None
+        and getattr(client, "_closing", False) is not True
+        and getattr(client, "_closed", False) is not True
+    )
+
+
+async def refresh_active_providers(
+    user_id: Optional[str] = None,
+) -> int:
+    """Refresh resolved transports for active analysis/report workflows."""
+    from backend.state import report_workflows, workflows
+    from backend.utils.config_resolver import resolve_config_for_user
+
+    targets: list[tuple[Any, AgentSettingsProvider, str]] = []
+    seen: set[int] = set()
+    for workflow in list(workflows.values()) + list(report_workflows.values()):
+        provider = getattr(workflow, "_settings_provider", None)
+        if not isinstance(provider, AgentSettingsProvider) or id(provider) in seen:
+            continue
+        seen.add(id(provider))
+        try:
+            owner_id = str(getattr(provider._get_state(), "user_id", "") or "")
+        except Exception:
+            continue
+        if user_id is not None and owner_id != user_id:
+            continue
+        targets.append((workflow, provider, owner_id))
+
+    resolved_by_user: dict[str, Optional[SystemConfig]] = {}
+    for owner_id in {owner for _, _, owner in targets}:
+        try:
+            resolved_by_user[owner_id] = await resolve_config_for_user(owner_id)
+        except Exception:
+            logger.warning(
+                "Could not resolve refreshed LLM configuration for an active workflow"
+            )
+            resolved_by_user[owner_id] = None
+
+    refreshed = 0
+    for workflow, provider, owner_id in targets:
+        try:
+            replacement = provider.refresh_resolved_config(
+                resolved_by_user.get(owner_id)
+            )
+        except Exception:
+            logger.warning(
+                "Could not construct a replacement LLM client for an active workflow"
+            )
+            continue
+
+        manager = getattr(workflow, "llm_manager", None)
+        if manager is not None and replacement is not None:
+            manager.llm = replacement
+            manager.openrouter = replacement
+        refreshed += 1
+    return refreshed

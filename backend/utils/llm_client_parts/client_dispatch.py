@@ -90,6 +90,7 @@ from .shared import (  # noqa: F401
     is_responses_chat_only_model,
     is_endpoint_absent,
     is_responses_only_model,
+    is_responses_vision_shape_error,
     _is_protocol_adaptation_signal,
     _RESPONSES_INPUT_PARAMETER_RE,
     is_responses_input_shape_error,
@@ -116,6 +117,9 @@ from .shared import (  # noqa: F401
     _url_path_suffix_protocol,
     _DEFAULT_PROTOCOL_ORDER,
     PROBE_RETRY_DELAYS,
+    TEXT_MODALITY,
+    VISION_MODALITY,
+    _probe_key,
     _keyword_protocol_hints,
     _route_protocol_order,
     _route_protocol,
@@ -281,15 +285,31 @@ class ClientDispatchMixin:
         return result
 
     def _cache_protocol_decision(self, model: str, protocol: str) -> None:
-        _PROBE_CACHE[(self.base_url, model)] = protocol
+        _PROBE_CACHE[_probe_key(self.base_url, model)] = protocol
 
-    def _note_probe_protocol_failure(self, model: str, protocol: str,
-                                     error: Exception) -> Optional[str]:
+    def _cache_protocol_decision_for_modality(
+        self, model: str, protocol: str, modality: str
+    ) -> None:
+        _PROBE_CACHE[_probe_key(self.base_url, model, modality)] = protocol
+
+    def _note_probe_protocol_failure(
+        self,
+        model: str,
+        protocol: str,
+        error: Exception,
+        modality: str = TEXT_MODALITY,
+    ) -> Optional[str]:
         """Record side effects for a DETERMINISTIC failure of `protocol` and
         return the protocol to redirect to next, or None. Never writes a success
         cache (only success writes _PROBE_CACHE); only records the site-level
         _NO_RESPONSES_ENDPOINT fact for a truly absent responses endpoint."""
         if protocol == "responses":
+            if modality == VISION_MODALITY and is_responses_vision_shape_error(error):
+                logger.warning(
+                    f"[{self.agent_name}] Responses vision shape rejected at "
+                    f"{self.base_url}; switching this vision request to chat"
+                )
+                return "chat"
             if is_responses_endpoint_absent(error):
                 logger.warning(f"[{self.agent_name}] Responses endpoint absent at "
                                f"{self.base_url}; switching to chat")
@@ -306,7 +326,13 @@ class ClientDispatchMixin:
                 return "responses"
         return None
 
-    async def _call_decided_protocol(self, protocol: str, call_for, model: str):
+    async def _call_decided_protocol(
+        self,
+        protocol: str,
+        call_for,
+        model: str,
+        modality: str = TEXT_MODALITY,
+    ):
         """Call a single, already-decided protocol with FULL retry/backoff. On a
         deterministic 'wrong protocol' error, redirect once to the indicated
         protocol (also full-retry). Fixes the confirmed-responses no-retry bug."""
@@ -316,32 +342,45 @@ class ClientDispatchMixin:
         try:
             result = await factory()
         except Exception as e:
-            redirect = self._note_probe_protocol_failure(model, protocol, e)
+            redirect = self._note_probe_protocol_failure(model, protocol, e, modality)
             if redirect is None:
                 raise
-            if _PROBE_CACHE.get((self.base_url, model)) == protocol:
-                _PROBE_CACHE.pop((self.base_url, model), None)
+            key = _probe_key(self.base_url, model, modality)
+            if _PROBE_CACHE.get(key) == protocol:
+                _PROBE_CACHE.pop(key, None)
             rfactory = call_for(redirect, probe=False)
             if rfactory is None:
                 raise
             result = await rfactory()
-            self._cache_protocol_decision(model, redirect)
+            self._cache_protocol_decision_for_modality(model, redirect, modality)
             return result
-        self._cache_protocol_decision(model, protocol)
+        self._cache_protocol_decision_for_modality(model, protocol, modality)
         return result
 
-    async def _probe_in_order(self, order: List[str], call_for, model: str):
+    async def _probe_in_order(
+        self,
+        order: List[str],
+        call_for,
+        model: str,
+        modality: str = TEXT_MODALITY,
+    ):
         """Try protocols in `order`. Per protocol: up to len(PROBE_RETRY_DELAYS)
         single-shot attempts on TRANSIENT errors (sleeping PROBE_RETRY_DELAYS
         between/after each), then move on. A DETERMINISTIC 'wrong protocol' error
         switches immediately (and may inject a redirect protocol at the front).
         Only a SUCCESS writes the protocol cache."""
-        key = (self.base_url, model)
+        key = _probe_key(self.base_url, model, modality)
         lock = _PROBE_LOCKS.setdefault(key, asyncio.Lock())
         async with lock:
-            recheck = _route_protocol_order(self.base_url, model)
+            recheck = (
+                _route_protocol_order(self.base_url, model)
+                if modality == TEXT_MODALITY
+                else _route_protocol_order(self.base_url, model, modality)
+            )
             if len(recheck) == 1:
-                return await self._call_decided_protocol(recheck[0], call_for, model)
+                return await self._call_decided_protocol(
+                    recheck[0], call_for, model, modality
+                )
 
             pending = list(order)
             tried: set = set()
@@ -359,14 +398,18 @@ class ClientDispatchMixin:
                 for attempt in range(len(PROBE_RETRY_DELAYS)):
                     try:
                         result = await factory()
-                        self._cache_protocol_decision(model, protocol)
+                        self._cache_protocol_decision_for_modality(
+                            model, protocol, modality
+                        )
                         return result
                     except Exception as e:
                         last_error = e
                         if is_transient_probe_error(e):
                             await asyncio.sleep(PROBE_RETRY_DELAYS[attempt])
                             continue
-                        redirect = self._note_probe_protocol_failure(model, protocol, e)
+                        redirect = self._note_probe_protocol_failure(
+                            model, protocol, e, modality
+                        )
                         if redirect and redirect not in tried and redirect not in pending:
                             pending.insert(0, redirect)
                         break
@@ -439,10 +482,15 @@ class ClientDispatchMixin:
                 )
             return None
 
-        order = _route_protocol_order(self.base_url, model)
+        modality = VISION_MODALITY if interaction_type == "vision" else TEXT_MODALITY
+        order = (
+            _route_protocol_order(self.base_url, model)
+            if modality == TEXT_MODALITY
+            else _route_protocol_order(self.base_url, model, modality)
+        )
         if len(order) == 1:
-            return await self._call_decided_protocol(order[0], call_for, model)
-        return await self._probe_in_order(order, call_for, model)
+            return await self._call_decided_protocol(order[0], call_for, model, modality)
+        return await self._probe_in_order(order, call_for, model, modality)
 
     def _responses_probe_decision(self, model: str) -> Optional[str]:
         key = (self.base_url, model)

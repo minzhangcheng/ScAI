@@ -35,6 +35,11 @@ _user_cache: dict[str, tuple[float, Optional[dict]]] = {}
 # Per-user locks to prevent thundering herd on cold cache entries.
 _user_locks: dict[str, asyncio.Lock] = {}
 
+# Invalidation advances an epoch instead of replacing locks.  A reader may be
+# awaiting the database while a route publishes new credentials; the epoch
+# prevents that old read from being published after invalidation.
+_cache_generation = 0
+
 
 # ---------------------------------------------------------------------------
 # Cache management
@@ -42,14 +47,16 @@ _user_locks: dict[str, asyncio.Lock] = {}
 
 def invalidate_cache(user_id: str) -> None:
     """Invalidate the cached per-user API config for a single user."""
+    global _cache_generation
+    _cache_generation += 1
     _user_cache.pop(user_id, None)
-    _user_locks.pop(user_id, None)
 
 
 def invalidate_all() -> None:
     """Clear the entire per-user cache (call when global config changes)."""
+    global _cache_generation
+    _cache_generation += 1
     _user_cache.clear()
-    _user_locks.clear()
 
 
 def _evict_if_needed() -> None:
@@ -61,7 +68,6 @@ def _evict_if_needed() -> None:
     sorted_keys = sorted(_user_cache.keys(), key=lambda k: _user_cache[k][0])
     for key in sorted_keys[:count_to_evict]:
         _user_cache.pop(key, None)
-        _user_locks.pop(key, None)
 
 
 # ---------------------------------------------------------------------------
@@ -84,47 +90,55 @@ async def _get_cached_user_api(user_id: str) -> Optional[dict]:
         if now < expiry:
             return data
 
-    # Slow path: acquire per-user lock to prevent thundering herd.
-    if user_id not in _user_locks:
-        _user_locks[user_id] = asyncio.Lock()
+    # The lock remains stable for the process lifetime.  Invalidation only
+    # clears values and advances the generation, so an in-flight waiter cannot
+    # be stranded on a lock that a later caller no longer shares.
+    lock = _user_locks.setdefault(user_id, asyncio.Lock())
 
-    async with _user_locks[user_id]:
-        # Double-check inside the lock: another coroutine may have filled the
-        # cache while we were waiting to acquire it.
-        now = time.time()
-        if user_id in _user_cache:
-            expiry, data = _user_cache[user_id]
-            if now < expiry:
-                return data
+    async with lock:
+        while True:
+            # Double-check inside the lock: another coroutine may have filled
+            # the cache while this caller was waiting to acquire it.
+            now = time.time()
+            if user_id in _user_cache:
+                expiry, data = _user_cache[user_id]
+                if now < expiry:
+                    return data
 
-        # Cache miss: fetch from DB.
-        db = await get_db()
-        row = await db.get_user_llm_config(user_id)
+            generation = _cache_generation
 
-        if row is None:
-            result = None
-        else:
-            try:
-                api_key = decrypt_value(row["encrypted_api_key"]) if row["encrypted_api_key"] else ""
-                proxy_url = decrypt_value(row["encrypted_proxy_url"]) if row["encrypted_proxy_url"] else ""
-            except (ConfigEncryptionUnavailable, InvalidToken) as e:
-                logger.error(
-                    "Failed to decrypt user %s LLM config: %s; falling back to global",
-                    user_id,
-                    e,
-                )
-                api_key = ""
-                proxy_url = ""
-            result = {
-                "api_key": api_key,
-                "llm_base_url": row["llm_base_url"],
-                "proxy_url": proxy_url,
-            }
+            # Cache miss: fetch from DB.
+            db = await get_db()
+            row = await db.get_user_llm_config(user_id)
 
-        # Store in cache (evict stale entries first if needed).
-        _evict_if_needed()
-        _user_cache[user_id] = (now + _TTL, result)
-        return result
+            if row is None:
+                result = None
+            else:
+                try:
+                    api_key = decrypt_value(row["encrypted_api_key"]) if row["encrypted_api_key"] else ""
+                    proxy_url = decrypt_value(row["encrypted_proxy_url"]) if row["encrypted_proxy_url"] else ""
+                except (ConfigEncryptionUnavailable, InvalidToken) as e:
+                    logger.error(
+                        "Failed to decrypt user %s LLM config: %s; falling back to global",
+                        user_id,
+                        e,
+                    )
+                    api_key = ""
+                    proxy_url = ""
+                result = {
+                    "api_key": api_key,
+                    "llm_base_url": row["llm_base_url"],
+                    "proxy_url": proxy_url,
+                }
+
+            if generation != _cache_generation:
+                # A route invalidated while the DB await was in flight.  The
+                # old result is not publishable; resolve the new generation.
+                continue
+
+            _evict_if_needed()
+            _user_cache[user_id] = (time.time() + _TTL, result)
+            return result
 
 
 # ---------------------------------------------------------------------------
