@@ -49,6 +49,17 @@ class TestConfigV1Validation:
         with pytest.raises(ValidationError):
             ConfigV1.model_validate(cfg)
 
+    def test_max_rounds_optional_and_bounded(self):
+        cfg = _valid_config()
+        assert ConfigV1.model_validate(cfg).analysis.max_rounds is None
+        for value in (1, 50):
+            cfg["analysis"]["max_rounds"] = value
+            assert ConfigV1.model_validate(cfg).analysis.max_rounds == value
+        for value in (0, 51):
+            cfg["analysis"]["max_rounds"] = value
+            with pytest.raises(ValidationError):
+                ConfigV1.model_validate(cfg)
+
     def test_unknown_agent_name_rejected(self):
         cfg = _valid_config(agents={"unknown_agent": {"model": "gpt-4"}})
         with pytest.raises(ValidationError):

@@ -11,13 +11,104 @@ Usage:
 import json
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from pathlib import PurePosixPath
+from typing import Any, Callable, Dict, Optional, Sequence
 
 import httpx
 
+from . import endpoints
+from .config import load_config, resolve_data_files
 from .job import Job
 from .upload import upload_file
 from .errors import ScaiError, AuthError, ImportFailed
+
+
+def login(base_url: str, username: str, password: str, *, timeout: int = 60) -> Dict[str, Any]:
+    """Exchange credentials for a short-lived JWT."""
+    response = httpx.post(
+        base_url.rstrip("/") + endpoints.login(),
+        json={"username": username, "password": password},
+        timeout=timeout,
+    )
+    if response.status_code == 401:
+        raise AuthError("login failed: invalid credentials")
+    if response.status_code == 429:
+        raise AuthError("login failed: too many attempts; wait and try again")
+    if response.status_code >= 400:
+        raise ScaiError(
+            f"login failed: HTTP {response.status_code}: {response.text[:400]}"
+        )
+    return response.json()
+
+
+def verify_exported_bindings(
+    config: Dict[str, Any],
+    exported: Dict[str, Any],
+    local_files: Optional[Sequence[Path]] = None,
+) -> None:
+    """Verify every exported V1 file binding against its declaration.
+
+    The server's export is authoritative for the durable destination.  A
+    successful checksum upload is not enough: a placeholder can still be
+    attached to the wrong section, group, sample, or filename.  Keep this
+    verifier shared by the SDK and CLI so both paths refuse the same unsafe
+    start.
+    """
+    declared = list(config.get("data", {}).get("files", []))
+    stored = exported.get("data", {}).get("files")
+    if not isinstance(stored, list) or len(stored) != len(declared):
+        raise ScaiError(
+            "exported binding manifest length differs from the configuration"
+        )
+    if local_files is not None and len(local_files) != len(declared):
+        raise ScaiError("resolved local files do not match the configuration order")
+
+    declared_group_names = {
+        str(group.get("key")): group.get("name")
+        for group in config.get("data", {}).get("groups", [])
+    }
+    stored_group_names = {
+        str(group.get("key")): group.get("name")
+        for group in exported.get("data", {}).get("groups", [])
+    }
+
+    for index, entry in enumerate(declared):
+        record = stored[index]
+        if not isinstance(record, dict):
+            raise ScaiError(f"exported binding at data.files[{index}] is invalid")
+        local = local_files[index] if local_files is not None else None
+        expected_filename = entry.get("filename") or (
+            local.name if local is not None else Path(entry["local_path"]).name
+        )
+        exported_path = PurePosixPath(str(record.get("local_path") or ""))
+        if exported_path.name != expected_filename:
+            raise ScaiError(f"exported binding filename mismatch at data.files[{index}]")
+        if record.get("section") != entry.get("section"):
+            raise ScaiError(f"exported binding section mismatch at data.files[{index}]")
+        if record.get("sample_number") != entry.get("sample_number"):
+            raise ScaiError(
+                f"exported binding sample_number mismatch at data.files[{index}]"
+            )
+
+        declared_group = entry.get("group")
+        stored_group = record.get("group")
+        if declared_group is None:
+            if stored_group is not None:
+                raise ScaiError(f"exported binding group mismatch at data.files[{index}]")
+            minimum_parts = 4  # uploads/section/_ungrouped/filename
+        else:
+            if stored_group is None or (
+                declared_group_names.get(str(declared_group))
+                != stored_group_names.get(str(stored_group))
+            ):
+                raise ScaiError(f"exported binding group mismatch at data.files[{index}]")
+            minimum_parts = 5  # uploads/section/group/sample/filename
+
+        if (
+            len(exported_path.parts) < minimum_parts
+            or exported_path.parts[0] != "uploads"
+        ):
+            raise ScaiError(f"data.files[{index}] is unbound in the exported session")
 
 
 class Client:
@@ -61,141 +152,131 @@ class Client:
     def __exit__(self, *args):
         self.close()
 
-    def submit(self, config_path: str | Path) -> Job:
-        """Submit a complete analysis: create job -> upload files -> start.
+    def new(self, config_path: str | Path) -> Job:
+        """Create, bind, upload, and start one complete ConfigV1 analysis."""
+        config, resolved_path = load_config(config_path)
+        local_files = resolve_data_files(config, resolved_path.parent)
+        entries = config.get("data", {}).get("files", [])
+        if len(local_files) != len(entries):
+            raise ScaiError("resolved data files do not match the configuration order")
 
-        Args:
-            config_path: Path to a ConfigV1 JSON file
+        job_id, manifest = self.create_analysis(config)
+        file_ids = self._validate_placeholder_manifest(config, local_files, manifest)
+        for local, file_id in zip(local_files, file_ids):
+            self.upload_data_file(job_id, local, placeholder_id=file_id)
+        verify_exported_bindings(config, self.export_config(job_id), local_files)
+        self.start_analysis(job_id)
+        return Job(self._http, job_id)
 
-        Returns:
-            A Job object for tracking progress
-
-        Raises:
-            FileNotFoundError: If a referenced local file does not exist.
-        """
-        config_path = Path(config_path)
-        cfg = json.loads(config_path.read_text())
-
-        # Resolve every local path before creating a remote job. A missing path
-        # must never leave behind a session that can only be populated partly.
-        config_dir = config_path.parent
-        locals_: list[Path] = []
-        missing: list[str] = []
-        entries = cfg.get("data", {}).get("files", [])
-        for entry in entries:
-            candidate = Path(entry["local_path"])
-            if not candidate.is_absolute():
-                candidate = config_dir / candidate
-            try:
-                local = candidate.resolve(strict=True)
-            except (OSError, RuntimeError):
-                missing.append(str(candidate))
-                continue
-            if not local.is_file():
-                missing.append(str(candidate))
-                continue
-            locals_.append(local)
-        if missing:
-            raise FileNotFoundError(
-                f"{config_path}: data.files references "
-                f"{len(missing)} path(s) that do not exist: "
-                + ", ".join(missing)
-            )
-
-        # 1. Create the job
-        r = self._http.post("/api/v1/analyses", json=cfg)
-        if r.status_code == 422:
-            raise ScaiError(f"Invalid config: {r.json()}")
-        if r.status_code == 401:
-            raise AuthError("Authentication failed")
-        r.raise_for_status()
-        created = r.json()
-        job_id = created["job_id"]
-
-        manifest = created.get("files")
+    @staticmethod
+    def _validate_placeholder_manifest(
+        config: Dict[str, Any], local_files: list[Path], manifest: Any
+    ) -> list[str]:
+        """Require a complete, ordered server manifest before any upload."""
+        entries = config.get("data", {}).get("files", [])
         if not isinstance(manifest, list) or len(manifest) != len(entries):
             raise ScaiError(
                 "Create response does not contain a complete placeholder manifest"
             )
         file_ids: list[str] = []
         seen_ids: set[str] = set()
-        group_ids_by_config_key: dict[str, str] = {}
-        config_keys_by_group_id: dict[str, str] = {}
-        for index, item in enumerate(manifest):
+        group_ids_by_key: dict[str, str] = {}
+        group_keys_by_id: dict[str, str] = {}
+        required = ("id", "filename", "section", "group_id", "sample_number")
+        for index, (entry, local, item) in enumerate(zip(entries, local_files, manifest)):
             if not isinstance(item, dict):
-                raise ScaiError(
-                    f"Create response has an invalid placeholder entry for data.files[{index}]"
-                )
-            required = ("id", "filename", "section", "group_id", "sample_number")
-            missing_fields = [field for field in required if field not in item]
-            if missing_fields:
+                raise ScaiError(f"invalid placeholder entry at data.files[{index}]")
+            missing = [field for field in required if field not in item]
+            if missing:
                 raise ScaiError(
                     f"Create response placeholder data.files[{index}] is missing "
-                    + ", ".join(missing_fields)
+                    + ", ".join(missing)
                 )
             file_id = item["id"]
             if not isinstance(file_id, str) or not file_id.strip() or file_id != file_id.strip():
-                raise ScaiError(
-                    f"Create response is missing the placeholder id for data.files[{index}]"
-                )
+                raise ScaiError(f"placeholder id is invalid at data.files[{index}]")
             if file_id in seen_ids:
-                raise ScaiError(
-                    f"Create response repeats the placeholder id for data.files[{index}]"
-                )
-            expected_filename = entries[index].get("filename") or locals_[index].name
+                raise ScaiError(f"placeholder id is repeated at data.files[{index}]")
+            expected_filename = entry.get("filename") or local.name
             if item["filename"] != expected_filename:
-                raise ScaiError(
-                    f"Create response filename does not match data.files[{index}]"
-                )
-            if item["section"] != entries[index].get("section"):
-                raise ScaiError(
-                    f"Create response section does not match data.files[{index}]"
-                )
-            if item["sample_number"] != entries[index].get("sample_number"):
-                raise ScaiError(
-                    f"Create response sample_number does not match data.files[{index}]"
-                )
-            configured_group = entries[index].get("group")
+                raise ScaiError(f"filename does not match data.files[{index}]")
+            if item["section"] != entry.get("section"):
+                raise ScaiError(f"section does not match data.files[{index}]")
+            if item["sample_number"] != entry.get("sample_number"):
+                raise ScaiError(f"sample_number does not match data.files[{index}]")
+            configured_group = entry.get("group")
             manifest_group = item["group_id"]
             if configured_group is None:
                 if manifest_group is not None:
-                    raise ScaiError(
-                        f"Create response group_id does not match data.files[{index}]"
-                    )
+                    raise ScaiError(f"group_id does not match data.files[{index}]")
+            elif not isinstance(manifest_group, str) or not manifest_group.strip():
+                raise ScaiError(f"group_id is missing at data.files[{index}]")
             else:
-                if not isinstance(manifest_group, str) or not manifest_group.strip():
-                    raise ScaiError(
-                        f"Create response group_id is missing for data.files[{index}]"
-                    )
-                prior_group_id = group_ids_by_config_key.get(configured_group)
-                if prior_group_id is not None and prior_group_id != manifest_group:
-                    raise ScaiError(
-                        f"Create response group_id does not preserve group "
-                        f"{configured_group!r} at data.files[{index}]"
-                    )
-                prior_config_key = config_keys_by_group_id.get(manifest_group)
-                if prior_config_key is not None and prior_config_key != configured_group:
-                    raise ScaiError(
-                        f"Create response reuses group_id across config groups at "
-                        f"data.files[{index}]"
-                    )
-                group_ids_by_config_key[configured_group] = manifest_group
-                config_keys_by_group_id[manifest_group] = configured_group
+                if group_ids_by_key.setdefault(configured_group, manifest_group) != manifest_group:
+                    raise ScaiError(f"group_id changes for {configured_group!r}")
+                prior_key = group_keys_by_id.setdefault(manifest_group, configured_group)
+                if prior_key != configured_group:
+                    raise ScaiError("group_id is reused across configured groups")
             seen_ids.add(file_id)
             file_ids.append(file_id)
+        return file_ids
 
-        # 2. Upload each referenced file
-        for local, file_id in zip(locals_, file_ids):
-            upload_file(self._http, job_id, local, file_id=file_id)
+    def submit(self, config_path: str | Path) -> Job:
+        """Backward-compatible alias for :meth:`new`."""
+        return self.new(config_path)
 
-        # 3. Start the analysis
-        r = self._http.post(f"/api/v1/analyses/{job_id}/start")
-        if r.status_code == 400:
-            missing = r.json().get("detail", "")
-            raise ScaiError(f"Cannot start: {missing}")
+    def create_analysis(self, config: Dict[str, Any]) -> tuple[str, list[dict]]:
+        r = self._http.post(endpoints.create_analysis(), json=config)
+        if r.status_code == 422:
+            raise ScaiError(f"Invalid config: {r.json()}")
+        if r.status_code == 401:
+            raise AuthError("Authentication failed")
         r.raise_for_status()
+        created = r.json()
+        return created["job_id"], list(created.get("files") or [])
 
-        return Job(self._http, job_id)
+    def upload_data_file(
+        self, job_id: str, path: str | Path, *, placeholder_id: Optional[str] = None
+    ) -> None:
+        if not isinstance(placeholder_id, str) or not placeholder_id.strip():
+            raise ScaiError("upload requires the exact server placeholder id")
+        upload_file(self._http, job_id, Path(path), file_id=placeholder_id)
+
+    def start_analysis(self, job_id: str) -> dict:
+        r = self._http.post(endpoints.start_analysis(job_id))
+        if r.status_code == 400:
+            raise ScaiError(f"Cannot start: {r.json().get('detail', '')}")
+        if r.status_code == 401:
+            raise AuthError("Authentication failed")
+        r.raise_for_status()
+        return r.json()
+
+    def export_config(self, session_id: str) -> Dict[str, Any]:
+        r = self._http.get(endpoints.analysis_config(session_id))
+        if r.status_code == 401:
+            raise AuthError("Authentication failed")
+        r.raise_for_status()
+        return r.json()
+
+    def stop_session(self, session_id: str, action: str = "immediate") -> dict:
+        r = self._http.post(endpoints.stop_session(session_id), json={"action": action})
+        if r.status_code == 401:
+            raise AuthError("Authentication failed")
+        r.raise_for_status()
+        return r.json()
+
+    def create_api_key(self, label: str) -> Dict[str, Any]:
+        r = self._http.post(endpoints.api_keys(), json={"label": label})
+        if r.status_code == 401:
+            raise AuthError("Authentication failed")
+        if r.status_code >= 400:
+            raise ScaiError(f"could not create an API key: HTTP {r.status_code}: {r.text[:400]}")
+        return r.json()
+
+    def health(self) -> Dict[str, Any]:
+        r = self._http.get(endpoints.health())
+        r.raise_for_status()
+        return r.json()
 
     def get_job(self, job_id: str) -> Job:
         """Get a Job object for an existing analysis."""
@@ -220,7 +301,7 @@ class Client:
             The session model has no separate ``description`` field;
             ``name`` serves as the title.
         """
-        r = self._http.get("/api/sessions")
+        r = self._http.get(endpoints.sessions())
         if r.status_code == 401:
             raise AuthError("Authentication failed")
         r.raise_for_status()
@@ -292,7 +373,7 @@ class Client:
             headers["X-Trust"] = "true"
         with open(archive_path, "rb") as fh:
             r = self._http.post(
-                "/api/session/import",
+                endpoints.session_import(),
                 content=fh,
                 headers=headers,
             )
@@ -384,7 +465,7 @@ class Client:
         try:
             with self._http.stream(
                 "GET",
-                f"/api/session/{session_id}/export",
+                endpoints.session_export(session_id),
                 params={"include_runtime": "true"} if include_runtime else None,
                 timeout=req_timeout,
             ) as r:
@@ -418,7 +499,7 @@ class Client:
     ) -> str:
         start = time.time()
         while True:
-            r = self._http.get(f"/api/session/import/{import_id}")
+            r = self._http.get(endpoints.import_status(import_id))
             if r.status_code == 401:
                 raise AuthError("Authentication failed")
             r.raise_for_status()
@@ -462,7 +543,7 @@ class Client:
             AuthError: If authentication fails.
             ScaiError: If the import id is not found or another HTTP error occurs.
         """
-        r = self._http.post(f"/api/session/import/{import_id}/cancel")
+        r = self._http.post(endpoints.import_cancel(import_id))
         if r.status_code == 401:
             raise AuthError("Authentication failed")
         if r.status_code == 404:

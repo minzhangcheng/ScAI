@@ -122,6 +122,11 @@ def apply_config_to_session(config: ConfigV1, user_id: str = "") -> AnalysisStat
         name=config.analysis.name,
         initial_instruction=config.analysis.initial_instruction,
         round_wait_seconds=config.analysis.round_wait_seconds,
+        max_rounds=(
+            config.analysis.max_rounds
+            if config.analysis.max_rounds is not None
+            else AnalysisState.model_fields["max_rounds"].default
+        ),
         status=TaskStatus.PENDING,
         treatment_groups=treatment_groups,
         data_files=data_files,
@@ -269,13 +274,18 @@ def export_session_to_config(state: AnalysisState) -> Dict[str, Any]:
     }
 
     # Build output
+    analysis_export = {
+        "name": state.name,
+        "initial_instruction": state.initial_instruction,
+        "round_wait_seconds": state.round_wait_seconds,
+    }
+    installed_max_rounds = AnalysisState.model_fields["max_rounds"].default
+    if state.max_rounds != installed_max_rounds:
+        analysis_export["max_rounds"] = state.max_rounds
+
     config = {
         "schema_version": "1.0",
-        "analysis": {
-            "name": state.name,
-            "initial_instruction": state.initial_instruction,
-            "round_wait_seconds": state.round_wait_seconds,
-        },
+        "analysis": analysis_export,
         "api_config": {
             "default_llm": {
                 "llm_base_url": global_llm_url,

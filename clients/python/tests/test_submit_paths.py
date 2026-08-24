@@ -75,14 +75,14 @@ def test_submit_rejects_all_missing_paths_before_create(tmp_path, monkeypatch):
     assert "2 path(s)" in message
 
 
-def test_submit_resolves_paths_and_binds_each_placeholder_id(tmp_path, monkeypatch):
+def test_new_resolves_paths_and_binds_each_placeholder_id(tmp_path, monkeypatch):
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     (data_dir / "a.h5ad").write_bytes(b"a")
     (data_dir / "b.h5ad").write_bytes(b"b")
     config_path = _write_config(
         tmp_path,
-        _config("data/../data/a.h5ad", "data/b.h5ad"),
+        _config("data/../data/a.h5ad", str(data_dir / "b.h5ad")),
     )
 
     uploaded: list[tuple[Path, str]] = []
@@ -108,17 +108,113 @@ def test_submit_resolves_paths_and_binds_each_placeholder_id(tmp_path, monkeypat
     with Client(base_url="http://localhost:8000", api_key="scai_test") as client:
         monkeypatch.setattr(client._http, "post", lambda *_args, **_kwargs: _Response(created))
         monkeypatch.setattr(
+            client._http,
+            "get",
+            lambda *_args, **_kwargs: _Response({
+                "data": {"groups": [], "files": [
+                    {
+                        "local_path": "uploads/sequencing/_ungrouped/a.h5ad",
+                        "section": "sequencing",
+                        "sample_number": None,
+                    },
+                    {
+                        "local_path": "uploads/sequencing/_ungrouped/b.h5ad",
+                        "section": "sequencing",
+                        "sample_number": None,
+                    },
+                ]},
+            }),
+        )
+        monkeypatch.setattr(
             "scai_client.client.upload_file",
             lambda _http, _job_id, path, *, file_id=None: uploaded.append((path, file_id)),
         )
 
-        job = client.submit(config_path)
+        job = client.new(config_path)
 
     assert job.job_id == "job-p1"
     assert uploaded == [
         (data_dir / "a.h5ad", "pf-a"),
         (data_dir / "b.h5ad", "pf-b"),
     ]
+
+
+def test_new_refuses_export_binding_mismatch_before_start(tmp_path, monkeypatch):
+    (tmp_path / "a.h5ad").write_bytes(b"a")
+    config_path = _write_config(tmp_path, _config("a.h5ad"))
+    created = {
+        "job_id": "job-export-mismatch",
+        "files": [{
+            "id": "placeholder-a",
+            "filename": "a.h5ad",
+            "section": "sequencing",
+            "group_id": None,
+            "sample_number": None,
+        }],
+    }
+    started = False
+    calls: list[str] = []
+
+    with Client(base_url="http://localhost:8000", api_key="scai_test") as client:
+        def post(url, *args, **kwargs):
+            nonlocal started
+            calls.append(url)
+            if url.endswith("/start"):
+                started = True
+            return _Response(created)
+
+        monkeypatch.setattr(client._http, "post", post)
+        monkeypatch.setattr(
+            client._http,
+            "get",
+            lambda *_args, **_kwargs: _Response({
+                "data": {"groups": [], "files": [{
+                    "local_path": "uploads/pathology/_ungrouped/a.h5ad",
+                    "section": "pathology",
+                    "sample_number": None,
+                }]},
+            }),
+        )
+        monkeypatch.setattr(
+            "scai_client.client.upload_file",
+            lambda *_args, **_kwargs: None,
+        )
+        with pytest.raises(ScaiError, match="section"):
+            client.new(config_path)
+
+    assert calls == ["/api/v1/analyses"]
+    assert not started
+
+
+def test_new_refuses_binding_mismatch_before_start(tmp_path, monkeypatch):
+    (tmp_path / "a.h5ad").write_bytes(b"a")
+    config_path = _write_config(tmp_path, _config("a.h5ad"))
+    calls: list[str] = []
+    created = {
+        "job_id": "job-mismatch",
+        "files": [{
+            "id": "placeholder-a",
+            "filename": "wrong.h5ad",
+            "section": "sequencing",
+            "group_id": None,
+            "sample_number": None,
+        }],
+    }
+
+    with Client(base_url="http://localhost:8000", api_key="scai_test") as client:
+        def post(url, *args, **kwargs):
+            calls.append(url)
+            return _Response(created)
+
+        monkeypatch.setattr(client._http, "post", post)
+        monkeypatch.setattr(
+            "scai_client.client.upload_file",
+            lambda *_args, **_kwargs: pytest.fail("mismatched placeholder must not upload"),
+        )
+        with pytest.raises(ScaiError, match="filename"):
+            client.new(config_path)
+
+    assert calls == ["/api/v1/analyses"]
 
 
 def test_submit_rejects_an_incomplete_placeholder_manifest(tmp_path, monkeypatch):

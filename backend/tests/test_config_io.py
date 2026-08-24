@@ -3,6 +3,7 @@ import os
 
 import pytest
 from backend.models.config_schema import ConfigV1
+from backend.models.schemas import AnalysisState
 from backend.services.config_io import apply_config_to_session, export_session_to_config
 from backend.services.report.artifacts import ARTIFACT_REGISTRY_VERSION
 
@@ -52,6 +53,23 @@ class TestConfigRoundtrip:
         exported = export_session_to_config(state)
         assert exported["analysis"]["name"] == "Roundtrip Test"
         assert exported["analysis"]["round_wait_seconds"] == 60
+
+    def test_max_rounds_roundtrip(self):
+        data = _config_dict()
+        data["analysis"]["max_rounds"] = 7
+        config = ConfigV1.model_validate(data)
+        state = apply_config_to_session(config, user_id="u1")
+
+        assert state.max_rounds == 7
+        assert export_session_to_config(state)["analysis"]["max_rounds"] == 7
+
+    def test_max_rounds_absent_keeps_installation_default(self):
+        config = ConfigV1.model_validate(_config_dict())
+        state = apply_config_to_session(config, user_id="u1")
+        installed_default = AnalysisState.model_fields["max_rounds"].default
+
+        assert state.max_rounds == installed_default
+        assert "max_rounds" not in export_session_to_config(state)["analysis"]
 
     def test_agent_custom_prompt_roundtrip(self):
         """custom_prompt field survives roundtrip (not 'prompt')."""

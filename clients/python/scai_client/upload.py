@@ -4,6 +4,7 @@ from pathlib import Path
 
 import httpx
 
+from . import endpoints
 from .errors import FileIntegrityError, UploadError, AuthError
 
 DEFAULT_CHUNK_SIZE = 10 * 1024 * 1024  # 10MB
@@ -55,7 +56,7 @@ def upload_file(
         "chunk_size": chunk_size,
     }
     init_resp = client.post(
-        f"/api/v1/analyses/{job_id}/files/init",
+        endpoints.upload_init(job_id),
         json=init_payload,
     )
     if init_resp.status_code != 200:
@@ -73,7 +74,7 @@ def upload_file(
         for attempt in range(max_retries + 1):
             try:
                 resp = client.post(
-                    f"/api/v1/analyses/{job_id}/files/chunk/{upload_id}/{chunk_index}",
+                    endpoints.upload_chunk(job_id, upload_id, chunk_index),
                     files={"file": (file_path.name, data, "application/octet-stream")},
                 )
                 if resp.status_code == 200:
@@ -90,7 +91,7 @@ def upload_file(
 
     # 3. Complete upload (server verifies SHA256)
     complete_resp = client.post(
-        f"/api/v1/analyses/{job_id}/files/complete/{upload_id}",
+        endpoints.upload_complete(job_id, upload_id),
     )
     if complete_resp.status_code == 400:
         raise FileIntegrityError(file_path.name, expected_sha256)

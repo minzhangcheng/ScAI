@@ -5,6 +5,7 @@ from typing import Optional
 
 import httpx
 
+from . import endpoints
 from .errors import JobFailed, AuthError
 
 
@@ -28,7 +29,7 @@ class Job:
 
     def status(self) -> dict:
         """Get current job status and metadata."""
-        r = self._client.get(f"/api/v1/analyses/{self.job_id}")
+        r = self._client.get(endpoints.analysis(self.job_id))
         self._check_auth(r)
         r.raise_for_status()
         return r.json()
@@ -75,7 +76,7 @@ class Job:
         """Download a single artifact by name."""
         dest = Path(dest)
         r = self._client.get(
-            f"/api/v1/analyses/{self.job_id}/artifacts/{name}",
+            endpoints.analysis_artifact(self.job_id, name),
             follow_redirects=True,
         )
         self._check_auth(r)
@@ -94,7 +95,7 @@ class Job:
         """
         dest = Path(dest)
         with self._client.stream(
-            "GET", f"/api/v1/analyses/{self.job_id}/export", follow_redirects=True
+            "GET", endpoints.analysis_export(self.job_id), follow_redirects=True
         ) as r:
             self._check_auth(r)
             r.raise_for_status()
@@ -106,7 +107,7 @@ class Job:
 
     def delete(self) -> dict:
         """Delete the job (only allowed for non-running jobs)."""
-        r = self._client.delete(f"/api/v1/analyses/{self.job_id}")
+        r = self._client.delete(endpoints.analysis(self.job_id))
         self._check_auth(r)
         r.raise_for_status()
         return r.json()

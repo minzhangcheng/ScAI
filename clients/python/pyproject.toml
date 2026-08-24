@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scai-client"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Python SDK for the ScAI batch analysis API"
 readme = "README.md"
 license = {text = "MIT"}
@@ -12,6 +12,12 @@ requires-python = ">=3.10"
 dependencies = [
     "httpx>=0.26.0",
 ]
+
+[project.scripts]
+scai = "scai_client.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "scai_client.__version__"}
 
 [project.optional-dependencies]
 dev = [

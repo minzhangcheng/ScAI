@@ -27,6 +27,17 @@ def test_readme_md_version_matches():
     assert m and m.group(1) == VERSION, f"README.md version {m.group(1) if m else 'NOT FOUND'} != {VERSION}"
 
 
+def test_python_client_version_matches():
+    """The Python client follows the application release version."""
+    txt = pathlib.Path("clients/python/scai_client/__init__.py").read_text(
+        encoding="utf-8"
+    )
+    m = re.search(r'^__version__ = "([^"]+)"', txt, re.MULTILINE)
+    assert m and m.group(1) == VERSION, (
+        f"scai_client version {m.group(1) if m else 'NOT FOUND'} != {VERSION}"
+    )
+
+
 def test_handover_version_matches():
     txt = (ROOT / "docs/HANDOVER.md").read_text(encoding="utf-8")
     m = re.search(r"\*\*Version\*\*:\s*(\S+)", txt)

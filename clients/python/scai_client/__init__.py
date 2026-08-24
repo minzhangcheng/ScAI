@@ -21,7 +21,7 @@ Usage:
     path = client.export_session("<session_id>")
     job = client.get_job(session_id)
 """
-from .client import Client
+from .client import Client, login
 from .job import Job
 from .errors import (
     AuthError,
@@ -35,6 +35,7 @@ from .errors import (
 __all__ = [
     "Client",
     "Job",
+    "login",
     "AuthError",
     "FileIntegrityError",
     "ImportFailed",
@@ -42,4 +43,6 @@ __all__ = [
     "ScaiError",
     "UploadError",
 ]
-__version__ = "0.2.0"
+# The client follows the application release version rather than maintaining
+# an independent release line.
+__version__ = "0.39.27"

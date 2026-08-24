@@ -19,6 +19,7 @@ class AnalysisSection(BaseModel):
     name: str = Field(min_length=1)
     initial_instruction: str
     round_wait_seconds: int = Field(ge=-1, le=3600)
+    max_rounds: Optional[int] = Field(default=None, ge=1, le=50)
 
 
 class DefaultLlm(BaseModel):
