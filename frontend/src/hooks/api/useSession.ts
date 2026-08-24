@@ -10,6 +10,7 @@ import { buildLiteratureConfigPayload } from '../../utils/literatureConfig'
 import { downloadBlob } from '../../utils/download'
 import type { SessionLoadResponse, SessionInfoUpdateResponse, GroupUpdateResponse, SessionListResponse } from '../../types'
 import { API_BASE, apiFetch, applyStoreUpdates, authHeaders } from './client'
+import { loadRealtimeMessageHistory } from './realtimeHistory'
 
 // Session hook
 export function useSession() {
@@ -21,13 +22,50 @@ export function useSession() {
     generation: number
     controller: AbortController
   } | null>(null)
+  const activeHistoryRef = useRef<{
+    sessionId: string
+    generation: number
+    controller: AbortController
+  } | null>(null)
+
+  const startHistoryPaging = useCallback((sessionId: string, generation: number) => {
+    activeHistoryRef.current?.controller.abort()
+    const controller = new AbortController()
+    activeHistoryRef.current = { sessionId, generation, controller }
+    const ownsHistory = () => {
+      const active = activeHistoryRef.current
+      return Boolean(
+        active
+        && active.sessionId === sessionId
+        && active.generation === generation
+        && active.controller === controller
+        && !controller.signal.aborted
+        && useAppStore.getState().currentSession?.id === sessionId
+      )
+    }
+    useAppStore.getState().setRealtimeHistoryError(null)
+    void loadRealtimeMessageHistory(sessionId, {
+      signal: controller.signal,
+      ownsResponse: ownsHistory,
+      onFailure: error => {
+        if (ownsHistory()) {
+          useAppStore.getState().setRealtimeHistoryError(
+            error instanceof Error ? error.message : 'Failed to load realtime history',
+          )
+        }
+      },
+    })
+  }, [])
 
   useEffect(() => () => {
     const activeLoad = activeLoadRef.current
-    if (!activeLoad) return
-    activeLoadRef.current = null
-    loadGenerationRef.current += 1
-    activeLoad.controller.abort()
+    if (activeLoad) {
+      activeLoadRef.current = null
+      loadGenerationRef.current += 1
+      activeLoad.controller.abort()
+    }
+    activeHistoryRef.current?.controller.abort()
+    activeHistoryRef.current = null
     useAppStore.getState().setSessionLoading(false)
   }, [])
   
@@ -73,6 +111,8 @@ export function useSession() {
   
   const loadSession = useCallback(async (sessionId: string) => {
     activeLoadRef.current?.controller.abort()
+    activeHistoryRef.current?.controller.abort()
+    activeHistoryRef.current = null
     const generation = loadGenerationRef.current + 1
     loadGenerationRef.current = generation
     const controller = new AbortController()
@@ -138,6 +178,10 @@ export function useSession() {
       } else {
         clearMessages()
       }
+
+      // Session state is committed first; realtime history is server-authoritative
+      // and loaded separately so page rendering is never blocked by a long stream.
+      startHistoryPaging(sessionId, generation)
       
       return session
     } catch (e) {
@@ -152,12 +196,18 @@ export function useSession() {
         useAppStore.getState().setSessionLoading(false)
       }
     }
-  }, [setCurrentSession, setMessages, clearMessages])
+  }, [setCurrentSession, setMessages, clearMessages, startHistoryPaging])
   
   const listSessions = useCallback(async () => {
     const data = await apiFetch<SessionListResponse>('/sessions')
     return data.sessions
   }, [])
+
+  const retryRealtimeHistory = useCallback(() => {
+    const sessionId = useAppStore.getState().currentSession?.id
+    if (!sessionId) return
+    startHistoryPaging(sessionId, loadGenerationRef.current)
+  }, [startHistoryPaging])
   
   const deleteSession = useCallback(async (sessionId: string) => {
     await apiFetch(`/session/${sessionId}`, { method: 'DELETE' })
@@ -508,6 +558,7 @@ export function useSession() {
     error,
     createSession,
     loadSession,
+    retryRealtimeHistory,
     listSessions,
     deleteSession,
     saveSession,

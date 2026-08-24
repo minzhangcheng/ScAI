@@ -4,6 +4,63 @@
 import { AppState } from './appState'
 import { AgentServerConfig, AgentType, PublicationFigure } from './domain'
 
+const memoryStorage = new Map<string, string>()
+
+function backingStorage(): Storage | null {
+  try {
+    return typeof window !== 'undefined' ? window.localStorage : null
+  } catch {
+    return null
+  }
+}
+
+/** A best-effort local cache: quota/security errors never reach React state. */
+export const quotaSafeLocalStorage: Storage = {
+  get length() {
+    const storage = backingStorage()
+    return storage?.length ?? memoryStorage.size
+  },
+  clear() {
+    try {
+      backingStorage()?.clear()
+    } catch {
+      // Ignore storage security failures.
+    }
+    memoryStorage.clear()
+  },
+  getItem(key: string) {
+    try {
+      return backingStorage()?.getItem(key) ?? memoryStorage.get(key) ?? null
+    } catch {
+      return memoryStorage.get(key) ?? null
+    }
+  },
+  key(index: number) {
+    try {
+      return backingStorage()?.key(index) ?? Array.from(memoryStorage.keys())[index] ?? null
+    } catch {
+      return Array.from(memoryStorage.keys())[index] ?? null
+    }
+  },
+  removeItem(key: string) {
+    try {
+      backingStorage()?.removeItem(key)
+    } catch {
+      // Ignore storage security failures.
+    }
+    memoryStorage.delete(key)
+  },
+  setItem(key: string, value: string) {
+    try {
+      backingStorage()?.setItem(key, value)
+      memoryStorage.set(key, value)
+    } catch (error) {
+      // A cache write is optional. Keep the last in-memory value and continue.
+      console.warn('Local storage quota unavailable; continuing without persistence', error)
+    }
+  },
+}
+
 const AGENT_TYPES: readonly AgentType[] = [
   'pi',
   'pathology',
@@ -60,12 +117,21 @@ export function partialize(state: AppState) {
       graphicAbstract: state.currentSession.graphicAbstract
         ? { ...state.currentSession.graphicAbstract, imageBase64: undefined, image_base64: undefined }
         : undefined,
+      curationReviewContext: undefined,
     } : null,
     // Limit persisted chat messages and strip ALL base64 content
     chatMessages: state.chatMessages.slice(-100).map(msg => ({
       ...msg,
-      figures: msg.figures?.map((f) => f ? { ...f, base64: undefined } : f)
+      figures: msg.figures?.map((f) => f ? {
+        ...f,
+        base64: undefined,
+        image_base64: undefined,
+        imageBase64: undefined,
+        data: undefined,
+      } : f)
     })),
+    // Review context may contain authoritative/image-heavy transient payloads;
+    // it is rebuilt from the session load response.
     // NOTE: realtime `messages` are intentionally NOT persisted here. They are
     // server-authoritative (backend keeps them in AnalysisState.realtime_messages
     // and on disk) and always re-hydrated from /session/{id}/load on open, refresh

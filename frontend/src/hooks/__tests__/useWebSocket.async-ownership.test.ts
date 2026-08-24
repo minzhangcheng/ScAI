@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useWebSocket } from '../api/useWebSocket'
 import { useAppStore } from '../../stores/appStore'
+import { setToken } from '../../utils/authStorage'
 
 
 const session = (id: string) => ({
@@ -318,5 +319,91 @@ describe('WebSocket async response ownership', () => {
     })
 
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('reloads authoritative state before overlap-bounded reconnect paging', async () => {
+    vi.useFakeTimers()
+    setToken('test-token')
+    const resolvers: Array<(response: Response) => void> = []
+    const fetchMock = vi.fn(() => new Promise<Response>(resolve => {
+      resolvers.push(resolve)
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    useAppStore.setState({ currentSession: session('history') })
+    const { result } = renderHook(() => useWebSocket())
+
+    act(() => result.current.connect())
+    const first = SocketMock.instances[0]
+    await act(async () => {
+      await first.onopen?.(new Event('open'))
+    })
+    act(() => first.onclose?.({ code: 1006, reason: '' } as CloseEvent))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000)
+    })
+    const second = SocketMock.instances[1]
+    let reconnectOpen!: Promise<unknown>
+    await act(async () => {
+      reconnectOpen = Promise.resolve(second.onopen?.(new Event('open')))
+      await Promise.resolve()
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/session/history/load')
+    await act(async () => {
+      resolvers[0](jsonResponse({ session_id: 'history', status: 'running', messages: [] }))
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(String(fetchMock.mock.calls[1][0])).toContain('/api/session/history/messages')
+    await act(async () => {
+      resolvers[1](jsonResponse({ session_id: 'history', status: 'running', messages: [], has_more: false }))
+      await reconnectOpen
+    })
+    vi.useRealTimers()
+  })
+
+  it('surfaces reconnect history failure as retryable state', async () => {
+    vi.useFakeTimers()
+    setToken('test-token')
+    const resolvers: Array<(response: Response) => void> = []
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => {
+      resolvers.push(resolve)
+    })))
+    useAppStore.setState({
+      currentSession: session('history-failure'),
+      realtimeHistoryError: null,
+    })
+    const { result } = renderHook(() => useWebSocket())
+
+    act(() => result.current.connect())
+    const first = SocketMock.instances[0]
+    await act(async () => {
+      await first.onopen?.(new Event('open'))
+    })
+    act(() => first.onclose?.({ code: 1006, reason: '' } as CloseEvent))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000)
+    })
+
+    const second = SocketMock.instances[1]
+    let reconnectOpen!: Promise<unknown>
+    await act(async () => {
+      reconnectOpen = Promise.resolve(second.onopen?.(new Event('open')))
+      await Promise.resolve()
+    })
+    await act(async () => {
+      resolvers[0](jsonResponse({
+        session_id: 'history-failure',
+        status: 'running',
+      }))
+      await vi.waitFor(() => expect(resolvers).toHaveLength(2))
+      resolvers[1](jsonResponse({ detail: 'history unavailable' }, 503))
+      await reconnectOpen
+    })
+
+    expect(useAppStore.getState().realtimeHistoryError).toContain('history unavailable')
+    vi.useRealTimers()
   })
 })

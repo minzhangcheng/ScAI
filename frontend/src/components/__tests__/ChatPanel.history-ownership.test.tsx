@@ -34,6 +34,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 describe('ChatPanel history response ownership', () => {
   const pending: Array<{
     url: string
+    body?: BodyInit | null
     signal?: AbortSignal
     resolve: (response: Response) => void
     reject: (reason?: unknown) => void
@@ -45,6 +46,7 @@ describe('ChatPanel history response ownership', () => {
       new Promise<Response>((resolve, reject) => {
         pending.push({
           url,
+          body: options?.body,
           signal: options?.signal ?? undefined,
           resolve,
           reject,
@@ -110,6 +112,63 @@ describe('ChatPanel history response ownership', () => {
 
     expect(useAppStore.getState().currentSession?.id).toBe('B')
     expect(useAppStore.getState().chatMessages.map(message => message.id)).toEqual(['message-B'])
+    view.unmount()
+  })
+
+  it('drops a legacy persisted chat cache before loading the selected session', async () => {
+    useAppStore.setState({
+      chatMessages: [{
+        role: 'assistant',
+        content: 'legacy stale cache',
+        timestamp: '2026-08-03T00:00:00Z',
+      } as any],
+    })
+    const view = render(<ChatPanel />)
+
+    await act(async () => {
+      pending[0].resolve(jsonResponse({
+        messages: [{
+          id: 'message-A',
+          role: 'assistant',
+          content: 'authoritative A',
+          timestamp: '2026-08-03T00:00:00Z',
+        }],
+      }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(useAppStore.getState().chatMessages.map(message => message.content)).toEqual([
+      'authoritative A',
+    ])
+    view.unmount()
+  })
+
+  it('retains the current request optimistic message when initial history fails', async () => {
+    const view = render(<ChatPanel />)
+    const textarea = view.container.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'current optimistic request' } })
+    fireEvent.click(Array.from(view.container.querySelectorAll('button')).at(-1)!)
+
+    const optimistic = useAppStore.getState().chatMessages[0]
+    expect(optimistic.content).toBe('current optimistic request')
+
+    await act(async () => {
+      pending[0].resolve(jsonResponse({ detail: 'history unavailable' }, 503))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(useAppStore.getState().chatMessages).toEqual([optimistic])
+
+    await act(async () => {
+      pending[1].resolve(jsonResponse({
+        id: 'assistant-current',
+        content: 'current response',
+        reply_to: optimistic.id,
+      }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
     view.unmount()
   })
 
@@ -265,6 +324,76 @@ describe('ChatPanel history response ownership', () => {
       await Promise.resolve()
     })
     expect(useAppStore.getState().chatLoading).toBe(false)
+    view.unmount()
+  })
+
+  it('round-trips one optimistic UUID through progressive assistant figures', async () => {
+    vi.useFakeTimers()
+    const view = render(<ChatPanel />)
+    await act(async () => {
+      pending[0].resolve(jsonResponse({ messages: [] }))
+      await Promise.resolve()
+    })
+
+    const textarea = view.container.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'show the result' } })
+    fireEvent.click(Array.from(view.container.querySelectorAll('button')).at(-1)!)
+
+    const send = pending[1]
+    const optimisticUser = useAppStore.getState().chatMessages[0]
+    expect(optimisticUser.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+    expect(send.body).toBeInstanceOf(FormData)
+    expect((send.body as FormData).get('message_id')).toBe(optimisticUser.id)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+    const poll = pending[2]
+    await act(async () => {
+      poll.resolve(jsonResponse({
+        messages: [
+          { ...optimisticUser, timestamp: '2026-08-04T00:00:00Z' },
+          {
+            id: 'assistant-response',
+            role: 'assistant',
+            content: 'Here is the result.',
+            timestamp: '2026-08-04T00:00:01Z',
+            reply_to: optimisticUser.id,
+            pending_figures: true,
+          },
+        ],
+      }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    let store = useAppStore.getState()
+    expect(store.chatMessages).toHaveLength(2)
+    expect(store.chatMessages[1].reply_to).toBe(optimisticUser.id)
+    expect(store.chatMessages[1].pending_figures).toBe(true)
+
+    await act(async () => {
+      send.resolve(jsonResponse({
+        id: 'assistant-response',
+        role: 'assistant',
+        content: 'Here is the result.',
+        timestamp: '2026-08-04T00:00:01Z',
+        reply_to: optimisticUser.id,
+        pending_figures: false,
+        figures: [{ name: 'result_plot', path: '/data/result_plot.png' }],
+      }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    store = useAppStore.getState()
+    expect(store.chatMessages).toHaveLength(2)
+    expect(store.chatMessages[1].id).toBe('assistant-response')
+    expect(store.chatMessages[1].reply_to).toBe(optimisticUser.id)
+    expect(store.chatMessages[1].pending_figures).toBe(false)
+    expect(store.chatMessages[1].figures).toEqual([
+      { name: 'result_plot', path: '/data/result_plot.png' },
+    ])
     view.unmount()
   })
 })

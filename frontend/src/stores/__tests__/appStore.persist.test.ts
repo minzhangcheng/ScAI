@@ -1,5 +1,9 @@
-import { it, expect } from 'vitest'
+import { afterEach, it, expect, vi } from 'vitest'
 import { partialize } from '../appStore'
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 it('does not persist api keys (nested or top-level)', () => {
   const state = {
@@ -42,4 +46,34 @@ it('does not persist realtime messages (server-authoritative, re-hydrated from /
   // Chat messages and session are still persisted (different restore sources).
   expect(persisted.chatMessages).toHaveLength(1)
   expect(persisted.currentSession).toEqual({ id: 's1' })
+})
+
+it('omits authoritative and image-heavy transient state from the local cache', () => {
+  const state = {
+    apiConfig: { apiKey: '', llmBaseUrl: '', proxyUrl: '' },
+    chatMessages: [{ id: 'c1', figures: [{ name: 'plot', base64: 'encoded-image' }] }],
+    messages: [{ id: '1', type: 'figure', content: { image: 'encoded-image' } }],
+    currentSession: {
+      id: 's1',
+      curationReviewContext: { image_base64: 'encoded-review-image' },
+    },
+  } as any
+
+  const persisted = partialize(state) as any
+  expect(persisted.messages).toBeUndefined()
+  expect(persisted.currentSession.curationReviewContext).toBeUndefined()
+  expect(persisted.chatMessages[0].figures[0].base64).toBeUndefined()
+})
+
+it('swallows quota failures from the persistence adapter', async () => {
+  const { quotaSafeLocalStorage } = await import('../persistence')
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const storage = quotaSafeLocalStorage as Storage
+  const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+    throw new DOMException('quota', 'QuotaExceededError')
+  })
+
+  expect(() => storage.setItem('scai-test', 'value')).not.toThrow()
+  setItem.mockRestore()
+  warn.mockRestore()
 })

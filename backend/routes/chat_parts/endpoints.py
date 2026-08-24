@@ -56,7 +56,11 @@ from backend.utils.sandbox import _TPL_NOOP_INSTALL
 
 from .core import _build_chat_context, router
 
-from .delegation import _run_chat_delegation, _try_parse_delegation
+from .delegation import (
+    _persist_chat_terminal,
+    _run_chat_delegation,
+    _try_parse_delegation,
+)
 from .figures import _generate_figures_in_chat
 from .snapshots import _create_chat_snapshot
 
@@ -73,6 +77,38 @@ _CHAT_IMAGE_EXTENSIONS = frozenset({
 _CHAT_TEXT_PREVIEW_EXTENSIONS = frozenset({".csv", ".tsv", ".txt", ".json"})
 _CHAT_TEXT_PREVIEW_BYTES = 20 * 1024
 _CHAT_TEXT_PREVIEW_CHARS = 5000
+_CHAT_MESSAGE_ID_NAMESPACE = uuid.UUID("13d6ca86-81cc-4e56-8e03-98de44d90a04")
+
+
+def _new_chat_message_id(candidate: str = "") -> str:
+    """Return a canonical client UUID or allocate a server-owned message ID."""
+    try:
+        candidate = (candidate or "").strip()
+        uuid.UUID(candidate)
+        return candidate
+    except (AttributeError, TypeError, ValueError):
+        return str(uuid.uuid4())
+
+
+def _chat_history_messages(
+    session_id: str,
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Serialize chat history with stable IDs without mutating legacy records."""
+    serialized: List[Dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        item = dict(message)
+        if not item.get("id"):
+            legacy_key = "|".join((
+                session_id,
+                str(index),
+                str(item.get("timestamp", "")),
+                str(item.get("role", "")),
+                str(item.get("content", "")),
+            ))
+            item["id"] = str(uuid.uuid5(_CHAT_MESSAGE_ID_NAMESPACE, legacy_key))
+        serialized.append(item)
+    return serialized
 
 
 def _chat_upload_error(detail: str) -> HTTPException:
@@ -185,6 +221,7 @@ async def _commit_chat_uploads(
     per_file_samples: list,
     per_file_types: list,
     message: str,
+    message_id: str | None = None,
 ) -> tuple[List[Dict[str, Any]], List[str], List[str]]:
     """Atomically publish one generation-bound group of chat attachments."""
     _preflight_chat_upload_limits(files)
@@ -326,6 +363,7 @@ async def _commit_chat_uploads(
 
             state.data_files.extend(data_file_records)
             user_message_record = {
+                "id": _new_chat_message_id(message_id or ""),
                 "role": "user",
                 "content": message,
                 "timestamp": datetime.now().isoformat(),
@@ -412,10 +450,12 @@ async def _publish_chat_delegation(
     user_content: str,
     image_b64_list: List[str],
     saved_files: List[Dict[str, Any]],
+    user_message_id: str = "",
 ) -> asyncio.Task:
     """Atomically reserve, persist, and release one generation-bound task."""
     start_event = asyncio.Event()
     placeholder = {
+        "id": _new_chat_message_id(),
         "role": "assistant",
         "content": (
             "Working on it: "
@@ -423,6 +463,7 @@ async def _publish_chat_delegation(
         ),
         "timestamp": datetime.now().isoformat(),
         "delegation_active": True,
+        "reply_to": user_message_id,
     }
     task: asyncio.Task | None = None
     publication_committed = False
@@ -510,6 +551,7 @@ async def chat_with_pi(
     file_groups: str = Form(default="[]"),
     file_samples: str = Form(default="[]"),
     file_types: str = Form(default="[]"),
+    message_id: str = Form(default=""),
     files: List[UploadFile] = File(default=[]),
 ):
     """Chat with PI Agent using analysis context. Supports file uploads with per-file agent targeting."""
@@ -545,6 +587,7 @@ async def chat_with_pi(
     per_file_groups = _parse_json_list(file_groups)
     per_file_samples = _parse_json_list(file_samples)
     per_file_types = _parse_json_list(file_types)
+    user_message_id = _new_chat_message_id(message_id)
 
     # --- Commit uploaded files and their state projection as one generation ---
     if files:
@@ -558,6 +601,7 @@ async def chat_with_pi(
                 per_file_samples=per_file_samples,
                 per_file_types=per_file_types,
                 message=message,
+                message_id=user_message_id,
             )
         )
     else:
@@ -565,6 +609,7 @@ async def chat_with_pi(
         image_b64_list = []
         data_file_contents = []
         state.chat_messages.append({
+            "id": user_message_id,
             "role": "user",
             "content": message,
             "timestamp": datetime.now().isoformat(),
@@ -702,6 +747,7 @@ async def chat_with_pi(
             user_content,
             image_b64_list,
             saved_files,
+            user_message_id,
         )
 
         return {"status": "processing", "plan": delegation.get("plan", "")}
@@ -737,9 +783,12 @@ async def chat_with_pi(
 
     # Save text response IMMEDIATELY (before figure generation which can take minutes)
     assistant_msg: Dict[str, Any] = {
+        "id": _new_chat_message_id(),
         "role": "assistant",
         "content": cleaned_content,
         "timestamp": datetime.now().isoformat(),
+        "reply_to": user_message_id,
+        "pending_figures": bool(generate_requests),
     }
     if response_figures:
         assistant_msg["figures"] = list(response_figures)
@@ -755,14 +804,17 @@ async def chat_with_pi(
             if generated:
                 existing = assistant_msg.get("figures", [])
                 assistant_msg["figures"] = existing + generated
-                response_figures.extend(generated)
-                await async_save_session(session_id, state)
         except Exception as e:
             logger.exception("Chat figure generation failed")
+        finally:
+            assistant_msg["pending_figures"] = False
+            if not await _persist_chat_terminal(session_id, state):
+                logger.info(
+                    "[%s] Skipping stale final figure completion save",
+                    session_id,
+                )
 
-    result: Dict[str, Any] = {"role": "assistant", "content": cleaned_content}
-    if assistant_msg.get("figures"):
-        result["figures"] = assistant_msg["figures"]
+    result: Dict[str, Any] = dict(assistant_msg)
 
     # Auto-snapshot after chat exchange (fail closed → coherent HITL)
     from backend.models.schemas import TaskStatus as _TaskStatus
@@ -784,12 +836,21 @@ async def chat_with_pi(
         logger.warning(f"[{session_id}] Post-chat snapshot blocked: {e}")
         # Always set chat retry_context (service may have written a bare failure).
         enter_chat_snapshot_failure_gate(state, e, pre_snapshot_status)
-        await async_save_session(session_id, state)
+        if not await _persist_chat_terminal(session_id, state):
+            raise HTTPException(
+                status_code=409,
+                detail="Chat session generation changed before terminal save",
+            )
         result["snapshot_failure"] = state.snapshot_failure
         result["wait_input_reason"] = "snapshot_failure"
         result["status"] = "snapshot_failure"
         return result
 
+    if not await _persist_chat_terminal(session_id, state):
+        raise HTTPException(
+            status_code=409,
+            detail="Chat session generation changed before terminal save",
+        )
     return result
 
 @router.post("/{session_id}/chat/cancel")
@@ -827,4 +888,4 @@ async def get_chat_history(request: Request, session_id: str):
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    return {"messages": state.chat_messages}
+    return {"messages": _chat_history_messages(session_id, state.chat_messages)}

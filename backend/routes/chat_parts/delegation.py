@@ -16,10 +16,19 @@ from fastapi.responses import JSONResponse
 
 from backend.config import get_session_workspace, get_session_reports, get_session_uploads, get_session_states, PI_AGENT_NAME
 from backend.models.schemas import WebSocketMessage, AgentType, DataFile, AnalysisState
-from backend.services.session_store import ensure_session_loaded, async_save_session, update_session_cache
+from backend.services.session_store import (
+    _async_save_session_under_lifecycle,
+    ensure_session_loaded,
+)
+from backend.services.session_lifecycle import (
+    assert_generation_writable,
+    get_lifecycle_lock,
+)
 from backend.state import (
     chat_sandboxes,
-    workflows, state_lock,
+    sessions,
+    workflows,
+    state_lock,
 )
 from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.auth import require_session_ownership
@@ -39,6 +48,81 @@ from .snapshots import _create_chat_snapshot
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _persist_chat_terminal(session_id: str, state: AnalysisState) -> bool:
+    """Force-save a terminal chat replacement only for the live generation."""
+    try:
+        async with get_lifecycle_lock(session_id):
+            async with state_lock:
+                if sessions.get(session_id) is not state:
+                    return False
+                assert_generation_writable(session_id, state)
+            await _async_save_session_under_lifecycle(
+                session_id, state, force=True,
+            )
+        return True
+    except Exception:
+        logger.warning(
+            "Chat terminal persistence rejected for %s",
+            session_id,
+            exc_info=True,
+        )
+        return False
+
+
+def _replace_latest_delegation_message(
+    state: AnalysisState,
+    replacement: Dict[str, Any],
+) -> bool:
+    """Replace the active placeholder without changing its message identity."""
+    for index in range(len(state.chat_messages) - 1, -1, -1):
+        current = state.chat_messages[index]
+        if not current.get("delegation_active"):
+            continue
+        replacement.setdefault("id", current.get("id") or str(uuid.uuid4()))
+        if current.get("reply_to"):
+            replacement.setdefault("reply_to", current["reply_to"])
+        state.chat_messages[index] = replacement
+        return True
+    return False
+
+
+def _active_delegation_identity(state: AnalysisState) -> Dict[str, str]:
+    """Return the assistant identity owned by this delegation's latest message."""
+    for current in reversed(state.chat_messages):
+        if current.get("delegation_active"):
+            return {
+                key: current[key]
+                for key in ("id", "reply_to")
+                if current.get(key)
+            }
+    for current in reversed(state.chat_messages):
+        if current.get("role") == "assistant" and current.get("reply_to"):
+            return {
+                key: current[key]
+                for key in ("id", "reply_to")
+                if current.get(key)
+            }
+    return {}
+
+
+def _replace_latest_chat_terminal(
+    state: AnalysisState,
+    replacement: Dict[str, Any],
+) -> bool:
+    """Replace an active placeholder or its already-published terminal message."""
+    if _replace_latest_delegation_message(state, replacement):
+        return True
+    for index in range(len(state.chat_messages) - 1, -1, -1):
+        current = state.chat_messages[index]
+        if current.get("role") != "assistant" or not current.get("reply_to"):
+            continue
+        replacement.setdefault("id", current.get("id") or str(uuid.uuid4()))
+        replacement.setdefault("reply_to", current["reply_to"])
+        state.chat_messages[index] = replacement
+        return True
+    return False
 
 
 async def _send_chat_ws(session_id: str, msg_type: str, content: Any):
@@ -379,9 +463,24 @@ async def _run_chat_delegation(
             # Filter out bioinformatics to avoid sandbox conflict
             delegates = [d for d in delegates if d.get("agent") != "bioinformatics"]
             if not delegates:
+                identity = _active_delegation_identity(state)
+                terminal = {
+                    "role": "assistant",
+                    "content": (
+                        "Cannot run bioinformatics analysis while main workflow is active. "
+                        "Please wait for the workflow to complete."
+                    ),
+                    "pending_figures": False,
+                    "timestamp": datetime.now().isoformat(),
+                    **identity,
+                }
+                _replace_latest_chat_terminal(state, terminal)
+                if not await _persist_chat_terminal(session_id, state):
+                    return
                 await _send_chat_ws(session_id, "chat_error", {
                     "error": "Cannot run bioinformatics analysis while main workflow is active. "
-                             "Please wait for the workflow to complete."
+                    "Please wait for the workflow to complete.",
+                    **terminal,
                 })
                 return
 
@@ -536,30 +635,30 @@ async def _run_chat_delegation(
             "role": "assistant",
             "content": cleaned_content,
             "timestamp": datetime.now().isoformat(),
+            "pending_figures": False,
         }
         if merged_figures:
             assistant_msg["figures"] = merged_figures
 
         # Replace placeholder message in chat_messages
-        replaced = False
-        for i in range(len(state.chat_messages) - 1, -1, -1):
-            if state.chat_messages[i].get("delegation_active"):
-                state.chat_messages[i] = assistant_msg
-                replaced = True
-                break
+        replaced = _replace_latest_delegation_message(state, assistant_msg)
         if not replaced:
+            assistant_msg["id"] = str(uuid.uuid4())
             state.chat_messages.append(assistant_msg)
+
+        # Persist the identity-preserving terminal replacement before delivery.
+        if not await _persist_chat_terminal(session_id, state):
+            return
 
         # 9. Send chat_result via WebSocket
         await _send_chat_ws(session_id, "chat_result", {
+            "id": assistant_msg.get("id"),
             "content": cleaned_content,
             "figures": merged_figures,
             "timestamp": datetime.now().isoformat(),
+            "reply_to": assistant_msg.get("reply_to"),
+            "pending_figures": False,
         })
-
-        # 10. Persist state
-        await update_session_cache(session_id, state)
-        await async_save_session(session_id, state)
 
         # Auto-snapshot after chat delegation completes
         from backend.models.schemas import TaskStatus as _TaskStatus
@@ -578,20 +677,30 @@ async def _run_chat_delegation(
 
     except asyncio.CancelledError:
         logger.info(f"Chat delegation cancelled by user for {session_id}")
-        for i in range(len(state.chat_messages) - 1, -1, -1):
-            if state.chat_messages[i].get("delegation_active"):
-                state.chat_messages[i] = {
-                    "role": "assistant",
+        identity = _active_delegation_identity(state)
+        _replace_latest_chat_terminal(state, {
+            "role": "assistant",
+            "content": "Cancelled",
+            "timestamp": datetime.now().isoformat(),
+            "pending_figures": False,
+        })
+        if await _persist_chat_terminal(session_id, state):
+            try:
+                await _send_chat_ws(session_id, "chat_cancelled", {
+                    "message": "Cancelled by user",
                     "content": "Cancelled",
-                    "timestamp": datetime.now().isoformat(),
-                }
-                break
-        try:
-            await _send_chat_ws(session_id, "chat_cancelled", {"message": "Cancelled by user"})
-            await update_session_cache(session_id, state)
-            await async_save_session(session_id, state)
-        except Exception:
-            logger.warning(f"[{session_id}] Failed to save session during cancellation", exc_info=True)
+                    "pending_figures": False,
+                    **identity,
+                })
+            except Exception:
+                logger.warning(
+                    f"[{session_id}] Failed to send cancellation terminal",
+                    exc_info=True,
+                )
+        else:
+            logger.info(
+                "[%s] Skipping stale cancellation terminal delivery", session_id,
+            )
         raise
 
     except RequiredSnapshotBlocked as e:
@@ -614,48 +723,51 @@ async def _run_chat_delegation(
                 previous_status = TaskStatus.COMPLETED
         # Always set chat retry_context (service may have written a bare failure).
         enter_chat_snapshot_failure_gate(state, e, previous_status)
-        for i in range(len(state.chat_messages) - 1, -1, -1):
-            if state.chat_messages[i].get("delegation_active"):
-                state.chat_messages[i] = {
-                    "role": "assistant",
-                    "content": (
-                        "Chat completed, but a required snapshot failed. "
-                        "Use Retry, Manage, or Terminate."
-                    ),
-                    "timestamp": datetime.now().isoformat(),
-                    "snapshot_failure": state.snapshot_failure,
-                }
-                break
-        await _send_chat_ws(session_id, "state_sync", {
-            "change_type": "snapshot_failure",
-            "status": getattr(state.status, "value", state.status),
-            "wait_input_reason": "snapshot_failure",
+        identity = _active_delegation_identity(state)
+        terminal_message = (
+            "Chat completed, but a required snapshot failed. "
+            "Use Retry, Manage, or Terminate."
+        )
+        _replace_latest_chat_terminal(state, {
+            "role": "assistant",
+            "content": terminal_message,
+            "timestamp": datetime.now().isoformat(),
             "snapshot_failure": state.snapshot_failure,
+            "pending_figures": False,
         })
-        try:
-            await update_session_cache(session_id, state)
-            await async_save_session(session_id, state)
-        except Exception:
-            logger.warning(
-                f"[{session_id}] Failed to persist snapshot_failure after delegation",
-                exc_info=True,
-            )
+        if await _persist_chat_terminal(session_id, state):
+            await _send_chat_ws(session_id, "state_sync", {
+                "change_type": "snapshot_failure",
+                "status": getattr(state.status, "value", state.status),
+                "wait_input_reason": "snapshot_failure",
+                "snapshot_failure": state.snapshot_failure,
+                "chat_message": {
+                    "id": identity.get("id"),
+                    "reply_to": identity.get("reply_to"),
+                    "role": "assistant",
+                    "content": terminal_message,
+                    "pending_figures": False,
+                },
+            })
 
     except Exception as e:
         logger.error(f"Chat delegation error for {session_id}: {traceback.format_exc()}")
         error_msg = f"Analysis failed: {str(e)}"
+        identity = _active_delegation_identity(state)
         # Update placeholder message
-        for i in range(len(state.chat_messages) - 1, -1, -1):
-            if state.chat_messages[i].get("delegation_active"):
-                state.chat_messages[i] = {
-                    "role": "assistant",
-                    "content": error_msg,
-                    "timestamp": datetime.now().isoformat(),
-                }
-                break
-        await _send_chat_ws(session_id, "chat_error", {"error": error_msg})
-        await update_session_cache(session_id, state)
-        await async_save_session(session_id, state)
+        _replace_latest_chat_terminal(state, {
+            "role": "assistant",
+            "content": error_msg,
+            "timestamp": datetime.now().isoformat(),
+            "pending_figures": False,
+        })
+        if await _persist_chat_terminal(session_id, state):
+            await _send_chat_ws(session_id, "chat_error", {
+                "error": error_msg,
+                "content": error_msg,
+                "pending_figures": False,
+                **identity,
+            })
 
     finally:
         active_sandbox = chat_sandboxes.get(session_id)

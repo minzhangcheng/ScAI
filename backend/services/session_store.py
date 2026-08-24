@@ -29,7 +29,10 @@ from backend.models.schemas import AnalysisState, TaskStatus, DEFAULT_ROUND_WAIT
 from backend.utils.blob_store import externalize_blobs, inline_blobs
 from backend.utils.files import validate_session_id
 from backend.utils.asyncio_tasks import run_in_owned_thread
-from backend.utils.websocket_delivery import strip_nested_binary_payload
+from backend.utils.websocket_delivery import (
+    json_safe_payload,
+    strip_nested_binary_payload,
+)
 from backend.state import (
     sessions, state_lock, session_access_times, last_save_times,
     session_locks,
@@ -259,36 +262,79 @@ def _blob_dir_for(session_id: str) -> Path:
 
 
 def _preserve_legacy_preview_digests(
-    source_dump: dict, durable_dump: dict
+    source_state: AnalysisState, durable_dump: dict
 ) -> None:
     """Carry a verifiable legacy preview identity across binary stripping."""
-    if source_dump.get("artifact_registry_version") is not None:
+    if source_state.artifact_registry_version is not None:
         return
-    source_figures = source_dump.get("publication_figures")
+    source_figures = source_state.publication_figures
     durable_figures = durable_dump.get("publication_figures")
     if not isinstance(source_figures, list) or not isinstance(durable_figures, list):
         return
     from backend.services.report.artifacts import preview_render_sha256
 
     for source_figure, durable_figure in zip(source_figures, durable_figures):
-        if not isinstance(source_figure, dict) or not isinstance(durable_figure, dict):
+        if not isinstance(durable_figure, dict):
             continue
         if str(durable_figure.get("preview_sha256") or "").strip():
             continue
-        digest = preview_render_sha256(source_figure.get("png_base64"))
+        source_preview = (
+            source_figure.get("png_base64")
+            if isinstance(source_figure, dict)
+            else getattr(source_figure, "png_base64", None)
+        )
+        digest = preview_render_sha256(source_preview)
         if digest:
             durable_figure["preview_sha256"] = digest
 
 
+def _strip_legacy_blob_references(value: Any, *, realtime: bool = False) -> Any:
+    """Replace legacy blob handles only inside durable realtime history."""
+    if isinstance(value, str):
+        return "[image]" if realtime and value.startswith("@scai-blob:") else value
+    if isinstance(value, list):
+        return [_strip_legacy_blob_references(item, realtime=realtime) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _strip_legacy_blob_references(
+                item,
+                realtime=realtime or key == "realtime_messages",
+            )
+            for key, item in value.items()
+        }
+    return value
+
+
 def _durable_state_dump(state: AnalysisState) -> dict:
     """Create a detached, sanitized JSON dump without mutating live state."""
-    source_dump = state.model_dump(mode="python")
-    sanitized_state = strip_nested_binary_payload(state)
+    # Totalize arbitrary realtime ``Any`` content before Pydantic serialization
+    # while retaining the AnalysisState serializer that seals persisted secrets.
+    safe_messages = []
+    for message in state.realtime_messages:
+        safe_content = json_safe_payload(
+            getattr(message, "content", None),
+            strip_binary=True,
+        )
+        if hasattr(message, "model_copy"):
+            safe_messages.append(message.model_copy(
+                deep=False,
+                update={"content": safe_content},
+            ))
+        elif isinstance(message, dict):
+            safe_messages.append({**message, "content": safe_content})
+        else:
+            safe_messages.append(json_safe_payload(message, strip_binary=True))
+
+    prepared_state = state.model_copy(
+        deep=False,
+        update={"realtime_messages": safe_messages},
+    )
+    sanitized_state = strip_nested_binary_payload(prepared_state)
     if not isinstance(sanitized_state, AnalysisState):
         raise TypeError("durable state copier returned an unexpected model")
     durable_dump = sanitized_state.model_dump(mode="json")
-    _preserve_legacy_preview_digests(source_dump, durable_dump)
-    return durable_dump
+    _preserve_legacy_preview_digests(state, durable_dump)
+    return _strip_legacy_blob_references(durable_dump)
 
 
 def _externalize_and_write(session_id: str, dumped: dict) -> None:
@@ -359,6 +405,7 @@ def load_session_from_disk(session_id: str) -> Optional[AnalysisState]:
         if session_file and session_file.exists():
             with open(session_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            data = _strip_legacy_blob_references(data)
             data = inline_blobs(data, session_file.parent / "blobs")
             if not data.get("user_id"):
                 logger.warning(f"Session {session_id} has empty user_id, refusing to load")
@@ -396,6 +443,36 @@ async def _get_cached_session(session_id: str) -> Optional[AnalysisState]:
         if cached is not None:
             session_access_times[session_id] = time.time()
         return cached
+
+
+async def ensure_session_loaded_for_read(
+    session_id: str,
+) -> Optional[AnalysisState]:
+    """Load a session for read-only endpoints, preferring the canonical cache."""
+    validate_session_id(session_id)
+    from backend.services.session_lifecycle import (
+        SessionGoneError,
+        adopt_persisted_generation,
+        get_lifecycle_lock,
+        read_lifecycle_record,
+    )
+
+    async with get_lifecycle_lock(session_id):
+        lifecycle = read_lifecycle_record(session_id)
+        if lifecycle and lifecycle.get("status") == "deleted":
+            raise SessionGoneError(
+                session_id,
+                str(lifecycle.get("owner_id") or ""),
+                int(lifecycle.get("generation") or 0),
+            )
+        if lifecycle and lifecycle.get("status") == "importing":
+            return None
+        cached = await _get_cached_session(session_id)
+        if cached is not None:
+            adopt_persisted_generation(cached)
+            return cached
+
+    return await ensure_session_loaded(session_id)
 
 
 async def _install_loaded_session(

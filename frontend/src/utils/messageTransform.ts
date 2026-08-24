@@ -2,7 +2,10 @@ import type { RawMessage, RawAgentError } from '../types'
 import type { Message, AgentType } from '../stores/appStore'
 import { useAppStore } from '../stores/appStore'
 
-// Generate UUID using crypto API with fallback for non-HTTPS contexts
+let fallbackMessageIdentity = 0
+
+// Generate UUID using the Web Crypto API. The deterministic process-local
+// fallback is only for non-browser/SSR environments and never uses content.
 function generateId(): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
     return crypto.randomUUID()
@@ -12,8 +15,11 @@ function generateId(): string {
   if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
     crypto.getRandomValues(bytes)
   } else {
-    console.warn('crypto.getRandomValues unavailable — falling back to Math.random() for ID generation')
-    for (let i = 0; i < 16; i++) bytes[i] = Math.random() * 256 | 0
+    fallbackMessageIdentity += 1
+    const value = `${Date.now().toString(16)}${fallbackMessageIdentity.toString(16)}`
+    for (let i = 0; i < value.length && i < bytes.length * 2; i += 2) {
+      bytes[i / 2] = Number.parseInt(value.slice(i, i + 2).padStart(2, '0'), 16)
+    }
   }
   bytes[6] = (bytes[6] & 0x0f) | 0x40
   bytes[8] = (bytes[8] & 0x3f) | 0x80

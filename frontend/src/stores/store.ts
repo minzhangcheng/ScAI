@@ -2,14 +2,38 @@
 // Split out of frontend/src/stores/appStore.ts verbatim.
 
 import { create, type StateCreator } from 'zustand'
-import { persist } from 'zustand/middleware'
+import { createJSONStorage, persist } from 'zustand/middleware'
 import { Language, getDefaultPrompts } from '../i18n/translations'
 import { getToken, setToken, clearToken } from '../utils/authStorage'
 import { PERSIST_STORAGE_KEY, PERSIST_VERSION } from '../constants/storage'
 import { resolveSnapshotFailureActions } from '../utils/snapshotV2'
 import { AppState } from './appState'
 import { DEFAULT_MODELS, DEFAULT_TEMPERATURES, DEFAULT_VISION_SETTINGS } from './domain'
-import { migratePersistedState, partialize, scrubAgentServerConfigs } from './persistence'
+import { migratePersistedState, partialize, quotaSafeLocalStorage, scrubAgentServerConfigs } from './persistence'
+
+let fallbackChatIdentity = 0
+
+function createChatIdentity(): string {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID()
+  }
+  const bytes = new Uint8Array(16)
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes)
+  } else {
+    // Non-browser test/SSR fallback remains unique within this process without
+    // deriving identity from message content or an unseeded random source.
+    fallbackChatIdentity += 1
+    const value = `${Date.now().toString(16)}${fallbackChatIdentity.toString(16)}`
+    for (let index = 0; index < value.length && index < bytes.length * 2; index += 2) {
+      bytes[index / 2] = Number.parseInt(value.slice(index, index + 2).padStart(2, '0'), 16)
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
 
 function clearSignedOutSecrets(state: AppState, authReady: boolean) {
   return {
@@ -52,6 +76,7 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
         llmModifySaved: false,
         explorationFailedInfo: null,
         showExplorationFailedDialog: false,
+        realtimeHistoryError: null,
       }),
       updateSession: (updates) => set((state) => ({
         currentSession: state.currentSession 
@@ -146,18 +171,13 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
       // Chat messages
       chatMessages: [],
       addChatMessage: (msg) => set((state) => {
-        const id = msg.id || (typeof crypto !== 'undefined' && crypto.randomUUID
-          ? crypto.randomUUID()
-          : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`)
+        const id = msg.id || createChatIdentity()
         return { chatMessages: [...state.chatMessages, { ...msg, id }] }
       }),
       setChatMessages: (msgs) => set({
-        chatMessages: msgs.map((m) => ({
-          ...m,
-          id: m.id || (typeof crypto !== 'undefined' && crypto.randomUUID
-            ? crypto.randomUUID()
-            : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`)
-        }))
+        chatMessages: msgs.every(message => Boolean(message.id))
+          ? msgs
+          : msgs.map(message => message.id ? message : ({ ...message, id: createChatIdentity() })),
       }),
       chatLoading: false,
       setChatLoading: (loading) => set({ chatLoading: loading }),
@@ -167,6 +187,8 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
       setChatDelegationPlan: (plan) => set({ chatDelegationPlan: plan }),
       chatAbortController: null,
       setChatAbortController: (controller) => set({ chatAbortController: controller }),
+      realtimeHistoryError: null,
+      setRealtimeHistoryError: (error) => set({ realtimeHistoryError: error }),
 
       // UI state - default to 'data' tab as users typically upload data first
       activeTab: 'data',
@@ -509,6 +531,7 @@ export const useAppStore = create<AppState>()(
         return merged
       },
       partialize,
+      storage: createJSONStorage(() => quotaSafeLocalStorage),
     }
   )
 )

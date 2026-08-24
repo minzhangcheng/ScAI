@@ -289,6 +289,15 @@ export interface RawMessage {
   timestamp?: string
 }
 
+export interface RealtimeMessagePage {
+  messages: RawMessage[]
+  count: number
+  total?: number
+  page_size: number
+  has_more: boolean
+  next_before?: string | null
+}
+
 /** Graphic abstract message content (snake_case/camelCase flexible) */
 export interface GraphicAbstractContent {
   id?: string
@@ -373,8 +382,18 @@ export interface ChatMessage {
   timestamp: string
   id: string
   delegation_active?: boolean
+  pending_figures?: boolean
+  reply_to?: string
   files?: { filename: string; type: string; target_agent?: string }[]
-  figures?: { name: string; path?: string; base64?: string; pdfPath?: string }[]
+  figures?: {
+    name: string
+    path?: string
+    base64?: string
+    image_base64?: string
+    imageBase64?: string
+    data?: string
+    pdfPath?: string
+  }[]
 }
 
 /** Report data returned by GET /session/:id/report */

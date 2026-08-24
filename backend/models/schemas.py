@@ -744,7 +744,7 @@ class AnalysisState(BaseModel):
 
         return [_convert(entry) if isinstance(entry, dict) else entry for entry in history]
 
-    def to_api_dict(self, *, strip_message_base64=None) -> dict:
+    def to_api_dict(self, *, strip_message_base64=None, include_messages: bool = True) -> dict:
         """Serialize state for the load_session API response.
 
         Uses model_dump(mode="json") as baseline, then applies snake_case →
@@ -755,7 +755,10 @@ class AnalysisState(BaseModel):
             strip_message_base64: Optional callable(msg_type, content) -> content
                 to strip large base64 data from messages before sending.
         """
-        dumped = self.model_dump(mode="json")
+        dumped = self.model_dump(
+            mode="json",
+            exclude=None if include_messages else {"realtime_messages"},
+        )
 
         result = {}
         for field_name, api_key in self._API_KEY_MAP.items():
@@ -787,7 +790,8 @@ class AnalysisState(BaseModel):
                 from backend.utils.settings_provider import AgentSettingsProvider
                 result[api_key] = AgentSettingsProvider.mask_literature_config(val)
             elif field_name == "realtime_messages":
-                result[api_key] = self._serialize_messages(strip_message_base64)
+                if include_messages:
+                    result[api_key] = self._serialize_messages(strip_message_base64)
             else:
                 result[api_key] = val
 

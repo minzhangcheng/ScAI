@@ -484,8 +484,11 @@ async def test_chat_delegation_callback_persists_durable_capped_history(
         "send_analysis_json",
         cancel_after_durable_append,
     )
-    monkeypatch.setattr(chat_delegation, "update_session_cache", AsyncMock())
-    monkeypatch.setattr(chat_delegation, "async_save_session", AsyncMock())
+    monkeypatch.setattr(
+        chat_delegation,
+        "_persist_chat_terminal",
+        AsyncMock(return_value=True),
+    )
 
     with pytest.raises(asyncio.CancelledError):
         await chat_delegation._run_chat_delegation(

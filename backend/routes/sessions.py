@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from backend.config import (
@@ -18,15 +18,14 @@ from backend.models.api_requests import (
     SessionUpdateRequest, StartRequest,
 )
 from backend.models.schemas import APIResponse, TaskStatus
-from backend.services.session_store import (
-    async_save_session, ensure_session_loaded, list_saved_sessions,
-)
+from backend.services.session_store import async_save_session, list_saved_sessions
 from backend.state import (
     sessions, workflows, state_lock, initializing_sessions,
     session_access_times, last_save_times,
 )
-from backend.utils.auth import require_session_ownership
+from backend.utils.auth import require_session_ownership, require_session_read_ownership
 from backend.utils.files import validate_path_within, validate_session_id
+from backend.utils.websocket_delivery import serialize_realtime_message
 
 router = APIRouter(prefix="/api", tags=["sessions"])
 
@@ -64,6 +63,21 @@ def _strip_message_base64(msg_type: str, content) -> Any:
                 stripped_figures.append(f)
         return {**content, "figures": stripped_figures}
     return content
+
+
+def _strip_legacy_blob_references(value: Any) -> Any:
+    """Remove legacy blob handles from durable history after JSON conversion."""
+    if isinstance(value, str):
+        return "[image]" if value.startswith("@scai-blob:") else value
+    if isinstance(value, list):
+        return [_strip_legacy_blob_references(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _strip_legacy_blob_references(item) for key, item in value.items()}
+    return value
+
+
+def _serialize_realtime_history_message(message: Any) -> dict:
+    return _strip_legacy_blob_references(serialize_realtime_message(message))
 
 
 @router.post("/session/start")
@@ -155,8 +169,50 @@ async def list_sessions(request: Request):
 async def load_session(session_id: str, request: Request):
     """Load a session by ID (from memory or disk)"""
     user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-    return state.to_api_dict(strip_message_base64=_strip_message_base64)
+    state = await require_session_read_ownership(session_id=session_id, user_id=user_id)
+    return state.to_api_dict(
+        strip_message_base64=_strip_message_base64,
+        include_messages=False,
+    )
+
+
+@router.get("/session/{session_id}/messages")
+async def load_realtime_messages(
+    session_id: str,
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    before: Optional[str] = Query(default=None, min_length=1, max_length=128),
+):
+    """Load realtime history in chronological pages using stable cursors."""
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_read_ownership(session_id=session_id, user_id=user_id)
+    snapshot = list(state.realtime_messages)
+    end = len(snapshot)
+    if before is not None:
+        cursor_index = next(
+            (index for index, message in enumerate(snapshot) if message.id == before),
+            None,
+        )
+        if cursor_index is None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "MESSAGE_CURSOR_EXPIRED",
+                    "message": "Realtime message cursor expired; restart from the newest page.",
+                },
+            )
+        end = cursor_index
+    start = max(0, end - limit)
+    selected = snapshot[start:end]
+    has_more = start > 0
+    return {
+        "messages": [_serialize_realtime_history_message(message) for message in selected],
+        "count": len(selected),
+        "total": len(snapshot),
+        "page_size": limit,
+        "has_more": has_more,
+        "next_before": selected[0].id if has_more and selected else None,
+    }
 
 
 @router.delete("/session/{session_id}")

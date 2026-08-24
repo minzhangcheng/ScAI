@@ -236,10 +236,30 @@ async def require_session_ownership(
     This allows HTML-embedded resources to be accessed without auth headers.
     """
     from backend.services.session_store import ensure_session_loaded
-    from backend.models.schemas import AnalysisState
+    return await _require_session_ownership_with_loader(
+        session_id, user_id, ensure_session_loaded,
+    )
 
+
+async def require_session_read_ownership(
+    session_id: str,
+    user_id: Optional[str] = Depends(optional_require_auth),
+) -> "AnalysisState":
+    """Verify ownership through the cache-first read-only session loader."""
+    from backend.services.session_store import ensure_session_loaded_for_read
+    return await _require_session_ownership_with_loader(
+        session_id, user_id, ensure_session_loaded_for_read,
+    )
+
+
+async def _require_session_ownership_with_loader(
+    session_id: str,
+    user_id: Optional[str],
+    loader,
+) -> "AnalysisState":
+    """Apply the leak-oracle-safe ownership contract to one session loader."""
     try:
-        state = await ensure_session_loaded(session_id)
+        state = await loader(session_id)
     except Exception as exc:
         from backend.services.session_lifecycle import SessionGoneError
 
@@ -307,7 +327,7 @@ async def ws_authenticate_and_load(
     """Authenticate WS connection and load session with ownership check.
     Returns (user_id, state) or None (closes websocket on failure).
     """
-    from backend.services.session_store import ensure_session_loaded
+    from backend.services.session_store import ensure_session_loaded_for_read
     from backend.utils.files import validate_session_id
 
     try:
@@ -322,7 +342,7 @@ async def ws_authenticate_and_load(
     if user_id is None:
         return None
     try:
-        state = await ensure_session_loaded(session_id)
+        state = await ensure_session_loaded_for_read(session_id)
     except Exception as exc:
         from backend.services.session_lifecycle import SessionGoneError
 

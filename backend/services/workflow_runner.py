@@ -116,7 +116,11 @@ async def _build_workflow_for_session(
 
     async def message_callback(msg):
         """Append only to a live canonical state owned by this workflow."""
-        from backend.utils.websocket_delivery import append_durable_realtime_message
+        from backend.utils.websocket_delivery import (
+            append_durable_realtime_message,
+            send_analysis_json,
+            serialize_realtime_message,
+        )
 
         async with get_lifecycle_lock(session_id):
             async with _state_lock:
@@ -125,6 +129,13 @@ async def _build_workflow_for_session(
                 if not _owner_is_current(owner_registry, owner, current):
                     return False
                 append_durable_realtime_message(current, msg)
+        # Headless workflows have no socket callback in the workflow object,
+        # but an already-connected analysis client still owns this channel.
+        # Keep the live copy (including images) separate from the durable copy.
+        await send_analysis_json(
+            session_id,
+            serialize_realtime_message(msg, strip_binary=False),
+        )
         return True
 
     async def state_callback(updated_state):

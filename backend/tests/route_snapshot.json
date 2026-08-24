@@ -500,6 +500,12 @@
     ]
   ],
   [
+    "/api/session/{session_id}/messages",
+    [
+      "GET"
+    ]
+  ],
+  [
     "/api/session/{session_id}/pause",
     [
       "POST"

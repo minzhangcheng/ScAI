@@ -6,6 +6,8 @@ import ReactMarkdown from 'react-markdown'
 import { Send, Loader2, User, Bot, AlertCircle, Paperclip, X, FileText, Image as ImageIcon, Download, Square } from 'lucide-react'
 import { base64ToDataUri } from '../utils/image'
 import { AGENT_OPTIONS } from '../constants/agents'
+import type { ChatMessage } from '../types'
+import { reconcileChatHistory, upsertChatMessage } from '../utils/chatMessages'
 
 // Section-specific data type options
 import { getSection, getTypeOptions, selectValueForDataType, hasCustomOption, CUSTOM_TYPE_SENTINEL } from '../utils/dataTypes'
@@ -25,6 +27,7 @@ interface ChatRequestOwner {
   sessionId: string
   requestId: number
   controller: AbortController
+  messageId: string
 }
 
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.svg'])
@@ -33,6 +36,28 @@ function isImageFile(filename: string): boolean {
   const dotIdx = filename.lastIndexOf('.')
   const ext = dotIdx >= 0 ? filename.toLowerCase().slice(dotIdx) : ''
   return IMAGE_EXTS.has(ext)
+}
+
+let fallbackChatIdentity = 0
+
+function createChatMessageId(): string {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID()
+  }
+  const bytes = new Uint8Array(16)
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes)
+  } else {
+    fallbackChatIdentity += 1
+    const value = `${Date.now().toString(16)}${fallbackChatIdentity.toString(16)}`
+    for (let index = 0; index < value.length && index < bytes.length * 2; index += 2) {
+      bytes[index / 2] = Number.parseInt(value.slice(index, index + 2).padStart(2, '0'), 16)
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
 export function ChatPanel() {
@@ -56,6 +81,7 @@ export function ChatPanel() {
   const loadedSessionRef = useRef<string | null>(null)
   const historyGenerationRef = useRef(0)
   const activeChatSessionRef = useRef<string | null>(currentSession?.id || null)
+  const optimisticMessageIdsRef = useRef(new Map<string, Set<string>>())
   const sendRequestSequenceRef = useRef(0)
   const sendOwnerRef = useRef<ChatRequestOwner | null>(null)
   const [textareaHeight, setTextareaHeight] = useState(MIN_TEXTAREA_HEIGHT)
@@ -101,6 +127,16 @@ export function ChatPanel() {
     if (loadedSessionRef.current === currentSession.id) return
     const sessionId = currentSession.id
     loadedSessionRef.current = sessionId
+    for (const cachedSessionId of optimisticMessageIdsRef.current.keys()) {
+      if (cachedSessionId !== sessionId) {
+        optimisticMessageIdsRef.current.delete(cachedSessionId)
+      }
+    }
+    const optimisticIds = optimisticMessageIdsRef.current.get(sessionId) ?? new Set<string>()
+    optimisticMessageIdsRef.current.set(sessionId, optimisticIds)
+    setChatMessages(
+      useAppStore.getState().chatMessages.filter(message => optimisticIds.has(message.id)),
+    )
     const controller = new AbortController()
     const ownsResponse = () => (
       historyGenerationRef.current === generation
@@ -114,10 +150,20 @@ export function ChatPanel() {
       ownsResponse,
     )
       .then((data) => {
-        if (ownsResponse()) setChatMessages(data.messages || [])
+        if (ownsResponse()) {
+          const current = useAppStore.getState().chatMessages
+          const optimistic = current.filter(message => optimisticIds.has(message.id))
+          setChatMessages(reconcileChatHistory(data.messages || [], optimistic))
+        }
       })
       .catch(() => {
-        if (ownsResponse()) setChatMessages([])
+        if (ownsResponse()) {
+          setChatMessages(
+            useAppStore.getState().chatMessages.filter(
+              message => optimisticIds.has(message.id),
+            ),
+          )
+        }
       })
 
     return () => controller.abort()
@@ -145,22 +191,20 @@ export function ChatPanel() {
         )
         if (!ownsResponse()) return
         const msgs = data.messages || []
-        // Check if backend has more messages than frontend (new response arrived)
-        // Read latest messages from store to avoid stale closure
+        // Reconcile every poll so progressive figure updates are observed even
+        // when the server-side message count stays constant.
         const currentChatMessages = useAppStore.getState().chatMessages
-        if (msgs.length > currentChatMessages.length) {
-          const lastMsg = msgs[msgs.length - 1] as any
-          if (lastMsg && !lastMsg?.delegation_active && lastMsg.role === 'assistant') {
-            // Merge: preserve any local-only (optimistic) messages not yet on the server
-            const serverMsgIds = new Set(msgs.map((m: any) => m.id || `${m.timestamp}|${m.role}`))
-            const localOnly = currentChatMessages.filter(
-              (m) => !serverMsgIds.has(m.id || `${m.timestamp}|${m.role}`)
-            )
-            setChatMessages([...msgs, ...localOnly])
+        setChatMessages(reconcileChatHistory(msgs, currentChatMessages))
+        const lastMsg = msgs[msgs.length - 1]
+        if (
+          lastMsg
+          && lastMsg.role === 'assistant'
+          && !lastMsg.delegation_active
+          && !lastMsg.pending_figures
+        ) {
             setChatLoading(false)
             setChatDelegationActive(false)
             setChatDelegationPlan(null)
-          }
         }
       } catch (e) {
         if (ownsResponse()) console.debug('Chat poll failed:', e)
@@ -297,11 +341,6 @@ export function ChatPanel() {
     const abortController = new AbortController()
     const requestId = sendRequestSequenceRef.current + 1
     sendRequestSequenceRef.current = requestId
-    sendOwnerRef.current = {
-      sessionId: sendSessionId,
-      requestId,
-      controller: abortController,
-    }
     const ownsRequest = () => {
       const owner = sendOwnerRef.current
       return Boolean(
@@ -315,7 +354,18 @@ export function ChatPanel() {
     setChatAbortController(abortController)
 
     // Optimistic: add user message immediately
+    const clientMessageId = createChatMessageId()
+    const sessionOptimisticIds = optimisticMessageIdsRef.current.get(sendSessionId) ?? new Set<string>()
+    sessionOptimisticIds.add(clientMessageId)
+    optimisticMessageIdsRef.current.set(sendSessionId, sessionOptimisticIds)
+    sendOwnerRef.current = {
+      sessionId: sendSessionId,
+      requestId,
+      controller: abortController,
+      messageId: clientMessageId,
+    }
     const userMsg = {
+      id: clientMessageId,
       role: 'user' as const,
       content: input.trim(),
       timestamp: new Date().toISOString(),
@@ -336,6 +386,7 @@ export function ChatPanel() {
       formData.append('file_groups', JSON.stringify(filesToSend.map((sf) => sf.groupId || null)))
       formData.append('file_samples', JSON.stringify(filesToSend.map((sf) => sf.sampleNumber || null)))
       formData.append('file_types', JSON.stringify(filesToSend.map((sf) => sf.dataType || null)))
+      formData.append('message_id', clientMessageId)
       filesToSend.forEach((sf) => formData.append('files', sf.file))
 
       const data = await apiFetch<any>(`/session/${sendSessionId}/chat`, {
@@ -362,19 +413,28 @@ export function ChatPanel() {
         return
       }
 
-      addChatMessage({
+      const responseMessage: ChatMessage = {
+        id: data.id || createChatMessageId(),
         role: 'assistant',
-        content: data.content,
-        timestamp: new Date().toISOString(),
+        content: data.content || '',
+        timestamp: data.timestamp || new Date().toISOString(),
         figures: data.figures,
-      })
+        pending_figures: data.pending_figures,
+        reply_to: data.reply_to || clientMessageId,
+      }
+      setChatMessages(upsertChatMessage(
+        useAppStore.getState().chatMessages,
+        responseMessage,
+      ))
     } catch (e: any) {
       if (!ownsRequest()) return
       if (e.name === 'AbortError') {
         addChatMessage({
+          id: createChatMessageId(),
           role: 'assistant',
           content: t('chatCancelled'),
           timestamp: new Date().toISOString(),
+          reply_to: clientMessageId,
         })
       } else {
         setError(t('chatError'))
@@ -518,6 +578,12 @@ export function ChatPanel() {
                     <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
                   )
                 )}
+                {msg.pending_figures && (
+                  <div className="mt-2 flex items-center gap-2 text-xs text-slate-500">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-accent-500" />
+                    <span>Generating figures...</span>
+                  </div>
+                )}
                 {/* Referenced / generated figures */}
                 {msg.figures && msg.figures.length > 0 && (
                   <div className="mt-3 space-y-3">
@@ -570,7 +636,13 @@ export function ChatPanel() {
             </div>
           ))
         )}
-        {(chatLoading || chatDelegationActive) && (
+        {(chatLoading || chatDelegationActive)
+          && !(
+            chatLoading
+            && !chatDelegationActive
+            && chatMessages[chatMessages.length - 1]?.role === 'assistant'
+            && chatMessages[chatMessages.length - 1]?.pending_figures
+          ) && (
           <div className="flex gap-3 justify-start">
             <div className="shrink-0 w-8 h-8 rounded-full bg-accent-100 flex items-center justify-center">
               <Bot className="w-4 h-4 text-accent-600" />

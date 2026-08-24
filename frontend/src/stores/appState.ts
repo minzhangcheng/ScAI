@@ -2,6 +2,7 @@
 // Split out of frontend/src/stores/appStore.ts verbatim.
 
 import { Language } from '../i18n/translations'
+import type { ChatMessage } from '../types'
 import type { SnapshotRecordV2, SnapshotStoreStatus, SnapshotTransactionRecord, SnapshotFailureInfo } from '../types/snapshotV2'
 import type { AnnotationData } from '../utils/annotationGate'
 import { AgentError, AgentModels, AgentPrompts, AgentServerConfig, AgentTemperatures, AgentType, AgentVisionSettings, AuthUser, ExplorationFailedInfo, LlmFailureInfo, Message, Session, SpeciesInputInfo } from './domain'
@@ -79,9 +80,9 @@ export interface AppState {
   setLiteratureMaxSearchRounds: (rounds: number) => void
 
   // Chat messages (PI Agent free-form chat)
-  chatMessages: { id: string; role: 'user' | 'assistant'; content: string; timestamp: string; files?: { filename: string; type: string }[]; figures?: { name: string; path?: string; base64?: string; pdfPath?: string }[] }[]
-  addChatMessage: (msg: Omit<AppState['chatMessages'][0], 'id'> & { id?: string }) => void
-  setChatMessages: (msgs: AppState['chatMessages']) => void
+  chatMessages: ChatMessage[]
+  addChatMessage: (msg: Omit<ChatMessage, 'id'> & { id?: string }) => void
+  setChatMessages: (msgs: ChatMessage[]) => void
   chatLoading: boolean
   setChatLoading: (loading: boolean) => void
   chatDelegationActive: boolean
@@ -90,6 +91,11 @@ export interface AppState {
   setChatDelegationPlan: (plan: string | null) => void
   chatAbortController: AbortController | null
   setChatAbortController: (controller: AbortController | null) => void
+
+  // Initial realtime history paging failure; retry remains owned by the
+  // session/reconnect hook and is deliberately not persisted.
+  realtimeHistoryError: string | null
+  setRealtimeHistoryError: (error: string | null) => void
 
   // UI state
   activeTab: 'analysis' | 'data' | 'prompts' | 'results' | 'report' | 'chat'

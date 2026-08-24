@@ -406,6 +406,60 @@ async def _capture_headless_callbacks(
 
 
 @pytest.mark.asyncio
+async def test_headless_message_callback_delivers_live_and_persists_sanitized(monkeypatch):
+    from backend.constants import STRIPPED_FIGURE_PLACEHOLDER
+    from backend.models.schemas import WebSocketMessage
+    from backend.services import workflow_runner
+    import backend.workflow as workflow_module
+
+    state = AnalysisState(id="headless-payload", user_id="owner")
+    saved = []
+    live = []
+
+    class Workflow:
+        def __init__(self, config, session_id, message_callback=None, state_callback=None):
+            self.message_callback = message_callback
+            self.state_callback = state_callback
+
+    async def resolve(_user_id):
+        return SimpleNamespace(max_rounds=3)
+
+    async def save(_session_id, current):
+        saved.append(current)
+
+    monkeypatch.setattr(workflow_module, "SingleCellAnalysisWorkflow", Workflow)
+    monkeypatch.setattr(workflow_runner, "resolve_config_for_user", resolve)
+    monkeypatch.setattr(workflow_runner, "_async_save_session_under_lifecycle", save)
+    monkeypatch.setattr(workflow_runner, "adopt_persisted_generation", lambda _state: None)
+    from backend.utils import websocket_delivery
+
+    async def deliver(_session_id, payload):
+        live.append(payload)
+        return True
+
+    monkeypatch.setattr(websocket_delivery, "send_analysis_json", deliver)
+
+    sessions[state.id] = state
+    workflow, _ = await workflow_runner._build_workflow_for_session(
+        state.id, owner_registry=workflows,
+    )
+    workflows[state.id] = workflow
+    message = WebSocketMessage(
+        type="figure",
+        content={"image": "iVBORw0KGgo" + ("A" * 2048)},
+    )
+    assert await workflow.message_callback(message) is True
+    assert state.realtime_messages[0].content["image"] == STRIPPED_FIGURE_PLACEHOLDER
+    assert message.content["image"].startswith("iVBORw0KGgo")
+    assert live and live[0]["content"]["image"].startswith("iVBORw0KGgo")
+
+    updated = AnalysisState(id=state.id, user_id=state.user_id)
+    assert await workflow.state_callback(updated) is True
+    assert saved and saved[-1] is updated
+    assert saved[-1].realtime_messages[0].content["image"] == STRIPPED_FIGURE_PLACEHOLDER
+
+
+@pytest.mark.asyncio
 async def test_headless_message_callback_is_async_bounded_and_binary_free(monkeypatch):
     from backend.constants import STRIPPED_FIGURE_PLACEHOLDER
     from backend.models.schemas import WebSocketMessage

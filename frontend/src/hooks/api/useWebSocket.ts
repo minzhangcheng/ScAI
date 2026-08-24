@@ -11,7 +11,9 @@ import { getToken } from '../../utils/authStorage'
 import { WS_AUTH_SUBPROTOCOL } from '../../constants/auth'
 import type { ChatMessage } from '../../types'
 import { resolveSnapshotFailureActions } from '../../utils/snapshotV2'
+import { reconcileChatHistory, upsertChatMessage } from '../../utils/chatMessages'
 import { WS_CONNECT_TIMEOUT_MS, ApiError, apiFetch, applyStoreUpdates, generateId } from './client'
+import { loadRealtimeMessageHistory, mergeRealtimeMessages } from './realtimeHistory'
 
 const SNAPSHOT_CLEANUP_THRESHOLD = 20
 const SNAPSHOT_REMINDER_INTERVAL = 5
@@ -60,7 +62,7 @@ function reloadSessionState(
 }
 
 export function useWebSocket() {
-  const { currentSession, addMessage, updateSession, setWsConnected, setMessages, addAgentError, setStateVersion } = useAppStore()
+  const { currentSession, addMessage, updateSession, setWsConnected, addAgentError, setStateVersion } = useAppStore()
   const wsRef = useRef<WebSocket | null>(null)
   const connectionAttemptRef = useRef(0)
   const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -157,12 +159,12 @@ export function useWebSocket() {
       // Use fresh state to avoid stale closure
       const freshSession = useAppStore.getState().currentSession
 
-      // On reconnect, restore message history from server
+      // On reconnect, reload authoritative session state before paging only the
+      // disconnected realtime gap.
       if (isReconnect && freshSession) {
         const loadingSessionId = freshSession.id
         try {
-          devLog('WebSocket: Reconnect detected, loading message history...')
-          // Mark that we're loading history to prevent race conditions
+          devLog('WebSocket: Reconnect detected, reloading session state...')
           const ownsReconnectLoad = () => (
             isCurrentAttempt()
             && useAppStore.getState().currentSession?.id === loadingSessionId
@@ -173,56 +175,30 @@ export function useWebSocket() {
             ownsReconnectLoad,
           )
 
-          if (!isCurrentAttempt()) return
-
-          // Verify session hasn't changed during fetch (race condition protection)
-          const currentState = useAppStore.getState()
-          if (currentState.currentSession?.id !== loadingSessionId) {
-            devLog('WebSocket: Session changed during reconnect, skipping history merge')
-            reconnectCountRef.current = 0
-            return
+          if (!ownsReconnectLoad()) return
+          const { sessionUpdates, storeUpdates } = transformLoadResponse(data)
+          useAppStore.getState().updateSession(sessionUpdates)
+          applyStoreUpdates(storeUpdates)
+          if (data.agent_errors && Array.isArray(data.agent_errors)) {
+            restoreAgentErrors(data.agent_errors)
           }
-
-          if (data) {
-
-            if (data.messages && Array.isArray(data.messages)) {
-              // Convert server messages to frontend format
-              const serverMessages: Message[] = data.messages.map(transformRawMessage)
-
-              // Transactional merge: read+write inside setState so messages that
-              // arrived via WebSocket during the async fetch are preserved.
-              let mergedCount = 0
-              let localOnlyCount = 0
-              useAppStore.setState((state) => {
-                const serverMsgIdSet = new Set(serverMessages.map(m => m.id))
-                localOnlyCount = state.messages.filter(m => !serverMsgIdSet.has(m.id)).length
-
-                const currentIdSet = new Set(state.messages.map((m: Message) => m.id))
-                const newFromServer = serverMessages.filter((m) => !currentIdSet.has(m.id))
-                if (newFromServer.length === 0) {
-                  return state
-                }
-                mergedCount = newFromServer.length
-                const merged = [...state.messages, ...newFromServer]
-                  .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
-                return { ...state, messages: merged }
-              })
-              devLog(`WebSocket: Restored ${serverMessages.length} messages (${mergedCount} new merged), ${localOnlyCount} local-only`)
-            }
-
-            // Also restore agent errors if present
-            if (data.agent_errors && Array.isArray(data.agent_errors)) {
-              restoreAgentErrors(data.agent_errors)
-            }
-
-            // Sync full session state from server using shared transform
-            const { sessionUpdates, storeUpdates } = transformLoadResponse(data)
-            const currentSess = useAppStore.getState().currentSession
-            if (currentSess && currentSess.id === loadingSessionId) {
-              useAppStore.getState().updateSession(sessionUpdates)
-              applyStoreUpdates(storeUpdates)
+          if (data.messages && Array.isArray(data.messages)) {
+            mergeRealtimeMessages(data.messages)
+          }
+          useAppStore.getState().setRealtimeHistoryError(null)
+          const reportHistoryFailure = (error: unknown) => {
+            if (ownsReconnectLoad()) {
+              useAppStore.getState().setRealtimeHistoryError(
+                error instanceof Error ? error.message : 'Failed to load realtime history',
+              )
             }
           }
+          await loadRealtimeMessageHistory(loadingSessionId, {
+            ownsResponse: ownsReconnectLoad,
+            stopWhenOverlapping: true,
+            onInitialFailure: reportHistoryFailure,
+            onFailure: reportHistoryFailure,
+          })
         } catch (e: unknown) {
           if (!isCurrentAttempt()) return
           // apiFetch already applies the lifecycle contract. Keep this guard so
@@ -236,7 +212,12 @@ export function useWebSocket() {
             ws.close()
             return
           }
-          console.error('WebSocket: Failed to restore message history:', e)
+          if (ownsReconnectLoad()) {
+            useAppStore.getState().setRealtimeHistoryError(
+              e instanceof Error ? e.message : 'Failed to reload session state/history',
+            )
+          }
+          console.error('WebSocket: Failed to restore session state/history:', e)
         }
       }
 
@@ -280,6 +261,19 @@ export function useWebSocket() {
           // while others place them at the top level of the message.
           const syncContent = data.content ?? data
           const currentVersion = useAppStore.getState().stateVersion
+
+          const terminalChat = syncContent.chat_message
+          if (terminalChat?.id) {
+            const currentChat = useAppStore.getState().chatMessages
+            useAppStore.getState().setChatMessages(upsertChatMessage(currentChat, {
+              id: terminalChat.id,
+              role: terminalChat.role === 'user' ? 'user' : 'assistant',
+              content: terminalChat.content || '',
+              timestamp: terminalChat.timestamp || data.timestamp || new Date().toISOString(),
+              pending_figures: terminalChat.pending_figures,
+              reply_to: terminalChat.reply_to,
+            }))
+          }
 
           // Check for version conflict - reload full session state from server
           if (syncContent.version < currentVersion) {
@@ -467,8 +461,8 @@ export function useWebSocket() {
         if (data.type === 'message_history') {
           if (data.content?.messages && Array.isArray(data.content.messages)) {
             const serverMessages = data.content.messages.map(transformRawMessage)
-            useAppStore.getState().setMessages(serverMessages)
-            devLog(`WebSocket: Restored ${serverMessages.length} messages from history`)
+            mergeRealtimeMessages(serverMessages)
+            devLog(`WebSocket: Merged ${serverMessages.length} legacy history messages`)
           }
           return  // Don't add message_history itself to the message stream
         }
@@ -519,7 +513,10 @@ export function useWebSocket() {
             )
               .then((res) => {
                 if (!ownsChatRefresh()) return
-                useAppStore.getState().setChatMessages(res.messages || [])
+                const current = useAppStore.getState().chatMessages
+                useAppStore.getState().setChatMessages(
+                  reconcileChatHistory(res.messages || [], current),
+                )
               })
               .catch((e) => {
                 if (ownsChatRefresh()) {
@@ -535,6 +532,18 @@ export function useWebSocket() {
 
         // Handle chat_cancelled - delegation was stopped by user
         if (data.type === 'chat_cancelled') {
+          const terminal = data.content || {}
+          if (terminal.id) {
+            const current = useAppStore.getState().chatMessages
+            useAppStore.getState().setChatMessages(upsertChatMessage(current, {
+              id: terminal.id,
+              role: 'assistant',
+              content: terminal.content || terminal.message || 'Cancelled',
+              timestamp: data.timestamp || new Date().toISOString(),
+              pending_figures: false,
+              reply_to: terminal.reply_to,
+            }))
+          }
           useAppStore.getState().setChatLoading(false)
           useAppStore.getState().setChatDelegationActive(false)
           useAppStore.getState().setChatDelegationPlan(null)
@@ -544,11 +553,24 @@ export function useWebSocket() {
 
         // Handle chat_error - delegation failed
         if (data.type === 'chat_error') {
-          useAppStore.getState().addChatMessage({
-            role: 'assistant',
-            content: `Error: ${data.content?.error || 'Unknown error during analysis'}`,
-            timestamp: new Date().toISOString(),
-          })
+          const terminal = data.content || {}
+          if (terminal.id) {
+            const current = useAppStore.getState().chatMessages
+            useAppStore.getState().setChatMessages(upsertChatMessage(current, {
+              id: terminal.id,
+              role: 'assistant',
+              content: terminal.content || `Error: ${terminal.error || 'Unknown error during analysis'}`,
+              timestamp: data.timestamp || new Date().toISOString(),
+              pending_figures: false,
+              reply_to: terminal.reply_to,
+            }))
+          } else {
+            useAppStore.getState().addChatMessage({
+              role: 'assistant',
+              content: `Error: ${terminal.error || 'Unknown error during analysis'}`,
+              timestamp: new Date().toISOString(),
+            })
+          }
           useAppStore.getState().setChatLoading(false)
           useAppStore.getState().setChatDelegationActive(false)
           useAppStore.getState().setChatDelegationPlan(null)
@@ -734,7 +756,7 @@ export function useWebSocket() {
         }
       }
     }
-  }, [currentSession, addMessage, updateSession, setWsConnected, setMessages, addAgentError, setStateVersion])
+  }, [currentSession, addMessage, updateSession, setWsConnected, addAgentError, setStateVersion])
   
   const disconnect = useCallback(() => {
     connectionAttemptRef.current += 1

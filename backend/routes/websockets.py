@@ -545,26 +545,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             except Exception as e:
                 logger.exception("Failed to send status to observer")
 
-            # Send message history from state (same approach as completed/HITL restore)
-            if state.realtime_messages:
-                msg_data_list = _serialize_realtime_messages(state.realtime_messages)
-                logger.info(f"Sending {len(msg_data_list)} messages from history to observer")
-                try:
-                    await send_connection_json(connection_ref, {
-                        "type": "message_history",
-                        "content": {
-                            "messages": msg_data_list,
-                            "count": len(msg_data_list)
-                        },
-                        "timestamp": datetime.now().isoformat()
-                    })
-                except Exception as e:
-                    logger.warning(f"Failed to send history to observer: {e}")
-
             # Re-emit pending HITL state_sync so the frontend can reopen the
             # LlmTimeoutDialog / disabled-agent dialog after a page reload.
-            # message_history alone doesn't drive the state_sync handler, so
-            # llmFailureInfo would otherwise stay null until the next event.
             await _resend_wait_input_state_sync(connection_ref, state, session_id)
 
         # Wait for workflow to complete AND restore to finish
@@ -635,18 +617,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 "timestamp": datetime.now().isoformat()
             })
 
-            # Send message_history for UI message stream restoration
-            if state.realtime_messages:
-                msg_data_list = _serialize_realtime_messages(state.realtime_messages)
-                await send_connection_json(connection_ref, {
-                    "type": "message_history",
-                    "content": {
-                        "messages": msg_data_list,
-                        "count": len(msg_data_list)
-                    },
-                    "timestamp": datetime.now().isoformat()
-                })
-                logger.info(f"[{session_id}] Sent {len(msg_data_list)} messages from history to reconnecting client")
         except Exception as e:
             logger.exception(f"[{session_id}] Failed to send completed status")
 
@@ -671,17 +641,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         logger.info(f"[{session_id}] HITL-hold: status={state.status.value}, waiting for user action")
         await _discard_captured_initializing()
         try:
-            # Send message history (includes synthesized HITL messages from restore)
-            if state.realtime_messages:
-                msg_data_list = _serialize_realtime_messages(state.realtime_messages)
-                await send_connection_json(connection_ref, {
-                    "type": "message_history",
-                    "content": {
-                        "messages": msg_data_list,
-                        "count": len(msg_data_list)
-                    },
-                    "timestamp": datetime.now().isoformat()
-                })
             await _resend_wait_input_state_sync(connection_ref, state, session_id)
             # Hold connection until user action triggers close
             while True:

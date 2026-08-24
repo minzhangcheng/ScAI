@@ -60,15 +60,16 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 describe('loadSession response ownership', () => {
   const pending: Array<{
+    url: string
     signal?: AbortSignal
     resolve: (response: Response) => void
   }> = []
 
   beforeEach(() => {
     pending.length = 0
-    vi.stubGlobal('fetch', vi.fn((_url: string, options?: RequestInit) => (
+    vi.stubGlobal('fetch', vi.fn((url: string, options?: RequestInit) => (
       new Promise<Response>((resolve) => {
-        pending.push({ signal: options?.signal ?? undefined, resolve })
+        pending.push({ url, signal: options?.signal ?? undefined, resolve })
       })
     )))
     useAppStore.setState({
@@ -166,6 +167,43 @@ describe('loadSession response ownership', () => {
 
     expect(useAppStore.getState().currentSession?.id).toBe('same')
     expect(useAppStore.getState().currentSession?.currentRound).toBe(3)
+    expect(result.current.error).toBeNull()
+  })
+
+  it('commits session state before paging history and merges a live arrival', async () => {
+    const { result } = renderHook(() => useSession())
+    let load!: Promise<Session>
+
+    act(() => {
+      load = result.current.loadSession('history')
+    })
+    expect(pending[0].url).toBe('/api/session/history/load')
+
+    await act(async () => {
+      pending[0].resolve(jsonResponse({ ...loadResponse('history', 4), messages: undefined }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(useAppStore.getState().currentSession?.id).toBe('history')
+    expect(pending[1].url).toContain('/api/session/history/messages')
+
+    act(() => useAppStore.getState().addMessage({
+      id: 'live-arrival',
+      type: 'message',
+      content: 'live',
+      timestamp: '2026-08-03T00:00:02Z',
+    }))
+    await act(async () => {
+      pending[1].resolve(jsonResponse({
+        messages: [{ id: 'paged', type: 'message', content: 'paged', timestamp: '2026-08-03T00:00:01Z' }],
+        page_size: 1,
+        has_more: false,
+        next_before: null,
+      }))
+      await load
+    })
+
+    expect(useAppStore.getState().messages.map(message => message.id)).toEqual(['paged', 'live-arrival'])
     expect(result.current.error).toBeNull()
   })
 })
