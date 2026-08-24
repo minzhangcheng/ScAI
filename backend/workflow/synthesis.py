@@ -525,7 +525,7 @@ class SynthesisMixin:
             reason = "Direction-level literature verification was skipped because the Literature Agent was skipped or disabled earlier in the workflow."
             direction_evidence = self._skipped_direction_evidence(raw_candidates, reason)
             report = await self.pi_agent.score_directions_with_evidence(analysis_state, round_result, raw_candidates, direction_evidence)
-            self.pi_agent._validate_direction_dependency_graph(getattr(report, "direction_dependency_graph", {}) or {})
+            self.pi_agent._sanitize_direction_dependency_graph(report)
             return report
 
         try:
@@ -539,7 +539,7 @@ class SynthesisMixin:
                 limitations=["Literature verification failed; PI scoring must be conservative."],
             )
         report = await self.pi_agent.score_directions_with_evidence(analysis_state, round_result, raw_candidates, direction_evidence)
-        self.pi_agent._validate_direction_dependency_graph(getattr(report, "direction_dependency_graph", {}) or {})
+        self.pi_agent._sanitize_direction_dependency_graph(report)
         return report
 
     async def _pi_synthesis(self, state: WorkflowState) -> WorkflowState:

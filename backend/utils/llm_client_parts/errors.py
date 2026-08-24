@@ -36,11 +36,20 @@ class UpstreamExhaustedError(RuntimeError):
         agent_name: str = "unknown",
         model: str = "",
         llm_server: str = "",
+        failure_kind: str = "upstream_exhausted",
     ):
         super().__init__(message)
         self.agent_name = agent_name
         self.model = model
         self.llm_server = llm_server
+        self.failure_kind = failure_kind
+
+
+class ToolProtocolError(UpstreamExhaustedError):
+    """A required tool-call contract was refused after bounded retries."""
+
+    def __init__(self, message: str, **kwargs):
+        super().__init__(message, failure_kind="tool_protocol_failure", **kwargs)
 
 class EmptyResponseError(RuntimeError):
     """A zero-token empty answer from the provider, raised on the protocol-probe

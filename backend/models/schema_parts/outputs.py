@@ -30,6 +30,7 @@ class ExplorationReport(BaseModel):
     raw_direction_candidates: List[Dict[str, Any]] = Field(default_factory=list)
     direction_literature_evidence: List[Dict[str, Any]] = Field(default_factory=list)
     direction_dependency_graph: Dict[str, List[str]] = Field(default_factory=dict)
+    direction_dependency_repairs: List[str] = Field(default_factory=list)
     direction_selection_summary: Dict[str, Any] = Field(default_factory=dict)
 
     @classmethod

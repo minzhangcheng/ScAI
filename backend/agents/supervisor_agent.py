@@ -98,6 +98,7 @@ class SupervisorAgent(
         self._recent_errors: List[str] = []
         self._pi_question_hashes: set = set()  # De-duplicate PI escalations
         self._recent_rule_feedback_hashes: set = set()  # De-duplicate rule-based feedback
+        self._diagnosed_packages: set = set()
         self.planning_stage: PlanStage = "full"
 
         # All rounds archive
@@ -166,7 +167,6 @@ class SupervisorAgent(
     # ------------------------------------------------------------------
     # Report generation helpers
     # ------------------------------------------------------------------
-
 
 
 

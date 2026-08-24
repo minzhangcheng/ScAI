@@ -87,6 +87,7 @@ class SupervisorEvalResult:
     """
     feedback: Optional[str] = None
     force_skip: bool = False
+    failure_class: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -193,5 +194,4 @@ def persist_graphic_abstract(graphic_abstract, figures_dir) -> "str | None":
         return None
     b64 = getattr(graphic_abstract, "image_base64", "") or ""
     return save_graphic_abstract_image(b64, figures_dir)
-
 

@@ -4,7 +4,12 @@ Moved verbatim out of backend/agents/literature_agent.py; composed into Literatu
 """
 from typing import Callable, Dict, Any, List, Optional, Set, Tuple
 import asyncio
+import copy
+import hashlib
+import inspect
+import json
 import logging
+import re
 import time
 import xml.etree.ElementTree as ET
 
@@ -12,6 +17,25 @@ import httpx
 
 
 logger = logging.getLogger(__name__)
+
+
+def _normalized_search_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _search_cache_key(
+    *, topic: str, query: str, organism: str, tissue: str, pi_guided: bool
+) -> str:
+    payload = {
+        "topic": _normalized_search_text(topic),
+        "query": _normalized_search_text(query),
+        "organism": _normalized_search_text(organism),
+        "tissue": _normalized_search_text(tissue),
+        "pi_guided": bool(pi_guided),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 from ...models.schemas import (
     AnalysisState,
     LiteratureReport,
@@ -221,8 +245,14 @@ IMPORTANT:
             return {"sufficient": True}
         return result
 
-    async def _focused_rare_search(self, items, organism: str, tissue: str,
-                                   bucket: str = "rare_unresolved") -> dict:
+    async def _focused_rare_search(
+        self,
+        items,
+        organism: str,
+        tissue: str,
+        bucket: str = "rare_unresolved",
+        deadline: Optional[float] = None,
+    ) -> dict:
         """两级 focused 检索,按簇返回 {articles,status,tier}。
 
         rare_unresolved: tier1(加 tissue) → 仅当 exhausted/contradictory 时升级 tier2(去 tissue)。
@@ -246,8 +276,23 @@ IMPORTANT:
             q = build_focused_query(item, organism, tissue, tier=tier, bucket=bucket)
             if not q:
                 return exhausted("empty_query")
+            def remaining() -> Optional[float]:
+                if deadline is None:
+                    return None
+                value = deadline - time.monotonic()
+                return value if value > 0 else None
+
             try:
-                arts = await self._pubmed_search(q, max_results=10)
+                timeout = remaining()
+                if deadline is not None and timeout is None:
+                    return exhausted("wall_clock_budget")
+                search = self._pubmed_search(q, max_results=10)
+                arts = await (
+                    asyncio.wait_for(search, timeout=timeout)
+                    if timeout is not None else search
+                )
+            except asyncio.TimeoutError:
+                return exhausted("wall_clock_budget")
             except Exception as e:
                 logger.warning(
                     "[Literature] Focused PubMed search failed for cluster %s tier %s: %s",
@@ -260,10 +305,28 @@ IMPORTANT:
             if not arts:
                 return exhausted("no_pubmed_results")
 
-            await asyncio.sleep(0.4)
+            timeout = remaining()
+            if deadline is not None and timeout is None:
+                return exhausted("wall_clock_budget")
+            try:
+                if timeout is not None:
+                    await asyncio.wait_for(asyncio.sleep(0.4), timeout=timeout)
+                else:
+                    await asyncio.sleep(0.4)
+            except asyncio.TimeoutError:
+                return exhausted("wall_clock_budget")
 
             try:
-                judged = await self._judge_focused_relevance(item, tissue, arts, bucket)
+                timeout = remaining()
+                if deadline is not None and timeout is None:
+                    return exhausted("wall_clock_budget")
+                judge = self._judge_focused_relevance(item, tissue, arts, bucket)
+                judged = await (
+                    asyncio.wait_for(judge, timeout=timeout)
+                    if timeout is not None else judge
+                )
+            except asyncio.TimeoutError:
+                return exhausted("wall_clock_budget")
             except Exception as e:
                 logger.warning(
                     "[Literature] Focused relevance judge failed for cluster %s tier %s: %s",
@@ -323,7 +386,24 @@ IMPORTANT:
         seen_pmids: Set[str] = set()
         search_history: List[Dict[str, Any]] = []
         latest_triage: Dict[str, Any] = {}
-        zero_streak = 0
+        plateau_streak = 0
+        evaluation_count = 0
+        stop_reason = "max_search_rounds"
+        search_started = time.monotonic()
+        search_wall_clock_seconds = float(
+            getattr(self, "search_wall_clock_seconds", 600) or 600
+        )
+        max_articles_per_topic = int(
+            getattr(self, "max_articles_per_topic", 200) or 200
+        )
+        max_sufficiency_evaluations = int(
+            getattr(self, "max_sufficiency_evaluations", 8) or 8
+        )
+        plateau_rounds = int(getattr(self, "plateau_rounds", 4) or 4)
+        plateau_min_new_articles = int(
+            getattr(self, "plateau_min_new_articles", 1) or 0
+        )
+        deadline = search_started + search_wall_clock_seconds
 
         # Generate initial PubMed query from the topic (or use provided one)
         if pi_guided:
@@ -331,7 +411,46 @@ IMPORTANT:
         else:
             query = await self._generate_pubmed_query(topic, state, current_round_findings)
 
+        cache_key = _search_cache_key(
+            topic=topic,
+            query=query,
+            organism=organism,
+            tissue=tissue,
+            pi_guided=pi_guided,
+        )
+        normalized_cache_query = _normalized_search_text(query)
+
+        def cache_result(result: Dict[str, Any]) -> None:
+            if state is None:
+                return
+            cache = getattr(state, "literature_search_cache", None)
+            if cache is None:
+                cache = {}
+                setattr(state, "literature_search_cache", cache)
+            cache[cache_key] = {
+                "normalized_topic": _normalized_search_text(topic),
+                "normalized_query": normalized_cache_query,
+                "result": copy.deepcopy(result),
+            }
+            while len(cache) > 100:
+                oldest_key = next(iter(cache))
+                cache.pop(oldest_key, None)
+
+        if state is not None:
+            cache = getattr(state, "literature_search_cache", None) or {}
+            cached = cache.get(cache_key)
+            cached_result = cached.get("result") if isinstance(cached, dict) else None
+            if isinstance(cached_result, dict):
+                reused = copy.deepcopy(cached_result)
+                meta = dict(reused.get("search_meta") or {})
+                meta.update({"stop_reason": "cache_reuse", "cache_hit": True})
+                reused["search_meta"] = meta
+                return reused
+
         for round_num in range(1, self.max_search_rounds + 1):
+            if time.monotonic() >= deadline:
+                stop_reason = "wall_clock_budget"
+                break
             logger.info(
                 f"[Literature] {label} round {round_num}/{self.max_search_rounds}: "
                 f"{query[:100]}"
@@ -340,16 +459,26 @@ IMPORTANT:
             # Search PubMed (first round uses validation + degradation)
             try:
                 if round_num == 1:
-                    query, articles = await self._validate_and_degrade_query(
-                        query, topic,
-                        max_results=pubmed_max_results or 20
+                    query, articles = await asyncio.wait_for(
+                        self._validate_and_degrade_query(
+                            query, topic,
+                            max_results=pubmed_max_results or 20
+                        ),
+                        timeout=max(0.001, deadline - time.monotonic()),
                     )
                 else:
-                    articles = await self._pubmed_search(query, max_results=pubmed_max_results or 20)
+                    articles = await asyncio.wait_for(
+                        self._pubmed_search(query, max_results=pubmed_max_results or 20),
+                        timeout=max(0.001, deadline - time.monotonic()),
+                    )
+            except asyncio.TimeoutError:
+                stop_reason = "wall_clock_budget"
+                break
             except Exception as e:
                 logger.warning(f"[Literature] PubMed search failed in round {round_num}: {e}")
                 if round_num == 1 and not all_articles:
                     raise  # Re-raise to trigger fallback
+                stop_reason = "pubmed_error"
                 break
 
             # Deduplicate by PMID
@@ -360,7 +489,14 @@ IMPORTANT:
                     seen_pmids.add(a["pmid"])
             all_articles.extend(new_articles)
 
-            zero_streak = zero_streak + 1 if not new_articles else 0
+            if len(all_articles) >= max_articles_per_topic:
+                all_articles = all_articles[:max_articles_per_topic]
+                stop_reason = "article_budget"
+
+            plateau_streak = (
+                plateau_streak + 1
+                if len(new_articles) <= plateau_min_new_articles else 0
+            )
 
             search_history.append({
                 "round": round_num,
@@ -375,14 +511,28 @@ IMPORTANT:
             )
 
             # Evaluate if more searching needed
-            if zero_streak >= 3:
-                logger.info(f"[Literature] {label} stop: 3 consecutive zero-new rounds")
+            if stop_reason == "article_budget":
+                logger.info(f"[Literature] {label} stop: article budget")
+                break
+            if plateau_streak >= plateau_rounds:
+                stop_reason = "marginal_yield_plateau"
+                logger.info(f"[Literature] {label} stop: marginal-yield plateau")
                 break
 
             if round_num < self.max_search_rounds and all_articles:
+                if evaluation_count >= max_sufficiency_evaluations:
+                    stop_reason = "sufficiency_evaluation_budget"
+                    break
                 if pi_guided:
+                    evaluation_count += 1
                     try:
-                        evaluation = await evaluate_fn(all_articles, search_history)
+                        evaluation = await asyncio.wait_for(
+                            evaluate_fn(all_articles, search_history),
+                            timeout=max(0.001, deadline - time.monotonic()),
+                        )
+                    except asyncio.TimeoutError:
+                        stop_reason = "wall_clock_budget"
+                        break
                     except Exception as e:
                         logger.warning(f"[Literature] PI evaluation failed in round {round_num}: {e}, stopping")
                         evaluation = {"sufficient": True}
@@ -390,23 +540,48 @@ IMPORTANT:
                     # 确定性语义终止: 全部簇已归桶 且 triage 非低置信
                     if evaluation.get("triage_complete") and not evaluation.get("triage_low_confidence"):
                         logger.info(f"[Literature] {label} semantic termination: all clusters triaged")
+                        stop_reason = "triage_complete"
                         break
                 else:
-                    evaluation = await self._evaluate_pubmed_results(
-                        topic, all_articles, search_history
-                    )
+                    evaluation_count += 1
+                    try:
+                        evaluation = await asyncio.wait_for(
+                            self._evaluate_pubmed_results(
+                                topic, all_articles, search_history
+                            ),
+                            timeout=max(0.001, deadline - time.monotonic()),
+                        )
+                    except asyncio.TimeoutError:
+                        stop_reason = "wall_clock_budget"
+                        break
 
                 if evaluation.get("sufficient", True):
+                    stop_reason = "sufficient"
                     logger.info(f"[Literature] {label} sufficient after {round_num} rounds")
                     break
-                query = evaluation.get("refined_query", query)
+                refined_query = str(evaluation.get("refined_query") or query).strip()
+                if _normalized_search_text(refined_query) == _normalized_search_text(query):
+                    stop_reason = "query_stagnation"
+                    break
+                query = refined_query
 
             # Rate limiting for NCBI E-utilities (3 req/s without API key)
             await asyncio.sleep(0.4)
 
         if not all_articles:
             logger.warning(f"[Literature] No PubMed articles found ({label}), falling back to quick search")
-            return await self._quick_search(topic, state)
+            fallback = await self._quick_search(topic, state)
+            fallback["search_meta"] = {
+                "stop_reason": stop_reason,
+                "cache_hit": False,
+                "rounds": len(search_history),
+                "article_count": 0,
+                "sufficiency_evaluations": evaluation_count,
+                "elapsed_seconds": round(time.monotonic() - search_started, 3),
+                "fallback": "llm_knowledge",
+            }
+            cache_result(fallback)
+            return fallback
 
         # --- Focused search: run after main loop, before synthesis ---
         focused_evidence: Dict[str, Any] = {}
@@ -416,7 +591,23 @@ IMPORTANT:
                 items = latest_triage.get(bucket, [])
                 if not items:
                     continue
-                fe = await self._focused_rare_search(items, organism, tissue, bucket=bucket)
+                focused_search = self._focused_rare_search
+                try:
+                    focused_parameters = inspect.signature(focused_search).parameters
+                except (TypeError, ValueError):
+                    focused_parameters = {}
+                focused_kwargs = {"bucket": bucket}
+                if (
+                    "deadline" in focused_parameters
+                    or any(
+                        parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        for parameter in focused_parameters.values()
+                    )
+                ):
+                    focused_kwargs["deadline"] = deadline
+                fe = await focused_search(
+                    items, organism, tissue, **focused_kwargs
+                )
                 focused_evidence.update(fe)
                 for cid, data in fe.items():
                     if data.get("status") in ("strong", "limited"):
@@ -429,11 +620,16 @@ IMPORTANT:
                                 seen_pmids.add(pmid)
                             focused_articles_for_synthesis.append(article)
 
+        if len(all_articles) > max_articles_per_topic:
+            all_articles = all_articles[:max_articles_per_topic]
+            stop_reason = "article_budget"
+
         # Prioritize focused evidence for synthesis because _synthesize_pubmed_results
         # intentionally truncates to the first 20 articles.
         synthesis_articles: List[Dict[str, Any]] = self._dedup_by_pmid(
             focused_articles_for_synthesis + all_articles, lambda a: a.get("pmid"),
-            drop_empty=True)
+            drop_empty=True,
+        )[:max_articles_per_topic]
 
         report_text = await self._synthesize_pubmed_results(topic, synthesis_articles)
 
@@ -445,6 +641,15 @@ IMPORTANT:
         final = await self._finalize_result(topic, report_text, references, state, len(search_history))
         final["focused_evidence"] = focused_evidence
         final["triage"] = latest_triage
+        final["search_meta"] = {
+            "stop_reason": stop_reason,
+            "cache_hit": False,
+            "rounds": len(search_history),
+            "article_count": len(all_articles),
+            "sufficiency_evaluations": evaluation_count,
+            "elapsed_seconds": round(time.monotonic() - search_started, 3),
+        }
+        cache_result(final)
         return final
 
     def _parse_pubmed_xml(self, xml_text: str) -> List[Dict[str, str]]:

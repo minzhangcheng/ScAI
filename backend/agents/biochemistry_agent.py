@@ -7,6 +7,7 @@ Three-step analysis pipeline:
   Step 3: Summarize findings from steps 1 & 2, provide conclusions and experiment suggestions
 """
 from typing import Dict, Any, List, Optional
+import hashlib
 import json
 import math
 import re
@@ -17,10 +18,18 @@ from .base import BaseAgent
 from ..models.schemas import (
     AgentType, AnalysisState, MessageRole, BiochemistryIndicator, DataFile
 )
-from ..utils.llm_client import OpenAICompatibleClient
+from ..utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
 from ..utils.settings_provider import AgentSettingsProvider
 
 logger = logging.getLogger(__name__)
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class BiochemistryAgent(BaseAgent):
@@ -220,6 +229,7 @@ Reply in JSON format:
         )
 
         image_analyses: List[str] = []
+        failed_files: List[str] = []
 
         for bio_file in image_files:
             analysis = await self._analyze_single_image(bio_file, instruction)
@@ -227,12 +237,21 @@ Reply in JSON format:
                 image_analyses.append(
                     f"### Image: {bio_file.filename}\n{analysis}"
                 )
+            else:
+                failed_files.append(bio_file.filename)
 
         if not image_analyses:
             logger.warning(
-                "[BiochemistryAgent] Step 2: All image analyses returned empty"
+                "[BiochemistryAgent] Step 2: all image analyses failed (%s)",
+                ", ".join(failed_files),
             )
-            return None
+            return {"status": "failed", "failed_files": failed_files}
+
+        if failed_files:
+            logger.warning(
+                "[BiochemistryAgent] Step 2: %d of %d image(s) failed to analyze (%s)",
+                len(failed_files), len(image_files), ", ".join(failed_files),
+            )
 
         # Consolidate all image analyses into structured findings
         combined_text = "\n\n".join(image_analyses)
@@ -268,11 +287,13 @@ Focus on:
         data = self._safe_parse_json(response, agent_label="BiochemistryAgent")
 
         return {
+            "status": "partial" if failed_files else "completed",
             "image_findings": data.get("image_findings", []),
             "observed_values": data.get("observed_values", []),
             "image_mechanisms": data.get("image_mechanisms", []),
             "image_suggested_experiments": data.get("image_suggested_experiments", []),
             "raw_analyses": combined_text,
+            "failed_files": failed_files,
         }
 
     async def _analyze_single_image(
@@ -287,6 +308,36 @@ Focus on:
         if not os.path.exists(bio_file.file_path):
             logger.warning(f"[BiochemistryAgent] Image file not found: {bio_file.file_path}")
             return None
+
+        try:
+            input_sha256 = _file_sha256(bio_file.file_path)
+        except OSError as exc:
+            logger.warning(
+                "[BiochemistryAgent] Could not fingerprint image %s: %s",
+                bio_file.filename,
+                exc,
+            )
+            input_sha256 = ""
+
+        cached = bio_file.extracted_data or {}
+        force_reanalysis = "[force_image_reanalysis]" in instruction.lower()
+        if (
+            not force_reanalysis
+            and input_sha256
+            and cached.get("type") == "visual_analysis_v2"
+            and cached.get("input_sha256") == input_sha256
+            and cached.get("extraction_status") in {
+                "usable", "unreadable", "metadata_incomplete"
+            }
+            and cached.get("terminal") is True
+            and str(cached.get("analysis") or "").strip()
+        ):
+            logger.info(
+                "[BiochemistryAgent] Reusing %s extraction for unchanged image %s",
+                cached.get("extraction_status"),
+                bio_file.filename,
+            )
+            return str(cached["analysis"])
 
         from ..utils.image_utils import load_image, create_overview_image
 
@@ -323,9 +374,18 @@ Focus on:
 Be thorough and extract EVERY piece of information visible in the image.
 If you see bar charts, describe the height/value of each bar for each group.
 If you see tables, extract all rows and columns.
+
+Start the response with exactly one machine-readable line:
+EXTRACTION_STATUS: usable
+or EXTRACTION_STATUS: unreadable
+or EXTRACTION_STATUS: metadata_incomplete
+Use unreadable when rendering prevents reliable reading. Use metadata_incomplete
+when pixels are visible but labels, units, groups, or statistical annotations are
+insufficient for interpretation. Then provide the full analysis below that line.
 """
 
         # Try vision analysis with retry
+        last_error: Optional[Exception] = None
         for attempt in range(2):
             try:
                 response = await self.llm_client.chat_with_vision(
@@ -344,9 +404,21 @@ If you see tables, extract all rows and columns.
                         f"[BiochemistryAgent] Successfully analyzed image "
                         f"{bio_file.filename} (attempt {attempt + 1})"
                     )
+                    status_match = re.search(
+                        r"(?im)^EXTRACTION_STATUS:\s*"
+                        r"(usable|unreadable|metadata_incomplete)\s*$",
+                        content,
+                    )
+                    extraction_status = (
+                        status_match.group(1).lower()
+                        if status_match else "metadata_incomplete"
+                    )
                     bio_file.extracted_data = {
                         "analysis": content,
-                        "type": "visual_analysis",
+                        "type": "visual_analysis_v2",
+                        "input_sha256": input_sha256,
+                        "extraction_status": extraction_status,
+                        "terminal": extraction_status == "usable",
                     }
                     return content
 
@@ -356,16 +428,22 @@ If you see tables, extract all rows and columns.
                 )
 
             except Exception as e:
+                last_error = e
                 logger.error(
                     f"[BiochemistryAgent] Vision analysis failed for "
                     f"{bio_file.filename} (attempt {attempt + 1}): {e}"
                 )
 
         # All attempts failed
-        bio_file.extracted_data = {"error": "Vision API returned empty content after retries"}
+        bio_file.extracted_data = {
+            "error": str(last_error) if last_error is not None
+            else "Vision API returned empty content after retries"
+        }
         logger.error(
             f"[BiochemistryAgent] All vision attempts failed for {bio_file.filename}"
         )
+        if isinstance(last_error, UpstreamExhaustedError):
+            raise last_error
         return None
 
     # ------------------------------------------------------------------
@@ -389,13 +467,17 @@ If you see tables, extract all rows and columns.
         """
 
         has_indicators = step1_result is not None
-        has_images = step2_result is not None
+        images_failed = bool(step2_result) and step2_result.get("status") == "failed"
+        images_partial = bool(step2_result) and step2_result.get("status") == "partial"
+        has_images = step2_result is not None and not images_failed
 
         # Get cross-agent context (prefer current round data over previous round)
         other_context = self._get_other_agent_context(state, current_round_context)
 
         # ----- Case 1: Neither step produced results -----
         if not has_indicators and not has_images:
+            if images_failed:
+                return self._failed_analysis_result(step2_result)
             logger.info(
                 "[BiochemistryAgent] Step 3: No data from steps 1 & 2, "
                 "providing general analysis"
@@ -404,6 +486,16 @@ If you see tables, extract all rows and columns.
 
         # ----- Build summary prompt based on available data -----
         sections = []
+
+        if images_failed or images_partial:
+            broken = step2_result.get("failed_files") or []
+            sections.append(
+                f"## Image Analysis Results (Step 2): {'PARTIAL' if images_partial else 'FAILED'}\n"
+                f"- {len(broken)} biochemistry image(s) were provided but could not be "
+                f"analyzed: {', '.join(broken) if broken else 'unknown'}\n"
+                "- Treat the image modality as MISSING evidence. Do NOT infer the "
+                "absence of any effect from the absence of image findings."
+            )
 
         if has_indicators:
             sections.append(f"""## Indicator Analysis Results (Step 1):
@@ -462,11 +554,18 @@ Please provide a comprehensive summary in JSON format:
         all_experiments = data.get("suggested_experiments", [])
         interpretation = data.get("interpretation", "")
 
-        # Count processed files
+        # Count processed files; an error-only extraction is not successful coverage.
         all_files = state.get_files_by_section("biochemistry")
-        processed_count = len([f for f in all_files if f.extracted_data])
+        processed_count = len([
+            f for f in all_files
+            if f.extracted_data
+            and not (
+                isinstance(f.extracted_data, dict)
+                and f.extracted_data.get("error")
+            )
+        ])
 
-        return {
+        result = {
             "status": "completed",
             "findings": all_findings,
             "abnormal_markers": all_markers,
@@ -477,6 +576,42 @@ Please provide a comprehensive summary in JSON format:
             "steps_completed": {
                 "indicators_analyzed": has_indicators,
                 "images_analyzed": has_images,
+            },
+        }
+        if images_failed:
+            result["image_analysis_failed"] = True
+            result["failed_files"] = step2_result.get("failed_files") or []
+        elif images_partial:
+            result["failed_files"] = step2_result.get("failed_files") or []
+            result["image_analysis_partial"] = True
+        elif has_images and step2_result.get("failed_files"):
+            result["failed_files"] = step2_result["failed_files"]
+        return result
+
+    def _failed_analysis_result(self, step2_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Report supplied-but-unreadable images as a failure, not no data."""
+        failed_files = step2_result.get("failed_files") or []
+        file_list = ", ".join(failed_files) if failed_files else "the uploaded image(s)"
+        message = (
+            f"Biochemistry image analysis failed for {file_list}. The data was "
+            "provided but could not be analyzed, so no biochemistry findings are "
+            "available for this round. This is a failure, not an absence of data."
+        )
+        return {
+            "status": "failed",
+            "error": message,
+            "message": message,
+            "image_analysis_failed": True,
+            "failed_files": failed_files,
+            "findings": [],
+            "abnormal_markers": [],
+            "interpretation": "",
+            "suggested_experiments": [],
+            "conclusions": [],
+            "processed_files": 0,
+            "steps_completed": {
+                "indicators_analyzed": False,
+                "images_analyzed": False,
             },
         }
 

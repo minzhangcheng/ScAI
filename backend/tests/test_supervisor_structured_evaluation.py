@@ -7,6 +7,7 @@ import pytest
 from backend.agents.supervisor.evaluation import (
     EvaluationMixin,
     _SUPERVISOR_EVALUATION_FIELDS,
+    _SUPERVISOR_REQUIRED_FIELDS,
     _SUPERVISOR_EVALUATION_TOOL_NAME,
 )
 from backend.utils.llm_client_parts.responses import ToolCall
@@ -93,7 +94,7 @@ async def test_structured_evaluation_retries_schema_failure_with_forced_tool():
     assert first["tool_choice"]["function"]["name"] == _SUPERVISOR_EVALUATION_TOOL_NAME
     schema = first["tools"][0]["function"]["parameters"]
     assert schema["additionalProperties"] is False
-    assert set(schema["required"]) == _SUPERVISOR_EVALUATION_FIELDS
+    assert set(schema["required"]) == _SUPERVISOR_REQUIRED_FIELDS
     assert "previous response was rejected" in client.calls[1]["messages"][-1]["content"]
 
 
@@ -109,12 +110,81 @@ async def test_structured_evaluation_marks_exhausted_invalid_output_unparsed():
     assert len(client.calls) == 2
 
 
-def test_parser_rejects_partial_or_wrongly_typed_objects():
+@pytest.mark.asyncio
+async def test_clean_verdict_casefolds_enums_and_defaults_optional_null_without_retry():
+    client = _FakeClient([
+        _tool_response(_valid_verdict(
+            severity=" NONE ",
+            issues=[],
+            action=" NONE ",
+            message="",
+            issue_type=None,
+            redirect_instruction=None,
+            pi_question=None,
+        )),
+    ])
+    supervisor = _SupervisorHarness(client)
+
+    result = await supervisor._request_structured_evaluation("system", "step")
+
+    assert result["severity"] == "none"
+    assert result["action"] == "none"
+    assert result["issue_type"] == "ambiguous"
+    assert result["redirect_instruction"] == ""
+    assert result["pi_question"] == ""
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_null_severity_and_blank_issue_type_with_issues_stay_invalid():
+    invalid = _valid_verdict(severity=None, issue_type="", issues=["real issue"])
+    client = _FakeClient([_tool_response(invalid), _tool_response(_valid_verdict())])
+    supervisor = _SupervisorHarness(client)
+
+    result = await supervisor._request_structured_evaluation("system", "step")
+
+    assert result == _valid_verdict()
+    assert len(client.calls) == 2
+    assert "invalid severity" in client.calls[1]["messages"][-1]["content"]
+
+
+def test_optional_fields_may_be_omitted_or_explicit_null():
+    omitted, omitted_error = EvaluationMixin._validate_supervisor_result(
+        {"severity": " NONE "}
+    )
+    explicit_null, null_error = EvaluationMixin._validate_supervisor_result({
+        "severity": "info",
+        "issues": None,
+        "action": None,
+        "message": None,
+        "redirect_instruction": None,
+        "issue_type": None,
+        "is_biological_checkpoint": None,
+        "pi_question": None,
+    })
+
+    assert omitted_error == ""
+    assert omitted == {
+        "severity": "none",
+        "issues": [],
+        "action": "none",
+        "message": "",
+        "redirect_instruction": "",
+        "issue_type": "ambiguous",
+        "is_biological_checkpoint": False,
+        "pi_question": "",
+    }
+    assert null_error == ""
+    assert explicit_null == {**omitted, "severity": "info"}
+
+
+def test_parser_accepts_optional_omission_but_rejects_wrongly_typed_objects():
     import json
 
-    assert EvaluationMixin._parse_supervisor_response('{"severity":"none"}')[
-        "parse_failed"
-    ] is True
+    partial = EvaluationMixin._parse_supervisor_response('{"severity":"none"}')
+    assert partial["severity"] == "none"
+    assert partial["issues"] == []
+    assert "parse_failed" not in partial
     invalid = _valid_verdict(issues=[1])
     assert EvaluationMixin._parse_supervisor_response(json.dumps(invalid))[
         "parse_failed"

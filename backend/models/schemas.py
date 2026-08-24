@@ -468,6 +468,8 @@ class AnalysisState(BaseModel):
         "pubmed_email": "",                  # For PubMed mode (NCBI requirement)
         "max_search_rounds": 20,             # Max iterative search rounds
     })
+    literature_search_cache: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    environment_api_notes: Dict[str, str] = Field(default_factory=dict)
     
     # Chat messages (PI Agent free-form chat, separate from workflow)
     chat_messages: List[Dict[str, Any]] = Field(default_factory=list)

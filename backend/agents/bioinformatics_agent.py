@@ -414,6 +414,33 @@ class BioinformaticsAgent(
 
     
     
+    @staticmethod
+    def _render_registered_data_files(state: AnalysisState) -> str:
+        """Render the host-owned upload registry as the executor's authority."""
+        lines = ["REGISTERED UPLOAD INVENTORY (AnalysisState.data_files):"]
+        for data_file in getattr(state, "data_files", []) or []:
+            path = str(getattr(data_file, "file_path", "") or "").strip()
+            if not path:
+                continue
+            exists = Path(path).is_file()
+            lines.append(
+                "- id={id}; section={section}; filename={filename}; "
+                "data_type={data_type}; group_id={group_id}; sample_number={sample}; "
+                "host_file_exists={exists}; path={path}".format(
+                    id=str(getattr(data_file, "id", "") or ""),
+                    section=str(getattr(data_file, "section", "") or ""),
+                    filename=str(getattr(data_file, "filename", "") or ""),
+                    data_type=str(getattr(data_file, "data_type", "") or ""),
+                    group_id=str(getattr(data_file, "group_id", "") or ""),
+                    sample=str(getattr(data_file, "sample_number", "") or ""),
+                    exists="true" if exists else "false",
+                    path=path,
+                )
+            )
+        if len(lines) == 1:
+            lines.append("- (none)")
+        return "\n".join(lines)
+
     def _build_data_context(self, state: AnalysisState) -> str:
         """Build context about available data"""
         data_parts = ["=== Available Data ===\n"]
@@ -447,6 +474,10 @@ class BioinformaticsAgent(
         if design:
             data_parts.append(design)
             data_parts.append("")
+
+        if state.data_files:
+            data_parts.append("REGISTERED UPLOAD INVENTORY IS AUTHORITATIVE")
+            data_parts.append(self._render_registered_data_files(state))
 
         # List sequencing files with group/sample context
         seq_files = [f for f in state.data_files if f.section == "sequencing"]

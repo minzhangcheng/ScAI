@@ -69,6 +69,10 @@ _EXCLUDED_FIELDS = {
     # keeping it off the load response keeps that payload bounded.
     "post_execution_reviews",
     "current_round_cache",
+    # Server-side bounded caches used to avoid repeated provider/search work;
+    # their rendered guidance/results reach clients through normal outputs.
+    "literature_search_cache",
+    "environment_api_notes",
     "messages",
     "revision_history",
     "all_candidates",

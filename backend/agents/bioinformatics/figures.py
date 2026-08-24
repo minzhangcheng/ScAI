@@ -401,6 +401,44 @@ from .shared import (  # noqa: F401
 class FiguresMixin:
     """Publication-figure generation, review loop, and revision."""
 
+    async def _environment_api_hint(
+        self,
+        state,
+        error: str | None,
+        failed_code: str = "",
+    ) -> str:
+        """Return one bounded, session-scoped note for a recognizable API mismatch."""
+        from backend.services.api_change_notes import (
+            api_change_signature,
+            format_api_note,
+            record_api_note,
+            recorded_api_note,
+        )
+
+        signature = api_change_signature(error)
+        if not signature:
+            return ""
+        note = recorded_api_note(state, signature)
+        if note:
+            return format_api_note(signature, note)
+        if not getattr(self, "technique_agent", None):
+            return ""
+        try:
+            note = await self.technique_agent.lookup_from_error(
+                self.sandbox, str(error or ""), failed_code or ""
+            )
+        except Exception as lookup_error:
+            logger.warning(
+                "[Bioinformatics] Environment-API lookup failed for %s: %s",
+                signature,
+                lookup_error,
+            )
+            return ""
+        if not str(note or "").strip():
+            return ""
+        record_api_note(state, signature, note)
+        return format_api_note(signature, note)
+
     async def _handle_generate_publication_figure(
         self,
         code: str,
@@ -566,6 +604,9 @@ class FiguresMixin:
             if staleness_note:
                 result.error = f"{result.error}\n{staleness_note}".strip()
             error_msg = f"Figure generation failed: {result.error}"
+            api_hint = await self._environment_api_hint(state, result.error, code)
+            if api_hint:
+                error_msg = f"{error_msg}{api_hint}"
             logger.error(f"[Bioinformatics] {error_msg}")
             await self._notify("error", error_msg)
             return error_msg
@@ -1327,7 +1368,12 @@ class FiguresMixin:
 
                     # Technique Agent documentation lookup for technical errors
                     extra_context = ""
-                    if self.technique_agent:
+                    api_hint = await self._environment_api_hint(
+                        state, error_msg, revised_code
+                    )
+                    if api_hint:
+                        extra_context = api_hint
+                    elif self.technique_agent:
                         err_type = extract_error_type(error_msg)
                         if err_type in TECHNICAL_ERROR_TYPES:
                             logger.info(f"[Bioinformatics] Looking up docs for {err_type} error")

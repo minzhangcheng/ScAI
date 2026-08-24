@@ -54,6 +54,16 @@ _SUPERVISOR_EVALUATION_FIELDS = {
     "is_biological_checkpoint",
     "pi_question",
 }
+_SUPERVISOR_REQUIRED_FIELDS = {"severity"}
+_SUPERVISOR_OPTIONAL_DEFAULTS: Dict[str, Any] = {
+    "issues": [],
+    "action": "none",
+    "message": "",
+    "redirect_instruction": "",
+    "issue_type": "ambiguous",
+    "is_biological_checkpoint": False,
+    "pi_question": "",
+}
 _SUPERVISOR_EVALUATION_TOOL = {
     "type": "function",
     "function": {
@@ -85,11 +95,58 @@ _SUPERVISOR_EVALUATION_TOOL = {
                 "is_biological_checkpoint": {"type": "boolean"},
                 "pi_question": {"type": "string", "maxLength": 4000},
             },
-            "required": sorted(_SUPERVISOR_EVALUATION_FIELDS),
+            "required": sorted(_SUPERVISOR_REQUIRED_FIELDS),
         },
     },
 }
 _SUPERVISOR_STRUCTURED_ATTEMPTS = 2
+_MISSING_MODULE_PATTERN = re.compile(
+    r"(?:ModuleNotFoundError|ImportError).*?No module named ['\"]([^'\"]+)['\"]",
+    re.IGNORECASE,
+)
+
+
+def _error_fingerprint(error: Optional[str]) -> str:
+    """Fingerprint the stable final exception line, not changing traceback frames."""
+    if not error:
+        return ""
+    lines = [line.strip() for line in str(error).splitlines() if line.strip()]
+    exception_lines = [
+        line for line in lines
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception):", line)
+    ]
+    final = exception_lines[-1] if exception_lines else (lines[-1] if lines else "")
+    final = re.sub(r"Cell In\[\d+\]", "Cell In[]", final)
+    final = re.sub(r"\bline\s+\d+\b", "line N", final, flags=re.IGNORECASE)
+    return hashlib.sha256(final.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _platform_fault_reason(step: AnalysisStep) -> Optional[str]:
+    """Recognize failures produced by ScAI's own execution wrappers."""
+    error = str(step.code_error or "")
+    output = str(step.code_output or "")
+    if (
+        "SyntaxError" in error
+        and "_scai_expression_contract_call" in error
+        and (
+            "Generator expression must be parenthesized" in error
+            or "f-string: unmatched" in error
+        )
+    ):
+        return "ScAI expression-contract instrumentation generated invalid Python"
+    if "Expression contract violation" in error and (
+        re.search(r"integer[-_ ]like\s*[:=]\s*False", output, re.IGNORECASE)
+        or re.search(
+            r"noninteger[_ ]fraction\s*[:=]\s*(?:0?\.\d*[1-9]\d*|1(?:\.0+)?)",
+            output,
+            re.IGNORECASE,
+        )
+    ):
+        return (
+            "ScAI expression-contract validation rejected a matrix whose "
+            "printed audit proves it is not integer-valued"
+        )
+    return None
 
 
 class EvaluationMixin:
@@ -151,9 +208,38 @@ class EvaluationMixin:
 
         # Resolve error type once — used by Phase 1.5 and Phase 2 below
         _err_type = extract_error_type(step.code_error) if step.code_error else None
+        platform_fault = _platform_fault_reason(step)
+        current_fingerprint = _error_fingerprint(step.code_error)
+        same_fingerprint_count = sum(
+            _error_fingerprint(error) == current_fingerprint
+            for error in self._recent_errors
+        ) if current_fingerprint else 0
+        if platform_fault:
+            feedback_parts.append(
+                "[Platform fault] " + platform_fault + ". Do not rebuild an "
+                "equivalent object or spend another execution retry on this "
+                "operation; preserve the checkpoint and release the step as "
+                "unavailable pending a platform repair."
+            )
+
+        # Missing packages are an actionable environment observation. Ask once
+        # per top-level package, and keep the guidance ecosystem-neutral.
+        missing_package = self._missing_package_name(step.code_error)
+        if missing_package:
+            diagnosed = getattr(self, "_diagnosed_packages", None)
+            if diagnosed is None:
+                diagnosed = set()
+                self._diagnosed_packages = diagnosed
+            if missing_package not in diagnosed:
+                diagnosed.add(missing_package)
+                package_hint = await self._diagnose_missing_package(
+                    missing_package, step.code or ""
+                )
+                if package_hint:
+                    feedback_parts.append(package_hint)
 
         # Phase 1.5: Technique Agent for repeated API errors
-        if self._should_trigger_technique(step):
+        if not platform_fault and self._should_trigger_technique(step):
             try:
                 # Syntax/gen errors get a static hint; API doc lookup is irrelevant.
                 if _err_type in CODE_GEN_ERROR_TYPES:
@@ -195,17 +281,9 @@ class EvaluationMixin:
         # Detect stuck: same error type appearing >= 3 times in recent history,
         # OR two consecutive identical types (original check).
         # (_err_type is hoisted above Phase 1.5 — no redundant re-parse here.)
-        _same_type_count = sum(
-            1 for e in self._recent_errors
-            if extract_error_type(e) == _err_type
-        ) if _err_type else 0
         is_stuck = (
-            _same_type_count >= 3
-            or (
-                len(self._recent_errors) >= 2
-                and extract_error_type(self._recent_errors[-1])
-                    == extract_error_type(self._recent_errors[-2])
-            )
+            bool(platform_fault)
+            or same_fingerprint_count >= 2
         )
         should_llm_evaluate = (
             (bool(step.code_error) and (not self._is_technical_error(step.code_error) or is_stuck))
@@ -215,7 +293,14 @@ class EvaluationMixin:
         )
 
         llm_result = None
-        if not should_llm_evaluate:
+        if platform_fault:
+            logger.warning(
+                "[%s] Step %s classified as platform fault: %s",
+                self.session_id,
+                step.step_number,
+                platform_fault,
+            )
+        elif not should_llm_evaluate:
             logger.debug(f"[{self.session_id}] Skipping LLM evaluation for step {step.step_number} (sampling)")
         else:
             try:
@@ -360,10 +445,24 @@ class EvaluationMixin:
 
         self.supervision_log.append(record)
         # force_skip: agent is stuck AND PI already intervened on this step,
-        # meaning the LLM has received strategic guidance but still cannot fix it.
+        # meaning a prior same-fingerprint executor turn received guidance and
+        # still failed. Current-step guidance is not enough to skip work.
+        prior_guidance = False
+        if step.code_error and is_stuck:
+            fingerprint = self._error_fingerprint(step.code_error)
+            prior_guidance = any(
+                record.step_number < step.step_number
+                and record.pi_escalated
+                and self._error_fingerprint(record.code_error) == fingerprint
+                for record in self.supervision_log
+            )
         return SupervisorEvalResult(
             feedback=feedback,
-            force_skip=is_stuck and record.pi_escalated,
+            force_skip=bool(platform_fault) or (is_stuck and prior_guidance),
+            failure_class=(
+                "platform_fault" if platform_fault
+                else ("repeated_execution_failure" if is_stuck else None)
+            ),
         )
 
     async def _llm_evaluate(
@@ -656,23 +755,24 @@ class EvaluationMixin:
         if not isinstance(value, dict):
             return None, "verdict is not an object"
         keys = set(value)
-        missing = _SUPERVISOR_EVALUATION_FIELDS - keys
+        missing = _SUPERVISOR_REQUIRED_FIELDS - keys
         extra = keys - _SUPERVISOR_EVALUATION_FIELDS
         if missing:
             return None, f"missing fields: {', '.join(sorted(missing))}"
         if extra:
             return None, f"unexpected fields: {', '.join(sorted(extra))}"
 
+        normalized_value = dict(value)
+        for field, default in _SUPERVISOR_OPTIONAL_DEFAULTS.items():
+            if normalized_value.get(field) is None:
+                normalized_value[field] = list(default) if isinstance(default, list) else default
+        value = normalized_value
+
         enums = {
             "severity": {"none", "info", "warning", "critical"},
             "action": {"none", "warn", "redirect"},
             "issue_type": {"technical", "biological", "ambiguous"},
         }
-        for field, allowed in enums.items():
-            item = value[field]
-            if not isinstance(item, str) or item not in allowed:
-                return None, f"invalid {field}"
-
         issues = value["issues"]
         if (
             not isinstance(issues, list)
@@ -681,8 +781,27 @@ class EvaluationMixin:
         ):
             return None, "issues must be a bounded list of strings"
 
+        normalized_enums: Dict[str, str] = {}
+        for field, allowed in enums.items():
+            item = value[field]
+            if not isinstance(item, str):
+                return None, f"invalid {field}"
+            normalized = item.strip().casefold()
+            if (
+                field == "issue_type"
+                and normalized in {"", "none", "n/a", "null"}
+                and not issues
+                and normalized_enums.get("severity") in {"none", "info"}
+            ):
+                normalized = "ambiguous"
+            if normalized not in allowed:
+                return None, f"invalid {field}"
+            normalized_enums[field] = normalized
+
         for field in ("message", "redirect_instruction", "pi_question"):
             item = value[field]
+            if item is None:
+                item = ""
             if not isinstance(item, str) or len(item) > 4000:
                 return None, f"invalid {field}"
         if not isinstance(value["is_biological_checkpoint"], bool):
@@ -691,14 +810,14 @@ class EvaluationMixin:
         # Copy the validated fields so callers never retain a mutable mapping
         # owned by an SDK/provider response object.
         return {
-            "severity": value["severity"],
+            "severity": normalized_enums["severity"],
             "issues": list(issues),
-            "action": value["action"],
-            "message": value["message"],
-            "redirect_instruction": value["redirect_instruction"],
-            "issue_type": value["issue_type"],
+            "action": normalized_enums["action"],
+            "message": value["message"] or "",
+            "redirect_instruction": value["redirect_instruction"] or "",
+            "issue_type": normalized_enums["issue_type"],
             "is_biological_checkpoint": value["is_biological_checkpoint"],
-            "pi_question": value["pi_question"],
+            "pi_question": value["pi_question"] or "",
         }, ""
 
     @classmethod
@@ -780,6 +899,45 @@ class EvaluationMixin:
             return False
         err_type = extract_error_type(code_error)
         return err_type in TECHNICAL_ERROR_TYPES
+
+    @staticmethod
+    def _missing_package_name(code_error: Optional[str]) -> Optional[str]:
+        if not code_error:
+            return None
+        match = _MISSING_MODULE_PATTERN.search(str(code_error))
+        if not match:
+            return None
+        return match.group(1).split(".", 1)[0].strip() or None
+
+    async def _diagnose_missing_package(
+        self, package_name: str, code: str
+    ) -> Optional[str]:
+        prompt = (
+            "A runtime analysis step reported a missing top-level package "
+            f"{package_name!r}. Give concise, domain-neutral troubleshooting guidance. "
+            "First ask the analyst to confirm whether the active ecosystem is Python, "
+            "R/CRAN, or R/Bioconductor and inspect the installed environment; do not "
+            "guess a replacement package or installation command. Explain how to "
+            "verify the package/import and preserve the current analysis contract.\n\n"
+            f"Code context:\n{code[-2000:]}"
+        )
+        try:
+            self._set_llm_context()
+            response = await self.llm_client.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+                max_tokens=1200,
+            )
+            content = str(getattr(response, "content", "") or "").strip()
+            return f"[Package Support] {content}" if content else None
+        except Exception as exc:
+            logger.warning("[%s] Missing-package diagnosis failed: %s", self.session_id, exc)
+            return None
+
+    @staticmethod
+    def _error_fingerprint(code_error: Optional[str]) -> str:
+        return _error_fingerprint(code_error)
 
     async def _escalate_to_pi(self, question: str, context: str) -> Optional[str]:
         """Escalate a question to PI, with deduplication."""

@@ -133,7 +133,13 @@ from ...models.schemas import (
     AnalysisStep, PlanStage,
     DATA_TYPE_SCRNASEQ, DATA_TYPE_BULK_RNASEQ,
 )
-from ...utils.llm_client import OpenAICompatibleClient, ToolCall, UpstreamExhaustedError, EMPTY_CONTENT_PLACEHOLDER
+from ...utils.llm_client import (
+    OpenAICompatibleClient,
+    ToolCall,
+    UpstreamExhaustedError,
+    ToolProtocolError,
+    EMPTY_CONTENT_PLACEHOLDER,
+)
 from ...utils.tool_messages import tool_calls_are_paired, append_missing_tool_results
 from ...constants import PLAN_REVISION_NEEDED_TAG
 from ...utils.error_parsing import (

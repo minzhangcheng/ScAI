@@ -30,6 +30,7 @@ from ..llm_client_parts.media import (  # noqa: F401
 )
 from ..llm_client_parts.errors import (  # noqa: F401
     UpstreamExhaustedError,
+    ToolProtocolError,
     EmptyResponseError,
 )
 from ..llm_client_parts.responses import (  # noqa: F401

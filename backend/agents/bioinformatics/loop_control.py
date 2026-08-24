@@ -118,6 +118,7 @@ from .shared import (  # noqa: F401
     OpenAICompatibleClient,
     ToolCall,
     UpstreamExhaustedError,
+    ToolProtocolError,
     EMPTY_CONTENT_PLACEHOLDER,
     tool_calls_are_paired,
     append_missing_tool_results,
@@ -212,7 +213,7 @@ class LoopControlMixin:
         the workflow into Stage 2 with no marker genes or annotation.
         """
         base_url = getattr(self.llm_client, "base_url", "") or ""
-        raise UpstreamExhaustedError(
+        raise ToolProtocolError(
             message=(
                 f"Bioinformatics agent returned {text_response_count} consecutive "
                 "text-only responses without calling any tool. The model is refusing "

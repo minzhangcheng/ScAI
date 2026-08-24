@@ -476,9 +476,9 @@ Return a complete structured report JSON:
         if not report.direction_literature_evidence:
             report.direction_literature_evidence = literature_evidence
 
-        # Dependency-cycle validation MUST propagate — a cyclic graph must not be exposed.
+        # Keep direction candidates available while removing only cycle-closing edges.
         if report.direction_dependency_graph:
-            self._validate_direction_dependency_graph(report.direction_dependency_graph)
+            self._sanitize_direction_dependency_graph(report)
 
         return report
 

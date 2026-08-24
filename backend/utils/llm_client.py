@@ -94,6 +94,7 @@ from .llm_client_parts.shared import (  # noqa: F401
     detect_image_mime,
     _detect_image_mime_type,
     UpstreamExhaustedError,
+    ToolProtocolError,
     EmptyResponseError,
     LLMResponse,
     ToolCall,

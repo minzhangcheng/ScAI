@@ -55,8 +55,8 @@ async def test_evidence_gate_uses_skipped_evidence_when_literature_was_skipped()
                 research_direction_candidates=[{"direction_id": "dir_001", "direction": "IFN network"}],
             )
 
-        def _validate_direction_dependency_graph(self, graph):
-            pass
+        def _sanitize_direction_dependency_graph(self, report):
+            return []
 
     class Literature:
         async def evaluate_direction_novelty_candidates(self, *args, **kwargs):
@@ -79,7 +79,7 @@ async def test_evidence_gate_uses_skipped_evidence_when_literature_was_skipped()
 
 
 @pytest.mark.asyncio
-async def test_evidence_gate_validates_dependency_graph_before_returning_report():
+async def test_evidence_gate_sanitizes_dependency_graph_before_returning_report():
     from backend.workflow.synthesis import SynthesisMixin
 
     state = AnalysisState(user_id="u1", name="s", initial_instruction="x")
@@ -96,8 +96,9 @@ async def test_evidence_gate_validates_dependency_graph_before_returning_report(
                 research_direction_candidates=[{"direction_id": "dir_001", "direction": "A"}],
             )
 
-        def _validate_direction_dependency_graph(self, graph):
-            validated["graph"] = graph
+        def _sanitize_direction_dependency_graph(self, report):
+            validated["graph"] = report.direction_dependency_graph
+            return []
 
     class Literature:
         async def evaluate_direction_novelty_candidates(self, *args, **kwargs):

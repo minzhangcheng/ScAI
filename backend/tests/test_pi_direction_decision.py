@@ -96,3 +96,31 @@ class TestGenerateRawDirectionCandidates:
 class TestScoreDirectionsWithEvidence:
     def test_resets_history(self):
         assert "self.reset_history()" in SRC.split("score_directions_with_evidence", 1)[1]
+
+
+class TestDependencyGraphRepair:
+    def test_a_cycle_drops_only_its_back_edge_and_records_repair(self):
+        agent = _make_pi_agent()
+        report = __import__("backend.models.schemas", fromlist=["ExplorationReport"]).ExplorationReport(
+            direction_dependency_graph={
+                "dir_001": ["dir_002"],
+                "dir_002": ["dir_003"],
+                "dir_003": ["dir_001"],
+            },
+            research_direction_candidates=[
+                {"direction_id": "dir_001", "direction": "A"},
+                {"direction_id": "dir_002", "direction": "B"},
+                {"direction_id": "dir_003", "direction": "C"},
+            ],
+        )
+
+        dropped = agent._sanitize_direction_dependency_graph(report)
+
+        assert dropped == ["dir_003 -> dir_001"]
+        assert len(report.research_direction_candidates) == 3
+        assert report.direction_dependency_graph == {
+            "dir_001": ["dir_002"],
+            "dir_002": ["dir_003"],
+            "dir_003": [],
+        }
+        assert report.direction_dependency_repairs

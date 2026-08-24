@@ -20,7 +20,7 @@ def _make_pi_agent():
 
 
 @pytest.mark.asyncio
-async def test_cyclic_graph_during_selection_raises(monkeypatch):
+async def test_cyclic_graph_during_selection_is_repaired(monkeypatch):
     agent = _make_pi_agent()
     report = ExplorationReport(
         research_direction_candidates=[
@@ -36,8 +36,34 @@ async def test_cyclic_graph_during_selection_raises(monkeypatch):
                            "rejected_directions": [], "selection_rationale": "r"})
 
     monkeypatch.setattr(agent, "chat", fake_chat)
-    with pytest.raises(ValueError):
-        await agent.select_best_directions(state)
+    decision = await agent.select_best_directions(state)
+    assert decision["selected_directions"]
+    agent._validate_direction_dependency_graph(report.direction_dependency_graph)
+    assert report.direction_dependency_repairs
+
+
+@pytest.mark.asyncio
+async def test_a_cyclic_graph_during_selection_is_broken_not_refused(monkeypatch):
+    agent = _make_pi_agent()
+    report = ExplorationReport(
+        research_direction_candidates=[
+            {"direction_id": "dir_001", "direction": "A"},
+            {"direction_id": "dir_002", "direction": "B"},
+        ],
+        direction_dependency_graph={"dir_001": ["dir_002"], "dir_002": ["dir_001"]},
+    )
+    state = SimpleNamespace(exploration_report=report)
+
+    async def fake_chat(prompt, temperature=0.3):
+        return json.dumps({"selected_directions": [{"direction": "A", "notes": ""}],
+                           "rejected_directions": [], "selection_rationale": "r"})
+
+    monkeypatch.setattr(agent, "chat", fake_chat)
+    decision = await agent.select_best_directions(state)
+
+    assert decision["selected_directions"]
+    agent._validate_direction_dependency_graph(report.direction_dependency_graph)
+    assert report.direction_dependency_repairs
 
 
 @pytest.mark.asyncio

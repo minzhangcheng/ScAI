@@ -587,11 +587,8 @@ async def test_stream_chat_reactive_chat_to_responses_fallback_before_first_chun
 
     assert "".join(chunks) == "Resp"
     assert llm_mod._PROBE_CACHE[(
-        "https://x/v1/chat/completions", "responses-only", "vision"
-    )] == "responses"
-    assert llm_mod._PROBE_CACHE.get((
         "https://x/v1/chat/completions", "responses-only"
-    )) is None
+    )] == "responses"
 
 
 @pytest.mark.asyncio

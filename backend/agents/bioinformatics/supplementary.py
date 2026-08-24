@@ -325,6 +325,11 @@ class SupplementaryMixin:
         from ...workflow.annotation_validation import signatures_match
 
         state = getattr(self, "_current_analysis_state", None)
+        registered_data_files = (
+            self._render_registered_data_files(state)
+            if state is not None and hasattr(self, "_render_registered_data_files")
+            else ""
+        )
         max_iterations = max(1, min(int(max_iterations), 8))
         step_timeout = max(1, int(timeout_seconds))
         total_timeout = int(total_timeout_seconds or 0)
@@ -411,7 +416,9 @@ class SupplementaryMixin:
                 nonlocal baseline, final_result, abort_envelope
                 prompt = self._build_supplementary_executor_prompt(
                     clean_tasks, context_summary, direction, metadata,
-                    "\n\n".join(transcript[-3:]))
+                    "\n\n".join(transcript[-3:]),
+                    registered_data_files=registered_data_files,
+                )
                 parsed = self._safe_parse_json(
                     await self.chat(prompt, temperature=0.2),
                     default={},
@@ -718,7 +725,13 @@ class SupplementaryMixin:
         direction: str,
         metadata: Dict[str, Any],
         transcript_tail: str,
+        registered_data_files: str = "",
     ) -> str:
+        from backend.services.execution_evidence import (
+            GENE_INDEX_ALIGNMENT_GUIDANCE,
+            LIANA_RUNTIME_GUIDANCE,
+            PYDESEQ2_RUNTIME_GUIDANCE,
+        )
         main_var = metadata.get("var")
         task_list = "\n".join(f"{i}. {t}" for i, t in enumerate(tasks, start=1))
         return f"""You are a RESTRICTED SUPPLEMENTARY code generator. This round's analysis has
@@ -737,6 +750,18 @@ analysis tools, literature search, PI consultation, or autonomous re-planning.
 
 ## Active object metadata
 {self._render_object_metadata(metadata)}
+
+## Registered uploaded data files (authoritative)
+{registered_data_files or '(no registered uploaded data files)'}
+Use these exact registered paths before inspecting guessed kernel variable names or
+workspace globs. A file that is not currently loaded into the kernel is NOT missing.
+Do not report an uploaded modality as absent until every matching registered path has
+been checked.
+
+## Installed-runtime guidance
+{PYDESEQ2_RUNTIME_GUIDANCE}
+{LIANA_RUNTIME_GUIDANCE}
+{GENE_INDEX_ALIGNMENT_GUIDANCE}
 
 ## Hard rules
 - Work on the LIVE object `{main_var}`. NEVER assign to `{main_var}` itself; write

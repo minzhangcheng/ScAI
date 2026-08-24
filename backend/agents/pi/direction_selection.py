@@ -49,6 +49,56 @@ class DirectionSelectionMixin:
             visit(node)
 
     @staticmethod
+    def _acyclic_direction_dependency_graph(
+        graph: Dict[str, List[str]],
+    ) -> tuple[Dict[str, List[str]], List[str]]:
+        """Drop only cycle-closing edges while preserving all other edges."""
+        repaired: Dict[str, List[str]] = {}
+        dropped: List[str] = []
+        on_stack: set[str] = set()
+        finished: set[str] = set()
+
+        def visit(node: str) -> None:
+            if node in finished:
+                return
+            on_stack.add(node)
+            kept: List[str] = []
+            for dependency in as_list(graph.get(node)):
+                if dependency in on_stack:
+                    dropped.append(f"{node} -> {dependency}")
+                    continue
+                visit(dependency)
+                kept.append(dependency)
+            if node in graph:
+                repaired[node] = kept
+            on_stack.discard(node)
+            finished.add(node)
+
+        for node in graph:
+            visit(node)
+        return repaired, dropped
+
+    def _sanitize_direction_dependency_graph(self, report: Any) -> List[str]:
+        graph = getattr(report, "direction_dependency_graph", None) or {}
+        if not graph:
+            return []
+        repaired, dropped = self._acyclic_direction_dependency_graph(graph)
+        if not dropped:
+            return []
+        report.direction_dependency_graph = repaired
+        notes = list(getattr(report, "direction_dependency_repairs", None) or [])
+        for edge in dropped:
+            note = (
+                f"Prerequisite dependency {edge} was dropped because it closed a cycle; "
+                "the directions themselves are unchanged."
+            )
+            if note not in notes:
+                notes.append(note)
+        report.direction_dependency_repairs = notes
+        logger.warning("[PI] Repaired cyclic direction dependency graph: %s", dropped)
+        return dropped
+
+    @staticmethod
     def _candidate_has_specific_core_observation(candidate: Dict[str, Any]) -> bool:
         text = str(candidate.get("core_observation") or "").strip()
         if len(text) < 25:
@@ -273,9 +323,8 @@ Return JSON:
 
         # Validate dependency graph if present
         dep_graph = state.exploration_report.direction_dependency_graph if state.exploration_report else {}
-        if dep_graph:
-            # A cyclic graph must not be used to present direction options (spec §377).
-            self._validate_direction_dependency_graph(dep_graph)
+        if dep_graph and state.exploration_report:
+            self._sanitize_direction_dependency_graph(state.exploration_report)
 
         # Prerequisite closure (multi-hop): keep adding prerequisites until none are missing.
         text_by_id = {c.get("direction_id"): c.get("direction", "") for c in candidates if isinstance(c, dict)}

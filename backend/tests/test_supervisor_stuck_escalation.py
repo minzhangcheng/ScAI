@@ -3,10 +3,25 @@
 Also tests force_skip flag: when stuck AND PI already intervened, the supervisor
 signals that the current step must be force-skipped.
 """
+from datetime import datetime
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from backend.agents.supervisor_agent import SupervisorAgent, SupervisorEvalResult
+from backend.agents.supervisor.shared import SupervisorRecord
 from backend.models.schemas import AnalysisStep
+
+
+STUCK_ERROR = "SyntaxError: unterminated string literal (Cell In[18], line 124)"
+
+
+def _prior_step(code_error: str, *, pi_escalated: bool, step_number: int = 1):
+    return SupervisorRecord(
+        step_number=step_number,
+        step_type="execute_code",
+        timestamp=datetime(2026, 8, 7, 12, 0, 0),
+        code_error=code_error,
+        pi_escalated=pi_escalated,
+    )
 
 
 def _make_step(code_error: str, step_number: int = 1) -> AnalysisStep:
@@ -70,9 +85,10 @@ async def test_stuck_agent_escalates_to_pi_regardless_of_severity():
     question = call_args[0][0]
     assert "stuck" in question.lower(), f"Expected 'stuck' in question, got: {question}"
 
-    # force_skip should be True because is_stuck=True AND PI was escalated
+    # Current-step PI guidance is advisory; a prior guided executor turn is
+    # required before force-skip.
     assert isinstance(result, SupervisorEvalResult)
-    assert result.force_skip is True
+    assert result.force_skip is False
 
 
 @pytest.mark.asyncio
@@ -114,7 +130,7 @@ async def test_syntax_error_stuck_triggers_pi():
         "Repeated SyntaxError should trigger PI escalation (is_stuck=True)"
     )
     assert isinstance(result, SupervisorEvalResult)
-    assert result.force_skip is True
+    assert result.force_skip is False
 
 
 @pytest.mark.asyncio
@@ -147,8 +163,8 @@ async def test_stuck_block_skipped_when_pi_already_escalated():
         "Stuck block should be skipped when record.pi_escalated is already True."
     )
     assert isinstance(result, SupervisorEvalResult)
-    # force_skip is True because is_stuck AND record.pi_escalated (from critical branch)
-    assert result.force_skip is True
+    # Current-step critical guidance does not itself authorize force-skip.
+    assert result.force_skip is False
 
 
 @pytest.mark.asyncio
@@ -190,3 +206,48 @@ async def test_force_skip_false_when_pi_escalation_fails():
     assert isinstance(result, SupervisorEvalResult)
     # PI was called but returned None, so pi_escalated stays False
     assert result.force_skip is False
+
+
+@pytest.mark.asyncio
+async def test_same_fingerprint_stops_only_after_prior_guidance_attempt():
+    current = _mk_supervisor(recent_errors=[STUCK_ERROR, STUCK_ERROR])
+    current_result = await current.evaluate_step(_make_step(STUCK_ERROR, 3), [])
+    assert current_result.force_skip is False
+
+    prior = _mk_supervisor(recent_errors=[STUCK_ERROR, STUCK_ERROR])
+    prior.supervision_log = [_prior_step(STUCK_ERROR, pi_escalated=True)]
+    prior_result = await prior.evaluate_step(_make_step(STUCK_ERROR, 5), [])
+    assert prior_result.force_skip is True
+
+
+@pytest.mark.asyncio
+async def test_current_or_different_fingerprint_guidance_does_not_stop():
+    different = _mk_supervisor(recent_errors=[STUCK_ERROR, STUCK_ERROR])
+    different.supervision_log = [
+        _prior_step("ValueError: could not convert string to float", pi_escalated=True),
+        SupervisorRecord(
+            step_number=2,
+            step_type="annotate_clusters",
+            timestamp=datetime(2026, 8, 7, 12, 0, 0),
+            pi_escalated=True,
+        ),
+    ]
+    result = await different.evaluate_step(_make_step(STUCK_ERROR, 5), [])
+    assert result.force_skip is False
+
+
+@pytest.mark.asyncio
+async def test_platform_fault_force_skips_immediately_with_failure_class():
+    sup = _mk_supervisor(recent_errors=[])
+    step = AnalysisStep(
+        step_number=1,
+        step_type="execute_code",
+        code="x = (v for v in values)",
+        code_error=(
+            "SyntaxError: Generator expression must be parenthesized "
+            "(_scai_expression_contract_call)"
+        ),
+    )
+    result = await sup.evaluate_step(step, [])
+    assert result.force_skip is True
+    assert result.failure_class == "platform_fault"
