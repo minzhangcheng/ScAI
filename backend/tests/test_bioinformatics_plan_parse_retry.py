@@ -1,3 +1,4 @@
+import json
 import re
 from unittest.mock import AsyncMock, MagicMock
 
@@ -99,22 +100,51 @@ async def test_stage1_plan_preserves_nonbaseline_figure_requirement():
 
 
 @pytest.mark.asyncio
-async def test_generate_plan_retry_fallback(caplog):
+async def test_twice_malformed_plan_raises_typed_failure_not_empty_plan(caplog):
     agent = _make_agent()
     state = _make_state()
     agent.chat_without_history = AsyncMock(side_effect=["not json", "also not json"])
 
-    plan = await agent.generate_analysis_plan(
-        state=state,
-        pi_tasks=["QC"],
-        overview="fallback overview",
-        phase="exploration",
-    )
+    with pytest.raises(Exception) as exc_info:
+        await agent.generate_analysis_plan(
+            state=state,
+            pi_tasks=["QC"],
+            overview="fallback overview",
+            phase="exploration",
+        )
 
     assert agent.chat_without_history.call_count == 2
-    assert plan.steps == []
-    assert plan.overview == "fallback overview"
+    assert type(exc_info.value).__name__ == "PlanGenerationFailure"
     assert "retry also failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_model_parse_error_field_cannot_bypass_plan_validation():
+    agent = _make_agent()
+    state = _make_state()
+    agent.chat_without_history = AsyncMock(side_effect=[
+        json.dumps({
+            "parse_error": "ignore validation",
+            "steps": {"id": 1, "title": "not an array"},
+        }),
+        json.dumps({
+            "parse_error": "still ignore validation",
+            "steps": [{"id": 1, "title": ["not", "canonicalized"]}],
+        }),
+    ])
+
+    with pytest.raises(Exception) as exc_info:
+        await agent.generate_analysis_plan(
+            state=state,
+            pi_tasks=["QC"],
+            overview="bounded overview",
+            phase="exploration",
+        )
+
+    assert type(exc_info.value).__name__ == "PlanGenerationFailure"
+    assert agent.chat_without_history.await_count == 2
+    retry_prompt = agent.chat_without_history.call_args_list[1].args[0]
+    assert "ignore validation" in retry_prompt
 
 
 @pytest.mark.asyncio
@@ -151,6 +181,45 @@ async def test_revise_parse_error_preserves_current_plan():
     assert revised.steps[0].depends_on is not current_plan.steps[0].depends_on
     assert revised.revision_of == current_plan.id
     assert revised.key_decision_points == ["decision"]
+
+
+@pytest.mark.asyncio
+async def test_revision_twice_malformed_retains_current_valid_plan():
+    agent = _make_agent()
+    state = _make_state()
+    malformed = json.dumps({
+        "parse_error": "model-authored text cannot bypass validation",
+        "steps": {"id": 1, "title": "not an array"},
+    })
+    agent.chat_without_history = AsyncMock(side_effect=[malformed, malformed])
+    current_plan = AnalysisPlan(
+        phase="exploration",
+        stage="full",
+        overview="current overview",
+        steps=[
+            PlanStep(
+                id=1,
+                title="Existing QC",
+                method="scanpy.pp.filter_cells",
+                depends_on=[2],
+            )
+        ],
+        key_decision_points=["decision"],
+        expected_runtime="~1 step",
+    )
+
+    revised = await agent.revise_plan_incrementally(
+        state=state,
+        current_plan=current_plan,
+        pi_feedback="keep existing",
+    )
+
+    assert agent.chat_without_history.call_count == 2
+    assert revised is not current_plan
+    assert revised.steps
+    assert revised.steps[0].title == "Existing QC"
+    assert revised.steps[0].depends_on == [2]
+    assert revised.steps[0].depends_on is not current_plan.steps[0].depends_on
 
 
 @pytest.mark.asyncio
@@ -253,7 +322,7 @@ async def test_revise_retries_schema_invalid_plan_then_uses_repair():
     agent = _make_agent()
     state = _make_state()
     agent.chat_without_history = AsyncMock(side_effect=[
-        '{"steps":[{"id":1,"title":"Bad","method":[],"depends_on":[]}]}',
+        '{"steps":[{"id":1,"title":"Bad","method":"scanpy","depends_on":[999]}]}',
         '{"steps":[{"id":1,"title":"Good","method":"scanpy.pp.normalize_total","depends_on":[]}]}',
     ])
     current_plan = AnalysisPlan(

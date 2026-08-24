@@ -7,6 +7,7 @@ import json
 import logging
 
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
+from ...utils.formatting import as_list, coerce_json_text
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -24,6 +25,29 @@ from .shared import (  # noqa: F401
     _format_database_priors_block,
     _build_default_bio_tasks,
 )
+
+
+_INSTRUCTION_LIST_FIELDS = (
+    "biochemistry_tasks",
+    "pathology_tasks",
+    "bioinformatics_tasks",
+    "literature_topics",
+    "recommended_future_experiments",
+)
+
+
+def _normalize_instruction_payload(value: Any) -> Dict[str, Any] | None:
+    """Normalize the container shape of one PI round-opening response."""
+    if not isinstance(value, dict) or "overview" not in value:
+        return None
+    normalized = dict(value)
+    normalized["overview"] = coerce_json_text(normalized.get("overview"))
+    for field in _INSTRUCTION_LIST_FIELDS:
+        normalized[field] = as_list(normalized.get(field))
+    for field in ("cluster_comparison_strategy", "merge_strategy"):
+        if field in normalized:
+            normalized[field] = coerce_json_text(normalized.get(field))
+    return normalized
 
 
 class InstructionsMixin:
@@ -88,8 +112,9 @@ Reply in JSON format as follows:
         result = self._safe_parse_json(response, default={})
 
         # If we got valid JSON with expected fields, return it
-        if result and "overview" in result:
-            return result
+        normalized = _normalize_instruction_payload(result)
+        if normalized is not None:
+            return normalized
 
         # Return default structure if parsing fails
         return {
@@ -185,8 +210,9 @@ Reply in JSON format:
         response = await self.chat(prompt, temperature=0.3)
         result = self._safe_parse_json(response, default={})
 
-        if result and "overview" in result:
-            return result
+        normalized = _normalize_instruction_payload(result)
+        if normalized is not None:
+            return normalized
 
         return {
             "overview": response or "Failed to generate exploration instructions",

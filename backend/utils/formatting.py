@@ -27,6 +27,25 @@ def as_list(value: Any) -> List[Any]:
     return [value]
 
 
+def coerce_json_text(value: Any, *, default: str = "") -> str:
+    """Preserve planner text while serializing structured values deterministically."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (dict, list, tuple)):
+        try:
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return str(value).strip()
+
+
 def fmt_tokens(n: int) -> str:
     """Format token count with K/M suffix."""
     if n >= 1_000_000:

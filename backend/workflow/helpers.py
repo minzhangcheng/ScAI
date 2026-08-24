@@ -303,6 +303,10 @@ def _dict_to_task_text(t: dict) -> str:
 def _normalize_tasks(tasks: list) -> List[str]:
     """Convert task items to strings — LLMs sometimes return dicts (or their repr) instead of plain strings."""
     result = []
+    if tasks is None:
+        return result
+    if isinstance(tasks, (str, dict)):
+        tasks = [tasks]
     for t in tasks:
         if isinstance(t, str):
             s = t.strip()

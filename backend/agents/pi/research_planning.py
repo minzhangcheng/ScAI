@@ -12,7 +12,7 @@ import logging
 logger = logging.getLogger(__name__)
 from ...models.schemas import AnalysisState, RoundResult, DATA_TYPE_SCRNASEQ
 from ...constants import PI_REVIEW_FALLBACK_DECISION
-from ...utils.formatting import render_plan_steps
+from ...utils.formatting import as_list, coerce_json_text, render_plan_steps
 
 from .shared import (  # noqa: F401
     _CONTROL_SIGNAL_RESULTS,
@@ -25,6 +25,15 @@ from .shared import (  # noqa: F401
     _bounded_brief_fallback,
     _format_database_priors_block,
     _build_default_bio_tasks,
+)
+from .planning_response import (
+    build_validated_final_plan,
+    normalize_data_needs,
+    normalize_plan_deviation_result,
+    normalize_plan_review_result,
+    normalize_supplementary_plan,
+    normalize_user_plan_feedback_result,
+    select_valid_plan_seed,
 )
 
 
@@ -127,16 +136,7 @@ IMPORTANT: Be specific in your feedback. Reference exact step IDs. If you approv
         response = await self.chat(prompt, temperature=0.2)
         result = self._safe_parse_json(response, default={})
         
-        if not result:
-            result = {
-                "decision": PI_REVIEW_FALLBACK_DECISION,
-                "feedback": "Plan needs review (fallback — PI response could not be parsed)",
-                "modifications": [],
-            }
-
-        result.setdefault("decision", PI_REVIEW_FALLBACK_DECISION)
-        result.setdefault("feedback", "")
-        result.setdefault("modifications", [])
+        result = normalize_plan_review_result(result)
         
         logger.info(f"[PI] Plan review decision: {result['decision']} (round {dialogue_round})")
         return result
@@ -228,56 +228,64 @@ Respond ONLY with JSON in this schema:
 }}"""
 
         response = await self.chat(prompt, temperature=0.2)
-        parsed = self._safe_parse_json(response, default={})
+        seed_plan = select_valid_plan_seed(
+            current_plan,
+            analysis_state.current_plan,
+            dialogue_history,
+        )
+        last_validation_error: Optional[Exception] = None
+        for attempt in range(2):
+            parsed = self._safe_parse_json(response, default={})
+            try:
+                plan = build_validated_final_plan(
+                    parsed,
+                    phase=phase,
+                    stage=stage,
+                    seed_plan=seed_plan,
+                    termination_reason=termination_reason,
+                )
+            except Exception as exc:
+                last_validation_error = exc
+                if attempt == 1:
+                    break
+                logger.warning(
+                    "[PI] Final plan failed schema validation; requesting one corrected response: %s",
+                    exc,
+                )
+                repair_prompt = f"""Your previous FINAL AnalysisPlan JSON failed
+schema validation. Correct the complete plan and return JSON only. Preserve all
+scientific content and change only fields needed to satisfy the schema.
 
-        steps: List[PlanStep] = []
-        if isinstance(parsed, dict):
-            for s in parsed.get("steps", []) or []:
-                if not isinstance(s, dict):
-                    continue
-                steps.append(PlanStep(
-                    id=s.get("id", len(steps) + 1),
-                    title=s.get("title", ""),
-                    method=s.get("method", ""),
-                    input=s.get("input", ""),
-                    expected_output=s.get("expected_output", ""),
-                    figure_requirements=s.get("figure_requirements", []) or [],
-                    allow_text_only=s.get("allow_text_only", False),
-                    text_only_reason=s.get("text_only_reason", ""),
-                    rationale=s.get("rationale", ""),
-                    depends_on=s.get("depends_on", []) or [],
-                ))
+Validation error:
+{str(exc)[:4000]}
 
-        if not steps:
-            raise RuntimeError(
-                "PI failed to generate a final plan from dialogue (no parseable steps)"
+Remember: ``platform_baseline`` must be exactly ``\"\"``, ``\"annotation\"``,
+``\"batch\"``, ``\"cluster\"``, or ``\"markers\"``. It is not a figure type."""
+                response = await self.chat(repair_prompt, temperature=0.2)
+                continue
+
+            logger.info(
+                "[PI] Generated final plan unilaterally from dialogue: %s steps, phase=%s, stage=%s",
+                len(plan.steps), phase, stage,
             )
+            return plan
 
-        overview = ""
-        decision_points: List[str] = []
-        expected_runtime = f"~{len(steps)} steps"
-        if isinstance(parsed, dict):
-            overview = parsed.get("overview", "") or ""
-            decision_points = parsed.get("key_decision_points", []) or []
-            expected_runtime = parsed.get("expected_runtime", expected_runtime) or expected_runtime
+        if seed_plan is not None and seed_plan.steps and seed_plan.status != "rejected":
+            fallback = seed_plan.model_copy(deep=True)
+            fallback.status = "pi_reviewing"
+            fallback.revision_reason = (
+                f"{termination_reason} — PI finalization fallback retained the "
+                "last valid plan after two schema-invalid responses"
+            )
+            return fallback
 
-        plan = AnalysisPlan(
+        from ..bioinformatics.planning import PlanGenerationFailure
+
+        raise PlanGenerationFailure(
+            "PI failed to generate a schema-valid final plan after one repair attempt",
             phase=phase,
             stage=stage,
-            overview=overview,
-            steps=steps,
-            key_decision_points=decision_points,
-            expected_runtime=expected_runtime,
-            status="pi_reviewing",
-            revision_of=(analysis_state.current_plan.id
-                         if analysis_state.current_plan else None),
-            revision_reason=f"{termination_reason} — PI finalized unilaterally",
-        )
-        logger.info(
-            f"[PI] Generated final plan unilaterally from dialogue: "
-            f"{len(steps)} steps, phase={phase}, stage={stage}"
-        )
-        return plan
+        ) from last_validation_error
 
     async def process_user_plan_feedback(
         self,
@@ -344,12 +352,10 @@ Respond in JSON:
                 "clarification_question": "",
             }
         
-        result.setdefault("intent", "confirm")
-        result.setdefault("action", "proceed_to_execution")
-        result.setdefault("guidance_for_bioinfo", "")
-        result.setdefault("clarification_question", "")
-        
-        return result
+        return normalize_user_plan_feedback_result(
+            result,
+            user_input=user_input,
+        )
 
     async def judge_plan_deviation(
         self,
@@ -410,15 +416,7 @@ Respond in JSON:
         response = await self.chat(prompt, temperature=0.1)
         result = self._safe_parse_json(response, default={})
         
-        if not result:
-            result = {}
-        
-        result.setdefault("severity", "minor")
-        result.setdefault("reasoning", "Unable to classify (fallback)")
-        result.setdefault("suggested_action", "Proceed with best judgment")
-        result.setdefault("needs_user_popup", False)
-        
-        return result
+        return normalize_plan_deviation_result(result)
 
     async def plan_supplementary_analysis(
         self, state: AnalysisState, user_request: str, context: str
@@ -497,9 +495,15 @@ so prioritize speed - plan only the minimum necessary analysis."""
                 "literature_topics": [],
                 "summary": user_request,
             }
-
-        logger.info(f"[PI] Supplementary analysis plan: {plan.get('summary', '')[:100]}")
-        return plan
+        normalized_plan = normalize_supplementary_plan(
+            plan,
+            user_request=user_request,
+        )
+        logger.info(
+            "[PI] Supplementary analysis plan: %s",
+            normalized_plan["summary"][:100],
+        )
+        return normalized_plan
 
     async def plan_agent_tasks(
         self,
@@ -724,11 +728,7 @@ If no additional data is needed, return empty lists.
         # Use base class safe JSON parser
         data = self._safe_parse_json(response, default={})
 
-        return {
-            "pathology": data.get("pathology", []),
-            "biochemistry": data.get("biochemistry", []),
-            "other": data.get("other", [])
-        }
+        return normalize_data_needs(data)
 
     async def plan_bioinformatics_workflow(
         self,

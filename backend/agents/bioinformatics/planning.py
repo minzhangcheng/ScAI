@@ -35,6 +35,8 @@ from backend.services import ora_kernel
 from backend.services.marker_priors import MarkerDB, summarize_database_priors
 
 from ...utils.formatting import (
+    as_list,
+    coerce_json_text,
     format_revision_history,
     render_plan_steps,
     truncate_for_llm,
@@ -216,6 +218,70 @@ from .shared import (  # noqa: F401
 )
 
 
+class PlanGenerationFailure(RuntimeError):
+    """Bounded, typed signal that a planner produced no executable plan."""
+
+    def __init__(self, detail: str, *, phase: str = "", stage: str = "full"):
+        self.detail = str(detail or "missing or invalid steps")
+        self.phase = str(phase)
+        self.stage = str(stage)
+        super().__init__(
+            "Bioinformatics plan generation produced no executable steps after "
+            f"the bounded JSON repair attempt (phase={self.phase}, "
+            f"stage={self.stage}): {self.detail}"
+        )
+
+
+def _normalize_plan_boundary(value: Any) -> dict:
+    """Normalize model-shaped planner fields before schema validation."""
+    if not isinstance(value, dict):
+        return {
+            "steps": [],
+            "parse_error": "Invalid plan schema: response must be a JSON object",
+        }
+    data = dict(value)
+    if "parse_error" in data:
+        return data
+    if "overview" in data:
+        data["overview"] = coerce_json_text(data.get("overview"))
+    if "expected_runtime" in data:
+        data["expected_runtime"] = coerce_json_text(data.get("expected_runtime"))
+    if "key_decision_points" in data:
+        raw_points = as_list(data.get("key_decision_points"))
+        data["key_decision_points"] = [
+            coerce_json_text(item) for item in raw_points if coerce_json_text(item)
+        ]
+    raw_steps = data.get("steps")
+    if isinstance(raw_steps, dict):
+        raw_steps = [raw_steps]
+    if not isinstance(raw_steps, list):
+        data["steps"] = []
+        data["parse_error"] = "Invalid plan schema: steps must be a JSON array"
+        return data
+    normalized_steps = []
+    for raw_step in raw_steps:
+        if not isinstance(raw_step, dict):
+            normalized_steps.append(raw_step)
+            continue
+        step = dict(raw_step)
+        for field in (
+            "title",
+            "method",
+            "input",
+            "expected_output",
+            "rationale",
+            "text_only_reason",
+        ):
+            step[field] = coerce_json_text(step.get(field))
+        step["depends_on"] = as_list(step.get("depends_on"))
+        step["figure_requirements"] = as_list(step.get("figure_requirements"))
+        if not isinstance(step.get("allow_text_only"), bool):
+            step["allow_text_only"] = False
+        normalized_steps.append(step)
+    data["steps"] = normalized_steps
+    return data
+
+
 class PlanningMixin:
     """Analysis-plan generation, incremental revision, and checkpoint discovery."""
 
@@ -224,6 +290,7 @@ class PlanningMixin:
         plan_data: dict,
         *,
         reserved_step_ids: Optional[set[int]] = None,
+        require_complete_steps: bool = False,
     ) -> dict:
         """Normalize LLM plan identifiers and validate every step.
 
@@ -237,12 +304,29 @@ class PlanningMixin:
         """
         from ...models.schemas import PlanStep
 
-        if not isinstance(plan_data, dict) or "parse_error" in plan_data:
-            return plan_data
+        plan_data = _normalize_plan_boundary(plan_data)
+        if not isinstance(plan_data, dict):
+            return {
+                "steps": [],
+                "parse_error": "Invalid plan schema: response must be a JSON object",
+            }
+        if "parse_error" in plan_data:
+            return {
+                **plan_data,
+                "steps": [],
+                "parse_error": (
+                    "Invalid plan schema: parse_error is reserved for host parsing; "
+                    f"model signal: {plan_data.get('parse_error')}"
+                ),
+            }
 
         raw_steps = plan_data.get("steps")
         if not isinstance(raw_steps, list) or not raw_steps:
-            return plan_data
+            return {
+                **plan_data,
+                "steps": [],
+                "parse_error": "Invalid plan schema: steps must be a non-empty JSON array",
+            }
 
         reserved = set(reserved_step_ids or set())
         used_ids: set[int] = set()
@@ -356,21 +440,31 @@ class PlanningMixin:
         warn_on_double_failure: bool = True,
         caller_name: str = "",
         reserved_step_ids: Optional[set[int]] = None,
+        require_complete_steps: bool = False,
     ) -> dict:
         """Normalize and validate a plan, retrying one malformed response."""
         plan_data = self._prepare_plan_data(
             plan_data,
             reserved_step_ids=reserved_step_ids,
+            require_complete_steps=require_complete_steps,
         )
+        if not isinstance(plan_data, dict):
+            plan_data = {
+                "steps": [],
+                "parse_error": "Invalid plan schema: normalizer returned a non-object",
+            }
         if "parse_error" not in plan_data and plan_data.get("steps"):
             return plan_data
 
+        validation_error = str(plan_data.get("parse_error") or "")[:4000]
         retry_prompt = (
             prompt
             + f"\n\nIMPORTANT: Use valid JSON only. Numeric fields must be numbers, "
             f"e.g. \"id\": 1 and \"depends_on\": [1, 2]. "
             f"Do not add stray quotes after numbers. "
-            f"Double-check JSON syntax before responding.\n[retry:{uuid.uuid4().hex[:8]}]"
+            f"Double-check JSON syntax before responding. "
+            f"Validation error to correct: {validation_error or 'missing or invalid steps'}"
+            f"\n[retry:{uuid.uuid4().hex[:8]}]"
         )
         # The retry prompt contains the complete original request, so it must not
         # inherit unrelated planning/validation turns from BaseAgent history.
@@ -379,7 +473,13 @@ class PlanningMixin:
         data2 = self._prepare_plan_data(
             data2,
             reserved_step_ids=reserved_step_ids,
+            require_complete_steps=require_complete_steps,
         )
+        if not isinstance(data2, dict):
+            data2 = {
+                "steps": [],
+                "parse_error": "Invalid plan schema: normalizer returned a non-object",
+            }
         if "parse_error" not in data2 and data2.get("steps"):
             return data2
 
@@ -556,6 +656,13 @@ Return the plan as a JSON object:
 
         plan_data = await self._retry_on_parse_failure(prompt, plan_data, warn_on_double_failure=True, caller_name="generate_analysis_plan")
 
+        if plan_data.get("parse_error") or not plan_data.get("steps"):
+            raise PlanGenerationFailure(
+                str(plan_data.get("parse_error") or "response contained no executable steps"),
+                phase=phase,
+                stage=planning_stage,
+            )
+
         steps = []
         for s in plan_data.get("steps", []):
             steps.append(PlanStep(
@@ -574,10 +681,12 @@ Return the plan as a JSON object:
         plan = AnalysisPlan(
             phase=phase,
             stage=planning_stage,
-            overview=plan_data.get("overview", overview),
+            overview=plan_data.get("overview") or overview,
             steps=steps,
-            key_decision_points=plan_data.get("key_decision_points", []),
-            expected_runtime=plan_data.get("expected_runtime", f"~{len(steps)} steps"),
+            key_decision_points=plan_data.get("key_decision_points") or [],
+            expected_runtime=(
+                plan_data.get("expected_runtime") or f"~{len(steps)} steps"
+            ),
             status="draft",
             revision_of=existing_plan.id if existing_plan else None,
         )
@@ -736,6 +845,7 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
             warn_on_double_failure=False,
             caller_name="revise_plan_incrementally",
             reserved_step_ids=set(completed_step_ids),
+            require_complete_steps=True,
         )
 
         steps = []
@@ -791,10 +901,14 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
         revised_plan = AnalysisPlan(
             phase=current_plan.phase,
             stage=current_plan.stage,
-            overview=plan_data.get("overview", current_plan.overview),
+            overview=plan_data.get("overview") or current_plan.overview,
             steps=steps,
-            key_decision_points=plan_data.get("key_decision_points", current_plan.key_decision_points),
-            expected_runtime=plan_data.get("expected_runtime", current_plan.expected_runtime),
+            key_decision_points=(
+                plan_data.get("key_decision_points") or current_plan.key_decision_points
+            ),
+            expected_runtime=(
+                plan_data.get("expected_runtime") or current_plan.expected_runtime
+            ),
             status="draft",
             revision_of=current_plan.id,
             revision_reason=pi_feedback[:500],

@@ -10,6 +10,7 @@ import logging
 logger = logging.getLogger(__name__)
 from ...models.schemas import AnalysisState
 from ...constants import STOP_KEYWORDS
+from ...utils.formatting import as_list, coerce_json_text
 
 from .shared import (  # noqa: F401
     _CONTROL_SIGNAL_RESULTS,
@@ -23,6 +24,38 @@ from .shared import (  # noqa: F401
     _format_database_priors_block,
     _build_default_bio_tasks,
 )
+
+
+_ADJUSTED_INSTRUCTION_FIELDS = (
+    "pathology_tasks",
+    "bioinformatics_tasks",
+    "biochemistry_tasks",
+    "literature_topics",
+)
+
+
+def _normalize_adjusted_instructions(value: Any) -> Dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    normalized = dict(value)
+    for field in _ADJUSTED_INSTRUCTION_FIELDS:
+        normalized[field] = as_list(normalized.get(field))
+    if "overview" in normalized:
+        normalized["overview"] = coerce_json_text(normalized.get("overview"))
+    return normalized
+
+
+def _normalize_file_assignments(value: Any) -> Dict[str, List[Dict[str, Any]]]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: Dict[str, List[Dict[str, Any]]] = {}
+    for key, items in value.items():
+        assignments = [
+            dict(item) for item in as_list(items) if isinstance(item, dict)
+        ]
+        if assignments:
+            normalized[str(key)] = assignments
+    return normalized
 
 
 class InteractionMixin:
@@ -95,13 +128,16 @@ If adjusting direction, provide specific and actionable tasks.
 
         if data and "interpretation" in data:
             return {
-                "interpretation": data.get("interpretation", ""),
-                "response": data.get("response", "Acknowledged. Adjusting analysis direction."),
-                "should_stop": data.get("should_stop", False),
-                "reason": data.get("reason", ""),
-                "adjusted_instructions": data.get("adjusted_instructions"),
-                "focus_areas": data.get("focus_areas", []),
-                "deprioritize": data.get("deprioritize", [])
+                "interpretation": coerce_json_text(data.get("interpretation")),
+                "response": coerce_json_text(data.get("response"))
+                or "Acknowledged. Adjusting analysis direction.",
+                "should_stop": data.get("should_stop") is True,
+                "reason": coerce_json_text(data.get("reason")),
+                "adjusted_instructions": _normalize_adjusted_instructions(
+                    data.get("adjusted_instructions")
+                ),
+                "focus_areas": as_list(data.get("focus_areas")),
+                "deprioritize": as_list(data.get("deprioritize")),
             }
         else:
             logger.warning(f"[PI] No valid JSON found in response, using fallback parsing. Response: {response[:200] if response else 'None'}...")
@@ -246,13 +282,21 @@ Note: Extract biochemistry values from user message if they mention specific num
 
         if data and "action" in data:
             return {
-                "action": data.get("action", "continue"),
-                "response": data.get("response", "Acknowledged"),
-                "file_assignments": data.get("file_assignments", {}),
-                "biochemistry_values": data.get("biochemistry_values", {}),
-                "adjusted_instructions": data.get("adjusted_instructions"),
-                "focus_areas": data.get("focus_areas", []),
-                "reason": data.get("reason", "")
+                "action": coerce_json_text(data.get("action")) or "continue",
+                "response": coerce_json_text(data.get("response")) or "Acknowledged",
+                "file_assignments": _normalize_file_assignments(
+                    data.get("file_assignments")
+                ),
+                "biochemistry_values": (
+                    dict(data["biochemistry_values"])
+                    if isinstance(data.get("biochemistry_values"), dict)
+                    else {}
+                ),
+                "adjusted_instructions": _normalize_adjusted_instructions(
+                    data.get("adjusted_instructions")
+                ),
+                "focus_areas": as_list(data.get("focus_areas")),
+                "reason": coerce_json_text(data.get("reason")),
             }
         
         # Fallback: check for stop keywords (English + Chinese)

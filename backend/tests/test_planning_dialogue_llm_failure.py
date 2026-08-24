@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from backend.utils.llm_client import UpstreamExhaustedError
 from backend.constants import LlmFailureAction
 from backend.models.schemas import AnalysisState, AnalysisPlan, PlanStep, TaskStatus
+from backend.agents.bioinformatics import planning as bioinformatics_planning
 
 
 def _make_workflow():
@@ -44,6 +45,39 @@ def _make_state(analysis_state=None, pi_instructions=None, planning_stage="full"
         "pi_instructions": pi_instructions,
         "planning_stage": planning_stage,
     }
+
+
+@pytest.mark.asyncio
+async def test_typed_plan_generation_failure_terminates_without_review_loop():
+    """A bounded planner failure is consumed once and stops planning."""
+    failure_type = getattr(bioinformatics_planning, "PlanGenerationFailure", None)
+    assert failure_type is not None, "A3 requires a typed plan-generation failure"
+
+    wf = _make_workflow()
+    analysis_state = AnalysisState(user_id="test")
+    analysis_state.current_plan = None
+    analysis_state.analysis_phase = MagicMock()
+    analysis_state.analysis_phase.value = "exploration"
+
+    failure = failure_type(
+        "no executable steps after the bounded JSON repair attempt",
+        phase="exploration",
+        stage="full",
+    )
+    wf.bioinformatics_agent = MagicMock()
+    wf.bioinformatics_agent.generate_analysis_plan = AsyncMock(side_effect=failure)
+    wf.pi_agent = MagicMock()
+    wf.pi_agent.review_bioinfo_plan = AsyncMock()
+
+    result = await wf._planning_dialogue(_make_state(analysis_state=analysis_state))
+
+    assert wf.bioinformatics_agent.generate_analysis_plan.await_count == 1
+    wf.pi_agent.review_bioinfo_plan.assert_not_awaited()
+    assert result["failed_node"] == "planning_dialogue"
+    assert result["planning_result"]["status"] == "failed"
+    assert "no executable steps" in result["planning_result"]["error"]
+    assert result["should_continue"] is False
+    assert analysis_state.status == TaskStatus.FAILED
 
 
 class TestPlanningDialogueBioinfoFailure:

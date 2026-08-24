@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.39.29 · **Last updated**: 2026-08-24
+**Version**: 0.39.30 · **Last updated**: 2026-08-24
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,7 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.39.x — (2026-08-04 onward)**
 
+- `0.39.30` — A3 model-output shape and bounded planning tolerance: closed renderer aliases, shared scalar/mapping/list/null normalization, reserved parser-sentinel handling, one bounded schema repair, typed plan-generation failure, and last-valid-seed fallback without new planning routes or gates. The frozen backend-full checkpoint recorded `5737 collected / 5564 passed / 79 failed / 94 skipped` at `test-results/20260824T053052Z-3938286/evidence.json`; all 79 failures match the accepted A2 baseline, leaving no A3 failed-node delta. Frontend, client, and kernel were not run.
 - `0.39.29` — A2 bounded agent work and failure handling: bounded PubMed work and cache reuse, explicit biochemistry image states, typed tool-protocol failures, advisory cycle repair, normalized supervisor evaluation, domain-neutral API guidance, and complete upload inventory propagation. The frozen backend-full checkpoint recorded `5721 collected / 5542 passed / 85 failed / 94 skipped` at `test-results/20260824T045007Z-3795021/evidence.json`; all six A2/A1 post-freeze deltas were closed by the directed `6/6` pass at `test-results/20260824T045806Z-3820716/evidence.json`, leaving 79 unrelated baseline failures and no accepted failed-node delta from A1. Frontend, client, and kernel were not run.
 - `0.39.28` — A1 provider and chat-runtime reliability: modality-scoped protocol decisions, request-scoped retry and parameter negotiation, exact tool recovery, credential/proxy isolation, safe active-provider rotation, and exact chat-runtime ownership with failed-start preservation. The frozen backend-full checkpoint recorded `5697 collected / 5519 passed / 84 failed / 94 skipped` at `test-results/20260824T034219Z-3560690/evidence.json`; its five new failures were closed by the directed `5/5` pass at `test-results/20260824T035219Z-3602184/evidence.json`, leaving no accepted failed-node delta from P4. Frontend, client, and kernel were not run.
 - `0.39.27` — P4 unified Python client and `scai` CLI: one escaped endpoint registry, strict ordered placeholder binding with post-upload verification, separately callable create/upload/start operations, `max_rounds` configuration round-trip, retained-route commands, and open-time mode-`0600` credentials with non-persistent JWT printing. Accepted checkpoints: backend-full `5679 collected / 5506 passed / 79 failed / 94 skipped` at `test-results/20260824T023736Z-3313353/evidence.json`, with no new failed-node delta from the accepted P3 baseline, plus client `40/40` at `test-results/20260824T023736Z-3313376/evidence.json`; the 79 unrelated backend failures remain baseline.

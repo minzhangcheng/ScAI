@@ -92,6 +92,11 @@ class TestGetTaskText:
 
 
 class TestNormalizeTasks:
+    def test_scalar_and_null_collections(self):
+        assert _normalize_tasks("Run QC") == ["Run QC"]
+        assert _normalize_tasks({"task": "Run QC"}) == ["Run QC"]
+        assert _normalize_tasks(None) == []
+
     def test_list_of_strings_passthrough(self):
         assert _normalize_tasks(["a", "b"]) == ["a", "b"]
 

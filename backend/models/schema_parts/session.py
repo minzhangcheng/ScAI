@@ -3,7 +3,14 @@
 """
 Data models for the Multi-Agent Single-Cell Analysis System
 """
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 import uuid
@@ -193,6 +200,20 @@ class FigureRequirement(BaseModel):
     # autonomous executor owns the deliverable. The closed keys prevent a loose
     # word such as "cluster" from misclassifying subclustering/comparison plots.
     platform_baseline: Literal["", "annotation", "batch", "cluster", "markers"] = ""
+
+    @field_validator("platform_baseline", mode="before")
+    @classmethod
+    def _canonicalize_platform_baseline(cls, value):
+        """Accept only the documented renderer aliases before Literal validation."""
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip().casefold()
+        return {
+            "annotation_overview": "annotation",
+            "batch_overview": "batch",
+            "cluster_overview": "cluster",
+            "marker_overview": "markers",
+        }.get(normalized, normalized)
 
 
 class PlanStep(BaseModel):
