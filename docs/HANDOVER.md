@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.39.35 · **Last updated**: 2026-08-24
+**Version**: 0.39.36 · **Last updated**: 2026-08-24
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,7 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.39.x — (2026-08-04 onward)**
 
+- `0.39.36` — Production Docker contexts exclude repository-local `test-results/`, preventing ignored test evidence, isolated npm installations, and caches from being copied into `/app` or traversed by the historical recursive ownership layer. A static regression pins the exclusion rule.
 - `0.39.35` — Restored production frontend builds by keeping the reconnect ownership predicate in scope for both the reload path and its error handler, and by giving the deferred fetch mock the browser fetch signature. The affected WebSocket suite passed `10/10`, the complete frontend suite passed `347/347` in 55 files, and `tsc && vite build` completed in an isolated Node 20.19.2 container. Backend, Python client, and kernel suites were not run because the repair is frontend-only.
 - `0.39.34` — Final gate-rebaseline closure: tracker-known disposable globals are reclaimed once under namespace pressure without deleting required, canonical, or AnnData state; current Python-client documentation now matches the application-following version contract. Frozen source digest `dc92142cbc5c9f48a72b3ef9c89e4d75a5659a35ae6da9fa44a460ebe974fd54` produced complete collection `5790`, backend-full `5750 collected / 5577 passed / 79 failed / 94 skipped`, frontend `347/347` in 145 suites, client `40/40`, and kernel `282 collected / 252 passed / 28 failed / 2 errors`. Backend and kernel failed/error node sets exactly match their accepted X2 and S4 baselines, so both deltas are zero. Evidence: `test-results/20260824T080624Z-292980/evidence.json`, `test-results/20260824T080702Z-297474/evidence.json`, `test-results/20260824T081338Z-b4ed00a8e28b-frontend/evidence.json`, `test-results/20260824T081422Z-326045/evidence.json`, and `test-results/20260824T081447Z-329867/evidence.json`.
 - `0.39.33` — X3 independent frontend UX: persisted accessible sidebar resizing/collapse, server-authoritative startup session selection, selector-level New Analysis, unified PNG branding, and browser-authoritative system theme with light publication canvases. The frozen frontend checkpoint passed `347/347` in 145 suites at `test-results/20260824T073521Z-390604d21782-frontend/evidence.json`. The production build retained three pre-existing TypeScript errors in unchanged `useWebSocket` source/tests; backend-full, client, and kernel were not run.

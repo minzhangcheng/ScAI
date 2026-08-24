@@ -97,6 +97,16 @@ def test_backend_data_is_excluded_from_the_docker_build_context():
     assert "backend/data/gene_sets/" in text
 
 
+def test_generated_test_results_are_excluded_from_the_docker_build_context():
+    """Local test evidence must never be copied into production images."""
+    lines = {
+        line.strip()
+        for line in (_REPO / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert "test-results/" in lines
+
+
 def test_gene_set_cache_is_also_outside_the_code_tree():
     """Same class of bug: a downloaded GMT under backend/data/ ships in the image."""
     from backend.config import DATA_BASE_DIR
