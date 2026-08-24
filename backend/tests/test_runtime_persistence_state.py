@@ -531,6 +531,139 @@ async def test_preflight_budget_blocks_before_kernel_serialization(tmp_path):
     assert blocked.value.violations[0].limit == budgets["max_rss_bytes"]
 
 
+@pytest.mark.asyncio
+async def test_namespace_preflight_reclaims_only_confirmed_disposable_globals_once(
+    tmp_path,
+):
+    """Namespace pressure may reclaim confirmed scratch, never required state."""
+    import ast
+    import io
+    import re
+    from contextlib import redirect_stdout
+    from types import SimpleNamespace
+
+    from backend.services.snapshot_v2.runtime_registry import RuntimeDependencyTracker
+    from backend.utils.runtime_budget import RuntimeBudgetExceeded
+
+    budgets = {
+        "max_namespace_count": 3,
+        "max_single_object_bytes": 1024,
+        "max_anndata_total_bytes": 1024,
+        "max_rss_bytes": 1024,
+        "max_pkl_bytes": 1024,
+        "max_save_seconds": 30,
+    }
+
+    class _Notebook:
+        session_path = tmp_path / "namespace-pressure.pkl"
+        state_path = tmp_path / "namespace-pressure.json"
+        runtime_persistence = {"commit_source": None, "saved_revision": 0}
+
+        def __init__(self):
+            self.updates = []
+
+        def has_session_dump(self):
+            return False
+
+        def update_runtime_persistence(self, status, **kwargs):
+            self.updates.append((status, kwargs))
+
+    sandbox = object.__new__(LocalJupyterSandbox)
+    sandbox.session_id = "namespace-pressure"
+    sandbox.runtime_revision = 1
+    sandbox.saved_runtime_revision = 0
+    sandbox.runtime_budgets = budgets
+    sandbox._expected_lifecycle_generation = 0
+    sandbox._session_restore_failed = False
+    sandbox._exec_lock = asyncio.Lock()
+    sandbox.notebook_state = _Notebook()
+    sandbox._known_user_globals = {
+        "declared_output",
+        "cross_cell",
+        "results",
+        "adata_with_arbitrary_name",
+        "scratch",
+    }
+    sandbox.runtime_dependency_tracker = RuntimeDependencyTracker()
+    sandbox.runtime_dependency_tracker.record_execution(
+        created=set(sandbox._known_user_globals) | {"unconfirmed_scratch"},
+        loaded={"cross_cell"},
+        declared={"declared_output"},
+    )
+    class AnnData:
+        __module__ = "anndata"
+
+    namespace = {name: object() for name in sandbox._known_user_globals}
+    namespace["adata_with_arbitrary_name"] = AnnData()
+    metric_calls = 0
+    prune_calls = []
+
+    async def _runtime_resource_metrics():
+        nonlocal metric_calls
+        metric_calls += 1
+        return {
+            "namespace_count": 10,
+            "largest_object_bytes": 1,
+            "anndata_total_bytes": 1,
+            "rss_bytes": 1,
+            "backed_anndata_total_bytes": 0,
+            "projected_materialized_rss_bytes": 1,
+            "top_offenders": [{
+                "name": "adata_with_arbitrary_name",
+                "type": "AnnData",
+                "bytes": 1,
+            }],
+        }
+
+    async def _execute_unlocked(code, **_kwargs):
+        match = re.search(r"_scai_prune_candidates = (\[.*?\])", code)
+        if match:
+            candidates = ast.literal_eval(match.group(1))
+            prune_calls.append(candidates)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                exec(code, namespace)
+            return SimpleNamespace(
+                success=True,
+                output=output.getvalue(),
+            )
+        raise AssertionError("namespace pressure must fail before serialization")
+
+    sandbox._runtime_resource_metrics = _runtime_resource_metrics
+    sandbox._execute_unlocked = _execute_unlocked
+
+    with pytest.raises(RuntimeBudgetExceeded):
+        await LocalJupyterSandbox.save_session(sandbox)
+
+    assert metric_calls == 2
+    assert len(prune_calls) == 1
+    assert set(prune_calls[0]) == {
+        "adata_with_arbitrary_name",
+        "scratch",
+        "unconfirmed_scratch",
+    }
+    assert {name for name in namespace if not name.startswith("_")} == {
+        "declared_output",
+        "cross_cell",
+        "results",
+        "adata_with_arbitrary_name",
+    }
+    assert sandbox.runtime_dependency_tracker.required_outputs == {
+        "declared_output",
+        "cross_cell",
+    }
+    assert sandbox.runtime_dependency_tracker.created_outputs == {
+        "declared_output",
+        "cross_cell",
+        "results",
+        "adata_with_arbitrary_name",
+        "unconfirmed_scratch",
+    }
+    assert sandbox._known_user_globals == {
+        name for name in namespace if not name.startswith("_")
+    }
+
+
 def test_metadata_never_reports_stale_pkl_as_current(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "backend.utils.sandbox_parts.shared._integrity_dir",

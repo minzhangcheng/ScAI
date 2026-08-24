@@ -1,6 +1,6 @@
 # scai-client
 
-`scai-client` is the synchronous Python SDK for submitting and managing ScAI batch analyses. The client package has its own release version (`0.2.0`), independent of the ScAI application version.
+`scai-client` is the synchronous Python SDK for submitting and managing ScAI batch analyses. The client package version follows the ScAI application release.
 
 ## Requirements and Installation
 

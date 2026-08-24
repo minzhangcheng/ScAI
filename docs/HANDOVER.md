@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.39.33 · **Last updated**: 2026-08-24
+**Version**: 0.39.34 · **Last updated**: 2026-08-24
 
 ## 1. Runtime Architecture
 
@@ -329,7 +329,7 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 
 ## 12. Python Client SDK (`clients/python/`)
 
-`scai_client` provides a `Client` and job-oriented batch API for submitting analysis configurations, waiting for completion, and downloading exports. Its package version is independent of the ScAI application version. See the [Python client README](../clients/python/README.md) for the authoritative API and examples.
+`scai_client` provides a `Client` and job-oriented batch API for submitting analysis configurations, waiting for completion, and downloading exports. Its package version follows the ScAI application release. See the [Python client README](../clients/python/README.md) for the authoritative API and examples.
 
 ## 13. Version History (condensed)
 
@@ -337,6 +337,7 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.39.x — (2026-08-04 onward)**
 
+- `0.39.34` — Final gate-rebaseline closure: tracker-known disposable globals are reclaimed once under namespace pressure without deleting required, canonical, or AnnData state; current Python-client documentation now matches the application-following version contract. Frozen source digest `dc92142cbc5c9f48a72b3ef9c89e4d75a5659a35ae6da9fa44a460ebe974fd54` produced complete collection `5790`, backend-full `5750 collected / 5577 passed / 79 failed / 94 skipped`, frontend `347/347` in 145 suites, client `40/40`, and kernel `282 collected / 252 passed / 28 failed / 2 errors`. Backend and kernel failed/error node sets exactly match their accepted X2 and S4 baselines, so both deltas are zero. Evidence: `test-results/20260824T080624Z-292980/evidence.json`, `test-results/20260824T080702Z-297474/evidence.json`, `test-results/20260824T081338Z-b4ed00a8e28b-frontend/evidence.json`, `test-results/20260824T081422Z-326045/evidence.json`, and `test-results/20260824T081447Z-329867/evidence.json`.
 - `0.39.33` — X3 independent frontend UX: persisted accessible sidebar resizing/collapse, server-authoritative startup session selection, selector-level New Analysis, unified PNG branding, and browser-authoritative system theme with light publication canvases. The frozen frontend checkpoint passed `347/347` in 145 suites at `test-results/20260824T073521Z-390604d21782-frontend/evidence.json`. The production build retained three pre-existing TypeScript errors in unchanged `useWebSocket` source/tests; backend-full, client, and kernel were not run.
 - `0.39.32` — X2 cache telemetry and stable prompt prefixes: Chat Completions, Responses and Anthropic cache metrics now distinguish absent/null/default values from explicit zero, Anthropic input accounting includes cache creation/read tokens, and figure revision keeps invariant instructions ahead of variable context without changing request behavior. The frozen backend-full checkpoint recorded `5749 collected / 5576 passed / 79 failed / 94 skipped` at `test-results/20260824T063715Z-20266/evidence.json`, with no failed-node delta from X1. Frontend, client, and kernel were not run.
 - `0.39.31` — X1 pathology coverage observation and disclosure: bounded per-image tile coverage and diagnostics now cross round state, persistence/API, WebSocket summaries, report prompts and rendered limitations, while reload preserves the wire record and scalar review instructions remain bounded. The frozen backend-full checkpoint recorded `5745 collected / 5572 passed / 79 failed / 94 skipped` at `test-results/20260824T061118Z-4105133/evidence.json`, with no failed-node delta from A3; the frozen frontend checkpoint passed `333/333` at `test-results/20260824T061105Z-547d3b54c048-frontend/evidence.json`. Client and kernel were not run.

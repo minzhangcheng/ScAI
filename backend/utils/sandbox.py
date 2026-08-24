@@ -746,6 +746,23 @@ except Exception as e:
                 preflight_violations = evaluate_runtime_budget(
                     resource_metrics, budgets
                 )
+                if any(
+                    violation.resource == "namespace_count"
+                    for violation in preflight_violations
+                ):
+                    pruned = await self.prune_unrequired_runtime_globals()
+                    if pruned:
+                        logger.warning(
+                            "[%s] Pruned %d unconsumed scratch global(s) after "
+                            "runtime namespace pressure: %s",
+                            self.session_id,
+                            len(pruned),
+                            ", ".join(pruned[:20]),
+                        )
+                    resource_metrics = await self._runtime_resource_metrics()
+                    preflight_violations = evaluate_runtime_budget(
+                        resource_metrics, budgets
+                    )
                 if preflight_violations:
                     _record_budget_failure(
                         preflight_violations,

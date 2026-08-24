@@ -265,8 +265,8 @@ The release helper always builds both the selected tag and `latest`:
 ```
 
 ```bash
-./build.sh --version 0.39.33
-./build.sh --version 0.39.33 --push
+./build.sh --version 0.39.34
+./build.sh --version 0.39.34 --push
 ```
 
 Without `--version`, the helper uses the newest Git tag returned by `git describe --tags --abbrev=0`, or `latest` if none exists. `--push` pushes both tags to `ghcr.io/minzhangcheng/scai`; authenticate Docker to that registry before using it. The helper does not accept registry, image-name, platform, or build-argument flags.
@@ -526,7 +526,7 @@ Monitor free disk and inode capacity on the data, dependency, and temporary-uplo
 
 ## 11. Python client installation and authentication
 
-`scai-client` version `0.2.0` requires Python `>=3.10` and `httpx>=0.26.0`. Install from the repository checkout:
+The `scai-client` version follows the ScAI application release; it requires Python `>=3.10` and `httpx>=0.26.0`. Install from the repository checkout:
 
 ```bash
 python3 -m pip install ./clients/python

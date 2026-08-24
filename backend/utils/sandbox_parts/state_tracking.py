@@ -452,3 +452,75 @@ print("__SCAI_RUNTIME_METRICS__:" + _scai_json.dumps({
             for node in ast.walk(tree)
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
         }
+
+    async def prune_unrequired_runtime_globals(self) -> list[str]:
+        """Release only kernel-confirmed disposable globals under namespace pressure.
+
+        The tracker narrows the host candidate set, while the kernel remains the
+        authority for what is actually present and for the AnnData type check.
+        This keeps arbitrary AnnData names and required/canonical state intact.
+        """
+        tracker = getattr(self, "runtime_dependency_tracker", None)
+        if tracker is None:
+            return []
+        from backend.services.snapshot_v2.runtime_registry import (
+            CANONICAL_RUNTIME_ARTIFACTS,
+        )
+
+        protected = set(tracker.required_outputs) | set(CANONICAL_RUNTIME_ARTIFACTS)
+        candidates = sorted(set(tracker.created_outputs) - protected)
+        candidate_set = set(candidates)
+        if not candidates:
+            return []
+
+        code = (
+            "import json as _scai_json\n"
+            f"_scai_prune_candidates = {candidates!r}\n"
+            "_scai_pruned = []\n"
+            "for _scai_name in _scai_prune_candidates:\n"
+            "    if _scai_name not in globals() or _scai_name.startswith('_'):\n"
+            "        continue\n"
+            "    _scai_value = globals()[_scai_name]\n"
+            "    _scai_type = type(_scai_value)\n"
+            "    if (_scai_type.__name__ == 'AnnData' and\n"
+            "            'anndata' in (_scai_type.__module__ or '').lower()):\n"
+            "        continue\n"
+            "    del globals()[_scai_name]\n"
+            "    _scai_pruned.append(_scai_name)\n"
+            "print('__SCAI_RUNTIME_PRUNED__:' + _scai_json.dumps({\n"
+            "    'removed': _scai_pruned,\n"
+            "}))\n"
+        )
+        result = await self._execute_unlocked(
+            code, save_to_history=False, skip_safety_check=True
+        )
+        if not result.success:
+            return []
+        for line in (result.output or "").splitlines():
+            if not line.startswith("__SCAI_RUNTIME_PRUNED__:"):
+                continue
+            try:
+                payload = json.loads(line.split(":", 1)[1])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(payload, dict) or not isinstance(
+                payload.get("removed"), list
+            ):
+                continue
+            removed = [
+                str(name)
+                for name in payload["removed"]
+                if str(name) in candidate_set and str(name) not in protected
+            ]
+            if removed:
+                tracker.release(
+                    set(removed),
+                    lifecycle="consumed",
+                    reason=(
+                        "Unrequired scratch globals were pruned after the runtime "
+                        "namespace exceeded its persistence budget."
+                    ),
+                )
+                self._known_user_globals.difference_update(removed)
+            return removed
+        return []
