@@ -167,7 +167,7 @@ class SnapshotService(
         self.session_quota_bytes = (
             session_quota_bytes
             if session_quota_bytes is not None
-            else default_config.snapshot_v2_session_quota_bytes
+            else 0
         )
         self.pre_restore_quota_grace_bytes = (
             pre_restore_quota_grace_bytes
@@ -177,7 +177,7 @@ class SnapshotService(
         self.free_space_reserve_bytes = (
             free_space_reserve_bytes
             if free_space_reserve_bytes is not None
-            else default_config.snapshot_v2_free_space_reserve_bytes
+            else 0
         )
 
         # Restore orchestration dependencies (keyword-only, production defaults).
@@ -1170,13 +1170,8 @@ class SnapshotService(
 
         lock = get_session_lock(self.session_id)
         async with lock:
-            # `SnapshotImportLimits.from_config` maps the whole
-            # `snapshot_v2_import_*` family plus the session quota and free-space
-            # reserve out of SystemConfig, but this — the only production
-            # construction of the importer — passed no limits at all, so it used
-            # the hard-coded defaults and an operator who lowered any of those
-            # settings on a shared installation had no effect on the one code
-            # path they exist for.
+            # Import safety limits still bound archive shape and metadata
+            # materialization. Disk quota and reserve defaults are unbounded.
             importer = SnapshotImporter(
                 self.session_id,
                 self.paths,
@@ -1258,22 +1253,23 @@ class SnapshotService(
             current_physical = self._physical_object_store_bytes()
             phase = str(getattr(request.phase, "value", request.phase))
             allow_over_quota_baseline = phase == "pre_restore"
-            quota_ceiling = (
-                current_physical + self.pre_restore_quota_grace_bytes
-                if (
-                    allow_over_quota_baseline
-                    and current_physical > self.session_quota_bytes
+            if self.session_quota_bytes > 0:
+                quota_ceiling = (
+                    current_physical + self.pre_restore_quota_grace_bytes
+                    if (
+                        allow_over_quota_baseline
+                        and current_physical > self.session_quota_bytes
+                    )
+                    else self.session_quota_bytes
                 )
-                else self.session_quota_bytes
-            )
-            if current_physical + estimated_addition > quota_ceiling:
-                raise SnapshotStorageError(
-                    "snapshot_quota_exceeded",
-                    "Conservative pre-write estimate would use "
-                    f"{current_physical + estimated_addition} bytes, exceeding "
-                    f"capture ceiling {quota_ceiling} bytes "
-                    f"(session quota {self.session_quota_bytes})",
-                )
+                if current_physical + estimated_addition > quota_ceiling:
+                    raise SnapshotStorageError(
+                        "snapshot_quota_exceeded",
+                        "Conservative pre-write estimate would use "
+                        f"{current_physical + estimated_addition} bytes, "
+                        f"exceeding capture ceiling {quota_ceiling} bytes "
+                        f"(session quota {self.session_quota_bytes})",
+                    )
 
             # Acquire exec lock (never acquire session_lock while holding this).
             exec_cm = (

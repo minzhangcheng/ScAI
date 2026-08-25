@@ -16,7 +16,7 @@ from urllib.parse import quote as url_quote
 
 from datetime import datetime
 from fastapi import Depends, HTTPException, Request
-from backend.config import MAX_UPLOAD_SIZE, UPLOAD_TEMP_DIR
+from backend.config import UPLOAD_TEMP_DIR
 from backend.models.schemas import AnalysisState
 
 from backend.utils.files import (
@@ -45,8 +45,6 @@ logger = logging.getLogger(__name__)
 from .core import REPORT_ARCHIVE_PREFIX, _should_skip_in_report_zip, router
 
 
-_BULK_ZIP_MAX_FILES = 10_000
-_BULK_ZIP_MAX_SOURCE_BYTES = MAX_UPLOAD_SIZE
 _BULK_ZIP_DISK_RESERVE_BYTES = 64 * 1024 * 1024
 
 
@@ -84,6 +82,7 @@ def _copy_validated_archive(
             destination_fd=destination_fd,
             expected_identity=expected_identity,
             reserve_bytes=_BULK_ZIP_DISK_RESERVE_BYTES,
+            include_source_space_estimate=False,
         )
     except SecureArchiveError as exc:
         if exc.status_code == 409:
@@ -116,9 +115,10 @@ def _build_disk_zip(
             destination_fd=destination_fd,
             recursive=recursive,
             include=include,
-            max_files=_BULK_ZIP_MAX_FILES,
-            max_source_bytes=_BULK_ZIP_MAX_SOURCE_BYTES,
+            max_files=None,
+            max_source_bytes=None,
             reserve_bytes=_BULK_ZIP_DISK_RESERVE_BYTES,
+            include_source_space_estimate=False,
         )
     except SecureArchiveError as exc:
         raise _BulkZipRejected(exc.status_code, exc.detail) from exc

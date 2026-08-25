@@ -1,6 +1,7 @@
 """Transactional contracts for ordinary (non-chunked) upload routes."""
 
 import asyncio
+import shutil
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -63,6 +64,34 @@ async def _upload_data(state, file, *, section="pathology"):
 def test_standard_file_upload_limit_is_ten_gibibytes():
     assert upload_routes._GENERIC_UPLOAD_MAX_BYTES == 10 * 1024 ** 3
     assert upload_routes._GENERIC_UPLOAD_MAX_BYTES == upload_routes.MAX_UPLOAD_SIZE
+
+
+@pytest.mark.asyncio
+async def test_data_upload_does_not_preflight_free_disk_space(
+    monkeypatch, tmp_path,
+):
+    state = AnalysisState(id="upload-without-disk-preflight", user_id="owner")
+    uploads = _configure_route(monkeypatch, tmp_path, state)
+    save = AsyncMock()
+    monkeypatch.setattr(
+        upload_routes, "_async_save_session_under_lifecycle", save,
+    )
+    monkeypatch.setattr(
+        shutil,
+        "disk_usage",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("data upload must not preflight free disk space")
+        ),
+    )
+
+    result, _response = await _upload_data(
+        state, ChunkUpload("sample.png", [b"payload"]),
+    )
+
+    assert result.success is True
+    assert (
+        uploads / "pathology" / "_ungrouped" / "sample.png"
+    ).read_bytes() == b"payload"
 
 
 @pytest.mark.asyncio

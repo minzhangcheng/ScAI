@@ -1063,12 +1063,12 @@ class TestCaptureRequiredContent:
         from backend.config._config import default_config
 
         service = SnapshotService("sess-cap", v2_paths)
-        assert service.session_quota_bytes == default_config.snapshot_v2_session_quota_bytes
+        assert service.session_quota_bytes == 0
         assert (
             service.pre_restore_quota_grace_bytes
             == default_config.snapshot_v2_pre_restore_quota_grace_bytes
         )
-        assert service.free_space_reserve_bytes == default_config.snapshot_v2_free_space_reserve_bytes
+        assert service.free_space_reserve_bytes == 0
 
     @pytest.mark.asyncio
     async def test_check_quota_when_v2_root_dir_missing(self, tmp_path):

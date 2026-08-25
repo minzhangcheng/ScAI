@@ -801,60 +801,54 @@ class RuntimeCapture:
                     ),
                 )
 
-            # Capacity gate (post-write): objects are already in the store, so
-            # disk free already accounts for payload. Require remaining free
-            # space to stay above reserve. Fail closed if we cannot probe.
-            total_size = sum(ref.size for ref in captured_adata_refs.values())
-            if captured_residual_ref is not None:
-                total_size += captured_residual_ref.size
-
-            probe = getattr(self._paths, "staging", None) or getattr(self._paths, "root", None)
-            if probe is None:
-                raise SnapshotCaptureError(
-                    "RUNTIME_CAPTURE_DISK_FULL",
-                    (
+            if self.FREE_SPACE_RESERVE_BYTES > 0:
+                total_size = sum(ref.size for ref in captured_adata_refs.values())
+                if captured_residual_ref is not None:
+                    total_size += captured_residual_ref.size
+                probe = (
+                    getattr(self._paths, "staging", None)
+                    or getattr(self._paths, "root", None)
+                )
+                if probe is None:
+                    raise SnapshotCaptureError(
+                        "RUNTIME_CAPTURE_DISK_FULL",
                         "Cannot verify free disk space for runtime capture: "
-                        "no staging/root path available"
-                    ),
-                    details={"total_size": total_size},
-                )
-            probe_path = Path(probe)
-            while not probe_path.exists() and probe_path != probe_path.parent:
-                probe_path = probe_path.parent
-            if not probe_path.exists():
-                raise SnapshotCaptureError(
-                    "RUNTIME_CAPTURE_DISK_FULL",
-                    (
+                        "no staging/root path available",
+                        details={"total_size": total_size},
+                    )
+                probe_path = Path(probe)
+                while not probe_path.exists() and probe_path != probe_path.parent:
+                    probe_path = probe_path.parent
+                if not probe_path.exists():
+                    raise SnapshotCaptureError(
+                        "RUNTIME_CAPTURE_DISK_FULL",
                         "Cannot verify free disk space for runtime capture: "
-                        f"no existing path from {probe}"
-                    ),
-                    details={"total_size": total_size, "probe": str(probe)},
-                )
-            try:
-                usage = shutil.disk_usage(probe_path)
-            except OSError as e:
-                raise SnapshotCaptureError(
-                    "RUNTIME_CAPTURE_DISK_FULL",
-                    f"Failed to check disk usage for runtime capture: {e}",
-                    details={"total_size": total_size},
-                ) from e
-            # After objects are written, free already accounts for payload.
-            # Require remaining free space to stay above reserve.
-            if usage.free < self.FREE_SPACE_RESERVE_BYTES:
-                raise SnapshotCaptureError(
-                    "RUNTIME_CAPTURE_DISK_FULL",
-                    (
-                        f"Insufficient disk space for runtime capture: "
-                        f"{usage.free} free after write, "
-                        f"{total_size} captured, "
-                        f"{self.FREE_SPACE_RESERVE_BYTES} reserve"
-                    ),
-                    details={
-                        "free": usage.free,
-                        "total_size": total_size,
-                        "reserve": self.FREE_SPACE_RESERVE_BYTES,
-                    },
-                )
+                        f"no existing path from {probe}",
+                        details={"total_size": total_size, "probe": str(probe)},
+                    )
+                try:
+                    usage = shutil.disk_usage(probe_path)
+                except OSError as exc:
+                    raise SnapshotCaptureError(
+                        "RUNTIME_CAPTURE_DISK_FULL",
+                        f"Failed to check disk usage for runtime capture: {exc}",
+                        details={"total_size": total_size},
+                    ) from exc
+                if usage.free < self.FREE_SPACE_RESERVE_BYTES:
+                    raise SnapshotCaptureError(
+                        "RUNTIME_CAPTURE_DISK_FULL",
+                        (
+                            f"Insufficient disk space for runtime capture: "
+                            f"{usage.free} free after write, "
+                            f"{total_size} captured, "
+                            f"{self.FREE_SPACE_RESERVE_BYTES} reserve"
+                        ),
+                        details={
+                            "free": usage.free,
+                            "total_size": total_size,
+                            "reserve": self.FREE_SPACE_RESERVE_BYTES,
+                        },
+                    )
 
             # Build complete RuntimeManifest with dependency proof.
             # Required is the registry-declared set minus soft-skipped absent

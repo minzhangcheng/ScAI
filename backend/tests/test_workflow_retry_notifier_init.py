@@ -79,8 +79,6 @@ async def test_snapshot_v2_disabled_keeps_regular_runtime_budgets(
     )
     config = SystemConfig(
         runtime_max_rss_bytes=2 * gib,
-        runtime_max_pkl_bytes=1 * gib,
-        runtime_max_save_seconds=17.5,
     )
     workflow = SingleCellAnalysisWorkflow(config=config, session_id=state.id)
     workflow._state = state
@@ -89,10 +87,11 @@ async def test_snapshot_v2_disabled_keeps_regular_runtime_budgets(
 
     await workflow.initialize()
 
-    assert _FakeSandbox.last_runtime_budgets["max_namespace_count"] == 1500
     assert _FakeSandbox.last_runtime_budgets["max_rss_bytes"] == 2 * gib
-    assert _FakeSandbox.last_runtime_budgets["max_pkl_bytes"] == 1 * gib
-    assert _FakeSandbox.last_runtime_budgets["max_save_seconds"] == 17.5
+    assert "max_namespace_count" not in _FakeSandbox.last_runtime_budgets
+    assert "max_single_object_bytes" not in _FakeSandbox.last_runtime_budgets
+    assert "max_pkl_bytes" not in _FakeSandbox.last_runtime_budgets
+    assert "max_save_seconds" not in _FakeSandbox.last_runtime_budgets
     assert _FakeSandbox.last_runtime_budgets["effective_limit_basis"] == "test_capacity"
 
 

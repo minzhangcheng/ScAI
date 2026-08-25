@@ -70,15 +70,13 @@ ScAI 在生产模式下由同一个 FastAPI/Uvicorn 进程在端口 `3000` 提�
 
 #### 运行时持久化预算
 
-常规运行时持久化使用一套独立于 Snapshot V2 的资源门禁。默认情况下，内存与文件大小上限
-为**自动计算**：优先使用 Docker cgroup 内存限额；没有限额时使用宿主机内存：
+常规运行时持久化使用一套独立于 Snapshot V2 的资源门禁。默认情况下，内存上限为
+**自动计算**：优先使用 Docker cgroup 内存限额；没有限额时使用宿主机内存：
 
 | 预算 | 自动上限 |
 |---|---:|
-| 最大单对象 | 检测容量的 25% |
 | 存活 AnnData 总量 | 45% |
 | 分析内核 RSS | 60% |
-| 压缩运行时文件 | 30% |
 
 这些是逐会话的持久化上限，不是全局调度器。共享实例必须按最大并发存活分析内核数量设置
 容器容量或逐会话绝对上限。未限制内存的容器会让每个会话都看到整台主机容量，两个会话
@@ -91,26 +89,24 @@ ScAI 在生产模式下由同一个 FastAPI/Uvicorn 进程在端口 `3000` 提�
 ```bash
 docker run -d --name scai --memory=128g \
   -e SCAI_RUNTIME_MAX_RSS_GB=64 \
-  -e SCAI_RUNTIME_MAX_SINGLE_OBJECT_GB=32 \
   -e SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB=48 \
-  -e SCAI_RUNTIME_MAX_PKL_GB=16 \
-  -e SCAI_RUNTIME_MAX_SAVE_SECONDS=900 \
   ... ghcr.io/minzhangcheng/scai:latest
 ```
 
 可参考以下显式配置档位：
 
-| 总细胞数 | RSS | 单对象 | AnnData 总量 | 运行时文件 | 保存超时 |
-|---:|---:|---:|---:|---:|---:|
-| 不超过 50,000 | 32 GiB | 16 GiB | 24 GiB | 8 GiB | 300 秒 |
-| 50,000–200,000 | 64 GiB | 32 GiB | 48 GiB | 16 GiB | 900 秒 |
-| 200,000–500,000 | 256 GiB | 128 GiB | 192 GiB | 64 GiB | 1,800 秒 |
-| 约 1,000,000 | 512 GiB | 256 GiB | 384 GiB | 128 GiB | 3,600 秒 |
+| 总细胞数 | RSS | AnnData 总量 |
+|---:|---:|---:|
+| 不超过 50,000 | 32 GiB | 24 GiB |
+| 50,000–200,000 | 64 GiB | 48 GiB |
+| 200,000–500,000 | 256 GiB | 192 GiB |
+| 约 1,000,000 | 512 GiB | 384 GiB |
 
 后两个档位属于外推，并假设每份内存配额内只运行一个大型分析。除非管理员需要设置更严格
-的并发边界，否则应使用自动默认值。磁盘空间只能保存 checkpoint，不会驱逐存活 Python
-对象或降低内核 RSS。常规持久化还可能需要将 backed AnnData 物化到内存，因此磁盘化输入
-本身不等于 out-of-core 执行。
+的并发边界，否则应使用自动默认值。ScAI 不对命名空间条目数、最大单对象、常规运行时 PKL
+大小或保存时长设置上限；管理员负责监控数据卷的剩余空间和 inode。磁盘空间不会驱逐存活
+Python 对象或降低内核 RSS。常规持久化还
+可能需要将 backed AnnData 物化到内存，因此磁盘化输入本身不等于 out-of-core 执行。
 
 **不要在没有内存上限的情况下运行实例。** 失控的内核耗尽主机内存后，会招致内核 OOM
 killer 终止任意进程，且可能是同一主机上的其他服务。请依据上表设置容器限额：
@@ -247,8 +243,8 @@ docker build -t ghcr.io/minzhangcheng/scai:latest .
 ```
 
 ```bash
-./build.sh --version 0.39.37
-./build.sh --version 0.39.37 --push
+./build.sh --version 0.39.38
+./build.sh --version 0.39.38 --push
 ```
 
 如果未指定 `--version`，辅助脚本使用 `git describe --tags --abbrev=0` 返回的最新 Git 标签；如果不存在标签，则使用 `latest`。`--push` 会将两个标签推送到 `ghcr.io/minzhangcheng/scai`；使用前请先向该注册表进行 Docker 身份验证。该辅助脚本不接受注册表、镜像名称、平台或构建参数 flags。
@@ -682,15 +678,9 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 | `SCAI_CONFIG_SECRET`                  | 生成的本地加密材料          | 加密存储的用户/模型 secrets                                                                                |
 | `SCAI_ENABLE_REPRODUCIBILITY`         | Disabled                    | 真值`1`、`true` 或 `yes` 启用可重现性 bundles                                                        |
 | `SCAI_ENABLE_SNAPSHOT_V2`             | Disabled                    | 真值`1`、`true` 或 `yes` 为该实例启用 Snapshot V2                                                    |
-| `SCAI_SNAPSHOT_SESSION_QUOTA_GB`      | `500`                     | 每个会话的快照存储上限，单位 GiB。**不建议设置为小于 100 GiB** —— 参见[快照容量](#快照容量)         |
-| `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB` | `50`                      | 一次捕获完成后数据卷上必须保留的剩余空间，单位 GiB                                                         |
 | `SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO`   | `0.8`                     | 一次捕获可规划使用的内核内存余量比例 —— 参见[快照的内存影响](#快照的内存影响)。超出 `(0, 1]` 的取值会被忽略并告警 |
 | `SCAI_RUNTIME_MAX_RSS_GB`             | `auto`                    | 常规运行时持久化的逐会话内核 RSS 上限；数值表示管理员 GiB 上限                                              |
-| `SCAI_RUNTIME_MAX_SINGLE_OBJECT_GB`   | `auto`                    | 最大存活对象上限；数值表示管理员 GiB 上限                                                                   |
 | `SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB`   | `auto`                    | 存活 AnnData 估算总量上限；数值表示管理员 GiB 上限                                                          |
-| `SCAI_RUNTIME_MAX_PKL_GB`             | `auto`                    | 常规压缩运行时文件上限；数值表示管理员 GiB 上限                                                             |
-| `SCAI_RUNTIME_MAX_NAMESPACE_COUNT`    | `1500`                    | 常规持久化前允许测得的最大存活命名空间条目数                                                                |
-| `SCAI_RUNTIME_MAX_SAVE_SECONDS`       | `300`                     | 常规运行时序列化的最长秒数                                                                                  |
 | `SCAI_MODE`                           | `prod`                    | Docker 入口程序模式；生产镜像会拒绝 `dev`                                                        |
 | `PIP_INDEX_URL`                       | pip environment/default     | Docker Python 软件包 index                                                                                 |
 | `SCAI_AUTO_FETCH_MARKERS`             | `0`                       | 直接启动；`1` 尝试下载标记数据库                                                                         |
@@ -699,29 +689,10 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 
 ### 快照容量
 
-Snapshot V2 有两道上限，均在捕获写入之前检查一次、写入落盘之后再检查一次：
-
-- **单会话存储配额** —— `SCAI_SNAPSHOT_SESSION_QUOTA_GB`，默认 500 GiB。以该会话
-  对象库中的物理字节数计算。存储是内容寻址的，因此未发生变化的 AnnData 只保存一
-  份、由引用它的所有快照共享；真正增长该数值的是新数据，而不是快照的数量。
-- **数据卷剩余空间保留** —— `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB`，默认 50 GiB。
-  一次捕获完成后仍必须保持空闲的空间，以免单个会话占满所有会话都要写入元数据的
-  那个卷。
-
-两者都在后端启动时读取一次；请在启动前设置，修改后需重启生效。
-
-**请勿将单会话配额设置为小于 100 GiB。** 一次大型 AnnData 的运行时捕获本身就可达
-数十 GB，而存储会保留该会话快照谱系中每一个不同的对象，而非仅保留最新的一份。小
-于这个量级的配额不会表现为性能逐步下降：越过上限的那次捕获会 fail-closed，并将分
-析停在快照失败门上，需用户处理后才能继续。小于 100 GiB 的取值仍会生效，但启动时会
-记录一条告警。
-
-配额是按会话计的，因此最坏情况下的总量为配额乘以持有快照的会话数；剩余空间保留是
-唯一的卷级约束。请按预期的并发分析数量来规划卷容量，并注意垃圾回收是在删除快照时
-触发的，而非定时执行 —— 被取代对象所占空间在删除时回收。
-
-当某个会话占用达到其配额的 90% 时，快照面板会提示用户清理，因此通常会在接近上限前
-得到预警，而不是毫无察觉地撞上。
+ScAI 不对 Snapshot V2 存储设置单会话磁盘配额或剩余空间保留。内容寻址存储仍会对未变化
+的对象去重，删除快照时仍会运行垃圾回收。管理员负责规划和监控数据卷，包括剩余空间与
+inode 容量。归档成员数量和元数据大小检查仍然保留，因为它们保护导入解析及内存使用，
+并非限制持久化磁盘用量。
 
 ### Shell 选项
 

@@ -696,7 +696,6 @@ except Exception as e:
 
             from backend.utils.runtime_budget import (
                 RuntimeBudgetExceeded,
-                RuntimeBudgetViolation,
                 evaluate_runtime_budget,
             )
 
@@ -718,8 +717,6 @@ except Exception as e:
             if budgets:
                 resource_metrics = await self._runtime_resource_metrics()
                 required_metrics = {
-                    "namespace_count",
-                    "largest_object_bytes",
                     "anndata_total_bytes",
                     "rss_bytes",
                     "backed_anndata_total_bytes",
@@ -746,23 +743,6 @@ except Exception as e:
                 preflight_violations = evaluate_runtime_budget(
                     resource_metrics, budgets
                 )
-                if any(
-                    violation.resource == "namespace_count"
-                    for violation in preflight_violations
-                ):
-                    pruned = await self.prune_unrequired_runtime_globals()
-                    if pruned:
-                        logger.warning(
-                            "[%s] Pruned %d unconsumed scratch global(s) after "
-                            "runtime namespace pressure: %s",
-                            self.session_id,
-                            len(pruned),
-                            ", ".join(pruned[:20]),
-                        )
-                    resource_metrics = await self._runtime_resource_metrics()
-                    preflight_violations = evaluate_runtime_budget(
-                        resource_metrics, budgets
-                    )
                 if preflight_violations:
                     _record_budget_failure(
                         preflight_violations,
@@ -980,37 +960,11 @@ except Exception:
 print(f"Session saved: {_saved_count} variables")
 print("__SCAI_SAVED_NAMES__:" + _scai_json.dumps(sorted(_saved_names)))
 """
-            save_started = time.monotonic()
-            save_timeout = budgets.get("max_save_seconds") if budgets else None
-            execute_kwargs = {
-                "save_to_history": False,
-                "skip_safety_check": True,
-            }
-            if save_timeout is not None and float(save_timeout) > 0:
-                execute_kwargs["execution_timeout"] = float(save_timeout)
-            result = await self._execute_unlocked(save_code, **execute_kwargs)
-
-            save_elapsed = time.monotonic() - save_started
-            if (
-                not result.success
-                and save_timeout is not None
-                and float(save_timeout) > 0
-                and getattr(result, "timed_out", False) is True
-            ):
-                staged_timeout_path = Path(str(self.notebook_state.session_path) + ".tmp")
-                staged_timeout_path.unlink(missing_ok=True)
-                resource_metrics["save_seconds"] = save_elapsed
-                timeout_violation = RuntimeBudgetViolation(
-                    "save_seconds", save_elapsed, float(save_timeout)
-                )
-                _record_budget_failure(
-                    [timeout_violation],
-                    error_summary=(
-                        "Runtime serialization exceeded its configured duration "
-                        "budget; the previous generation was retained."
-                    ),
-                )
-                raise RuntimeBudgetExceeded([timeout_violation])
+            result = await self._execute_unlocked(
+                save_code,
+                save_to_history=False,
+                skip_safety_check=True,
+            )
 
             skipped = []
             for line in (result.output or "").splitlines():
@@ -1050,29 +1004,6 @@ print("__SCAI_SAVED_NAMES__:" + _scai_json.dumps(sorted(_saved_names)))
                 pkl_path = Path(self.notebook_state.session_path)
                 staged_path = Path(str(pkl_path) + ".tmp")
                 production_transaction = staged_path.exists()
-                if budgets:
-                    measured_path = staged_path if production_transaction else pkl_path
-                    resource_metrics["pkl_bytes"] = (
-                        measured_path.stat().st_size if measured_path.exists() else 0
-                    )
-                    resource_metrics["save_seconds"] = time.monotonic() - save_started
-                    postflight_violations = evaluate_runtime_budget(
-                        resource_metrics, budgets
-                    )
-                    if postflight_violations:
-                        staged_path.unlink(missing_ok=True)
-                        _record_budget_failure(
-                            postflight_violations,
-                            error_summary=(
-                                "Runtime serialization exceeded its configured "
-                                "size or duration budget; the previous generation "
-                                "was retained."
-                            ),
-                        )
-                        raise RuntimeBudgetExceeded(
-                            postflight_violations,
-                            resource_metrics.get("top_offenders"),
-                        )
                 integrity_path = _integrity_dir(self.session_id)
 
                 def _cleanup_unjournaled_products() -> None:

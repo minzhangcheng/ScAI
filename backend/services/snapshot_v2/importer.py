@@ -661,7 +661,10 @@ class SnapshotImporter:
                 projected += meta.size
 
         current = physical_object_store_bytes(objects_dir)
-        if current + projected > self.limits.session_quota_bytes:
+        if (
+            self.limits.session_quota_bytes > 0
+            and current + projected > self.limits.session_quota_bytes
+        ):
             raise SnapshotStorageError(
                 "snapshot_quota_exceeded",
                 f"Import would take the object store to {current + projected} "
@@ -669,23 +672,21 @@ class SnapshotImporter:
                 f"{self.limits.session_quota_bytes}",
             )
 
-        try:
-            free = free_bytes_at(self.paths.root)
-        except OSError as exc:
-            raise SnapshotStorageError(
-                "DISK_USAGE_CHECK_FAILED",
-                f"Failed to check disk usage: {exc}",
-            ) from exc
-        # Unlike the capture check this runs *before* the write, so the
-        # projection has to be subtracted: the free bytes still include what
-        # pass 2 is about to consume.
-        if free - projected < self.limits.free_space_reserve_bytes:
-            raise SnapshotStorageError(
-                "snapshot_quota_exceeded",
-                f"Insufficient disk space: {free} free, importing "
-                f"{projected} would leave less than the "
-                f"{self.limits.free_space_reserve_bytes} reserve",
-            )
+        if self.limits.free_space_reserve_bytes > 0:
+            try:
+                free = free_bytes_at(self.paths.root)
+            except OSError as exc:
+                raise SnapshotStorageError(
+                    "DISK_USAGE_CHECK_FAILED",
+                    f"Failed to check disk usage: {exc}",
+                ) from exc
+            if free - projected < self.limits.free_space_reserve_bytes:
+                raise SnapshotStorageError(
+                    "snapshot_quota_exceeded",
+                    f"Insufficient disk space: {free} free, importing "
+                    f"{projected} would leave less than the "
+                    f"{self.limits.free_space_reserve_bytes} reserve",
+                )
 
     def _check_member_limits(self, members: list) -> None:
         """Enforce member count and size limits from import bounds."""

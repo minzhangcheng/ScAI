@@ -943,6 +943,7 @@ class TestRuntimeCapture:
         paths.root = tmp_path
 
         capturer = RuntimeCapture(obj_store, paths)
+        capturer.FREE_SPACE_RESERVE_BYTES = 5 * 1024 ** 3
         # Post-write free below reserve (1 GiB free, 5 GiB reserve) → DISK_FULL.
         # Do NOT require free - total_size < reserve (payload already on disk).
         fake_usage = type("U", (), {"total": 10 * 1024**3, "used": 9 * 1024**3, "free": 1 * 1024**3})()

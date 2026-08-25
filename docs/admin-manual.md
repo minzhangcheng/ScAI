@@ -80,15 +80,13 @@ validated at one million cells.
 #### Runtime persistence budgets
 
 Regular runtime persistence has a separate resource gate from Snapshot V2. By
-default, its memory and file-size ceilings are **automatic**, derived from the
-Docker cgroup memory limit when one is present, otherwise from host memory:
+default, its memory ceilings are **automatic**, derived from the Docker cgroup
+memory limit when one is present, otherwise from host memory:
 
 | Budget | Automatic ceiling |
 |---|---:|
-| Largest single object | 25% of detected capacity |
 | Total live AnnData size | 45% |
 | Analysis-kernel RSS | 60% |
-| Compressed runtime file | 30% |
 
 These are per-session persistence ceilings, not a global scheduler. On a shared
 instance, size the container and any explicit per-session caps for the maximum
@@ -105,28 +103,28 @@ limit is the lower of that value and the automatic ceiling. For example:
 ```bash
 docker run -d --name scai --memory=128g \
   -e SCAI_RUNTIME_MAX_RSS_GB=64 \
-  -e SCAI_RUNTIME_MAX_SINGLE_OBJECT_GB=32 \
   -e SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB=48 \
-  -e SCAI_RUNTIME_MAX_PKL_GB=16 \
-  -e SCAI_RUNTIME_MAX_SAVE_SECONDS=900 \
   ... ghcr.io/minzhangcheng/scai:latest
 ```
 
 Illustrative explicit profiles are:
 
-| Total cells | RSS | Single object | AnnData total | Runtime file | Save timeout |
-|---:|---:|---:|---:|---:|---:|
-| up to 50,000 | 32 GiB | 16 GiB | 24 GiB | 8 GiB | 300 s |
-| 50,000–200,000 | 64 GiB | 32 GiB | 48 GiB | 16 GiB | 900 s |
-| 200,000–500,000 | 256 GiB | 128 GiB | 192 GiB | 64 GiB | 1,800 s |
-| around 1,000,000 | 512 GiB | 256 GiB | 384 GiB | 128 GiB | 3,600 s |
+| Total cells | RSS | AnnData total |
+|---:|---:|---:|
+| up to 50,000 | 32 GiB | 24 GiB |
+| 50,000–200,000 | 64 GiB | 48 GiB |
+| 200,000–500,000 | 256 GiB | 192 GiB |
+| around 1,000,000 | 512 GiB | 384 GiB |
 
 The last two profiles are extrapolations and assume one large analysis per
 allocated memory share. Use the automatic defaults unless an operator needs a
-stricter concurrency boundary. Disk capacity only stores a checkpoint; it does
-not evict live Python objects or reduce kernel RSS. Backed AnnData may also need
-materialisation during regular persistence, so disk-backed input is not itself
-an out-of-core execution guarantee.
+stricter concurrency boundary. ScAI does not impose namespace-count,
+single-object, regular-runtime-PKL-size, or save-duration ceilings; operators
+are responsible for monitoring data-volume free
+space and inode capacity. Disk capacity does not evict live Python objects or
+reduce kernel RSS. Backed AnnData may also need materialisation during regular
+persistence, so disk-backed input is not itself an out-of-core execution
+guarantee.
 
 **Do not run an instance without a memory ceiling.** An unbounded kernel that
 exhausts host memory invites the kernel OOM killer to terminate an arbitrary
@@ -265,8 +263,8 @@ The release helper always builds both the selected tag and `latest`:
 ```
 
 ```bash
-./build.sh --version 0.39.37
-./build.sh --version 0.39.37 --push
+./build.sh --version 0.39.38
+./build.sh --version 0.39.38 --push
 ```
 
 Without `--version`, the helper uses the newest Git tag returned by `git describe --tags --abbrev=0`, or `latest` if none exists. `--push` pushes both tags to `ghcr.io/minzhangcheng/scai`; authenticate Docker to that registry before using it. The helper does not accept registry, image-name, platform, or build-argument flags.
@@ -441,8 +439,9 @@ again — the gate could never clear.
 Two scoping rules matter:
 
 - **With snapshots disabled, this snapshot-copy preflight does not run.** The
-  separate regular runtime-persistence gate still checks the live namespace at
-  its persistence boundaries using the automatic/operator budgets above.
+  separate regular runtime-persistence gate still checks live AnnData total and
+  kernel RSS at its persistence boundaries using the automatic/operator budgets
+  above.
 - **Ordinary analysis allocations are not pre-authorised.** A step may allocate
   memory before the next persistence boundary; the container memory limit remains
   the hard backstop for that interval.
@@ -736,15 +735,9 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 | `SCAI_CONFIG_SECRET` | Generated local encryption material | Encrypts stored user/model secrets |
 | `SCAI_ENABLE_REPRODUCIBILITY` | Disabled | Truthy `1`, `true`, or `yes` enables reproducibility bundles |
 | `SCAI_ENABLE_SNAPSHOT_V2` | Disabled | Truthy `1`, `true`, or `yes` opts the instance into Snapshot V2 |
-| `SCAI_SNAPSHOT_SESSION_QUOTA_GB` | `500` | Per-session snapshot store ceiling, in GiB. **Values below 100 GiB are not advised** — see [Snapshot capacity](#snapshot-capacity) |
-| `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB` | `50` | Free space that must remain on the data volume after a capture, in GiB |
 | `SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO` | `0.8` | Fraction of measured kernel memory headroom a capture may plan against — see [Memory impact of snapshots](#memory-impact-of-snapshots). Values outside `(0, 1]` are ignored with a warning |
 | `SCAI_RUNTIME_MAX_RSS_GB` | `auto` | Per-session kernel RSS ceiling for regular runtime persistence; numeric values are GiB administrator caps |
-| `SCAI_RUNTIME_MAX_SINGLE_OBJECT_GB` | `auto` | Largest live object ceiling; numeric values are GiB administrator caps |
 | `SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB` | `auto` | Total estimated size of live AnnData objects; numeric values are GiB administrator caps |
-| `SCAI_RUNTIME_MAX_PKL_GB` | `auto` | Compressed regular-runtime file ceiling; numeric values are GiB administrator caps |
-| `SCAI_RUNTIME_MAX_NAMESPACE_COUNT` | `1500` | Maximum measured live namespace entries before regular persistence |
-| `SCAI_RUNTIME_MAX_SAVE_SECONDS` | `300` | Maximum regular-runtime serialization time in seconds |
 | `SCAI_MODE` | `prod` | Docker entrypoint mode; the production image rejects `dev` |
 | `PIP_INDEX_URL` | pip environment/default | Docker Python package index |
 | `SCAI_AUTO_FETCH_MARKERS` | `0` | Direct startup; `1` attempts marker-database download |
@@ -754,37 +747,13 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 
 ### Snapshot capacity
 
-Snapshot V2 enforces two ceilings, both checked before a capture writes anything
-and again after it lands:
-
-- **Per-session store quota** — `SCAI_SNAPSHOT_SESSION_QUOTA_GB`, default 500
-  GiB. Measured against the physical bytes in that session's object store. The
-  store is content-addressed, so one copy of an unchanged AnnData is shared by
-  every snapshot that references it; what grows the figure is genuinely new
-  data, not the number of snapshots.
-- **Data-volume free-space reserve** — `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB`,
-  default 50 GiB. Space that must still be free after a capture completes, so a
-  session cannot fill the volume every other session writes its metadata to.
-
-Both are read once at backend startup; set them before starting, and restart to
-change them.
-
-**Do not set the per-session quota below 100 GiB.** A single runtime capture of a
-large AnnData already runs to tens of GB, and the store retains every distinct
-object across a session's snapshot lineage rather than only the newest. A quota
-smaller than that does not degrade gradually: the capture that crosses the
-ceiling fails closed and parks the analysis on a snapshot-failure gate, which the
-user must resolve before the run continues. A value under 100 GiB is honoured but
-logs a warning at startup.
-
-The quota is per session, so the worst-case total is the quota multiplied by the
-number of sessions holding snapshots; the free-space reserve is the only
-volume-wide bound. Size the volume for the number of concurrent analyses you
-expect, and note that garbage collection runs when snapshots are deleted, not on
-a timer — space from superseded objects is reclaimed at deletion.
-
-The snapshot panel warns the user to clean up once a session reaches 90% of its
-quota, so the ceiling is normally approached with notice rather than hit blind.
+ScAI does not impose a per-session disk quota or a free-space reserve on
+Snapshot V2 storage. The content-addressed store still deduplicates unchanged
+objects, and garbage collection runs when snapshots are deleted. Operators are
+responsible for sizing and monitoring the data volume, including free space and
+inode capacity. Archive member-count and metadata-size checks remain because
+they protect import parsing and memory use rather than limiting persistent disk
+consumption.
 
 ### Shell options
 

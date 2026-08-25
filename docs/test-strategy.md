@@ -20,8 +20,7 @@ properties:
 - a `--tmpfs /tmp:rw,size=2g` temporary filesystem and no `/dep`, `/extra`,
   production `/data`, or host virtual environment;
 - `NUMBA_DISABLE_JIT=1` for the test environment;
-- `SCAI_RUN_KERNEL_TESTS=1` and
-  `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB=1` for the `kernel` profile;
+- `SCAI_RUN_KERNEL_TESTS=1` for the `kernel` profile;
 - `SCAI_ENABLE_SNAPSHOT_V2=true` as a test-only default from the test
   conftest, while the production default remains disabled.
 

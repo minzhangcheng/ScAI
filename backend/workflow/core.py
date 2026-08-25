@@ -1224,12 +1224,8 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         )
 
         configured_runtime_budgets = apply_runtime_budget_environment({
-            "max_namespace_count": self.config.runtime_max_namespace_count,
-            "max_single_object_bytes": self.config.runtime_max_single_object_bytes,
             "max_anndata_total_bytes": self.config.runtime_max_anndata_total_bytes,
             "max_rss_bytes": self.config.runtime_max_rss_bytes,
-            "max_pkl_bytes": self.config.runtime_max_pkl_bytes,
-            "max_save_seconds": self.config.runtime_max_save_seconds,
         })
         runtime_budgets = resolve_effective_runtime_budgets(
             configured_runtime_budgets

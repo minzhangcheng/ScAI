@@ -131,18 +131,17 @@ async def test_execution_timeout_overrides_default_without_changing_default(
 
 
 @pytest.mark.asyncio
-async def test_timeout_text_without_canonical_identity_is_not_a_save_budget_timeout(
+async def test_timeout_text_without_canonical_identity_is_a_regular_save_failure(
     tmp_path, monkeypatch,
 ):
     from backend.utils.runtime_budget import RuntimeBudgetExceeded
     from backend.utils.sandbox import CodeExecutionResult, LocalJupyterSandbox
 
-    budgets = {"max_save_seconds": 0.25}
     sb = LocalJupyterSandbox(
         session_id="timeout-text-without-identity",
         state_dir=str(tmp_path / "states"),
         working_dir=str(tmp_path / "workspace"),
-        runtime_budgets=budgets,
+        runtime_budgets={},
     )
     sb.runtime_revision = 1
     sb.saved_runtime_revision = 0

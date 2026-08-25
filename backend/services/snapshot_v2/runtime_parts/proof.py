@@ -19,10 +19,9 @@ from backend.services.snapshot_v2.models import RuntimeManifest
 # Re-export for existing imports / tests.
 
 
-# No hard size cap. Capacity is gated by free disk space minus reserve
-# (aligned with SystemConfig.snapshot_v2_free_space_reserve_bytes default, and
-# pinned to it by test_capacity_defaults_mirror_system_config).
-RUNTIME_CAPTURE_FREE_SPACE_RESERVE_BYTES: int = 50 * 1024 * 1024 * 1024
+# Production runtime capture has no disk quota or free-space reserve. The class
+# attribute remains injectable for focused lower-level tests and callers.
+RUNTIME_CAPTURE_FREE_SPACE_RESERVE_BYTES: int = 0
 
 def _parse_dill_skipped(output: str) -> list[str]:
     """Structurally parse ``__DILL_SKIPPED__`` lines (JSON or Python literal)."""

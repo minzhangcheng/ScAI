@@ -1,8 +1,7 @@
-"""Regression tests for the Snapshot V2 capacity settings.
+"""Regression tests for unbounded Snapshot V2 disk storage.
 
-Covers the operator-tunable per-session quota and free-space reserve, the
-advisory floor, and the usage figures the listing endpoint reports so the UI can
-advise a cleanup before the ceiling refuses a capture.
+Lower-level quota injection remains available for isolated callers and status
+rendering, but production configuration does not impose a disk ceiling.
 """
 
 from __future__ import annotations
@@ -17,143 +16,49 @@ GIB = 1024 ** 3
 # ── 1. Defaults ──────────────────────────────────────────────────────────────
 
 
-def test_default_capacity_is_500gib_quota_and_50gib_reserve():
+def test_default_snapshot_storage_has_no_disk_capacity_fields():
     from backend.config import default_config
 
-    assert default_config.snapshot_v2_session_quota_bytes == 500 * GIB
-    assert default_config.snapshot_v2_free_space_reserve_bytes == 50 * GIB
+    assert not hasattr(default_config, "snapshot_v2_session_quota_bytes")
+    assert not hasattr(default_config, "snapshot_v2_free_space_reserve_bytes")
 
 
-def test_capacity_defaults_mirror_system_config():
-    """The two modules that cannot import config must not drift from it.
-
-    ``SnapshotImportLimits`` takes a duck-typed config and ``proof.py`` holds a
-    module-level reserve, so both carry a hand-copied default. A change to
-    ``SystemConfig`` that forgets them would leave the import path and the
-    runtime-capture path enforcing the old ceiling.
-    """
-    from backend.config import default_config
+def test_snapshot_storage_defaults_are_unbounded_across_capture_and_import():
     from backend.services.snapshot_v2.object_store import SnapshotImportLimits
     from backend.services.snapshot_v2.runtime_parts.proof import (
         RUNTIME_CAPTURE_FREE_SPACE_RESERVE_BYTES,
     )
 
     limits = SnapshotImportLimits()
-    assert limits.session_quota_bytes == default_config.snapshot_v2_session_quota_bytes
-    assert (
-        limits.free_space_reserve_bytes
-        == default_config.snapshot_v2_free_space_reserve_bytes
-    )
-    assert (
-        RUNTIME_CAPTURE_FREE_SPACE_RESERVE_BYTES
-        == default_config.snapshot_v2_free_space_reserve_bytes
-    )
+    assert limits.session_quota_bytes == 0
+    assert limits.free_space_reserve_bytes == 0
+    assert RUNTIME_CAPTURE_FREE_SPACE_RESERVE_BYTES == 0
 
 
-def test_from_config_fallbacks_match_the_field_defaults():
-    """A config object missing the fields resolves to the same ceilings."""
+def test_from_config_without_capacity_fields_remains_unbounded():
     from backend.services.snapshot_v2.object_store import SnapshotImportLimits
 
     class _Bare:
         pass
 
     limits = SnapshotImportLimits.from_config(_Bare())
-    assert limits.session_quota_bytes == 500 * GIB
-    assert limits.free_space_reserve_bytes == 50 * GIB
+    assert limits.session_quota_bytes == 0
+    assert limits.free_space_reserve_bytes == 0
 
 
-# ── 2. Operator overrides ────────────────────────────────────────────────────
-#
-# These exercise the parser and the advisory check directly rather than
-# reloading the config module. A reload rebinds ``default_config``, and every
-# consumer that captured it by reference at import time keeps the old object —
-# so a reloading test leaks a different ceiling into the rest of the session
-# (it did: it broke ``test_quota_config_injected`` two files away).
-
-
-def test_operator_can_raise_both_ceilings(monkeypatch):
-    from backend.config._config import _parse_capacity_gb_env
-
-    monkeypatch.setenv("SCAI_SNAPSHOT_SESSION_QUOTA_GB", "800")
-    monkeypatch.setenv("SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB", "80")
-
-    assert _parse_capacity_gb_env("SCAI_SNAPSHOT_SESSION_QUOTA_GB", 500) == 800 * GIB
-    assert (
-        _parse_capacity_gb_env("SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB", 50) == 80 * GIB
-    )
-
-
-def test_the_configured_fields_are_wired_to_the_parsed_values():
-    """The SystemConfig defaults must be the parsed overrides, not literals."""
+def test_legacy_capacity_environment_does_not_reintroduce_disk_limits(monkeypatch):
     from backend.config import _config as cfg
+    from backend.services.snapshot_v2.object_store import SnapshotImportLimits
 
-    assert (
-        cfg.SystemConfig().snapshot_v2_session_quota_bytes
-        == cfg.SNAPSHOT_SESSION_QUOTA_BYTES
-    )
-    assert (
-        cfg.SystemConfig().snapshot_v2_free_space_reserve_bytes
-        == cfg.SNAPSHOT_FREE_SPACE_RESERVE_BYTES
-    )
-
-
-@pytest.mark.parametrize("bad", ["abc", "", "  ", "12.5", "-5", "0"])
-def test_an_unusable_override_falls_back_instead_of_refusing_to_start(
-    monkeypatch, bad,
-):
-    """Parsed at import: raising here would make a typo un-bootable."""
-    from backend.config._config import _parse_capacity_gb_env
-
-    monkeypatch.setenv("SCAI_SNAPSHOT_SESSION_QUOTA_GB", bad)
-    assert _parse_capacity_gb_env("SCAI_SNAPSHOT_SESSION_QUOTA_GB", 500) == 500 * GIB
+    monkeypatch.setenv("SCAI_SNAPSHOT_SESSION_QUOTA_GB", "1")
+    monkeypatch.setenv("SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB", "1")
+    config = cfg.SystemConfig()
+    limits = SnapshotImportLimits.from_config(config)
+    assert limits.session_quota_bytes == 0
+    assert limits.free_space_reserve_bytes == 0
 
 
-def test_an_absent_override_uses_the_default(monkeypatch):
-    from backend.config._config import _parse_capacity_gb_env
-
-    monkeypatch.delenv("SCAI_SNAPSHOT_SESSION_QUOTA_GB", raising=False)
-    assert _parse_capacity_gb_env("SCAI_SNAPSHOT_SESSION_QUOTA_GB", 500) == 500 * GIB
-
-
-def test_a_quota_below_the_advised_floor_is_warned_about_but_honoured(caplog):
-    """The floor is advice, not a clamp: the operator's value still applies."""
-    from backend.config._config import (
-        SNAPSHOT_SESSION_QUOTA_ADVISORY_MINIMUM_GB,
-        warn_if_quota_below_advisory,
-    )
-
-    assert SNAPSHOT_SESSION_QUOTA_ADVISORY_MINIMUM_GB == 100
-
-    with caplog.at_level("WARNING"):
-        warned = warn_if_quota_below_advisory(50 * GIB)
-
-    assert warned is True
-    messages = [r.getMessage() for r in caplog.records]
-    assert any("below the advised minimum" in m for m in messages), (
-        f"no advisory warning logged; saw {messages}"
-    )
-    assert any("100 GiB" in m for m in messages)
-
-
-def test_the_advised_floor_itself_does_not_warn(caplog):
-    from backend.config._config import warn_if_quota_below_advisory
-
-    with caplog.at_level("WARNING"):
-        assert warn_if_quota_below_advisory(100 * GIB) is False
-    assert not [r for r in caplog.records if "advised minimum" in r.getMessage()]
-
-
-def test_the_shipped_default_does_not_warn(caplog):
-    from backend.config._config import (
-        SNAPSHOT_SESSION_QUOTA_BYTES,
-        warn_if_quota_below_advisory,
-    )
-
-    with caplog.at_level("WARNING"):
-        assert warn_if_quota_below_advisory(SNAPSHOT_SESSION_QUOTA_BYTES) is False
-
-
-# ── 3. The usage figures the panel advises from ───────────────────────────────
+# ── 2. Explicit lower-level quota status ────────────────────────────────────
 
 
 class _Paths:

@@ -2,10 +2,7 @@
 
 from pydantic import BaseModel
 
-from backend.config import (
-    SNAPSHOT_QUOTA_WARNING_RATIO,
-    default_config,
-)
+from backend.config import SNAPSHOT_QUOTA_WARNING_RATIO
 from backend.services.snapshot_v2.object_store import ManifestStore
 from backend.services.snapshot_v2.paths import SnapshotV2Paths
 
@@ -49,10 +46,7 @@ def compute_store_status(
     turn the whole list route into 422. Safety paths (GC/delete/export) keep
     calling ``verify_all_committed`` separately.
 
-    *quota_bytes* defaults to the configured per-session quota; callers that own
-    a resolved ceiling (``SnapshotService``, which accepts a per-instance
-    override) pass theirs so the reported figure matches the one that would
-    refuse their next capture.
+    A zero or omitted *quota_bytes* reports unbounded production storage.
     """
     entries = manifest_store.list_committed_with_diagnostics()
     manifests = [e.manifest for e in entries if e.status == "ok" and e.manifest is not None]
@@ -79,11 +73,7 @@ def compute_store_status(
 
     dedup_savings = logical_bytes - physical_bytes
 
-    effective_quota = (
-        quota_bytes
-        if quota_bytes is not None
-        else default_config.snapshot_v2_session_quota_bytes
-    )
+    effective_quota = quota_bytes or 0
     if effective_quota > 0:
         usage_ratio = physical_bytes / effective_quota
         quota_warning = usage_ratio >= SNAPSHOT_QUOTA_WARNING_RATIO

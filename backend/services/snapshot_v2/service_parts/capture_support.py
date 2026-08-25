@@ -291,60 +291,54 @@ class CaptureSupportMixin:
         quota_baseline_bytes: int | None = None,
         allow_over_quota_baseline: bool = False,
     ) -> None:
-        # Session quota counts physical additions for this capture.
+        # Zero means production storage is unbounded. Explicit lower-level
+        # limits remain supported for callers that need an isolated quota.
         added = manifest.physical_added_bytes
-        addition_ceiling = self.session_quota_bytes
-        if (
-            allow_over_quota_baseline
-            and quota_baseline_bytes is not None
-            and quota_baseline_bytes > self.session_quota_bytes
-        ):
-            addition_ceiling = self.pre_restore_quota_grace_bytes
-        if added > addition_ceiling:
-            raise SnapshotStorageError(
-                "snapshot_quota_exceeded",
-                f"Snapshot physical addition {added} exceeds quota "
-                f"{addition_ceiling}",
-            )
-        cumulative = self._physical_object_store_bytes()
-        cumulative_ceiling = self.session_quota_bytes
-        if (
-            allow_over_quota_baseline
-            and quota_baseline_bytes is not None
-            and quota_baseline_bytes > self.session_quota_bytes
-        ):
-            cumulative_ceiling = (
-                quota_baseline_bytes + self.pre_restore_quota_grace_bytes
-            )
-        if cumulative > cumulative_ceiling:
-            raise SnapshotStorageError(
-                "snapshot_quota_exceeded",
-                f"Snapshot object store uses {cumulative} bytes, exceeding "
-                f"capture ceiling {cumulative_ceiling} bytes "
-                f"(session quota {self.session_quota_bytes})",
-            )
-        # Also enforce cumulative store size soft bound via logical objects.
-        try:
-            free = free_bytes_at(self.paths.root)
-        except OSError as exc:
-            raise SnapshotStorageError(
-                "DISK_USAGE_CHECK_FAILED",
-                f"Failed to check disk usage: {exc}",
-            )
-        # This runs at capture step 8 — *after* every object has already been
-        # written into objects/ — so the free bytes already exclude `added`.
-        # Subtracting it again demanded roughly twice the headroom the capture
-        # actually needed, and failed deterministically on exactly the workloads
-        # this system exists for (multi-GB AnnData captures): the bytes were
-        # safely on disk, the capture was rejected anyway, the objects were
-        # cleaned up, and Retry reproduced the same arithmetic forever. The
-        # reserve is the only meaningful post-write guard.
-        if free < self.free_space_reserve_bytes:
-            raise SnapshotStorageError(
-                "snapshot_quota_exceeded",
-                f"Insufficient disk space: {free} free after writing "
-                f"{added}, below {self.free_space_reserve_bytes} reserve",
-            )
+        if self.session_quota_bytes > 0:
+            addition_ceiling = self.session_quota_bytes
+            if (
+                allow_over_quota_baseline
+                and quota_baseline_bytes is not None
+                and quota_baseline_bytes > self.session_quota_bytes
+            ):
+                addition_ceiling = self.pre_restore_quota_grace_bytes
+            if added > addition_ceiling:
+                raise SnapshotStorageError(
+                    "snapshot_quota_exceeded",
+                    f"Snapshot physical addition {added} exceeds quota "
+                    f"{addition_ceiling}",
+                )
+            cumulative = self._physical_object_store_bytes()
+            cumulative_ceiling = self.session_quota_bytes
+            if (
+                allow_over_quota_baseline
+                and quota_baseline_bytes is not None
+                and quota_baseline_bytes > self.session_quota_bytes
+            ):
+                cumulative_ceiling = (
+                    quota_baseline_bytes + self.pre_restore_quota_grace_bytes
+                )
+            if cumulative > cumulative_ceiling:
+                raise SnapshotStorageError(
+                    "snapshot_quota_exceeded",
+                    f"Snapshot object store uses {cumulative} bytes, exceeding "
+                    f"capture ceiling {cumulative_ceiling} bytes "
+                    f"(session quota {self.session_quota_bytes})",
+                )
+        if self.free_space_reserve_bytes > 0:
+            try:
+                free = free_bytes_at(self.paths.root)
+            except OSError as exc:
+                raise SnapshotStorageError(
+                    "DISK_USAGE_CHECK_FAILED",
+                    f"Failed to check disk usage: {exc}",
+                )
+            if free < self.free_space_reserve_bytes:
+                raise SnapshotStorageError(
+                    "snapshot_quota_exceeded",
+                    f"Insufficient disk space: {free} free after writing "
+                    f"{added}, below {self.free_space_reserve_bytes} reserve",
+                )
 
     def _cleanup_unpublished_capture_objects(
         self, existing_hashes: set[str],

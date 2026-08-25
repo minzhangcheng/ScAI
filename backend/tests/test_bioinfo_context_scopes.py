@@ -196,7 +196,7 @@ def test_fresh_approved_plan_context_is_not_a_resume_instruction():
     assert "Resume from the existing checkpoint" not in text
 
 
-def test_exhausted_checkpoint_gets_one_bounded_window_for_a_new_plan():
+def test_new_pi_plan_resets_exhausted_executor_to_a_fresh_attempt():
     checkpoint = {
         "step_number": 200,
         "total_steps": 200,
@@ -208,19 +208,21 @@ def test_exhausted_checkpoint_gets_one_bounded_window_for_a_new_plan():
         checkpoint,
         checkpoint_valid=True,
         step_count=200,
-        max_steps=200,
+        current_max_steps=200,
+        per_attempt_max_steps=200,
         active_plan_id="new-plan",
-    ) == 230
+    ) == (400, 200, True)
     assert _resume_budget_after_plan_revision(
         checkpoint,
         checkpoint_valid=True,
         step_count=200,
-        max_steps=200,
+        current_max_steps=200,
+        per_attempt_max_steps=200,
         active_plan_id="old-plan",
-    ) == 200
+    ) == (200, 0, False)
 
 
-def test_non_exhausted_checkpoint_cannot_mint_extra_executor_budget():
+def test_new_pi_plan_resets_a_non_exhausted_executor_attempt():
     checkpoint = {
         "active_plan_id": "old-plan",
         "budget_exhausted": False,
@@ -228,28 +230,38 @@ def test_non_exhausted_checkpoint_cannot_mint_extra_executor_budget():
     assert _resume_budget_after_plan_revision(
         checkpoint,
         checkpoint_valid=True,
-        step_count=200,
-        max_steps=200,
+        step_count=80,
+        current_max_steps=200,
+        per_attempt_max_steps=200,
         active_plan_id="new-plan",
-    ) == 200
+    ) == (280, 80, True)
 
 
-def test_revised_plan_cannot_mint_a_second_repair_window():
+def test_each_new_pi_plan_gets_its_own_fresh_executor_attempt():
     checkpoint = {
         "step_number": 230,
         "total_steps": 230,
+        "attempt_start_step": 200,
         "active_plan_id": "plan-v2",
         "budget_exhausted": True,
-        "plan_revision_repair_windows_used": 1,
     }
 
     assert _resume_budget_after_plan_revision(
         checkpoint,
         checkpoint_valid=True,
         step_count=230,
-        max_steps=230,
+        current_max_steps=230,
+        per_attempt_max_steps=200,
         active_plan_id="plan-v3",
-    ) == 230
+    ) == (430, 230, True)
+    assert _resume_budget_after_plan_revision(
+        checkpoint,
+        checkpoint_valid=True,
+        step_count=230,
+        current_max_steps=230,
+        per_attempt_max_steps=200,
+        active_plan_id="plan-v2",
+    ) == (230, 200, False)
 
 
 @pytest.mark.asyncio
@@ -314,6 +326,8 @@ async def test_resume_preserves_executor_messages_and_persists_new_plan(
     assert saves, "the updated resume context must be persisted before execution"
     saved = saves[-1]
     assert saved["active_plan_id"] == "new-plan"
+    assert saved["attempt_start_step"] == 1
+    assert saved["total_steps"] == 2
     assert saved["messages"][:3] == original_messages
     assert "APPROVED PLAN REVISION" in saved["messages"][-1]["content"]
     assert saved["analysis_context"] == {"kept": True}

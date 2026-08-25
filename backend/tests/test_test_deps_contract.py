@@ -991,7 +991,6 @@ def test_test_strategy_documents_the_active_evidence_contract():
         "--tmpfs /tmp:rw,size=2g",
         "NUMBA_DISABLE_JIT=1",
         "SCAI_RUN_KERNEL_TESTS=1",
-        "SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB=1",
         "pytest==9.1.1",
         "pytest-asyncio==1.3.0",
         "pytest-benchmark==5.2.3",

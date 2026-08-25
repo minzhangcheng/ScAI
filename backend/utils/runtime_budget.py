@@ -10,24 +10,14 @@ from typing import Any
 
 
 _MEMORY_FRACTIONS = {
-    "max_single_object_bytes": 0.25,
     "max_anndata_total_bytes": 0.45,
     "max_rss_bytes": 0.60,
-    "max_pkl_bytes": 0.30,
 }
 _UNBOUNDED_CGROUP_SENTINEL = 1 << 60
 
 _CAPACITY_ENV_VARS = {
-    "max_single_object_bytes": "SCAI_RUNTIME_MAX_SINGLE_OBJECT_GB",
     "max_anndata_total_bytes": "SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB",
     "max_rss_bytes": "SCAI_RUNTIME_MAX_RSS_GB",
-    "max_pkl_bytes": "SCAI_RUNTIME_MAX_PKL_GB",
-}
-_POSITIVE_INT_ENV_VARS = {
-    "max_namespace_count": "SCAI_RUNTIME_MAX_NAMESPACE_COUNT",
-}
-_POSITIVE_FLOAT_ENV_VARS = {
-    "max_save_seconds": "SCAI_RUNTIME_MAX_SAVE_SECONDS",
 }
 
 
@@ -75,54 +65,6 @@ def apply_runtime_budget_environment(
             )
             continue
         result[key] = max(1, int(value_gib * 1024 ** 3))
-
-    for key, name in _POSITIVE_INT_ENV_VARS.items():
-        raw = str(env.get(name, "") or "").strip()
-        if not raw:
-            continue
-        try:
-            value = int(raw)
-        except ValueError:
-            logger.warning(
-                "%s=%r is not a positive integer; keeping %r",
-                name,
-                raw,
-                result.get(key),
-            )
-            continue
-        if value <= 0:
-            logger.warning(
-                "%s=%r must be a positive integer; keeping %r",
-                name,
-                raw,
-                result.get(key),
-            )
-            continue
-        result[key] = value
-
-    for key, name in _POSITIVE_FLOAT_ENV_VARS.items():
-        raw = str(env.get(name, "") or "").strip()
-        if not raw:
-            continue
-        try:
-            value = float(raw)
-        except ValueError:
-            logger.warning(
-                "%s=%r is not a positive number; keeping %r",
-                name,
-                raw,
-                result.get(key),
-            )
-            continue
-        if not math.isfinite(value) or value <= 0:
-            logger.warning(
-                "%s=%r must be a positive finite number; keeping %r",
-                name,
-                raw,
-                result.get(key),
-            )
-            continue
-        result[key] = value
 
     return result
 
@@ -214,16 +156,12 @@ def evaluate_runtime_budget(
 ) -> list[RuntimeBudgetViolation]:
     """Compare normalized metrics with configured positive limits."""
     mapping = {
-        "namespace_count": "max_namespace_count",
-        "largest_object_bytes": "max_single_object_bytes",
         "anndata_total_bytes": "max_anndata_total_bytes",
         "rss_bytes": "max_rss_bytes",
         # Backed AnnData is materialized before dill can persist it. The live
         # RSS and on-disk object can each fit independently while their sum
         # exceeds the same kernel ceiling, so evaluate that projected peak too.
         "projected_materialized_rss_bytes": "max_rss_bytes",
-        "pkl_bytes": "max_pkl_bytes",
-        "save_seconds": "max_save_seconds",
     }
     violations = []
     for resource, budget_key in mapping.items():

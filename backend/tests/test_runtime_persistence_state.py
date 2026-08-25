@@ -33,14 +33,16 @@ def _long_runtime_diagnostic_traceback():
     )
 
 
-def test_system_config_runtime_memory_ceilings_default_to_auto_and_are_not_persisted():
+def test_system_config_keeps_only_active_runtime_memory_ceilings():
     from backend.config._config import SystemConfig
 
     config = SystemConfig()
-    assert config.runtime_max_single_object_bytes is None
     assert config.runtime_max_anndata_total_bytes is None
     assert config.runtime_max_rss_bytes is None
-    assert config.runtime_max_pkl_bytes is None
+    assert not hasattr(config, "runtime_max_namespace_count")
+    assert not hasattr(config, "runtime_max_single_object_bytes")
+    assert not hasattr(config, "runtime_max_pkl_bytes")
+    assert not hasattr(config, "runtime_max_save_seconds")
     persisted = config.model_dump(mode="json")
     assert "runtime_max_rss_bytes" not in persisted
     assert "runtime_max_save_seconds" not in persisted
@@ -159,12 +161,8 @@ async def test_projected_materialization_peak_uses_rss_budget_before_serializati
     from backend.utils.runtime_budget import RuntimeBudgetExceeded
 
     budgets = {
-        "max_namespace_count": 100,
-        "max_single_object_bytes": 1024,
         "max_anndata_total_bytes": 1024,
         "max_rss_bytes": 60,
-        "max_pkl_bytes": 1024,
-        "max_save_seconds": 30,
     }
 
     class _Notebook:
@@ -238,123 +236,23 @@ async def test_projected_materialization_peak_uses_rss_budget_before_serializati
     }]
 
 
-@pytest.mark.asyncio
-async def test_save_duration_budget_is_passed_to_kernel_and_cleans_staging(
-    tmp_path,
-):
-    from backend.utils.runtime_budget import RuntimeBudgetExceeded
-
-    old_pkl = tmp_path / "timeout-session.pkl"
-    old_pkl.write_bytes(b"known-generation")
-    old_digest = "a" * 64
-
-    class _Notebook:
-        session_path = old_pkl
-        state_path = tmp_path / "timeout-session.json"
-        state_dir = tmp_path
-        runtime_persistence = {
-            "status": "current",
-            "commit_source": "regular_save",
-            "saved_revision": 7,
-            "committed_revision": 7,
-            "runtime_digest": old_digest,
-            "committed_digest": old_digest,
-        }
-
-        def __init__(self):
-            self.updates = []
-
-        def has_session_dump(self):
-            return True
-
-        def update_runtime_persistence(self, status, **kwargs):
-            self.updates.append((status, kwargs))
-
-    class _Sandbox:
-        session_id = "save-timeout"
-        runtime_revision = 8
-        saved_runtime_revision = 7
-        runtime_budgets = {
-            "max_namespace_count": 100,
-            "max_single_object_bytes": 1024,
-            "max_anndata_total_bytes": 1024,
-            "max_rss_bytes": 1024,
-            "max_pkl_bytes": 1024,
-            "max_save_seconds": 17.5,
-        }
-        runtime_dependency_tracker = None
-        _expected_lifecycle_generation = 0
-        _session_restore_failed = False
-        _exec_lock = asyncio.Lock()
-        notebook_state = _Notebook()
-
-        async def _runtime_resource_metrics(self):
-            return {
-                "namespace_count": 1,
-                "largest_object_bytes": 1,
-                "anndata_total_bytes": 0,
-                "rss_bytes": 1,
-                "backed_anndata_total_bytes": 0,
-                "projected_materialized_rss_bytes": 1,
-                "top_offenders": [],
-            }
-
-        async def _snapshot_user_globals(self):
-            return set()
-
-        def _prune_legacy_unobserved_required(self, _live_names):
-            return set()
-
-        def get_runtime_dependency_names(self):
-            return set()
-
-        async def _execute_unlocked(self, _code, **kwargs):
-            assert kwargs["execution_timeout"] == 17.5
-            Path(str(self.notebook_state.session_path) + ".tmp").write_bytes(
-                b"partial-generation"
-            )
-            return SimpleNamespace(
-                success=False,
-                output="",
-                error="Execution timed out after 17.5 seconds",
-                timed_out=True,
-            )
-
-    sandbox = _Sandbox()
-    with pytest.raises(RuntimeBudgetExceeded) as blocked:
-        await LocalJupyterSandbox.save_session(sandbox)
-
-    assert blocked.value.violations[0].resource == "save_seconds"
-    assert blocked.value.violations[0].limit == 17.5
-    assert old_pkl.read_bytes() == b"known-generation"
-    assert not Path(str(old_pkl) + ".tmp").exists()
-    assert sandbox.notebook_state.runtime_persistence["committed_revision"] == 7
-    status, failure = sandbox.notebook_state.updates[-1]
-    assert status == "failed"
-    assert failure["budget_violations"][0]["resource"] == "save_seconds"
-
-
 def test_effective_runtime_budgets_clamp_to_container_capacity():
     from backend.utils.runtime_budget import resolve_effective_runtime_budgets
 
     gib = 1024 ** 3
     effective = resolve_effective_runtime_budgets(
         {
-            "max_namespace_count": 5000,
-            "max_single_object_bytes": 32 * gib,
             "max_anndata_total_bytes": 128 * gib,
             "max_rss_bytes": 192 * gib,
-            "max_pkl_bytes": 128 * gib,
-            "max_save_seconds": 900,
         },
         memory_capacity_bytes=8 * gib,
         capacity_source="test_cgroup",
     )
 
-    assert effective["max_single_object_bytes"] == 2 * gib
     assert effective["max_anndata_total_bytes"] == int(8 * gib * 0.45)
     assert effective["max_rss_bytes"] == int(8 * gib * 0.60)
-    assert effective["max_pkl_bytes"] == int(8 * gib * 0.30)
+    assert "max_single_object_bytes" not in effective
+    assert "max_pkl_bytes" not in effective
     assert effective["effective_limit_basis"] == "test_cgroup"
 
 
@@ -364,23 +262,19 @@ def test_effective_runtime_budgets_default_to_capacity_fractions():
     gib = 1024 ** 3
     effective = resolve_effective_runtime_budgets(
         {
-            "max_namespace_count": 1500,
-            "max_single_object_bytes": None,
             "max_anndata_total_bytes": None,
             "max_rss_bytes": None,
-            "max_pkl_bytes": None,
-            "max_save_seconds": 300,
         },
         memory_capacity_bytes=2 * 1024 * gib,
         capacity_source="test_cgroup",
     )
 
-    assert effective["max_single_object_bytes"] == 512 * gib
     assert effective["max_anndata_total_bytes"] == int(2 * 1024 * gib * 0.45)
     assert effective["max_rss_bytes"] == int(2 * 1024 * gib * 0.60)
-    assert effective["max_pkl_bytes"] == int(2 * 1024 * gib * 0.30)
-    assert effective["max_namespace_count"] == 1500
-    assert effective["max_save_seconds"] == 300
+    assert "max_single_object_bytes" not in effective
+    assert "max_pkl_bytes" not in effective
+    assert "max_namespace_count" not in effective
+    assert "max_save_seconds" not in effective
 
 
 def test_runtime_budget_environment_supports_numeric_caps_and_auto():
@@ -388,12 +282,8 @@ def test_runtime_budget_environment_supports_numeric_caps_and_auto():
 
     gib = 1024 ** 3
     configured = {
-        "max_namespace_count": 1500,
-        "max_single_object_bytes": None,
         "max_anndata_total_bytes": None,
         "max_rss_bytes": None,
-        "max_pkl_bytes": None,
-        "max_save_seconds": 300,
     }
     resolved = apply_runtime_budget_environment(
         configured,
@@ -401,19 +291,15 @@ def test_runtime_budget_environment_supports_numeric_caps_and_auto():
             "SCAI_RUNTIME_MAX_SINGLE_OBJECT_GB": "32.5",
             "SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB": "48",
             "SCAI_RUNTIME_MAX_RSS_GB": "64",
-            "SCAI_RUNTIME_MAX_PKL_GB": "auto",
+            "SCAI_RUNTIME_MAX_PKL_GB": "1",
             "SCAI_RUNTIME_MAX_NAMESPACE_COUNT": "3000",
             "SCAI_RUNTIME_MAX_SAVE_SECONDS": "900.5",
         },
     )
 
     assert resolved == {
-        "max_namespace_count": 3000,
-        "max_single_object_bytes": int(32.5 * gib),
         "max_anndata_total_bytes": 48 * gib,
         "max_rss_bytes": 64 * gib,
-        "max_pkl_bytes": None,
-        "max_save_seconds": 900.5,
     }
 
 
@@ -421,26 +307,38 @@ def test_runtime_budget_environment_ignores_invalid_values(caplog):
     from backend.utils.runtime_budget import apply_runtime_budget_environment
 
     configured = {
-        "max_namespace_count": 1500,
-        "max_single_object_bytes": None,
         "max_anndata_total_bytes": None,
         "max_rss_bytes": None,
-        "max_pkl_bytes": None,
-        "max_save_seconds": 300,
     }
     resolved = apply_runtime_budget_environment(
         configured,
         environ={
             "SCAI_RUNTIME_MAX_RSS_GB": "not-a-size",
-            "SCAI_RUNTIME_MAX_NAMESPACE_COUNT": "0",
-            "SCAI_RUNTIME_MAX_SAVE_SECONDS": "inf",
         },
     )
 
     assert resolved == configured
     assert "SCAI_RUNTIME_MAX_RSS_GB" in caplog.text
-    assert "SCAI_RUNTIME_MAX_NAMESPACE_COUNT" in caplog.text
-    assert "SCAI_RUNTIME_MAX_SAVE_SECONDS" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("metric", "budget"),
+    [
+        ("pkl_bytes", "max_pkl_bytes"),
+        ("namespace_count", "max_namespace_count"),
+        ("largest_object_bytes", "max_single_object_bytes"),
+        ("save_seconds", "max_save_seconds"),
+    ],
+)
+def test_runtime_budget_does_not_gate_retired_resources(metric, budget):
+    from backend.utils.runtime_budget import evaluate_runtime_budget
+
+    violations = evaluate_runtime_budget(
+        {metric: 1024 ** 4},
+        {budget: 1},
+    )
+
+    assert violations == []
 
 
 @pytest.mark.asyncio
@@ -453,12 +351,8 @@ async def test_preflight_budget_blocks_before_kernel_serialization(tmp_path):
     gib = 1024 ** 3
     budgets = resolve_effective_runtime_budgets(
         {
-            "max_namespace_count": 1500,
-            "max_single_object_bytes": 4 * gib,
             "max_anndata_total_bytes": 12 * gib,
             "max_rss_bytes": 16 * gib,
-            "max_pkl_bytes": 8 * gib,
-            "max_save_seconds": 300,
         },
         memory_capacity_bytes=4 * gib,
         capacity_source="test_cgroup",
@@ -529,139 +423,6 @@ async def test_preflight_budget_blocks_before_kernel_serialization(tmp_path):
         },
     ]
     assert blocked.value.violations[0].limit == budgets["max_rss_bytes"]
-
-
-@pytest.mark.asyncio
-async def test_namespace_preflight_reclaims_only_confirmed_disposable_globals_once(
-    tmp_path,
-):
-    """Namespace pressure may reclaim confirmed scratch, never required state."""
-    import ast
-    import io
-    import re
-    from contextlib import redirect_stdout
-    from types import SimpleNamespace
-
-    from backend.services.snapshot_v2.runtime_registry import RuntimeDependencyTracker
-    from backend.utils.runtime_budget import RuntimeBudgetExceeded
-
-    budgets = {
-        "max_namespace_count": 3,
-        "max_single_object_bytes": 1024,
-        "max_anndata_total_bytes": 1024,
-        "max_rss_bytes": 1024,
-        "max_pkl_bytes": 1024,
-        "max_save_seconds": 30,
-    }
-
-    class _Notebook:
-        session_path = tmp_path / "namespace-pressure.pkl"
-        state_path = tmp_path / "namespace-pressure.json"
-        runtime_persistence = {"commit_source": None, "saved_revision": 0}
-
-        def __init__(self):
-            self.updates = []
-
-        def has_session_dump(self):
-            return False
-
-        def update_runtime_persistence(self, status, **kwargs):
-            self.updates.append((status, kwargs))
-
-    sandbox = object.__new__(LocalJupyterSandbox)
-    sandbox.session_id = "namespace-pressure"
-    sandbox.runtime_revision = 1
-    sandbox.saved_runtime_revision = 0
-    sandbox.runtime_budgets = budgets
-    sandbox._expected_lifecycle_generation = 0
-    sandbox._session_restore_failed = False
-    sandbox._exec_lock = asyncio.Lock()
-    sandbox.notebook_state = _Notebook()
-    sandbox._known_user_globals = {
-        "declared_output",
-        "cross_cell",
-        "results",
-        "adata_with_arbitrary_name",
-        "scratch",
-    }
-    sandbox.runtime_dependency_tracker = RuntimeDependencyTracker()
-    sandbox.runtime_dependency_tracker.record_execution(
-        created=set(sandbox._known_user_globals) | {"unconfirmed_scratch"},
-        loaded={"cross_cell"},
-        declared={"declared_output"},
-    )
-    class AnnData:
-        __module__ = "anndata"
-
-    namespace = {name: object() for name in sandbox._known_user_globals}
-    namespace["adata_with_arbitrary_name"] = AnnData()
-    metric_calls = 0
-    prune_calls = []
-
-    async def _runtime_resource_metrics():
-        nonlocal metric_calls
-        metric_calls += 1
-        return {
-            "namespace_count": 10,
-            "largest_object_bytes": 1,
-            "anndata_total_bytes": 1,
-            "rss_bytes": 1,
-            "backed_anndata_total_bytes": 0,
-            "projected_materialized_rss_bytes": 1,
-            "top_offenders": [{
-                "name": "adata_with_arbitrary_name",
-                "type": "AnnData",
-                "bytes": 1,
-            }],
-        }
-
-    async def _execute_unlocked(code, **_kwargs):
-        match = re.search(r"_scai_prune_candidates = (\[.*?\])", code)
-        if match:
-            candidates = ast.literal_eval(match.group(1))
-            prune_calls.append(candidates)
-            output = io.StringIO()
-            with redirect_stdout(output):
-                exec(code, namespace)
-            return SimpleNamespace(
-                success=True,
-                output=output.getvalue(),
-            )
-        raise AssertionError("namespace pressure must fail before serialization")
-
-    sandbox._runtime_resource_metrics = _runtime_resource_metrics
-    sandbox._execute_unlocked = _execute_unlocked
-
-    with pytest.raises(RuntimeBudgetExceeded):
-        await LocalJupyterSandbox.save_session(sandbox)
-
-    assert metric_calls == 2
-    assert len(prune_calls) == 1
-    assert set(prune_calls[0]) == {
-        "adata_with_arbitrary_name",
-        "scratch",
-        "unconfirmed_scratch",
-    }
-    assert {name for name in namespace if not name.startswith("_")} == {
-        "declared_output",
-        "cross_cell",
-        "results",
-        "adata_with_arbitrary_name",
-    }
-    assert sandbox.runtime_dependency_tracker.required_outputs == {
-        "declared_output",
-        "cross_cell",
-    }
-    assert sandbox.runtime_dependency_tracker.created_outputs == {
-        "declared_output",
-        "cross_cell",
-        "results",
-        "adata_with_arbitrary_name",
-        "unconfirmed_scratch",
-    }
-    assert sandbox._known_user_globals == {
-        name for name in namespace if not name.startswith("_")
-    }
 
 
 def test_metadata_never_reports_stale_pkl_as_current(monkeypatch, tmp_path):

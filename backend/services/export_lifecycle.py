@@ -301,8 +301,12 @@ def _reserve_space(
     source_bytes: int,
     member_count: int,
     reserve_bytes: int,
+    *,
+    include_source_estimate: bool = True,
 ) -> None:
-    required = int(source_bytes) + int(member_count) * _ZIP_MEMBER_OVERHEAD_BYTES + int(reserve_bytes)
+    required = int(reserve_bytes)
+    if include_source_estimate:
+        required += int(source_bytes) + int(member_count) * _ZIP_MEMBER_OVERHEAD_BYTES
     try:
         free_bytes = int(shutil.disk_usage(destination.parent).free)
     except OSError as exc:
@@ -409,6 +413,7 @@ def build_secure_zip(
     max_files: int | None,
     max_source_bytes: int | None,
     reserve_bytes: int,
+    include_source_space_estimate: bool = True,
 ) -> None:
     """Build a bounded ZIP from descriptor-pinned, no-follow source files."""
     root = Path(source_root)
@@ -427,7 +432,13 @@ def build_secure_zip(
             max_files=max_files,
             max_source_bytes=max_source_bytes,
         )
-        _reserve_space(target, total_bytes, len(selected), reserve_bytes)
+        _reserve_space(
+            target,
+            total_bytes,
+            len(selected),
+            reserve_bytes,
+            include_source_estimate=include_source_space_estimate,
+        )
         _verify_root(root, root_fd, root_identity)
         _verify_owned_destination(target, destination_fd, owned_identity)
         output_fd = os.dup(destination_fd)
@@ -483,6 +494,7 @@ def copy_secure_file(
     destination_fd: int,
     expected_identity: tuple[int, ...],
     reserve_bytes: int,
+    include_source_space_estimate: bool = True,
 ) -> None:
     """Copy one selected regular file without reopening it by pathname."""
     root = Path(source_root)
@@ -500,7 +512,13 @@ def copy_secure_file(
         member = _selected_member(root, source_path)
         if not _identity_matches(member.identity, expected_identity):
             raise SecureArchiveError(409, "Archive member changed during selection")
-        _reserve_space(target, member.identity[3], 0, reserve_bytes)
+        _reserve_space(
+            target,
+            member.identity[3],
+            0,
+            reserve_bytes,
+            include_source_estimate=include_source_space_estimate,
+        )
         _verify_root(root, root_fd, root_identity)
         _verify_owned_destination(target, destination_fd, owned_identity)
         descriptors = _open_member(root_fd, member, directory_flags, file_flags)

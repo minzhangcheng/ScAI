@@ -370,14 +370,6 @@ async def upload_data(
         validate_path_within(file_path, session_uploads)
         upload_parent.mkdir(parents=True, exist_ok=True)
 
-        import shutil as _shutil
-
-        disk_usage = _shutil.disk_usage(upload_parent)
-        if file.size and disk_usage.free < file.size * 2:
-            raise HTTPException(
-                status_code=507, detail="Insufficient disk space for upload"
-            )
-
         data_file = DataFile(
             filename=sanitized_name,
             file_path=str(file_path),

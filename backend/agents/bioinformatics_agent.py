@@ -114,9 +114,6 @@ def _gate_samples_per_group(state) -> Dict[str, int]:
 # Configure logger
 logger = logging.getLogger(__name__)
 
-_PLAN_REVISION_REPAIR_STEPS = 30
-
-
 @dataclass(frozen=True)
 class DatabasePriorResult:
     """Outcome of the optional offline marker-database evidence path."""
@@ -186,19 +183,21 @@ def _resume_budget_after_plan_revision(
     *,
     checkpoint_valid: bool,
     step_count: int,
-    max_steps: int,
+    current_max_steps: int,
+    per_attempt_max_steps: int,
     active_plan_id: Optional[str],
-) -> int:
-    """Return a bounded new cap for a revised plan after genuine exhaustion."""
+) -> tuple[int, int, bool]:
+    """Reset one executor attempt when the PI approves a replacement plan."""
+    attempt_start_step = 0
+    if checkpoint:
+        raw_attempt_start = checkpoint.get("attempt_start_step", 0)
+        if isinstance(raw_attempt_start, int):
+            attempt_start_step = min(max(0, raw_attempt_start), step_count)
     if not checkpoint or not checkpoint_valid:
-        return max_steps
-    if not bool(checkpoint.get("budget_exhausted")) or step_count < max_steps:
-        return max_steps
-    if int(checkpoint.get("plan_revision_repair_windows_used", 0) or 0) >= 1:
-        return max_steps
+        return current_max_steps, attempt_start_step, False
     if not active_plan_id or active_plan_id == checkpoint.get("active_plan_id"):
-        return max_steps
-    return step_count + _PLAN_REVISION_REPAIR_STEPS
+        return current_max_steps, attempt_start_step, False
+    return step_count + per_attempt_max_steps, step_count, True
 
 # Re-exported so `backend.agents.bioinformatics_agent.<name>` keeps resolving
 # for existing importers and for tests that patch these by name.
@@ -1288,6 +1287,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             Dict with analysis results
         """
         self.refresh_runtime_config_if_needed()
+        per_attempt_max_steps = max_steps
         # Use provided callback or fall back to instance callback
         review_callback = figure_review_callback or self.figure_review_callback
         _supervisor_callback = supervisor_callback or self.supervisor_callback
@@ -1528,30 +1528,25 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                 return str(plan.id)
             return None
 
-        # A run that exhausted its original executor budget can be routed back
-        # through planning when a completion contract is still open (including a
-        # missing publication figure).  Resuming at ``step_count == max_steps``
-        # would otherwise make the loop a no-op forever.  Grant one bounded repair
-        # window only when the checkpoint explicitly records exhaustion *and* the
-        # approved plan has changed.  The next checkpoint carries the new plan id,
-        # so an ordinary retry cannot mint another window.
-        revised_max_steps = _resume_budget_after_plan_revision(
+        # A PI-approved replacement plan starts a new bounded analysis attempt.
+        # Keep absolute step numbers monotonic for evidence identity, but reset
+        # the per-attempt counter and grant the configured number of fresh steps.
+        # The next checkpoint carries the new plan id and attempt offset, so an
+        # ordinary retry or reconnect resumes the same budget instead of resetting.
+        max_steps, attempt_start_step, attempt_reset = _resume_budget_after_plan_revision(
             checkpoint,
             checkpoint_valid=checkpoint_valid,
             step_count=step_count,
-            max_steps=max_steps,
+            current_max_steps=max_steps,
+            per_attempt_max_steps=per_attempt_max_steps,
             active_plan_id=_active_plan_id(),
         )
-        plan_revision_repair_windows_used = int(
-            (checkpoint or {}).get("plan_revision_repair_windows_used", 0) or 0
-        )
-        if revised_max_steps > max_steps:
-            max_steps = revised_max_steps
-            plan_revision_repair_windows_used += 1
+        if attempt_reset:
             logger.info(
-                "[Bioinformatics] Approved plan changed after executor budget "
-                "exhaustion; granting %s bounded repair steps (new cap=%s)",
-                _PLAN_REVISION_REPAIR_STEPS,
+                "[Bioinformatics] PI-approved plan changed; resetting the "
+                "analysis-attempt counter and granting %s fresh steps "
+                "(absolute cap=%s)",
+                per_attempt_max_steps,
                 max_steps,
             )
 
@@ -1569,6 +1564,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                 'planning_stage': planning_stage,
                 'step_number': step_count,
                 'total_steps': max_steps,
+                'attempt_start_step': attempt_start_step,
                 'active_plan_id': _active_plan_id(),
                 'messages': messages,
                 'findings': all_findings,
@@ -1577,9 +1573,6 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                 'analysis_log': [step.model_dump(mode="json") for step in analysis_log],
                 'analysis_context': self.analysis_context,
                 'budget_exhausted': budget_exhausted,
-                'plan_revision_repair_windows_used': (
-                    plan_revision_repair_windows_used
-                ),
                 'completed': False,
             }
             await checkpoint_mgr.save(checkpoint_data)
@@ -4448,7 +4441,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             defer_platform_baseline=True,
         )
         _saved_fig_count = count_saved_figures(analysis_log)
-        logger.info(f"[Bioinformatics] Analysis {status}: {step_count} steps executed, {len(all_findings)} findings, {len(all_figures)} inline figures, {_saved_fig_count} saved figures")
+        attempt_steps_executed = step_count - attempt_start_step
+        logger.info(f"[Bioinformatics] Analysis {status}: {attempt_steps_executed} steps executed in this attempt, {len(all_findings)} findings, {len(all_figures)} inline figures, {_saved_fig_count} saved figures")
 
         # Clear checkpoint only on explicit completion via report_findings
         # Preserve checkpoint for max_steps_reached and completed_with_fallback to allow resumption
@@ -4459,7 +4453,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             "status": status,
             "findings": all_findings,
             "figures": all_figures,
-            "steps_executed": step_count,
+            "steps_executed": attempt_steps_executed,
             "code_history": self.code_history,
             "analysis_log": analysis_log,
             "success": status != "error",

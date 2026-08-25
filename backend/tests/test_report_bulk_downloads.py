@@ -357,7 +357,7 @@ async def test_bulk_download_over_many_ranges_falls_back_to_full_200_and_cleans_
 
 
 @pytest.mark.asyncio
-async def test_bulk_download_rejects_oversized_source_and_removes_staging_file(
+async def test_bulk_download_disables_file_count_source_size_and_space_estimate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -366,17 +366,23 @@ async def test_bulk_download_rejects_oversized_source_and_removes_staging_file(
     source.mkdir()
     (source / "large.bin").write_bytes(b"1234")
     monkeypatch.setattr(downloads, "UPLOAD_TEMP_DIR", staging)
-    monkeypatch.setattr(downloads, "_BULK_ZIP_MAX_SOURCE_BYTES", 3)
+    calls = []
 
-    with pytest.raises(HTTPException) as exc_info:
-        await downloads._disk_zip_response(
-            source,
-            filename="bundle.zip",
-            recursive=False,
-        )
+    def build_secure_zip(*_args, **kwargs):
+        calls.append(kwargs)
 
-    assert exc_info.value.status_code == 413
-    assert list(staging.iterdir()) == []
+    monkeypatch.setattr(downloads, "build_secure_zip", build_secure_zip)
+    response = await downloads._disk_zip_response(
+        source,
+        filename="bundle.zip",
+        recursive=False,
+    )
+
+    assert calls[0]["max_files"] is None
+    assert calls[0]["max_source_bytes"] is None
+    assert calls[0]["include_source_space_estimate"] is False
+    assert calls[0]["reserve_bytes"] == 64 * 1024 * 1024
+    await _consume_response(response)
 
 
 @pytest.mark.asyncio
@@ -404,6 +410,31 @@ async def test_bulk_download_rejects_when_staging_disk_cannot_fit_estimate(
 
     assert exc_info.value.status_code == 507
     assert list(staging.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_download_requires_only_the_fixed_disk_reserve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    staging = tmp_path / "staging"
+    source.mkdir()
+    (source / "figure.png").write_bytes(b"image")
+    monkeypatch.setattr(downloads, "UPLOAD_TEMP_DIR", staging)
+    monkeypatch.setattr(
+        downloads.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=64 * 1024 * 1024),
+    )
+
+    response = await downloads._disk_zip_response(
+        source,
+        filename="bundle.zip",
+        recursive=False,
+    )
+
+    assert await _consume_response(response)
 
 
 def test_disk_zip_csv_filter_skips_symlinks(

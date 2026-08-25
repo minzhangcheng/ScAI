@@ -371,88 +371,6 @@ async def test_real_kernel_backed_anndata_materializes_with_aliases_or_fails_clo
 
 
 @pytest.mark.asyncio
-async def test_real_kernel_save_timeout_preserves_previous_generation_and_restores_cleanly(
-    tmp_path,
-):
-    from backend.utils.runtime_budget import RuntimeBudgetExceeded
-    from backend.utils.sandbox import LocalJupyterSandbox, _sha256_file
-
-    session_id = "real-kernel-save-timeout-preserve"
-    states_dir = tmp_path / "states"
-    workspace_dir = tmp_path / "workspace"
-    budgets = {
-        "max_namespace_count": 1500,
-        "max_single_object_bytes": 256 * 1024 * 1024,
-        "max_anndata_total_bytes": 256 * 1024 * 1024,
-        "max_rss_bytes": 2 * 1024 * 1024 * 1024,
-        "max_pkl_bytes": 256 * 1024 * 1024,
-        "max_save_seconds": 0.25,
-    }
-    sb = LocalJupyterSandbox(
-        session_id=session_id,
-        state_dir=str(states_dir),
-        working_dir=str(workspace_dir),
-        timeout=60,
-        runtime_budgets=budgets,
-    )
-    await sb.start()
-    try:
-        known = await sb.execute("known_generation = {'value': 'known'}")
-        assert known.success, known.error
-        assert await sb.save_session()
-        committed_bytes = sb.notebook_state.session_path.read_bytes()
-        committed_digest = _sha256_file(sb.notebook_state.session_path)
-        committed_revision = sb.saved_runtime_revision
-
-        slow = await sb.execute(
-            "import time\n"
-            "class SlowRuntimeValue:\n"
-            "    def __reduce__(self):\n"
-            "        time.sleep(2)\n"
-            "        return (str, ('slow',))\n"
-            "slow_runtime_value = SlowRuntimeValue()"
-        )
-        assert slow.success, slow.error
-        with pytest.raises(RuntimeBudgetExceeded) as blocked:
-            await sb.save_session()
-        assert any(
-            item.resource == "save_seconds" for item in blocked.value.violations
-        )
-        assert sb.notebook_state.session_path.read_bytes() == committed_bytes
-        assert _sha256_file(sb.notebook_state.session_path) == committed_digest
-        assert sb.saved_runtime_revision == committed_revision
-        assert not Path(
-            str(sb.notebook_state.session_path) + ".tmp"
-        ).exists()
-
-        idle = await sb.execute("print('kernel-idle-after-save-timeout')")
-        assert idle.success, idle.error
-        assert idle.output.strip() == "kernel-idle-after-save-timeout"
-        assert sb._kernel_dead is False
-    finally:
-        await sb.stop(save=False)
-
-    restored = LocalJupyterSandbox(
-        session_id=session_id,
-        state_dir=str(states_dir),
-        working_dir=str(workspace_dir),
-        timeout=60,
-        runtime_budgets=budgets,
-    )
-    await restored.start()
-    try:
-        check = await restored.execute(
-            "print(known_generation)\n"
-            "print('slow_runtime_value' in globals())"
-        )
-        assert check.success, check.error
-        assert "known" in check.output
-        assert "False" in check.output
-    finally:
-        await restored.stop(save=False)
-
-
-@pytest.mark.asyncio
 async def test_real_kernel_snapshot_v2_disabled_save_restore_keeps_budgets(
     tmp_path, monkeypatch,
 ):
@@ -461,12 +379,8 @@ async def test_real_kernel_snapshot_v2_disabled_save_restore_keeps_budgets(
     from backend.utils.sandbox import LocalJupyterSandbox, _sha256_file
 
     budgets = {
-        "max_namespace_count": 1500,
-        "max_single_object_bytes": 256 * 1024 * 1024,
         "max_anndata_total_bytes": 256 * 1024 * 1024,
         "max_rss_bytes": 2 * 1024 * 1024 * 1024,
-        "max_pkl_bytes": 256 * 1024 * 1024,
-        "max_save_seconds": 17.5,
     }
     session_id = "real-kernel-snapshot-off-save-restore"
     states_dir = tmp_path / "states"
@@ -504,8 +418,6 @@ async def test_real_kernel_snapshot_v2_disabled_save_restore_keeps_budgets(
 
         sb.runtime_budgets = dict(budgets)
         assert sb.runtime_budgets["max_rss_bytes"] == budgets["max_rss_bytes"]
-        assert sb.runtime_budgets["max_pkl_bytes"] == budgets["max_pkl_bytes"]
-        assert sb.runtime_budgets["max_save_seconds"] == 17.5
     finally:
         await sb.stop(save=False)
 

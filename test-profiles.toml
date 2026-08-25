@@ -10,7 +10,7 @@ args = ["clients/python/tests"]
 [profiles.kernel]
 description = "Known real-kernel and integration surface; serial"
 claim_scope = "complete known real-kernel/integration evidence"
-env = { SCAI_RUN_KERNEL_TESTS = "1", SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB = "1" }
+env = { SCAI_RUN_KERNEL_TESTS = "1" }
 args = [
   "backend/tests/integration",
   "backend/tests/test_kernel_core_dump_suppression.py",
