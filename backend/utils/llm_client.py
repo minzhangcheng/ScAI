@@ -218,6 +218,10 @@ class OpenAICompatibleClient(
         # status updates to WebSocket so the frontend knows we're still alive.
         # Signature: async (attempt, max_retries, delay, error_type, agent_name) -> None
         self.on_retry: Optional[Callable[[int, int, float, str, str], Awaitable[None]]] = None
+        # Optional lifecycle gate awaited after retry backoff and immediately
+        # before another request.  Unlike on_retry, this callback is not
+        # best-effort: cancellation and gate failures propagate.
+        self.before_retry: Optional[Callable[[], Awaitable[None]]] = None
 
         # Session-level cache of models that rejected temperature parameter
         # Key is model name (extracted), value is True

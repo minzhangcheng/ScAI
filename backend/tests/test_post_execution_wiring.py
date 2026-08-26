@@ -464,6 +464,7 @@ class _PI:
                                           "remaining_gaps": []}
         self._raise = raise_on_review
         self.review_calls = 0
+        self.assessment_inputs = []
 
     async def review_round_execution(self, **kwargs):
         self.review_calls += 1
@@ -472,6 +473,7 @@ class _PI:
         return self._plan
 
     async def assess_supplementary_result(self, **kwargs):
+        self.assessment_inputs.append(kwargs)
         return self._assessment
 
 
@@ -566,6 +568,52 @@ async def test_unmet_step_triggers_pass_and_merges_back():
     assert reaudit["n_unmet"] == 1
     assert reaudit["unmet_figure_kinds"] == ["result"]
     assert plan.steps[0].status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_evidence_records_reach_pi_and_meta_without_raw_provenance():
+    plan = _plan([PlanStep(id=1, title="Pathway activity", method="Run decoupler run_ulm")])
+    state = _state(plan)
+    raw_execution = _execution("dc.run_ulm(adata)", exec_id="supp-evidence")
+    evidence_records = [{
+        "execution_id": raw_execution.id,
+        "status": "completed",
+        "stdout_excerpt": "top regulons: A, B",
+        "error": "",
+    }]
+    raw_result = {
+        "status": "partial",
+        "summary": "The iteration limit was reached.",
+        "findings": [],
+        "figures": [],
+        "warnings": ["max_iterations reached"],
+        "evidence_records": evidence_records,
+        "code_history": [raw_execution],
+        "analysis_log": [],
+    }
+    pi = _PI(assessment={
+        "verdict": "partial",
+        "summary": "The execution record is available for review.",
+        "resolved_gaps": [],
+        "remaining_gaps": ["decoupler never ran"],
+    })
+    harness = _Harness(pi=pi, bio=_Bio(result=raw_result))
+
+    audit_summary = harness._audit_round_plan_execution(state, {})
+    meta, merge = await harness._run_post_execution_review(
+        state, _unmet_result(), audit_summary, "full"
+    )
+
+    assert pi.assessment_inputs
+    assessed = pi.assessment_inputs[-1]["supplementary_result"]
+    assert assessed["evidence_records"] == evidence_records
+    assert meta["review_result"]["evidence_records"] == evidence_records
+    assert "code_history" not in assessed and "analysis_log" not in assessed
+    assert "code_history" not in meta and "analysis_log" not in meta
+    assert merge["code_history"] == [raw_execution]
+    assert merge["findings"] == []
+    import json
+    json.dumps(meta)
 
 
 def test_merge_discards_unreviewed_automatic_supplementary_figures():

@@ -362,6 +362,23 @@ class SupplementaryMixin:
                     "Withheld unreviewed image file(s) written during restricted "
                     "supplementary execution: " + ", ".join(sorted(newly_quarantined))
                 )
+            # These are bounded observations of the cells this pass actually
+            # returned.  They deliberately carry no scientific interpretation;
+            # the PI uses the output/error context to decide whether a requested
+            # gap was addressed.  The loop is capped at eight iterations, which
+            # is below the existing review-list bound.
+            evidence_records = [
+                {
+                    "execution_id": str(record.id)[:100],
+                    "status": "failed" if record.error else "completed",
+                    "stdout_excerpt": (record.output or "")[-2000:],
+                    "error": (
+                        compact_traceback(record.error, max_chars=1000)
+                        if record.error else ""
+                    ),
+                }
+                for record in produced
+            ]
             return {
                 "status": status,
                 "summary": summary,
@@ -370,6 +387,7 @@ class SupplementaryMixin:
                 "warnings": warnings + list(extra_warnings),
                 "code_history": list(produced),
                 "analysis_log": list(analysis_log),
+                "evidence_records": evidence_records,
             }
 
         if not clean_tasks:

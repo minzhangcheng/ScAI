@@ -308,6 +308,9 @@ class ClientParamsMixin:
             kwargs["rate_limit_retries"] = len(RATE_LIMIT_DELAYS)
         if self.on_retry is not None:
             kwargs["on_retry"] = self.on_retry
+        before_retry = getattr(self, "before_retry", None)
+        if before_retry is not None:
+            kwargs["before_retry"] = before_retry
         if non_retryable_predicate is not None:
             kwargs["non_retryable_predicate"] = non_retryable_predicate
         return kwargs

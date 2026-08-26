@@ -55,6 +55,10 @@ def test_compute_delay_budget_capped_by_max_retries():
 @pytest.mark.asyncio
 async def test_first_429_uses_index_zero_after_5xx(captured_sleeps):
     seq = {"i": 0}
+    gate_calls = []
+
+    async def before_retry():
+        gate_calls.append(seq["i"])
 
     async def func():
         i = seq["i"]
@@ -65,10 +69,16 @@ async def test_first_429_uses_index_zero_after_5xx(captured_sleeps):
             raise RateLimitError("Rate limit reached, slow down", response=_resp(429), body=None)
         return "ok"
 
-    result = await retry_with_backoff(func, max_retries=4, agent_name="t")
+    result = await retry_with_backoff(
+        func,
+        max_retries=4,
+        agent_name="t",
+        before_retry=before_retry,
+    )
     assert result == "ok"
     # first delay from the 5xx backoff, second delay must be RATE_LIMIT_DELAYS[0]
     assert captured_sleeps == [RETRY_DELAY_BASE * 1, float(RATE_LIMIT_DELAYS[0])]
+    assert gate_calls == [1, 2]
 
 
 @pytest.mark.asyncio
@@ -115,6 +125,9 @@ def test_long_timeout_disables_ordinary_retries_but_keeps_429_budget():
     client.agent_name = "literature"
     client.base_url = "https://example.invalid/v1"
     client.on_retry = None
+    async def before_retry():
+        return None
+    client.before_retry = before_retry
 
     kwargs = client._build_retry_kwargs(
         "deep-research",
@@ -123,3 +136,4 @@ def test_long_timeout_disables_ordinary_retries_but_keeps_429_budget():
 
     assert kwargs["max_retries"] == 0
     assert kwargs["rate_limit_retries"] == len(RATE_LIMIT_DELAYS)
+    assert kwargs["before_retry"] is before_retry

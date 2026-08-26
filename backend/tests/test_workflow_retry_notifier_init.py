@@ -11,6 +11,7 @@ from backend.workflow.core import SingleCellAnalysisWorkflow
 class _FakeOpenRouter:
     def __init__(self):
         self.on_retry = None
+        self.before_retry = None
 
 
 class _FakeLLMManager:
@@ -37,6 +38,7 @@ class _FakeCheckpointer:
 class _FakeDeepResearchClient:
     def __init__(self, *args, **kwargs):
         self.on_retry = None
+        self.before_retry = None
 
     async def close(self):
         return None
@@ -131,6 +133,7 @@ async def test_preconfigured_deep_research_client_gets_retry_callback_before_age
 
     assert workflow.literature_agent._deep_research_llm_client is not None
     assert workflow.literature_agent._deep_research_llm_client.on_retry is workflow.llm_manager.openrouter.on_retry
+    assert workflow.literature_agent._deep_research_llm_client.before_retry is workflow.llm_manager.openrouter.before_retry
 
 
 @pytest.mark.asyncio

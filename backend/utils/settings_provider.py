@@ -33,6 +33,10 @@ _SECRET_FIELD_NAMES = {
     "proxy_url",
 }
 
+# ``set_retry_callback`` predates the lifecycle gate.  Keep a one-argument
+# update from accidentally clearing an already-installed ``before_retry``.
+_RETRY_CALLBACK_UNSET = object()
+
 
 def agent_endpoint_lacks_credential(
     agent_url: str,
@@ -89,6 +93,7 @@ class AgentSettingsProvider:
         global_client: Optional[OpenAICompatibleClient],
         session_id: Optional[str] = None,
         retry_callback: Optional[Callable] = None,
+        before_retry_callback: Optional[Callable] = None,
     ):
         self._state = state
         self._session_id = session_id
@@ -96,6 +101,7 @@ class AgentSettingsProvider:
         self._global_client = global_client
         self._global_client_signature = _api_transport_signature(config.api)
         self._retry_callback = retry_callback
+        self._before_retry_callback = before_retry_callback
         self._client_cache: Dict[Tuple[str, ...], OpenAICompatibleClient] = {}
         self._retired_clients: set[OpenAICompatibleClient] = set()
         self._client_close_tasks: set[asyncio.Task[None]] = set()
@@ -104,19 +110,75 @@ class AgentSettingsProvider:
         self._cleanup_lock = asyncio.Lock()
         self._closing = False
         self._cleanup_complete = False
+        if self._retry_callback is not None or self._before_retry_callback is not None:
+            self._apply_retry_callbacks(self._global_client)
 
-    def set_retry_callback(self, callback: Optional[Callable]) -> None:
-        """Set or update the retry callback for newly created LLM clients."""
+    def _apply_retry_callbacks(self, client: Optional[OpenAICompatibleClient]) -> None:
+        """Apply notification and lifecycle callbacks to one owned client."""
+        if client is None:
+            return
+        if self._retry_callback is not None:
+            client.on_retry = self._retry_callback
+        if self._before_retry_callback is not None:
+            client.before_retry = self._before_retry_callback
+
+    def _set_retry_callbacks_on_owned_clients(
+        self,
+        *,
+        set_notification: bool = False,
+        set_gate: bool = False,
+    ) -> None:
+        """Set explicitly requested callbacks on currently owned clients.
+
+        The historical notification setter clears ``on_retry`` when given
+        ``None``.  The lifecycle-only setter must not clear a notification that
+        another owner installed, so the two update paths are intentionally
+        separate from the conditional helper used for new/external clients.
+        """
+        clients = [self._global_client, *self._client_cache.values()]
+        for client in clients:
+            if client is None:
+                continue
+            if set_notification:
+                client.on_retry = self._retry_callback
+            if set_gate:
+                client.before_retry = self._before_retry_callback
+
+    def set_retry_callback(
+        self,
+        callback: Optional[Callable],
+        before_retry: Any = _RETRY_CALLBACK_UNSET,
+    ) -> None:
+        """Set retry callbacks and apply them to every currently owned client.
+
+        ``before_retry`` is optional for compatibility with callers that only
+        install the historical best-effort notification callback.
+        """
         self._retry_callback = callback
-        if self._global_client is not None:
-            self._global_client.on_retry = callback
-        for client in self._client_cache.values():
-            client.on_retry = callback
+        if before_retry is not _RETRY_CALLBACK_UNSET:
+            self._before_retry_callback = before_retry
+        self._set_retry_callbacks_on_owned_clients(
+            set_notification=True,
+            set_gate=before_retry is not _RETRY_CALLBACK_UNSET,
+        )
+
+    def set_before_retry_callback(self, callback: Optional[Callable]) -> None:
+        """Set the lifecycle retry gate without changing notification wiring."""
+        self._before_retry_callback = callback
+        self._set_retry_callbacks_on_owned_clients(set_gate=True)
 
     def apply_retry_callback(self, client: Optional[OpenAICompatibleClient]) -> None:
-        """Apply the current retry callback to an externally-created client."""
-        if client is not None and self._retry_callback:
+        """Apply current retry callbacks to an externally-created client."""
+        if client is None:
+            return
+        # Preserve the legacy helper's no-op behavior when the provider has no
+        # callback configured; an external owner may already have its own
+        # notification hook.  Workflow-installed callbacks are non-None and
+        # therefore apply both the notification and lifecycle gate.
+        if self._retry_callback is not None:
             client.on_retry = self._retry_callback
+        if self._before_retry_callback is not None:
+            client.before_retry = self._before_retry_callback
 
     def _get_state(self) -> AnalysisState:
         """Return the freshest available AnalysisState.
@@ -188,7 +250,7 @@ class AgentSettingsProvider:
                 session_id=self._session_id,
                 agent_name="workflow",
             )
-            replacement.on_retry = self._retry_callback
+            self._apply_retry_callbacks(replacement)
         except Exception:
             self._global_client = None
             self._global_client_signature = new_signature
@@ -255,8 +317,7 @@ class AgentSettingsProvider:
                 session_id=self._session_id,
                 agent_name=agent_name,
             )
-            if self._retry_callback:
-                client.on_retry = self._retry_callback
+            self._apply_retry_callbacks(client)
             self._client_cache[cache_key] = client
         return self._client_cache[cache_key]
 
@@ -296,6 +357,7 @@ class AgentSettingsProvider:
             # races with teardown; retain and close the rejected client.
             self._retire_client(client)
             raise RuntimeError("settings provider is closing")
+        self._apply_retry_callbacks(client)
         cache_key = ("registered", key[0], key[1])
         previous = self._client_cache.get(cache_key)
         if previous is not None and previous is not client:

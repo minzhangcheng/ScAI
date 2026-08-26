@@ -1331,7 +1331,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         logger.info(f"[{self.session_id}] Workflow graph built")
         
     def _install_retry_notifiers(self):
-        """Set on_retry callbacks on all agent LLM clients.
+        """Set retry notification and pause-gate callbacks on all LLM clients.
 
         When an LLM request fails and enters retry-with-backoff, the callback
         pushes a status message through the WebSocket so the frontend knows the
@@ -1362,13 +1362,21 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             except Exception:
                 pass  # Best-effort; never break retry logic
 
+        async def _before_retry():
+            # This is a lifecycle gate, not a notification.  Do not swallow
+            # cancellation or other failures: a paused workflow must not begin
+            # another request until signal_resume() releases this event.
+            await self._pause_event.wait()
+
         # Set on the global client
         self.llm_manager.openrouter.on_retry = _on_retry
+        self.llm_manager.openrouter.before_retry = _before_retry
         # Set on the provider so all future lazy-created clients also get it
-        self._settings_provider.set_retry_callback(_on_retry)
+        self._settings_provider.set_retry_callback(_on_retry, _before_retry)
         # Also set on any already-cached clients
         for client in self._settings_provider.cached_clients():
             client.on_retry = _on_retry
+            client.before_retry = _before_retry
 
     async def _build_and_save_detailed_segment(
         self, state: AnalysisState, phase: str, title: str,

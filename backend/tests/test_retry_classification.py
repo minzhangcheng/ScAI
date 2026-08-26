@@ -195,3 +195,107 @@ async def test_on_retry_is_called_with_the_arity_core_declares():
         "error_type": "TimeoutError",
         "agent_name": "biochemistry",
     }
+
+
+@pytest.mark.asyncio
+async def test_before_retry_gate_blocks_until_resume_and_retries_once():
+    pause = asyncio.Event()
+    gate_entered = asyncio.Event()
+    calls = 0
+
+    async def before_retry():
+        gate_entered.set()
+        await pause.wait()
+
+    async def request():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise asyncio.TimeoutError()
+        return "ok"
+
+    task = asyncio.create_task(retry_with_backoff(
+        request,
+        max_retries=1,
+        retry_delay_base=0,
+        agent_name="test",
+        before_retry=before_retry,
+    ))
+    await gate_entered.wait()
+    await asyncio.sleep(0)
+    assert calls == 1
+
+    pause.set()
+    assert await task == "ok"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_before_retry_gate_cancellation_propagates_without_retry():
+    pause = asyncio.Event()
+    gate_entered = asyncio.Event()
+    calls = 0
+
+    async def before_retry():
+        gate_entered.set()
+        await pause.wait()
+
+    async def request():
+        nonlocal calls
+        calls += 1
+        raise asyncio.TimeoutError()
+
+    task = asyncio.create_task(retry_with_backoff(
+        request,
+        max_retries=1,
+        retry_delay_base=0,
+        agent_name="test",
+        before_retry=before_retry,
+    ))
+    await gate_entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_set_before_retry_gate_preserves_notification_and_backoff_order(monkeypatch):
+    import backend.utils.llm_client_parts.retry as retry_module
+
+    real_sleep = asyncio.sleep
+    sleeps = []
+    events = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(retry_module.asyncio, "sleep", fake_sleep)
+
+    calls = 0
+
+    async def on_retry(*_args):
+        events.append("notify")
+
+    async def before_retry():
+        events.append("gate")
+
+    async def request():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise asyncio.TimeoutError()
+        return "ok"
+
+    assert await retry_with_backoff(
+        request,
+        max_retries=1,
+        retry_delay_base=0.25,
+        agent_name="test",
+        on_retry=on_retry,
+        before_retry=before_retry,
+    ) == "ok"
+    assert events == ["notify", "gate"]
+    assert sleeps == [0.25]
+    assert calls == 2

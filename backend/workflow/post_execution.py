@@ -465,6 +465,7 @@ class PostExecutionReviewMixin:
                 "status": supplementary.get("status"),
                 "summary": supplementary.get("summary"),
                 "warnings": supplementary.get("warnings", []),
+                "evidence_records": supplementary.get("evidence_records", []),
             },
             "plan_audit": audit_summary,
             "supplementary_findings": supplementary.get("findings", []),
@@ -485,6 +486,7 @@ class PostExecutionReviewMixin:
             "figures": [],
             "code_history": raw_result.get("code_history") or [],
             "analysis_log": raw_result.get("analysis_log") or [],
+            "evidence_records": supplementary.get("evidence_records", []),
             "assessment_summary": meta["assessment"]["summary"],
         }
         logger.info(

@@ -200,8 +200,14 @@ Research direction this round: {direction or "N/A"}
 {json.dumps(supplementary_result, ensure_ascii=False)[:6000]}
 
 Rules:
-- A gap is resolved only when the pass produced a concrete result that addresses it. A
-  task that errored, was skipped, or returned nothing leaves its gap open.
+- `evidence_records` are bounded observations of individual execution requests. Their
+  `execution_id` is the join key to the raw provenance record, `status` says only whether
+  the request returned an error, and `stdout_excerpt` / `error` are the available context;
+  they are not host-generated findings or scientific verdicts.
+- A gap is resolved only when a completed record's bounded output contains a concrete
+  result that addresses it and you judge that result sufficient. A completed status alone
+  does not resolve a gap; a task that errored, was skipped, or returned no informative
+  output leaves its gap open.
 - An inline notebook plot is not a registered or PI-reviewed PublicationFigure and cannot
   resolve a required publication-figure gap. Leave that gap in `remaining_gaps` for the
   main executor.

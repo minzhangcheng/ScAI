@@ -23,6 +23,7 @@ class _Client:
         self._closed = False
         self.close = AsyncMock()
         self.on_retry = None
+        self.before_retry = None
 
 
 @pytest.mark.asyncio
@@ -47,6 +48,12 @@ async def test_config_rotation_publishes_new_before_inflight_old_closes(monkeypa
         base_url="https://new.example/v1",
     )
     provider = AgentSettingsProvider(state, old_config, old)
+    on_retry = lambda *args: None
+
+    async def before_retry():
+        return None
+
+    provider.set_retry_callback(on_retry, before_retry)
     workflow = SimpleNamespace(
         _settings_provider=provider,
         llm_manager=SimpleNamespace(llm=old, openrouter=old),
@@ -68,6 +75,8 @@ async def test_config_rotation_publishes_new_before_inflight_old_closes(monkeypa
         assert provider.get_llm_client("pi") is new
         assert workflow.llm_manager.llm is new
         assert workflow.llm_manager.openrouter is new
+        assert old.before_retry is before_retry
+        assert new.before_retry is before_retry
         await asyncio.sleep(0)
         old.close.assert_not_awaited()
 

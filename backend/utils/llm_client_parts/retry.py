@@ -107,6 +107,7 @@ async def retry_with_backoff(
     on_retry: Optional[Callable[[int, int, float, str, str], Awaitable[None]]] = None,
     non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
     rate_limit_retries: Optional[int] = None,
+    before_retry: Optional[Callable[[], Awaitable[None]]] = None,
 ):
     """
     Execute an async function with exponential backoff retry on timeout/connection errors
@@ -124,6 +125,9 @@ async def retry_with_backoff(
             long retry waits. agent_name is passed through because the retry
             notice is the only trace of the stall the user sees, and a notice
             attributed to the wrong agent sends them to the wrong logs.
+        before_retry: Optional async gate awaited after each retry backoff and
+            immediately before the next request. Exceptions, including
+            ``asyncio.CancelledError``, propagate to the caller.
 
     Returns:
         Result from the function
@@ -161,6 +165,11 @@ async def retry_with_backoff(
             except Exception:
                 pass  # Never let notification failure break retry logic
 
+    async def _await_before_retry() -> None:
+        """Wait for lifecycle permission before starting another request."""
+        if before_retry is not None:
+            await before_retry()
+
     attempt = 0
     while attempt <= effective_max:
         try:
@@ -181,6 +190,7 @@ async def retry_with_backoff(
                 )
                 await _notify_retry(attempt, delay, "JSONDecodeError")
                 await asyncio.sleep(delay)
+                await _await_before_retry()
             else:
                 logger.error(
                     f"[{agent_name}] Invalid JSON after {json_error_count} attempts: {str(e)}"
@@ -221,6 +231,7 @@ async def retry_with_backoff(
                 )
                 await asyncio.sleep(delay)
                 rate_limit_attempt += 1
+                await _await_before_retry()
                 continue
             else:
                 logger.error(
@@ -273,6 +284,7 @@ async def retry_with_backoff(
                 await _notify_retry(attempt, delay, error_label)
                 await asyncio.sleep(delay)
                 attempt += 1
+                await _await_before_retry()
                 continue
             else:
                 logger.error(

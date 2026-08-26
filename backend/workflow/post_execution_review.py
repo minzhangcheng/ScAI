@@ -1210,6 +1210,39 @@ def sanitize_review_plan(plan: Any, max_tasks: int) -> Dict[str, Any]:
 
 
 _MAX_FINDINGS = 40
+
+
+def _sanitize_evidence_records(values: Any) -> List[Dict[str, str]]:
+    """Allowlist bounded execution observations for PI/storage transport.
+
+    Raw ``CodeExecution`` and ``AnalysisStep`` instances remain on the separate
+    provenance merge path.  Only the four primitive observation fields cross the
+    review boundary, and the terminal portions of output/error are retained so
+    the useful result or exception context survives truncation.
+    """
+    from backend.utils.error_parsing import bounded_diagnostic
+
+    if not isinstance(values, (list, tuple)):
+        return []
+    records: List[Dict[str, str]] = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        status = str(value.get("status", "") or "").strip().lower()
+        if status not in {"completed", "failed"}:
+            continue
+        error = str(value.get("error", "") or "")
+        records.append({
+            "execution_id": str(value.get("execution_id", "") or "")[:100],
+            "status": status,
+            "stdout_excerpt": str(value.get("stdout_excerpt", "") or "")[-2000:],
+            "error": bounded_diagnostic(error, 1000) if error else "",
+        })
+        if len(records) >= _MAX_LIST:
+            break
+    return records
+
+
 def sanitize_review_result(result: Any) -> Dict[str, Any]:
     """Bound a supplementary-execution result for storage and transport.
 
@@ -1221,7 +1254,8 @@ def sanitize_review_result(result: Any) -> Dict[str, Any]:
     """
     if not isinstance(result, dict):
         return {"status": "failed", "summary": "Supplementary pass returned no structured result.",
-                "findings": [], "figures": [], "warnings": ["non-dict result"]}
+                "findings": [], "figures": [], "warnings": ["non-dict result"],
+                "evidence_records": []}
     warnings = _clean_list(
         result.get("warnings"), _MAX_LIST, _MAX_GAP_LEN, diagnostic=True,
     )
@@ -1243,6 +1277,7 @@ def sanitize_review_result(result: Any) -> Dict[str, Any]:
         # callback. Never serialize its raw notebook images into report state.
         "figures": [],
         "warnings": warnings,
+        "evidence_records": _sanitize_evidence_records(result.get("evidence_records")),
     }
 
 

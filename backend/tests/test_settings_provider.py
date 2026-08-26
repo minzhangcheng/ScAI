@@ -147,6 +147,64 @@ class TestGetLlmClient:
             provider.get_llm_client("pi")
             assert mock_instance.on_retry is not None
 
+    def test_propagates_before_retry_to_global_cached_lazy_and_external_clients(
+        self, provider, state, mock_global_client
+    ):
+        on_retry = lambda *args: None
+
+        async def before_retry():
+            return None
+
+        provider.set_retry_callback(on_retry, before_retry)
+        assert mock_global_client.on_retry is on_retry
+        assert mock_global_client.before_retry is before_retry
+
+        state.agent_server_configs["pi"] = {
+            "llm_base_url": "https://custom.api/v1",
+            "api_key": "custom-key",
+        }
+        with patch("backend.utils.settings_provider.OpenAICompatibleClient") as MockClient:
+            cached = MagicMock()
+            MockClient.return_value = cached
+            assert provider.get_llm_client("pi") is cached
+            assert cached.on_retry is on_retry
+            assert cached.before_retry is before_retry
+
+        state.agent_server_configs["literature"] = {
+            "llm_base_url": "https://lazy.api/v1",
+            "api_key": "lazy-key",
+        }
+        with patch("backend.utils.settings_provider.OpenAICompatibleClient") as MockClient:
+            lazy = MagicMock()
+            MockClient.return_value = lazy
+            assert provider.get_llm_client("literature") is lazy
+            assert lazy.on_retry is on_retry
+            assert lazy.before_retry is before_retry
+
+        external = MagicMock()
+        provider.apply_retry_callback(external)
+        assert external.on_retry is on_retry
+        assert external.before_retry is before_retry
+
+        registered = MagicMock()
+        provider.register_client(("deep_research", "registered"), registered)
+        assert registered.on_retry is on_retry
+        assert registered.before_retry is before_retry
+
+    def test_notification_update_does_not_clear_existing_pause_gate(
+        self, provider, mock_global_client
+    ):
+        existing_on_retry = lambda *args: None
+        mock_global_client.on_retry = existing_on_retry
+
+        async def before_retry():
+            return None
+
+        provider.set_before_retry_callback(before_retry)
+        assert mock_global_client.on_retry is existing_on_retry
+        provider.set_retry_callback(lambda *args: None)
+        assert mock_global_client.before_retry is before_retry
+
 
 class TestGetVisionSetting:
     def test_returns_true_by_default(self, provider):

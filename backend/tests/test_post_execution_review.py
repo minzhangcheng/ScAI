@@ -550,11 +550,13 @@ def test_sanitize_review_result_bounds_lists_and_survives_non_dict():
     assert out["figures"] == []
     assert len(out["warnings"]) == 12
     assert any("discarded" in warning.lower() for warning in out["warnings"])
+    assert out["evidence_records"] == []
 
     bad = sanitize_review_result(None)
     assert bad["status"] == "failed"
     assert bad["warnings"] == ["non-dict result"]
     assert bad["findings"] == [] and bad["figures"] == []
+    assert bad["evidence_records"] == []
 
 
 def _long_review_diagnostic_traceback():
@@ -568,6 +570,70 @@ def _long_review_diagnostic_traceback():
         f"{frames}\n"
         "TypeError: boolean value of NA is ambiguous"
     )
+
+
+def test_sanitize_review_result_bounds_evidence_records_and_drops_raw_values():
+    from backend.models.schemas import CodeExecution
+
+    stdout = "stdout-head-" + ("x" * 2200) + "-stdout-tail"
+    records = [
+        "malformed",
+        CodeExecution(code="print('raw')", output="raw output"),
+        {
+            "execution_id": "e" * 140,
+            "status": "completed",
+            "stdout_excerpt": stdout,
+            "error": _long_review_diagnostic_traceback(),
+            "code": "print('must not cross the review boundary')",
+        },
+    ]
+    records.extend({
+        "execution_id": f"execution-{index}",
+        "status": "failed",
+        "stdout_excerpt": "failed output",
+        "error": "RuntimeError: failed",
+    } for index in range(20))
+
+    out = sanitize_review_result({
+        "evidence_records": records,
+        "code_history": [CodeExecution(code="raw")],
+        "analysis_log": [{"code": "raw"}],
+    })
+
+    evidence = out["evidence_records"]
+    assert len(evidence) == 12
+    first = evidence[0]
+    assert first["execution_id"] == "e" * 100
+    assert first["status"] == "completed"
+    assert len(first["stdout_excerpt"]) <= 2000
+    assert first["stdout_excerpt"].endswith("-stdout-tail")
+    assert len(first["error"]) <= 1000
+    assert "TypeError: boolean value of NA is ambiguous" in first["error"]
+    assert evidence[1]["execution_id"] == "execution-0"
+    assert evidence[1]["status"] == "failed"
+    assert "code_history" not in out and "analysis_log" not in out
+    assert all(set(record) == {
+        "execution_id", "status", "stdout_excerpt", "error"
+    } for record in evidence)
+    import json
+    json.dumps(out)
+
+
+def test_sanitize_review_result_drops_non_terminal_evidence_statuses():
+    out = sanitize_review_result({
+        "evidence_records": [
+            {"execution_id": "running", "status": "running"},
+            {"execution_id": "success", "status": "success"},
+            {"execution_id": "empty", "status": ""},
+            {"execution_id": "completed", "status": "completed"},
+            {"execution_id": "failed", "status": "failed"},
+        ],
+    })
+
+    assert out["evidence_records"] == [
+        {"execution_id": "completed", "status": "completed", "stdout_excerpt": "", "error": ""},
+        {"execution_id": "failed", "status": "failed", "stdout_excerpt": "", "error": ""},
+    ]
 
 
 def test_supplementary_warning_retains_the_exception():

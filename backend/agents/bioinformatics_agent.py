@@ -2832,49 +2832,6 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             ))
                             continue
 
-                        # A result is not complete while an approved plan's
-                        # required visual deliverables are absent, stale, or
-                        # held back by review/layout gates.  Integration and
-                        # genuinely narrative work opt out explicitly on the
-                        # plan step; ordinary analytical results do not.
-                        from ..services.figure_contract import (
-                            audit_figure_contract,
-                            format_missing_figure_feedback,
-                        )
-                        _figure_contract = audit_figure_contract(
-                            state,
-                            plan=state.current_plan,
-                            planning_stage=planning_stage,
-                            include_stage_baseline=False,
-                            defer_platform_baseline=True,
-                        )
-                        if not _figure_contract.passed:
-                            missing_text = format_missing_figure_feedback(_figure_contract)
-                            logger.warning(
-                                "[Bioinformatics] report_findings rejected: %d required "
-                                "figure deliverable(s) missing",
-                                len(_figure_contract.missing),
-                            )
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": (
-                                    "[REJECTED] Required result figures are incomplete. "
-                                    "Generate or repair the following publication figures, "
-                                    "ensure they pass review/layout checks, and cite the "
-                                    "approved plan_step_id when applicable:\n"
-                                    f"{missing_text}"
-                                ),
-                            })
-                            analysis_log.append(AnalysisStep(
-                                step_number=step_count,
-                                step_type="report_findings",
-                                agent_reasoning=agent_reasoning,
-                                findings=[],
-                                findings_summary="REJECTED: required result figures incomplete",
-                            ))
-                            continue
-
                         has_scrna_data = state.has_scrnaseq()
                         has_bulk_data = state.has_bulk_rnaseq()
                         evidence_executions = successful_evidence_executions(
@@ -2893,6 +2850,63 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         _attempt_gate_findings: List[Dict[str, Any]] = list(
                             evidence_gate_findings
                         )
+
+                        # An approved plan's required visual deliverables are
+                        # measured here, but this is an observation, not a
+                        # refusal.  The executor's only lever is another
+                        # render, and the deliverables it would be asked for
+                        # are routinely ones the review/layout loop has already
+                        # given up on: "requires upstream reanalysis" skips the
+                        # revision loop outright, and a figure that never
+                        # becomes report-eligible can never satisfy the
+                        # contract.  A refusal there cannot be worked off, so
+                        # it is not a gate -- it is a trap.  Measured on
+                        # session a7cbb0b4: refused seven times, the missing
+                        # count stuck at 49 for four and a half hours, the
+                        # whole 200-step budget spent, one fallback finding
+                        # reported.  Record the gap where the PI's
+                        # post-execution review can act on it and let the
+                        # report through.
+                        from ..services.figure_contract import (
+                            audit_figure_contract,
+                            format_missing_figure_feedback,
+                        )
+                        _figure_contract = audit_figure_contract(
+                            state,
+                            plan=state.current_plan,
+                            planning_stage=planning_stage,
+                            include_stage_baseline=False,
+                            defer_platform_baseline=True,
+                        )
+                        if not _figure_contract.passed:
+                            missing_text = format_missing_figure_feedback(
+                                _figure_contract
+                            )
+                            logger.warning(
+                                "[Bioinformatics] %d required figure deliverable(s) "
+                                "unmet at report_findings; recorded for PI review",
+                                len(_figure_contract.missing),
+                            )
+                            _figure_gap_detail = (
+                                "Required result figures were not complete at "
+                                "report submission. They are unrendered, stale, "
+                                "or held back by review/layout gates, so the PI "
+                                "must decide whether to repair them, accept the "
+                                "result with a limitation, or drop the "
+                                "deliverable:\n"
+                                f"{missing_text}"
+                            )
+                            _escaped_notes.append(
+                                "[PI review observation; non-blocking] "
+                                + _figure_gap_detail
+                            )
+                            _attempt_gate_findings.append(_evidence_gate_record(
+                                gate="required-figure-observation",
+                                rule_id="scai-native/required-figure-observation",
+                                detail=_figure_gap_detail,
+                                subject="required-publication-figures",
+                                severity="advise",
+                            ))
 
                         # Gate S (statistical validity). Runs against structured
                         # state -- registered scores and frozen plans -- rather
@@ -4400,23 +4414,11 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         else:
             status = "max_steps_reached"
 
-        # Fallback: extract findings from last assistant text if report_findings
-        # was never called AND we ran out of step budget. We deliberately do NOT
-        # fall back for text-only exhaustion (that path now raises
-        # UpstreamExhaustedError and never reaches here) or for `llm_error`
-        # exits, where fabricated findings would mask real failures and push
-        # the workflow into the next stage with empty Stage-1 results.
-        if not all_findings and not completed and status == "max_steps_reached":
-            logger.warning("[Bioinformatics] No findings reported, attempting fallback extraction...")
-            last_assistant_content = None
-            for msg in reversed(messages):
-                if msg.get("role") == "assistant" and msg.get("content"):
-                    last_assistant_content = msg["content"]
-                    break
-            if last_assistant_content:
-                all_findings.append(f"[Fallback extraction] {last_assistant_content[:3000]}")
-                status = "completed_with_fallback"
-                logger.info("[Bioinformatics] Extracted findings from last text response (fallback)")
+        # Step-budget exhaustion without an accepted report_findings call is an
+        # incomplete execution.  Assistant prose is not an evidence channel and
+        # must never be promoted into a finding or a completed-with-fallback
+        # result.  Keep the existing max_steps_reached checkpoint below so the
+        # run remains resumable.
 
         if status in ("max_steps_reached", "completed_with_fallback"):
             try:
@@ -4444,8 +4446,9 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         attempt_steps_executed = step_count - attempt_start_step
         logger.info(f"[Bioinformatics] Analysis {status}: {attempt_steps_executed} steps executed in this attempt, {len(all_findings)} findings, {len(all_figures)} inline figures, {_saved_fig_count} saved figures")
 
-        # Clear checkpoint only on explicit completion via report_findings
-        # Preserve checkpoint for max_steps_reached and completed_with_fallback to allow resumption
+        # Clear checkpoint only on explicit completion via report_findings.
+        # Preserve the exhausted checkpoint (and legacy completed_with_fallback
+        # records) to allow resumption.
         if completed:
             checkpoint_mgr.clear()
 

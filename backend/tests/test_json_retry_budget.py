@@ -30,6 +30,7 @@ async def test_json_error_retried_exactly_max_times():
 @pytest.mark.asyncio
 async def test_json_error_then_success():
     calls = {"n": 0}
+    gate_calls = []
 
     async def func():
         calls["n"] += 1
@@ -37,6 +38,15 @@ async def test_json_error_then_success():
             raise json.JSONDecodeError("Expecting value", "", 0)
         return "ok"
 
-    result = await retry_with_backoff(func, max_retries=4, agent_name="t")
+    async def before_retry():
+        gate_calls.append(calls["n"])
+
+    result = await retry_with_backoff(
+        func,
+        max_retries=4,
+        agent_name="t",
+        before_retry=before_retry,
+    )
     assert result == "ok"
     assert calls["n"] == 3  # 2 bad-JSON attempts then success
+    assert gate_calls == [1, 2]

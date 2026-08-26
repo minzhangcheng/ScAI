@@ -102,12 +102,24 @@ def _pi_agent(replies):
     return agent
 
 
-def _bio_agent(replies, exec_output="top regulons: A, B", exec_error=None, exec_figures=None):
+def _bio_agent(
+    replies,
+    exec_output="top regulons: A, B",
+    exec_error=None,
+    exec_figures=None,
+    exec_results=None,
+):
     sandbox = MagicMock()
     executed = []
+    result_index = 0
 
     async def _execute(code, **kwargs):
+        nonlocal result_index
         executed.append(code)
+        if exec_results is not None and result_index < len(exec_results):
+            output, error = exec_results[result_index]
+            result_index += 1
+            return SimpleNamespace(output=output, error=error, figures=[])
         return SimpleNamespace(
             output=exec_output,
             error=exec_error,
@@ -429,6 +441,49 @@ async def test_incidental_inline_figures_are_discarded_from_evidence_and_result(
     assert result["figures"] == []
     assert result["code_history"] and result["code_history"][0].figures == []
     assert any("inline figure" in warning for warning in result["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_max_iterations_exposes_success_and_failure_execution_records():
+    state = _state_and_plan()
+    bio = _bio_agent(
+        [
+            json.dumps({"code": "print('success output')"}),
+            json.dumps({"code": "raise RuntimeError('failure')"}),
+        ],
+        exec_results=[
+            ("success output", None),
+            ("partial output", "Traceback\nRuntimeError: terminal failure"),
+        ],
+    )
+    bio._current_analysis_state = state
+
+    result = await bio.run_supplementary_tasks(
+        tasks=["Run the requested computation"],
+        context_summary="",
+        direction="d",
+        max_iterations=2,
+        timeout_seconds=60,
+        total_timeout_seconds=120,
+    )
+
+    records = result["evidence_records"]
+    raw_records = result["code_history"]
+    assert result["status"] == "partial"
+    assert result["findings"] == []
+    assert len(records) == len(raw_records) == 2
+    assert [record["execution_id"] for record in records] == [
+        record.id for record in raw_records
+    ]
+    assert [record["status"] for record in records] == ["completed", "failed"]
+    assert records[0]["stdout_excerpt"] == "success output"
+    assert records[0]["error"] == ""
+    assert records[1]["stdout_excerpt"] == "partial output"
+    assert "RuntimeError: terminal failure" in records[1]["error"]
+    assert all(len(record["execution_id"]) <= 100 for record in records)
+    assert all(len(record["stdout_excerpt"]) <= 2000 for record in records)
+    assert all(len(record["error"]) <= 1000 for record in records)
+    json.dumps(result["evidence_records"])
 
 
 @pytest.mark.asyncio
