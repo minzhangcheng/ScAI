@@ -24,6 +24,7 @@ from backend.models.schemas import AnalysisState
 from backend.services.report.analysis_log import AnalysisLogMixin
 from backend.services.report.generator import DetailedReportGenerator
 from backend.utils.sandbox_parts.shared import NotebookState
+from backend.utils.sandbox_parts import notebook_state as notebook_state_owner
 
 
 _EXTERNAL_IMAGE_MIME = "application/vnd.scai.external-image+json"
@@ -38,6 +39,36 @@ def _notebook_state(tmp_path: Path, session_id: str = "notebook-compaction"):
     states.mkdir(parents=True)
     workspace.mkdir(parents=True)
     return NotebookState(session_id, str(states)), workspace
+
+
+def test_notebook_state_identity_and_serialized_bytes_are_stable(tmp_path):
+    state, _workspace = _notebook_state(tmp_path, "rc17-contract")
+    assert NotebookState is notebook_state_owner.NotebookState
+    assert NotebookState.__module__ == "backend.utils.sandbox_parts.shared"
+    assert (
+        notebook_state_owner.CodeExecutionResult.__module__
+        == "backend.utils.sandbox_parts.shared"
+    )
+
+    state.created_at = "2026-08-27T00:00:00"
+    state.updated_at = "2026-08-27T00:00:01"
+    state.execution_count = 1
+    state.cells = [{
+        "code": "print('stable')",
+        "outputs": [{"type": "stream", "name": "stdout", "text": "stable\\n"}],
+        "execution_count": 1,
+        "executed_at": "2026-08-27T00:00:01",
+    }]
+
+    state.save_notebook()
+    state.save_metadata()
+
+    assert hashlib.sha256(state.notebook_path.read_bytes()).hexdigest() == (
+        "d59f8142e9762fee2ba5584dfdd126ed6bbb57e159d192da77b3c92fb394f255"
+    )
+    assert hashlib.sha256(state.state_path.read_bytes()).hexdigest() == (
+        "5487f841d71f5f9af1feaecd7a62043a70e1152826f24a2513ae57f832249e1e"
+    )
 
 
 def _reference(raw: bytes, media_type: str = "image/png") -> dict[str, object]:
