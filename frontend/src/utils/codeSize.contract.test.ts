@@ -27,9 +27,7 @@ const BASELINE_LONG_TYPESCRIPT = new Set([
   'frontend/src/components/SnapshotPanel.tsx::SnapshotPanel',
   'frontend/src/components/analysis/FigureGallery.tsx::FigureGallery',
   'frontend/src/components/data/DataSection.tsx::DataSection',
-  'frontend/src/hooks/api/useSession.ts::useSession',
   'frontend/src/pages/Admin.tsx::Admin',
-  'frontend/src/stores/store.ts::createAppState',
 ])
 
 const BASELINE_OVERSIZED_TYPESCRIPT = new Set([

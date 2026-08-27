@@ -99,6 +99,20 @@ describe('loadSession response ownership', () => {
     vi.unstubAllGlobals()
   })
 
+  it('preserves the hook surface order and resume alias identity', () => {
+    const { result } = renderHook(() => useSession())
+
+    expect(Object.keys(result.current)).toEqual([
+      'currentSession', 'loading', 'error', 'createSession', 'loadSession',
+      'retryRealtimeHistory', 'listSessions', 'deleteSession', 'saveSession',
+      'updateSessionInfo', 'updateRoundWait', 'addGroup', 'updateGroup', 'deleteGroup',
+      'uploadData', 'deleteDataFile', 'addIndicator', 'deleteIndicator', 'startAnalysis',
+      'pauseAnalysis', 'resumeAnalysis', 'continueRound', 'stopAnalysis', 'exportState',
+      'getReport', 'updateSession',
+    ])
+    expect(result.current.resumeAnalysis).toBe(result.current.continueRound)
+  })
+
   it('drops a superseded response and keeps both loading indicators owned by the newer request', async () => {
     const { result } = renderHook(() => useSession())
     let staleLoad!: Promise<unknown>
