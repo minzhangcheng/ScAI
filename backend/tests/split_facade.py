@@ -42,6 +42,7 @@ SPLIT_PACKAGES: dict[str, str] = {
     "backend.services.snapshot_v2.restore": "backend.services.snapshot_v2.restore_parts",
     "backend.services.snapshot_v2.runtime": "backend.services.snapshot_v2.runtime_parts",
     "backend.services.snapshot_v2.service": "backend.services.snapshot_v2.service_parts",
+    "backend.services.snapshot_v2.jobs": "backend.services.snapshot_v2.jobs_parts",
     "backend.utils.llm_client": "backend.utils.llm_client_parts",
     "backend.utils.expression_contract": "backend.utils.expression_contract_parts",
     "backend.utils.sandbox": "backend.utils.sandbox_parts",
