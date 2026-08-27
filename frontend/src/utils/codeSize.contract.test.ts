@@ -30,9 +30,7 @@ const BASELINE_LONG_TYPESCRIPT = new Set([
   'frontend/src/pages/Admin.tsx::Admin',
 ])
 
-const BASELINE_OVERSIZED_TYPESCRIPT = new Set([
-  'frontend/src/components/AnalysisPanel.tsx',
-])
+const BASELINE_OVERSIZED_TYPESCRIPT = new Set([])
 
 type FunctionLike = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction
   | ts.MethodDeclaration | ts.GetAccessorDeclaration | ts.SetAccessorDeclaration
