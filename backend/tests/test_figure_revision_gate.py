@@ -199,6 +199,267 @@ async def _run(tmp_path, verdicts, reviews):
 
 
 @pytest.mark.asyncio
+async def test_first_pass_acceptance_phase_trace_is_stable(tmp_path, monkeypatch):
+    from backend.agents.bioinformatics import figures as figures_mod
+
+    expected = [
+        "recover-pending",
+        "execute-render",
+        "record-expression-provenance",
+        "validate-output",
+        "measure-layout",
+        "journal-pending-attempt",
+        "upsert-pending-record",
+        "persist-pending-record",
+        "emit-preview",
+        "pi-review",
+        "acquire-publish-locks",
+        "refreeze-reviewed-bytes",
+        "begin-publish",
+        "apply-record-paths",
+        "mark-record-applied",
+        "persist-published-record",
+        "commit-publish",
+        "emit-approved-record",
+    ]
+    trace = []
+    agent = _Agent(_FakeSandbox(tmp_path, [CLEAN]))
+    state = AnalysisState(user_id="u")
+
+    real_prepare = figures_mod.prepare_figure_request
+
+    async def prepare(request):
+        result = await real_prepare(request)
+        trace.append("recover-pending")
+        return result
+
+    real_execute = agent.sandbox.execute
+
+    async def execute(code, **kwargs):
+        trace.append("execute-render")
+        return await real_execute(code, **kwargs)
+
+    def wrap_module(name, phase):
+        real = getattr(figures_mod, name)
+
+        def wrapped(*args, **kwargs):
+            result = real(*args, **kwargs)
+            trace.append(phase)
+            return result
+
+        monkeypatch.setattr(figures_mod, name, wrapped)
+
+    monkeypatch.setattr(figures_mod, "prepare_figure_request", prepare)
+    monkeypatch.setattr(agent.sandbox, "execute", execute)
+    wrap_module(
+        "record_executed_representation_change",
+        "record-expression-provenance",
+    )
+    wrap_module("_publication_output_error", "validate-output")
+    wrap_module("parse_layout_violations", "measure-layout")
+    wrap_module("register_pending_figure_attempt", "journal-pending-attempt")
+    wrap_module("acquire_figure_publish_locks", "acquire-publish-locks")
+    wrap_module("refreeze_pending_figure_attempt", "refreeze-reviewed-bytes")
+    wrap_module("begin_figure_publish_transaction", "begin-publish")
+    wrap_module("apply_publish_record_paths", "apply-record-paths")
+    wrap_module("mark_publish_record_applied", "mark-record-applied")
+    wrap_module("commit_figure_publish_transaction", "commit-publish")
+
+    real_upsert = agent._upsert_publication_figure
+    pending_upsert_seen = False
+
+    def upsert(*args, **kwargs):
+        nonlocal pending_upsert_seen
+        result = real_upsert(*args, **kwargs)
+        figure = args[1]
+        if figure.producer_status == "pending" and not pending_upsert_seen:
+            pending_upsert_seen = True
+            trace.append("upsert-pending-record")
+        return result
+
+    persist_calls = 0
+
+    async def persist(_state, _figures_dir):
+        nonlocal persist_calls
+        persist_calls += 1
+        trace.append(
+            "persist-pending-record"
+            if persist_calls == 1
+            else "persist-published-record"
+        )
+        return False
+
+    real_notify = agent._notify
+
+    async def notify(kind, content):
+        if kind == "figure":
+            trace.append("emit-preview")
+        await real_notify(kind, content)
+
+    real_emit = agent._emit_figure_record
+
+    async def emit(kind, figure, **kwargs):
+        result = await real_emit(kind, figure, **kwargs)
+        if kind == "figure_approved":
+            trace.append("emit-approved-record")
+        return result
+
+    async def review(_figure):
+        trace.append("pi-review")
+        return _review(approved=True, score=9)
+
+    monkeypatch.setattr(agent, "_upsert_publication_figure", upsert)
+    monkeypatch.setattr(agent, "_persist_figure_record_boundary", persist)
+    monkeypatch.setattr(agent, "_notify", notify)
+    monkeypatch.setattr(agent, "_emit_figure_record", emit)
+
+    result = await agent._handle_generate_publication_figure(
+        code="plot()",
+        figure_name="f",
+        description="d",
+        figure_type="heatmap",
+        state=state,
+        review_callback=review,
+    )
+
+    assert trace == expected
+    assert "approved by PI" in result
+    assert state.publication_figures[0].review_status == FigureReviewStatus.APPROVED
+    assert state.publication_figures[0].producer_status == "published"
+
+
+@pytest.mark.asyncio
+async def test_render_failure_stops_before_journal_phase(tmp_path):
+    agent = _Agent(_SetupFailureSandbox(tmp_path, "ValueError: render failed"))
+    state = AnalysisState(user_id="u")
+
+    result = await agent._handle_generate_publication_figure(
+        code="plot()",
+        figure_name="f",
+        description="d",
+        figure_type="heatmap",
+        state=state,
+        review_callback=_reviews(_review(approved=True, score=9)),
+    )
+
+    assert "Figure generation failed: ValueError: render failed" in result
+    assert state.publication_figures == []
+    assert not (tmp_path / "figures" / ".transactions").exists()
+
+
+@pytest.mark.asyncio
+async def test_transaction_lock_failure_trace_terminalizes_pending_record(
+    tmp_path, monkeypatch,
+):
+    from backend.agents.bioinformatics import figures as figures_mod
+
+    trace = []
+    agent = _Agent(_FakeSandbox(tmp_path, [CLEAN]))
+    state = AnalysisState(user_id="u")
+
+    def refuse_lock(**_kwargs):
+        trace.append("acquire-publish-locks")
+        return "synthetic publication lock failure"
+
+    real_rollback = figures_mod.rollback_figure_publish_transaction
+
+    def rollback(*args, **kwargs):
+        result = real_rollback(*args, **kwargs)
+        trace.append("rollback-pending-record")
+        return result
+
+    persist_calls = 0
+
+    async def persist(_state, _figures_dir):
+        nonlocal persist_calls
+        persist_calls += 1
+        trace.append(
+            "persist-pending-record"
+            if persist_calls == 1
+            else "persist-terminal-record"
+        )
+        return False
+
+    monkeypatch.setattr(figures_mod, "acquire_figure_publish_locks", refuse_lock)
+    monkeypatch.setattr(figures_mod, "rollback_figure_publish_transaction", rollback)
+    monkeypatch.setattr(agent, "_persist_figure_record_boundary", persist)
+
+    result = await agent._handle_generate_publication_figure(
+        code="plot()",
+        figure_name="f",
+        description="d",
+        figure_type="heatmap",
+        state=state,
+        review_callback=_reviews(_review(approved=True, score=9)),
+    )
+
+    assert trace == [
+        "persist-pending-record",
+        "acquire-publish-locks",
+        "rollback-pending-record",
+        "persist-terminal-record",
+    ]
+    assert result == "synthetic publication lock failure"
+    assert state.publication_figures[0].producer_status == "failed"
+    assert state.publication_figures[0].png_path == ""
+
+
+@pytest.mark.asyncio
+async def test_preview_message_failure_trace_abandons_attempt(tmp_path, monkeypatch):
+    from backend.agents.bioinformatics import figures as figures_mod
+
+    trace = []
+    agent = _Agent(_FakeSandbox(tmp_path, [CLEAN]))
+    state = AnalysisState(user_id="u")
+    real_rollback = figures_mod.rollback_figure_publish_transaction
+
+    def rollback(*args, **kwargs):
+        result = real_rollback(*args, **kwargs)
+        trace.append("rollback-pending-record")
+        return result
+
+    persist_calls = 0
+
+    async def persist(_state, _figures_dir):
+        nonlocal persist_calls
+        persist_calls += 1
+        trace.append(
+            "persist-pending-record"
+            if persist_calls == 1
+            else "persist-terminal-record"
+        )
+        return False
+
+    async def fail_preview(kind, _content):
+        if kind == "figure":
+            trace.append("emit-preview")
+            raise RuntimeError("synthetic preview delivery failure")
+
+    monkeypatch.setattr(figures_mod, "rollback_figure_publish_transaction", rollback)
+    monkeypatch.setattr(agent, "_persist_figure_record_boundary", persist)
+    monkeypatch.setattr(agent, "_notify", fail_preview)
+
+    with pytest.raises(RuntimeError, match="preview delivery failure"):
+        await agent._handle_generate_publication_figure(
+            code="plot()",
+            figure_name="f",
+            description="d",
+            figure_type="heatmap",
+            state=state,
+            review_callback=_reviews(_review(approved=True, score=9)),
+        )
+
+    assert trace == [
+        "persist-pending-record",
+        "emit-preview",
+        "rollback-pending-record",
+        "persist-terminal-record",
+    ]
+    assert state.publication_figures[0].producer_status == "abandoned"
+    assert not (tmp_path / "figures" / "f.jpg").exists()
+
+
+@pytest.mark.asyncio
 async def test_stalled_score_still_accepts_a_clean_figure(tmp_path):
     """The shortcut is about diminishing returns and stays available when the
     renderer has no objection — this is the pre-existing behaviour."""
