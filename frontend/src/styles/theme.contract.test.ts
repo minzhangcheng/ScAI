@@ -12,7 +12,9 @@ import chatPanelSource from '../components/ChatPanel.tsx?raw'
 import figureGallerySource from '../components/analysis/FigureGallery.tsx?raw'
 import graphicAbstractSource from '../components/analysis/GraphicAbstract.tsx?raw'
 import loadingScreenSource from '../components/LoadingScreen.tsx?raw'
-import messageItemSource from '../components/MessageStream.tsx?raw'
+import messageItemSource from '../components/messageStream/MessageItem.tsx?raw'
+import messageRenderersSource from '../components/messageStream/renderers.tsx?raw'
+import messageStreamViewSource from '../components/messageStream/MessageStreamView.tsx?raw'
 import resultsPanelSource from '../components/ResultsPanel.tsx?raw'
 import sidebarResizeHandleSource from '../components/SidebarResizeHandle.tsx?raw'
 import settingsDialogSource from '../components/SettingsDialog.tsx?raw'
@@ -71,10 +73,10 @@ describe('system color theme contract', () => {
     expect(appSource).toContain('bg-white/90 dark:bg-surface-900/90')
     expect(appSource).toContain('bg-white dark:bg-surface-900')
     expect(mainSource).toContain('<SystemThemeProvider>')
-    expect(messageItemSource).toContain('isDark ? oneDark : oneLight')
+    expect(messageRenderersSource).toContain('isDark ? oneDark : oneLight')
     expect(messageItemSource).toContain('bg-white dark:bg-surface-900')
-    expect(messageItemSource).toContain('bg-surface-50 dark:bg-surface-950')
-    expect(messageItemSource).toContain('bg-white/90 dark:bg-surface-900/90')
+    expect(messageStreamViewSource).toContain('bg-surface-50 dark:bg-surface-950')
+    expect(messageStreamViewSource).toContain('bg-white/90 dark:bg-surface-900/90')
     expect(sidebarResizeHandleSource).toContain('bg-surface-50 dark:bg-surface-950')
     expect(sidebarResizeHandleSource).toContain('bg-surface-200 dark:bg-surface-700')
     expect(globalsSource).toMatch(/\.publication-canvas\s*{[\s\S]*background:\s*#fff;[\s\S]*color-scheme:\s*light;/)
