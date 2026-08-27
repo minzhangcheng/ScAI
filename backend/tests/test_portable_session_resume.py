@@ -170,8 +170,16 @@ def _extract_save_code(monkeypatch, live_names, tracker_required):
     """Run save_session far enough to capture the code it sends to the kernel."""
     from backend.utils import sandbox as sandbox_mod
 
-    sandbox = sandbox_mod.LocalJupyterSandbox.__new__(sandbox_mod.LocalJupyterSandbox)
-    sandbox.session_id = "save-code-probe"
+    # __init__ is cheap -- it starts no kernel -- so call it for real and
+    # override only the collaborators this probe needs to control. Bypassing it
+    # with __new__ made the fixture drift: every attribute __init__ later grew
+    # was simply absent, and save_session reads several of them.
+    _probe_root = get_session_states("save-code-probe").parent / "probe-root"
+    sandbox = sandbox_mod.LocalJupyterSandbox(
+        session_id="save-code-probe",
+        state_dir=str(_probe_root / "states"),
+        working_dir=str(_probe_root / "workspace"),
+    )
     sandbox._exec_lock = asyncio.Lock()
     sandbox._last_save_skipped = []
     sandbox.notebook_state = types.SimpleNamespace(

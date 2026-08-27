@@ -5,6 +5,7 @@ import threading
 import pytest
 
 from backend.utils.sandbox import LocalJupyterSandbox
+from backend.tests.split_facade import setattr_facade
 
 
 def _bare_sandbox() -> LocalJupyterSandbox:
@@ -280,8 +281,13 @@ def _save_test_sandbox(tmp_path, session_id, monkeypatch):
     sb.runtime_revision = 2
     sb.saved_runtime_revision = 1
     integrity = tmp_path / "integrity"
-    monkeypatch.setattr(
-        "backend.utils.sandbox._integrity_dir",
+    # The readers live in backend/utils/sandbox_parts/shared.py, so patching
+    # the facade alone rebinds a name nobody reads and the test silently
+    # exercises the real dependency. setattr_facade binds every holder.
+    setattr_facade(
+        monkeypatch,
+        "backend.utils.sandbox",
+        "_integrity_dir",
         lambda _session_id: integrity,
     )
     old_pkl = Path(sb.notebook_state.session_path)
@@ -360,7 +366,9 @@ async def test_cancelled_digest_removes_unjournaled_staged_generation(
         release.wait(timeout=2)
         return "a" * 64
 
-    monkeypatch.setattr("backend.utils.sandbox._sha256_file", blocking_digest)
+    setattr_facade(
+        monkeypatch, "backend.utils.sandbox", "_sha256_file", blocking_digest
+    )
     task = asyncio.create_task(sb.save_session())
     while not started.is_set():
         await asyncio.sleep(0)

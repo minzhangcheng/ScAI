@@ -3,6 +3,7 @@ import json
 import pytest
 from backend.utils.blob_store import externalize_blobs, inline_blobs, BLOB_REF_PREFIX, MIN_BLOB_LEN
 from backend.models.schemas import AnalysisState, PublicationFigure
+from backend.constants import STRIPPED_FIGURE_PLACEHOLDER
 
 
 def _long_b64(n=MIN_BLOB_LEN + 100):
@@ -67,12 +68,20 @@ def test_session_roundtrip_strips_base64_from_json(tmp_path, monkeypatch):
 
     raw = session_file.read_text(encoding="utf-8")
     assert big not in raw                       # base64 no longer inline
-    assert "@scai-blob:" in raw                 # reference present
-    assert (session_file.parent / "blobs").exists()
 
+    # A figure's preview no longer reaches the blob store at all: the durable
+    # dump replaces it with STRIPPED_FIGURE_PLACEHOLDER and records a
+    # preview_sha256 beside it, so there is nothing left for externalize_blobs
+    # to write. The "@scai-blob:" handle survives only as a legacy form that
+    # inline_blobs still reads back -- see _strip_legacy_blob_references. The
+    # externalize/inline round trip itself is covered by the other tests in
+    # this file, which drive blob_store directly. preview_sha256 is not
+    # asserted here: it is only computed for a decodable image, and this
+    # fixture's payload is filler chosen for its length.
     loaded = ss.load_session_from_disk(sid)
     assert loaded is not None
-    assert loaded.publication_figures[0].png_base64 == big   # lossless rehydrate
+    figure = loaded.publication_figures[0]
+    assert figure.png_base64 == STRIPPED_FIGURE_PLACEHOLDER
 
 
 def test_async_save_offloads_blob_io_to_worker_thread(tmp_path, monkeypatch):

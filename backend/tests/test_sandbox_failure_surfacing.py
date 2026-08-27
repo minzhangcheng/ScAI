@@ -50,8 +50,15 @@ async def test_save_session_refuses_to_overwrite_after_a_failed_restore(tmp_path
 
     from backend.utils.sandbox import LocalJupyterSandbox
 
-    sandbox = LocalJupyterSandbox.__new__(LocalJupyterSandbox)
-    sandbox.session_id = "restore-failed"
+    # __init__ is cheap -- it starts no kernel -- so call it for real and
+    # override only the collaborators this test needs to control. Bypassing
+    # it with __new__ made the fixture drift: every attribute __init__ later
+    # grew was simply absent, and save_session reads several of them.
+    sandbox = LocalJupyterSandbox(
+        session_id="restore-failed",
+        state_dir=str(tmp_path / "states"),
+        working_dir=str(tmp_path / "workspace"),
+    )
     sandbox._session_restore_failed = True
     sandbox._exec_lock = asyncio.Lock()
     pkl = tmp_path / "restore-failed_session.pkl"
@@ -79,8 +86,15 @@ def _latched_sandbox(tmp_path, *, baseline, live):
 
     from backend.utils.sandbox import CodeExecutionResult, LocalJupyterSandbox
 
-    sandbox = LocalJupyterSandbox.__new__(LocalJupyterSandbox)
-    sandbox.session_id = "restore-failed-rebuild"
+    # __init__ is cheap -- it starts no kernel -- so call it for real and
+    # override only the collaborators this test needs to control. Bypassing
+    # it with __new__ made the fixture drift: every attribute __init__ later
+    # grew was simply absent, and save_session reads several of them.
+    sandbox = LocalJupyterSandbox(
+        session_id="restore-failed-rebuild",
+        state_dir=str(tmp_path / "states"),
+        working_dir=str(tmp_path / "workspace"),
+    )
     sandbox._session_restore_failed = True
     sandbox._restore_failed_at_revision = 0
     sandbox._restore_failed_globals = set(baseline)

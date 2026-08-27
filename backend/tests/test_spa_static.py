@@ -283,7 +283,13 @@ async def test_spa_response_consumes_the_opened_inode_after_path_rebinding(
     assert body == trusted
     assert asset.read_bytes() == attacker
     assert not any(message["type"] == "http.response.pathsend" for message in messages)
-    assert response.headers["content-type"].startswith("text/javascript")
+    # Both spellings are valid JavaScript media types and browsers accept
+    # either; which one appears depends on the mimetypes database the
+    # deployment happens to carry, and this test is about the response
+    # body and ASGI shape, not about that database.
+    assert response.headers["content-type"].split(";")[0].strip() in {
+        "text/javascript", "application/javascript",
+    }
     assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
 
 
@@ -335,7 +341,13 @@ async def test_spa_response_does_not_depend_on_file_response_asgi_internals(
 
     assert body == b"minimum-starlette-compatible"
     assert response.headers["content-length"] == str(len(body))
-    assert response.headers["content-type"].startswith("text/javascript")
+    # Both spellings are valid JavaScript media types and browsers accept
+    # either; which one appears depends on the mimetypes database the
+    # deployment happens to carry, and this test is about the response
+    # body and ASGI shape, not about that database.
+    assert response.headers["content-type"].split(";")[0].strip() in {
+        "text/javascript", "application/javascript",
+    }
 
 
 @pytest.mark.asyncio

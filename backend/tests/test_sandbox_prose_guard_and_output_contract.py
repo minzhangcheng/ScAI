@@ -18,6 +18,7 @@ from backend.utils.sandbox import (
     LocalJupyterSandbox,
     validate_code_safety,
 )
+from backend.tests.split_facade import source_for_path
 
 
 def _sandbox(tmp_path, monkeypatch, name, *, before, after, result):
@@ -162,7 +163,10 @@ async def test_valid_identifier_remains_required(tmp_path, monkeypatch):
 
 
 def test_no_tracker_fallback_cannot_readd_nonidentifier():
-    source = Path("backend/agents/bioinformatics_agent.py").read_text()
+    # bioinformatics_agent.py is a partial facade: part of its implementation
+    # was split into backend.agents.bioinformatics, so reading the path alone
+    # can scan a re-export header and make this assertion pass over nothing.
+    source = source_for_path("backend/agents/bioinformatics_agent.py")
     marker = "No tracker (should not happen with track_globals)"
     fallback = source[source.index(marker):source.index("sandbox_state[", source.index(marker))]
     assert "isidentifier()" in fallback
