@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -77,6 +78,23 @@ async def test_bootstrap_injects_repr_safe_paths_before_workspace_use(tmp_path):
     assert "os.chdir(_WORKSPACE_DIR)" in path_source
     assert "_sandboxed_open" in path_source
     assert sandbox._initialized is True
+
+    normalized_common = init_source.replace(
+        repr(str(sandbox.working_dir.absolute())), repr("<workspace>")
+    ).replace(repr(str(sandbox._session_tmp)), repr("<session-tmp>"))
+    normalized_path = path_source.replace(
+        repr(str(sandbox.working_dir.absolute())), repr("<workspace>")
+    ).replace(
+        repr(str(sandbox._session_tmp)), repr("<session-tmp>")
+    ).replace(
+        repr(str(sandbox.notebook_state.state_dir)), repr("<state-dir>")
+    )
+    assert hashlib.sha256(normalized_common.encode()).hexdigest() == (
+        "c386ca26f2be5f3ce47ca59d930bd94693a252fee9214c4a83e18d7bb331ef49"
+    )
+    assert hashlib.sha256(normalized_path.encode()).hexdigest() == (
+        "1963f14f4f6128b74e1fb5816ceac98b37f0ea1f5eb7ed32a016a4798d74c9df"
+    )
 
 
 @pytest.mark.asyncio
