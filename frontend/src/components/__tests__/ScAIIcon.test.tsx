@@ -17,7 +17,7 @@ describe('ScAIIcon', () => {
       'src/App.tsx',
       'src/components/AuthLayout.tsx',
       'src/components/LoadingScreen.tsx',
-      'src/components/Sidebar.tsx',
+      'src/components/sidebar/SidebarView.tsx',
     ]) {
       const surface = source(path)
       expect(surface).toContain('ScAIIcon')

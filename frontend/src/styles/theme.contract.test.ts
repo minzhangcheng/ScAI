@@ -31,7 +31,8 @@ const analysisPanelSource = [
 const themeOwnedPaths = [
   'src/components/ErrorBoundary.tsx',
   'src/components/LanguageSelector.tsx',
-  'src/components/PromptsPanel.tsx',
+  'src/components/prompts/PromptEditor.tsx',
+  'src/components/prompts/ProviderConfig.tsx',
   'src/components/UserMenu.tsx',
   'src/components/analysis/DirectionEvidence.tsx',
   'src/components/analysis/DownloadButtons.tsx',
