@@ -15,8 +15,6 @@ const BASELINE_LONG_TYPESCRIPT = new Set([
   'frontend/src/components/AnnotationConfirmationDialog.tsx::AnnotationConfirmationDialog',
   'frontend/src/components/ExplorationReportDialog.tsx::ExplorationReportDialog',
   'frontend/src/components/PlanReviewDialog.tsx::PlanReviewDialog',
-  'frontend/src/components/ReportPanel.tsx::ReportPanel',
-  'frontend/src/components/ResultsPanel.tsx::ResultsPanel',
   'frontend/src/components/RoundFeedbackDialog.tsx::RoundFeedbackDialog',
   'frontend/src/components/SnapshotPanel.tsx::SnapshotPanel',
   'frontend/src/components/analysis/FigureGallery.tsx::FigureGallery',

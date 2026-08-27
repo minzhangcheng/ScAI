@@ -15,7 +15,7 @@ import loadingScreenSource from '../components/LoadingScreen.tsx?raw'
 import messageItemSource from '../components/messageStream/MessageItem.tsx?raw'
 import messageRenderersSource from '../components/messageStream/renderers.tsx?raw'
 import messageStreamViewSource from '../components/messageStream/MessageStreamView.tsx?raw'
-import resultsPanelSource from '../components/ResultsPanel.tsx?raw'
+import resultsViewSource from '../components/results/ResultsView.tsx?raw'
 import sidebarResizeHandleSource from '../components/SidebarResizeHandle.tsx?raw'
 import settingsDialogSource from '../components/SettingsDialog.tsx?raw'
 import indexSource from '../../index.html?raw'
@@ -28,6 +28,7 @@ const analysisPanelSource = [
   analysisPanelImplSource,
   analysisStatusSource,
 ].join('\n')
+const resultsPanelSource = resultsViewSource
 const themeOwnedPaths = [
   'src/components/ErrorBoundary.tsx',
   'src/components/LanguageSelector.tsx',
