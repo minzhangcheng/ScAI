@@ -2,11 +2,225 @@
 
 import asyncio
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
 
 from backend.utils.upload import ChunkedUploadManager
+
+
+@pytest.mark.asyncio
+async def test_completion_and_commit_phase_order(monkeypatch, tmp_path):
+    manager = ChunkedUploadManager(tmp_path / "chunks", chunk_size=4)
+    upload_id = await manager.init_upload(
+        "session-a", "data.bin", 4, 1, "file",
+    )
+    assert (await manager.save_chunk(
+        upload_id, 0, b"data", session_id="session-a",
+    ))["success"]
+
+    trace = []
+    original_load = manager._load_upload_meta_locked
+    original_assemble = manager._assemble_chunks_sync
+    original_publish = manager._publish_staged_sync
+    original_write = manager._write_upload_meta_locked
+    original_cleanup = manager._cleanup_loaded_upload_locked
+
+    async def traced_load(*args, **kwargs):
+        phase = "commit" if (tmp_path / "result.bin").exists() else "complete"
+        trace.append(f"{phase}:load-meta")
+        return await original_load(*args, **kwargs)
+
+    def traced_assemble(*args, **kwargs):
+        trace.append("complete:assemble")
+        return original_assemble(*args, **kwargs)
+
+    def traced_publish(*args, **kwargs):
+        trace.append("complete:publish")
+        return original_publish(*args, **kwargs)
+
+    async def traced_write(upload_id, meta):
+        if meta.get("completed"):
+            trace.append("commit:write-completed-meta")
+        elif meta.get("assembled_path"):
+            trace.append("complete:write-assembled-meta")
+        else:
+            trace.append("complete:write-staged-meta")
+        return await original_write(upload_id, meta)
+
+    async def traced_cleanup(*args, **kwargs):
+        trace.append("commit:cleanup")
+        return await original_cleanup(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_load_upload_meta_locked", traced_load)
+    monkeypatch.setattr(manager, "_assemble_chunks_sync", traced_assemble)
+    monkeypatch.setattr(manager, "_publish_staged_sync", traced_publish)
+    monkeypatch.setattr(manager, "_write_upload_meta_locked", traced_write)
+    monkeypatch.setattr(manager, "_cleanup_loaded_upload_locked", traced_cleanup)
+
+    result = await manager.complete_upload(
+        upload_id,
+        tmp_path / "result.bin",
+        session_id="session-a",
+        defer_cleanup=True,
+    )
+    assert result["success"] is True
+    assert await manager.commit_completed_upload(
+        upload_id, session_id="session-a",
+    )
+    assert trace == [
+        "complete:load-meta",
+        "complete:assemble",
+        "complete:write-staged-meta",
+        "complete:publish",
+        "complete:write-assembled-meta",
+        "commit:load-meta",
+        "commit:write-completed-meta",
+        "commit:cleanup",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_direct_completion_publishes_then_cleans_without_metadata_write(
+    monkeypatch, tmp_path,
+):
+    manager = ChunkedUploadManager(tmp_path / "chunks", chunk_size=4)
+    upload_id = await manager.init_upload(
+        "session-a", "data.bin", 4, 1, "file",
+    )
+    assert (await manager.save_chunk(
+        upload_id, 0, b"data", session_id="session-a",
+    ))["success"]
+
+    trace = []
+    original_publish = manager._publish_staged_sync
+    original_cleanup = manager._cleanup_loaded_upload_locked
+
+    def traced_publish(*args, **kwargs):
+        trace.append("publish")
+        return original_publish(*args, **kwargs)
+
+    async def traced_cleanup(*args, **kwargs):
+        trace.append("cleanup")
+        return await original_cleanup(*args, **kwargs)
+
+    async def unexpected_write(*_args, **_kwargs):
+        raise AssertionError("direct completion must not update metadata")
+
+    monkeypatch.setattr(manager, "_publish_staged_sync", traced_publish)
+    monkeypatch.setattr(manager, "_cleanup_loaded_upload_locked", traced_cleanup)
+    monkeypatch.setattr(manager, "_write_upload_meta_locked", unexpected_write)
+
+    result = await manager.complete_upload(
+        upload_id, tmp_path / "result.bin", session_id="session-a",
+    )
+    assert result["success"] is True
+    assert trace == ["publish", "cleanup"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failed_phase",
+    [
+        "assemble",
+        "write-staged-meta",
+        "publish",
+        "write-assembled-meta",
+        "write-completed-meta",
+        "cleanup",
+    ],
+)
+async def test_transaction_boundary_failures_preserve_current_filesystem_state(
+    monkeypatch, tmp_path, failed_phase,
+):
+    manager = ChunkedUploadManager(tmp_path / failed_phase / "chunks", chunk_size=4)
+    upload_id = await manager.init_upload(
+        "session-a", "data.bin", 4, 1, "file",
+    )
+    assert (await manager.save_chunk(
+        upload_id, 0, b"data", session_id="session-a",
+    ))["success"]
+    final_path = tmp_path / failed_phase / "result.bin"
+    staging_path = manager.temp_dir / f"{upload_id}.assembled.tmp"
+    meta_path = manager._get_upload_meta_path(upload_id)
+
+    if failed_phase == "assemble":
+        def fail_assemble(*_args, **_kwargs):
+            staging_path.write_bytes(b"partial")
+            raise RuntimeError("injected assembly failure")
+
+        monkeypatch.setattr(manager, "_assemble_chunks_sync", fail_assemble)
+        result = await manager.complete_upload(
+            upload_id, final_path, session_id="session-a", defer_cleanup=True,
+        )
+        assert result["success"] is False
+        assert not staging_path.exists()
+        assert not final_path.exists()
+        assert not meta_path.exists()
+        assert manager._active_uploads == {}
+        return
+
+    original_write = manager._write_upload_meta_locked
+    write_count = 0
+
+    async def maybe_fail_write(current_upload_id, meta):
+        nonlocal write_count
+        write_count += 1
+        should_fail = (
+            (failed_phase == "write-staged-meta" and write_count == 1)
+            or (failed_phase == "write-assembled-meta" and write_count == 2)
+        )
+        if should_fail:
+            raise OSError(f"injected {failed_phase} failure")
+        return await original_write(current_upload_id, meta)
+
+    if failed_phase in {"write-staged-meta", "write-assembled-meta"}:
+        monkeypatch.setattr(manager, "_write_upload_meta_locked", maybe_fail_write)
+    if failed_phase == "publish":
+        def fail_publish(*_args, **_kwargs):
+            raise OSError("injected publish failure")
+
+        monkeypatch.setattr(manager, "_publish_staged_sync", fail_publish)
+
+    if failed_phase in {
+        "write-staged-meta", "publish", "write-assembled-meta",
+    }:
+        with pytest.raises(OSError):
+            await manager.complete_upload(
+                upload_id, final_path, session_id="session-a", defer_cleanup=True,
+            )
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert staging_path.exists()
+        assert not final_path.exists()
+        assert bool(meta.get("staged_path")) is (failed_phase != "write-staged-meta")
+        assert not meta.get("assembled_path")
+        assert manager._active_uploads == {"session-a": 1}
+        return
+
+    result = await manager.complete_upload(
+        upload_id, final_path, session_id="session-a", defer_cleanup=True,
+    )
+    assert result["success"] is True
+
+    if failed_phase == "write-completed-meta":
+        async def fail_completed_write(*_args, **_kwargs):
+            raise OSError("injected completed metadata failure")
+
+        monkeypatch.setattr(manager, "_write_upload_meta_locked", fail_completed_write)
+    else:
+        async def fail_cleanup(*_args, **_kwargs):
+            raise OSError("injected cleanup failure")
+
+        monkeypatch.setattr(manager, "_cleanup_loaded_upload_locked", fail_cleanup)
+
+    assert not await manager.commit_completed_upload(
+        upload_id, session_id="session-a",
+    )
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert final_path.read_bytes() == b"data"
+    assert meta.get("completed", False) is (failed_phase == "cleanup")
+    assert manager._active_uploads == {}
 
 
 @pytest.mark.asyncio
