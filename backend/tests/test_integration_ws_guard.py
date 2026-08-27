@@ -1,13 +1,14 @@
 import inspect
 import backend.routes.websockets as ws
+from backend.routes.websocket_parts import analysis_connection, state_sync
 from backend.models.schemas import AnalysisState, AnalysisPhase, TaskStatus
 
 
 def test_needs_report_only_guards_integration_loop_source():
-    src = open(ws.__file__).read()
+    src = inspect.getsource(state_sync._needs_report_only)
     assert "in_integration_loop" in src
     assert "not in_integration_loop" in src
-    helper = inspect.getsource(ws._in_integration_loop)
+    helper = inspect.getsource(state_sync._in_integration_loop)
     assert "pending_integration" in helper
     assert "INTEGRATION" in helper or "integration" in helper
     assert "active_direction_batch" in helper or "integration_gate_candidates" in helper
