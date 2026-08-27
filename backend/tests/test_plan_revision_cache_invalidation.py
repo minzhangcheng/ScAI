@@ -6,17 +6,13 @@ If we don't invalidate, the post-revision re-entry into the node will hit the
 stale cache and skip executing the revised plan.
 """
 import re
+import inspect
 import backend.workflow.agents as agents_mod
+from backend.workflow.agent_nodes import bioinformatics_node
 
 
 def test_plan_revision_invalidates_bioinformatics_cache():
-    source = open(agents_mod.__file__).read()
-    fn = re.search(
-        r"async def _bioinformatics_analysis\b.*?(?=\n    (?:async )?def |\Z)",
-        source, re.DOTALL,
-    )
-    assert fn, "could not locate _bioinformatics_analysis"
-    body = fn.group(0)
+    body = inspect.getsource(bioinformatics_node.finalize_bioinformatics_analysis)
 
     set_idx = body.find('"plan_revision_needed"] = True')
     if set_idx == -1:

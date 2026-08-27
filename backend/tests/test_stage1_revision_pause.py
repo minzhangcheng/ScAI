@@ -6,19 +6,15 @@ revision pause:
      unconditional `planning_stage == "stage1"` branch);
   B) the revision flag must be read from the raw agent `result`, NOT from the
      rebuilt `final_result` (which omits the key)."""
+import inspect
 import re
 
 import backend.workflow.agents as agents_mod
+from backend.workflow.agent_nodes import bioinformatics_node
 
 
 def _bioinfo_body() -> str:
-    source = open(agents_mod.__file__).read()
-    fn = re.search(
-        r"async def _bioinformatics_analysis\b.*?(?=\n    (?:async )?def |\Z)",
-        source, re.DOTALL,
-    )
-    assert fn, "could not locate _bioinformatics_analysis"
-    return fn.group(0)
+    return inspect.getsource(bioinformatics_node.finalize_bioinformatics_analysis)
 
 
 def test_revision_flag_read_from_raw_result():
@@ -37,9 +33,9 @@ def test_uses_decision_helper():
 
 
 def test_helper_is_imported():
-    source = open(agents_mod.__file__).read()
-    assert "decide_bioinfo_post_execution" in source.split("async def")[0], (
-        "decide_bioinfo_post_execution must be imported at module top"
+    source = inspect.getsource(bioinformatics_node.finalize_bioinformatics_analysis)
+    assert "decide_bioinfo_post_execution" in source, (
+        "finalization must resolve the post-execution decision helper"
     )
 
 

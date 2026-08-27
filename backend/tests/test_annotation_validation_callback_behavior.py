@@ -108,10 +108,9 @@ def test_real_payload_builder_includes_validation_fields():
 def test_callback_wires_validation_round_and_payload_builder():
     """Source-inspection guard: the callback invokes validation spread + payload builder."""
     import inspect
+    from backend.workflow.annotation_parts import callback
 
-    from backend.workflow.annotation import AnnotationMixin
-
-    src = inspect.getsource(AnnotationMixin._annotate_clusters_callback)
+    src = inspect.getsource(callback.review_and_confirm_annotations)
 
     # validation round invoked before building cluster annotations
     assert src.index("_run_annotation_validation_round") < src.index(
@@ -130,10 +129,9 @@ def test_callback_wires_validation_round_and_payload_builder():
 
 def test_callback_wires_group_proportion_computation_before_confirmation_state():
     import inspect
+    from backend.workflow.annotation_parts import callback
 
-    from backend.workflow.annotation import AnnotationMixin
-
-    src = inspect.getsource(AnnotationMixin._annotate_clusters_callback)
+    src = inspect.getsource(callback.review_and_confirm_annotations)
 
     assert "compute_cluster_group_proportions" in src
     assert "_apply_group_proportions" in src

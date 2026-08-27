@@ -1130,17 +1130,14 @@ def test_the_bioinformatics_node_opens_the_round_before_it_runs():
     what matters is only that the round is opened *before* the autonomous loop,
     since everything that writes an artifact runs inside that loop.
     """
+    import inspect
     import re
 
     import backend.workflow.agents as agents_mod
 
-    source = open(agents_mod.__file__).read()
-    fn = re.search(
-        r"async def _bioinformatics_analysis\b.*?(?=\n    (?:async )?def |\Z)",
-        source, re.DOTALL,
-    )
-    assert fn, "could not locate _bioinformatics_analysis"
-    body = fn.group(0)
+    from backend.workflow.agent_nodes import bioinformatics_node
+
+    body = inspect.getsource(bioinformatics_node)
     opened = body.find("record_round_start(analysis_state)")
     runs = body.find("run_autonomous_analysis(")
     assert opened != -1, "the bioinformatics node must open the round"
