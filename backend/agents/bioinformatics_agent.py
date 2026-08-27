@@ -34,6 +34,32 @@ from backend.services.marker_priors import MarkerDB, summarize_database_priors
 from ..utils.formatting import format_revision_history, truncate_for_llm
 from ..utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ..services.statistical_gates import run_gates as run_statistical_gates
+from .bioinformatics.executor_collaboration import (
+    method_guidance,
+    species_validation_response,
+)
+from .bioinformatics.executor_dispatch import (
+    DispatchStatus,
+    ToolDispatchContext,
+    dispatch_tool,
+    tool_error_message,
+)
+from .bioinformatics.executor_execute import build_execution_tool_result
+from .bioinformatics.executor_gene_sets import (
+    fetch_failure,
+    partition_failure,
+    resolve_fetch_organism,
+)
+from .bioinformatics.executor_registration import (
+    eligible_execution_ids,
+    mechanism_execution_id_error,
+)
+from .bioinformatics.executor_report import terminal_status
+from .bioinformatics.executor_report_gates import (
+    evidence_gate_record as _evidence_gate_record,
+    gate_samples_per_group as _gate_samples_per_group,
+    gate_score_definitions,
+)
 
 
 def _method_rule_text(rule_id: str) -> str:
@@ -51,88 +77,8 @@ def _method_rule_text(rule_id: str) -> str:
 
 
 def _gate_score_definitions(state) -> List[Any]:
-    """Registered scores the statistical gates judge this round's findings against.
-
-    Scores accumulate for the whole session and there is no de-register tool. A
-    record that is defective in itself -- an undeclared testing family, an
-    unnamed ORA universe -- is refused against the record rather than against
-    the finding, and re-registering only replaces a score of the same name, so
-    a later round working on something else can never clear it and the block
-    would repeat forever. That, and only that, is what this filter is for.
-
-    Everything else an earlier round registered is evidence the current findings
-    have to be judged against: the resample count behind a quoted p-value, the
-    joint compositional model that turns the simplex refusal into a note.
-    Dropping it makes the gates blind rather than lenient, and it takes the
-    exemption away together with the check. So an earlier round's score is
-    carried forward unless the gates already refuse the record itself, asked
-    with no findings to judge -- posing the question to the gates rather than
-    restating their taxonomy here, so a record-level check added later is
-    honoured without a second copy of the rules.
-    """
-    carried: List[Any] = []
-    for score in (state.score_definitions or []):
-        # round_number is stamped at registration; 0 means pre-tracking or
-        # restored state, so it is kept.
-        if getattr(score, "round_number", 0) in (0, state.current_round):
-            carried.append(score)
-            continue
-        if run_statistical_gates(
-            None,
-            score_definitions=[score],
-            scoring_plans=state.scoring_plans,
-        ).passed:
-            carried.append(score)
-    return carried
-
-
-def _gate_samples_per_group(state) -> Dict[str, int]:
-    """Samples per condition as the record has them, for the design gates.
-
-    A measured record from the data_profiling pass wins outright: the
-    declaration could only ever be raised, so a user who declared more samples
-    than they uploaded made every consumer wrong in the same direction and this
-    function returned the inflated number to the very gates written to catch it.
-
-    Without such a record the previous resolution stands. sample_count defaults
-    to 1 in the schema, so a declaration left alone can undercount a group whose
-    upload plainly holds more; per-sample-numbered files are the harder evidence
-    and raise the count. That path is what every session already on disk takes.
-
-    They do not decide membership. A group the record shows as a single
-    specimen is exactly the input check_analysis_unit and
-    check_permutation_at_small_n exist to refuse, and leaving it out empties the
-    mapping -- both gates return early on an empty one, so the design they were
-    written for is the one design they would stop seeing.
-    """
-    numbered: Dict[Any, set] = {}
-    for data_file in (state.data_files or []):
-        if getattr(data_file, "sample_number", None) is None:
-            continue
-        numbered.setdefault(data_file.group_id, set()).add(data_file.sample_number)
-
-    # Measured counts, one per (group, data_type). detected_count == 0 means
-    # the read did not resolve a count -- skipping such a record is what keeps
-    # one unreadable file from manufacturing an n=0 group. The per-group
-    # minimum is the fail-safe direction: a group whose sequencing holds one
-    # specimen is judged at one even when another modality has more.
-    detected: Dict[Any, int] = {}
-    for record in (getattr(state, "detected_sample_counts", None) or []):
-        group_id = getattr(record, "group_id", None)
-        count = int(getattr(record, "detected_count", 0) or 0)
-        if group_id is None or count < 1:
-            continue
-        prior = detected.get(group_id)
-        detected[group_id] = count if prior is None else min(prior, count)
-
-    return {
-        g.name: (
-            detected[g.id] if g.id in detected
-            else max(g.sample_count, len(numbered.get(g.id, ())))
-        )
-        for g in (state.treatment_groups or [])
-        if getattr(g, "sample_count", None) is not None
-    }
+    """Compatibility facade for the report-gate owner."""
+    return gate_score_definitions(state, run_gates=run_statistical_gates)
 
 
 # Configure logger
@@ -176,30 +122,6 @@ class DatabasePriorResult:
 def _compact_database_prior_error(value: Any, limit: int = 500) -> str:
     text = " ".join(str(value or "unknown error").split())
     return text if len(text) <= limit else text[: limit - 3] + "..."
-
-
-def _evidence_gate_record(
-    *,
-    gate: str,
-    detail: str,
-    severity: str,
-    rule_id: str = "",
-    subject: str = "",
-    rejection_count: int = 0,
-    rejection_limit: int = 0,
-    forced_release: bool = False,
-) -> Dict[str, Any]:
-    """Return the stable, serializable audit record for one gate outcome."""
-    return {
-        "gate": str(gate),
-        "rule_id": str(rule_id),
-        "detail": str(detail),
-        "subject": str(subject),
-        "severity": str(severity),
-        "rejection_count": max(0, int(rejection_count)),
-        "rejection_limit": max(0, int(rejection_limit)),
-        "forced_release": bool(forced_release),
-    }
 
 
 def _resume_budget_after_plan_revision(
@@ -1509,26 +1431,24 @@ class BioinformaticsAgent(
                 })
 
             _step_figures: List[str] = []  # Figures generated in this iteration (for supervisor)
+            dispatch_context = ToolDispatchContext(
+                messages=messages,
+                known_tool_names=KNOWN_TOOL_NAMES,
+                logger=logger,
+            )
 
             for tool_call in response.tool_calls:
                 tool_name = tool_call.name
                 args = tool_call.arguments
 
-                # P2-2: surface JSON parse failures back to the LLM so it can retry
-                # with valid JSON instead of silently KeyError-ing downstream.
-                if tool_call.parse_error:
-                    err_msg = (
-                        f"ERROR: failed to parse arguments JSON for tool "
-                        f"'{tool_name}': {tool_call.parse_error}. "
-                        f"Raw arguments: {tool_call.raw_arguments!r}. "
-                        f"Please retry the call with a valid JSON arguments object."
-                    )
-                    logger.warning(f"[Bioinformatics] {err_msg}")
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": err_msg,
-                    })
+                dispatch_result = await dispatch_tool(dispatch_context, tool_call)
+                if dispatch_result.status is not DispatchStatus.LEGACY_HANDLER:
+                    if tool_name not in KNOWN_TOOL_NAMES:
+                        analysis_log.append(AnalysisStep(
+                            step_number=step_count, step_type="unknown_tool",
+                            agent_reasoning=agent_reasoning,
+                            text_content=dispatch_result.content[:2000],
+                        ))
                     continue
 
                 try:
@@ -1813,23 +1733,7 @@ class BioinformaticsAgent(
                                     self._current_analysis_state
                                 )
 
-                        tool_result = (
-                            f"Execution {'successful' if not result.error else 'failed'}.\n"
-                            f"Evidence execution ID: {code_exec.id}\n"
-                        )
-                        if result.output:
-                            tool_result += f"Output:\n{result.output}\n"
-                        if result.error:
-                            tool_result += f"Error: {result.error}\n"
-                            # Hint: if a module is missing, tell the agent to report it
-                            if "ModuleNotFoundError" in result.error:
-                                tool_result += (
-                                    "\nHint: A required package is not installed. "
-                                    "Report the missing dependency, explain which analysis step is limited, "
-                                    "and use an already-installed alternative only when the substitution is scientifically valid.\n"
-                                )
-                        if result.figures:
-                            tool_result += f"Generated {len(result.figures)} figure(s).\n"
+                        tool_result = build_execution_tool_result(code_exec, result)
 
                         if swallowed_type:
                             tool_result += _build_swallowed_error_feedback(
@@ -2816,7 +2720,7 @@ class BioinformaticsAgent(
                         collection = str(args.get("collection", "") or "").strip()
                         version = str(args.get("version", "") or "").strip()
                         organism = normalize_organism(
-                            args.get("organism") or state.species or ""
+                            resolve_fetch_organism(args, state)
                         )
 
                         native = organism in MSIGDB_ORGANISMS
@@ -2962,7 +2866,7 @@ class BioinformaticsAgent(
                                 messages.append({
                                     "role": "tool",
                                     "tool_call_id": tool_call.id,
-                                    "content": f"fetch_gene_set could not partition: {error}",
+                                    "content": partition_failure(error),
                                 })
                                 analysis_log.append(AnalysisStep(
                                     step_number=step_count, step_type="fetch_gene_set",
@@ -3023,7 +2927,7 @@ class BioinformaticsAgent(
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call.id,
-                                "content": f"fetch_gene_set failed: {error}",
+                                "content": fetch_failure(error),
                             })
                             # Record the attempt. Without this a failed fetch is
                             # invisible in session.json, and a later reader
@@ -3412,24 +3316,13 @@ class BioinformaticsAgent(
                                 findings=[], findings_summary=f"REJECTED: {err}",
                             ))
                             continue
-                        eligible_ids = {
-                            execution.id
-                            for execution in successful_evidence_executions(
-                                self.code_history, round_number=state.current_round
-                            )
-                        }
-                        invalid_program_ids = sorted({
-                            evidence_id
-                            for program in progs
-                            for evidence_id in program.evidence_execution_ids
-                            if evidence_id not in eligible_ids
-                        })
-                        if invalid_program_ids:
-                            err = (
-                                "Mechanism programs cite failed, contradictory, or unknown "
-                                f"execution IDs: {invalid_program_ids}. Available IDs: "
-                                f"{sorted(eligible_ids)[-20:]}"
-                            )
+                        eligible_ids = eligible_execution_ids(
+                            self.code_history,
+                            round_number=state.current_round,
+                            successful_executions=successful_evidence_executions,
+                        )
+                        err = mechanism_execution_id_error(progs, eligible_ids)
+                        if err:
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call.id,
@@ -3473,25 +3366,17 @@ class BioinformaticsAgent(
                             tool_result = "No species set in session. Skipping validation."
                         else:
                             assessment = await self._assess_gene_species_match(gene_names, state.species)
-                            if assessment.get("match", True):
-                                tool_result = f"Gene names are consistent with {state.species}. Proceed with analysis."
-                            else:
+                            action = None
+                            if not assessment.get("match", True):
                                 if self.species_validation_callback:
                                     action = await self.species_validation_callback(
                                         gene_names, state.species, assessment
                                     )
-                                    if action.get("action") == "change_species":
-                                        tool_result = f"Species updated to {action.get('new_species', '')}. Proceed."
-                                    elif action.get("action") == "custom":
+                                    if action.get("action") == "custom":
                                         self.analysis_context["species_user_directive"] = action.get("user_input", "")
-                                        tool_result = f"User instruction received. Proceed with analysis."
-                                    else:
-                                        tool_result = f"Keeping species as {state.species}. Proceed with caution."
-                                else:
-                                    tool_result = (
-                                        f"Warning: gene names may not match {state.species}. "
-                                        f"{assessment.get('reasoning', '')}. Proceeding anyway."
-                                    )
+                            tool_result = species_validation_response(
+                                state, assessment, action
+                            )
                             # Validation actually ran here (_assess_gene_species_match completed
                             # above); unlike the auto-validation hook, every branch in this tool
                             # call executes the assessment, so the flag can be set unconditionally.
@@ -3519,17 +3404,11 @@ class BioinformaticsAgent(
                                     format_rule, search_rules,
                                 )
 
-                                hits = search_rules(method_question, limit=3)
-                                if hits:
-                                    method_answer = "\n\n".join(
-                                        format_rule(r) for r in hits
-                                    )
-                                else:
-                                    method_answer = (
-                                        "No rule in the corpus covers that question. "
-                                        "Proceed with standard practice and state your "
-                                        "reasoning in the findings."
-                                    )
+                                method_answer = method_guidance(
+                                    method_question,
+                                    format_rule=format_rule,
+                                    search_rules=search_rules,
+                                )
                             except Exception as exc:
                                 logger.warning(
                                     f"[Bioinformatics] method rule lookup failed: {exc}"
@@ -3713,9 +3592,7 @@ class BioinformaticsAgent(
                 except UpstreamExhaustedError:
                     raise
                 except Exception as _exc_tool:
-                    compact_error = compact_traceback(
-                        str(_exc_tool), max_chars=3000
-                    )
+                    compact_error = compact_traceback(str(_exc_tool), max_chars=3000)
                     logger.warning(
                         "[Bioinformatics] Tool '%s' failed: %s; continuing",
                         tool_call.name,
@@ -3724,10 +3601,7 @@ class BioinformaticsAgent(
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": (
-                            f"Error processing tool '{tool_call.name}': "
-                            f"{compact_error}"
-                        ),
+                        "content": tool_error_message(tool_call.name, compact_error),
                     })
                     analysis_log.append(AnalysisStep(
                         step_number=step_count,
@@ -3907,14 +3781,12 @@ class BioinformaticsAgent(
                             "this successful registration consumes a normal analysis step"
                         )
 
-        if llm_error:
-            status = "error"
-        elif _plan_revision_needed:
-            status = "paused_for_revision"
-        elif completed:
-            status = "partial" if evidence_gate_degraded else "completed"
-        else:
-            status = "max_steps_reached"
+        status = terminal_status(
+            llm_error=llm_error,
+            plan_revision_needed=_plan_revision_needed,
+            completed=completed,
+            evidence_gate_degraded=evidence_gate_degraded,
+        )
 
         # Step-budget exhaustion without an accepted report_findings call is an
         # incomplete execution.  Assistant prose is not an evidence channel and

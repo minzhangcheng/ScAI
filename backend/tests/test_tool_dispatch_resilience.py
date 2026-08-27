@@ -7,9 +7,65 @@ tool_call rather than propagating the exception and crashing.
 """
 import pytest
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
+from backend.agents.bioinformatics.executor_dispatch import (
+    DispatchStatus,
+    ToolDispatchContext,
+    dispatch_tool,
+)
 from backend.models.schemas import AgentType, AnalysisState
 from backend.tests.split_facade import setattr_facade
 from backend.utils.llm_client import UpstreamExhaustedError
+
+
+@pytest.mark.asyncio
+async def test_dispatch_contract_covers_handler_parse_unknown_and_error():
+    from unittest.mock import AsyncMock, MagicMock
+    from backend.utils.llm_client import ToolCall
+
+    messages = []
+    handled = AsyncMock(return_value={"ok": True})
+    failed = AsyncMock(side_effect=ValueError("broken handler"))
+    context = ToolDispatchContext(
+        messages=messages,
+        known_tool_names=frozenset({"known", "failed"}),
+        logger=MagicMock(),
+        handlers={"known": handled, "failed": failed},
+    )
+
+    accepted = await dispatch_tool(
+        context, ToolCall(id="accepted", name="known", arguments={})
+    )
+    assert accepted.status is DispatchStatus.HANDLED
+    assert accepted.value == {"ok": True}
+
+    malformed = ToolCall(id="malformed", name="known", arguments={})
+    malformed.parse_error = "bad json"
+    malformed.raw_arguments = "{"
+    rejected = await dispatch_tool(context, malformed)
+    assert rejected.status is DispatchStatus.REJECTED
+    assert messages[-1] == {
+        "role": "tool",
+        "tool_call_id": "malformed",
+        "content": (
+            "ERROR: failed to parse arguments JSON for tool 'known': bad json. "
+            "Raw arguments: '{'. Please retry the call with a valid JSON arguments object."
+        ),
+    }
+
+    errored = await dispatch_tool(
+        context, ToolCall(id="failed", name="failed", arguments={})
+    )
+    assert errored.status is DispatchStatus.ERROR
+    assert messages[-1]["content"] == "Error processing tool 'failed': broken handler"
+
+    unknown = await dispatch_tool(
+        context, ToolCall(id="unknown", name="invented", arguments={})
+    )
+    assert unknown.status is DispatchStatus.REJECTED
+    assert messages[-1]["content"] == (
+        "ERROR: Unknown tool 'invented'. This tool does not exist. "
+        "Available tools: failed, known. Please retry using one of the available tools."
+    )
 
 
 class TestToolDispatchResilience:
