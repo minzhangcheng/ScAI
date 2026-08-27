@@ -35,7 +35,11 @@ def test_integrity_dir_not_sandbox_writable(tmp_path, monkeypatch):
     fake_data_base = Path("/nonexistent-scai-integrity-test-path")
     monkeypatch.setattr(cfg, "DATA_BASE_DIR", fake_data_base)
 
-    sb = sandbox.LocalJupyterSandbox(session_id="s", working_dir=str(tmp_path / "workspace"))
+    sb = sandbox.LocalJupyterSandbox(
+        session_id="s",
+        state_dir=str(tmp_path / "states"),
+        working_dir=str(tmp_path / "workspace"),
+    )
 
     integ = str(fake_data_base / "integrity" / "s" / "x")
     assert not any(
