@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import appSource from '../App.tsx?raw'
+import appLayoutSource from '../components/app/AppLayout.tsx?raw'
 import mainSource from '../main.tsx?raw'
 import analysisControlsSource from '../components/analysisPanel/AnalysisControls.tsx?raw'
 import analysisDialogsSource from '../components/analysisPanel/AnalysisDialogs.tsx?raw'
@@ -9,7 +10,8 @@ import analysisPanelImplSource from '../components/analysisPanel/AnalysisPanelIm
 import analysisStatusSource from '../components/analysisPanel/AnalysisStatusView.tsx?raw'
 import authLayoutSource from '../components/AuthLayout.tsx?raw'
 import chatPanelSource from '../components/ChatPanel.tsx?raw'
-import figureGallerySource from '../components/analysis/FigureGallery.tsx?raw'
+import figureCardSource from '../components/analysis/FigureCard.tsx?raw'
+import figureGalleryViewSource from '../components/analysis/FigureGallery.tsx?raw'
 import graphicAbstractSource from '../components/analysis/GraphicAbstract.tsx?raw'
 import loadingScreenSource from '../components/LoadingScreen.tsx?raw'
 import messageItemSource from '../components/messageStream/MessageItem.tsx?raw'
@@ -22,6 +24,7 @@ import indexSource from '../../index.html?raw'
 import tailwindConfigSource from '../../tailwind.config.js?raw'
 
 const globalsSource = readFileSync(join(process.cwd(), 'src/styles/globals.css'), 'utf8')
+const appThemeSource = [appSource, appLayoutSource].join('\n')
 const analysisPanelSource = [
   analysisControlsSource,
   analysisDialogsSource,
@@ -29,6 +32,7 @@ const analysisPanelSource = [
   analysisStatusSource,
 ].join('\n')
 const resultsPanelSource = resultsViewSource
+const figureGallerySource = [figureCardSource, figureGalleryViewSource].join('\n')
 const themeOwnedPaths = [
   'src/components/ErrorBoundary.tsx',
   'src/components/LanguageSelector.tsx',
@@ -40,7 +44,7 @@ const themeOwnedPaths = [
   'src/components/analysis/IntegratedReport.tsx',
   'src/components/analysis/RoundSummaries.tsx',
   'src/components/data/DataPanel.tsx',
-  'src/components/data/DataSection.tsx',
+  'src/components/data/DataSectionView.tsx',
   'src/components/data/GroupManager.tsx',
   'src/components/data/IndicatorForm.tsx',
   'src/components/shared/CustomTypeInput.tsx',
@@ -66,14 +70,14 @@ describe('system color theme contract', () => {
     expect(globalsSource).toMatch(
       /@media \(prefers-color-scheme: dark\)\s*{\s*:root\s*{[^}]*color-scheme:\s*dark;/,
     )
-    expect(appSource).not.toMatch(/localStorage\.(getItem|setItem)\(['"]theme/)
-    expect(appSource).not.toMatch(/setTheme|toggleTheme/)
+    expect(appThemeSource).not.toMatch(/localStorage\.(getItem|setItem)\(['"]theme/)
+    expect(appThemeSource).not.toMatch(/setTheme|toggleTheme/)
   })
 
   it('uses static classes and preserves light publication canvases', () => {
-    expect(appSource).toContain('bg-surface-50 dark:bg-surface-950')
-    expect(appSource).toContain('bg-white/90 dark:bg-surface-900/90')
-    expect(appSource).toContain('bg-white dark:bg-surface-900')
+    expect(appThemeSource).toContain('bg-surface-50 dark:bg-surface-950')
+    expect(appThemeSource).toContain('bg-white/90 dark:bg-surface-900/90')
+    expect(appThemeSource).toContain('bg-white dark:bg-surface-900')
     expect(mainSource).toContain('<SystemThemeProvider>')
     expect(messageRenderersSource).toContain('isDark ? oneDark : oneLight')
     expect(messageItemSource).toContain('bg-white dark:bg-surface-900')

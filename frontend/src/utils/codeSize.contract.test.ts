@@ -10,12 +10,7 @@ const MAX_FUNCTION_LINES = 300
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 const FRONTEND_ROOT = path.join(REPO_ROOT, 'frontend', 'src')
 
-const BASELINE_LONG_TYPESCRIPT = new Set([
-  'frontend/src/App.tsx::App',
-  'frontend/src/components/analysis/FigureGallery.tsx::FigureGallery',
-  'frontend/src/components/data/DataSection.tsx::DataSection',
-  'frontend/src/pages/Admin.tsx::Admin',
-])
+const BASELINE_LONG_TYPESCRIPT = new Set([])
 
 const BASELINE_OVERSIZED_TYPESCRIPT = new Set([])
 
