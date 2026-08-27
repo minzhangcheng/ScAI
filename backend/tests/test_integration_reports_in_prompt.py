@@ -22,8 +22,8 @@ def test_integrated_report_prompt_includes_integration_reports():
 
 def test_supervisor_report_prompt_includes_integration_reports():
     """SupervisorAgent._build_report_prompt must feed integration_reports."""
-    from backend.agents.supervisor_agent import SupervisorAgent
-    src = inspect.getsource(SupervisorAgent._build_report_prompt)
+    from backend.agents.supervisor import report_prompt
+    src = inspect.getsource(report_prompt._build_report_prompt)
     assert "build_integration_block" in src, (
         "_build_report_prompt must call build_integration_block"
     )
