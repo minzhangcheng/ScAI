@@ -15,6 +15,7 @@ import re
 import ast
 import textwrap
 import time
+import sys
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass
@@ -348,6 +349,14 @@ from .bioinformatics import (  # noqa: F401
     ProfilingMixin,
 )
 from .bioinformatics.executor_prompt import build_static_executor_prompt
+from .bioinformatics import (
+    executor_checkpoint,
+    executor_context,
+    executor_priors,
+    executor_restore,
+    executor_runtime,
+    executor_support,
+)
 
 class BioinformaticsAgent(
     ContextMixin,
@@ -824,144 +833,26 @@ class BioinformaticsAgent(
         self, adata_var, cluster_key, rank_key, organism, workspace_dir,
         tissue="", cluster_markers=None,
     ) -> DatabasePriorResult:
-        """Compute offline marker priors without making annotation depend on them.
+        return await executor_priors._compute_database_priors(
+            self, adata_var, cluster_key, rank_key, organism, workspace_dir,
+            tissue=tissue, cluster_markers=cluster_markers,
+            bindings=sys.modules[__name__],
+        )
 
-        The Scanpy rank key remains the primary marker source. When that key is
-        unavailable, the kernel falls back to the sanitized marker mapping that
-        ``annotate_clusters`` is actually using. Every outcome is explicit so a
-        database failure cannot be mistaken for a successful literature-only
-        decision.
-        """
-        try:
-            if not marker_priors_write(organism, workspace_dir):
-                return DatabasePriorResult(
-                    "skipped", {},
-                    f"marker database has no entries for organism {organism!r}",
-                )
-            src = _ORA_KERNEL_SRC
-            markers_json = _json.dumps(cluster_markers or {}, ensure_ascii=False)
-            call = (
-                f"\n_provided_cluster_markers = json.loads({_json.dumps(markers_json)})\n"
-                f"_priors = compute_ora_priors({adata_var}, "
-                f"'tables/marker_priors_input.tsv', {cluster_key!r}, {rank_key!r}, "
-                f"tissue={str(tissue or '')!r}, "
-                f"cluster_markers=_provided_cluster_markers)\n"
-                f"import json as __j; print(__j.dumps(_priors))\n"
-            )
-            result = await self.sandbox.execute(src + call, save_to_history=False,
-                                                skip_safety_check=True)
-            if not getattr(result, "success", False):
-                raw_error = (
-                    getattr(result, "error", None)
-                    or getattr(result, "output", None)
-                    or "unknown sandbox execution error"
-                )
-                detail = _compact_database_prior_error(raw_error)
-                logger.warning(
-                    f"[{self.session_id}] DB priors sandbox execution failed: {raw_error}")
-                return DatabasePriorResult("failed", {}, detail)
-            out = getattr(result, "output", "") or ""
-            line = next((ln for ln in out.strip().splitlines()[::-1]
-                         if ln.strip().startswith("{")), None)
-            if line is None:
-                detail = "sandbox returned no JSON result"
-                logger.warning(f"[{self.session_id}] DB priors computation failed: {detail}")
-                return DatabasePriorResult("failed", {}, detail)
-            try:
-                priors = _json.loads(line)
-            except (TypeError, ValueError) as e:
-                detail = _compact_database_prior_error(f"invalid JSON result: {e}")
-                logger.warning(f"[{self.session_id}] DB priors computation failed: {detail}")
-                return DatabasePriorResult("failed", {}, detail)
-            if not isinstance(priors, dict):
-                detail = f"sandbox returned {type(priors).__name__}, expected object"
-                logger.warning(f"[{self.session_id}] DB priors computation failed: {detail}")
-                return DatabasePriorResult("failed", {}, detail)
-            if not priors:
-                return DatabasePriorResult(
-                    "empty", {}, "no eligible marker-database overlaps passed the ORA threshold")
-            marker_sources = {
-                str(hit.get("marker_source") or "")
-                for hits in priors.values() if isinstance(hits, list)
-                for hit in hits if isinstance(hit, dict)
-            }
-            marker_sources.discard("")
-            return DatabasePriorResult(
-                "used", priors, marker_source="+".join(sorted(marker_sources)))
-        except Exception as e:
-            detail = _compact_database_prior_error(e)
-            logger.warning(
-                f"[{self.session_id}] DB priors computation failed: {detail}",
-                exc_info=True)
-            return DatabasePriorResult("failed", {}, detail)
-
-    async def _bind_gene_set(self, set_id: str, genes: List[str], label: str) -> Optional[str]:
-        """Bind a fetched panel into the kernel; returns its variable name or None.
-
-        Handing the genes over as data rather than asking the model to retype
-        them is where a fetched panel stops silently becoming a remembered one
-        again. `None` means the kernel would not take them, and the caller must
-        inline the genes into its reply instead.
-        """
-        var_name = f"gene_set_{re.sub(r'[^0-9A-Za-z_]', '_', set_id)[:60]}"
-        try:
-            result = await self.sandbox.execute(
-                f"{var_name} = {genes!r}",
-                save_to_history=False, skip_safety_check=True,
-            )
-            # A kernel that will not take the assignment says so in the result
-            # -- dead kernel, restart, timeout, MemoryError on a large panel --
-            # far more often than it raises. Reporting the variable anyway is
-            # the worst outcome available: the caller then suppresses the inline
-            # gene list, and the next cell dies on NameError or the model
-            # retypes the panel from memory, which is what this helper exists to
-            # prevent.
-            if result.error:
-                compact_error = compact_traceback(result.error, max_chars=1000)
-                logger.warning(
-                    f"[{self.session_id}] {label} injection failed: {compact_error}"
-                )
-                return None
-            return var_name
-        except Exception as exc:
-            logger.warning(
-                "[%s] %s injection failed: %s",
-                self.session_id,
-                label,
-                compact_traceback(str(exc), max_chars=1000),
-            )
-            return None
+    async def _bind_gene_set(
+        self, set_id: str, genes: List[str], label: str,
+    ) -> Optional[str]:
+        return await executor_priors._bind_gene_set(
+            self, set_id, genes, label, bindings=sys.modules[__name__],
+        )
 
     async def _bind_gene_set_collection(
         self, collection: str, path: Path,
     ) -> Optional[str]:
-        """Bind a backend-cached GMT path into the analysis kernel."""
-        var_name = (
-            "gene_set_collection_"
-            + re.sub(r"[^0-9A-Za-z_]", "_", collection)[:60]
-            + "_path"
+        return await executor_priors._bind_gene_set_collection(
+            self, collection, path, bindings=sys.modules[__name__],
         )
-        try:
-            result = await self.sandbox.execute(
-                f"{var_name} = {str(path)!r}",
-                save_to_history=False,
-                skip_safety_check=True,
-            )
-            if result.error:
-                logger.warning(
-                    "[%s] gene-set collection path injection failed: %s",
-                    self.session_id,
-                    compact_traceback(result.error, max_chars=1000),
-                )
-                return None
-            return var_name
-        except Exception as exc:
-            logger.warning(
-                "[%s] gene-set collection path injection failed: %s",
-                self.session_id,
-                compact_traceback(str(exc), max_chars=1000),
-            )
-            return None
+
 
     async def run_autonomous_analysis(
         self,
@@ -1001,149 +892,23 @@ class BioinformaticsAgent(
             Path(state_dir).mkdir(parents=True, exist_ok=True)
         checkpoint_mgr = CheckpointManager(session_id=state.id, state_dir=state_dir)
 
-        # Try to resume from checkpoint if enabled
-        checkpoint = None
-        checkpoint_valid = False
-        if resume_from_checkpoint:
-            try:
-                checkpoint = await checkpoint_mgr.load()
-                if checkpoint and not checkpoint.get('completed', False):
-                    # Validate checkpoint has required fields with correct types
-                    validation_errors = []
+        checkpoint, checkpoint_valid = await executor_checkpoint.load_checkpoint(
+            self,
+            checkpoint_mgr,
+            state,
+            resume_from_checkpoint=resume_from_checkpoint,
+            planning_stage=planning_stage,
+            bindings=sys.modules[__name__],
+        )
 
-                    # Check step_number is a valid integer
-                    step_num = checkpoint.get('step_number')
-                    if not isinstance(step_num, int) or step_num < 0:
-                        validation_errors.append(f"step_number invalid: {step_num}")
-
-                    # Check messages is a non-empty list
-                    messages = checkpoint.get('messages')
-                    if not isinstance(messages, list) or len(messages) < 2:
-                        validation_errors.append(f"messages invalid: expected list with >= 2 items")
-
-                    # Check findings is a list
-                    findings = checkpoint.get('findings')
-                    if not isinstance(findings, list):
-                        validation_errors.append(f"findings invalid: expected list")
-
-                    # Check figures is a list
-                    figures = checkpoint.get('figures')
-                    if not isinstance(figures, list):
-                        validation_errors.append(f"figures invalid: expected list")
-
-                    # Check round_number matches current round
-                    cp_round = checkpoint.get('round_number')
-                    if cp_round is not None and cp_round != state.current_round:
-                        validation_errors.append(
-                            f"round_number mismatch: checkpoint={cp_round}, current={state.current_round}"
-                        )
-
-                    # Check planning_stage matches. stage1 and stage2 share the same
-                    # round_number, so without this a stage1 checkpoint that wasn't
-                    # cleared (e.g. stage1 ended max_steps_reached/completed_with_fallback,
-                    # which keep completed=False) would be wrongly resumed when stage2
-                    # starts — feeding the stage2 run the stale stage1 conversation
-                    # instead of the stage2 instruction. Only reject on an explicit
-                    # mismatch so pre-fix checkpoints (no planning_stage) still resume.
-                    cp_stage = checkpoint.get('planning_stage')
-                    if cp_stage is not None and cp_stage != planning_stage:
-                        validation_errors.append(
-                            f"planning_stage mismatch: checkpoint={cp_stage}, current={planning_stage}"
-                        )
-
-                    if not validation_errors:
-                        checkpoint_valid = True
-                        logger.info(f"[Bioinformatics] Resuming from checkpoint at step {checkpoint['step_number']}")
-                        await self._notify("status", f"Resuming analysis from step {checkpoint['step_number']}...")
-                    else:
-                        logger.warning(f"[Bioinformatics] Checkpoint validation failed: {validation_errors}, starting fresh")
-                        checkpoint_mgr.clear()
-                        checkpoint = None
-            except Exception as e:
-                logger.exception("[Bioinformatics] Failed to load checkpoint")
-                # Only clear if it's a data corruption issue, not a transient error
-                try:
-                    checkpoint_mgr.clear()
-                    logger.warning("[Bioinformatics] Cleared corrupted checkpoint data")
-                except Exception as clear_err:
-                    logger.error(f"[Bioinformatics] Failed to clear checkpoint: {clear_err}")
-                checkpoint = None
-                await self._notify("status", "Previous checkpoint corrupted, starting fresh analysis...")
 
         logger.info(f"[Bioinformatics] Starting autonomous analysis with max_steps={max_steps}")
-        # Start sandbox if needed
-        if self.sandbox.km is None:
-            await self._notify("status", "Starting analysis environment...")
-            start_result = await self.sandbox.start()
-            logger.info("[Bioinformatics] Sandbox started")
-            if start_result.get("restore_failed"):
-                logger.warning("[Bioinformatics] Previous session restore failed, starting with fresh environment")
-                await self._notify("status", "Note: Previous session could not be restored, starting fresh...")
-            elif start_result.get("session_restored") and not self.code_history:
-                # Populate code_history from restored notebook cells so _build_notebook_context()
-                # shows previous analysis, preventing the agent from restarting from scratch
-                restored_cells = self.sandbox.get_code_history()
-                for cell in restored_cells:
-                    outputs = cell.get('outputs', [])
-                    output_text = '\n'.join(
-                        o.get('text', '') for o in outputs if o.get('type') == 'stream'
-                    )
-                    error_text = '\n'.join(
-                        o.get('evalue', '') for o in outputs if o.get('type') == 'error'
-                    )
-                    figures = [
-                        o.get('data', {}).get('image/png', '')
-                        for o in outputs
-                        if o.get('type') == 'display_data' and 'image/png' in o.get('data', {})
-                    ]
-                    self.code_history.append(CodeExecution(
-                        code=cell.get('code', ''),
-                        output=output_text if output_text else None,
-                        error=error_text if error_text else None,
-                        figures=figures,
-                        execution_time=None,
-                    ))
-                logger.info(f"[Bioinformatics] Restored {len(self.code_history)} cells into code_history from notebook state")
+        await executor_runtime.prepare_sandbox(
+            self,
+            state,
+            bindings=sys.modules[__name__],
+        )
 
-        # A verified older generation may be the only runtime that survived a
-        # newer failed save. Do not silently call that fully current: stop at a
-        # durable HITL gate unless the user already chose recompute/reduce.
-        persistence = self.sandbox.sync_runtime_persistence_state(state)
-        if getattr(state, "runtime_recompute_pending", False) and persistence.get(
-            "requires_recompute"
-        ):
-            from backend.services.runtime_persistence_gate import (
-                prepare_runtime_recompute,
-            )
-
-            # A process restart leaves the notebook metadata as the
-            # authoritative failed/degraded record while the user's explicit
-            # Recompute action lives in AnalysisState. Apply that authorization
-            # to the newly-created sandbox before the executor loop checks the
-            # latch, otherwise it immediately re-arms the same gate.
-            prepare_runtime_recompute(state, self.sandbox)
-            persistence = self.sandbox.sync_runtime_persistence_state(state)
-        if (
-            (
-                persistence.get("degraded_recovery")
-                or persistence.get("status") == "failed"
-                or persistence.get("requires_recompute")
-            )
-            and not getattr(state, "runtime_recompute_pending", False)
-        ):
-            from backend.services.runtime_persistence_gate import (
-                RuntimePersistenceBlocked,
-                enter_runtime_persistence_gate,
-            )
-
-            enter_runtime_persistence_gate(
-                state,
-                persistence,
-                degraded_recovery=bool(persistence.get("degraded_recovery")),
-            )
-            raise RuntimePersistenceBlocked(
-                "Runtime persistence requires an explicit recovery action"
-            )
 
         # Build initial prompt — split into static prefix (cacheable) and dynamic context
         self._current_analysis_state = state
@@ -1151,82 +916,28 @@ class BioinformaticsAgent(
         dynamic_context = self._build_dynamic_context(state)
         dynamic_ctx_msg = {"role": "user", "content": f"{_DYNAMIC_CONTEXT_PREFIX}\n{dynamic_context}"}
 
-        # Initialize or restore state from checkpoint
-        restored_messages_rebuilt = False
-        if checkpoint and checkpoint_valid:
-            messages = checkpoint.get('messages', [])
-            # Validate message structure: each must have role and content
-            valid_messages = (
-                all(
-                    isinstance(m, dict) and "role" in m and ("content" in m or "tool_calls" in m)
-                    for m in messages
-                )
-                and tool_calls_are_paired(messages)
-            ) if messages else False
-            if len(messages) < 2 or not valid_messages:
-                logger.warning("[Bioinformatics] Checkpoint messages invalid (len=%d, valid=%s), using fresh messages",
-                               len(messages), valid_messages)
-                messages = [
-                    {"role": "system", "content": static_system_prompt},
-                    dynamic_ctx_msg,
-                    {"role": "user", "content": f"Analysis instruction: {initial_instruction}"}
-                ]
-                restored_messages_rebuilt = True
-            else:
-                # Migrate old checkpoint format: replace monolithic system prompt
-                # with split static + dynamic structure for better prefix caching.
-                # Old format: [system(full), user(instruction), ...]
-                # New format: [system(static), user(context), user(instruction), ...]
-                if (len(messages) >= 2
-                        and messages[0].get("role") == "system"
-                        and messages[1].get("role") == "user"
-                        and isinstance(messages[1].get("content"), str)
-                        and messages[1]["content"].startswith("Analysis instruction:")):
-                    logger.info("[Bioinformatics] Migrating checkpoint to split prompt format for better caching")
-                    messages[0] = {"role": "system", "content": static_system_prompt}
-                    messages.insert(1, dynamic_ctx_msg)
-            all_findings = checkpoint.get('findings', [])
-            all_figures = checkpoint.get('figures', [])
-            step_count = checkpoint.get('step_number', 0)
-            # Give resumed agent its remaining budget based on original total_steps cap.
-            # Use the larger of (caller's max_steps, checkpoint's total_steps) to avoid shrinking budget.
-            # max_steps stays at original_total so the agent has (original_total - step_count) steps left.
-            original_total = max(max_steps, checkpoint.get('total_steps', max_steps))
-            max_steps = original_total
-            self.analysis_context = checkpoint.get('analysis_context', {})
-            analysis_log = [AnalysisStep(**s) for s in checkpoint.get('analysis_log', [])]
-            restored_code_history = checkpoint.get('code_history', [])
-            if restored_code_history:
-                self.code_history = [CodeExecution(**ce) for ce in restored_code_history]
-                logger.info(f"[Bioinformatics] Restored {len(self.code_history)} code_history entries from checkpoint")
-            logger.info(f"[Bioinformatics] Restored state: step={step_count}, findings={len(all_findings)}, figures={len(all_figures)}, new max_steps={max_steps}")
-        else:
-            messages = [
-                {"role": "system", "content": static_system_prompt},
-                dynamic_ctx_msg,
-                {"role": "user", "content": f"Analysis instruction: {initial_instruction}"}
-            ]
-            # Inject approved analysis plan if available
-            if state.current_plan and state.current_plan.status == "approved":
-                messages.append({
-                    "role": "user",
-                    "content": build_approved_plan_context(state.current_plan),
-                })
-            all_findings = []
-            all_figures = []
-            step_count = 0
-            analysis_log = []
-            # Reset per-run state to avoid pollution from previous rounds
-            # (process() does this but workflow calls run_autonomous_analysis directly)
-            self.code_history = []
-            self.analysis_context = {}
-            self.last_result = None
+        restored = executor_restore.restore_executor_state(
+            self,
+            state,
+            checkpoint=checkpoint,
+            checkpoint_valid=checkpoint_valid,
+            static_system_prompt=static_system_prompt,
+            dynamic_context_message=dynamic_ctx_msg,
+            initial_instruction=initial_instruction,
+            max_steps=max_steps,
+            bindings=sys.modules[__name__],
+        )
+        messages = restored.messages
+        all_findings = restored.findings
+        all_figures = restored.figures
+        step_count = restored.step_count
+        max_steps = restored.max_steps
+        analysis_log = restored.analysis_log
+        restored_messages_rebuilt = restored.messages_rebuilt
+
 
         def _active_plan_id() -> Optional[str]:
-            plan = state.current_plan
-            if plan and plan.status == "approved":
-                return str(plan.id)
-            return None
+            return executor_support.active_plan_id(state)
 
         # A PI-approved replacement plan starts a new bounded analysis attempt.
         # Keep absolute step numbers monotonic for evidence identity, but reset
@@ -1250,6 +961,27 @@ class BioinformaticsAgent(
                 max_steps,
             )
 
+        executor_budget = executor_context.ExecutorBudget(
+            per_attempt_max_steps=per_attempt_max_steps,
+            max_steps=max_steps,
+            step_count=step_count,
+            attempt_start_step=attempt_start_step,
+        )
+        executor_run_state = executor_context.ExecutorRunState(
+            agent=self,
+            analysis_state=state,
+            messages=messages,
+            findings=all_findings,
+            figures=all_figures,
+            analysis_log=analysis_log,
+            checkpoint=checkpoint,
+            checkpoint_valid=checkpoint_valid,
+            budget=executor_budget,
+        )
+        executor_bindings = executor_context.ExecutorBindings(
+            facade=sys.modules[__name__],
+        )
+
         async def _save_executor_checkpoint(
             step_name: str,
             *,
@@ -1257,24 +989,26 @@ class BioinformaticsAgent(
             budget_exhausted: bool = False,
         ) -> None:
             """Persist the executor transcript independently of planning history."""
-            checkpoint_data = {
-                'step_name': step_name,
-                'session_id': state.id,
-                'round_number': state.current_round,
-                'planning_stage': planning_stage,
-                'step_number': step_count,
-                'total_steps': max_steps,
-                'attempt_start_step': attempt_start_step,
-                'active_plan_id': _active_plan_id(),
-                'messages': messages,
-                'findings': all_findings,
-                'figures': all_figures,
-                'code_history': [ce.model_dump(mode="json") for ce in self.code_history],
-                'analysis_log': [step.model_dump(mode="json") for step in analysis_log],
-                'analysis_context': self.analysis_context,
-                'budget_exhausted': budget_exhausted,
-                'completed': False,
-            }
+            checkpoint_data = executor_checkpoint.build_checkpoint_payload(
+                step_name=step_name,
+                state=state,
+                planning_stage=planning_stage,
+                step_number=step_count,
+                total_steps=max_steps,
+                attempt_start_step=attempt_start_step,
+                active_plan_id=_active_plan_id(),
+                messages=messages,
+                findings=all_findings,
+                figures=all_figures,
+                code_history=[
+                    ce.model_dump(mode="json") for ce in self.code_history
+                ],
+                analysis_log=[
+                    step.model_dump(mode="json") for step in analysis_log
+                ],
+                analysis_context=self.analysis_context,
+                budget_exhausted=budget_exhausted,
+            )
             await checkpoint_mgr.save(checkpoint_data)
             if save_sandbox:
                 try:

@@ -147,7 +147,7 @@ async def _execute_supplementary_pass(
             fatal = agent._supplementary_fatal_signature_changes(changed)
             if fatal:
                 logger.error(
-                    f"[{getattr(self, 'session_id', '?')}] supplementary pass "
+                    f"[{getattr(agent, 'session_id', '?')}] supplementary pass "
                     f"corrupted main object: {fatal}")
                 abort_envelope = envelope(
                     "failed",
@@ -178,7 +178,7 @@ async def _execute_supplementary_pass(
             # a cheaper route — abandoning the whole pass here would throw
             # away the steps that already succeeded.
             logger.warning(
-                f"[{getattr(self, 'session_id', '?')}] supplementary step "
+                f"[{getattr(agent, 'session_id', '?')}] supplementary step "
                 f"exceeded its {step_timeout}s budget")
             agent._interrupt_kernel_after_timeout()
             warnings.append(
@@ -293,10 +293,10 @@ async def run_supplementary_tasks(
     # package __init__ pulls in the workflow core, which imports the agents.
     from ...workflow.annotation_validation import signatures_match
 
-    state = getattr(self, "_current_analysis_state", None)
+    state = getattr(agent, "_current_analysis_state", None)
     registered_data_files = (
         agent._render_registered_data_files(state)
-        if state is not None and hasattr(self, "_render_registered_data_files")
+        if state is not None and hasattr(agent, "_render_registered_data_files")
         else ""
     )
     max_iterations = max(1, min(int(max_iterations), 8))
@@ -397,7 +397,7 @@ async def run_supplementary_tasks(
         )
     except asyncio.TimeoutError:
         logger.warning(
-            f"[{getattr(self, 'session_id', '?')}] supplementary pass exceeded its "
+            f"[{getattr(agent, 'session_id', '?')}] supplementary pass exceeded its "
             f"total {total_timeout}s budget")
         # Cancelling the coroutine only stops US waiting: a cell already
         # dispatched keeps running in the kernel and would hold it against the
@@ -409,7 +409,7 @@ async def run_supplementary_tasks(
         compact_error = compact_traceback(str(e), max_chars=3000)
         logger.error(
             "[%s] supplementary executor failed: %s",
-            getattr(self, "session_id", "?"),
+            getattr(agent, "session_id", "?"),
             compact_error,
         )
         return _envelope(
