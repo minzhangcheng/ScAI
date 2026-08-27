@@ -35,6 +35,7 @@ SPLIT_PACKAGES: dict[str, str] = {
     "backend.models.schemas": "backend.models.schema_parts",
     "backend.routes.chat": "backend.routes.chat_parts",
     "backend.routes.export_import": "backend.routes.export_import_parts",
+    "backend.routes.lifecycle": "backend.routes.lifecycle_parts",
     "backend.routes.reports": "backend.routes.reports_parts",
     "backend.services.export_lifecycle": "backend.services.export_lifecycle_parts",
     "backend.services.report.variants": "backend.services.report.variants_parts",

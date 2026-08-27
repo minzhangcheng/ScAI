@@ -2,36 +2,52 @@
 
 Extracted from backend/main.py to decouple lifecycle route handlers.
 """
+
 import json
+
 import logging
+
 from datetime import datetime
+
 from typing import Any, Dict, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Depends
+
 from pydantic import BaseModel
 
 from backend.config import get_session_states
+
 from backend.constants import WaitInputReason, SEMANTIC_WAIT_GATES
+
 from backend.models.api_requests import LlmFailureActionRequest, RetryNodeRequest, StopAnalysisRequest
+
 from backend.models.schemas import (
     APIResponse, TaskStatus,
 )
+
 from backend.services.session_store import (
     async_save_session,
     assert_recovery_clear,
     ensure_session_loaded,
     pause_and_restart_ws as _pause_and_restart_ws_impl,
 )
+
 from backend.utils.auth import require_session_ownership
+
 from backend.utils.runtime_apply import is_forward_resume_blocked
+
 from backend.services.snapshot_v2.checkpoint_paths import checkpoint_sqlite_path
+
 from backend.services.snapshot_v2.errors import (
     SNAPSHOT_FAILURE_ACTIONS,
     SnapshotTransactionError,
     is_snapshot_failure_blocked,
 )
+
 from backend.services.snapshot_v2.feature_gate import require_snapshot_v2_enabled
+
 from backend.utils.files import validate_session_id
+
 from backend.state import (
     _run_tasks,
     state_lock as _state_lock,
@@ -39,15 +55,17 @@ from backend.state import (
     get_session_lock,
     get_snapshot_action_lock,
 )
+
 from backend.services.session_store import update_session_cache as _update_session_cache
+
 from backend.routes._helpers import teardown_running_workflow
+
 from backend.utils.websocket_delivery import send_analysis_json
+
 from backend.utils.websocket_delivery import close_analysis_websocket
 
 logger = logging.getLogger(__name__)
 
-# HITL gates that pause the workflow waiting on explicit user input. Kept as a
-# single source of truth so adding a new WAITING_* gate only touches one place.
 WAITING_HITL_STATUSES = frozenset({
     TaskStatus.WAITING_INPUT,
     TaskStatus.WAITING_ANNOTATION,
@@ -55,1335 +73,146 @@ WAITING_HITL_STATUSES = frozenset({
     TaskStatus.WAITING_SPECIES_INPUT,
 })
 
-
-async def _resume_workflow(session_id, state, signal_fn=None):
-    """Transition state to RUNNING, persist, and optionally signal the workflow."""
-    await _update_session_cache(session_id, state)
-    await async_save_session(session_id, state)
-    async with _state_lock:
-        workflow = workflows.get(session_id)
-    if workflow and signal_fn:
-        signal_fn(workflow)
-    return workflow
-
-
-def resolve_hitl_skip_target(state):
-    """Return (node_name, generation) for a WAITING_INPUT gate that must be
-    released via signal_llm_failure_action — both the LLM-failure gate and the
-    disabled-agent gate use that path. Return None for the round-completion
-    gate (released via signal_continue).
-    """
-    reason = getattr(state, "wait_input_reason", None)
-    if reason == WaitInputReason.LLM_FAILURE.value:
-        info = state.llm_failure_info or {}
-        return info.get("node_name", ""), info.get("generation", 0)
-    if reason == WaitInputReason.AGENT_DISABLED.value:
-        info = state.agent_disabled_info or {}
-        return info.get("node_name", ""), info.get("generation", 0)
-    if reason == WaitInputReason.MARKER_DB_MISSING.value:
-        info = getattr(state, "llm_failure_info", None) or {}
-        return info.get("node_name"), info.get("generation")
-    if reason in (WaitInputReason.SPECIES_INPUT.value, WaitInputReason.GENE_SPECIES_MISMATCH.value):
-        return "species_input", 0  # sentinel: lifecycle will call signal_species_input("")
-    # Unknown or None reason — round-completion gate uses signal_continue.
-    # Fail-closed: if a new WaitInputReason is added that has its own gate,
-    # this must be updated to handle it (otherwise signal_continue would deadlock).
-    if reason is not None:
-        logger.warning(f"[lifecycle] resolve_hitl_skip_target: unknown wait_input_reason={reason}, "
-                       f"falling back to signal_continue which may not unblock this gate")
-    return None
-
-
-async def _pause_and_restart_ws(session_id: str, state):
-    await _pause_and_restart_ws_impl(session_id, state)
-
-
-async def _close_hitl_socket_for_redrive(session_id: str, reason: str) -> None:
-    """Close a parked HITL socket so the frontend reconnects and re-drives.
-
-    A workflow-boundary gate unwound the graph, so nothing is running and the
-    re-drive only starts when a WebSocket reconnect rebuilds the workflow. The
-    client holding the HITL connection never reconnects on its own, so close it
-    with the same 4000 code the confirm/choose endpoints use to trigger the
-    frontend's auto-reconnect. Skipped when a workflow is live: the capture then
-    already ran in-process and that run owns the socket.
-    """
-    async with _state_lock:
-        workflow_live = session_id in workflows
-    if not workflow_live:
-        await close_analysis_websocket(session_id, code=4000)
-
-
 router = APIRouter(prefix="/api/session", tags=["lifecycle"])
 
+import sys
+from .lifecycle_parts import interventions as lifecycle_interventions
+from .lifecycle_parts import run_resume as lifecycle_run_resume
+from .lifecycle_parts import runtime_persistence as lifecycle_runtime_persistence
+from .lifecycle_parts import shared as lifecycle_shared
+from .lifecycle_parts import snapshot_failures as lifecycle_snapshot_failures
 
-@router.post("/{session_id}/run")
+async def _resume_workflow(session_id, state, signal_fn=None):
+    lifecycle_shared.bind_facade(sys.modules[__name__])
+    return await lifecycle_shared._resume_workflow(session_id, state, signal_fn)
+
+def resolve_hitl_skip_target(state):
+    lifecycle_shared.bind_facade(sys.modules[__name__])
+    return lifecycle_shared.resolve_hitl_skip_target(state)
+
+async def _pause_and_restart_ws(session_id: str, state):
+    lifecycle_shared.bind_facade(sys.modules[__name__])
+    return await lifecycle_shared._pause_and_restart_ws(session_id, state)
+
+async def _close_hitl_socket_for_redrive(session_id: str, reason: str) -> None:
+    lifecycle_shared.bind_facade(sys.modules[__name__])
+    return await lifecycle_shared._close_hitl_socket_for_redrive(session_id, reason)
+
+@router.post('/{session_id}/run')
 async def run_analysis(session_id: str, request: Request):
-    """Start running analysis (use WebSocket for real-time updates)"""
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    lifecycle_run_resume.bind_facade(sys.modules[__name__])
+    return await lifecycle_run_resume.run_analysis(session_id, request)
 
-    from backend.config import is_snapshot_v2_enabled
-    from backend.services.snapshot_v2.feature_gate import (
-        normalize_disabled_snapshot_state,
-    )
-
-    if not is_snapshot_v2_enabled():
-        normalize_disabled_snapshot_state(
-            state,
-            workflow_active=session_id in workflows,
-        )
-
-    if state.status == TaskStatus.RUNNING:
-        raise HTTPException(status_code=400, detail="Analysis already running")
-
-    try:
-        assert_recovery_clear(state, session_id=session_id)
-    except SnapshotTransactionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    if is_snapshot_failure_blocked(state):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Session is blocked on a required snapshot failure. "
-                "Use Retry, Manage, or Terminate — generic start is refused."
-            ),
-        )
-
-    # Idle-restored session: signal explicit_start so the graph node
-    # preserves the restored round and plan rather than auto-incrementing.
-    #
-    # The same signal is what makes an *imported* session runnable at all. A
-    # session that has already run (current_round > 0) is dispatched to
-    # workflow.resume() by the WebSocket handler, and resume() refuses to
-    # "invent a fresh initialize_round run" when it finds no checkpoint --
-    # which an import never carries unless include_runtime was set. Without an
-    # explicit start intent it logs, flips the status back to PAUSED and
-    # executes nothing, so Start/Re-run looked like a silent no-op and the
-    # session had no way forward at all.
-    from backend.config import get_session_states
-    from backend.utils.runtime_apply import _live_pkl
-
-    # A checkpoint is only resumable together with the kernel it was written
-    # against: it names the graph node to continue from, and the pkl holds the
-    # values that node expects to find. Testing the file alone let an archive
-    # exported with include_runtime but imported without trust=true — the
-    # checkpoint travels unconditionally, the pkl does not — look resumable,
-    # which withheld the explicit_start intent and sent Re-run into an exact
-    # continuation on an empty kernel instead of a fresh round.
-    has_resumable_checkpoint = (
-        checkpoint_sqlite_path(get_session_states(session_id)).exists()
-        and _live_pkl(session_id).exists()
-    )
-    if getattr(state, "restore_resume_kind", None) is None and (
-        getattr(state, "restore_branch_id", None)
-        or (not has_resumable_checkpoint and state.current_round > 0)
-    ):
-        state.restore_start_intent = "explicit_start"
-
-    # A Skip armed at a boundary the graph never reached again stays on the
-    # session forever — consume_snapshot_skip only clears it at a *matching*
-    # boundary. Starting a run is a fresh intent, so an unconsumed marker from a
-    # previous run must not silently suppress this run's first required capture
-    # (the wildcard form, armed when the failing phase is unknown, would
-    # suppress whichever capture happens to come first).
-    if getattr(state, "skip_required_snapshot_phase", None) is not None:
-        state.skip_required_snapshot_phase = None
-
-    # Fresh rerun clears any snapshot restore state — new kernel will be built.
-    # Remember *why* it is being cleared: this run is the "re-run from your data"
-    # the blocked-resume message promises, so the bioinformatics agent has to be
-    # told its kernel is empty rather than left to trip over a missing adata.
-    if is_forward_resume_blocked(getattr(state, "runtime_restore_status", "complete")):
-        state.runtime_recompute_pending = True
-    state.runtime_restore_status = "complete"
-    state.runtime_restore_warning = None
-    state.status = TaskStatus.RUNNING
-    # Forced: this write carries the cleared runtime block and the explicit
-    # start intent, and RUNNING is not one of the statuses that bypasses the
-    # 5s save throttle. Losing it to the throttle would leave a restarted
-    # backend still refusing to start the session the user just started.
-    await async_save_session(session_id, state, force=True)
-
-    return APIResponse(
-        success=True,
-        message="Analysis started. Connect to WebSocket for updates.",
-        data={"websocket_url": f"/ws/{session_id}"}
-    )
-
-
-@router.post("/{session_id}/pause")
+@router.post('/{session_id}/pause')
 async def pause_analysis(session_id: str, request: Request):
-    """Pause running analysis"""
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
-    # P1-9: serialize with concurrent resume/stop/llm-failure mutators.
-    sess_lock = get_session_lock(session_id)
-    async with sess_lock:
-        return await _pause_analysis_locked(session_id, user_id)
-
+    lifecycle_run_resume.bind_facade(sys.modules[__name__])
+    return await lifecycle_run_resume.pause_analysis(session_id, request)
 
 async def _pause_analysis_locked(session_id: str, user_id: str):
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    lifecycle_run_resume.bind_facade(sys.modules[__name__])
+    return await lifecycle_run_resume._pause_analysis_locked(session_id, user_id)
 
-    # Idempotent: already paused → no-op success (rapid double-click safe).
-    if state.status == TaskStatus.PAUSED:
-        return APIResponse(success=True, message="Analysis already paused")
-
-    # Accept RUNNING and any WAITING_* state. Pausing while waiting for HITL
-    # input still snapshots sandbox and clears the cooperative gate so when
-    # the user later resumes from the gate, the agent loop also honors pause.
-    _pausable = {TaskStatus.RUNNING} | WAITING_HITL_STATUSES
-    if state.status not in _pausable:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot pause from status '{state.status}'"
-        )
-
-    if state.status in WAITING_HITL_STATUSES:
-        state.pre_pause_status = state.status
-    else:
-        state.pre_pause_status = None
-    # Grab workflow reference under lock to avoid race with cleanup_stale_sessions
-    async with _state_lock:
-        workflow = workflows.get(session_id)
-    if workflow:
-        result = await workflow.pause(session_id, analysis_state=state)
-        await _update_session_cache(session_id, state)
-        await async_save_session(session_id, state, force=not result.get("success", True))
-        if not result.get("success", True):
-            return APIResponse(
-                success=False,
-                message=(
-                    "Analysis execution is held, but its live runtime could not "
-                    "be persisted. Choose Retry persistence, Recompute or reduce, "
-                    "or Terminate."
-                ),
-                data=result,
-            )
-    else:
-        state.status = TaskStatus.PAUSED
-        await _update_session_cache(session_id, state)
-        await async_save_session(session_id, state)
-
-    return APIResponse(
-        success=True,
-        message="Analysis paused",
-        data={"status": state.status.value, "still_blocked": False},
-    )
-
-
-@router.post("/{session_id}/resume")
+@router.post('/{session_id}/resume')
 async def resume_analysis(session_id: str, request: Request):
-    """Resume paused or completed analysis (for re-analysis)"""
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
-    # P1-9: serialize with concurrent pause/stop/llm-failure mutators.
-    sess_lock = get_session_lock(session_id)
-    async with sess_lock:
-        return await _resume_analysis_locked(session_id, user_id)
-
+    lifecycle_run_resume.bind_facade(sys.modules[__name__])
+    return await lifecycle_run_resume.resume_analysis(session_id, request)
 
 async def _resume_analysis_locked(session_id: str, user_id: str):
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    lifecycle_run_resume.bind_facade(sys.modules[__name__])
+    return await lifecycle_run_resume._resume_analysis_locked(session_id, user_id)
 
-    from backend.config import is_snapshot_v2_enabled
-    from backend.services.snapshot_v2.feature_gate import (
-        normalize_disabled_snapshot_state,
-    )
-
-    if not is_snapshot_v2_enabled():
-        normalize_disabled_snapshot_state(
-            state,
-            workflow_active=session_id in workflows,
-        )
-
-    try:
-        assert_recovery_clear(state, session_id=session_id)
-    except SnapshotTransactionError as exc:
-        return APIResponse(
-            success=False,
-            message=str(exc),
-            data={"needs_reconnect": False, "recovery_blocked": True},
-        )
-
-    # Snapshot-failure gate: generic resume must not clear or advance.
-    # Only dedicated producer-aware snapshot-failure actions may clear it.
-    if is_snapshot_failure_blocked(state):
-        return APIResponse(
-            success=False,
-            message=(
-                "Session is blocked on a required snapshot failure. "
-                "Use a snapshot-failure action — generic resume is refused."
-            ),
-            data={
-                "needs_reconnect": False,
-                "snapshot_failure": getattr(state, "snapshot_failure", None),
-                "wait_input_reason": getattr(state, "wait_input_reason", None),
-            },
-        )
-
-    # A completed session first has to retire its old workflow. Do not consume
-    # the saved round limit before that teardown succeeds, otherwise a refused
-    # re-analysis request still mutates the durable analysis contract.
-    if (
-        state.status != TaskStatus.COMPLETED
-        and state.original_max_rounds is not None
-    ):
-        state.max_rounds = state.original_max_rounds
-        state.original_max_rounds = None
-
-    if is_forward_resume_blocked(state.runtime_restore_status) and state.status != TaskStatus.COMPLETED:
-        return APIResponse(
-            success=True,
-            message=(
-                "This session was restored without a consistent kernel runtime. "
-                "Forward analysis is blocked. Re-run the analysis from your data to "
-                "recompute kernel state, or view the session read-only."
-            ),
-            data={"needs_reconnect": False, "runtime_unavailable": True},
-        )
-
-    if state.status == TaskStatus.COMPLETED:
-        # Re-analysis: tear down the terminated checkpoint so the WS
-        # reconnect triggers a fresh run (core.py "no checkpoint" path)
-        # instead of resuming a graph already at END (infinite loop).
-        from backend.workflow.provenance import consume_restore_provenance
-
-        cleanup_complete = await teardown_running_workflow(
-            session_id, discard_runtime=True,
-        )
-        if cleanup_complete is False:
-            return APIResponse(
-                success=False,
-                message=(
-                    "Re-analysis was not started because the previous "
-                    "workflow cleanup is incomplete"
-                ),
-                data={
-                    "status": state.status.value,
-                    "needs_reconnect": False,
-                    "cleanup_incomplete": True,
-                },
-            )
-        if state.original_max_rounds is not None:
-            state.max_rounds = state.original_max_rounds
-            state.original_max_rounds = None
-        state.status = TaskStatus.RUNNING
-        state.max_rounds = state.current_round + 1
-        # Clear both durable restore fields so the next run cannot mis-tag
-        # plan/RoundResult from a prior restore (terminal/idle leave provenance).
-        consume_restore_provenance(state)
-        # Same contract as POST /run: a re-analysis that is clearing an
-        # unavailable runtime has to tell the agent its kernel is empty, or it
-        # carries on as though adata were still loaded from the original run.
-        if is_forward_resume_blocked(getattr(state, "runtime_restore_status", "complete")):
-            state.runtime_recompute_pending = True
-        state.runtime_restore_status = "complete"  # re-run recomputes kernel state
-        state.runtime_restore_warning = None  # fresh rerun clears any restore warning
-        await _update_session_cache(session_id, state)
-        # Forced for the same reason as POST /run: the cleared runtime block and
-        # the recompute flag must survive a restart, and RUNNING does not bypass
-        # the save throttle on its own.
-        await async_save_session(session_id, state, force=True)
-        return APIResponse(
-            success=True,
-            message="Re-analysis started",
-            data={"needs_reconnect": True}
-        )
-    elif state.status == TaskStatus.WAITING_INPUT:
-        # P3-5: directionless-INNOVATION default lives in workflow's
-        # _initialize_round (workflow-state invariant, not a transport concern).
-        # Continue from round-end wait (user sent input or skipped)
-        # Signal the workflow to continue from _wait_for_user_input
-        # Grab workflow reference under lock to avoid race with cleanup_stale_sessions
-        async with _state_lock:
-            workflow = workflows.get(session_id)
-        if workflow:
-            state.status = TaskStatus.RUNNING
-            await _update_session_cache(session_id, state)
-            await async_save_session(session_id, state)
-            workflow.signal_continue()
-            return APIResponse(
-                success=True,
-                message="Continuing analysis"
-            )
-        else:
-            if (
-                state.restore_resume_kind == "semantic_gate"
-                and state.restore_resume_gate in SEMANTIC_WAIT_GATES
-            ):
-                from backend.workflow.restore_targets import (
-                    prepare_restored_semantic_action,
-                )
-
-                target = prepare_restored_semantic_action(state)
-                if target is None:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Restored semantic gate has no exact post-action target",
-                    )
-                state.status = TaskStatus.RUNNING
-                await _update_session_cache(session_id, state)
-                await async_save_session(session_id, state)
-                return APIResponse(
-                    success=True,
-                    message="Continuing restored analysis",
-                    data={
-                        "needs_reconnect": True,
-                        "restored_wait_continuation": True,
-                        "next_node": target,
-                    },
-                )
-            await _pause_and_restart_ws(session_id, state)
-            return APIResponse(
-                success=True,
-                message="Continuing analysis",
-                data={"needs_reconnect": True},
-            )
-    elif state.status == TaskStatus.WAITING_ANNOTATION:
-        # Continue from annotation confirmation wait
-        state.status = TaskStatus.RUNNING
-        await _update_session_cache(session_id, state)
-        await async_save_session(session_id, state)
-        async with _state_lock:
-            workflow = workflows.get(session_id)
-        if workflow:
-            workflow.signal_annotation_confirmed()
-            return APIResponse(
-                success=True,
-                message="Annotation confirmed, continuing analysis"
-            )
-        else:
-            await _pause_and_restart_ws(session_id, state)
-            return APIResponse(
-                success=True,
-                message="Continuing analysis",
-                data={"needs_reconnect": True},
-            )
-    elif state.status == TaskStatus.WAITING_PLAN_REVIEW:
-        # Plan review requires an explicit approve/skip/modify action via /plan-review.
-        # Generic resume must not silently convert the gate into "skip".
-        return APIResponse(
-            success=True,
-            message="Session is waiting for plan review. Submit /plan-review to approve, skip, or modify the plan.",
-            data={"needs_reconnect": False},
-        )
-    elif state.status == TaskStatus.WAITING_SPECIES_INPUT:
-        # Continue from species-input wait by sending an empty signal
-        # (workflow treats empty input as "use suggestion / auto-skip").
-        # An explicit submission goes through /interaction/species-input instead.
-        state.status = TaskStatus.RUNNING
-        await _update_session_cache(session_id, state)
-        await async_save_session(session_id, state)
-        async with _state_lock:
-            workflow = workflows.get(session_id)
-        if workflow:
-            workflow.signal_species_input("")
-            return APIResponse(
-                success=True,
-                message="Continuing analysis (species input auto-skipped)"
-            )
-        else:
-            await _pause_and_restart_ws(session_id, state)
-            return APIResponse(
-                success=True,
-                message="Continuing analysis",
-                data={"needs_reconnect": True},
-            )
-    elif state.status == TaskStatus.PAUSED:
-        if state.pre_pause_status in WAITING_HITL_STATUSES:
-            restored_status = state.pre_pause_status
-            state.status = restored_status
-            state.pre_pause_status = None
-        else:
-            state.status = TaskStatus.RUNNING
-            state.pre_pause_status = None
-        await _update_session_cache(session_id, state)
-        await async_save_session(session_id, state)
-        async with _state_lock:
-            workflow = workflows.get(session_id)
-        if workflow:
-            workflow.signal_resume()
-            # P0-5: do NOT auto-signal HITL gates on generic resume. The user
-            # asked to unpause; they must still submit an explicit action via
-            # /choose-direction, /confirm-annotation, or /plan-review to
-            # advance past the restored WAITING_* gate.
-            if state.status in WAITING_HITL_STATUSES:
-                message = (
-                    "Analysis resumed; awaiting explicit user input via the "
-                    "appropriate gate endpoint"
-                )
-            else:
-                message = "Analysis resumed"
-            return APIResponse(
-                success=True,
-                message=message,
-                data={"needs_reconnect": False, "status": state.status.value},
-            )
-        return APIResponse(
-            success=True,
-            message="Analysis resumed",
-            data={"needs_reconnect": True}
-        )
-    elif state.status in (TaskStatus.GENERATING_REPORT, TaskStatus.FAILED):
-        # Interrupted during report generation or failed — allow re-run
-        state.status = TaskStatus.RUNNING
-        await _update_session_cache(session_id, state)
-        await async_save_session(session_id, state)
-        return APIResponse(
-            success=True,
-            message="Resuming analysis",
-            data={"needs_reconnect": True}
-        )
-    else:
-        raise HTTPException(status_code=400, detail="Analysis not paused, waiting, or completed")
-
-
-@router.post("/{session_id}/stop")
+@router.post('/{session_id}/stop')
 async def stop_analysis(session_id: str, request: Request, req: StopAnalysisRequest):
-    """Stop a running analysis - either immediately or with summary report"""
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
-    # P1-9: serialize with concurrent pause/resume/llm-failure mutators.
-    sess_lock = get_session_lock(session_id)
-    async with sess_lock:
-        return await _stop_analysis_locked(session_id, user_id, req)
-
+    lifecycle_run_resume.bind_facade(sys.modules[__name__])
+    return await lifecycle_run_resume.stop_analysis(session_id, request, req)
 
 async def _stop_analysis_locked(session_id: str, user_id: str, req: StopAnalysisRequest):
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    lifecycle_run_resume.bind_facade(sys.modules[__name__])
+    return await lifecycle_run_resume._stop_analysis_locked(session_id, user_id, req)
 
-    if state.status not in ({TaskStatus.RUNNING, TaskStatus.GENERATING_REPORT} | WAITING_HITL_STATUSES):
-        if state.status == TaskStatus.PAUSED:
-            return APIResponse(success=True, message="Analysis is already paused")
-        return APIResponse(success=True, message=f"Analysis is {state.status.value}")
-
-    # Handle GENERATING_REPORT state
-    if state.status == TaskStatus.GENERATING_REPORT:
-        if req.action == "immediate":
-            state.status = TaskStatus.PAUSED
-            await _update_session_cache(session_id, state)
-            await async_save_session(session_id, state)
-            task = _run_tasks.get(session_id)
-            if task and not task.done():
-                task.cancel()
-            return APIResponse(success=True, message="Report generation cancelled")
-        else:  # summarize
-            return APIResponse(success=True, message="Report generation already in progress")
-
-    if req.action == "immediate":
-        state.status = TaskStatus.PAUSED
-        await _update_session_cache(session_id, state)
-        await async_save_session(session_id, state)
-        task = _run_tasks.get(session_id)
-        if task and not task.done():
-            task.cancel()
-        # Notify via WebSocket
-        await send_analysis_json(session_id, {
-                    "type": "status",
-                    "agent": None,
-                    "content": "Analysis terminated. State saved.",
-                    "timestamp": datetime.now().isoformat()
-        })
-        return APIResponse(success=True, message="Analysis terminated")
-
-    elif req.action == "summarize":
-        # Snapshot-failure gate: stop-and-summarize must not skip or advance.
-        if is_snapshot_failure_blocked(state):
-            return APIResponse(
-                success=False,
-                message=(
-                    "Session is blocked on a required snapshot failure. "
-                    "Stop-and-summarize is refused until Retry, Manage, or Terminate."
-                ),
-                data={
-                    "snapshot_failure": getattr(state, "snapshot_failure", None),
-                    "wait_input_reason": getattr(state, "wait_input_reason", None),
-                },
-            )
-        if state.status == TaskStatus.WAITING_INPUT:
-            skip_target = resolve_hitl_skip_target(state)
-            if skip_target is not None:
-                node_name, generation = skip_target
-                if node_name == "species_input":
-                    # Species-input gate — released via signal_species_input
-                    if state.original_max_rounds is None:
-                        state.original_max_rounds = state.max_rounds
-                    state.max_rounds = state.current_round
-                    state.status = TaskStatus.RUNNING
-                    await _resume_workflow(session_id, state,
-                        signal_fn=lambda w: w.signal_species_input(""))
-                    return APIResponse(success=True, message="Skipping species input, generating report...")
-                # LLM-failure OR disabled-agent gate — both wait on
-                # _llm_failure_events[node] and are released by
-                # signal_llm_failure_action. Using signal_continue here would
-                # leave the gate blocked forever (deadlock).
-                if state.original_max_rounds is None:
-                    state.original_max_rounds = state.max_rounds
-                state.max_rounds = state.current_round
-                state.status = TaskStatus.RUNNING
-                await _resume_workflow(session_id, state,
-                    signal_fn=lambda w, nn=node_name, g=generation: w.signal_llm_failure_action(nn, "skip", g))
-                return APIResponse(success=True, message="Skipping blocked step, generating report...")
-            else:
-                # Round completion wait — existing behavior
-                if state.original_max_rounds is None:
-                    state.original_max_rounds = state.max_rounds
-                state.max_rounds = state.current_round
-                state.status = TaskStatus.RUNNING
-                await _resume_workflow(session_id, state,
-                    signal_fn=lambda w: w.signal_continue())
-                return APIResponse(success=True, message="Generating report...")
-        elif state.status == TaskStatus.WAITING_ANNOTATION:
-            # Workflow is blocked at _annotation_event.wait() inside callback
-            # Unblock it and let the round finish, then route to report gen
-            if state.original_max_rounds is None:
-                state.original_max_rounds = state.max_rounds
-            state.max_rounds = state.current_round
-            state.status = TaskStatus.RUNNING
-            await _resume_workflow(session_id, state,
-                signal_fn=lambda w: w.signal_annotation_confirmed())
-            return APIResponse(success=True, message="Generating report...")
-        elif state.status == TaskStatus.WAITING_PLAN_REVIEW:
-            # Workflow is blocked at _plan_review_event.wait()
-            # Unblock it by skipping the review and finishing the round
-            if state.original_max_rounds is None:
-                state.original_max_rounds = state.max_rounds
-            state.max_rounds = state.current_round
-            state.status = TaskStatus.RUNNING
-            await _resume_workflow(session_id, state,
-                signal_fn=lambda w: w.signal_plan_review("skip"))
-            return APIResponse(success=True, message="Generating report...")
-        elif state.status == TaskStatus.WAITING_SPECIES_INPUT:
-            # Workflow is blocked at _species_event.wait() inside planning or
-            # gene validation callback. Release via empty signal (auto-skip).
-            if state.original_max_rounds is None:
-                state.original_max_rounds = state.max_rounds
-            state.max_rounds = state.current_round
-            state.status = TaskStatus.RUNNING
-            await _resume_workflow(session_id, state,
-                signal_fn=lambda w: w.signal_species_input(""))
-            return APIResponse(success=True, message="Generating report...")
-        else:
-            # RUNNING - mid-agent execution: cancel task, start report generation
-            state.status = TaskStatus.GENERATING_REPORT
-            await _update_session_cache(session_id, state)
-            await async_save_session(session_id, state)
-            task = _run_tasks.get(session_id)
-            if task and not task.done():
-                task.cancel()
-            return APIResponse(success=True, message="Generating report...")
-
-
-@router.post("/{session_id}/llm-failure-action")
+@router.post('/{session_id}/llm-failure-action')
 async def llm_failure_action(session_id: str, request: Request, req: LlmFailureActionRequest):
-    """Handle user's choice for an LLM timeout/failure.
-
-    Idempotency: the `generation` field must match the workflow's
-    current `_llm_failure_generation`. Duplicate or stale requests
-    (e.g. double-click) are rejected with 409.
-    """
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
-    # P1-9: serialize with concurrent pause/resume/stop mutators.
-    sess_lock = get_session_lock(session_id)
-    async with sess_lock:
-        return await _llm_failure_action_locked(session_id, user_id, req)
-
+    lifecycle_interventions.bind_facade(sys.modules[__name__])
+    return await lifecycle_interventions.llm_failure_action(session_id, request, req)
 
 async def _llm_failure_action_locked(session_id: str, user_id: str, req: LlmFailureActionRequest):
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-
-    if state.status != TaskStatus.WAITING_INPUT:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Session is {state.status.value}, expected waiting_input"
-        )
-    if state.wait_input_reason not in (
-        WaitInputReason.LLM_FAILURE.value,
-        WaitInputReason.AGENT_DISABLED.value,
-        WaitInputReason.MARKER_DB_MISSING.value,
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Session wait_input_reason is {state.wait_input_reason}, expected llm_failure, agent_disabled, or marker_db_missing"
-        )
-
-    workflow = workflows.get(session_id)
-
-    if workflow is None:
-        raise HTTPException(status_code=404, detail="Workflow not found")
-
-    ok = workflow.signal_llm_failure_action(req.node_name, req.action, req.generation)
-    if not ok:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Stale or duplicate request (generation {req.generation} != current)"
-        )
-
-    return APIResponse(
-        success=True,
-        message=f"LLM failure action '{req.action}' applied to node '{req.node_name}'"
-    )
-
+    lifecycle_interventions.bind_facade(sys.modules[__name__])
+    return await lifecycle_interventions._llm_failure_action_locked(session_id, user_id, req)
 
 def _raise_runtime_persistence_action_409(result) -> None:
-    """Expose stable, machine-readable arbitration outcomes to clients."""
-    from backend.services.runtime_persistence_gate import (
-        RuntimePersistenceActionOutcome,
-    )
+    lifecycle_runtime_persistence.bind_facade(sys.modules[__name__])
+    return lifecycle_runtime_persistence._raise_runtime_persistence_action_409(result)
 
-    contracts = {
-        RuntimePersistenceActionOutcome.STALE: (
-            "RUNTIME_PERSISTENCE_ACTION_STALE",
-            "The runtime-persistence action targets a stale gate token or generation.",
-        ),
-        RuntimePersistenceActionOutcome.DUPLICATE_OR_CONFLICT: (
-            "RUNTIME_PERSISTENCE_ACTION_DUPLICATE_OR_CONFLICT",
-            "A runtime-persistence action is already pending for this gate.",
-        ),
-        RuntimePersistenceActionOutcome.INACTIVE: (
-            "RUNTIME_PERSISTENCE_ACTION_INACTIVE",
-            "No active runtime-persistence action consumer is available.",
-        ),
-    }
-    code, message = contracts.get(
-        result.outcome,
-        (
-            "RUNTIME_PERSISTENCE_ACTION_CONFLICT",
-            "The runtime-persistence action could not be accepted.",
-        ),
-    )
-    raise HTTPException(
-        status_code=409,
-        detail={
-            "code": code,
-            "message": message,
-            "action_result": result.outcome.value,
-            "gate_token": result.gate_token,
-            "gate_generation": result.generation,
-        },
-    )
+async def _runtime_persistence_action_locked(session_id: str, user_id: str, action: str, *, gate_token: str | None=None, generation: int | None=None):
+    lifecycle_runtime_persistence.bind_facade(sys.modules[__name__])
+    return await lifecycle_runtime_persistence._runtime_persistence_action_locked(session_id, user_id, action, gate_token=gate_token, generation=generation)
 
+async def _runtime_persistence_action(session_id: str, request: Request, action: str):
+    lifecycle_runtime_persistence.bind_facade(sys.modules[__name__])
+    return await lifecycle_runtime_persistence._runtime_persistence_action(session_id, request, action)
 
-async def _runtime_persistence_action_locked(
-    session_id: str,
-    user_id: str,
-    action: str,
-    *,
-    gate_token: str | None = None,
-    generation: int | None = None,
-):
-    from backend.services.runtime_persistence_gate import (
-        RuntimePersistenceActionOutcome,
-        RuntimePersistenceActionResult,
-        clear_runtime_persistence_gate,
-        is_runtime_persistence_blocked,
-        prepare_runtime_recompute,
-        runtime_persistence_gate_identity,
-        validate_runtime_persistence_action,
-    )
-
-    state = await require_session_ownership(
-        session_id=session_id,
-        user_id=user_id,
-    )
-    if not is_runtime_persistence_blocked(state):
-        token, current_generation = runtime_persistence_gate_identity(state)
-        _raise_runtime_persistence_action_409(
-            RuntimePersistenceActionResult(
-                RuntimePersistenceActionOutcome.INACTIVE,
-                action,
-                token,
-                current_generation,
-            )
-        )
-
-    workflow = workflows.get(session_id)
-    if workflow is not None:
-        delivery = workflow.signal_runtime_persistence_action(
-            action,
-            gate_token=gate_token,
-            generation=generation,
-        )
-        if delivery.outcome is RuntimePersistenceActionOutcome.ACCEPTED:
-            await _update_session_cache(session_id, state)
-            await async_save_session(session_id, state, force=True)
-            return APIResponse(
-                success=True,
-                message=f"Runtime persistence action '{action}' accepted",
-                data={
-                    "status": state.status.value,
-                    "action_pending": True,
-                    "still_blocked": True,
-                    "action_result": delivery.outcome.value,
-                    "gate_token": delivery.gate_token,
-                    "gate_generation": delivery.generation,
-                },
-            )
-        _raise_runtime_persistence_action_409(delivery)
-
-    if action == "retry":
-        # The process no longer owns the unsaved kernel namespace. Pretending a
-        # retry succeeded here would silently bless the older committed
-        # generation. Keep the durable gate and direct the user to recompute.
-        retry_claim = validate_runtime_persistence_action(
-            state,
-            action,
-            gate_token=gate_token,
-            generation=generation,
-            active=False,
-        )
-        _raise_runtime_persistence_action_409(retry_claim)
-
-    fallback_claim = validate_runtime_persistence_action(
-        state,
-        action,
-        gate_token=gate_token,
-        generation=generation,
-        active=True,
-    )
-    if fallback_claim.outcome is not RuntimePersistenceActionOutcome.ACCEPTED:
-        _raise_runtime_persistence_action_409(fallback_claim)
-
-    if action == "manage":
-        prepare_runtime_recompute(state)
-        await _update_session_cache(session_id, state)
-        await async_save_session(session_id, state, force=True)
-        await _close_hitl_socket_for_redrive(
-            session_id,
-            "runtime_persistence_recompute",
-        )
-        return APIResponse(
-            success=True,
-            message="Runtime recompute/reduction authorized",
-            data={
-                "status": state.status.value,
-                "still_blocked": False,
-                "snapshot_failure": None,
-                "action_result": fallback_claim.outcome.value,
-            },
-        )
-
-    if action == "terminate":
-        clear_runtime_persistence_gate(state)
-        state.status = TaskStatus.STOPPED
-        state.termination_reason = "runtime_persistence_failure"
-        await _update_session_cache(session_id, state)
-        await async_save_session(session_id, state, force=True)
-        cleanup_complete = await teardown_running_workflow(
-            session_id, discard_runtime=True,
-        )
-        if cleanup_complete is False:
-            return APIResponse(
-                success=False,
-                message=(
-                    "Session termination was committed, but resource cleanup "
-                    "is incomplete"
-                ),
-                data={
-                    "status": state.status.value,
-                    "still_blocked": False,
-                    "action_result": fallback_claim.outcome.value,
-                    "cleanup_incomplete": True,
-                    "termination_committed": True,
-                },
-            )
-        return APIResponse(
-            success=True,
-            message="Session terminated after runtime persistence failure",
-            data={
-                "status": state.status.value,
-                "still_blocked": False,
-                "action_result": fallback_claim.outcome.value,
-            },
-        )
-
-    raise HTTPException(status_code=400, detail="Unknown runtime persistence action")
-
-
-async def _runtime_persistence_action(
-    session_id: str,
-    request: Request,
-    action: str,
-):
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    if not isinstance(body, dict):
-        body = {}
-    gate_token = body.get("gate_token")
-    raw_generation = body.get("gate_generation", body.get("generation"))
-    try:
-        generation = int(raw_generation) if raw_generation is not None else None
-    except (TypeError, ValueError):
-        generation = None
-    async with get_session_lock(session_id):
-        return await _runtime_persistence_action_locked(
-            session_id,
-            user_id,
-            action,
-            gate_token=str(gate_token) if gate_token is not None else None,
-            generation=generation,
-        )
-
-
-@router.post("/{session_id}/runtime-persistence/retry")
+@router.post('/{session_id}/runtime-persistence/retry')
 async def runtime_persistence_retry(session_id: str, request: Request):
-    return await _runtime_persistence_action(session_id, request, "retry")
+    lifecycle_runtime_persistence.bind_facade(sys.modules[__name__])
+    return await lifecycle_runtime_persistence.runtime_persistence_retry(session_id, request)
 
-
-@router.post("/{session_id}/runtime-persistence/recompute")
+@router.post('/{session_id}/runtime-persistence/recompute')
 async def runtime_persistence_recompute(session_id: str, request: Request):
-    return await _runtime_persistence_action(session_id, request, "manage")
+    lifecycle_runtime_persistence.bind_facade(sys.modules[__name__])
+    return await lifecycle_runtime_persistence.runtime_persistence_recompute(session_id, request)
 
-
-@router.post("/{session_id}/runtime-persistence/terminate")
+@router.post('/{session_id}/runtime-persistence/terminate')
 async def runtime_persistence_terminate(session_id: str, request: Request):
-    return await _runtime_persistence_action(session_id, request, "terminate")
+    lifecycle_runtime_persistence.bind_facade(sys.modules[__name__])
+    return await lifecycle_runtime_persistence.runtime_persistence_terminate(session_id, request)
 
-
-@router.post("/{session_id}/retry-node")
+@router.post('/{session_id}/retry-node')
 async def retry_node(session_id: str, request: Request, body: RetryNodeRequest):
-    """Retry or skip a failed node"""
-    validate_session_id(session_id)
-    node_name = body.node_name
-    skip = body.skip
+    lifecycle_interventions.bind_facade(sys.modules[__name__])
+    return await lifecycle_interventions.retry_node(session_id, request, body)
 
-    user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-
-    if state.status != TaskStatus.FAILED:
-        raise HTTPException(status_code=400, detail="Session is not in failed state")
-
-    # Note: The actual retry/skip logic is handled by the workflow's with_retry decorator
-    # This endpoint just updates the state to allow resumption
-
-    if skip:
-        # Store skip_nodes in sandbox_state (used by workflow on resume)
-        if state.sandbox_state is None:
-            state.sandbox_state = {}
-        if "skip_nodes" not in state.sandbox_state:
-            state.sandbox_state["skip_nodes"] = []
-        if node_name not in state.sandbox_state["skip_nodes"]:
-            state.sandbox_state["skip_nodes"].append(node_name)
-        message = f"Node {node_name} will be skipped on resume"
-    else:
-        # Clear failed status for retry
-        state.status = TaskStatus.PAUSED  # Allow resumption
-        message = f"Session ready to retry from node {node_name}"
-
-    await async_save_session(session_id, state)
-
-    return APIResponse(
-        success=True,
-        message=message,
-        data={"node": node_name, "action": "skip" if skip else "retry"}
-    )
-
-
-@router.get("/{session_id}/failed-node")
+@router.get('/{session_id}/failed-node')
 async def get_failed_node(session_id: str, request: Request):
-    """Get information about the failed node"""
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    lifecycle_interventions.bind_facade(sys.modules[__name__])
+    return await lifecycle_interventions.get_failed_node(session_id, request)
 
-    # Check if we have workflow state with error info
-    if session_id in workflows:
-        workflow = workflows[session_id]
-        config = {"configurable": {"thread_id": session_id}}
-        try:
-            graph_state = await workflow.compiled_graph.aget_state(config)
-            if graph_state and graph_state.values:
-                return {
-                    "failed_node": graph_state.values.get("failed_node"),
-                    "node_errors": graph_state.values.get("node_errors", {}),
-                    "retry_counts": graph_state.values.get("node_retry_count", {})
-                }
-        except Exception as e:
-            logger.exception("Error getting workflow state")
-
-    # Fallback: check sandbox_state
-    if state.sandbox_state:
-        return {
-            "failed_node": state.sandbox_state.get("failed_node"),
-            "node_errors": state.sandbox_state.get("node_errors", {}),
-            "retry_counts": state.sandbox_state.get("node_retry_count", {})
-        }
-
-    return {"failed_node": None, "node_errors": {}, "retry_counts": {}}
-
-
-@router.post("/{session_id}/resume-bioinformatics")
+@router.post('/{session_id}/resume-bioinformatics')
 async def resume_bioinformatics(session_id: str, request: Request):
-    """Resume bioinformatics analysis from last checkpoint"""
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    lifecycle_interventions.bind_facade(sys.modules[__name__])
+    return await lifecycle_interventions.resume_bioinformatics(session_id, request)
 
-    # Check for checkpoint
-    checkpoint_path = get_session_states(session_id) / f"{session_id}_bioinfo_checkpoint.json"
-    if not checkpoint_path.exists():
-        raise HTTPException(status_code=404, detail="No bioinformatics checkpoint found")
-
-    # Read checkpoint info
-    try:
-        with open(checkpoint_path, 'r') as f:
-            checkpoint = json.load(f)
-        return APIResponse(
-            success=True,
-            message=f"Checkpoint found at step {checkpoint.get('step_number', 0)}. Connect to WebSocket to resume.",
-            data={
-                "has_checkpoint": True,
-                "step_number": checkpoint.get("step_number", 0),
-                "total_steps": checkpoint.get("total_steps", 80),
-                "findings_count": len(checkpoint.get("findings", [])),
-                "figures_count": len(checkpoint.get("figures", []))
-            }
-        )
-    except Exception as e:
-        logger.exception("Error reading checkpoint")
-        raise HTTPException(status_code=500, detail=f"Error reading checkpoint: {str(e)}")
-
-
-@router.post(
-    "/{session_id}/snapshot-failure/retry",
-    dependencies=[Depends(require_snapshot_v2_enabled)],
-)
+@router.post('/{session_id}/snapshot-failure/retry', dependencies=[Depends(require_snapshot_v2_enabled)])
 async def snapshot_failure_retry(session_id: str, request: Request):
-    """Retry a snapshot failure by re-invoking the exact failed capture producer.
-
-    Validates ``SnapshotRetryContext`` from the failure gate. Missing or
-    invalid context returns 409 and leaves the gate intact. Never defaults
-    a missing producer to workflow-boundary.
-    """
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
-    # Serialize the three snapshot-failure actions. Retry is the longest-running
-    # mutator in the system - it re-runs the failed capture while the gate stays
-    # armed - and all three actions read-modify-persist the *same* cached
-    # AnalysisState. Without this, a Terminate issued mid-capture wins its
-    # is_snapshot_failure_blocked() check, tears the workflow down and persists
-    # STOPPED, and is then silently overwritten when this handler persists its
-    # own outcome below.
-    async with get_snapshot_action_lock(session_id):
-        return await _snapshot_failure_retry_locked(session_id, user_id)
-
+    lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
+    return await lifecycle_snapshot_failures.snapshot_failure_retry(session_id, request)
 
 async def _snapshot_failure_retry_locked(session_id: str, user_id: str):
-    from pydantic import ValidationError
+    lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
+    return await lifecycle_snapshot_failures._snapshot_failure_retry_locked(session_id, user_id)
 
-    from backend.services.snapshot_v2.failure_gate import (
-        default_snapshot_retry_dependencies,
-        retry_snapshot_producer,
-    )
-    from backend.services.snapshot_v2.models import SnapshotRetryContext
-
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-
-    if not is_snapshot_failure_blocked(state):
-        raise HTTPException(
-            status_code=409,
-            detail="Session is not blocked on a snapshot failure",
-        )
-
-    failure = getattr(state, "snapshot_failure", None) or {}
-    raw_context = failure.get("retry_context")
-    if not isinstance(raw_context, dict) or not raw_context:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Snapshot failure retry context is missing; "
-                "gate left intact"
-            ),
-        )
-    try:
-        context = SnapshotRetryContext.model_validate(raw_context)
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Snapshot failure retry context is invalid; "
-                "gate left intact"
-            ),
-        ) from exc
-
-    outcome = await retry_snapshot_producer(
-        session_id,
-        state,
-        context,
-        default_snapshot_retry_dependencies(),
-    )
-
-    await _update_session_cache(session_id, state)
-    # force=True for the same reason as Skip below: the statuses this write
-    # installs (RUNNING / PAUSED) do not bypass the 5s throttle, and the gate
-    # write it supersedes was force-saved moments earlier.
-    await async_save_session(session_id, state, force=True)
-
-    if outcome.success and context.producer == "workflow_boundary":
-        await _close_hitl_socket_for_redrive(session_id, "snapshot_retry_resume")
-
-    data = {
-        "status": outcome.status
-        if outcome.status is not None
-        else getattr(state.status, "value", str(state.status)),
-        "wait_input_reason": (
-            outcome.wait_input_reason
-            if outcome.wait_input_reason is not None
-            or outcome.still_blocked
-            else getattr(state, "wait_input_reason", None)
-        ),
-        "snapshot_failure": (
-            outcome.snapshot_failure
-            if outcome.still_blocked
-            else getattr(state, "snapshot_failure", None)
-        ),
-    }
-    if outcome.still_blocked:
-        data["still_blocked"] = True
-    if outcome.transaction_id is not None:
-        data["transaction_id"] = outcome.transaction_id
-    if outcome.snapshot_transaction is not None:
-        data["snapshot_transaction"] = outcome.snapshot_transaction
-
-    return APIResponse(
-        success=outcome.success,
-        message=outcome.message,
-        data=data,
-    )
-
-
-@router.post(
-    "/{session_id}/snapshot-failure/proceed",
-    dependencies=[Depends(require_snapshot_v2_enabled)],
-)
+@router.post('/{session_id}/snapshot-failure/proceed', dependencies=[Depends(require_snapshot_v2_enabled)])
 async def snapshot_failure_proceed(session_id: str, request: Request):
-    """Capture anyway after the memory preflight refused, accepting the OOM risk.
-
-    Only valid on a gate that offered ``proceed`` — i.e. one raised by the
-    runtime memory preflight. Arms a one-shot override and then runs the
-    ordinary retry dispatch, so the capture re-runs through the same producer
-    with the preflight lowered for that attempt only.
-    """
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
-    # Same gate and same cached AnalysisState as Retry/Skip/Terminate; this
-    # handler additionally mutates the override flag, so it must not interleave.
-    async with get_snapshot_action_lock(session_id):
-        return await _snapshot_failure_proceed_locked(session_id, user_id)
-
+    lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
+    return await lifecycle_snapshot_failures.snapshot_failure_proceed(session_id, request)
 
 async def _snapshot_failure_proceed_locked(session_id: str, user_id: str):
-    from backend.services.snapshot_v2.failure_gate import (
-        arm_memory_preflight_override,
-        clear_memory_preflight_override,
-    )
+    lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
+    return await lifecycle_snapshot_failures._snapshot_failure_proceed_locked(session_id, user_id)
 
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-
-    if not is_snapshot_failure_blocked(state):
-        raise HTTPException(
-            status_code=409,
-            detail="Session is not blocked on a snapshot failure",
-        )
-
-    failure = getattr(state, "snapshot_failure", None) or {}
-    if "proceed" not in (failure.get("allowed_actions") or []):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "This snapshot failure cannot be overridden. Proceed is offered "
-                "only when the memory preflight refused the capture."
-            ),
-        )
-
-    arm_memory_preflight_override(state)
-    # Reuse retry verbatim: the producer dispatch, context validation and gate
-    # bookkeeping are identical — the override flag is the only difference, and
-    # the capture consumes it on its own.
-    #
-    # The approval covers exactly the capture this dispatch leads to. Retry can
-    # refuse before reaching one at all — 409 for a missing or invalid retry
-    # context, an unknown producer — and the override was already force-written
-    # to session.json by the time that happens, so without this the preflight
-    # stayed disabled for the session and some later capture on a different
-    # object skipped it. Disarm and persist on that path; a dispatch that does
-    # run re-persists through _snapshot_failure_retry_locked's own save, and a
-    # capture that fails clears the approval as it re-enters the gate.
-    try:
-        return await _snapshot_failure_retry_locked(session_id, user_id)
-    except Exception:
-        if clear_memory_preflight_override(state):
-            await _update_session_cache(session_id, state)
-            await async_save_session(session_id, state, force=True)
-        raise
-
-
-@router.post(
-    "/{session_id}/snapshot-failure/skip",
-    dependencies=[Depends(require_snapshot_v2_enabled)],
-)
+@router.post('/{session_id}/snapshot-failure/skip', dependencies=[Depends(require_snapshot_v2_enabled)])
 async def snapshot_failure_skip(session_id: str, request: Request):
-    """Skip snapshot creation and continue the analysis.
-
-    Clears the failure gate WITHOUT capturing a snapshot and resumes the
-    workflow, forfeiting only the restore point at that boundary. Producer-aware:
-    workflow_boundary / post_report / chat are skippable; pre_restore is not
-    (skipping would proceed with a restore that overwrites live state without a
-    safety point) and returns 409.
-    """
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
-    # Same gate, same cached state object as Retry/Terminate - must not interleave.
-    async with get_snapshot_action_lock(session_id):
-        return await _snapshot_failure_skip_locked(session_id, user_id)
-
+    lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
+    return await lifecycle_snapshot_failures.snapshot_failure_skip(session_id, request)
 
 async def _snapshot_failure_skip_locked(session_id: str, user_id: str):
-    from pydantic import ValidationError
+    lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
+    return await lifecycle_snapshot_failures._snapshot_failure_skip_locked(session_id, user_id)
 
-    from backend.services.snapshot_v2.failure_gate import skip_snapshot_producer
-    from backend.services.snapshot_v2.models import SnapshotRetryContext
-
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-
-    if not is_snapshot_failure_blocked(state):
-        raise HTTPException(
-            status_code=409,
-            detail="Session is not blocked on a snapshot failure",
-        )
-
-    failure = getattr(state, "snapshot_failure", None) or {}
-    raw_context = failure.get("retry_context")
-    if not isinstance(raw_context, dict) or not raw_context:
-        raise HTTPException(
-            status_code=409,
-            detail="Snapshot failure retry context is missing; gate left intact",
-        )
-    try:
-        context = SnapshotRetryContext.model_validate(raw_context)
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail="Snapshot failure retry context is invalid; gate left intact",
-        ) from exc
-
-    outcome = skip_snapshot_producer(state, context)
-    if not outcome.success:
-        # Skip unsupported for this producer (e.g. pre_restore): gate left intact.
-        raise HTTPException(status_code=409, detail=outcome.message)
-
-    # Clear gate + arm the one-shot skip marker + set RUNNING, then persist. The
-    # frontend reconnects the WebSocket, which resumes the workflow from the graph
-    # checkpoint; the armed marker makes the next required capture at that phase a
-    # no-op so the analysis proceeds past the boundary that previously failed.
-    # (Mirrors the Retry flow, which likewise defers graph re-drive to reconnect.)
-    #
-    # force=True: RUNNING is not one of the statuses that bypass the 5s save
-    # throttle, and the gate write this request is undoing was force-saved
-    # moments earlier — so the throttle window is entered from a guaranteed
-    # preceding write and the cleared gate could be dropped silently.
-    await _update_session_cache(session_id, state)
-    await async_save_session(session_id, state, force=True)
-
-    # Without this close the session sat at status=RUNNING with no workflow, no
-    # run task and no dialog, making zero progress until a full page reload.
-    if context.producer == "workflow_boundary":
-        await _close_hitl_socket_for_redrive(session_id, "snapshot_skip_resume")
-
-    return APIResponse(
-        success=True,
-        message=outcome.message,
-        data={
-            "status": outcome.status
-            if outcome.status is not None
-            else getattr(state.status, "value", str(state.status)),
-            "wait_input_reason": None,
-            "snapshot_failure": None,
-        },
-    )
-
-
-@router.post(
-    "/{session_id}/snapshot-failure/terminate",
-    dependencies=[Depends(require_snapshot_v2_enabled)],
-)
+@router.post('/{session_id}/snapshot-failure/terminate', dependencies=[Depends(require_snapshot_v2_enabled)])
 async def snapshot_failure_terminate(session_id: str, request: Request):
-    """Terminate the session on snapshot failure.
-
-    Delegates to existing workflow teardown — does NOT create a second
-    kernel teardown. Clears the failure gate and stops the workflow.
-    """
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
-    # Teardown pops the workflow, closes the kernel and deletes the graph
-    # checkpoint. Running that under an in-flight Retry would yank the sandbox
-    # out from under a live capture and then have the STOPPED write overwritten,
-    # so wait for any Retry/Skip on this gate to finish first.
-    async with get_snapshot_action_lock(session_id):
-        return await _snapshot_failure_terminate_locked(session_id, user_id)
-
+    lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
+    return await lifecycle_snapshot_failures.snapshot_failure_terminate(session_id, request)
 
 async def _snapshot_failure_terminate_locked(session_id: str, user_id: str):
-    from backend.services.snapshot_v2.failure_gate import (
-        terminate_snapshot_failure,
-    )
-
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-
-    if not is_snapshot_failure_blocked(state):
-        raise HTTPException(
-            status_code=409,
-            detail="Session is not blocked on a snapshot failure",
-        )
-
-    terminate_snapshot_failure(state)
-
-    # Persist STOPPED *before* the irreversible teardown, and force the write.
-    #
-    # teardown_running_workflow closes the kernel and unlinks the graph
-    # checkpoint (plus its -wal/-shm). Running it first meant a crash anywhere
-    # inside it left session.json still saying WAITING_INPUT with the gate armed
-    # while the checkpoint was already gone — a session the user had terminated,
-    # shown to them as blocked, whose Retry would then resume against a
-    # checkpoint that no longer exists. STOPPED is also not in
-    # _FORCE_SAVE_STATUSES, so the unforced write could be dropped by the 5s
-    # throttle on top of that, entered from the force-saved gate write.
-    await _update_session_cache(session_id, state)
-    await async_save_session(session_id, state, force=True)
-
-    # After STOPPED + termination_reason: tear down workflow/kernel resources.
-    # Do NOT pause — pause would clobber STOPPED → PAUSED on the same state.
-    cleanup_complete = await teardown_running_workflow(
-        session_id, discard_runtime=True,
-    )
-    if cleanup_complete is False:
-        return APIResponse(
-            success=False,
-            message=(
-                "Session termination was committed, but resource cleanup "
-                "is incomplete"
-            ),
-            data={
-                "status": getattr(state.status, "value", str(state.status)),
-                "cleanup_incomplete": True,
-                "termination_committed": True,
-            },
-        )
-
-    return APIResponse(
-        success=True,
-        message="Session terminated due to snapshot failure",
-        data={
-            "status": getattr(state.status, "value", str(state.status)),
-            "termination_committed": True,
-        },
-    )
+    lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
+    return await lifecycle_snapshot_failures._snapshot_failure_terminate_locked(session_id, user_id)
