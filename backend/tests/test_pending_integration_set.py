@@ -1,9 +1,10 @@
 import inspect
 from backend.workflow.synthesis import SynthesisMixin
+from backend.workflow.synthesis_parts import phases
 
 
 def test_pi_synthesis_sets_pending_integration_on_batch_complete():
-    src = inspect.getsource(SynthesisMixin._pi_synthesis)
+    src = inspect.getsource(phases.persist_round_result)
     assert "pending_integration" in src
     # _pi_synthesis now delegates batch-coverage to the active_batch_complete
     # predicate (extracted in the 0.32.3 refactor) instead of inlining

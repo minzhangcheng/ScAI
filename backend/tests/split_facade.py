@@ -53,7 +53,10 @@ SPLIT_PACKAGES: dict[str, str] = {
     "backend.utils.upload": "backend.utils.upload_parts",
     "backend.workflow.agents": "backend.workflow.agent_nodes",
     "backend.workflow.annotation": "backend.workflow.annotation_parts",
+    "backend.workflow.post_execution_review": "backend.workflow.post_execution_review_parts",
+    "backend.workflow.planning": "backend.workflow.planning_parts",
     "backend.workflow.reporting": "backend.workflow.reporting_parts",
+    "backend.workflow.synthesis": "backend.workflow.synthesis_parts",
 }
 
 

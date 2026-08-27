@@ -1,6 +1,6 @@
-from pathlib import Path
+from backend.tests.split_facade import source_for_path
 
-SRC = Path("backend/workflow/synthesis.py").read_text()
+SRC = source_for_path("backend/workflow/synthesis.py")
 
 
 def test_phase_transition_is_guarded_by_success_flag():

@@ -1,14 +1,11 @@
 from types import SimpleNamespace
-from pathlib import Path
-
 import pytest
 
 from backend.models.schemas import AnalysisState, ExplorationReport
+from backend.tests.split_facade import source_for_path
 
-
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-SYNTHESIS = (_REPO_ROOT / "backend/workflow/synthesis.py").read_text()
-PLANNING = (_REPO_ROOT / "backend/workflow/planning.py").read_text()
+SYNTHESIS = source_for_path("backend/workflow/synthesis.py")
+PLANNING = source_for_path("backend/workflow/planning.py")
 
 
 def test_all_exploration_report_paths_use_evidence_gate():
