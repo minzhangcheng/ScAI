@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 import backend.agents.bioinformatics_agent as bio_mod
+from backend.services import statistical_gates
 from backend.services.statistical_gates import (
     MIN_SAMPLES_PER_GROUP_FOR_PERMUTATION,
     GateFinding,
@@ -240,6 +241,32 @@ def test_run_gates_aggregates_and_reports_clean():
                        samples_per_group={"A": 3, "B": 3})
     assert report.passed
     assert report.message() == ""
+
+
+def test_run_gates_calls_families_in_frozen_order(monkeypatch):
+    calls = []
+    names = [
+        "check_underpowered_negative_claims",
+        "check_declared_testing_family",
+        "check_permutation_at_small_n",
+        "check_resampling_resolution",
+        "check_panel_redundancy",
+        "check_analysis_unit",
+        "check_cell_level_inference",
+        "check_ora_background",
+        "check_composition_claims",
+        "check_magnitude_claims",
+    ]
+    for name in names:
+        monkeypatch.setattr(
+            statistical_gates,
+            name,
+            lambda *args, _name=name, **kwargs: calls.append(_name) or [],
+        )
+
+    statistical_gates.run_gates([], score_definitions=[], scoring_plans=[])
+
+    assert calls == names
 
 
 def test_run_gates_message_is_actionable():
