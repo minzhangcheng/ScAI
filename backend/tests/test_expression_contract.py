@@ -1,4 +1,5 @@
 import asyncio
+from hashlib import sha256
 import os
 import time
 from contextlib import redirect_stdout
@@ -28,6 +29,16 @@ from backend.utils.expression_contract import (
     unchanged_artifact_stems,
     workspace_artifact_versions,
 )
+
+
+def test_generated_expression_contract_source_is_byte_stable():
+    specs = [{"name": "adata", "layer": None}]
+    assert sha256(build_expression_preflight_code(specs).encode()).hexdigest() == (
+        "b4ad69f679eb6caa18848f439f4b44738e829902569c479bc3c7580d924c1f35"
+    )
+    assert sha256(build_expression_runtime_code().encode()).hexdigest() == (
+        "7150ce9ec7c90361fd04ef83096ee646de9df2ce013f943d438e29c3847a94b3"
+    )
 
 
 def test_extracts_scanpy_and_nmf_expression_inputs():
