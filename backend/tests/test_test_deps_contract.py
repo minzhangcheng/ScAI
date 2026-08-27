@@ -39,8 +39,15 @@ UNVERIFIED_EXTRA_LABEL = "com.example.unverified"
 
 
 def _frontend_source() -> str:
-    source = (ROOT / "scripts/scai-frontend-test").read_text(encoding="utf-8")
-    return source.split("<<'PYTHON_EOF'\n", 1)[1].rsplit("\nPYTHON_EOF\n", 1)[0]
+    return (ROOT / "scripts/scai_frontend_parts/npm.py").read_text(encoding="utf-8")
+
+
+def _frontend_implementation_source() -> str:
+    paths = [
+        ROOT / "scripts/scai_frontend_runner.py",
+        *sorted((ROOT / "scripts/scai_frontend_parts").glob("*.py")),
+    ]
+    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
 
 def _markdown_section(path: Path, heading: str, next_heading_prefix: str) -> str:
@@ -860,7 +867,7 @@ def test_frontend_fixture_is_the_exact_npm9_layout_contract():
 
 
 def test_frontend_runner_has_the_separate_authorized_install_boundary():
-    source = (ROOT / "scripts/scai-frontend-test").read_text(encoding="utf-8")
+    source = _frontend_implementation_source()
     assert 'argv != ["--install-and-test"]' in source
     assert "package_json_sha256" in source and "package_lock_sha256" in source and "input_key" in source
     assert "frontend-installations" in source and 'Path("/tmp") / f"scai-frontend-' in source
@@ -871,7 +878,7 @@ def test_frontend_runner_has_the_separate_authorized_install_boundary():
 
 
 def test_frontend_runner_owns_environment_config_and_cleanup_contract():
-    source = (ROOT / "scripts/scai-frontend-test").read_text(encoding="utf-8")
+    source = _frontend_implementation_source()
     tree = ast.parse(_frontend_source(), filename="scripts/scai-frontend-test")
     command_env = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "command_env")
     returned = next(node for node in ast.walk(command_env) if isinstance(node, ast.Return))
@@ -884,7 +891,7 @@ def test_frontend_runner_owns_environment_config_and_cleanup_contract():
 
 
 def test_frontend_runner_hashes_and_tokenizes_all_published_artifacts():
-    source = (ROOT / "scripts/scai-frontend-test").read_text(encoding="utf-8")
+    source = _frontend_implementation_source()
     for marker in ("artifact_manifest", "sha256_file", "json_hash", "sanitize_output", "source_after", "npm-config-values.json", "npm-config-sources.json", "npm-tree.json", "vitest.json"):
         assert marker in source
     evidence_start = source.index("def evidence")
@@ -896,7 +903,7 @@ def test_frontend_runner_hashes_and_tokenizes_all_published_artifacts():
 
 
 def test_frontend_runner_tree_and_vitest_fail_closed_contract():
-    source = (ROOT / "scripts/scai-frontend-test").read_text(encoding="utf-8")
+    source = _frontend_implementation_source()
     for marker in ("lockfileVersion"):
         assert marker in source
     for marker in ("installed/lock drift", "locked package is absent", "integrity", "resolved", "hidden lock package subset differs", "set(declarations) != bin_dirs", "vitest shim is missing", "success does not agree with details/process exit", "suite-level import/setup/transform application failure"):
