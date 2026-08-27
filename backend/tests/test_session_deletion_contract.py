@@ -84,6 +84,128 @@ def _prepare_delete_case(monkeypatch, tmp_path, session_id):
     return state, session_dir, marker
 
 
+class _DeletionTraceRecorder:
+    """Record the deletion transaction through its historical collaborators."""
+
+    def __init__(self):
+        self.trace = []
+        self._drained = False
+        self._revalidated = False
+
+    def install(self, monkeypatch):
+        original_get_lock = session_deletion._get_cleanup_lock
+        original_lease = session_deletion._try_acquire_cleanup_lease
+        original_publish = session_deletion._tombstone_detach_and_publish
+        original_drain = session_deletion._drain_tombstone_producers
+        original_read = session_deletion.read_lifecycle_record
+        original_side_cleanup = session_deletion._cleanup_tombstone_side_surfaces
+        original_delete = session_deletion._delete_tombstoned_files
+        original_release_slot = session_deletion.release_session_lock_slot
+        original_complete = session_deletion.complete_tombstone_cleanup
+        original_release_handles = session_deletion._release_cleanup_handles
+
+        recorder = self
+
+        class _TracedCleanupLock:
+            def __init__(self, lock):
+                self._lock = lock
+
+            async def __aenter__(self):
+                recorder.trace.append("acquire-session-cleanup-lock")
+                await self._lock.acquire()
+
+            async def __aexit__(self, *_exc):
+                self._lock.release()
+
+        def traced_get_lock(session_id):
+            return _TracedCleanupLock(original_get_lock(session_id))
+
+        async def traced_lease(*args, **kwargs):
+            self.trace.append("acquire-process-and-file-lease")
+            return await original_lease(*args, **kwargs)
+
+        async def traced_publish(*args, **kwargs):
+            self.trace.append("publish-tombstone-and-detach")
+            return await original_publish(*args, **kwargs)
+
+        async def traced_drain(*args, **kwargs):
+            self.trace.append("drain-producers")
+            result = await original_drain(*args, **kwargs)
+            self._drained = result == 0
+            return result
+
+        def traced_read(*args, **kwargs):
+            if self._drained and not self._revalidated:
+                self.trace.append("revalidate-tombstone")
+                self._revalidated = True
+            return original_read(*args, **kwargs)
+
+        async def traced_side_cleanup(*args, **kwargs):
+            self.trace.append("cleanup-side-surfaces")
+            return await original_side_cleanup(*args, **kwargs)
+
+        async def traced_delete(*args, **kwargs):
+            self.trace.append("delete-generation-files")
+            return await original_delete(*args, **kwargs)
+
+        def traced_release_slot(*args, **kwargs):
+            self.trace.append("release-session-lock-slot")
+            return original_release_slot(*args, **kwargs)
+
+        def traced_complete(*args, **kwargs):
+            self.trace.append("publish-cleanup-complete")
+            return original_complete(*args, **kwargs)
+
+        def traced_release_handles(*args, **kwargs):
+            self.trace.append("release-cleanup-handles-and-lease")
+            return original_release_handles(*args, **kwargs)
+
+        for name, replacement in (
+            ("_get_cleanup_lock", traced_get_lock),
+            ("_try_acquire_cleanup_lease", traced_lease),
+            ("_tombstone_detach_and_publish", traced_publish),
+            ("_drain_tombstone_producers", traced_drain),
+            ("read_lifecycle_record", traced_read),
+            ("_cleanup_tombstone_side_surfaces", traced_side_cleanup),
+            ("_delete_tombstoned_files", traced_delete),
+            ("release_session_lock_slot", traced_release_slot),
+            ("complete_tombstone_cleanup", traced_complete),
+            ("_release_cleanup_handles", traced_release_handles),
+        ):
+            monkeypatch.setattr(session_deletion, name, replacement)
+
+
+@pytest.mark.asyncio
+async def test_successful_deletion_preserves_transaction_phase_order(
+    monkeypatch, tmp_path,
+):
+    session_id = "delete-phase-order"
+    state, session_dir, _marker = _prepare_delete_case(
+        monkeypatch, tmp_path, session_id,
+    )
+    recorder = _DeletionTraceRecorder()
+    recorder.install(monkeypatch)
+
+    result = await session_deletion.delete_session_generation(
+        session_id, state, "owner",
+    )
+
+    assert result["pending_producers"] == 0
+    assert not session_dir.exists()
+    assert recorder.trace == [
+        "acquire-session-cleanup-lock",
+        "acquire-process-and-file-lease",
+        "publish-tombstone-and-detach",
+        "drain-producers",
+        "revalidate-tombstone",
+        "cleanup-side-surfaces",
+        "delete-generation-files",
+        "release-session-lock-slot",
+        "publish-cleanup-complete",
+        "release-cleanup-handles-and-lease",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_delete_drains_export_builder_and_removes_integrity_root(
     monkeypatch, tmp_path,
@@ -333,6 +455,8 @@ async def test_timeout_keeps_tombstoned_tree_for_safe_retry(monkeypatch, tmp_pat
 
     producer = asyncio.create_task(stubborn_producer())
     _run_tasks[session_id] = producer
+    recorder = _DeletionTraceRecorder()
+    recorder.install(monkeypatch)
 
     try:
         deletion = asyncio.create_task(
@@ -348,11 +472,21 @@ async def test_timeout_keeps_tombstoned_tree_for_safe_retry(monkeypatch, tmp_pat
             )
             deletion.cancel()
             pytest.fail(f"deletion did not reach its bounded timeout:\n{stack}")
-        with pytest.raises(SessionProducerStopError, match="did not stop"):
+        with pytest.raises(SessionProducerStopError, match="did not stop") as raised:
             await deletion
 
         record = read_lifecycle_record(session_id)
+        assert isinstance(raised.value, SessionProducerStopError)
+        assert recorder.trace == [
+            "acquire-session-cleanup-lock",
+            "acquire-process-and-file-lease",
+            "publish-tombstone-and-detach",
+            "drain-producers",
+        ]
         assert record is not None and record["status"] == "deleted"
+        assert record["cleanup_complete"] is False
+        retained = session_deletion._pending_tombstone_cleanup[session_id]
+        assert retained.lease is not None and not retained.lease.released
         assert marker.read_text(encoding="utf-8") == "producer-owned"
         assert session_id not in sessions
         assert session_id not in _run_tasks
