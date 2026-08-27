@@ -3,7 +3,10 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import appSource from '../App.tsx?raw'
 import mainSource from '../main.tsx?raw'
-import analysisPanelSource from '../components/AnalysisPanel.tsx?raw'
+import analysisControlsSource from '../components/analysisPanel/AnalysisControls.tsx?raw'
+import analysisDialogsSource from '../components/analysisPanel/AnalysisDialogs.tsx?raw'
+import analysisPanelImplSource from '../components/analysisPanel/AnalysisPanelImpl.tsx?raw'
+import analysisStatusSource from '../components/analysisPanel/AnalysisStatusView.tsx?raw'
 import authLayoutSource from '../components/AuthLayout.tsx?raw'
 import chatPanelSource from '../components/ChatPanel.tsx?raw'
 import figureGallerySource from '../components/analysis/FigureGallery.tsx?raw'
@@ -17,6 +20,12 @@ import indexSource from '../../index.html?raw'
 import tailwindConfigSource from '../../tailwind.config.js?raw'
 
 const globalsSource = readFileSync(join(process.cwd(), 'src/styles/globals.css'), 'utf8')
+const analysisPanelSource = [
+  analysisControlsSource,
+  analysisDialogsSource,
+  analysisPanelImplSource,
+  analysisStatusSource,
+].join('\n')
 const themeOwnedPaths = [
   'src/components/ErrorBoundary.tsx',
   'src/components/LanguageSelector.tsx',
