@@ -427,6 +427,11 @@ class AnalysisState(BaseModel):
     # its retry ceiling and was force-released.
     evidence_gate_degraded: bool = False
     evidence_gate_findings: List[Dict[str, Any]] = Field(default_factory=list)
+    # How many execution-driven plan revisions each round+stage has already
+    # spent, keyed "<round>:<stage>". The revision cycle bypasses
+    # check_convergence, so this counter is the only thing bounding it; see
+    # MAX_EXECUTION_REVISION_ATTEMPTS.
+    execution_revision_attempts: Dict[str, int] = Field(default_factory=dict)
 
     # Scoring plans frozen before their results were known. register_score cites
     # one of these; the handler re-hashes the panel to detect post-hoc revision.

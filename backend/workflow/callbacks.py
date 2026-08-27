@@ -386,10 +386,15 @@ Be strict but fair. Approve if quality_score >= 7."""
         since a small model shouldn't block the pipeline.  Suggestions are still
         forwarded as non-blocking feedback.
 
-        A per-figure rejection counter (_sup_rejections) tracks consecutive
-        rejections.  After 2 consecutive rejections of the same figure, the
-        review auto-sets ``requires_reanalysis=True`` so the bioinformatics
-        agent breaks out of the revision loop instead of retrying endlessly.
+        Retry exhaustion is NOT decided here.  The producer's own review loop
+        (``figures.py``: ``revision_count = 0`` then ``while revision_count <= 3``)
+        owns it, and it is the only scope that can: this method is re-entered per
+        render, so a counter kept on the orchestrator outlives the loop it would
+        bound and merely starves later renders of revisions they never used.
+        A low visual score is also not evidence about the upstream analysis, so
+        it is never promoted to ``requires_reanalysis`` -- that stamps the figure
+        REVISION_REQUESTED, which is not report-eligible, and the figure can then
+        never satisfy the plan's visual contract.
         """
         compressed = self.supervisor_agent._compress_base64_figure(figure.png_base64)
 
@@ -441,27 +446,8 @@ Approve if quality_score >= 7."""
                     f"[Accepted with relaxed threshold (supervisor-only mode, score={score}/10)] "
                     + review.get("feedback", "")
                 )
-            else:
-                # Track consecutive rejections per figure
-                if not hasattr(self, "_sup_rejections"):
-                    self._sup_rejections: Dict[str, int] = {}
-                self._sup_rejections[figure.name] = self._sup_rejections.get(figure.name, 0) + 1
-                reject_count = self._sup_rejections[figure.name]
-
-                if reject_count >= 2:
-                    logger.warning(
-                        f"[{self.session_id}] Supervisor rejected figure {figure.name} "
-                        f"{reject_count} times consecutively, escalating to requires_reanalysis"
-                    )
-                    review["requires_reanalysis"] = True
-                    review["feedback"] = (
-                        f"[Escalated after {reject_count} consecutive rejections] "
-                        + review.get("feedback", "")
-                    )
-
-        # Reset rejection counter on approval
-        if review.get("approved", False) and hasattr(self, "_sup_rejections"):
-            self._sup_rejections.pop(figure.name, None)
+            # Below the relaxed threshold the review stays an ordinary
+            # rejection and the producer loop decides what to do with it.
 
         return review
 

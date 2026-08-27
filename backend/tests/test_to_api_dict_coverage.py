@@ -10,6 +10,10 @@ from backend.models.schemas import AnalysisState
 
 
 _EXCLUDED_FIELDS = {
+    # Host-internal bound on the execution-driven replan cycle. The client
+    # learns the outcome from the round's status and its gate observations;
+    # the raw attempt counter is bookkeeping.
+    "execution_revision_attempts",
     "original_max_rounds",
     "pre_pause_status",
     # One-shot marker set by POST /run when the run exists to rebuild a kernel

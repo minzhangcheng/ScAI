@@ -9,7 +9,7 @@ from ..models.schemas import AgentType, AnalysisPhase, AnalysisStep, MessageRole
 from ..utils.llm_client import UpstreamExhaustedError
 from ..utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ..utils.expression_contract import record_round_start
-from ..agents.bioinformatics_agent import count_saved_figures
+from ..agents.bioinformatics_agent import _evidence_gate_record, count_saved_figures
 from ..agents.bioinformatics.exploration_diagnostics import (
     ensure_exploration_diagnostic_figure,
 )
@@ -17,7 +17,7 @@ from ..agents.bioinformatics.stage1_baseline_figures import (
     ensure_stage1_baseline_figures,
 )
 from ..services.figure_contract import audit_figure_contract
-from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, prepend_species, safe_pi_brief, STAGE1_KEYWORDS, WorkflowSupersededError
+from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, MAX_EXECUTION_REVISION_ATTEMPTS, prepend_species, safe_pi_brief, STAGE1_KEYWORDS, WorkflowSupersededError
 from ..utils.blob_store import BLOB_REF_PREFIX
 from .retry import with_retry
 
@@ -576,12 +576,77 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         # the agent stopped partway through the current plan — NOT a stage
         # completion — so the stage must not advance here.
         plan_revision_requested = bool(result.get("plan_revision_needed"))
+        settlement_status = (
+            "forced_stop" if result.get("forced_stop") else effective_status
+        )
+        # The counter is keyed by round+stage because that is the scope the
+        # cycle re-enters: it bypasses check_convergence, so `current_round`
+        # does not move and a fresh key would never be minted.
+        revision_key = f"{analysis_state.current_round}:{planning_stage}"
+        prior_attempts = int(
+            (analysis_state.execution_revision_attempts or {}).get(revision_key, 0)
+        )
         action = decide_bioinfo_post_execution(
             planning_stage,
             plan_revision_requested,
-            result_status=("forced_stop" if result.get("forced_stop") else effective_status),
-            figure_contract_passed=figure_contract.passed,
+            result_status=settlement_status,
+            incomplete_attempts=prior_attempts,
         )
+
+        gate_observations = final_result.setdefault("evidence_gate_findings", [])
+        status_was_unclean = str(settlement_status or "").strip().lower() not in (
+            "completed",
+            "partial",
+        )
+        if action == "incomplete":
+            analysis_state.execution_revision_attempts = {
+                **(analysis_state.execution_revision_attempts or {}),
+                revision_key: prior_attempts + 1,
+            }
+        elif status_was_unclean:
+            # Released at the ceiling. Recorded as an observation, not as a
+            # forced release: `forced_release` is read one frame up as
+            # `evidence_gate_degraded`, which withholds direction-coverage
+            # eligibility from the round. The round already carries its unclean
+            # status, which post-execution review reads directly, so the PI
+            # learns this without that side effect.
+            gate_observations.append(_evidence_gate_record(
+                gate="execution-revision-ceiling",
+                rule_id="scai-native/execution-revision-ceiling",
+                subject=revision_key,
+                detail=(
+                    f"Execution ended as '{settlement_status}' after "
+                    f"{prior_attempts} plan revision(s) in this stage. The "
+                    "revision budget is spent; the round settles as degraded "
+                    "rather than re-planning the same failure again."
+                ),
+                severity="advise",
+                rejection_count=prior_attempts,
+                rejection_limit=MAX_EXECUTION_REVISION_ATTEMPTS,
+            ))
+
+        if not figure_contract.passed:
+            # No longer a gate. Measured here because this audit runs after the
+            # workflow-owned repair paths (deterministic baselines, the
+            # supplementary pass) and therefore sees more than the executor's
+            # own advisory did.
+            gate_observations.append(_evidence_gate_record(
+                gate="required-figure-observation",
+                rule_id="scai-native/required-figure-observation",
+                subject="required-publication-figures",
+                detail=(
+                    "Required result figures were not complete when the round "
+                    "settled. They are unrendered, stale, or held back by "
+                    "review/layout gates, so the PI must decide whether to "
+                    "repair them, accept the result with a limitation, or drop "
+                    "the deliverable: "
+                    + json.dumps(
+                        figure_contract.summary().get("missing", []),
+                        ensure_ascii=False,
+                    )
+                ),
+                severity="advise",
+            ))
 
         # One-shot: the recompute prompt has now been delivered and acted on.
         analysis_state.runtime_recompute_pending = False

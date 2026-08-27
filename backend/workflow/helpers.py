@@ -190,11 +190,30 @@ def _has_stage1_keyword(text: str) -> bool:
             idx = pos + len(kw)
     return False
 
+#: How many times one round+stage may be sent back through planning because the
+#: executor did not finish cleanly.
+#:
+#: This bound is load-bearing. The "incomplete" cycle runs
+#: bioinformatics_analysis -> planning_dialogue -> user_review_gate ->
+#: bioinformatics_analysis and never touches check_convergence, so `max_rounds`
+#: cannot end it; the caller holds the only counter. Without one, an execution
+#: that fails the same way every attempt re-plans until LangGraph raises
+#: GraphRecursionError -- which nothing in backend/ catches -- and the session
+#: ends FAILED with no report, having spent a full planning dialogue, a review
+#: wait and a fresh executor attempt on each of ~33 cycles.
+#:
+#: Sized like the executor's own gate family (MAX_MECHANISM, MAX_INTEGRATION
+#: and MAX_DECONV are all 2): one retry absorbs a transient failure (gateway
+#: flake, model nondeterminism); a second identical failure is deterministic
+#: and another attempt buys nothing.
+MAX_EXECUTION_REVISION_ATTEMPTS = 2
+
+
 def decide_bioinfo_post_execution(
     planning_stage: str,
     plan_revision_requested: bool,
     result_status: str = "completed",
-    figure_contract_passed: bool = True,
+    incomplete_attempts: int = 0,
 ) -> str:
     """Decide what _bioinformatics_analysis should do after the agent returns.
 
@@ -202,19 +221,37 @@ def decide_bioinfo_post_execution(
     partway through the current plan and must resume the SAME plan/stage after
     the revision is approved.
 
+    ``incomplete_attempts`` is how many times this same round+stage has already
+    been sent back for an execution-driven revision. At
+    ``MAX_EXECUTION_REVISION_ATTEMPTS`` the round settles as degraded instead of
+    re-planning again: the statuses that reach this clause -- forced_stop,
+    max_steps_reached, error -- are the executor reporting that it already spent
+    its own bounded budget and released, so re-running it is the caller
+    repeating work the executor has already declared finished.
+
+    The required-figure contract is deliberately NOT a clause here. It is still
+    measured and still reaches the PI, as an observation on the round. Replanning
+    cannot make a figure the review loop abandoned ("requires upstream
+    reanalysis, skipping revision loop", or three revisions without approval)
+    become report-eligible, so a refusal on it could never be worked off -- the
+    same reasoning that demoted the executor's copy of this check to a
+    non-blocking observation.
+
     Returns one of:
       "revision"        — agent paused mid-plan; keep current stage + current_plan,
                           do not cache the partial result.
-      "incomplete"      — execution or required-figure contract is incomplete;
-                          keep the stage and request a bounded plan revision.
-      "stage1_complete" — stage1 genuinely finished; advance to stage2.
-      "complete"        — stage2/full finished normally; cache result.
+      "incomplete"      — execution did not finish cleanly and attempts remain;
+                          keep the stage and request one more plan revision.
+      "stage1_complete" — stage1 finished, or exhausted its revision budget;
+                          advance to stage2.
+      "complete"        — stage2/full finished, or exhausted its revision budget.
     """
     if plan_revision_requested:
         return "revision"
-    if str(result_status or "").strip().lower() not in ("completed", "partial"):
-        return "incomplete"
-    if not figure_contract_passed:
+    if (
+        str(result_status or "").strip().lower() not in ("completed", "partial")
+        and incomplete_attempts < MAX_EXECUTION_REVISION_ATTEMPTS
+    ):
         return "incomplete"
     if planning_stage == "stage1":
         return "stage1_complete"

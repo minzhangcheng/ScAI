@@ -1653,7 +1653,17 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         # cannot satisfy must not trap the loop, and an escape is recorded.
         MAX_STATS_GATE_REJECTIONS = 3
         integration_reject_count = 0  # Track rejections for bulk/scRNA-seq integration gate
+        bulk_reject_count = 0  # Track rejections for the bulk RNA-seq analysis gate
+        evidence_citation_reject_count = 0  # Track refusals of the evidence-citation gate
         MAX_INTEGRATION_REJECTIONS = 2  # Escape hatch: allow through after N rejections
+        MAX_BULK_REJECTIONS = 2  # Escape hatch: allow through after N rejections
+        # NOT an escape hatch. The evidence-citation gate never releases:
+        # accepting findings that cite no successful execution is the one
+        # thing it exists to prevent. This is the point at which a refusal
+        # that keeps repeating becomes a fact the PI is told about, because
+        # the refusal step carries no code_error and the supervisor's stuck
+        # detection therefore cannot see it.
+        MAX_EVIDENCE_CITATION_REFUSALS = 2
         deconv_reject_count = 0  # Track rejections for cell-type deconvolution gate
         MAX_DECONV_REJECTIONS = 2  # Escape hatch: allow through after N rejections
         innovation_bulk_reject_count = 0
@@ -1703,11 +1713,21 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         empty_response_count = 0
         MAX_EMPTY_RESPONSES = 3  # transient upstream truncation → bounded retry
         figure_iteration_count = 0
+        register_score_iteration_count = 0
         # The first few successful figure-only turns are free so visualization
         # does not steal analysis budget.  This is not a hard figure ceiling:
         # additional figures simply consume normal steps, so required/result
         # plots can never be forbidden while the executor is still running.
         MAX_FREE_FIGURE_ITERATIONS = 5
+        # Bounded exactly like the figure allowance above, and for the same
+        # reason. A register_score-only turn never sets has_substantive_work,
+        # and re-registering an existing score name keeps succeeding
+        # (the handler overwrites by name and the score gates record rather
+        # than refuse past their own ceiling), so refunding its step
+        # unconditionally let step_count stand still for as many turns as the
+        # model chose to spend that way -- and `while step_count < max_steps`
+        # is the loop's only bound.
+        MAX_FREE_REGISTER_SCORE_ITERATIONS = 5
         figures_rendered = 0
         consecutive_errors = 0
         MAX_CONSECUTIVE_ERRORS = 5  # Force report_findings after this many consecutive code errors
@@ -3054,15 +3074,19 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 
                             # Gate 1: Bulk RNA-seq analysis
                             if has_bulk_data:
-                                code_mentions_bulk = any(
-                                    "bulk" in lc or "merged_counts" in lc
-                                    or "pydeseq" in lc or "deseqdataset" in lc
-                                    for lc in lowered_codes
+                                # Bounded like its three siblings below. A
+                                # hand-rolled keyword test ending in a bare
+                                # `continue` could refuse for the whole step
+                                # budget: the refusal carries no code_error, so
+                                # the supervisor's stuck detection cannot see it
+                                # and nothing else can end the loop either.
+                                bulk_reject_count, rejected, escaped = self._check_gate_keyword(
+                                    lowered_codes,
+                                    ["bulk", "merged_counts", "pydeseq", "deseqdataset"],
+                                    bulk_reject_count, MAX_BULK_REJECTIONS,
+                                    "bulk RNA-seq data exists but was not analyzed",
                                 )
-                                if not code_mentions_bulk:
-                                    logger.warning(
-                                        "[Bioinformatics] report_findings rejected: bulk RNA-seq data exists but was not analyzed"
-                                    )
+                                if rejected:
                                     bulk_paths = ", ".join(
                                         f.file_path for f in state.get_files_by_section("sequencing")
                                         if f.data_type == DATA_TYPE_BULK_RNASEQ
@@ -3086,6 +3110,18 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                         findings=[], findings_summary="REJECTED: bulk RNA-seq not analyzed",
                                     ))
                                     continue
+                                if escaped:
+                                    _escaped_notes.append(build_gate_skip_note("bulk RNA-seq analysis"))
+                                    _attempt_gate_degraded = True
+                                    _attempt_gate_findings.append(_evidence_gate_record(
+                                        gate="bulk-rnaseq-analysis",
+                                        rule_id="scai-native/bulk-rnaseq-analysis",
+                                        detail="Bulk RNA-seq data was available but was never analyzed.",
+                                        severity="block",
+                                        rejection_count=MAX_BULK_REJECTIONS,
+                                        rejection_limit=MAX_BULK_REJECTIONS,
+                                        forced_release=True,
+                                    ))
 
                             # Gate 2: Bulk/scRNA-seq cross-validation
                             if has_scrna_data and has_bulk_data:
@@ -3225,6 +3261,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         eligible_evidence_ids = {execution.id for execution in evidence_executions}
                         invalid_evidence_ids = requested_evidence_ids - eligible_evidence_ids
                         if not requested_evidence_ids or invalid_evidence_ids:
+                            evidence_citation_reject_count += 1
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call.id,
@@ -3244,6 +3281,25 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                 findings_summary="REJECTED: missing or invalid execution evidence",
                                 evidence_execution_ids=sorted(requested_evidence_ids),
                             ))
+                            if evidence_citation_reject_count == MAX_EVIDENCE_CITATION_REFUSALS:
+                                # Recorded, not released. rejection_limit=0 says
+                                # so honestly: this gate has no ceiling, and the
+                                # record exists because nothing else observes it.
+                                _attempt_gate_findings.append(_evidence_gate_record(
+                                    gate="evidence-citation",
+                                    rule_id="scai-native/evidence-citation",
+                                    subject="evidence_execution_ids",
+                                    detail=(
+                                        "report_findings was refused "
+                                        f"{evidence_citation_reject_count} times for citing no "
+                                        "successful current-run execution. The gate does not "
+                                        "release; the run continues to spend its step budget "
+                                        "until a successful cell is cited or the budget ends."
+                                    ),
+                                    severity="block",
+                                    rejection_count=evidence_citation_reject_count,
+                                    rejection_limit=0,
+                                ))
                             continue
 
                         has_substantive_work = True
@@ -4402,8 +4458,20 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             "this successful figure consumes a normal analysis step"
                         )
                 elif has_register_score:
-                    step_count -= 1
-                    logger.debug(f"[Bioinformatics] register_score-only step excluded, step_count={step_count}")
+                    register_score_iteration_count += 1
+                    if register_score_iteration_count <= MAX_FREE_REGISTER_SCORE_ITERATIONS:
+                        step_count -= 1
+                        logger.debug(
+                            f"[Bioinformatics] register_score-only step excluded "
+                            f"({register_score_iteration_count}/"
+                            f"{MAX_FREE_REGISTER_SCORE_ITERATIONS} free), "
+                            f"step_count={step_count}"
+                        )
+                    else:
+                        logger.debug(
+                            "[Bioinformatics] Free register_score allowance exhausted; "
+                            "this successful registration consumes a normal analysis step"
+                        )
 
         if llm_error:
             status = "error"
