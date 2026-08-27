@@ -441,10 +441,12 @@ def test_rollback_reports_that_it_rewrote_session_json():
     """The in-memory cache still holds the target state after a rollback."""
     import inspect
 
-    from backend.services.snapshot_v2 import recovery
     from backend.services import session_store
+    from backend.tests.split_facade import split_source
 
-    assert "session_state_rewritten" in inspect.getsource(recovery), (
+    assert "session_state_rewritten" in split_source(
+        "backend.services.snapshot_v2.recovery"
+    ), (
         "recovery must report when it rewrote session.json"
     )
     assert "session_state_rewritten" in inspect.getsource(session_store), (
@@ -454,11 +456,9 @@ def test_rollback_reports_that_it_rewrote_session_json():
 
 
 def test_rollback_quarantines_a_residual_the_pre_restore_never_had():
-    import inspect
+    from backend.tests.split_facade import split_source
 
-    from backend.services.snapshot_v2 import recovery
-
-    source = inspect.getsource(recovery)
+    source = split_source("backend.services.snapshot_v2.recovery")
     assert "quarantine_live_runtime_pkl" in source, (
         "rollback must mirror apply()'s else-branch: with no pre_restore "
         "residual the TARGET's pkl stays installed with a valid signature"
