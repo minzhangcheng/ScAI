@@ -17,118 +17,76 @@ import logging
 import os
 import shutil
 import stat
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from backend.utils.crypto import sign_hmac_sha256
-
+from .figure_transaction_parts import (
+    filesystem as _filesystem_owner,
+    journal as _journal_owner,
+    locks as _locks_owner,
+)
+from .figure_transaction_parts.types import (
+    TRANSACTION_SCHEMA_VERSION,
+    TRANSACTION_ROOT,
+    JOURNAL_FILENAME,
+    COMMIT_MARKER,
+    ABANDON_MARKER,
+    FAILURE_MARKER,
+    ROLLBACK_DURABLE_MARKER,
+    _PROCESS_TOKEN,
+    _LockOwner,
+    _HELD_LOCKS,
+    _MAX_JOURNAL_BYTES,
+    _MAX_GC_ENTRIES,
+    _STALE_ENTRY_SECONDS,
+    _QUARANTINE_RETENTION_SECONDS,
+    _RUNTIME_JOURNAL_FIELDS,
+    _TERMINAL_MARKERS,
+    _TRANSACTION_RECORD_FIELDS,
+)
 
 logger = logging.getLogger(__name__)
 
-TRANSACTION_SCHEMA_VERSION = 2
-TRANSACTION_ROOT = ".transactions"
-JOURNAL_FILENAME = "journal.json"
-COMMIT_MARKER = "COMMITTED"
-ABANDON_MARKER = "ABANDONED"
-FAILURE_MARKER = "FAILED"
-ROLLBACK_DURABLE_MARKER = "ROLLBACK_DURABLE"
-_PROCESS_TOKEN = uuid.uuid4().hex
-_LockOwner = tuple[str, str, str, tuple[str, ...]]
-_HELD_LOCKS: dict[str, tuple[_LockOwner, Any]] = {}
-_MAX_JOURNAL_BYTES = 4 * 1024 * 1024
-_MAX_GC_ENTRIES = 100
-_STALE_ENTRY_SECONDS = 24 * 60 * 60
-_QUARANTINE_RETENTION_SECONDS = 7 * 24 * 60 * 60
 
 # These values are useful to the live caller but are deliberately not persisted.
 # Every one is derived from the authenticated identity fields and trusted roots;
 # accepting a second path representation from disk would make the journal a path
 # traversal capability.
-_RUNTIME_JOURNAL_FIELDS = frozenset({
-    "attempt_dir",
-    "staged_jpg",
-    "staged_pdf",
-    "final_jpg",
-    "final_pdf",
-    "backup_jpg",
-    "backup_pdf",
-    "archive_jpg",
-    "archive_pdf",
-    "journal_path",
-    "lock_keys",
-})
-_TERMINAL_MARKERS = frozenset({COMMIT_MARKER, ABANDON_MARKER, FAILURE_MARKER})
-
-_TRANSACTION_RECORD_FIELDS = frozenset({
-    "png_path",
-    "pdf_path",
-    "render_sha256",
-    "preview_sha256",
-    "pdf_sha256",
-    "producer_status",
-    "is_published_head",
-    "supersedes_id",
-    "revision_of_id",
-})
 
 
 def _value(item: Any, key: str, default: Any = None) -> Any:
-    if isinstance(item, Mapping):
-        return item.get(key, default)
-    return getattr(item, key, default)
+    return _filesystem_owner._value(item, key, default, bindings=sys.modules[__name__])
 
 
 def _set(item: Any, key: str, value: Any) -> None:
-    if isinstance(item, dict):
-        item[key] = value
-    else:
-        setattr(item, key, value)
+    return _filesystem_owner._set(item, key, value, bindings=sys.modules[__name__])
 
 
 def _safe_component(value: Any, fallback: str) -> str:
-    cleaned = "".join(
-        char if char.isalnum() or char in "-_." else "_"
-        for char in str(value or "")
-    ).strip("._")
-    return cleaned[:180] or fallback
+    return _filesystem_owner._safe_component(value, fallback, bindings=sys.modules[__name__])
 
 
 def _archive_record_component(record_id: Any) -> str:
     """Map an arbitrary record identity to one collision-resistant path part."""
-    value = str(record_id or "")
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return _filesystem_owner._archive_record_component(record_id, bindings=sys.modules[__name__])
 
 
 def _absolute(path: Path) -> Path:
     """Return a lexical absolute path without following its final component."""
-    return Path(os.path.abspath(os.fspath(path)))
+    return _filesystem_owner._absolute(path, bindings=sys.modules[__name__])
 
 
 def _directory_flags() -> int:
-    return (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-    )
+    return _filesystem_owner._directory_flags(bindings=sys.modules[__name__])
 
 
 def _open_directory_nofollow(path: Path) -> int:
     """Open one real directory, rejecting a file or symlink final component."""
-    try:
-        descriptor = os.open(os.fspath(path), _directory_flags())
-    except OSError as exc:
-        raise ValueError(f"trusted directory is missing, invalid, or a symlink: {path}") from exc
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISDIR(metadata.st_mode):
-            raise ValueError(f"trusted path is not a directory: {path}")
-        return descriptor
-    except BaseException:
-        os.close(descriptor)
-        raise
+    return _filesystem_owner._open_directory_nofollow(path, bindings=sys.modules[__name__])
 
 
 def _open_child_directory_nofollow(
@@ -138,27 +96,7 @@ def _open_child_directory_nofollow(
     create: bool = False,
 ) -> int:
     """Open one direct child directory relative to an already trusted FD."""
-    if name in {"", ".", ".."} or "/" in name or os.sep in name:
-        raise ValueError("invalid trusted directory component")
-    if create:
-        try:
-            os.mkdir(name, mode=0o700, dir_fd=parent_fd)
-        except FileExistsError:
-            pass
-    try:
-        descriptor = os.open(name, _directory_flags(), dir_fd=parent_fd)
-    except OSError as exc:
-        raise ValueError(
-            f"trusted directory component is missing, invalid, or a symlink: {name}"
-        ) from exc
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISDIR(metadata.st_mode):
-            raise ValueError(f"trusted path component is not a directory: {name}")
-        return descriptor
-    except BaseException:
-        os.close(descriptor)
-        raise
+    return _filesystem_owner._open_child_directory_nofollow(parent_fd, name, create=create, bindings=sys.modules[__name__])
 
 
 def _require_directory_entry_binding(
@@ -169,17 +107,7 @@ def _require_directory_entry_binding(
     label: str,
 ) -> None:
     """Require a live parent entry to still name the opened directory inode."""
-    try:
-        entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except OSError as exc:
-        raise ValueError(f"{label} directory binding is missing or invalid") from exc
-    opened = os.fstat(child_fd)
-    if (
-        not stat.S_ISDIR(entry.st_mode)
-        or not stat.S_ISDIR(opened.st_mode)
-        or (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino)
-    ):
-        raise ValueError(f"{label} directory binding changed")
+    return _filesystem_owner._require_directory_entry_binding(parent_fd, name, child_fd, label=label, bindings=sys.modules[__name__])
 
 
 def _open_transaction_root(
@@ -188,51 +116,12 @@ def _open_transaction_root(
     create: bool = False,
 ) -> tuple[int, int]:
     """Open ``figures/.transactions`` without following either component."""
-    figures_fd = _open_directory_nofollow(_absolute(figures_dir))
-    try:
-        root_fd = _open_child_directory_nofollow(
-            figures_fd, TRANSACTION_ROOT, create=create
-        )
-        _require_directory_entry_binding(
-            figures_fd,
-            TRANSACTION_ROOT,
-            root_fd,
-            label="publication transaction root",
-        )
-    except BaseException:
-        os.close(figures_fd)
-        raise
-    return figures_fd, root_fd
+    return _filesystem_owner._open_transaction_root(figures_dir, create=create, bindings=sys.modules[__name__])
 
 
 def _open_transaction_directory(transaction_dir: Path) -> tuple[int, int, int]:
     """Open one direct transaction directory through trusted directory FDs."""
-    transaction_dir = _absolute(transaction_dir)
-    root = transaction_dir.parent
-    if root.name != TRANSACTION_ROOT:
-        raise ValueError("publication transaction is outside the transaction root")
-    figures_fd, root_fd = _open_transaction_root(root.parent, create=False)
-    try:
-        transaction_fd = _open_child_directory_nofollow(
-            root_fd, transaction_dir.name, create=False
-        )
-        _require_directory_entry_binding(
-            figures_fd,
-            TRANSACTION_ROOT,
-            root_fd,
-            label="publication transaction root",
-        )
-        _require_directory_entry_binding(
-            root_fd,
-            transaction_dir.name,
-            transaction_fd,
-            label="publication transaction",
-        )
-    except BaseException:
-        os.close(root_fd)
-        os.close(figures_fd)
-        raise
-    return figures_fd, root_fd, transaction_fd
+    return _filesystem_owner._open_transaction_directory(transaction_dir, bindings=sys.modules[__name__])
 
 
 def _open_attempt_directory(
@@ -241,38 +130,7 @@ def _open_attempt_directory(
     create: bool = False,
 ) -> tuple[int, int, int]:
     """Open ``figures/.attempts/<attempt>`` without following components."""
-    attempt_dir = _absolute(attempt_dir)
-    attempts_root = attempt_dir.parent
-    if attempts_root.name != ".attempts":
-        raise ValueError("publication attempt is outside the attempts root")
-    figures_fd = _open_directory_nofollow(attempts_root.parent)
-    try:
-        attempts_fd = _open_child_directory_nofollow(
-            figures_fd, ".attempts", create=create
-        )
-        try:
-            attempt_fd = _open_child_directory_nofollow(
-                attempts_fd, attempt_dir.name, create=create
-            )
-            _require_directory_entry_binding(
-                figures_fd,
-                ".attempts",
-                attempts_fd,
-                label="publication attempts root",
-            )
-            _require_directory_entry_binding(
-                attempts_fd,
-                attempt_dir.name,
-                attempt_fd,
-                label="publication attempt",
-            )
-        except BaseException:
-            os.close(attempts_fd)
-            raise
-    except BaseException:
-        os.close(figures_fd)
-        raise
-    return figures_fd, attempts_fd, attempt_fd
+    return _filesystem_owner._open_attempt_directory(attempt_dir, create=create, bindings=sys.modules[__name__])
 
 
 def _open_revision_directory(
@@ -281,57 +139,7 @@ def _open_revision_directory(
     create: bool = False,
 ) -> tuple[int, int, int, int]:
     """Open ``figures/.revisions/<record>/<attempt>`` component by component."""
-    revision_dir = _absolute(revision_dir)
-    record_dir = revision_dir.parent
-    revision_root = record_dir.parent
-    if (
-        revision_root.name != ".revisions"
-        or len(record_dir.name) != 64
-        or any(char not in "0123456789abcdef" for char in record_dir.name)
-        or revision_dir.name != _safe_component(revision_dir.name, "attempt")
-    ):
-        raise ValueError("publication revision archive has an invalid layout")
-    figures_fd = _open_directory_nofollow(revision_root.parent)
-    try:
-        revision_fd = _open_child_directory_nofollow(
-            figures_fd, ".revisions", create=create
-        )
-        try:
-            record_fd = _open_child_directory_nofollow(
-                revision_fd, record_dir.name, create=create
-            )
-            try:
-                attempt_fd = _open_child_directory_nofollow(
-                    record_fd, revision_dir.name, create=create
-                )
-                _require_directory_entry_binding(
-                    figures_fd,
-                    ".revisions",
-                    revision_fd,
-                    label="publication revisions root",
-                )
-                _require_directory_entry_binding(
-                    revision_fd,
-                    record_dir.name,
-                    record_fd,
-                    label="publication revision record",
-                )
-                _require_directory_entry_binding(
-                    record_fd,
-                    revision_dir.name,
-                    attempt_fd,
-                    label="publication revision attempt",
-                )
-            except BaseException:
-                os.close(record_fd)
-                raise
-        except BaseException:
-            os.close(revision_fd)
-            raise
-    except BaseException:
-        os.close(figures_fd)
-        raise
-    return figures_fd, revision_fd, record_fd, attempt_fd
+    return _filesystem_owner._open_revision_directory(revision_dir, create=create, bindings=sys.modules[__name__])
 
 
 def _require_transaction_directory_binding(
@@ -340,18 +148,7 @@ def _require_transaction_directory_binding(
     transaction_fd: int,
     attempt_id: str,
 ) -> None:
-    _require_directory_entry_binding(
-        figures_fd,
-        TRANSACTION_ROOT,
-        root_fd,
-        label="publication transaction root",
-    )
-    _require_directory_entry_binding(
-        root_fd,
-        attempt_id,
-        transaction_fd,
-        label="publication transaction",
-    )
+    return _filesystem_owner._require_transaction_directory_binding(figures_fd, root_fd, transaction_fd, attempt_id, bindings=sys.modules[__name__])
 
 
 def _require_attempt_directory_binding(
@@ -360,18 +157,7 @@ def _require_attempt_directory_binding(
     attempt_fd: int,
     attempt_id: str,
 ) -> None:
-    _require_directory_entry_binding(
-        figures_fd,
-        ".attempts",
-        attempts_fd,
-        label="publication attempts root",
-    )
-    _require_directory_entry_binding(
-        attempts_fd,
-        attempt_id,
-        attempt_fd,
-        label="publication attempt",
-    )
+    return _filesystem_owner._require_attempt_directory_binding(figures_fd, attempts_fd, attempt_fd, attempt_id, bindings=sys.modules[__name__])
 
 
 def _open_known_file_parent(
@@ -380,112 +166,21 @@ def _open_known_file_parent(
     create: bool = False,
 ) -> tuple[int, list[int]]:
     """Open the trusted parent for public and hidden figure transaction files."""
-    path = _absolute(path)
-    parent = path.parent
-    if parent.parent.name == TRANSACTION_ROOT:
-        figures_fd, root_fd, parent_fd = _open_transaction_directory(parent)
-        return parent_fd, [figures_fd, root_fd]
-    if parent.parent.name == ".attempts":
-        figures_fd, attempts_fd, parent_fd = _open_attempt_directory(
-            parent, create=create
-        )
-        return parent_fd, [figures_fd, attempts_fd]
-    if parent.parent.parent.name == ".revisions":
-        figures_fd, revision_fd, record_fd, parent_fd = (
-            _open_revision_directory(parent, create=create)
-        )
-        return parent_fd, [figures_fd, revision_fd, record_fd]
-    return _open_directory_nofollow(parent), []
+    return _filesystem_owner._open_known_file_parent(path, create=create, bindings=sys.modules[__name__])
 
 
 def _close_parent_chain(parent_fd: int, ancestors: Iterable[int]) -> None:
-    os.close(parent_fd)
-    for descriptor in reversed(list(ancestors)):
-        os.close(descriptor)
+    return _filesystem_owner._close_parent_chain(parent_fd, ancestors, bindings=sys.modules[__name__])
 
 
 def _digest_regular_file_at(parent_fd: int, name: str) -> str:
     """Hash one stable regular direct child using one no-follow descriptor."""
-    try:
-        descriptor = os.open(
-            name,
-            os.O_RDONLY
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0),
-            dir_fd=parent_fd,
-        )
-    except OSError as exc:
-        raise ValueError("figure transaction file is missing or a symlink") from exc
-    try:
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode):
-            raise ValueError("figure transaction path is not a regular file")
-        digest = hashlib.sha256()
-        size = 0
-        while True:
-            chunk = os.read(descriptor, 65_536)
-            if not chunk:
-                break
-            digest.update(chunk)
-            size += len(chunk)
-        after = os.fstat(descriptor)
-        before_identity = (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        )
-        after_identity = (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        )
-        if before_identity != after_identity or size != before.st_size:
-            raise ValueError("figure transaction file changed while hashing")
-        return digest.hexdigest()
-    finally:
-        os.close(descriptor)
+    return _filesystem_owner._digest_regular_file_at(parent_fd, name, bindings=sys.modules[__name__])
 
 
 def _digest_open_regular_file(descriptor: int, *, label: str) -> str:
     """Hash an already opened regular file and restore its seek position."""
-    position = os.lseek(descriptor, 0, os.SEEK_CUR)
-    os.lseek(descriptor, 0, os.SEEK_SET)
-    try:
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode):
-            raise ValueError(f"{label} is not a regular file")
-        digest = hashlib.sha256()
-        size = 0
-        while True:
-            chunk = os.read(descriptor, 65_536)
-            if not chunk:
-                break
-            digest.update(chunk)
-            size += len(chunk)
-        after = os.fstat(descriptor)
-        before_identity = (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        )
-        after_identity = (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        )
-        if before_identity != after_identity or size != before.st_size:
-            raise ValueError(f"{label} changed while it was read")
-        return digest.hexdigest()
-    finally:
-        os.lseek(descriptor, position, os.SEEK_SET)
+    return _filesystem_owner._digest_open_regular_file(descriptor, label=label, bindings=sys.modules[__name__])
 
 
 def _open_frozen_staged_file(
@@ -495,26 +190,7 @@ def _open_frozen_staged_file(
     *,
     label: str,
 ) -> tuple[int, os.stat_result]:
-    try:
-        descriptor = os.open(
-            name,
-            os.O_RDONLY
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0),
-            dir_fd=attempt_fd,
-        )
-    except OSError as exc:
-        raise ValueError(f"{label} is missing, invalid, or a symlink") from exc
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise ValueError(f"{label} is not a regular file")
-        if _digest_open_regular_file(descriptor, label=label) != expected_sha256:
-            raise ValueError(f"{label} does not match its frozen digest")
-        return descriptor, metadata
-    except BaseException:
-        os.close(descriptor)
-        raise
+    return _filesystem_owner._open_frozen_staged_file(attempt_fd, name, expected_sha256, label=label, bindings=sys.modules[__name__])
 
 
 def _open_stable_staged_file(
@@ -524,25 +200,7 @@ def _open_stable_staged_file(
     label: str,
 ) -> tuple[int, os.stat_result, str]:
     """Open and hash one pending staged file without trusting its path again."""
-    try:
-        descriptor = os.open(
-            name,
-            os.O_RDONLY
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0),
-            dir_fd=attempt_fd,
-        )
-    except OSError as exc:
-        raise ValueError(f"{label} is missing, invalid, or a symlink") from exc
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise ValueError(f"{label} is not a regular file")
-        digest = _digest_open_regular_file(descriptor, label=label)
-        return descriptor, metadata, digest
-    except BaseException:
-        os.close(descriptor)
-        raise
+    return _filesystem_owner._open_stable_staged_file(attempt_fd, name, label=label, bindings=sys.modules[__name__])
 
 
 def _require_regular_entry_binding(
@@ -553,27 +211,11 @@ def _require_regular_entry_binding(
     label: str,
 ) -> None:
     """Require a direct filename to still name the opened regular-file inode."""
-    try:
-        entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except OSError as exc:
-        raise ValueError(f"{label} binding is missing or invalid") from exc
-    opened = os.fstat(descriptor)
-    if (
-        not stat.S_ISREG(entry.st_mode)
-        or not stat.S_ISREG(opened.st_mode)
-        or (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino)
-    ):
-        raise ValueError(f"{label} binding changed")
+    return _filesystem_owner._require_regular_entry_binding(parent_fd, name, descriptor, label=label, bindings=sys.modules[__name__])
 
 
 def _regular_child_exists(parent_fd: int, name: str, *, label: str) -> bool:
-    try:
-        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return False
-    if not stat.S_ISREG(metadata.st_mode):
-        raise ValueError(f"{label} is not a regular file")
-    return True
+    return _filesystem_owner._regular_child_exists(parent_fd, name, label=label, bindings=sys.modules[__name__])
 
 
 def _replace_staged_entry(
@@ -582,12 +224,7 @@ def _replace_staged_entry(
     source_name: str,
     destination_name: str,
 ) -> None:
-    os.replace(
-        source_name,
-        destination_name,
-        src_dir_fd=attempt_fd,
-        dst_dir_fd=figures_fd,
-    )
+    return _filesystem_owner._replace_staged_entry(attempt_fd, figures_fd, source_name, destination_name, bindings=sys.modules[__name__])
 
 
 def _verify_published_entry(
@@ -599,19 +236,7 @@ def _verify_published_entry(
     *,
     label: str,
 ) -> None:
-    current = os.stat(name, dir_fd=figures_fd, follow_symlinks=False)
-    opened = os.fstat(staged_fd)
-    expected_identity = (staged_metadata.st_dev, staged_metadata.st_ino)
-    if (
-        not stat.S_ISREG(current.st_mode)
-        or not stat.S_ISREG(opened.st_mode)
-        or (current.st_dev, current.st_ino) != expected_identity
-        or (opened.st_dev, opened.st_ino) != expected_identity
-        or opened.st_size != staged_metadata.st_size
-    ):
-        raise ValueError(f"{label} does not name the frozen staged inode")
-    if _digest_regular_file_at(figures_fd, name) != expected_sha256:
-        raise ValueError(f"{label} does not match its frozen digest")
+    return _filesystem_owner._verify_published_entry(figures_fd, name, staged_fd, staged_metadata, expected_sha256, label=label, bindings=sys.modules[__name__])
 
 
 def _read_regular_file_at(
@@ -622,186 +247,40 @@ def _read_regular_file_at(
     label: str,
 ) -> bytes:
     """Read and validate one regular file entirely through one no-follow FD."""
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-    )
-    try:
-        descriptor = os.open(name, flags, dir_fd=parent_fd)
-    except OSError as exc:
-        raise ValueError(f"{label} is missing, unreadable, or a symlink") from exc
-    try:
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode):
-            raise ValueError(f"{label} is not a regular file")
-        if before.st_size > max_bytes:
-            raise ValueError(f"{label} is oversized")
-        chunks: list[bytes] = []
-        remaining = max_bytes + 1
-        while remaining:
-            chunk = os.read(descriptor, min(65_536, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        payload = b"".join(chunks)
-        after = os.fstat(descriptor)
-        if len(payload) > max_bytes:
-            raise ValueError(f"{label} is oversized")
-        identity_before = (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        )
-        identity_after = (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        )
-        if identity_after != identity_before or len(payload) != before.st_size:
-            raise ValueError(f"{label} changed while it was read")
-        return payload
-    finally:
-        os.close(descriptor)
+    return _filesystem_owner._read_regular_file_at(parent_fd, name, max_bytes=max_bytes, label=label, bindings=sys.modules[__name__])
 
 
 def _read_transaction_file(path: Path, *, max_bytes: int, label: str) -> bytes:
-    figures_fd, root_fd, transaction_fd = _open_transaction_directory(Path(path).parent)
-    try:
-        return _read_regular_file_at(
-            transaction_fd,
-            Path(path).name,
-            max_bytes=max_bytes,
-            label=label,
-        )
-    finally:
-        os.close(transaction_fd)
-        os.close(root_fd)
-        os.close(figures_fd)
+    return _filesystem_owner._read_transaction_file(path, max_bytes=max_bytes, label=label, bindings=sys.modules[__name__])
 
 
 def _fsync_file(path: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(os.fspath(path), flags)
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise ValueError(f"path is not a regular file: {path}")
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    return _filesystem_owner._fsync_file(path, bindings=sys.modules[__name__])
 
 
 def _fsync_dir(path: Path) -> None:
-    descriptor = os.open(
-        os.fspath(path),
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
-    )
-    try:
-        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
-            raise ValueError(f"path is not a directory: {path}")
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    return _filesystem_owner._fsync_dir(path, bindings=sys.modules[__name__])
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
-    path = _absolute(path)
-    encoded = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, indent=2
-    ).encode("utf-8")
-    figures_fd, root_fd, parent_fd = _open_transaction_directory(path.parent)
-    temporary_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
-    descriptor: int | None = None
-    try:
-        descriptor = os.open(
-            temporary_name,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0),
-            0o600,
-            dir_fd=parent_fd,
-        )
-        view = memoryview(encoded)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("short publication transaction metadata write")
-            view = view[written:]
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = None
-        _require_transaction_directory_binding(
-            figures_fd, root_fd, parent_fd, path.parent.name
-        )
-        # Keep metadata rename independent of failure injection for the public
-        # JPG/PDF pair while retaining one trusted directory descriptor.
-        os.rename(
-            temporary_name,
-            path.name,
-            src_dir_fd=parent_fd,
-            dst_dir_fd=parent_fd,
-        )
-        os.fsync(parent_fd)
-        _require_transaction_directory_binding(
-            figures_fd, root_fd, parent_fd, path.parent.name
-        )
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        try:
-            os.unlink(temporary_name, dir_fd=parent_fd)
-        except OSError:
-            pass
-        os.close(parent_fd)
-        os.close(root_fd)
-        os.close(figures_fd)
+    return _filesystem_owner._atomic_json(path, payload, bindings=sys.modules[__name__])
 
 
 def _canonical_json(payload: Mapping[str, Any]) -> bytes:
-    return json.dumps(
-        dict(payload),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    return _journal_owner._canonical_json(payload, bindings=sys.modules[__name__])
 
 
 def _journal_body(payload: Mapping[str, Any]) -> bytes:
-    return _canonical_json({
-        key: value
-        for key, value in payload.items()
-        if key != "journal_hmac" and key not in _RUNTIME_JOURNAL_FIELDS
-    })
+    return _journal_owner._journal_body(payload, bindings=sys.modules[__name__])
 
 
 def _marker_body(payload: Mapping[str, Any]) -> bytes:
-    return _canonical_json({
-        key: value for key, value in payload.items() if key != "marker_hmac"
-    })
+    return _journal_owner._marker_body(payload, bindings=sys.modules[__name__])
 
 
 def _write_marker(path: Path) -> None:
     """Write an authenticated transaction marker bound to journal identity."""
-    if path.name not in _TERMINAL_MARKERS | {ROLLBACK_DURABLE_MARKER}:
-        raise ValueError("unknown publication transaction marker")
-    journal = _read_verified_journal(path.parent / JOURNAL_FILENAME)
-    payload = {
-        "schema_version": TRANSACTION_SCHEMA_VERSION,
-        "session_id": journal["session_id"],
-        "attempt_id": journal["attempt_id"],
-        "marker": path.name,
-    }
-    payload["marker_hmac"] = sign_hmac_sha256(_marker_body(payload))
-    _atomic_json(path, payload)
+    return _journal_owner._write_marker(path, bindings=sys.modules[__name__])
 
 
 def _authenticated_marker_exists(
@@ -809,33 +288,7 @@ def _authenticated_marker_exists(
     marker: str,
     journal: Mapping[str, Any],
 ) -> bool:
-    marker_path = transaction_dir / marker
-    try:
-        if marker not in _TERMINAL_MARKERS | {ROLLBACK_DURABLE_MARKER}:
-            return False
-        raw = _read_transaction_file(
-            marker_path,
-            max_bytes=16_384,
-            label="publication transaction marker",
-        )
-        payload = json.loads(raw.decode("utf-8"))
-        if not isinstance(payload, dict):
-            return False
-        signature = str(payload.get("marker_hmac") or "")
-        if not signature or not hmac.compare_digest(
-            signature, sign_hmac_sha256(_marker_body(payload))
-        ):
-            return False
-        return bool(
-            payload.get("schema_version") == TRANSACTION_SCHEMA_VERSION
-            and str(payload.get("session_id") or "")
-            == str(journal.get("session_id") or "")
-            and str(payload.get("attempt_id") or "")
-            == str(journal.get("attempt_id") or "")
-            and payload.get("marker") == marker
-        )
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return False
+    return _journal_owner._authenticated_marker_exists(transaction_dir, marker, journal, bindings=sys.modules[__name__])
 
 
 def _unlink_transaction_regular_file_if_present(
@@ -843,83 +296,23 @@ def _unlink_transaction_regular_file_if_present(
     name: str,
 ) -> None:
     """Unlink one direct transaction child only through a verified directory FD."""
-    if name not in _TERMINAL_MARKERS | {ROLLBACK_DURABLE_MARKER}:
-        raise ValueError("unknown publication transaction marker")
-    figures_fd, root_fd, transaction_fd = _open_transaction_directory(
-        transaction_dir
-    )
-    try:
-        _require_transaction_directory_binding(
-            figures_fd,
-            root_fd,
-            transaction_fd,
-            _absolute(transaction_dir).name,
-        )
-        try:
-            metadata = os.stat(
-                name, dir_fd=transaction_fd, follow_symlinks=False
-            )
-        except FileNotFoundError:
-            return
-        if not stat.S_ISREG(metadata.st_mode):
-            raise ValueError("publication transaction marker is not a regular file")
-        os.unlink(name, dir_fd=transaction_fd)
-        os.fsync(transaction_fd)
-        _require_transaction_directory_binding(
-            figures_fd,
-            root_fd,
-            transaction_fd,
-            _absolute(transaction_dir).name,
-        )
-    finally:
-        os.close(transaction_fd)
-        os.close(root_fd)
-        os.close(figures_fd)
+    return _journal_owner._unlink_transaction_regular_file_if_present(transaction_dir, name, bindings=sys.modules[__name__])
 
 
 def _sha256(path: Path) -> str | None:
-    parent_fd: int | None = None
-    ancestors: list[int] = []
-    try:
-        parent_fd, ancestors = _open_known_file_parent(Path(path), create=False)
-        return _digest_regular_file_at(parent_fd, Path(path).name)
-    except (OSError, ValueError):
-        return None
-    finally:
-        if parent_fd is not None:
-            _close_parent_chain(parent_fd, ancestors)
+    return _journal_owner._sha256(path, bindings=sys.modules[__name__])
 
 
 def _snapshot_record(record: Any, *, include_preview: bool = False) -> dict[str, Any]:
-    if record is None:
-        return {}
-    if hasattr(record, "model_dump"):
-        dumped = record.model_dump(mode="json")
-    elif isinstance(record, Mapping):
-        dumped = dict(record)
-    else:
-        dumped = {
-            key: value for key, value in vars(record).items()
-            if not key.startswith("_")
-        }
-    if not include_preview:
-        dumped["png_base64"] = None
-    return dumped
+    return _journal_owner._snapshot_record(record, include_preview=include_preview, bindings=sys.modules[__name__])
 
 
 def _find_record(records: Iterable[Any], record_id: str) -> Any | None:
-    return next(
-        (record for record in records if str(_value(record, "id", "")) == record_id),
-        None,
-    )
+    return _journal_owner._find_record(records, record_id, bindings=sys.modules[__name__])
 
 
 def _journal_paths(figures_dir: Path, attempt_id: str) -> tuple[Path, Path]:
-    safe_attempt_id = _safe_component(attempt_id, "attempt")
-    if str(attempt_id) != safe_attempt_id:
-        raise ValueError("publication attempt ID is not a safe path component")
-    transaction_dir = _absolute(figures_dir) / TRANSACTION_ROOT / safe_attempt_id
-    return transaction_dir, transaction_dir / JOURNAL_FILENAME
+    return _journal_owner._journal_paths(figures_dir, attempt_id, bindings=sys.modules[__name__])
 
 
 def _publish_lock_keys(
@@ -927,92 +320,24 @@ def _publish_lock_keys(
     final_jpg: Path,
     published_record: Any,
 ) -> list[str]:
-    lineage = str(_value(published_record, "lineage_id", None) or "main")
-    logical = str(_value(published_record, "logical_figure_id", None) or "")
-    path_key = "path:" + str(_absolute(final_jpg))
-    workspace_key = hashlib.sha256(
-        str(_absolute(Path(figures_dir))).encode("utf-8")
-    ).hexdigest()
-    logical_key = "logical:" + workspace_key + ":" + lineage + ":" + logical
-    keys = {path_key, logical_key}
-    attempt_id = str(_value(published_record, "render_attempt_id", "") or "")
-    if attempt_id and attempt_id == _safe_component(attempt_id, "attempt"):
-        keys.add(_attempt_lock_key(figures_dir, attempt_id))
-    return sorted(keys)
+    return _locks_owner._publish_lock_keys(figures_dir, final_jpg, published_record, bindings=sys.modules[__name__])
 
 
 def _attempt_lock_key(figures_dir: Path, attempt_id: str) -> str:
-    workspace_key = hashlib.sha256(
-        str(_absolute(Path(figures_dir))).encode("utf-8")
-    ).hexdigest()
-    return "attempt:" + workspace_key + ":" + str(attempt_id)
+    return _locks_owner._attempt_lock_key(figures_dir, attempt_id, bindings=sys.modules[__name__])
 
 
 def _transaction_creation_is_live(figures_dir: Path, attempt_id: str) -> bool:
     """Probe the attempt-scoped flock before classifying a pre-journal directory."""
-    scope = str(_absolute(figures_dir))
-    key = _attempt_lock_key(figures_dir, attempt_id)
-    held = _HELD_LOCKS.get(key)
-    if held is not None and held[0][0] == scope and held[0][2] == attempt_id:
-        return True
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover
-        return False
-    try:
-        locks_fd, parents = _open_hidden_root(
-            _absolute(figures_dir) / TRANSACTION_ROOT / ".locks",
-            create=False,
-        )
-    except ValueError:
-        return False
-    descriptor: int | None = None
-    try:
-        lock_name = _lock_file(figures_dir, key).name
-        descriptor = os.open(
-            lock_name,
-            os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
-            dir_fd=locks_fd,
-        )
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            return False
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
-        return False
-    except OSError:
-        return False
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        os.close(locks_fd)
-        for parent in reversed(parents):
-            os.close(parent)
+    return _locks_owner._transaction_creation_is_live(figures_dir, attempt_id, bindings=sys.modules[__name__])
 
 
 def _require_within(path: Path, root: Path, *, label: str) -> Path:
-    resolved = _absolute(Path(path))
-    root_resolved = _absolute(Path(root))
-    try:
-        resolved.relative_to(root_resolved)
-    except ValueError as exc:
-        raise ValueError(f"{label} is outside its trusted root") from exc
-    return resolved
+    return _journal_owner._require_within(path, root, label=label, bindings=sys.modules[__name__])
 
 
 def _validate_regular_child(parent_fd: int, name: str, *, label: str) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(name, flags, dir_fd=parent_fd)
-    except OSError as exc:
-        raise ValueError(f"{label} is missing, invalid, or a symlink") from exc
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise ValueError(f"{label} is not a regular file")
-    finally:
-        os.close(descriptor)
+    return _journal_owner._validate_regular_child(parent_fd, name, label=label, bindings=sys.modules[__name__])
 
 
 def _validate_optional_regular_child(
@@ -1021,12 +346,7 @@ def _validate_optional_regular_child(
     *,
     label: str,
 ) -> None:
-    try:
-        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return
-    if not stat.S_ISREG(metadata.st_mode):
-        raise ValueError(f"{label} is not a regular file")
+    return _journal_owner._validate_optional_regular_child(parent_fd, name, label=label, bindings=sys.modules[__name__])
 
 
 def _validate_registration_paths(
@@ -1038,190 +358,27 @@ def _validate_registration_paths(
     final_pdf: Path,
     published_record: Any,
 ) -> tuple[Path, str, str]:
-    attempt_id = str(
-        _value(published_record, "render_attempt_id", "") or Path(attempt_dir).name
-    )
-    if attempt_id != _safe_component(attempt_id, "attempt"):
-        raise ValueError("publication attempt ID is not a safe path component")
-    figure_name = str(_value(published_record, "name", "") or Path(final_jpg).stem)
-    if figure_name != _safe_component(figure_name, "figure"):
-        raise ValueError("publication figure name is not a safe path component")
-
-    figures_dir = _absolute(Path(final_jpg).parent)
-    expected_final_jpg = figures_dir / f"{figure_name}.jpg"
-    expected_final_pdf = figures_dir / f"{figure_name}.pdf"
-    expected_attempt_dir = figures_dir / ".attempts" / attempt_id
-    if _absolute(Path(final_jpg)) != expected_final_jpg:
-        raise ValueError("publication JPG is not the current public figure path")
-    if _absolute(Path(final_pdf)) != expected_final_pdf:
-        raise ValueError("publication PDF is not the current public figure path")
-    if _absolute(Path(attempt_dir)) != expected_attempt_dir:
-        raise ValueError("publication attempt directory is outside its trusted root")
-    if _absolute(Path(staged_jpg)) != expected_attempt_dir / f"{figure_name}.jpg":
-        raise ValueError("staged publication JPG does not match the attempt identity")
-    if _absolute(Path(staged_pdf)) != expected_attempt_dir / f"{figure_name}.pdf":
-        raise ValueError("staged publication PDF does not match the attempt identity")
-    _require_within(expected_attempt_dir, figures_dir / ".attempts", label="attempt")
-    figures_fd = _open_directory_nofollow(figures_dir)
-    try:
-        attempts_fd = _open_child_directory_nofollow(
-            figures_fd, ".attempts", create=False
-        )
-        try:
-            attempt_fd = _open_child_directory_nofollow(
-                attempts_fd, attempt_id, create=False
-            )
-            try:
-                _validate_regular_child(
-                    attempt_fd, f"{figure_name}.jpg", label="staged publication JPG"
-                )
-                _validate_regular_child(
-                    attempt_fd, f"{figure_name}.pdf", label="staged publication PDF"
-                )
-                _validate_optional_regular_child(
-                    figures_fd, f"{figure_name}.jpg", label="publication JPG"
-                )
-                _validate_optional_regular_child(
-                    figures_fd, f"{figure_name}.pdf", label="publication PDF"
-                )
-            finally:
-                os.close(attempt_fd)
-        finally:
-            os.close(attempts_fd)
-    finally:
-        os.close(figures_fd)
-    return figures_dir, attempt_id, figure_name
+    return _journal_owner._validate_registration_paths(attempt_dir=attempt_dir, staged_jpg=staged_jpg, staged_pdf=staged_pdf, final_jpg=final_jpg, final_pdf=final_pdf, published_record=published_record, bindings=sys.modules[__name__])
 
 
 def _hydrate_verified_journal(
     payload: dict[str, Any],
     journal_path: Path,
 ) -> dict[str, Any]:
-    if payload.get("schema_version") != TRANSACTION_SCHEMA_VERSION:
-        raise ValueError("unsupported publication transaction journal schema")
-    if any(field in payload for field in _RUNTIME_JOURNAL_FIELDS):
-        raise ValueError("publication transaction journal contains persisted paths")
-
-    session_id = str(payload.get("session_id") or "")
-    attempt_id = str(payload.get("attempt_id") or "")
-    figure_name = str(payload.get("figure_name") or "")
-    if not session_id:
-        raise ValueError("publication transaction journal has no session identity")
-    if attempt_id != _safe_component(attempt_id, "attempt"):
-        raise ValueError("publication transaction attempt identity is invalid")
-    if figure_name != _safe_component(figure_name, "figure"):
-        raise ValueError("publication transaction figure identity is invalid")
-
-    transaction_root = journal_path.parent.parent
-    if transaction_root.name != TRANSACTION_ROOT:
-        raise ValueError("publication journal is outside the transaction root")
-    figures_dir = _absolute(transaction_root.parent)
-    expected_transaction_dir = transaction_root / attempt_id
-    if journal_path.parent != expected_transaction_dir:
-        raise ValueError("publication journal directory does not match its attempt")
-    _require_within(journal_path.parent, transaction_root, label="transaction")
-
-    new_record = payload.get("new_record")
-    if not isinstance(new_record, dict):
-        raise ValueError("publication journal has no record snapshot")
-    new_record_id = str(payload.get("new_record_id") or "")
-    if not new_record_id or str(new_record.get("id") or "") != new_record_id:
-        raise ValueError("publication journal record identity is inconsistent")
-    if str(new_record.get("render_attempt_id") or "") != attempt_id:
-        raise ValueError("publication journal record attempt is inconsistent")
-    if str(new_record.get("name") or "") != figure_name:
-        raise ValueError("publication journal record figure name is inconsistent")
-
-    old_record_id = str(payload.get("old_record_id") or "")
-
-    attempt_dir = figures_dir / ".attempts" / attempt_id
-    transaction_dir = transaction_root / attempt_id
-    archive_dir = (
-        figures_dir / ".revisions" / _archive_record_component(old_record_id) / attempt_id
-        if old_record_id else None
-    )
-    hydrated = dict(payload)
-    hydrated.update({
-        "attempt_dir": str(attempt_dir),
-        "staged_jpg": str(attempt_dir / f"{figure_name}.jpg"),
-        "staged_pdf": str(attempt_dir / f"{figure_name}.pdf"),
-        "final_jpg": str(figures_dir / f"{figure_name}.jpg"),
-        "final_pdf": str(figures_dir / f"{figure_name}.pdf"),
-        "backup_jpg": str(transaction_dir / "previous.jpg"),
-        "backup_pdf": str(transaction_dir / "previous.pdf"),
-        "archive_jpg": (
-            str(archive_dir / f"{figure_name}.jpg") if archive_dir else ""
-        ),
-        "archive_pdf": (
-            str(archive_dir / f"{figure_name}.pdf") if archive_dir else ""
-        ),
-        "journal_path": str(journal_path),
-        "lock_keys": _publish_lock_keys(
-            figures_dir, figures_dir / f"{figure_name}.jpg", new_record
-        ),
-    })
-    return hydrated
+    return _journal_owner._hydrate_verified_journal(payload, journal_path, bindings=sys.modules[__name__])
 
 
 def _read_verified_journal(journal_path: Path) -> dict[str, Any]:
-    journal_path = _absolute(Path(journal_path))
-    raw = _read_transaction_file(
-        journal_path,
-        max_bytes=_MAX_JOURNAL_BYTES,
-        label="publication transaction journal",
-    )
-    payload = json.loads(raw.decode("utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError("publication transaction journal is not an object")
-    signature = str(payload.get("journal_hmac") or "")
-    if not signature or not hmac.compare_digest(
-        signature, sign_hmac_sha256(_journal_body(payload))
-    ):
-        raise ValueError("publication transaction journal HMAC is invalid")
-    return _hydrate_verified_journal(payload, journal_path)
+    return _journal_owner._read_verified_journal(journal_path, bindings=sys.modules[__name__])
 
 
 def _quarantine_transaction_dir(transaction_dir: Path) -> bool:
     """Isolate one untrusted root entry without following any journal path."""
-    transaction_dir = _absolute(Path(transaction_dir))
-    root = transaction_dir.parent
-    if root.name != TRANSACTION_ROOT or transaction_dir.name.startswith("."):
-        return False
-    destination_name = (
-        f"{_safe_component(transaction_dir.name, 'transaction')}-{uuid.uuid4().hex}"
-    )
-    figures_fd: int | None = None
-    root_fd: int | None = None
-    quarantine_fd: int | None = None
-    try:
-        figures_fd, root_fd = _open_transaction_root(root.parent, create=False)
-        quarantine_fd = _open_child_directory_nofollow(
-            root_fd, ".quarantine", create=True
-        )
-        os.rename(
-            transaction_dir.name,
-            destination_name,
-            src_dir_fd=root_fd,
-            dst_dir_fd=quarantine_fd,
-        )
-        os.fsync(root_fd)
-        os.fsync(quarantine_fd)
-        return True
-    except (OSError, ValueError):
-        logger.exception("Could not quarantine publication transaction %s", transaction_dir)
-        return False
-    finally:
-        if quarantine_fd is not None:
-            os.close(quarantine_fd)
-        if root_fd is not None:
-            os.close(root_fd)
-        if figures_fd is not None:
-            os.close(figures_fd)
+    return _journal_owner._quarantine_transaction_dir(transaction_dir, bindings=sys.modules[__name__])
 
 
 def _lock_file(figures_dir: Path, key: str) -> Path:
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-    return _absolute(figures_dir) / TRANSACTION_ROOT / ".locks" / f"{digest}.lock"
+    return _locks_owner._lock_file(figures_dir, key, bindings=sys.modules[__name__])
 
 
 def _lock_owner(
@@ -1230,12 +387,7 @@ def _lock_owner(
     attempt_id: str,
     keys: Iterable[str],
 ) -> _LockOwner:
-    return (
-        str(_absolute(figures_dir)),
-        str(session_id or ""),
-        str(attempt_id or ""),
-        tuple(sorted(set(keys))),
-    )
+    return _locks_owner._lock_owner(figures_dir, session_id, attempt_id, keys, bindings=sys.modules[__name__])
 
 
 def _acquire_publish_locks(
@@ -1245,64 +397,7 @@ def _acquire_publish_locks(
     *,
     session_id: str = "",
 ) -> str | None:
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover - ScAI's runtime is POSIX
-        return "Cross-process figure publishing requires POSIX file locks"
-
-    normalized_keys = tuple(sorted(set(keys)))
-    owner = _lock_owner(figures_dir, session_id, attempt_id, normalized_keys)
-    acquired: list[str] = []
-    figures_fd: int | None = None
-    root_fd: int | None = None
-    locks_fd: int | None = None
-    try:
-        figures_fd, root_fd = _open_transaction_root(figures_dir, create=True)
-        locks_fd = _open_child_directory_nofollow(root_fd, ".locks", create=True)
-        for key in normalized_keys:
-            held = _HELD_LOCKS.get(key)
-            if held is not None:
-                if held[0] == owner:
-                    continue
-                raise BlockingIOError(f"publication lock is held for {key}")
-            path = _lock_file(figures_dir, key)
-            descriptor = os.open(
-                path.name,
-                os.O_RDWR
-                | os.O_CREAT
-                | os.O_APPEND
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_CLOEXEC", 0),
-                0o600,
-                dir_fd=locks_fd,
-            )
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                os.close(descriptor)
-                raise ValueError("publication lock path is not a regular file")
-            handle = os.fdopen(descriptor, "a+b")
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except Exception:
-                handle.close()
-                raise
-            _HELD_LOCKS[key] = (owner, handle)
-            acquired.append(key)
-        return None
-    except (BlockingIOError, OSError, ValueError) as exc:
-        _release_publish_locks(
-            attempt_id,
-            keys=acquired,
-            figures_dir=figures_dir,
-            session_id=session_id,
-        )
-        return f"Another publication attempt is committing this figure: {exc}"
-    finally:
-        if locks_fd is not None:
-            os.close(locks_fd)
-        if root_fd is not None:
-            os.close(root_fd)
-        if figures_fd is not None:
-            os.close(figures_fd)
+    return _locks_owner._acquire_publish_locks(figures_dir, attempt_id, keys, session_id=session_id, bindings=sys.modules[__name__])
 
 
 def _release_publish_locks(
@@ -1312,40 +407,7 @@ def _release_publish_locks(
     figures_dir: Path | None = None,
     session_id: str | None = None,
 ) -> None:
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover
-        fcntl = None
-    candidates = list(keys) if keys is not None else list(_HELD_LOCKS)
-    scope = str(_absolute(figures_dir)) if figures_dir is not None else None
-    matching_owners: list[_LockOwner] = []
-    for key in candidates:
-        held = _HELD_LOCKS.get(key)
-        if held is None:
-            continue
-        owner = held[0]
-        if owner[2] != attempt_id:
-            continue
-        if scope is not None and owner[0] != scope:
-            continue
-        if session_id is not None and owner[1] != str(session_id or ""):
-            continue
-        if owner not in matching_owners:
-            matching_owners.append(owner)
-    # A legacy unscoped release may see equal attempt IDs in two workspaces.
-    # Release one complete ownership group, never every matching workspace.
-    selected_owner = matching_owners[0] if matching_owners else None
-    for key in candidates:
-        held = _HELD_LOCKS.get(key)
-        if held is None or held[0] != selected_owner:
-            continue
-        handle = held[1]
-        try:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            handle.close()
-            _HELD_LOCKS.pop(key, None)
+    return _locks_owner._release_publish_locks(attempt_id, keys=keys, figures_dir=figures_dir, session_id=session_id, bindings=sys.modules[__name__])
 
 
 def acquire_figure_publish_locks(
@@ -1355,33 +417,11 @@ def acquire_figure_publish_locks(
     published_record: Any,
 ) -> str | None:
     """Acquire path and semantic-lineage locks before choosing the old head."""
-    attempt_id = str(_value(published_record, "render_attempt_id", "") or "")
-    try:
-        _transaction_dir, journal_path = _journal_paths(figures_dir, attempt_id)
-        journal = _read_verified_journal(journal_path)
-    except Exception as exc:
-        return f"Could not verify the pending publication lock owner: {exc}"
-    if str(journal.get("new_record_id") or "") != str(
-        _value(published_record, "id", "") or ""
-    ):
-        return "Could not acquire a publication lock for a mismatched record"
-    return _acquire_publish_locks(
-        figures_dir,
-        attempt_id,
-        _publish_lock_keys(figures_dir, final_jpg, published_record),
-        session_id=str(journal.get("session_id") or ""),
-    )
+    return _locks_owner.acquire_figure_publish_locks(figures_dir=figures_dir, final_jpg=final_jpg, published_record=published_record, bindings=sys.modules[__name__])
 
 
 def _persist_journal(journal_path: Path, journal: dict[str, Any]) -> None:
-    payload = {
-        key: value
-        for key, value in journal.items()
-        if key not in _RUNTIME_JOURNAL_FIELDS and key != "journal_hmac"
-    }
-    payload["journal_hmac"] = sign_hmac_sha256(_journal_body(payload))
-    _atomic_json(journal_path, payload)
-    journal["journal_hmac"] = payload["journal_hmac"]
+    return _journal_owner._persist_journal(journal_path, journal, bindings=sys.modules[__name__])
 
 
 def _complete_step(
@@ -1391,120 +431,12 @@ def _complete_step(
     *,
     status: str | None = None,
 ) -> None:
-    completed = list(journal.get("completed_steps") or [])
-    if step not in completed:
-        completed.append(step)
-    journal["completed_steps"] = completed
-    if status is not None:
-        journal["status"] = status
-    _persist_journal(journal_path, journal)
+    return _journal_owner._complete_step(journal_path, journal, step, status=status, bindings=sys.modules[__name__])
 
 
 def _copy_durable(source: Path, destination: Path) -> None:
     """Copy a regular file atomically without following hidden path entries."""
-    source = _absolute(source)
-    destination = _absolute(destination)
-    source_parent_fd: int | None = None
-    destination_parent_fd: int | None = None
-    source_ancestors: list[int] = []
-    destination_ancestors: list[int] = []
-    source_fd: int | None = None
-    temporary_fd: int | None = None
-    temporary_name = f".{destination.name}.copy-{uuid.uuid4().hex}"
-    try:
-        source_parent_fd, source_ancestors = _open_known_file_parent(
-            source, create=False
-        )
-        destination_parent_fd, destination_ancestors = _open_known_file_parent(
-            destination, create=True
-        )
-        source_fd = os.open(
-            source.name,
-            os.O_RDONLY
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0),
-            dir_fd=source_parent_fd,
-        )
-        source_before = os.fstat(source_fd)
-        if not stat.S_ISREG(source_before.st_mode):
-            raise ValueError("publication copy source is not a regular file")
-        try:
-            destination_metadata = os.stat(
-                destination.name,
-                dir_fd=destination_parent_fd,
-                follow_symlinks=False,
-            )
-        except FileNotFoundError:
-            pass
-        else:
-            if not stat.S_ISREG(destination_metadata.st_mode):
-                raise ValueError(
-                    "publication copy destination is not a regular file"
-                )
-        temporary_fd = os.open(
-            temporary_name,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0),
-            0o600,
-            dir_fd=destination_parent_fd,
-        )
-        copied_size = 0
-        while True:
-            chunk = os.read(source_fd, 65_536)
-            if not chunk:
-                break
-            view = memoryview(chunk)
-            while view:
-                written = os.write(temporary_fd, view)
-                if written <= 0:
-                    raise OSError("short publication archive write")
-                view = view[written:]
-                copied_size += written
-        source_after = os.fstat(source_fd)
-        before_identity = (
-            source_before.st_dev,
-            source_before.st_ino,
-            source_before.st_size,
-            source_before.st_mtime_ns,
-            source_before.st_ctime_ns,
-        )
-        after_identity = (
-            source_after.st_dev,
-            source_after.st_ino,
-            source_after.st_size,
-            source_after.st_mtime_ns,
-            source_after.st_ctime_ns,
-        )
-        if before_identity != after_identity or copied_size != source_before.st_size:
-            raise ValueError("publication copy source changed while it was read")
-        os.fsync(temporary_fd)
-        os.close(temporary_fd)
-        temporary_fd = None
-        os.rename(
-            temporary_name,
-            destination.name,
-            src_dir_fd=destination_parent_fd,
-            dst_dir_fd=destination_parent_fd,
-        )
-        os.fsync(destination_parent_fd)
-    finally:
-        if source_fd is not None:
-            os.close(source_fd)
-        if temporary_fd is not None:
-            os.close(temporary_fd)
-        if destination_parent_fd is not None:
-            try:
-                os.unlink(temporary_name, dir_fd=destination_parent_fd)
-            except OSError:
-                pass
-            _close_parent_chain(
-                destination_parent_fd, destination_ancestors
-            )
-        if source_parent_fd is not None:
-            _close_parent_chain(source_parent_fd, source_ancestors)
+    return _filesystem_owner._copy_durable(source, destination, bindings=sys.modules[__name__])
 
 
 def register_pending_figure_attempt(
