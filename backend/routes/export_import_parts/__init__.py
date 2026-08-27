@@ -64,3 +64,4 @@ from .import_impl import (  # noqa: F401
     _remap_paths_in_text,
     _session_id_is_taken,
 )
+from .import_tar import ImportTarContext  # noqa: F401

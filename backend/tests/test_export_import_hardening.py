@@ -75,6 +75,81 @@ def _build_archive(
     return path
 
 
+@pytest.mark.asyncio
+async def test_import_phase_order_from_bind_through_publication(
+    monkeypatch, tmp_path,
+):
+    from backend.config import DATA_BASE_DIR
+    from backend.routes.export_import_parts import import_impl, import_tar
+    from backend.state import import_jobs, sessions
+
+    archive_session_id = str(uuid.uuid4())
+    archive = _build_archive(
+        tmp_path / "phase-order.tar.gz",
+        archive_session_id,
+        {f"{archive_session_id}/workspace/{archive_session_id}/result.txt": b"ok"},
+        data_base_dir=str(DATA_BASE_DIR),
+    )
+    import_job_id = "phase-order-job"
+    import_jobs[import_job_id] = {
+        "created_at": 1.0,
+        "cancel_requested": False,
+    }
+    trace = []
+    extract_seen = False
+
+    original_allocate = import_impl._allocate_import_session_id
+    original_resolve = import_tar._resolve_import_dest
+    original_rebind = import_tar._rebind_session_id_values
+    original_model = import_tar.AnalysisState
+    original_finalize = import_tar._finalize_imported_state
+    original_save = import_impl.async_save_session
+
+    def traced_allocate(*args, **kwargs):
+        trace.append("bind")
+        return original_allocate(*args, **kwargs)
+
+    def traced_resolve(*args, **kwargs):
+        nonlocal extract_seen
+        if not extract_seen:
+            trace.append("extract")
+            extract_seen = True
+        return original_resolve(*args, **kwargs)
+
+    def traced_rebind(*args, **kwargs):
+        trace.append("rebind")
+        return original_rebind(*args, **kwargs)
+
+    def traced_model(*args, **kwargs):
+        trace.append("validate")
+        return original_model(*args, **kwargs)
+
+    def traced_finalize(*args, **kwargs):
+        trace.append("finalize")
+        return original_finalize(*args, **kwargs)
+
+    async def traced_save(*args, **kwargs):
+        trace.append("publish")
+        return await original_save(*args, **kwargs)
+
+    monkeypatch.setattr(import_impl, "_allocate_import_session_id", traced_allocate)
+    monkeypatch.setattr(import_tar, "_resolve_import_dest", traced_resolve)
+    monkeypatch.setattr(import_tar, "_rebind_session_id_values", traced_rebind)
+    monkeypatch.setattr(import_tar, "AnalysisState", traced_model)
+    monkeypatch.setattr(import_tar, "_finalize_imported_state", traced_finalize)
+    monkeypatch.setattr(import_impl, "async_save_session", traced_save)
+
+    await import_impl._process_import_job(
+        str(archive), import_job_id, "owner",
+    )
+
+    assert import_jobs[import_job_id]["status"] == "completed"
+    assert trace == ["bind", "extract", "rebind", "validate", "finalize", "publish"]
+    imported_id = import_jobs[import_job_id]["session_id"]
+    sessions.pop(imported_id, None)
+    import_jobs.pop(import_job_id, None)
+
+
 # --- The catch-all destination: anything under the data root was writable ---
 
 
