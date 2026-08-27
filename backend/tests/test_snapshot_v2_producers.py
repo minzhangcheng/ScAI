@@ -374,9 +374,8 @@ async def test_run_boundary_catches_required_snapshot_blocked():
 
     run = SingleCellAnalysisWorkflow.run.__get__(wf, SingleCellAnalysisWorkflow)
 
-    with patch(
-        "backend.workflow.core.is_forward_resume_blocked",
-        return_value=False,
+    with patch_facade(
+        "backend.workflow.core", "is_forward_resume_blocked", return_value=False
     ):
         result = await run(state, "thread-1")
 
@@ -1242,9 +1241,8 @@ async def test_run_entry_guard_when_snapshot_failure_already_present():
     wf._set_status = _set_status
 
     run = SingleCellAnalysisWorkflow.run.__get__(wf, SingleCellAnalysisWorkflow)
-    with patch(
-        "backend.workflow.core.is_forward_resume_blocked",
-        return_value=False,
+    with patch_facade(
+        "backend.workflow.core", "is_forward_resume_blocked", return_value=False
     ):
         result = await run(state, "thread-1")
 

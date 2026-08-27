@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from backend.config._config import SystemConfig
+from backend.tests.split_facade import setattr_facade
 from backend.workflow.core import SingleCellAnalysisWorkflow
 
 
@@ -28,11 +29,11 @@ class _FakeCheckpointer:
 
 @pytest.mark.asyncio
 async def test_pause_keeps_plan_review_action(monkeypatch, tmp_path):
-    monkeypatch.setattr("backend.workflow.core.LLMManager", _FakeLLMManager)
-    monkeypatch.setattr("backend.workflow.core.LocalJupyterSandbox", _FakeSandbox)
-    monkeypatch.setattr("backend.workflow.core.AsyncSqliteSaver", _FakeCheckpointer)
-    monkeypatch.setattr("backend.workflow.core.get_session_states", lambda session_id: tmp_path / "states")
-    monkeypatch.setattr("backend.workflow.core.get_session_workspace", lambda session_id: tmp_path / "workspace")
+    setattr_facade(monkeypatch, "backend.workflow.core", "LLMManager", _FakeLLMManager)
+    setattr_facade(monkeypatch, "backend.workflow.core", "LocalJupyterSandbox", _FakeSandbox)
+    setattr_facade(monkeypatch, "backend.workflow.core", "AsyncSqliteSaver", _FakeCheckpointer)
+    setattr_facade(monkeypatch, "backend.workflow.core", "get_session_states", lambda session_id: tmp_path / "states")
+    setattr_facade(monkeypatch, "backend.workflow.core", "get_session_workspace", lambda session_id: tmp_path / "workspace")
     monkeypatch.setattr(SingleCellAnalysisWorkflow, "ensure_agent_ready", lambda self, agent_name: None)
     monkeypatch.setattr(SingleCellAnalysisWorkflow, "_build_graph", lambda self: None)
 

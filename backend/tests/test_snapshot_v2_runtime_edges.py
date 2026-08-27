@@ -922,9 +922,9 @@ def test_bioinformatics_step_loop_honours_the_superseded_signal():
     """The step loop waits on the safe point directly; it must unwind too."""
     import inspect
 
-    from backend.agents.bioinformatics_agent import BioinformaticsAgent
+    from backend.agents.bioinformatics import executor_loop
 
-    src = inspect.getsource(BioinformaticsAgent)
+    src = inspect.getsource(executor_loop.start_turn)
     idx = src.find("await sp.wait_for(session_id)")
     assert idx != -1, "step-loop safe-point wait not found"
 
@@ -1175,9 +1175,9 @@ def test_run_job_releases_the_safe_point_in_a_finally():
     session then failed SAFE_POINT_BUSY until a process restart."""
     import inspect
 
-    from backend.services.snapshot_v2.jobs import RestoreJobManager
+    from backend.services.snapshot_v2.jobs_parts import manager
 
-    src = inspect.getsource(RestoreJobManager._run_job)
+    src = inspect.getsource(manager._run_job)
 
     assert "finally:" in src, (
         "_run_job has no finally: a journal-write failure in an except handler "
@@ -1198,10 +1198,10 @@ def test_every_superseded_entry_point_unwinds_quietly():
     """
     import inspect
 
-    from backend.workflow.core import SingleCellAnalysisWorkflow
+    from backend.workflow.core_parts import execution
     from backend.services import workflow_runner
 
-    resume_src = inspect.getsource(SingleCellAnalysisWorkflow.resume)
+    resume_src = inspect.getsource(execution.resume)
     idx = resume_src.index("await self.await_restore_safe_point()")
     window = resume_src[max(0, idx - 400):idx]
     assert "try:" in window, (

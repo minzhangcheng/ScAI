@@ -1,0 +1,887 @@
+"""SingleCellAnalysisWorkflow execution method owners."""
+from __future__ import annotations
+
+
+def bind_facade(facade) -> None:
+    globals().update(
+        {name: value for name, value in vars(facade).items() if not name.startswith("__")}
+    )
+
+
+async def run(
+    self,
+    initial_state: AnalysisState,
+    thread_id: str
+) -> AnalysisState:
+    """
+    Run the complete workflow
+
+    Args:
+        initial_state: Initial analysis state
+        thread_id: Thread ID for checkpointing
+
+    Returns:
+        Final analysis state
+    """
+    from ...config import is_snapshot_v2_enabled
+    from ...services.snapshot_v2.feature_gate import (
+        normalize_disabled_snapshot_state,
+    )
+
+    if not is_snapshot_v2_enabled():
+        normalize_disabled_snapshot_state(
+            initial_state,
+            workflow_active=True,
+        )
+
+    # §1d: never run the graph forward on a kernel that is inconsistent with
+    # the restored state. Twin of the lifecycle run guard.
+    if is_forward_resume_blocked(
+        getattr(initial_state, "runtime_restore_status", "complete")
+    ):
+        logger.warning(
+            f"[{self.session_id}] run blocked: "
+            "runtime_restore_status=unavailable; refusing to start the graph"
+        )
+        self._set_status(initial_state, TaskStatus.FAILED)
+        return initial_state
+
+    # Entry guard: already blocked on required snapshot failure — hold,
+    # do not start the graph or clear the gate.
+    from ...services.snapshot_v2.errors import is_snapshot_failure_blocked
+    if is_snapshot_failure_blocked(initial_state):
+        logger.warning(
+            f"[{self.session_id}] run blocked: snapshot_failure already present; "
+            "holding WAITING_INPUT until Retry/Manage/Terminate"
+        )
+        self._set_status(initial_state, TaskStatus.WAITING_INPUT)
+        initial_state.wait_input_reason = "snapshot_failure"
+        try:
+            await self._send_state_sync(initial_state, "snapshot_failure")
+        except Exception:
+            pass
+        return initial_state
+
+    # Guard: terminal restore → no workflow, mark complete immediately.
+    if initial_state.restore_resume_kind == "terminal":
+        logger.info(
+            f"[{self.session_id}] Terminal restore — marking complete "
+            f"(current_round={initial_state.current_round})"
+        )
+        self._set_status(initial_state, TaskStatus.COMPLETED)
+        self._consume_restore_resume_metadata(initial_state)
+        return initial_state
+
+    # Guard: idle restore (branch_id set but no resume kind) → persist only.
+    # The session was restored from a manual snapshot with no continuation
+    # target; the user must explicitly start analysis from the UI.
+    # Exception: restore_start_intent="explicit_start" means the user clicked
+    # Start — let the graph run (restore_entry will preserve round/plan).
+    if (
+        initial_state.restore_resume_kind is None
+        and (
+            initial_state.restore_branch_id
+            or initial_state.last_restored_snapshot_id
+        )
+        and getattr(initial_state, "restore_start_intent", None) != "explicit_start"
+    ):
+        logger.info(
+            f"[{self.session_id}] Idle restore — no auto-start "
+            f"(branch={initial_state.restore_branch_id})"
+        )
+        # Ensure status reflects the idle state — PAUSED so the UI
+        # offers a "Start" / "Resume" button rather than "Analysis running".
+        if initial_state.status == TaskStatus.RUNNING:
+            self._set_status(initial_state, TaskStatus.PAUSED)
+        self._consume_restore_resume_metadata(initial_state)
+        return initial_state
+
+    # Store state for settings provider initialization
+    self._state = initial_state
+
+    try:
+        await self._send_message("status", "Initializing analysis system...")
+        await self.initialize()
+        logger.info(f"Workflow initialized for session {self.session_id}")
+    except Exception as e:
+        logger.exception("Failed to initialize workflow")
+        await self._send_message("error", f"Initialization failed: {str(e)}")
+        self._set_status(initial_state, TaskStatus.FAILED)
+        return initial_state
+
+    # Guard: restored wait-state snapshot → continuation, not fresh run.
+    if (
+        initial_state.restore_resume_kind == "semantic_gate"
+        and initial_state.restore_resume_gate in SEMANTIC_WAIT_GATES
+        and initial_state.status == TaskStatus.RUNNING
+    ):
+        return await self.resume_restored_wait_state(initial_state)
+
+    # Guard: graph-node restore → seed workflow state and start graph.
+    # This handles the case where a snapshot was taken at a specific graph
+    # node boundary. The initial workflow state is built from the restore
+    # context so the correct planning stage and round are carried forward.
+    if initial_state.restore_resume_kind == "graph_node":
+        logger.info(
+            f"[{self.session_id}] Graph-node restore — starting graph "
+            f"from node {initial_state.restore_resume_node} "
+            f"(round={initial_state.current_round})"
+        )
+
+    # Create initial workflow state
+    workflow_state = self._make_initial_workflow_state(initial_state)
+
+    # Run workflow
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": GRAPH_RECURSION_LIMIT}
+
+    # Verify workflow was properly initialized
+    if self.compiled_graph is None:
+        error_msg = "Workflow not properly initialized - compiled_graph is None"
+        logger.error(f"[{self.session_id}] {error_msg}")
+        await self._send_message("error", error_msg)
+        self._set_status(initial_state, TaskStatus.FAILED)
+        return initial_state
+
+    try:
+        logger.info(f"Starting workflow execution for {thread_id}")
+        final_state = await self.compiled_graph.ainvoke(
+            workflow_state,
+            config
+        )
+        logger.info(f"Workflow completed for {thread_id}")
+        return final_state["analysis_state"]
+
+    except WorkflowSupersededError as e:
+        # Deliberately does NOT touch session state: the restore already
+        # persisted the authoritative state, and a terminal status written
+        # here would overwrite exactly what the restore just installed.
+        logger.info(f"[{self.session_id}] Run superseded by restore: {e}")
+        return self._superseded_state(initial_state)
+
+    except WorkflowTerminatedError as e:
+        logger.warning(f"[{self.session_id}] Workflow terminated by user: {e}")
+        self._set_status(initial_state, TaskStatus.STOPPED)
+        initial_state.wait_input_reason = None
+        await self._send_state_sync(initial_state, StateSyncChangeType.LLM_RETRY.value)
+        return initial_state
+
+    except RequiredSnapshotBlocked as e:
+        logger.warning(
+            f"[{self.session_id}] Required snapshot blocked workflow: {e}"
+        )
+        from ...services.snapshot_v2.failure_gate import (
+            ensure_workflow_boundary_retry_context,
+        )
+
+        ensure_workflow_boundary_retry_context(
+            initial_state,
+            e,
+            previous_status="running",
+        )
+        try:
+            await self._send_state_sync(initial_state, "snapshot_failure")
+        except Exception:
+            pass
+        return initial_state
+
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        logger.error(f"Workflow execution failed: {error_detail}")
+        await self._send_message("error", f"Workflow execution failed: {str(e)}")
+        self._set_status(initial_state, TaskStatus.FAILED)
+        initial_state.add_message(
+            AgentType.PI,
+            MessageRole.SYSTEM,
+            f"Workflow execution failed: {str(e)}"
+        )
+        return initial_state
+
+async def generate_report(
+    self,
+    initial_state: AnalysisState,
+    thread_id: str
+) -> AnalysisState:
+    """
+    Run only the report generation phase, bypassing analysis rounds.
+    Used when a session completed all analysis rounds but was interrupted
+    before report generation finished.
+    """
+    from ...config import is_snapshot_v2_enabled
+    from ...services.snapshot_v2.feature_gate import (
+        normalize_disabled_snapshot_state,
+    )
+
+    if not is_snapshot_v2_enabled() and normalize_disabled_snapshot_state(
+        initial_state,
+        workflow_active=True,
+    ):
+        if initial_state.status == TaskStatus.COMPLETED:
+            return initial_state
+
+    # Entry guard: snapshot_failure or pending post-report snapshot means
+    # reports already ran; hold WAITING_INPUT for capture-only retry.
+    # WS reconnect must not re-run report generators.
+    from ...services.snapshot_v2.errors import is_snapshot_failure_blocked
+    pending = getattr(initial_state, "pending_required_snapshot", None)
+    if is_snapshot_failure_blocked(initial_state) or pending is not None:
+        logger.warning(
+            f"[{self.session_id}] generate_report blocked: "
+            f"snapshot_failure={is_snapshot_failure_blocked(initial_state)} "
+            f"pending_required_snapshot={pending is not None}; "
+            "holding WAITING_INPUT without re-running report generators"
+        )
+        from ...services.snapshot_v2.failure_gate import (
+            ensure_post_report_retry_context,
+            enter_snapshot_failure_gate,
+        )
+
+        if pending is not None and not initial_state.snapshot_failure:
+            enter_snapshot_failure_gate(
+                initial_state,
+                {
+                    "code": "pending_required_snapshot",
+                    "message": (
+                        "Post-report snapshot is pending; use Retry to "
+                        "re-enter capture only (reports will not re-run), "
+                        "or Skip to complete without this snapshot."
+                    ),
+                    "allowed_actions": ["retry", "skip", "manage", "terminate"],
+                },
+                retry_context={
+                    "producer": "post_report",
+                    "resume_policy": "complete",
+                    "snapshot_request": dict(pending),
+                    "previous_status": "generating_report",
+                    "report_generation_id": pending.get("report_generation_id"),
+                },
+            )
+        else:
+            # Always merge typed post_report context (service bare gate
+            # may have snapshot_failure without retry_context).
+            ensure_post_report_retry_context(
+                initial_state,
+                previous_status="generating_report",
+                snapshot_request=(
+                    dict(pending) if isinstance(pending, dict) else {"phase": "post_report"}
+                ),
+            )
+        try:
+            await self._send_state_sync(initial_state, "snapshot_failure")
+        except Exception:
+            pass
+        return initial_state
+
+    # Store state for settings provider initialization
+    self._state = initial_state
+
+    # Consume any integration-gate finalize request: once we commit to
+    # report-only generation the flag must be cleared, otherwise a later WS
+    # reconnect would see final_report_requested=True and re-trigger report
+    # generation on every reconnect. The live integration-wait path clears
+    # this in _wait_for_user_input, but the no-workflow report-only path
+    # bypasses that node.
+    initial_state.consume_final_report_request()
+
+    try:
+        await self._send_message("status", "Resuming report generation (analysis already complete)...")
+        await self.initialize()
+        logger.info(f"[{self.session_id}] Workflow initialized for report-only generation")
+    except Exception as e:
+        logger.exception(f"[{self.session_id}] Failed to initialize for report generation")
+        await self._send_message("error", f"Initialization failed: {str(e)}")
+        self._set_status(initial_state, TaskStatus.FAILED)
+        return initial_state
+
+    # Create workflow state with existing analysis data
+    config = {"configurable": {"thread_id": thread_id}}
+    if self.compiled_graph is None:
+        self._build_graph()
+
+    workflow_state = None
+    try:
+        snapshot = await self.compiled_graph.aget_state(config)
+        if snapshot and snapshot.values:
+            workflow_state = snapshot.values
+            workflow_state["analysis_state"] = initial_state
+            workflow_state.pop("report_blocked", None)
+            if initial_state.current_round > len(initial_state.round_results):
+                logger.info(f"[{self.session_id}] Found incomplete round {initial_state.current_round}, running pi_synthesis before report")
+                workflow_state = await self._pi_synthesis(workflow_state)
+    except WorkflowSupersededError as e:
+        return self._superseded_report_result(initial_state, e)
+    except Exception as e:
+        logger.warning(f"[{self.session_id}] Could not load state from checkpointer: {e}")
+
+    if workflow_state is None:
+        workflow_state = {
+            "analysis_state": initial_state,
+            "current_round": initial_state.current_round,
+            "pi_instructions": {},
+            "pathology_result": None,
+            "bioinformatics_result": None,
+            "biochemistry_result": None,
+            "literature_result": None,
+            "round_result": None,
+            "should_continue": False,
+            "error": None,
+            "messages": []
+        }
+
+    try:
+        logger.info(f"[{self.session_id}] Running report generation only (skipping analysis)")
+        state = await self._generate_final_report(workflow_state)
+        state = await self._generate_graphic_abstract(state)
+        state = await self._generate_detailed_report(state)
+        logger.info(f"[{self.session_id}] Report generation completed")
+        return state["analysis_state"]
+    except RequiredSnapshotBlocked as e:
+        logger.warning(
+            f"[{self.session_id}] Required snapshot blocked during report generation: {e}"
+        )
+        from ...services.snapshot_v2.failure_gate import (
+            ensure_post_report_retry_context,
+        )
+
+        # Always merge typed post_report context (bare service gate may
+        # already set snapshot_failure without retry_context).
+        ensure_post_report_retry_context(
+            initial_state,
+            e,
+            previous_status="generating_report",
+        )
+        try:
+            await self._send_state_sync(initial_state, "snapshot_failure")
+        except Exception:
+            pass
+        return initial_state
+    except WorkflowSupersededError as e:
+        return self._superseded_report_result(initial_state, e)
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        logger.error(f"[{self.session_id}] Report generation failed: {error_detail}")
+        await self._send_message("error", f"Report generation failed: {str(e)}")
+        self._set_status(initial_state, TaskStatus.FAILED)
+        return initial_state
+
+def _superseded_state(self, *fallbacks: Optional[AnalysisState]) -> Optional[AnalysisState]:
+    """The state a superseded run must return, and the flag it must drop.
+
+    Shared tail of every ``WorkflowSupersededError`` handler in this class.
+    The restore has already persisted the authoritative object, so the live
+    session wins over whatever this run was holding; the fallbacks are tried
+    in order only when it is gone. The session-scoped superseded flag is
+    cleared because this run IS the superseded one and it has now unwound —
+    forgetting that in one handler leaks the flag across the process.
+    """
+    from ...state import sessions as live_sessions
+    from ...services.snapshot_v2.safe_point import (
+        get_snapshot_safe_point_manager as _sp_clear,
+    )
+
+    _sp_clear().clear_superseded(self.session_id)
+    state = live_sessions.get(self.session_id)
+    for fallback in fallbacks:
+        if state:
+            break
+        state = fallback
+    return state
+
+def _superseded_report_result(
+    self, initial_state: AnalysisState, exc: BaseException,
+) -> AnalysisState:
+    """Unwind a report run that a committed restore superseded.
+
+    `generate_report` reaches acknowledgement sites (``_pi_synthesis``'s
+    node-entry hook, the post-report capture's handover), so it can be
+    frozen on a restore safe point and woken with its state already
+    replaced. Both of its generic handlers used to absorb that: the
+    checkpointer-load one mislabelled it as "could not load state from
+    checkpointer" and kept generating — producing reports and a post-report
+    snapshot from the state the restore had just discarded — and the
+    trailing one wrote FAILED, which is exactly what WorkflowSupersededError
+    forbids (see helpers.py).
+
+    Deliberately does not touch session state: the restore already persisted
+    the authoritative object. Returning that object rather than
+    ``initial_state`` keeps a caller that saves the result from writing the
+    pre-restore state back. The session-scoped superseded flag is cleared
+    here because this run IS the superseded one and it has now unwound; no
+    report path did that, so the flag used to outlive the process.
+    """
+    logger.info(
+        f"[{self.session_id}] Report generation superseded by restore: {exc}"
+    )
+    # Keep a workflow-scoped record before dropping the session-scoped one.
+    # The report runner's `finally` calls close(), which reads both to decide
+    # `save=not superseded`; a report workflow is never registered in
+    # `state.workflows`, so `_retire_superseded_workflow` cannot set the flag
+    # on it and close() would otherwise start a kernel purely to re-dump the
+    # runtime the restore just installed and verified.
+    self._restore_superseded = True
+    return self._superseded_state(initial_state)
+
+async def _invoke_restore_entry(
+    self, analysis_state: AnalysisState, thread_id: str,
+) -> AnalysisState:
+    self._set_status(analysis_state, TaskStatus.RUNNING)
+    self._current_analysis_state = analysis_state
+    workflow_state = self._make_initial_workflow_state(
+        analysis_state,
+        current_round=analysis_state.current_round,
+    )
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": GRAPH_RECURSION_LIMIT,
+    }
+    final_state = await self.compiled_graph.ainvoke(workflow_state, config)
+    return final_state["analysis_state"]
+
+async def resume(
+    self,
+    thread_id: str,
+    analysis_state: Optional[AnalysisState] = None
+) -> AnalysisState:
+    """Resume a paused workflow
+
+    Args:
+        thread_id: Thread ID for checkpointing
+        analysis_state: Optional analysis state to restore custom config from
+    """
+    logger.info(f"[{self.session_id}] Resuming workflow for thread {thread_id}")
+
+    if analysis_state is not None:
+        from ...config import is_snapshot_v2_enabled
+        from ...services.snapshot_v2.feature_gate import (
+            normalize_disabled_snapshot_state,
+        )
+
+        if not is_snapshot_v2_enabled():
+            normalize_disabled_snapshot_state(
+                analysis_state,
+                workflow_active=True,
+            )
+
+    # §1d: never run the graph forward on a kernel that is inconsistent with
+    # the restored state. This is the workflow-level twin of the lifecycle
+    # resume block and covers the WebSocket-reconnect resume path.
+    if analysis_state is not None and is_forward_resume_blocked(
+        getattr(analysis_state, "runtime_restore_status", "complete")
+    ):
+        logger.warning(
+            f"[{self.session_id}] resume blocked: runtime_restore_status=unavailable; "
+            "holding without running the graph"
+        )
+        return analysis_state
+
+    # Entry guard: already blocked on required snapshot failure.
+    from ...services.snapshot_v2.errors import is_snapshot_failure_blocked
+    if analysis_state is not None and is_snapshot_failure_blocked(analysis_state):
+        logger.warning(
+            f"[{self.session_id}] resume blocked: snapshot_failure already present; "
+            "holding without running the graph"
+        )
+        self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
+        analysis_state.wait_input_reason = "snapshot_failure"
+        return analysis_state
+
+    # Terminal restore → no workflow, mark complete immediately.
+    if analysis_state is not None and analysis_state.restore_resume_kind == "terminal":
+        logger.info(
+            f"[{self.session_id}] Terminal restore in resume — marking complete "
+            f"(round={analysis_state.current_round})"
+        )
+        self._set_status(analysis_state, TaskStatus.COMPLETED)
+        self._consume_restore_resume_metadata(analysis_state)
+        return analysis_state
+
+    # Re-initialize agents and components if not already initialized
+    if self.compiled_graph is None:
+        # Restore state for settings provider initialization
+        if analysis_state:
+            self._state = analysis_state
+        logger.info(f"[{self.session_id}] Re-initializing workflow components for resume")
+        await self.initialize()
+
+    # A restore Retry may reconstruct the workflow after its new job has
+    # already requested a safe point. Acknowledge before touching the
+    # checkpointer, then remain frozen until the restore owner releases it.
+    #
+    # This await sits outside the try below, so a restore that commits while
+    # we are frozen here would otherwise escape resume() entirely and land
+    # in the caller's generic `except Exception` — which writes
+    # TaskStatus.FAILED over the state the restore just persisted. Unwind
+    # the same way the in-graph handlers do: quietly, returning the restored
+    # state untouched.
+    try:
+        await self.await_restore_safe_point()
+    except WorkflowSupersededError as exc:
+        logger.info(
+            f"[{self.session_id}] Resume superseded by restore before the "
+            f"graph was entered: {exc}"
+        )
+        return self._superseded_state(analysis_state)
+    if analysis_state is not None:
+        from ...state import sessions as live_sessions
+
+        refreshed_state = live_sessions.get(self.session_id)
+        if refreshed_state is not None:
+            analysis_state = refreshed_state
+            self._state = refreshed_state
+
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": GRAPH_RECURSION_LIMIT}
+
+    # Get current state
+    state = await self.compiled_graph.aget_state(config)
+
+    # Graph already at END (no pending nodes) — nothing to resume.
+    # Continuing would inject stale RUNNING status and ainvoke(None)
+    # returns it unchanged, causing an infinite resume loop on every
+    # WebSocket reconnect (kernel restart → reconnect → resume → RUNNING).
+    if state and state.values and not state.next:
+        effective = state.values.get("analysis_state") or analysis_state
+        terminal_statuses = {
+            TaskStatus.COMPLETED,
+            TaskStatus.STOPPED,
+            TaskStatus.FAILED,
+        }
+        if effective and effective.status not in terminal_statuses:
+            self._set_status(effective, TaskStatus.COMPLETED)
+            logger.info(
+                f"[{self.session_id}] Resume requested but graph already "
+                "terminated; marking complete"
+            )
+        else:
+            logger.info(
+                f"[{self.session_id}] Resume requested but graph already "
+                f"terminated; preserving status={getattr(effective, 'status', None)}"
+            )
+        return effective
+
+    if state and state.values:
+        # Restore _current_analysis_state for callbacks
+        self._current_analysis_state = state.values.get("analysis_state")
+        self._current_graph_state = state.values
+
+        # Inject latest analysis_state if provided (so user changes during pause are picked up)
+        if analysis_state:
+            await self.compiled_graph.aupdate_state(config, {"analysis_state": analysis_state})
+            self._current_analysis_state = analysis_state
+            # Keep in-memory graph state in sync with the updated checkpoint
+            self._current_graph_state = {**state.values, "analysis_state": analysis_state}
+
+        # Sync skip_nodes from sandbox_state to graph state (retry-node API stores
+        # skip decisions in analysis_state.sandbox_state, but with_retry checks
+        # the top-level WorkflowState)
+        skip_nodes = []
+        effective_analysis = analysis_state or state.values.get("analysis_state")
+        if effective_analysis and effective_analysis.sandbox_state:
+            skip_nodes = effective_analysis.sandbox_state.get("skip_nodes", [])
+        if skip_nodes:
+            await self.compiled_graph.aupdate_state(config, {"skip_nodes": skip_nodes})
+            logger.info(f"[{self.session_id}] Injected skip_nodes into graph state: {skip_nodes}")
+
+        # Resume from checkpoint
+        logger.info(f"[{self.session_id}] Found saved state, resuming execution")
+        try:
+            final_state = await self.compiled_graph.ainvoke(
+                None,
+                config
+            )
+            logger.info(f"[{self.session_id}] Workflow resumed and completed")
+            return final_state["analysis_state"]
+        except WorkflowSupersededError as e:
+            logger.info(f"[{self.session_id}] Resume superseded by restore: {e}")
+            return self._superseded_state(
+                analysis_state, state.values.get("analysis_state")
+            )
+
+        except WorkflowTerminatedError as e:
+            logger.warning(f"[{self.session_id}] Workflow terminated by user: {e}")
+            effective = analysis_state or state.values.get("analysis_state")
+            if effective:
+                self._set_status(effective, TaskStatus.STOPPED)
+                effective.wait_input_reason = None
+            return effective or analysis_state or state.values["analysis_state"]
+        except RequiredSnapshotBlocked as e:
+            logger.warning(
+                f"[{self.session_id}] Required snapshot blocked on resume: {e}"
+            )
+            from ...services.snapshot_v2.failure_gate import (
+                ensure_workflow_boundary_retry_context,
+            )
+
+            effective = analysis_state or state.values.get("analysis_state")
+            if effective:
+                ensure_workflow_boundary_retry_context(
+                    effective,
+                    e,
+                    previous_status="running",
+                )
+            return effective or analysis_state
+
+    # No checkpoint found. Exact continuation only — never fall back to a
+    # generic fresh run from initialize_round.
+    if analysis_state is None:
+        logger.error(f"[{self.session_id}] No checkpoint and no analysis_state for {thread_id}")
+        raise ValueError(f"No saved state found for thread {thread_id}")
+
+    if (
+        analysis_state.restore_resume_kind == "semantic_gate"
+        and analysis_state.restore_resume_gate in SEMANTIC_WAIT_GATES
+        and analysis_state.status == TaskStatus.RUNNING
+    ):
+        return await self.resume_restored_wait_state(analysis_state)
+
+    if analysis_state.restore_resume_kind == "graph_node":
+        logger.info(
+            f"[{self.session_id}] Graph-node restore without checkpoint — "
+            f"seeding exact next node {analysis_state.restore_resume_node} "
+            f"(round={analysis_state.current_round})"
+        )
+        self._set_status(analysis_state, TaskStatus.RUNNING)
+        self._current_analysis_state = analysis_state
+        workflow_state = self._make_initial_workflow_state(
+            analysis_state, current_round=analysis_state.current_round
+        )
+        if analysis_state.restore_resume_node:
+            workflow_state["_restore_resume_node"] = analysis_state.restore_resume_node
+        try:
+            final_state = await self.compiled_graph.ainvoke(workflow_state, config)
+            logger.info(f"[{self.session_id}] Exact graph-node continuation completed")
+            self._consume_restore_resume_metadata(final_state["analysis_state"])
+            return final_state["analysis_state"]
+        except WorkflowSupersededError as e:
+            logger.info(f"[{self.session_id}] Resume superseded by restore: {e}")
+            return self._superseded_state(analysis_state)
+
+        except WorkflowTerminatedError as e:
+            logger.warning(f"[{self.session_id}] Workflow terminated by user: {e}")
+            if analysis_state:
+                self._set_status(analysis_state, TaskStatus.STOPPED)
+                analysis_state.wait_input_reason = None
+            return analysis_state
+        except RequiredSnapshotBlocked as e:
+            logger.warning(
+                f"[{self.session_id}] Required snapshot blocked after restore: {e}"
+            )
+            from ...services.snapshot_v2.failure_gate import (
+                ensure_workflow_boundary_retry_context,
+            )
+
+            if analysis_state:
+                ensure_workflow_boundary_retry_context(
+                    analysis_state,
+                    e,
+                    previous_status="running",
+                )
+            return analysis_state
+
+    if analysis_state.status in (TaskStatus.WAITING_INPUT, TaskStatus.WAITING_ANNOTATION):
+        logger.info(
+            f"[{self.session_id}] Status is {analysis_state.status.value}, "
+            f"deferring to HITL-hold path"
+        )
+        return analysis_state
+
+    if getattr(analysis_state, "restore_start_intent", None) == "explicit_start":
+        return await self._invoke_restore_entry(analysis_state, thread_id)
+
+    # Idle / unknown: do not invent a fresh initialize_round run.
+    logger.info(
+        f"[{self.session_id}] No checkpoint and no exact continuation target "
+        f"(kind={analysis_state.restore_resume_kind}); holding without fresh run "
+        f"(current_round={analysis_state.current_round})"
+    )
+    if analysis_state.status == TaskStatus.RUNNING:
+        self._set_status(analysis_state, TaskStatus.PAUSED)
+    self._consume_restore_resume_metadata(analysis_state)
+    return analysis_state
+
+async def _recover_failed_pause_persistence(
+    self,
+    thread_id: str,
+    analysis_state: AnalysisState,
+) -> None:
+    """Own the live-kernel pause failure gate until one action completes."""
+    try:
+        action = await self._wait_for_runtime_persistence_intervention(
+            analysis_state,
+            successful_status=TaskStatus.PAUSED,
+            persist_transitions=True,
+        )
+        if action == "retry":
+            self._set_status(analysis_state, TaskStatus.PAUSED)
+        elif action == "recompute":
+            self._set_status(analysis_state, TaskStatus.RUNNING)
+            self._pause_event.set()
+            previous = getattr(analysis_state, "pre_pause_status", None)
+            if previous == TaskStatus.WAITING_ANNOTATION:
+                self._annotation_event.set()
+            elif previous == TaskStatus.WAITING_PLAN_REVIEW:
+                self._plan_review_event.set()
+            elif previous == TaskStatus.WAITING_SPECIES_INPUT:
+                self._species_event.set()
+            elif previous in (
+                TaskStatus.WAITING_INPUT,
+            ):
+                self._continue_event.set()
+        elif action == "terminate":
+            self._set_status(analysis_state, TaskStatus.STOPPED)
+            analysis_state.termination_reason = "runtime_persistence_failure"
+            # Release every cooperative waiter after checkpointing a stop
+            # decision. The graph observes should_continue=False at its next
+            # conditional boundary rather than remaining parked forever.
+            config = {"configurable": {"thread_id": thread_id}}
+            try:
+                await self.compiled_graph.aupdate_state(config, {
+                    "analysis_state": analysis_state,
+                    "human_stop_requested": True,
+                    "should_continue": False,
+                })
+            except Exception:
+                logger.warning(
+                    "[%s] Could not checkpoint pause-failure termination",
+                    self.session_id,
+                    exc_info=True,
+                )
+            self._pause_event.set()
+            self._continue_event.set()
+            self._annotation_event.set()
+            self._plan_review_event.set()
+            self._species_event.set()
+        await self._send_state_sync(
+            analysis_state,
+            StateSyncChangeType.RUNTIME_PERSISTENCE_FAILURE.value,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception(
+            "[%s] Pause runtime-persistence recovery task failed",
+            self.session_id,
+        )
+    finally:
+        self._runtime_persistence_pause_task = None
+
+async def pause(
+    self,
+    thread_id: str,
+    analysis_state: Optional[AnalysisState] = None,
+) -> Dict[str, Any]:
+    """Pause the workflow and save sandbox state including Python session.
+
+    Clears the cooperative pause gate FIRST so the bioinformatics agent's
+    autonomous loop and the @with_retry wrapper block at their next check,
+    then waits for any in-flight sandbox.execute to drain via the shared
+    _exec_lock (see LocalJupyterSandbox._init_exec_lock) before persisting state.
+    """
+    logger.info(f"[{self.session_id}] Pausing workflow for thread {thread_id}")
+    # Block waiters before doing anything else — once cleared, the next time
+    # the agent loop or a node entry checks the event it will await here.
+    self._pause_event.clear()
+    # Also clear the HITL gate the workflow is actually blocked on, so
+    # resume() can re-set the correct one.  Without this, resume() only
+    # sets _pause_event but the workflow stays stuck on the HITL event.
+    self._continue_event.clear()
+    self._annotation_event.clear()
+    self._plan_review_event.clear()
+    self._species_event.clear()
+    self._species_user_response = None
+
+    config = {"configurable": {"thread_id": thread_id}}
+    state = await self.compiled_graph.aget_state(config)
+
+    if state and state.values:
+        analysis_state = analysis_state or state.values["analysis_state"]
+    if analysis_state is None:
+        # Internal callers without an AnalysisState still receive the
+        # cooperative-gate result. HTTP lifecycle callers always pass the
+        # authoritative object and therefore take the durable path below.
+        return {
+            "success": True,
+            "status": TaskStatus.PAUSED.value,
+            "still_blocked": False,
+        }
+
+    # The first graph checkpoint may not exist yet.  The lifecycle state is
+    # nevertheless authoritative and must record the pause before success
+    # is exposed; otherwise the cleared cooperative gate leaves a durable
+    # RUNNING session that can never advance.
+    self._set_status(analysis_state, TaskStatus.PAUSED)
+
+    # Save sandbox state including Python session using dill. The Jupyter
+    # kernel is single-threaded, so this queues behind any in-flight
+    # execute() and captures a clean post-step snapshot.
+    if self.sandbox:
+        try:
+            saved = await self.sandbox.save_session()
+            persistence = self.sandbox.sync_runtime_persistence_state(
+                analysis_state
+            )
+            if not saved or persistence.get("status") == "failed":
+                raise RuntimeError(
+                    "runtime persistence did not commit a current generation"
+                )
+            self.sandbox.notebook_state.save()
+        except Exception:
+            logger.warning(
+                "[%s] Pause persistence failed; arming live-kernel gate",
+                self.session_id,
+                exc_info=True,
+            )
+            from ...services.runtime_persistence_gate import (
+                enter_runtime_persistence_gate,
+            )
+
+            try:
+                persistence = self.sandbox.sync_runtime_persistence_state(
+                    analysis_state
+                )
+            except Exception as sync_error:
+                persistence = dict(
+                    getattr(analysis_state, "runtime_persistence", None) or {}
+                )
+                persistence.update({
+                    "status": "failed",
+                    "error_summary": (
+                        "Pause runtime state synchronization failed: "
+                        f"{type(sync_error).__name__}"
+                    ),
+                })
+            failure = enter_runtime_persistence_gate(
+                analysis_state,
+                persistence,
+                degraded_recovery=bool(
+                    persistence.get("degraded_recovery")
+                ),
+            )
+            task = getattr(
+                self, "_runtime_persistence_pause_task", None,
+            )
+            if task is None or task.done():
+                task = asyncio.create_task(
+                    self._recover_failed_pause_persistence(
+                        thread_id, analysis_state,
+                    ),
+                    name=f"runtime-persistence-pause:{self.session_id}",
+                )
+                self._runtime_persistence_pause_task = task
+            # Let the recovery task establish its in-memory arbitration
+            # fields before the HTTP response exposes the gate token.
+            await asyncio.sleep(0)
+            return {
+                "success": False,
+                "status": analysis_state.status.value,
+                "still_blocked": True,
+                "snapshot_failure": failure,
+            }
+        logger.info(f"[{self.session_id}] Sandbox state saved")
+
+    logger.info(f"[{self.session_id}] Workflow paused successfully")
+    return {
+        "success": True,
+        "status": analysis_state.status.value,
+        "still_blocked": False,
+    }

@@ -15,11 +15,12 @@ from unittest.mock import AsyncMock
 from backend.constants import GATE_INTEGRATION_SELECTION
 from backend.models.schemas import AnalysisState, TaskStatus
 from backend.workflow.core import SingleCellAnalysisWorkflow
+from backend.workflow.core_parts import execution
 from backend.workflow.routing import RoutingMixin
 
 
 def test_generate_report_clears_final_report_requested():
-    src = inspect.getsource(SingleCellAnalysisWorkflow.generate_report)
+    src = inspect.getsource(execution.generate_report)
     assert "consume_final_report_request()" in src, (
         "generate_report must consume final_report_requested so reconnect "
         "does not re-trigger report-only generation"
