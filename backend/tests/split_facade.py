@@ -29,6 +29,7 @@ SPLIT_PACKAGES: dict[str, str] = {
     "backend.agents.bioinformatics_agent": "backend.agents.bioinformatics",
     "backend.agents.literature_agent": "backend.agents.literature",
     "backend.agents.pi_agent": "backend.agents.pi",
+    "backend.agents.pathology_agent": "backend.agents.pathology_parts",
     "backend.agents.supervisor_agent": "backend.agents.supervisor",
     "backend.models.schemas": "backend.models.schema_parts",
     "backend.routes.chat": "backend.routes.chat_parts",
