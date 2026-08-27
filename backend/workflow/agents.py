@@ -86,6 +86,73 @@ class AgentNodesMixin(
 
 
     
+    async def _adopt_workspace_figures(self, analysis_state, planning_stage) -> int:
+        """Bind unregistered workspace renders to the plan they already satisfy.
+
+        The executor's savefig output never becomes a PublicationFigure, and the
+        figure contract matches records only. Measured on session 3d675631: 37
+        images on disk, one generate_publication_figure call all round, and 16
+        requirements reported at 0/1 eligible with every one of them rendered.
+
+        Best-effort by construction. Any failure -- discovery, the PI call,
+        malformed bindings -- leaves publication_figures untouched and lets the
+        audit report exactly what it reports today. This can only add eligible
+        figures; it never removes or invalidates one.
+
+        Returns how many records were adopted.
+        """
+        try:
+            from ..config import get_session_workspace
+            from ..services.figure_adoption import (
+                adopt_bindings,
+                build_adoption_candidates,
+                validate_bindings,
+            )
+
+            probe = audit_figure_contract(
+                analysis_state,
+                plan=analysis_state.current_plan,
+                planning_stage=planning_stage,
+            )
+            if probe.passed:
+                return 0
+
+            workspace = get_session_workspace(analysis_state.id)
+            candidates = build_adoption_candidates(analysis_state, workspace)
+            if not candidates:
+                return 0
+
+            requirements = [item.requirement for item in probe.missing]
+            proposed = await self.pi_agent.bind_workspace_figures(
+                analysis_state, requirements, candidates
+            )
+            bindings = validate_bindings(proposed, requirements, candidates)
+            if not bindings:
+                logger.info(
+                    f"[{self.session_id}] figure adoption: no binding survived "
+                    f"validation for {len(requirements)} unmet requirement(s)"
+                )
+                return 0
+
+            # ACCEPTED_WITH_RESERVATIONS is the caller's attestation that the PI
+            # was shown the images. bind_workspace_figures is a vision call and
+            # returns [] when no vision model is configured, so reaching here
+            # means the review happened.
+            adopted = adopt_bindings(analysis_state, bindings, candidates)
+            if adopted:
+                logger.info(
+                    f"[{self.session_id}] figure adoption: registered "
+                    f"{len(adopted)} workspace render(s) against the plan"
+                )
+            return len(adopted)
+        except Exception:
+            logger.warning(
+                f"[{self.session_id}] figure adoption failed; the audit will "
+                f"report the unmet requirements as it did before",
+                exc_info=True,
+            )
+            return 0
+
     @with_retry("bioinformatics_analysis")
     async def _bioinformatics_analysis(self, state: WorkflowState) -> WorkflowState:
         """
@@ -490,6 +557,12 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             # that triggered it.
             audit_summary = self._audit_round_plan_execution(analysis_state, result)
             review_meta["plan_audit"] = audit_summary
+
+        # Register workspace renders the executor produced with plt.savefig but
+        # never declared. Runs BEFORE the audit below, which reads records and
+        # nothing else: an unregistered file is invisible to it however plainly
+        # it sits on disk. See figure_adoption and its spec.
+        await self._adopt_workspace_figures(analysis_state, planning_stage)
 
         # Re-evaluate after deterministic baselines and any supplementary work.
         # The executor's own audit was taken before these workflow-owned repair

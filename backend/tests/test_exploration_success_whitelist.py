@@ -1,13 +1,23 @@
 """P1-12: whitelist semantics for _exploration_round_succeeded.
 
-Only status == "completed" (or "completed_with_fallback") should count as
-success. All other terminal/non-terminal statuses (error, failed, timeout,
-max_steps_reached, waiting_data, skipped, no_data, empty, missing) must
-NOT advance the workflow into the innovation phase.
+Only a clean settlement -- status "completed", or "partial" with findings --
+counts as success. All other terminal/non-terminal statuses (error, failed,
+timeout, max_steps_reached, completed_with_fallback, waiting_data, skipped,
+no_data, empty, missing) must NOT advance the workflow into the innovation
+phase.
 
 Rationale (docs/problems.md P1-12): the previous blacklist treated unknown
 or partial-failure statuses as success, causing premature EXPLORATION ->
 INNOVATION transition with empty exploration reports.
+
+"partial" is on the success side because it does not mean the loop stopped
+early: it is what the executor returns when report_findings was accepted but
+a bounded gate force-released, and what workflow.agents substitutes when the
+required-figure contract is unmet. Both are quality disclosures carried
+separately by evidence_gate_degraded / evidence_verified. This list did not
+have an entry for it when "partial" was introduced in 0.34.9, and the
+resulting refusal deadlocked a real session out of the innovation phase --
+see test_exploration_partial_status.py.
 """
 import re
 import pytest
@@ -25,6 +35,10 @@ class _Probe(SynthesisMixin):
     "status,expected_success",
     [
         ("completed", True),
+        # Findings are supplied by the fixture below, so this is the
+        # "partial with substantive findings" case. The empty-findings case
+        # lives in test_exploration_partial_status.py.
+        ("partial", True),
         ("completed_with_fallback", False),
         ("error", False),
         ("failed", False),

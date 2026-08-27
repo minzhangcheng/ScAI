@@ -775,6 +775,146 @@ an earlier version may win.
 
         return len(candidates) - 1
 
+    #: Bounded so one call cannot carry an unbounded image payload. Anything
+    #: dropped is logged by name rather than silently truncated.
+    MAX_ADOPTION_CANDIDATES = 24
+
+    async def bind_workspace_figures(
+        self,
+        state: AnalysisState,
+        requirements: List[Any],
+        candidates: List[Any],
+    ) -> List[Any]:
+        """Decide which workspace render answers which plan figure requirement.
+
+        This is a vision call by necessity, not by preference. ``adopt_bindings``
+        records ACCEPTED_WITH_RESERVATIONS, and ``is_report_eligible`` admits a
+        non-diagnostic record only at a reviewed status -- so the attestation has
+        to be real. Seeing the images is also the only dependable way to tell a
+        superseded draft from the render that replaced it; filenames must never
+        be read for that (see ``PublicationFigure.logical_figure_id``).
+
+        Returns ``[]`` when vision is unavailable or the call fails. An empty
+        result simply leaves every requirement missing, which is the honest
+        outcome and exactly what the audit already reports today.
+        """
+        from backend.services.figure_adoption import AdoptionCandidate, FigureBinding
+        from backend.utils.image_utils import compress_image_to_base64
+
+        if not requirements or not candidates:
+            return []
+        if not self.has_vision:
+            logger.info(
+                "[PI] bind_workspace_figures skipped: no vision model, so no "
+                "review can be attested and nothing may be adopted"
+            )
+            return []
+
+        offered = list(candidates)[: self.MAX_ADOPTION_CANDIDATES]
+        if len(candidates) > len(offered):
+            dropped = [c.name for c in list(candidates)[len(offered):]]
+            logger.warning(
+                "[PI] bind_workspace_figures capped at %d candidates; not shown: %s",
+                self.MAX_ADOPTION_CANDIDATES, ", ".join(dropped),
+            )
+
+        images: List[str] = []
+        shown: List[Any] = []
+        for candidate in offered:
+            try:
+                images.append(compress_image_to_base64(candidate.path, max_width=900))
+                shown.append(candidate)
+            except Exception:
+                logger.warning(
+                    "[PI] could not read candidate %r for review; not offered",
+                    candidate.path, exc_info=True,
+                )
+        if not shown:
+            return []
+
+        req_lines = "\n".join(
+            f"- step {getattr(r, 'plan_step_id', None)} needs a "
+            f"{getattr(r, 'figure_type', 'figure')}: {getattr(r, 'description', '')}"
+            for r in requirements
+        )
+        cand_lines = "\n".join(
+            f"[image {i + 1}] filename={c.name!r} — {c.provenance or 'no recorded provenance'}"
+            for i, c in enumerate(shown)
+        )
+
+        prompt = f"""These images were produced during the analysis but were never registered
+against the approved plan, so the platform cannot tell which of them satisfies
+which planned deliverable. Decide that now.
+
+Research objective: {state.initial_instruction}
+
+Unmet plan requirements:
+{req_lines}
+
+Candidate images, in the order attached:
+{cand_lines}
+
+For each requirement you can satisfy, return one binding. Rules:
+- Look at the image. Bind a requirement only when the image really is that kind
+  of figure and really shows what the requirement describes.
+- Several candidates may be successive attempts at the same figure. Choose the
+  finished one by what the images show and by the recorded provenance. Do NOT
+  infer version order from filename suffixes such as _final, _fixed or _v2 —
+  those are unreliable and in past sessions the "_fixed" file was the older one.
+- Use each filename at most once.
+- If nothing among these images satisfies a requirement, leave it out. Do not
+  stretch an unrelated figure to fill a gap; an unmet requirement is reported
+  honestly, a wrong binding files a real figure under the wrong step.
+- caption: one sentence describing what the figure shows, for the report.
+
+Respond with ONLY a JSON array:
+[{{"plan_step_id": <int>, "figure_type": "<type>", "filename": "<name>", "caption": "<one sentence>"}}]
+Return [] if none of the images satisfy any requirement.
+"""
+
+        try:
+            self._set_llm_context()
+            response = await self.llm_client.chat_with_vision(
+                model=self.model,
+                text_prompt=prompt,
+                images=images,
+                temperature=0.1,
+                system_prompt=self.system_prompt,
+            )
+            text = (response.content or "") if response else ""
+        except Exception as e:
+            logger.warning(f"[PI] bind_workspace_figures vision call failed: {e}")
+            return []
+
+        parsed = safe_parse_json_array(text.strip())
+        if not isinstance(parsed, list):
+            logger.warning("[PI] bind_workspace_figures returned no usable JSON array")
+            return []
+
+        bindings: List[Any] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            try:
+                step = int(item["plan_step_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            filename = str(item.get("filename") or "").strip()
+            figure_type = str(item.get("figure_type") or "").strip()
+            if not filename or not figure_type:
+                continue
+            bindings.append(FigureBinding(
+                plan_step_id=step,
+                figure_type=figure_type,
+                filename=filename,
+                caption=str(item.get("caption") or "").strip(),
+            ))
+        logger.info(
+            "[PI] bind_workspace_figures proposed %d binding(s) over %d candidate(s)",
+            len(bindings), len(shown),
+        )
+        return bindings
+
     @staticmethod
     def _describe_candidate(figure: Dict[str, Any]) -> str:
         """One prompt line per candidate, using whatever the caller supplied.

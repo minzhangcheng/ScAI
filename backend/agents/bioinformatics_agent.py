@@ -3001,7 +3001,10 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         # exactly one satisfiable response: reword the claim as
                         # descriptive. Asking twice more trains the phrasing, not
                         # the analysis, and burns two steps doing it.
-                        _unsatisfiable = {"cell-level-inference", "unidentifiable-design"}
+                        # unidentifiable-design used to sit here. It advises
+                        # now (see check_analysis_unit), so it never reaches
+                        # `blocking` and listing it would be a dead branch.
+                        _unsatisfiable = {"cell-level-inference"}
                         _cap = (1 if all(f.gate in _unsatisfiable
                                          for f in _stats_report.blocking)
                                 else MAX_STATS_GATE_REJECTIONS)

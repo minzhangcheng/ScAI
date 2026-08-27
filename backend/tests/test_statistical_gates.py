@@ -165,11 +165,14 @@ def test_partially_unknown_sample_counts_do_not_raise():
 
 # --------------------------------------------------------------- design
 
-def test_single_sample_per_condition_blocks_an_inferential_claim():
+def test_single_sample_per_condition_advises_on_an_inferential_claim():
+    """Advisory since the count reaching this check is a cross-modality
+    minimum; see test_analysis_unit_advisory.py."""
     findings = ["the effect of condition on this program is significant"]
     out = check_analysis_unit(findings, {"A": 1, "B": 1})
     assert len(out) == 1
     assert out[0].rule_id == "one-sample-per-condition-is-unidentifiable"
+    assert out[0].severity == "advise"
 
 
 def test_descriptive_wording_passes_at_n1():
@@ -379,14 +382,17 @@ def _frozen_plan(plan_id, name, method, *, family=()):
                        testing_family=list(family))
 
 
-def test_a_single_sample_group_still_reaches_the_design_gate():
-    """The n=1 group is the input check_analysis_unit exists to refuse.
+def test_a_single_sample_group_still_reaches_the_design_check():
+    """The n=1 group is the input check_analysis_unit exists to flag.
 
     A 1-vs-1 pilot uploaded with "No sample distinction" leaves every group at
     sample_count 1 with no numbered file. Withholding those groups empties the
     mapping, and both check_analysis_unit and check_permutation_at_small_n
-    return early on an empty one -- so the one design the gate was written for
+    return early on an empty one -- so the one design the check was written for
     would be the one design it never sees.
+
+    What it does on arrival is advise, not refuse; the assertion below tracks
+    reachability, which is what this test is for.
     """
     state = _live_state(
         treatment_groups=[_group("ga", "Vehicle", 1), _group("gb", "Treated", 1)],
@@ -398,7 +404,8 @@ def test_a_single_sample_group_still_reaches_the_design_gate():
     report = run_gates(["Treatment significantly increases Il6 (p = 0.003)."],
                        score_definitions=[], scoring_plans=[],
                        samples_per_group=samples)
-    assert [f.gate for f in report.blocking] == ["unidentifiable-design"]
+    assert [f.gate for f in report.advisories] == ["unidentifiable-design"]
+    assert report.blocking == []
 
 
 def test_numbered_uploads_raise_a_count_left_at_the_schema_default():
@@ -581,12 +588,16 @@ def test_a_conventional_cutoff_is_not_a_resolution_floor_violation():
                         scores) == ["p-below-resampling-resolution"]
 
 
-def test_a_detected_singleton_reaches_the_analysis_unit_gate():
+def test_a_detected_singleton_reaches_the_analysis_unit_check():
     """The end of the measured failure.
 
     Declared 3, uploaded 1, every DataFile carrying sample_number=None: the old
     resolver computed max(3, 0) = 3 and check_analysis_unit -- which exists for
     exactly this design -- returned nothing.
+
+    Single-modality on purpose: this pins that the singleton is still seen. The
+    multi-modality case, where the same collapse produces a count that describes
+    a different arm than the finding, is test_analysis_unit_advisory.py.
     """
     from backend.models.schemas import SampleCountRecord
 
@@ -607,4 +618,5 @@ def test_a_detected_singleton_reaches_the_analysis_unit_gate():
     report = run_gates(["DKO significantly increases Mt1 (p = 0.004)."],
                        score_definitions=[], scoring_plans=[],
                        samples_per_group=samples)
-    assert [f.gate for f in report.blocking] == ["unidentifiable-design"]
+    assert [f.gate for f in report.advisories] == ["unidentifiable-design"]
+    assert report.blocking == []

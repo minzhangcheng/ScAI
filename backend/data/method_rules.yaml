@@ -185,7 +185,7 @@ rules:
   source_skill: single-cell/differential-abundance
 - id: one-sample-per-condition-is-unidentifiable
   title: With n=1 per group the effect is not estimable at all
-  enforcement: gate
+  enforcement: advisory
   applies_when: A design has a single sample, library or donor per condition.
   rule: When condition is perfectly confounded with sample, report contrasts as descriptive
     observations about those specimens. Do not present them as condition-level effects, with

@@ -1041,10 +1041,32 @@ def check_panel_redundancy(score_definitions, scoring_plans):
 
 
 def check_analysis_unit(findings, samples_per_group):
-    """A single sample per condition cannot support a condition-level claim."""
+    """A single sample per condition cannot support a condition-level claim.
+
+    Advisory, not a refusal. The rule is arithmetic -- with one library per
+    condition the condition effect and the sample effect are the same parameter
+    -- but this check cannot tell which modality a finding rests on, and
+    ``samples_per_group`` reaches it as one number per group, reduced across
+    the session's modalities at the minimum. In a session pairing replicated
+    bulk with a single-nucleus library per group, that number describes the
+    single-cell arm and refuses the bulk one.
+
+    Measured on session 3d675631: a bulk contrast at three replicates per group
+    was refused by a count of 1 taken from the single-cell arm. The refusal had
+    no satisfiable response -- restating an estimable bulk contrast as
+    descriptive is wrong -- so the executor reworded its single-cell findings
+    instead, resubmitted, was refused again, and the ceiling force-released,
+    marking the whole round's evidence degraded.
+
+    n=1 single-cell work is ordinary and publishable as descriptive analysis.
+    A note the model cannot suppress is proportionate to that; a refusal that
+    can be wrong and cannot be worked off is not. See
+    test_analysis_unit_advisory.py.
+    """
     if not samples_per_group:
         return []
-    singletons = [g for g, n in samples_per_group.items() if n is not None and n < 2]
+    singletons = [(g, n) for g, n in samples_per_group.items()
+                  if n is not None and n < 2]
     if not singletons:
         return []
 
@@ -1058,15 +1080,21 @@ def check_analysis_unit(findings, samples_per_group):
             continue
         if any(m in lowered for m in descriptive_markers):
             continue
+        counts = ", ".join(f"{g}={n}" for g, n in singletons)
         out.append(GateFinding(
             gate="unidentifiable-design",
             rule_id="one-sample-per-condition-is-unidentifiable",
+            severity="advise",
             also_see=("biological-replicate-is-the-unit",),
             detail=(
-                f"group(s) {', '.join(map(str, singletons))} have fewer than 2 "
-                f"samples, so condition is perfectly confounded with sample and "
-                f"the effect is not estimable at all. State such contrasts as "
-                f"descriptive observations about the specimens."
+                f"the replicate counts these checks were given are {counts}. "
+                f"Each is the lowest across this session's modalities for that "
+                f"group, so it can understate a modality holding more. Where a "
+                f"contrast rests on the modality a count came from, condition "
+                f"is perfectly confounded with sample and the effect is not "
+                f"estimable -- state such contrasts as descriptive "
+                f"observations about the specimens. Where it rests on a "
+                f"modality with replicates, this note does not apply."
             ),
         ))
         break
