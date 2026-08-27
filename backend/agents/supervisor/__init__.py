@@ -1,4 +1,5 @@
 """Mixin modules composing SupervisorAgent."""
+from . import evaluation_state, evaluation_support  # noqa: F401
 from .runtime import RuntimeMixin  # noqa: F401
 from .evaluation import EvaluationMixin  # noqa: F401
 from .report_content import ReportContentMixin  # noqa: F401
