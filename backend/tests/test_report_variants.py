@@ -1,4 +1,6 @@
 import os
+import hashlib
+import re
 from pathlib import Path
 
 import pytest
@@ -6,6 +8,15 @@ from backend.services.report.variants import _render_direction_evidence_section_
 from backend.services.report.variants import _deduplicate_detailed_figure_blocks
 from backend.tests.split_facade import setattr_facade
 from backend.utils.blob_store import externalize_blobs
+
+
+def _normalized_html_digest(path):
+    html = Path(path).read_text(encoding="utf-8")
+    html = re.sub(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", "<TIMESTAMP>", html)
+    html = re.sub(
+        r"\b[0-9a-f]{8}-[0-9a-f-]{27,}\b", "<UUID>", html,
+    )
+    return hashlib.sha256(html.encode()).hexdigest()
 
 
 def test_render_direction_evidence_section_from_lists_empty():
@@ -70,6 +81,42 @@ def _patch_report_paths(monkeypatch, tmp_path):
     setattr_facade(monkeypatch, facade, "get_session_dir", lambda _session_id: session_root)
     setattr_facade(monkeypatch, facade, "get_session_reports", lambda _session_id: reports_dir)
     return session_root, reports_dir
+
+
+def test_static_variant_normalized_html_is_stable(tmp_path, monkeypatch):
+    from backend.models.schemas import ExplorationReport, RoundResult
+    from backend.services.report.variants import (
+        generate_annotation_context_report_html,
+        generate_exploration_report_html,
+        generate_integration_report_html,
+    )
+
+    state = _make_integration_state()
+    session_root, reports_dir = _patch_report_paths(monkeypatch, tmp_path)
+    workspace = session_root / "workspace"
+    workspace.mkdir(parents=True)
+    monkeypatch.setattr(
+        "backend.config.get_session_workspace", lambda _session_id: workspace,
+    )
+    monkeypatch.setattr(
+        "backend.config.get_session_reports", lambda _session_id: reports_dir,
+    )
+
+    paths = {
+        "exploration": generate_exploration_report_html(
+            state,
+            ExplorationReport(),
+            RoundResult(round_number=1, phase="exploration"),
+        ),
+        "annotation": generate_annotation_context_report_html(state, None, []),
+        "integration": generate_integration_report_html(state, [], []),
+    }
+
+    assert {name: _normalized_html_digest(path) for name, path in paths.items()} == {
+        "exploration": "7a6f5c8738d3569dfe026c8832d42aa4da3c06f72c80fc9f39484508aeddbdaa",
+        "annotation": "26f08ad70a0ee87a291b179103ab74b509aac4ac784399b8b140a20840a3de98",
+        "integration": "39e7468e3da3a851d52c228b29fd4927f08091c0f85b12b7f4cbd251fe65d05f",
+    }
 
 
 def test_generate_integration_report_html_with_candidates(tmp_path, monkeypatch):

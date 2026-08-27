@@ -37,6 +37,7 @@ SPLIT_PACKAGES: dict[str, str] = {
     "backend.services.export_lifecycle": "backend.services.export_lifecycle_parts",
     "backend.services.report.variants": "backend.services.report.variants_parts",
     "backend.services.report.figure_transactions": "backend.services.report.figure_transaction_parts",
+    "backend.services.report.generator": "backend.services.report.generator_parts",
     "backend.services.session_deletion": "backend.services.session_deletion_parts",
     "backend.services.snapshot_v2.restore": "backend.services.snapshot_v2.restore_parts",
     "backend.services.snapshot_v2.runtime": "backend.services.snapshot_v2.runtime_parts",

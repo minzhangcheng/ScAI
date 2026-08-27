@@ -702,6 +702,14 @@ async def test_force_fallback_is_forwarded_without_checkpoint_resume(
 async def test_forced_fallback_staged_pipeline_never_calls_an_llm(
     monkeypatch, tmp_path,
 ):
+    from backend.services.report import generator as generator_module
+
+    trace = []
+
+    def record(label, value):
+        trace.append(label)
+        return value
+
     generator = DetailedReportGenerator(
         llm_client=object(),
         pi_model="pi",
@@ -730,7 +738,11 @@ async def test_forced_fallback_staged_pipeline_never_calls_an_llm(
     monkeypatch.setattr(
         "backend.services.report.generator.CheckpointManager", Checkpoint,
     )
-    monkeypatch.setattr(generator, "_report_progress", AsyncMock())
+
+    async def report_progress(value, *_args):
+        trace.append(f"progress-{int(value)}")
+
+    monkeypatch.setattr(generator, "_report_progress", report_progress)
     monkeypatch.setattr(
         generator,
         "_pi_chat",
@@ -741,36 +753,43 @@ async def test_forced_fallback_staged_pipeline_never_calls_an_llm(
         "_chat_with_vision_fallback",
         AsyncMock(side_effect=AssertionError("vision call in deterministic fallback")),
     )
-    monkeypatch.setattr(generator, "_scan_existing_figures", lambda **_kwargs: [])
-    monkeypatch.setattr(generator, "_scan_existing_tables", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        generator, "_scan_existing_figures",
+        lambda **_kwargs: record("scan-figures", []),
+    )
+    monkeypatch.setattr(
+        generator, "_scan_existing_tables",
+        lambda **_kwargs: record("scan-tables", []),
+    )
     monkeypatch.setattr(
         generator,
         "_build_analysis_record",
-        lambda _state: {
+        lambda _state: record("analysis-record", {
             "total_code_cells": 0,
             "analysis_steps": [],
             "total_rounds": 0,
-        },
+        }),
     )
     monkeypatch.setattr(
         generator,
         "_extract_findings",
-        lambda _state: {
+        lambda _state: record("findings", {
             "bioinformatics": [],
             "pathology": [],
             "biochemistry": [],
             "literature": [],
             "summary": "Retained workflow evidence only.",
             "cluster_annotations": "Not available",
-        },
+        }),
     )
     monkeypatch.setattr(
-        generator, "_extract_cluster_annotations_from_state", lambda _state: None,
+        generator, "_extract_cluster_annotations_from_state",
+        lambda _state: record("annotations", None),
     )
     monkeypatch.setattr(
         generator,
         "_create_fallback_plan_with_existing_figures",
-        lambda _state, _figures: {
+        lambda _state, _figures: record("fallback-plan", {
             "title": "Partial retained-evidence report",
             "sections": [{
                 "id": "retained",
@@ -780,22 +799,60 @@ async def test_forced_fallback_staged_pipeline_never_calls_an_llm(
                 "existing_figures": [],
                 "existing_tables": [],
             }],
-        },
+        }),
     )
-    monkeypatch.setattr(generator, "_build_full_analysis_log", lambda _state: [])
     monkeypatch.setattr(
-        generator, "_maybe_generate_reproducibility_bundle", lambda **_kwargs: None,
+        generator, "_build_full_analysis_log",
+        lambda _state: record("analysis-log", []),
+    )
+    monkeypatch.setattr(
+        generator, "_maybe_generate_reproducibility_bundle",
+        lambda **_kwargs: record("reproducibility", None),
     )
     monkeypatch.setattr(
         "backend.services.report.generator.write_interaction_record_files",
-        lambda *_args, **_kwargs: [],
+        lambda *_args, **_kwargs: record("interaction-records", []),
     )
     monkeypatch.setattr(
         "backend.services.report.generator.write_literature_report",
-        lambda *_args, **_kwargs: None,
+        lambda *_args, **_kwargs: record("literature-report", None),
     )
 
+    real_lineage = generator_module.build_lineage_report_state
+    monkeypatch.setattr(
+        generator_module,
+        "build_lineage_report_state",
+        lambda *args, **kwargs: record("lineage", real_lineage(*args, **kwargs)),
+    )
+    real_coverage = generator_module.ensure_report_plan_figure_coverage
+    monkeypatch.setattr(
+        generator_module,
+        "ensure_report_plan_figure_coverage",
+        lambda *args, **kwargs: record("plan-coverage", real_coverage(*args, **kwargs)),
+    )
+
+    real_section = generator._generate_section_from_existing_figures
+    real_abstract = generator._generate_abstract
+    real_conclusions = generator._generate_conclusions
+
+    async def generate_section(*args, **kwargs):
+        trace.append("section")
+        return await real_section(*args, **kwargs)
+
+    async def generate_abstract(*args, **kwargs):
+        trace.append("abstract")
+        return await real_abstract(*args, **kwargs)
+
+    async def generate_conclusions(*args, **kwargs):
+        trace.append("conclusions")
+        return await real_conclusions(*args, **kwargs)
+
+    monkeypatch.setattr(generator, "_generate_section_from_existing_figures", generate_section)
+    monkeypatch.setattr(generator, "_generate_abstract", generate_abstract)
+    monkeypatch.setattr(generator, "_generate_conclusions", generate_conclusions)
+
     async def write_html(_report, _language, state=None):
+        trace.append("html")
         path = generator.output_dir / "report.html"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("<html>partial</html>", encoding="utf-8")
@@ -815,6 +872,31 @@ async def test_forced_fallback_staged_pipeline_never_calls_an_llm(
     assert report["status"] == "partial"
     assert report["degraded_fallback"] is True
     assert "deterministically" in report["abstract"]
+    assert trace == [
+        "lineage",
+        "progress-2",
+        "progress-5",
+        "analysis-record",
+        "progress-10",
+        "scan-figures",
+        "scan-tables",
+        "progress-15",
+        "findings",
+        "annotations",
+        "fallback-plan",
+        "plan-coverage",
+        "progress-35",
+        "section",
+        "abstract",
+        "conclusions",
+        "interaction-records",
+        "analysis-log",
+        "literature-report",
+        "reproducibility",
+        "progress-95",
+        "html",
+        "progress-100",
+    ]
     generator._pi_chat.assert_not_awaited()
     generator._chat_with_vision_fallback.assert_not_awaited()
 
