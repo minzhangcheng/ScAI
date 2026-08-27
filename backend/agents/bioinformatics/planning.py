@@ -29,6 +29,7 @@ from ...utils.sandbox import (
     LocalJupyterSandbox, CodeExecutionResult, _TPL_NOOP_INSTALL,
 )
 from ...utils.checkpoint import CheckpointManager
+from ...constants import PROFILED_OBJECTS_KEY
 import inspect
 import json as _json
 from backend.services import ora_kernel
@@ -564,12 +565,50 @@ You are REVISING the remaining steps based on new findings."""
             state.build_experimental_design_summary(),
             max_chars=8_000,
         )
+
+        # The pre-planning profiling pass already read these files and left the
+        # objects in the kernel. Without this note the planner writes a load
+        # step that re-reads them, and -- worse -- an acceptance condition that
+        # restates the declared sample count, which is exactly the condition the
+        # data could not satisfy. Empty when no profiling pass ran, which is
+        # every session already on disk.
+        #
+        # Gated to a genuine first plan of round 1: this function also serves
+        # round 2+ and mid-round revisions, and neither should see it. The
+        # profiling pass runs once, in round 1, but its sandbox_state entry is
+        # never cleared, so `profiled` alone stays truthy in every later round
+        # too -- current_round has to gate it. And existing_plan is only ever
+        # None on the very first call for a round (see the three branches in
+        # _planning_dialogue); a revision already carries "Completed steps
+        # MUST NOT be changed" from revision_context, which this note's "the
+        # first step should verify the loaded object" directly contradicts.
+        profiled = (getattr(state, "sandbox_state", None) or {}).get(
+            PROFILED_OBJECTS_KEY
+        ) or []
+        is_first_plan_of_round_one = (
+            existing_plan is None
+            and int(getattr(state, "current_round", 0) or 0) == 1
+        )
+        loaded_objects_block = ""
+        if profiled and is_first_plan_of_round_one:
+            loaded_objects_block = (
+                "\n\nThe sequencing data is ALREADY LOADED in the analysis "
+                f"kernel as: {', '.join(profiled)}. Replicate counts per group "
+                "and data type were established by reading it and appear above."
+                "\nDo NOT plan a step that re-reads these files from disk. Do "
+                "NOT plan a step whose acceptance condition restates how many "
+                "samples are expected -- the counts above are the measurement, "
+                "not a target. The first step should verify the loaded object: "
+                "its dimensions, its obs columns, and the group labels it "
+                "carries."
+            )
+
         research_context = self._research_context_block(state)
 
         prompt = f"""You are planning a single-cell RNA-seq bioinformatics analysis. Generate a method-level analysis plan.
 
 ## Data Context
-{data_desc}
+{data_desc}{loaded_objects_block}
 {research_context}
 
 ## PI's Analysis Goals

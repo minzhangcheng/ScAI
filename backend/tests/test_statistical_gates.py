@@ -579,3 +579,32 @@ def test_a_conventional_cutoff_is_not_a_resolution_floor_violation():
     # A value that is not a conventional cutoff and is under the floor still goes.
     assert _floor_gates(["Preranked GSEA: NES = 2.4, q = 0.0004."],
                         scores) == ["p-below-resampling-resolution"]
+
+
+def test_a_detected_singleton_reaches_the_analysis_unit_gate():
+    """The end of the measured failure.
+
+    Declared 3, uploaded 1, every DataFile carrying sample_number=None: the old
+    resolver computed max(3, 0) = 3 and check_analysis_unit -- which exists for
+    exactly this design -- returned nothing.
+    """
+    from backend.models.schemas import SampleCountRecord
+
+    state = _live_state(
+        treatment_groups=[_group("g1", "Con", 3), _group("g2", "DKO", 3)],
+        data_files=[_uploaded("g1", None), _uploaded("g2", None)],
+        current_round=1,
+    )
+    state.detected_sample_counts = [
+        SampleCountRecord(group_id=gid, group_name=name, section="sequencing",
+                          data_type="scRNA-seq", detected_count=1,
+                          declared_count=3, method="obs_column:sample",
+                          evidence="single value", conflicts=True)
+        for gid, name in (("g1", "Con"), ("g2", "DKO"))
+    ]
+    samples = bio_mod._gate_samples_per_group(state)
+    assert samples == {"Con": 1, "DKO": 1}
+    report = run_gates(["DKO significantly increases Mt1 (p = 0.004)."],
+                       score_definitions=[], scoring_plans=[],
+                       samples_per_group=samples)
+    assert [f.gate for f in report.blocking] == ["unidentifiable-design"]

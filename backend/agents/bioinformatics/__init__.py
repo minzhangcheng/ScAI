@@ -8,6 +8,7 @@ from .planning import PlanningMixin  # noqa: F401
 from .figures import FiguresMixin  # noqa: F401
 from .diagrams import DiagramsMixin  # noqa: F401
 from .lifecycle import LifecycleMixin  # noqa: F401
+from .profiling import ProfilingMixin  # noqa: F401
 
 __all__ = [
     "ContextMixin",
@@ -19,4 +20,5 @@ __all__ = [
     "FiguresMixin",
     "DiagramsMixin",
     "LifecycleMixin",
+    "ProfilingMixin",
 ]

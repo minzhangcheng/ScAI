@@ -70,6 +70,7 @@ from .agent_nodes.shared import (  # noqa: F401
 from .agent_nodes import (  # noqa: F401
     ModalityNodesMixin,
     LiteratureNodeMixin,
+    ProfilingNodeMixin,
 )
 
 
@@ -79,6 +80,7 @@ logger = logging.getLogger(__name__)
 class AgentNodesMixin(
     ModalityNodesMixin,
     LiteratureNodeMixin,
+    ProfilingNodeMixin,
 ):
     """Mixin providing agent-node execution methods. Composed into SingleCellAnalysisWorkflow."""
 

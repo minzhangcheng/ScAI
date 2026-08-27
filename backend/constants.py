@@ -5,12 +5,13 @@ action enums, and LLM failure intervention constants.
 """
 from enum import Enum
 
-VERSION = "0.39.40"
+VERSION = "0.39.41"
 
 
 # ── Authoritative graph node registry — single source of truth ─────
 WORKFLOW_GRAPH_NODES: frozenset[str] = frozenset({
-    "restore_entry", "initialize_round", "pi_planning", "planning_dialogue",
+    "restore_entry", "initialize_round", "data_profiling", "pi_planning",
+    "planning_dialogue",
     "user_review_gate", "pathology_analysis", "bioinformatics_analysis",
     "biochemistry_analysis", "literature_research", "pi_synthesis",
     "wait_for_user_input", "check_convergence", "generate_final_report",
@@ -103,6 +104,12 @@ CORE_AGENTS = frozenset({"pi", "bioinformatics", "literature"})
 # ── PI-agent signalling constants ──────────────────────────────────
 # Sentinel tag injected into PI responses to signal plan revision is needed
 PLAN_REVISION_NEEDED_TAG = "[__PLAN_REVISION_NEEDED__]"
+
+# sandbox_state key holding the kernel variable names the pre-planning
+# profiling pass left behind. Written by the data_profiling node, read by the
+# plan prompt in backend/agents/bioinformatics/planning.py -- two different
+# layers, so the name lives here rather than as a literal in both.
+PROFILED_OBJECTS_KEY = "profiled_objects_v1"
 PI_REVIEW_FALLBACK_DECISION = "revise"
 
 # HITL signal sentinel values used in analysis_state.user_chosen_direction and

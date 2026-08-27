@@ -24,6 +24,7 @@ class GraphMixin:
         # Add nodes
         self.graph.add_node("restore_entry", self._restore_entry)
         self.graph.add_node("initialize_round", self._initialize_round)
+        self.graph.add_node("data_profiling", self._data_profiling)
         self.graph.add_node("pi_planning", self._pi_planning)
         self.graph.add_node("planning_dialogue", self._planning_dialogue)
         self.graph.add_node("user_review_gate", self._user_review_gate)
@@ -46,10 +47,12 @@ class GraphMixin:
             "initialize_round",
             self._should_continue_after_init,
             {
-                "continue": "pi_planning",
+                "continue": "data_profiling",
                 "stop": "generate_final_report",
+                # Inert branch, kept on purpose -- see backend/workflow/initialize.py:262-277.
                 **{f"route_{n}": n for n in [
-                    "initialize_round", "pi_planning", "planning_dialogue",
+                    "initialize_round", "data_profiling", "pi_planning",
+                    "planning_dialogue",
                     "user_review_gate", "pathology_analysis", "bioinformatics_analysis",
                     "biochemistry_analysis", "literature_research", "pi_synthesis",
                     "wait_for_user_input", "check_convergence",
@@ -58,6 +61,13 @@ class GraphMixin:
                 ]},
             }
         )
+
+        # Replicate counts are measured before anything plans against them:
+        # build_experimental_design_summary is what pi_planning reads, and a
+        # declared count in that string is what produced an unsatisfiable
+        # acceptance condition in a plan step. The node is a pass-through
+        # after round 1.
+        self.graph.add_edge("data_profiling", "pi_planning")
 
         # pi_planning → agent pipeline, unless PI selected 0 integration directions
         # (in which case final_report_requested is set and we short-circuit to report)
@@ -168,7 +178,8 @@ class GraphMixin:
             self._route_from_restore_entry,
             {
                 **{f"route_{n}": n for n in [
-                    "initialize_round", "pi_planning", "planning_dialogue",
+                    "initialize_round", "data_profiling", "pi_planning",
+                    "planning_dialogue",
                     "user_review_gate", "pathology_analysis", "bioinformatics_analysis",
                     "biochemistry_analysis", "literature_research", "pi_synthesis",
                     "wait_for_user_input", "check_convergence",

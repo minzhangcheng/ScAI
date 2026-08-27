@@ -175,6 +175,33 @@ class TreatmentGroup(BaseModel):
     sample_count: int = 1              # Number of samples/replicates in this group
     order: int = 0                     # Display order
 
+class SampleCountRecord(BaseModel):
+    """How many biological replicates one (group, data_type) pair actually holds.
+
+    Measured from the data, not declared. ``TreatmentGroup.sample_count`` is a
+    single number per group, so it cannot say that a group's sequencing holds
+    one specimen while its pathology holds three stains of that same specimen --
+    and counting files says the opposite of the truth in both directions. The
+    (group, data_type) key is what separates those cases.
+
+    ``detected_count == 0`` means undetermined, not zero samples. Such a record
+    is excluded from the per-group minimum rather than dragging it to zero.
+    """
+    group_id: Optional[str] = None          # None = ungrouped data
+    group_name: str = ""
+    section: Literal["pathology", "sequencing", "biochemistry"]
+    data_type: str
+    detected_count: int = 0
+    declared_count: Optional[int] = None    # sample_count at detection time
+    method: str = "undetermined"            # obs_column:<name> | barcode_suffix
+                                            # | matrix_columns | file_records
+                                            # | indicator_sample_numbers | undetermined
+    evidence: str = ""                      # one line naming what was read;
+                                            # recorded on the session, not
+                                            # currently shown to the PI or report
+    conflicts: bool = False                 # detected_count != declared_count
+
+
 class DataFile(BaseModel):
     """Universal file record for all uploaded data (pathology, sequencing, biochemistry)"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))

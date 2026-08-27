@@ -621,3 +621,95 @@ TOOLS = [
 KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
     t["function"]["name"] for t in TOOLS
 )
+
+
+# Deliberately NOT a member of TOOLS. The counts are measured once, before
+# planning, and every consumer treats them as the authority over the user's
+# declaration; a tool the main executor could call would let a mid-analysis turn
+# rewrite the number the plan was built on.
+REGISTER_SAMPLE_COUNTS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "register_sample_counts",
+        "description": (
+            "Register how many biological replicates each (group, data type) "
+            "pair actually holds, as read from the data. Call once, after "
+            "inspecting every sequencing input. This call covers sequencing "
+            "inputs only; pathology and biochemistry replicate counts are "
+            "registered by the platform elsewhere and must not be reported "
+            "here. Report what the data shows, "
+            "not what the experimental design says it should show: the whole "
+            "point of this pass is that the declaration may be wrong. Two "
+            "files of different formats holding the same specimen are one "
+            "replicate. One file holding several multiplexed specimens is "
+            "several. When a count cannot be determined, register the record "
+            "with detected_count 0 and method 'undetermined' rather than "
+            "guessing -- an undetermined record is skipped, a wrong one is not."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "records": {
+                    "type": "array",
+                    "description": "One entry per (group, data type) pair inspected.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "group_name": {
+                                "type": "string",
+                                "description": (
+                                    "Treatment group name exactly as given in the "
+                                    "experimental design. Empty string for ungrouped data."
+                                ),
+                            },
+                            "data_type": {
+                                "type": "string",
+                                "description": (
+                                    "Data type exactly as given in the file listing "
+                                    "(e.g. 'scRNA-seq', 'Loom', 'bulk RNA-seq')."
+                                ),
+                            },
+                            "detected_count": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "description": (
+                                    "Biological replicates found. 0 means undetermined, "
+                                    "never 'no samples'."
+                                ),
+                            },
+                            "method": {
+                                "type": "string",
+                                "description": (
+                                    "How the count was established: 'obs_column:<name>', "
+                                    "'barcode_suffix', 'matrix_columns', or 'undetermined'."
+                                ),
+                            },
+                            "evidence": {
+                                "type": "string",
+                                "description": (
+                                    "One line naming what was read and what it showed, "
+                                    "e.g. \"adata.obs['sample'] has 1 unique value: Con_1\". "
+                                    "This is recorded on the session."
+                                ),
+                            },
+                        },
+                        "required": ["group_name", "data_type", "detected_count",
+                                     "method", "evidence"],
+                    },
+                },
+            },
+            "required": ["records"],
+        },
+    },
+}
+
+_TOOL_BY_NAME = {t["function"]["name"]: t for t in TOOLS}
+
+#: The two-tool set for the pre-planning profiling pass. It reuses the
+#: executor's own execute_code schema so persistent_outputs keeps its meaning,
+#: and adds nothing that could emit an analysis artifact.
+PROFILING_TOOLS = [_TOOL_BY_NAME["execute_code"], REGISTER_SAMPLE_COUNTS_TOOL]
+
+PROFILING_TOOL_NAMES: frozenset[str] = frozenset(
+    t["function"]["name"] for t in PROFILING_TOOLS
+)

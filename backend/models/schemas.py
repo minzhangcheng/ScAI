@@ -91,6 +91,7 @@ from .schema_parts.analysis import (  # noqa: F401
     AnalysisStep,
     ScoreDefinition,
     TreatmentGroup,
+    SampleCountRecord,
     DataFile,
     BiochemistryIndicator,
     LiteratureMechanismSignal,
@@ -427,6 +428,10 @@ class AnalysisState(BaseModel):
     # its retry ceiling and was force-released.
     evidence_gate_degraded: bool = False
     evidence_gate_findings: List[Dict[str, Any]] = Field(default_factory=list)
+    # Replicate counts measured from the data, one record per
+    # (group, data_type). Supersedes TreatmentGroup.sample_count wherever a
+    # record exists; see _gate_samples_per_group.
+    detected_sample_counts: List[SampleCountRecord] = Field(default_factory=list)
     # How many execution-driven plan revisions each round+stage has already
     # spent, keyed "<round>:<stage>". The revision cycle bypasses
     # check_convergence, so this counter is the only thing bounding it; see
@@ -567,6 +572,7 @@ class AnalysisState(BaseModel):
         "runtime_persistence": "runtime_persistence",
         "evidence_gate_degraded": "evidence_gate_degraded",
         "evidence_gate_findings": "evidence_gate_findings",
+        "detected_sample_counts": "detected_sample_counts",
         "publication_figures": "publication_figures",
         "publication_tables": "publication_tables",
         "graphic_abstract": "graphic_abstract",
@@ -640,9 +646,50 @@ class AnalysisState(BaseModel):
                 return "\n".join(parts)
             return "No experimental groups or data defined."
 
+        # Counts measured from the data, one per (group, data_type). Where a
+        # record exists it is the operative number: the declared count is a
+        # user's statement that nothing verified, and this very string is what
+        # carried an unverified "3 sample(s)" into a plan step's acceptance
+        # condition that the data could never satisfy.
+        detected_by_group: Dict[Any, List[Any]] = {}
+        for record in (self.detected_sample_counts or []):
+            if record.group_id is None:
+                continue
+            detected_by_group.setdefault(record.group_id, []).append(record)
+
         parts = [f"Experimental Design: {len(self.treatment_groups)} group(s)"]
         for g in sorted(self.treatment_groups, key=lambda x: x.order):
-            parts.append(f"  - {g.name} ({g.sample_count} sample(s)): {g.description}")
+            found = detected_by_group.get(g.id) or []
+            usable = [r for r in found if r.detected_count >= 1]
+            # Computed once and shown after either branch below: a group can
+            # have records that are ALL undetermined, and that must still show
+            # up here -- otherwise it looks indistinguishable from a group
+            # detection never touched, which is the gap this feature exists to
+            # close.
+            undetermined = [r for r in found if r.detected_count < 1]
+            if usable:
+                per_type = ", ".join(
+                    f"{r.data_type}: {r.detected_count}"
+                    for r in sorted(usable, key=lambda r: r.data_type)
+                )
+                effective = min(r.detected_count for r in usable)
+                line = (f"  - {g.name} (detected {effective} sample(s) "
+                        f"[{per_type}]): {g.description}")
+                # r.conflicts is fixed at detection time, but sample_count can be
+                # edited afterward with no round or profiling guard (PUT
+                # /session/{id}/groups/{id}) -- comparing against the stored flag
+                # can show a conflict that a later correction already resolved, or
+                # miss one a later edit just introduced. Recompute live instead.
+                if any(r.detected_count != g.sample_count for r in usable):
+                    line += (f"  [CONFLICT: user declared {g.sample_count}; "
+                             f"the detected counts above are authoritative]")
+                parts.append(line)
+            else:
+                parts.append(
+                    f"  - {g.name} ({g.sample_count} sample(s)): {g.description}")
+            if undetermined:
+                parts.append("    undetermined: " + ", ".join(
+                    r.data_type for r in undetermined))
             group_files = self.get_files_by_group(g.id)
             for section in ["pathology", "sequencing", "biochemistry"]:
                 section_files = [f for f in group_files if f.section == section]
@@ -779,6 +826,8 @@ class AnalysisState(BaseModel):
                 result[api_key] = self._serialize_data_files(val)
             elif field_name == "biochemistry_indicators":
                 result[api_key] = self._serialize_biochemistry_indicators(val)
+            elif field_name == "detected_sample_counts":
+                result[api_key] = self._serialize_detected_sample_counts(val)
             elif field_name == "round_results":
                 result[api_key] = self._serialize_round_results(val)
             elif field_name == "agent_errors":
@@ -848,6 +897,16 @@ class AnalysisState(BaseModel):
              "referenceRange": r["reference_range"], "interpretation": r["interpretation"],
              "groupId": r["group_id"], "sampleNumber": r["sample_number"]}
             for r in indicators
+        ]
+
+    @staticmethod
+    def _serialize_detected_sample_counts(records):
+        return [
+            {"groupId": r["group_id"], "groupName": r["group_name"], "section": r["section"],
+             "dataType": r["data_type"], "detectedCount": r["detected_count"],
+             "declaredCount": r["declared_count"], "method": r["method"],
+             "evidence": r["evidence"], "conflicts": r["conflicts"]}
+            for r in records
         ]
 
     @staticmethod

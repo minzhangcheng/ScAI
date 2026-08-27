@@ -86,6 +86,7 @@ class TestAnalysisStateApiDictRoundTrip:
             "runtime_persistence",
             "evidence_gate_degraded",
             "evidence_gate_findings",
+            "detected_sample_counts",
             "termination_reason",
             "snapshot_failure",
             "snapshot_transaction",

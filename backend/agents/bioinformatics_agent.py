@@ -88,10 +88,15 @@ def _gate_score_definitions(state) -> List[Any]:
 def _gate_samples_per_group(state) -> Dict[str, int]:
     """Samples per condition as the record has them, for the design gates.
 
-    sample_count defaults to 1 in the schema, so a declaration left alone can
-    undercount a group whose upload plainly holds more. Per-sample-numbered
-    files are the harder evidence and raise the count when the upload resolves
-    more samples than were declared.
+    A measured record from the data_profiling pass wins outright: the
+    declaration could only ever be raised, so a user who declared more samples
+    than they uploaded made every consumer wrong in the same direction and this
+    function returned the inflated number to the very gates written to catch it.
+
+    Without such a record the previous resolution stands. sample_count defaults
+    to 1 in the schema, so a declaration left alone can undercount a group whose
+    upload plainly holds more; per-sample-numbered files are the harder evidence
+    and raise the count. That path is what every session already on disk takes.
 
     They do not decide membership. A group the record shows as a single
     specimen is exactly the input check_analysis_unit and
@@ -104,8 +109,26 @@ def _gate_samples_per_group(state) -> Dict[str, int]:
         if getattr(data_file, "sample_number", None) is None:
             continue
         numbered.setdefault(data_file.group_id, set()).add(data_file.sample_number)
+
+    # Measured counts, one per (group, data_type). detected_count == 0 means
+    # the read did not resolve a count -- skipping such a record is what keeps
+    # one unreadable file from manufacturing an n=0 group. The per-group
+    # minimum is the fail-safe direction: a group whose sequencing holds one
+    # specimen is judged at one even when another modality has more.
+    detected: Dict[Any, int] = {}
+    for record in (getattr(state, "detected_sample_counts", None) or []):
+        group_id = getattr(record, "group_id", None)
+        count = int(getattr(record, "detected_count", 0) or 0)
+        if group_id is None or count < 1:
+            continue
+        prior = detected.get(group_id)
+        detected[group_id] = count if prior is None else min(prior, count)
+
     return {
-        g.name: max(g.sample_count, len(numbered.get(g.id, ())))
+        g.name: (
+            detected[g.id] if g.id in detected
+            else max(g.sample_count, len(numbered.get(g.id, ())))
+        )
         for g in (state.treatment_groups or [])
         if getattr(g, "sample_count", None) is not None
     }
@@ -322,6 +345,7 @@ from .bioinformatics import (  # noqa: F401
     FiguresMixin,
     DiagramsMixin,
     LifecycleMixin,
+    ProfilingMixin,
 )
 class BioinformaticsAgent(
     ContextMixin,
@@ -334,6 +358,7 @@ class BioinformaticsAgent(
     DiagramsMixin,
     LifecycleMixin,
     BaseAgent,
+    ProfilingMixin,
 ):
     """
     Bioinformatics Agent with Autonomous Mode
@@ -2945,8 +2970,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             # a plan_id lookup table, and a current-round score
                             # may legitimately cite a plan frozen earlier.
                             scoring_plans=state.scoring_plans,
-                            # Declared counts, raised by per-sample files when the
-                            # upload resolves more. See _gate_samples_per_group.
+                            # A measured record supersedes the declaration either way, not just
+                            # upward. Fallback below is for a group with none. See _gate_samples_per_group.
                             samples_per_group=_gate_samples_per_group(state),
                             # cluster_labels deliberately not supplied: measured,
                             # feeding annotation vocabulary to the composition
