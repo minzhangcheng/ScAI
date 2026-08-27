@@ -12,11 +12,6 @@ const FRONTEND_ROOT = path.join(REPO_ROOT, 'frontend', 'src')
 
 const BASELINE_LONG_TYPESCRIPT = new Set([
   'frontend/src/App.tsx::App',
-  'frontend/src/components/AnnotationConfirmationDialog.tsx::AnnotationConfirmationDialog',
-  'frontend/src/components/ExplorationReportDialog.tsx::ExplorationReportDialog',
-  'frontend/src/components/PlanReviewDialog.tsx::PlanReviewDialog',
-  'frontend/src/components/RoundFeedbackDialog.tsx::RoundFeedbackDialog',
-  'frontend/src/components/SnapshotPanel.tsx::SnapshotPanel',
   'frontend/src/components/analysis/FigureGallery.tsx::FigureGallery',
   'frontend/src/components/data/DataSection.tsx::DataSection',
   'frontend/src/pages/Admin.tsx::Admin',
