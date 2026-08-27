@@ -1,63 +1,152 @@
-"""Split failure-injection contracts for publication transactions."""
+"""Split publication transaction recovery contracts."""
 from backend.tests.figure_transaction_support import *  # noqa: F401,F403
 
-def test_reviewed_revision_is_refrozen_before_pair_publication(tmp_path):
+
+EXPECTED_ROLLBACK_PHASES = (
+    "restore-pdf",
+    "restore-jpg",
+    "restore-records",
+    "remove-revision-archive",
+    "cleanup-attempt",
+    "persist-terminal",
+    "unlink-rollback-durable",
+    "write-abandon-marker",
+    "release-locks",
+)
+
+EXPECTED_RESTART_FORWARD_PHASES = (
+    "acquire-locks",
+    "match-committed-files",
+    "write-commit-marker",
+    "persist-committed",
+    "apply-committed-records",
+    "cleanup-attempt",
+    "release-locks",
+    "remove-transaction-dir",
+    "garbage-collect",
+)
+
+
+def _trace_call(monkeypatch, phases, name, phase, *, predicate=None):
+    real = getattr(tx, name)
+
+    def traced(*args, **kwargs):
+        result = real(*args, **kwargs)
+        if predicate is None or predicate(*args, **kwargs):
+            phases.append(phase)
+        return result
+
+    monkeypatch.setattr(tx, name, traced)
+
+
+def test_rollback_phase_trace_is_stable(tmp_path, monkeypatch):
     case = _setup_attempt(tmp_path)
-    revised_jpg, revised_pdf = _write_pair(
-        case["staged_jpg"], case["staged_pdf"], color=(20, 30, 160)
-    )
-    case["new"].render_sha256 = image_file_sha256(case["staged_jpg"])
-    case["new"].pdf_sha256 = pdf_file_sha256(case["staged_pdf"])
-
-    case["journal"] = _refreeze(case)
     transaction, error = _begin(case)
-
     assert error is None
     assert transaction is not None
-    assert transaction["new_render_sha256"] == hashlib.sha256(revised_jpg).hexdigest()
-    assert transaction["new_pdf_sha256"] == hashlib.sha256(revised_pdf).hexdigest()
-    assert case["final_jpg"].read_bytes() == revised_jpg
-    assert case["final_pdf"].read_bytes() == revised_pdf
+    phases = []
+
+    real_restore = tx._restore_file
+
+    def restore(*args, **kwargs):
+        result = real_restore(*args, **kwargs)
+        phases.append(
+            "restore-pdf"
+            if Path(kwargs["final_path"]).suffix == ".pdf"
+            else "restore-jpg"
+        )
+        return result
+
+    real_persist = tx._persist_journal
+
+    def persist(journal_path, journal):
+        result = real_persist(journal_path, journal)
+        if journal.get("status") == "ABANDONED":
+            phases.append("persist-terminal")
+        return result
+
+    monkeypatch.setattr(tx, "_restore_file", restore)
+    monkeypatch.setattr(tx, "_persist_journal", persist)
+    _trace_call(monkeypatch, phases, "_restore_abandoned_records", "restore-records")
+    _trace_call(
+        monkeypatch, phases, "_remove_revision_archive_dir", "remove-revision-archive"
+    )
+    _trace_call(monkeypatch, phases, "_cleanup_attempt", "cleanup-attempt")
+    _trace_call(
+        monkeypatch,
+        phases,
+        "_unlink_transaction_regular_file_if_present",
+        "unlink-rollback-durable",
+        predicate=lambda transaction_dir, name: name == tx.ROLLBACK_DURABLE_MARKER,
+    )
+    _trace_call(
+        monkeypatch,
+        phases,
+        "_write_marker",
+        "write-abandon-marker",
+        predicate=lambda path: Path(path).name == tx.ABANDON_MARKER,
+    )
+    _trace_call(monkeypatch, phases, "_release_journal_locks", "release-locks")
+
     tx.rollback_figure_publish_transaction(
         Path(transaction["journal_path"]), state=case["state"]
     )
 
+    assert tuple(phases) == EXPECTED_ROLLBACK_PHASES
+    _assert_old_restored(case, terminal="abandoned")
 
-def test_refreeze_rejects_forged_runtime_identity_without_rewriting_journal(
-    tmp_path,
-):
+
+def test_restart_forward_recovery_phase_trace_is_stable(tmp_path, monkeypatch):
     case = _setup_attempt(tmp_path)
-    original = tx._read_verified_journal(Path(case["journal"]["journal_path"]))
-    _write_pair(case["staged_jpg"], case["staged_pdf"], color=(160, 30, 20))
-    forged = dict(case["journal"])
-    forged["journal_hmac"] = "0" * 64
+    transaction, error = _begin(case)
+    assert error is None
+    assert transaction is not None
+    _apply_record(case, transaction)
+    phases = []
 
-    with pytest.raises(ValueError, match="journal_hmac identity changed"):
-        _refreeze(case, forged)
+    _trace_call(monkeypatch, phases, "_acquire_publish_locks", "acquire-locks")
+    _trace_call(
+        monkeypatch, phases, "_record_matches_committed_files", "match-committed-files"
+    )
+    _trace_call(
+        monkeypatch,
+        phases,
+        "_write_marker",
+        "write-commit-marker",
+        predicate=lambda path: Path(path).name == tx.COMMIT_MARKER,
+    )
+    real_persist = tx._persist_journal
 
-    retained = tx._read_verified_journal(Path(case["journal"]["journal_path"]))
-    assert retained["new_render_sha256"] == original["new_render_sha256"]
-    assert retained["new_pdf_sha256"] == original["new_pdf_sha256"]
-    tx.rollback_figure_publish_transaction(
-        Path(case["journal"]["journal_path"]), state=case["state"]
+    def persist(journal_path, journal):
+        result = real_persist(journal_path, journal)
+        if journal.get("status") == "COMMITTED":
+            phases.append("persist-committed")
+        return result
+
+    monkeypatch.setattr(tx, "_persist_journal", persist)
+    _trace_call(
+        monkeypatch, phases, "_apply_committed_records", "apply-committed-records"
+    )
+    _trace_call(monkeypatch, phases, "_cleanup_attempt", "cleanup-attempt")
+    _trace_call(monkeypatch, phases, "_release_publish_locks", "release-locks")
+    _trace_call(
+        monkeypatch, phases, "_remove_transaction_dir", "remove-transaction-dir"
+    )
+    _trace_call(
+        monkeypatch,
+        phases,
+        "garbage_collect_figure_transaction_roots",
+        "garbage-collect",
     )
 
-
-def test_refreeze_requires_the_original_transaction_locks(tmp_path):
-    case = _setup_attempt(tmp_path)
-    tx._release_publish_locks(
-        case["new"].render_attempt_id,
-        keys=case["journal"]["lock_keys"],
-        figures_dir=case["figures"],
-        session_id=case["state"].id,
+    tx.recover_figure_publish_transactions(
+        case["state"], case["figures"], force=True
     )
 
-    with pytest.raises(RuntimeError, match="locks are not held"):
-        _refreeze(case)
-
-    tx.rollback_figure_publish_transaction(
-        Path(case["journal"]["journal_path"]), state=case["state"]
-    )
+    assert tuple(phases) == EXPECTED_RESTART_FORWARD_PHASES
+    assert case["final_jpg"].read_bytes() == case["new_jpg"]
+    assert case["final_pdf"].read_bytes() == case["new_pdf"]
+    assert case["new"].producer_status == "published"
 
 
 def test_restart_abandons_a_review_pending_attempt(tmp_path):
@@ -71,47 +160,6 @@ def test_restart_abandons_a_review_pending_attempt(tmp_path):
 
     _assert_old_restored(case, terminal="abandoned")
     assert applied == {case["new"].render_attempt_id}
-
-
-def test_archive_copy_failure_restores_pair_and_terminalizes_record(tmp_path, monkeypatch):
-    case = _setup_attempt(tmp_path)
-    real_copy = tx._copy_durable
-    calls = 0
-
-    def fail_first_archive(source, destination):
-        nonlocal calls
-        calls += 1
-        if calls == 3:  # old JPG/PDF backups are calls 1/2
-            raise OSError("archive copy fault")
-        return real_copy(source, destination)
-
-    monkeypatch.setattr(tx, "_copy_durable", fail_first_archive)
-    transaction, error = _begin(case)
-    assert transaction is None and "archive copy fault" in error
-    tx.recover_figure_publish_transactions(case["state"], case["figures"], force=True)
-    _assert_old_restored(case, terminal="failed")
-
-
-@pytest.mark.parametrize("failed_suffix", [".jpg", ".pdf"])
-def test_replace_failure_restores_the_whole_pair(
-    tmp_path, monkeypatch, failed_suffix
-):
-    case = _setup_attempt(tmp_path)
-    real_replace = tx._replace_staged_entry
-    failed = False
-
-    def injected_replace(attempt_fd, figures_fd, source, destination):
-        nonlocal failed
-        if not failed and Path(source).suffix == failed_suffix:
-            failed = True
-            raise OSError(f"{failed_suffix} replace fault")
-        return real_replace(attempt_fd, figures_fd, source, destination)
-
-    monkeypatch.setattr(tx, "_replace_staged_entry", injected_replace)
-    transaction, error = _begin(case)
-    assert transaction is None and "replace fault" in error
-    tx.recover_figure_publish_transactions(case["state"], case["figures"], force=True)
-    _assert_old_restored(case, terminal="failed")
 
 
 def test_restart_after_jpg_replace_rolls_back_pair_and_record(tmp_path, monkeypatch):
@@ -232,82 +280,6 @@ def test_cleanup_failure_leaves_a_forward_recoverable_commit(tmp_path, monkeypat
     assert [record.id for record in eligible_artifacts(restart_state.publication_figures)] == [
         case["new"].id
     ]
-
-
-def test_same_logical_and_filename_attempts_publish_serially_to_one_head(tmp_path):
-    first = _setup_attempt(tmp_path, "attempt-one")
-    figures = first["figures"]
-    attempt_dir = figures / ".attempts" / "attempt-two"
-    staged_jpg = attempt_dir / "result.jpg"
-    staged_pdf = attempt_dir / "result.pdf"
-    second_jpg, second_pdf = _write_pair(staged_jpg, staged_pdf, color=(10, 10, 90))
-    second = _record(
-        record_id="attempt-two",
-        jpg=staged_jpg,
-        pdf=staged_pdf,
-        producer_status="pending",
-        head=False,
-        revision_of_id=first["old"].id,
-    )
-    first["state"].publication_figures.append(second)
-    with pytest.raises(RuntimeError, match="publication lock is held"):
-        tx.register_pending_figure_attempt(
-            attempt_dir=attempt_dir,
-            staged_jpg=staged_jpg,
-            staged_pdf=staged_pdf,
-            final_jpg=first["final_jpg"],
-            final_pdf=first["final_pdf"],
-            published_record=second,
-            session_id=first["state"].id,
-        )
-
-    first_tx, error = _begin(first)
-    assert error is None
-    assert tx.acquire_figure_publish_locks(
-        figures_dir=figures,
-        final_jpg=first["final_jpg"],
-        published_record=second,
-    )
-    _apply_record(first, first_tx)
-    tx.commit_figure_publish_transaction(first_tx)
-
-    tx.register_pending_figure_attempt(
-        attempt_dir=attempt_dir,
-        staged_jpg=staged_jpg,
-        staged_pdf=staged_pdf,
-        final_jpg=first["final_jpg"],
-        final_pdf=first["final_pdf"],
-        published_record=second,
-        session_id=first["state"].id,
-    )
-
-    second_case = dict(first)
-    second_case.update({
-        "new": second,
-        "attempt_dir": attempt_dir,
-        "staged_jpg": staged_jpg,
-        "staged_pdf": staged_pdf,
-    })
-    second_tx, error = _begin(second_case, archived=first["new"])
-    assert error is None
-    tx.apply_publish_record_paths(second_tx, second, first["new"])
-    second.producer_status = "published"
-    second.render_sha256 = image_file_sha256(second.png_path)
-    second.pdf_sha256 = pdf_file_sha256(second.pdf_path)
-    second.supersedes_id = first["new"].id
-    second.is_published_head = True
-    first["new"].is_published_head = False
-    tx.mark_publish_record_applied(
-        second_tx, published_record=second, archived_record=first["new"]
-    )
-    tx.commit_figure_publish_transaction(second_tx)
-
-    assert first["final_jpg"].read_bytes() == second_jpg
-    assert first["final_pdf"].read_bytes() == second_pdf
-    assert [record.id for record in eligible_artifacts(first["state"].publication_figures)] == [
-        second.id
-    ]
-    assert Path(first["new"].png_path).read_bytes() == first["new_jpg"]
 
 
 def test_terminal_transaction_gc_is_scoped_to_saved_transaction_ids(tmp_path):
