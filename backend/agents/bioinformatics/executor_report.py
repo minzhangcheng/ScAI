@@ -1,9 +1,27 @@
 """Terminal result helpers for autonomous analysis reporting."""
 from __future__ import annotations
 
+from .executor_dispatch import ToolAction
+from .executor_report_gates import (
+    check_mandatory_report_gates,
+    check_report_evidence,
+    prepare_report_attempt,
+)
 
-def terminal_status(*, llm_error: bool, plan_revision_needed: bool, completed: bool,
-                    evidence_gate_degraded: bool) -> str:
+
+def bind_facade(facade) -> None:
+    globals().update(
+        {name: value for name, value in vars(facade).items() if not name.startswith("__")}
+    )
+
+
+def terminal_status(
+    *,
+    llm_error: bool,
+    plan_revision_needed: bool,
+    completed: bool,
+    evidence_gate_degraded: bool,
+) -> str:
     if llm_error:
         return "error"
     if plan_revision_needed:
@@ -11,3 +29,76 @@ def terminal_status(*, llm_error: bool, plan_revision_needed: bool, completed: b
     if completed:
         return "partial" if evidence_gate_degraded else "completed"
     return "max_steps_reached"
+
+
+async def handle_report_findings(context, tool_call) -> ToolAction:
+    attempt = await prepare_report_attempt(context, tool_call)
+    if attempt is None:
+        return ToolAction.CONTINUE
+    if not await check_mandatory_report_gates(context, tool_call, attempt):
+        return ToolAction.CONTINUE
+    if not await check_report_evidence(context, tool_call, attempt):
+        return ToolAction.CONTINUE
+    self = context.agent
+    state = context.state
+    messages = context.messages
+    analysis_log = context.analysis_log
+    step_count = context.step_count
+    agent_reasoning = context.agent_reasoning
+    args = tool_call.arguments
+    context.has_substantive_work = True
+    findings = await self._handle_report_findings(args)
+    summary = args.get("summary", "")
+    suggestions = args.get("suggestions", [])
+    for note in attempt.escaped_notes:
+        if note not in findings:
+            findings.append(note)
+    context.all_findings.extend(findings)
+    context.reported_evidence_ids = sorted(attempt.requested_evidence_ids)
+    context.evidence_gate_degraded = attempt.gate_degraded
+    context.evidence_gate_findings = list(attempt.gate_findings)
+    if context.evidence_gate_degraded:
+        state.evidence_gate_degraded = True
+        known_gate_records = {
+            (
+                item.get("gate"), item.get("rule_id"),
+                item.get("subject"), item.get("round_number"),
+            )
+            for item in state.evidence_gate_findings
+            if isinstance(item, dict)
+        }
+        for item in context.evidence_gate_findings:
+            if not isinstance(item, dict):
+                continue
+            enriched = {
+                **item,
+                "round_number": item.get(
+                    "round_number", state.current_round,
+                ),
+            }
+            key = (
+                enriched.get("gate"), enriched.get("rule_id"),
+                enriched.get("subject"), enriched.get("round_number"),
+            )
+            if key not in known_gate_records:
+                state.evidence_gate_findings.append(enriched)
+                known_gate_records.add(key)
+    await self._notify("findings", json.dumps({
+        "findings": findings,
+        "summary": summary,
+        "suggestions": suggestions
+    }))
+    messages.append({
+        "role": "tool",
+        "tool_call_id": tool_call.id,
+        "content": "Findings recorded. Continue or wait for instructions."
+    })
+    analysis_log.append(AnalysisStep(
+        step_number=step_count, step_type="report_findings",
+        agent_reasoning=agent_reasoning,
+        findings=findings, findings_summary=summary,
+        findings_suggestions=suggestions or [],
+        evidence_execution_ids=context.reported_evidence_ids,
+    ))
+    context.completed = True
+    return ToolAction.BREAK

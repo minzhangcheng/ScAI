@@ -1,18 +1,20 @@
 import inspect
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
+from backend.agents.bioinformatics import executor_auxiliary, executor_loop, executor_registration
 
 
 def test_run_autonomous_return_lists_mechanism_programs():
-    src = inspect.getsource(BioinformaticsAgent.run_autonomous_analysis)
-    assert '"mechanism_programs": mechanism_programs' in src
+    src = inspect.getsource(executor_loop) + inspect.getsource(executor_auxiliary.finalize_run)
+    assert '"mechanism_programs": context.mechanism_programs' in src
     assert "mechanism_programs: List" in src or "mechanism_programs = []" in src
 
 
 def test_handler_branch_exists():
-    src = inspect.getsource(BioinformaticsAgent.run_autonomous_analysis)
-    assert 'tool_name == "register_mechanism_programs"' in src
+    dispatch_source = inspect.getsource(executor_loop)
+    src = inspect.getsource(executor_registration.handle_register_mechanisms)
+    assert '"register_mechanism_programs"' in dispatch_source
     assert "validate_mechanism_program_payload" in src
-    assert "mechanism_programs_registered = True" in src
+    assert "context.mechanism_programs_registered = True" in src
 
 
 def test_process_passes_mechanism_programs_through():

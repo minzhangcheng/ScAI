@@ -7,6 +7,7 @@ parts a model cannot talk its way around.
 import inspect
 
 import backend.agents.bioinformatics_agent as bio_mod
+from backend.agents.bioinformatics import executor_registration
 from backend.models.schemas import ScoreDefinition
 from backend.services.report.score_section import (
     build_score_definitions_section_html,
@@ -41,20 +42,17 @@ def test_handler_rejects_invalid_provenance_and_returns_a_tool_message():
     Otherwise the call is orphaned and the next request fails -- the same
     invariant test_unknown_tool_dispatch pins for unknown tools.
     """
-    src = inspect.getsource(bio_mod)
-    start = src.index('elif tool_name == "register_score":')
-    end = src.index('elif tool_name == "register_mechanism_programs":', start)
-    block = src[start:end]
+    block = inspect.getsource(executor_registration.handle_register_score)
 
     assert "parse_provenance" in block, "handler does not validate provenance"
     assert "prov_error" in block
     # The rejection path emits a tool message then skips registration.
     assert '"role": "tool"' in block
-    assert "continue" in block
+    assert "ToolAction.CONTINUE" in block
     # has_register_score must not be set before validation succeeds, or a
     # rejected call would satisfy the "did you register a score" gate.
     reject_idx = block.index("prov_error")
-    flag_idx = block.index("has_register_score = True")
+    flag_idx = block.index("context.has_register_score = True")
     assert flag_idx > reject_idx, (
         "has_register_score is set before provenance validation, so a rejected "
         "score would still satisfy the registration gate"
@@ -62,10 +60,7 @@ def test_handler_rejects_invalid_provenance_and_returns_a_tool_message():
 
 
 def test_handler_records_power_assessment():
-    src = inspect.getsource(bio_mod)
-    start = src.index('elif tool_name == "register_score":')
-    end = src.index('elif tool_name == "register_mechanism_programs":', start)
-    block = src[start:end]
+    block = inspect.getsource(executor_registration.handle_register_score)
     assert "assess_panel_power" in block
     assert "power=power" in block
     assert "n_genes=len(panel_members)" in block
@@ -79,10 +74,7 @@ def test_power_is_assessed_on_the_frozen_panel_not_the_reported_excerpt():
     handler must take its counts and its hash from plan.panel_genes when a plan
     is cited, and use gene_list only for the drift comparison.
     """
-    src = inspect.getsource(bio_mod)
-    start = src.index('elif tool_name == "register_score":')
-    end = src.index('elif tool_name == "register_mechanism_programs":', start)
-    block = src[start:end]
+    block = inspect.getsource(executor_registration.handle_register_score)
     assert "panel_members = list(plan.panel_genes)" in block
     assert "assess_panel_power(len(panel_members)" in block
     assert "panel_hash(panel_members)" in block

@@ -13,6 +13,66 @@ class DispatchStatus(Enum):
     ERROR = "error"
 
 
+class ToolAction(Enum):
+    CONTINUE = "continue"
+    BREAK = "break"
+
+
+@dataclass
+class ToolRuntime:
+    """Mutable state shared by one response's family handlers."""
+
+    agent: Any
+    state: Any
+    messages: list
+    analysis_log: list
+    step_count: int
+    agent_reasoning: str | None
+    planning_stage: str
+    review_callback: Any
+    step_figures: list
+    all_figures: list
+    all_findings: list
+    mechanism_programs: list
+    annotation_completed: bool
+    annotation_retry_required: bool
+    annotation_retry_attempts: int
+    consecutive_errors: int
+    total_errors: int
+    figures_rendered: int
+    score_gate_reject_count: int
+    mechanism_gate_reject_count: int
+    stats_gate_reject_count: int
+    integration_reject_count: int
+    bulk_reject_count: int
+    evidence_citation_reject_count: int
+    deconv_reject_count: int
+    innovation_bulk_reject_count: int
+    evidence_gate_degraded: bool
+    evidence_gate_findings: list
+    reported_evidence_ids: list
+    mechanism_programs_registered: bool
+    completed: bool
+    plan_revision_needed: bool
+    plan_revision_context: dict
+    has_substantive_work: bool = False
+    has_figure_work: bool = False
+    has_register_score: bool = False
+    record_forced_score_gate: Any = None
+    save_checkpoint: Any = None
+    supervisor_callback: Any = None
+    max_score_gate_rejections: int = 4
+    max_mechanism_rejections: int = 2
+    max_stats_gate_rejections: int = 3
+    max_integration_rejections: int = 2
+    max_bulk_rejections: int = 2
+    max_evidence_citation_refusals: int = 2
+    max_deconv_rejections: int = 2
+    max_innovation_bulk_rejections: int = 2
+    max_consecutive_errors: int = 5
+    max_total_errors: int = 50
+
+
 @dataclass(frozen=True)
 class ToolDispatchResult:
     status: DispatchStatus
@@ -30,6 +90,7 @@ class ToolDispatchContext:
         default_factory=dict
     )
     propagate_exceptions: tuple[type[BaseException], ...] = ()
+    error_formatter: Callable[[BaseException], str] = str
 
 
 def parse_error_message(tool_call) -> str:
@@ -75,11 +136,12 @@ async def dispatch_tool(context: ToolDispatchContext, tool_call) -> ToolDispatch
         except context.propagate_exceptions:
             raise
         except Exception as exc:
-            content = tool_error_message(tool_name, str(exc))
+            compact_error = context.error_formatter(exc)
+            content = tool_error_message(tool_name, compact_error)
             context.logger.warning(
                 "[Bioinformatics] Tool '%s' failed: %s; continuing",
                 tool_name,
-                exc,
+                compact_error,
             )
             append_tool_message(context, tool_call, content)
             return ToolDispatchResult(DispatchStatus.ERROR, tool_name, content)

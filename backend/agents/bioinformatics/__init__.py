@@ -10,6 +10,7 @@ from .figure_preflight import FigureAttemptState, FigureRequestContext  # noqa: 
 from .diagrams import DiagramsMixin  # noqa: F401
 from .lifecycle import LifecycleMixin  # noqa: F401
 from .profiling import ProfilingMixin  # noqa: F401
+from .executor_context import ExecutorBindings  # noqa: F401
 
 __all__ = [
     "ContextMixin",
@@ -24,4 +25,5 @@ __all__ = [
     "DiagramsMixin",
     "LifecycleMixin",
     "ProfilingMixin",
+    "ExecutorBindings",
 ]

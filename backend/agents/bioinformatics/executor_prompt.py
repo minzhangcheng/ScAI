@@ -84,7 +84,7 @@ SECURITY RESTRICTIONS:
 """
 
 
-def _executor_prompt_workflow() -> str:
+def _executor_prompt_workflow(workspace_dir: str) -> str:
     return f"""
 WORKFLOW GUIDELINES:
 - Technical steps can be done autonomously: data loading, QC, normalization, PCA, clustering, UMAP, basic DE
@@ -271,7 +271,7 @@ CELL TYPE ANNOTATION WORKFLOW:
 7. Generate UMAP colored by cell_type
 
 === Working Directory ===
-Your Jupyter kernel is running in: {self.sandbox.working_dir}
+Your Jupyter kernel is running in: {workspace_dir}
 A variable `_WORKSPACE_DIR` (pathlib.Path) is pre-defined in the kernel and points to this directory.
 All output files MUST be saved using `_WORKSPACE_DIR` as the root. NEVER use relative paths like './' or '../'.
 - Figures: in execute_code, call `plt.savefig('name.jpg')` or `sc.pl.*(save='_name.jpg')` with a bare filename — files land under `_WORKSPACE_DIR/figures` automatically and a companion PDF is generated. Do NOT manually save a separate PDF, and do NOT save figures into nested results/<dir>/figures/ paths. For report-quality figures, use generate_publication_figure instead. (Inside generate_publication_figure's `code`, the tool wraps saving — see that tool's notes.)
@@ -331,5 +331,9 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 """
 
 
-def build_static_executor_prompt(sp: str, modality: str) -> str:
-    return _executor_prompt_tools(sp, modality) + _executor_prompt_workflow()
+def build_static_executor_prompt(
+    sp: str, modality: str, workspace_dir: str
+) -> str:
+    return _executor_prompt_tools(sp, modality) + _executor_prompt_workflow(
+        workspace_dir
+    )

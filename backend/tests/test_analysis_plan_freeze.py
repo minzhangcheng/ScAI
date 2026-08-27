@@ -14,6 +14,11 @@ import inspect
 import pytest
 
 import backend.agents.bioinformatics_agent as bio_mod
+from backend.agents.bioinformatics import (
+    executor_loop,
+    executor_prompt,
+    executor_registration,
+)
 from backend.models.schemas import AnalysisState, ScoringPlan
 from backend.services.analysis_plan import (
     EDIT_OPERATIONS,
@@ -135,8 +140,9 @@ def test_register_analysis_plan_is_a_registered_tool():
 
 
 def test_register_analysis_plan_has_a_dispatch_branch():
-    src = inspect.getsource(bio_mod)
-    assert 'elif tool_name == "register_analysis_plan":' in src
+    source = inspect.getsource(executor_loop)
+    assert '"register_analysis_plan"' in source
+    assert "handle_register_analysis_plan" in source
 
 
 def test_every_tool_is_named_in_the_system_prompt():
@@ -145,7 +151,7 @@ def test_every_tool_is_named_in_the_system_prompt():
     A tool the prompt never mentions is a tool the model will not call, so the
     enumeration has to stay in sync with TOOLS.
     """
-    src = inspect.getsource(bio_mod)
+    src = inspect.getsource(executor_prompt)
     missing = [t["function"]["name"] for t in bio_mod.TOOLS
                if t["function"]["name"] not in src]
     assert not missing, f"tools absent from the agent module text: {missing}"
@@ -154,10 +160,7 @@ def test_every_tool_is_named_in_the_system_prompt():
 def test_register_score_requires_plan_id_for_panel_scores():
     import re
 
-    src = inspect.getsource(bio_mod)
-    start = src.index('elif tool_name == "register_score":')
-    end = src.index('elif tool_name == "register_mechanism_programs":', start)
-    block = src[start:end]
+    block = inspect.getsource(executor_registration.handle_register_score)
     # Long messages are written as implicitly concatenated literals across
     # lines, so match the joined text rather than the raw source; otherwise the
     # test breaks on reflow instead of on behaviour.

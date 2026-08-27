@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 import backend.agents.bioinformatics_agent as bio_mod
+from backend.agents.bioinformatics import executor_report_gates
 from backend.services import statistical_gates
 from backend.services.statistical_gates import (
     MIN_SAMPLES_PER_GROUP_FOR_PERMUTATION,
@@ -295,9 +296,7 @@ def test_gate_finding_message_includes_rule_guidance():
 # ----------------------------------------------------------------- wiring
 
 def test_gate_is_wired_into_report_findings():
-    src = inspect.getsource(bio_mod)
-    start = src.index('elif tool_name == "report_findings":')
-    block = src[start:start + 20000]
+    block = inspect.getsource(executor_report_gates.prepare_report_attempt)
     assert "run_statistical_gates" in block
     assert "stats_gate_reject_count" in block
 
@@ -313,11 +312,11 @@ def test_gate_is_bounded_and_records_its_escape():
     cell-level-inference rejection is to reword the claim, and asking twice more
     trains the phrasing rather than the analysis.
     """
-    src = inspect.getsource(bio_mod)
-    assert "MAX_STATS_GATE_REJECTIONS" in src
+    src = inspect.getsource(executor_report_gates.prepare_report_attempt)
+    assert "max_stats_gate_rejections" in src
     assert "_unsatisfiable" in src, "the per-violation ceiling is missing"
     assert "cell-level-inference" in src
-    start = src.index("if stats_gate_reject_count < _cap:")
+    start = src.index("if context.stats_gate_reject_count < _cap:")
     block = src[start:start + 3000]
     assert "_escaped_notes.append" in block, (
         "a force-released gate must record the escape in the report"
@@ -326,7 +325,7 @@ def test_gate_is_bounded_and_records_its_escape():
 
 def test_advisories_reach_the_report_without_blocking():
     """A narrow check earns a note, not a rejection."""
-    src = inspect.getsource(bio_mod)
+    src = inspect.getsource(executor_report_gates.prepare_report_attempt)
     assert "advisory_message()" in src
     idx = src.index("advisory_message()")
     window = src[idx:idx + 400]
