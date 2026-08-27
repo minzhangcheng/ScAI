@@ -191,9 +191,9 @@ def test_capture_releases_its_safe_point_in_a_finally():
     """
     import inspect
 
-    from backend.services.snapshot_v2.service import SnapshotService
+    from backend.services.snapshot_v2.service_parts import capture_flow
 
-    src = inspect.getsource(SnapshotService._capture_impl)
+    src = inspect.getsource(capture_flow.capture_impl)
 
     assert "finally:" in src, (
         "_capture_impl has no finally: a cancelled capture (CancelledError is a "
@@ -212,9 +212,9 @@ def test_capture_impl_does_not_rely_on_except_clauses_for_release():
     import inspect
     import textwrap
 
-    from backend.services.snapshot_v2.service import SnapshotService
+    from backend.services.snapshot_v2.service_parts import capture_flow
 
-    src = textwrap.dedent(inspect.getsource(SnapshotService._capture_impl))
+    src = textwrap.dedent(inspect.getsource(capture_flow.capture_impl))
     tree = __import__("ast").parse(src)
 
     releases_in_finally = False
