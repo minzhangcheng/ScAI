@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.39.42 · **Last updated**: 2026-08-27
+**Version**: 0.48.1 · **Last updated**: 2026-08-27
 
 ## 1. Runtime Architecture
 
@@ -335,6 +335,10 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.48.x — (2026-08-27 onward)**
+
+- `0.48.1` — The `main` code baseline is replaced by the exact `gate-rebaseline-0.39.1` release tree from `f56435fb` (`ver 0.39.42`). The release commit is a direct child of that source commit and changes only the application version surfaces and this changelog, so no code or documentation changes from the former `main` tip are retained. Version consistency passed `8/8`; no broader test profile, image build, registry push, or deployment was performed because the application code is unchanged from the already recorded `0.39.42` release.
 
 **0.39.x — (2026-08-04 onward)**
 
