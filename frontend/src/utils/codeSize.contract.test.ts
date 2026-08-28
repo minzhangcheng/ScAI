@@ -10,10 +10,6 @@ const MAX_FUNCTION_LINES = 300
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 const FRONTEND_ROOT = path.join(REPO_ROOT, 'frontend', 'src')
 
-const BASELINE_LONG_TYPESCRIPT = new Set([])
-
-const BASELINE_OVERSIZED_TYPESCRIPT = new Set([])
-
 type FunctionLike = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction
   | ts.MethodDeclaration | ts.GetAccessorDeclaration | ts.SetAccessorDeclaration
 
@@ -179,8 +175,8 @@ function scanOversizedFiles(): Set<string> {
 }
 
 describe('production TypeScript size debt', () => {
-  it('matches the frozen planning-base inventory', () => {
-    expect(scanLongFunctions()).toEqual(BASELINE_LONG_TYPESCRIPT)
-    expect(scanOversizedFiles()).toEqual(BASELINE_OVERSIZED_TYPESCRIPT)
+  it('has no oversized files or functions', () => {
+    expect(scanLongFunctions()).toEqual(new Set())
+    expect(scanOversizedFiles()).toEqual(new Set())
   })
 })
