@@ -480,6 +480,26 @@ You are REVISING the remaining steps based on new findings."""
                 "\n\n## Replication and Design Constraint\n"
                 + sample_design_constraint
             )
+        bulk_profile_block = ""
+        if state.bulk_input_profiles:
+            profile_lines = [
+                (
+                    f"- {item.id}: shape={item.shape}; annotation_columns="
+                    f"{item.annotation_columns}; candidate_sample_columns="
+                    f"{item.candidate_sample_columns}; integer_like_fraction="
+                    f"{item.integer_like_fraction}; negative_values="
+                    f"{item.negative_value_count}; declared_scale="
+                    f"{item.declared_scale}; profile_status="
+                    f"{item.profile_status}; rows_scanned={item.rows_scanned}"
+                )
+                for item in state.bulk_input_profiles[:12]
+            ]
+            bulk_profile_block = (
+                "\n\n## Host-observed bulk input facts\n"
+                "These facts do not select a statistical method. Resolve material "
+                "claim-level ambiguity with the PI and let Bioinformatics select "
+                "and justify a compatible method.\n" + "\n".join(profile_lines)
+            )
 
         # The pre-planning profiling pass already read these files and left the
         # objects in the kernel. Without this note the planner writes a load
@@ -523,7 +543,7 @@ You are REVISING the remaining steps based on new findings."""
         prompt = f"""You are planning a single-cell RNA-seq bioinformatics analysis. Generate a method-level analysis plan.
 
 ## Data Context
-{data_desc}{sample_design_constraint}{loaded_objects_block}
+{data_desc}{sample_design_constraint}{bulk_profile_block}{loaded_objects_block}
 {research_context}
 
 ## PI's Analysis Goals
@@ -938,7 +958,7 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
                                 item.get("evidence_execution_ids"),
                             )
                             if str(value).strip()
-                        ],
+                        ] or fallback_ids,
                     })
             elif isinstance(item, str):
                 if item.strip():

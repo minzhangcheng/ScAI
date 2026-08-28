@@ -47,10 +47,10 @@ async def handle_report_findings(context, tool_call) -> ToolAction:
     agent_reasoning = context.agent_reasoning
     args = tool_call.arguments
     context.has_substantive_work = True
-    findings = await self._handle_report_findings(args)
-    context.accepted_finding_records = list(
-        getattr(self, "_last_finding_records", []) or []
-    )
+    context.accepted_finding_records = list(attempt.finding_records)
+    findings = [record["text"] for record in context.accepted_finding_records]
+    self._last_finding_records = context.accepted_finding_records
+    self._last_findings = findings
     summary = args.get("summary", "")
     suggestions = args.get("suggestions", [])
     for note in attempt.escaped_notes:

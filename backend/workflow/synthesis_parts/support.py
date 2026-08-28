@@ -486,6 +486,9 @@ def build_round_summary_payload(
     effective_max_rounds: int,
     data_requests: dict | None = None,
     cross_modal_candidates: list | None = None,
+    *,
+    status: str = "waiting_input",
+    wait_policy: str = "manual",
 ) -> dict:
     """Build the round_summary WebSocket payload from a RoundResult.
 
@@ -513,7 +516,8 @@ def build_round_summary_payload(
         ],
         "cross_modal_candidates": cross_modal_candidates or [],
         "data_requests": data_requests or {"pathology": [], "biochemistry": [], "other": []},
-        "status": "waiting_input",
+        "status": status,
+        "wait_policy": wait_policy,
         "phase": round_result.phase,
         "integration_candidates": round_result.integration_candidates,
         "integration_report_summary": round_result.integration_report_summary,

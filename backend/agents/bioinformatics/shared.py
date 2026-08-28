@@ -310,6 +310,11 @@ def successful_evidence_executions(
     executions: List[CodeExecution],
     *,
     round_number: Optional[int] = None,
+    plan_id: Optional[str] = None,
+    lineage_id: Optional[str] = None,
+    cohort_digest: Optional[str] = None,
+    cohort_generation: Optional[int] = None,
+    require_plan_binding: bool = False,
 ) -> List[CodeExecution]:
     """Filter code history to successful, non-contradictory executions."""
     return [
@@ -317,7 +322,76 @@ def successful_evidence_executions(
         for execution in executions
         if execution_supports_evidence(execution)
         and (round_number is None or execution.round_number == round_number)
+        and (
+            plan_id is None
+            or str(getattr(execution, "plan_id", "") or "") == str(plan_id)
+        )
+        and (
+            lineage_id is None
+            or (getattr(execution, "lineage_id", None) or "main") == lineage_id
+        )
+        and (
+            cohort_digest is None
+            or str(getattr(execution, "cohort_digest", "") or "")
+            == str(cohort_digest)
+        )
+        and (
+            cohort_generation is None
+            or int(getattr(execution, "cohort_generation", 0) or 0)
+            == int(cohort_generation)
+        )
+        and (
+            not require_plan_binding
+            or (
+                getattr(execution, "evidence_schema_version", None) == 2
+                and getattr(execution, "plan_binding_status", None)
+                in {"confirmed", "bound"}
+                and bool(getattr(execution, "plan_step_ids", None))
+            )
+        )
     ]
+
+
+def current_execution_identity_error(state: Any, execution: Any) -> Optional[str]:
+    """Return why a receipt cannot source a current derived record.
+
+    This checks only Host-owned identity and lifecycle fields. It deliberately
+    makes no semantic judgment about what the execution computed.
+    """
+    if execution is None:
+        return "execution_id is unknown"
+    if not execution_supports_evidence(execution):
+        return "execution_id is failed, partial, or ineligible"
+    if getattr(execution, "evidence_schema_version", None) != 2:
+        return "execution_id is legacy-unverifiable"
+    if int(getattr(execution, "round_number", 0) or 0) != int(
+        getattr(state, "current_round", 0) or 0
+    ):
+        return "execution_id belongs to another round"
+    active_plan_id = str(
+        getattr(getattr(state, "current_plan", None), "id", "") or ""
+    )
+    if not active_plan_id or str(getattr(execution, "plan_id", "") or "") != active_plan_id:
+        return "execution_id belongs to another approved plan"
+    active_lineage = getattr(state, "restore_branch_id", None) or "main"
+    if (getattr(execution, "lineage_id", None) or "main") != active_lineage:
+        return "execution_id belongs to another lineage"
+    sandbox_state = getattr(state, "sandbox_state", None) or {}
+    active_analysis_generation = int(
+        sandbox_state.get("analysis_generation", 0) or 0
+    )
+    if int(getattr(execution, "analysis_generation", 0) or 0) != active_analysis_generation:
+        return "execution_id belongs to an earlier analysis generation"
+    cohort = sandbox_state.get("cohort_identity_v1") or {}
+    active_digest = str(cohort.get("cohort_digest") or "")
+    if active_digest and str(getattr(execution, "cohort_digest", "") or "") != active_digest:
+        return "execution_id belongs to another analysis cohort"
+    active_cohort_generation = int(cohort.get("cohort_generation", 0) or 0)
+    if active_cohort_generation and int(
+        getattr(execution, "cohort_generation", 0) or 0
+    ) != active_cohort_generation:
+        return "execution_id belongs to an earlier cohort generation"
+    return None
 
 
 _STAGE1_GUIDANCE = """

@@ -51,9 +51,39 @@ TOOLS = [
                             "declaration."
                         ),
                         "default": [],
+                    },
+                    "plan_step_ids": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 1},
+                        "description": (
+                            "Current-plan step IDs this cell may support. The host records "
+                            "these as candidate links; only Supervisor semantic review can "
+                            "grant plan credit. Omit when uncertain."
+                        ),
+                        "default": [],
+                    },
+                    "execution_purpose": {
+                        "type": "string",
+                        "enum": ["planned", "supplementary", "repair"],
+                        "description": (
+                            "Producer intent only: planned for approved work, repair for a "
+                            "correction, or supplementary for out-of-plan exploration."
+                        ),
+                        "default": "supplementary",
+                    },
+                    "input_profile_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Host BulkInputProfile IDs directly read by this cell. "
+                            "Use an empty list when the cell does not consume bulk input."
+                        ),
+                        "default": [],
                     }
                 },
-                "required": ["code", "description", "step_type", "persistent_outputs"]
+                "required": [
+                    "code", "description", "step_type"
+                ]
             }
         }
     },
@@ -133,18 +163,16 @@ TOOLS = [
                                 "evidence_execution_ids": {
                                     "type": "array",
                                     "items": {"type": "string"},
-                                    "minItems": 1,
                                     "description": (
-                                        "Successful current-run execute_code IDs that "
-                                        "directly support this finding. The host derives "
-                                        "their analysis modality from the executed code "
-                                        "and rejects a mismatched finding modality."
+                                        "Candidate current-run execute_code IDs that may "
+                                        "support this finding. The host validates objective "
+                                        "identity and records missing or invalid links as "
+                                        "unverified without rejecting the report."
                                     ),
+                                    "default": [],
                                 },
                             },
-                            "required": [
-                                "text", "modality", "evidence_execution_ids",
-                            ],
+                            "required": ["text"],
                         },
                         "description": (
                             "List of key findings with a structured evidence modality "
@@ -164,13 +192,14 @@ TOOLS = [
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "IDs printed by successful execute_code calls that directly "
-                            "support the reported findings. Failed executions and prior "
-                            "rounds must not be cited."
-                        )
+                            "Candidate IDs printed by successful execute_code calls. The "
+                            "host keeps only objectively current IDs; uncertain links are "
+                            "retained as unverified rather than blocking completion."
+                        ),
+                        "default": [],
                     }
                 },
-                "required": ["findings", "summary", "evidence_execution_ids"]
+                "required": ["findings", "summary"]
             }
         }
     },
@@ -224,12 +253,20 @@ TOOLS = [
                             "figure. Use the most directly related approved step for an "
                             "additional supporting figure."
                         )
+                    },
+                    "evidence_execution_id": {
+                        "type": "string",
+                        "description": (
+                            "Candidate current-run execute_code receipt that produced "
+                            "or directly supports the data shown. If omitted or invalid, "
+                            "the figure can still be reviewed as supplementary but cannot "
+                            "receive plan credit."
+                        ),
                     }
                 },
                 "required": [
                     "code",
                     "figure_name",
-                    "logical_figure_id",
                     "description",
                     "figure_type",
                 ]
@@ -595,6 +632,75 @@ TOOLS = [
                 "required": ["gene_names"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "register_method_decision",
+            "description": (
+                "Record the PI/Bioinformatics scientific method choice for a bulk "
+                "input before reporting its findings. The platform supplies input "
+                "facts but does not choose the method or fallback."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "input_profile_id": {"type": "string"},
+                    "claim_level": {
+                        "type": "string",
+                        "enum": ["inferential", "descriptive", "not_feasible"],
+                    },
+                    "method": {"type": "string"},
+                    "rationale": {"type": "string"},
+                    "execution_id": {"type": "string"},
+                },
+                "required": [
+                    "input_profile_id", "claim_level", "method", "rationale",
+                    "execution_id",
+                ],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "register_publication_table",
+            "description": (
+                "Register an existing workspace CSV as a publication table. The "
+                "host records its digest and current identity; unregistered CSV files "
+                "are not included in reports."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "csv_path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to an existing CSV file.",
+                    },
+                    "interpretation": {"type": "string"},
+                    "evidence_execution_id": {
+                        "type": "string",
+                        "description": (
+                            "Candidate current execution that produced the table. An "
+                            "invalid or missing value leaves the table unverified rather "
+                            "than granting plan credit."
+                        ),
+                    },
+                    "plan_step_ids": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 1},
+                        "description": (
+                            "Candidate approved-plan steps supported by the table. "
+                            "Supervisor semantic review decides final plan credit."
+                        ),
+                        "default": [],
+                    },
+                },
+                "required": ["name", "description", "csv_path"],
+            },
+        },
     },
     {
         "type": "function",

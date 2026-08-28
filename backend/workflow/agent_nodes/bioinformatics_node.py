@@ -163,6 +163,10 @@ async def prepare_bioinformatics_instruction(self, state, analysis_state):
     # Detect data types for dynamic instruction (single pass)
     has_scrna = analysis_state.has_scrnaseq()
     has_bulk = analysis_state.has_bulk_rnaseq()
+    if has_bulk:
+        from backend.services.bulk_input_profile import ensure_bulk_input_profiles
+
+        ensure_bulk_input_profiles(analysis_state)
     scrna_replicated = has_replicated_condition_design(
         analysis_state, SCRNA_MODALITY,
     )
@@ -197,47 +201,18 @@ async def prepare_bioinformatics_instruction(self, state, analysis_state):
         goals_text = "\n".join(f"- {task}" for task in _normalize_tasks(bioinf_tasks))
     elif has_bulk and not has_scrna:
         goals_text = (
-            "- Perform replicated bulk RNA-seq DEG and pathway analysis"
-            if bulk_replicated else
-            "- Keep bulk condition comparisons descriptive until independent "
-            "sample-to-group membership is verified"
+            "- Execute the PI-approved bulk objectives. Treat the Host input profile "
+            "as facts; PI owns the question and claim level, while Bioinformatics "
+            "selects and records the method and implementation details"
         )
     elif has_bulk and has_scrna:
-        if scrna_replicated and bulk_replicated:
-            goals_text = (
-                "- Perform standard scRNA-seq analysis pipeline\n"
-                "- Perform bulk RNA-seq DEG analysis and compare it with "
-                "sample-level scRNA-seq pseudobulk results"
-            )
-        elif bulk_replicated:
-            goals_text = (
-                "- Perform standard scRNA-seq QC, clustering and annotation; "
-                "keep condition comparisons descriptive\n"
-                "- Perform replicated bulk RNA-seq DEG analysis and localize "
-                "bulk-supported signals to single-cell cell types/states"
-            )
-        elif scrna_replicated:
-            goals_text = (
-                "- Use sample-level scRNA-seq pseudobulk for condition inference\n"
-                "- Keep bulk comparisons descriptive until its sample design is verified"
-            )
-        else:
-            goals_text = "- Keep condition comparisons descriptive in both sequencing modalities"
+        goals_text = (
+            "- Execute the PI-approved single-cell and bulk objectives. PI decides "
+            "which cross-modal questions and claim levels are justified; "
+            "Bioinformatics selects and records compatible methods and details"
+        )
     else:
         goals_text = "- Perform standard scRNA-seq analysis pipeline"
-
-    # Ensure bulk direction validation appears in goals even if PI didn't assign a bulk-specific task
-    if analysis_state.analysis_phase == AnalysisPhase.INNOVATION and has_bulk and has_scrna:
-        goals_lower = goals_text.lower()
-        bulk_validation_mentioned = any(
-            kw in goals_lower for kw in ["bulk", "ssgsea", "deconvolution", "cross-validat", "pseudobulk"]
-        )
-        if not bulk_validation_mentioned:
-            goals_text += (
-                "\n- Validate direction-level findings on bulk RNA-seq data "
-                "(reuse the bulk variables already loaded in Round 1; see the data context section "
-                "for their exact names)"
-            )
 
     instruction = f"""Analyze {data_desc} data for project: {analysis_state.name}
 
@@ -439,7 +414,10 @@ async def collect_bioinformatics_results(self, ctx, result):
     # Both run inside this node so the round still produces exactly one
     # RoundResult for one direction: max_rounds, the direction queue and the
     # integration bookkeeping are untouched. Neither can fail the round.
-    audit_summary = self._audit_round_plan_execution(analysis_state, result)
+    reconciliation = await self._reconcile_plan_evidence(analysis_state, result)
+    audit_summary = self._audit_round_plan_execution(
+        analysis_state, result, reconciliation
+    )
     review_meta, review_merge = await self._run_post_execution_review(
         analysis_state, result, audit_summary, planning_stage
     )
@@ -449,7 +427,12 @@ async def collect_bioinformatics_results(self, ctx, result):
         )
         # Re-audit so the persisted plan reflects the repair, not the state
         # that triggered it.
-        audit_summary = self._audit_round_plan_execution(analysis_state, result)
+        reconciliation = await self._reconcile_plan_evidence(
+            analysis_state, result
+        )
+        audit_summary = self._audit_round_plan_execution(
+            analysis_state, result, reconciliation
+        )
         review_meta["plan_audit"] = audit_summary
 
     await self._adopt_workspace_figures(analysis_state, planning_stage)

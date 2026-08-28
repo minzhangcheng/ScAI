@@ -27,6 +27,7 @@ class PlanAudit:
     executed_families: List[str] = field(default_factory=list)
     unavailable_families: List[str] = field(default_factory=list)
     eligible_figures: List[str] = field(default_factory=list)
+    evidence_mode: str = "legacy_unverifiable"
 
     @property
     def unmet(self) -> List[StepAudit]:
@@ -68,6 +69,7 @@ class PlanAudit:
             "executed_families": sorted(self.executed_families),
             "unavailable_families": sorted(self.unavailable_families),
             "eligible_figures": sorted(self.eligible_figures),
+            "evidence_mode": self.evidence_mode,
         }
 
 
@@ -79,6 +81,9 @@ def audit_plan_execution(
     publication_figures: Optional[Sequence[Any]] = None,
     inherited_plan_ids_by_step: Optional[Mapping[int, Sequence[str]]] = None,
     target_lineage_id: str = "main",
+    target_cohort_digest: Optional[str] = None,
+    target_cohort_generation: Optional[int] = None,
+    semantic_reconciliation: Optional[Mapping[str, Any]] = None,
 ) -> PlanAudit:
     """Audit an approved plan against this round's execution evidence.
 
@@ -109,6 +114,61 @@ def audit_plan_execution(
     plan_created_at = getattr(plan, "created_at", None)
     plan_revision_of = getattr(plan, "revision_of", None)
     plan_phase = str(getattr(plan, "phase", "") or "")
+    plan_receipt_records = [
+        execution
+        for execution in code_history
+        if getattr(execution, "evidence_schema_version", None) == 2
+        and int(getattr(execution, "round_number", 0) or 0) == int(round_number)
+        and str(getattr(execution, "plan_id", "") or "") == plan_id
+        and (getattr(execution, "lineage_id", None) or "main")
+        == target_lineage_id
+    ]
+    receipt_records = [
+        execution
+        for execution in plan_receipt_records
+        if (
+            target_cohort_digest is None
+            or str(getattr(execution, "cohort_digest", "") or "")
+            == str(target_cohort_digest)
+        )
+        and (
+            target_cohort_generation is None
+            or int(getattr(execution, "cohort_generation", 0) or 0)
+            == int(target_cohort_generation)
+        )
+    ]
+    reconciliation_current = bool(
+        isinstance(semantic_reconciliation, Mapping)
+        and str(semantic_reconciliation.get("plan_id") or "") == plan_id
+        and int(semantic_reconciliation.get("round_number") or 0)
+        == int(round_number)
+        and str(semantic_reconciliation.get("lineage_id") or "main")
+        == target_lineage_id
+        and (
+            target_cohort_digest is None
+            or str(semantic_reconciliation.get("cohort_digest") or "")
+            == str(target_cohort_digest)
+        )
+        and (
+            target_cohort_generation is None
+            or int(semantic_reconciliation.get("cohort_generation") or 0)
+            == int(target_cohort_generation)
+        )
+    )
+    semantic_links = {
+        int(item.get("plan_step_id")): item
+        for item in (
+            semantic_reconciliation.get("links", [])
+            if reconciliation_current else []
+        )
+        if isinstance(item, Mapping)
+        and str(item.get("plan_step_id", "")).isdigit()
+    }
+    receipt_mode = bool(plan_receipt_records)
+    if receipt_mode:
+        audit.evidence_mode = "supervisor_semantic"
+    else:
+        audit.evidence_mode = "legacy_unverifiable"
     audit.executed_families = sorted(executed)
     audit.unavailable_families = sorted(unavailable)
     audit.eligible_figures = [_artifact_label(figure) for figure in eligible_figures]
@@ -130,64 +190,94 @@ def audit_plan_execution(
         step_id = int(getattr(step, "id", 0) or 0)
         title = str(getattr(step, "title", "") or "")[:300]
 
-        if not planned and not planned_figures:
-            audit.steps.append(StepAudit(
-                step_id=step_id, title=title, status=STATUS_PENDING,
-                reason="No machine-checkable method or figure identifier in the step text.",
-                verifiable=False,
-            ))
-            continue
-
-        missing = sorted(planned - executed)
-        if not missing and not missing_figures:
-            evidence: List[str] = []
-            if planned:
-                evidence.append("successful execution of: " + ", ".join(sorted(planned)))
-            if planned_figures:
-                evidence.append(
-                    "shared figure contract for current-round report-eligible "
-                    "PublicationFigure type(s): " + ", ".join(sorted(planned_figures))
+        if receipt_mode:
+            semantic = semantic_links.get(step_id)
+            semantic_status = str(
+                (semantic or {}).get("status") or "unverified"
+            )
+            linked_execution_ids = [
+                str(value) for value in ((semantic or {}).get("execution_ids") or [])
+            ]
+            if semantic_status == "evidenced":
+                receipt_reason = (
+                    "Confirmed by Supervisor semantic reconciliation"
+                    + (
+                        "; execution receipt(s): "
+                        + ", ".join(linked_execution_ids[:8])
+                        if linked_execution_ids else ""
+                    )
                 )
-            audit.steps.append(StepAudit(
-                step_id=step_id, title=title, status=STATUS_COMPLETED,
-                reason="Evidenced by " + "; ".join(evidence),
-                planned_families=sorted(planned),
-                planned_figure_kinds=sorted(planned_figures),
-            ))
+                if not missing_figures:
+                    audit.steps.append(StepAudit(
+                        step_id=step_id,
+                        title=title,
+                        status=STATUS_COMPLETED,
+                        reason=receipt_reason,
+                        planned_families=sorted(planned),
+                        planned_figure_kinds=sorted(planned_figures),
+                    ))
+                else:
+                    audit.steps.append(StepAudit(
+                        step_id=step_id,
+                        title=title,
+                        status=STATUS_PENDING,
+                        reason=(
+                            receipt_reason
+                            + "; required reviewed artifact(s) remain missing: "
+                            + ", ".join(missing_figures)
+                        ),
+                        planned_families=sorted(planned),
+                        planned_figure_kinds=sorted(planned_figures),
+                        missing_figure_kinds=missing_figures,
+                    ))
+            elif semantic_status == "partial":
+                absent = []
+                absent.append("remaining semantic work")
+                absent.extend(f"figure:{kind}" for kind in missing_figures)
+                audit.steps.append(StepAudit(
+                    step_id=step_id,
+                    title=title,
+                    status=STATUS_PENDING,
+                    reason=(
+                        str((semantic or {}).get("reason") or "Partially evidenced")
+                        + "; unresolved: " + ", ".join(absent)
+                    ),
+                    planned_families=sorted(planned),
+                    missing_families=sorted(planned),
+                    planned_figure_kinds=sorted(planned_figures),
+                    missing_figure_kinds=missing_figures,
+                ))
+            else:
+                audit.steps.append(StepAudit(
+                    step_id=step_id,
+                    title=title,
+                    status=STATUS_PENDING,
+                    reason=str(
+                        (semantic or {}).get("reason")
+                        or "Supervisor semantic reconciliation did not verify this step."
+                    ),
+                    planned_families=sorted(planned),
+                    missing_families=sorted(planned),
+                    planned_figure_kinds=sorted(planned_figures),
+                    missing_figure_kinds=missing_figures,
+                    verifiable=False,
+                ))
             continue
 
-        blocked = [f for f in missing if f in unavailable]
-        if blocked and len(blocked) == len(missing):
-            audit.steps.append(StepAudit(
-                step_id=step_id, title=title, status=STATUS_SKIPPED,
-                reason="Required tooling unavailable in this kernel: " + ", ".join(blocked),
-                planned_families=sorted(planned), missing_families=missing,
-                planned_figure_kinds=sorted(planned_figures),
-                missing_figure_kinds=missing_figures,
-            ))
-            continue
-
-        if _method_requirement_is_conditional(step, planned):
-            absent = list(missing)
-            absent.extend(f"figure:{kind}" for kind in missing_figures)
-            audit.steps.append(StepAudit(
-                step_id=step_id, title=title, status=STATUS_SKIPPED,
-                reason="Step is conditional in the approved plan; not evidenced: "
-                       + ", ".join(absent),
-                planned_families=sorted(planned), missing_families=missing,
-                planned_figure_kinds=sorted(planned_figures),
-                missing_figure_kinds=missing_figures,
-            ))
-            continue
-
-        absent = list(missing)
-        absent.extend(f"figure:{kind}" for kind in missing_figures)
+        # Historical sessions have no Host receipt identity. Keep the keyword
+        # families above for operator diagnostics only; they cannot grant plan
+        # credit or trigger an automatic repair pass.
         audit.steps.append(StepAudit(
             step_id=step_id, title=title, status=STATUS_PENDING,
-            reason="No current-round eligible evidence for: " + ", ".join(absent),
-            planned_families=sorted(planned), missing_families=missing,
+            reason=(
+                "Legacy execution has no Host receipt identity and is therefore "
+                "semantically unverifiable. Keyword-family matches are advisory only."
+            ),
+            planned_families=sorted(planned),
+            missing_families=sorted(planned),
             planned_figure_kinds=sorted(planned_figures),
             missing_figure_kinds=missing_figures,
+            verifiable=False,
         ))
 
     return audit
@@ -618,20 +708,76 @@ def _sanitize_finding_records(values: Any) -> List[Dict[str, Any]]:
             continue
         text = str(value.get("text", "") or "").strip()
         modality = str(value.get("modality", "") or "").strip()
-        evidence_ids = [
-            str(item).strip()[:100]
-            for item in (value.get("evidence_execution_ids") or [])
-            if str(item).strip()
-        ]
-        if (not text
-                or modality not in {"single_cell", "bulk_rna_seq", "cross_modal"}
-                or not evidence_ids):
+        if not text:
             continue
-        records.append({
+        if modality not in {"single_cell", "bulk_rna_seq", "cross_modal"}:
+            modality = ""
+
+        def _ids(field_name: str) -> List[str]:
+            return [
+                str(item).strip()[:100]
+                for item in (value.get(field_name) or [])
+                if str(item).strip()
+            ][:_MAX_LIST]
+
+        def _step_ids(field_name: str) -> List[int]:
+            normalized = []
+            for item in value.get(field_name) or []:
+                try:
+                    step_id = int(item)
+                except (TypeError, ValueError):
+                    continue
+                if step_id > 0 and step_id not in normalized:
+                    normalized.append(step_id)
+                if len(normalized) >= _MAX_LIST:
+                    break
+            return normalized
+
+        def _nonnegative_int(field_name: str) -> int:
+            try:
+                return max(0, int(value.get(field_name) or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        evidence_status = str(
+            value.get("evidence_status") or "unverified"
+        ).lower()
+        if evidence_status not in {"verified", "unverified"}:
+            evidence_status = "unverified"
+        semantic_status = str(
+            value.get("semantic_status") or "unverified"
+        ).lower()
+        if semantic_status not in {"evidenced", "partial", "unverified"}:
+            semantic_status = "unverified"
+        record = {
+            "id": str(value.get("id") or "")[:100],
             "text": text[:_MAX_TASK_LEN],
-            "modality": modality,
-            "evidence_execution_ids": evidence_ids[:_MAX_LIST],
-        })
+            "modality": modality or None,
+            "evidence_execution_ids": _ids("evidence_execution_ids"),
+            "candidate_evidence_execution_ids": _ids(
+                "candidate_evidence_execution_ids"
+            ),
+            "claimed_evidence_execution_ids": _ids(
+                "claimed_evidence_execution_ids"
+            ),
+            "candidate_plan_step_ids": _step_ids(
+                "candidate_plan_step_ids"
+            ),
+            "confirmed_plan_step_ids": _step_ids(
+                "confirmed_plan_step_ids"
+            ),
+            "evidence_status": evidence_status,
+            "semantic_status": semantic_status,
+            "round_number": _nonnegative_int("round_number"),
+            "lineage_id": str(value.get("lineage_id") or "main")[:100],
+            "plan_id": str(value.get("plan_id") or "")[:100] or None,
+            "analysis_generation": _nonnegative_int("analysis_generation"),
+            "cohort_generation": _nonnegative_int("cohort_generation"),
+            "cohort_digest": (
+                str(value.get("cohort_digest") or "")[:128] or None
+            ),
+        }
+        records.append(record)
         if len(records) >= _MAX_FINDINGS:
             break
     return records

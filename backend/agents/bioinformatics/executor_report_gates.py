@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
+import uuid
 
 from backend.services.sample_design import samples_per_group_by_modality
 
@@ -119,9 +120,42 @@ async def prepare_report_attempt(context, tool_call) -> ReportAttempt | None:
             findings_summary="REJECTED: empty findings payload",
         ))
         return None
-    evidence_executions = successful_evidence_executions(
-        self.code_history, round_number=state.current_round
+    active_plan_id = str(getattr(state.current_plan, "id", "") or "") or None
+    active_lineage = getattr(state, "restore_branch_id", None) or "main"
+    cohort_identity = active_cohort_identity(state)
+    active_cohort_digest = (
+        str(cohort_identity.get("cohort_digest") or "") or None
     )
+    active_cohort_generation = int(
+        cohort_identity.get("cohort_generation", 0) or 0
+    ) or None
+    evidence_executions = successful_evidence_executions(
+        self.code_history,
+        round_number=state.current_round,
+        plan_id=active_plan_id,
+        lineage_id=active_lineage,
+        cohort_digest=active_cohort_digest,
+        cohort_generation=active_cohort_generation,
+        require_plan_binding=False,
+    )
+    for record in finding_records:
+        record.update({
+            "id": str(record.get("id") or uuid.uuid4()),
+            "round_number": int(state.current_round or 0),
+            "lineage_id": active_lineage,
+            "plan_id": active_plan_id,
+            "analysis_generation": int(
+                (state.sandbox_state or {}).get("analysis_generation", 0) or 0
+            ),
+            "cohort_generation": int(
+                cohort_identity.get("cohort_generation", 0) or 0
+            ),
+            "cohort_digest": active_cohort_digest,
+            "candidate_plan_step_ids": [],
+            "confirmed_plan_step_ids": [],
+            "evidence_status": "unverified",
+            "semantic_status": "unverified",
+        })
     lowered_codes = [ce.code.lower() for ce in evidence_executions if ce.code]
     _escaped_notes = []
     _attempt_gate_degraded = context.evidence_gate_degraded
@@ -304,194 +338,26 @@ async def check_mandatory_report_gates(context, tool_call, attempt) -> bool:
                 rejection_limit=context.max_mechanism_rejections,
                 forced_release=True,
             ))
-    if state.analysis_phase == AnalysisPhase.EXPLORATION and context.planning_stage != "stage1":
-        if has_bulk_data:
-            context.bulk_reject_count, rejected, escaped = self._check_gate_keyword(
-                lowered_codes,
-                ["bulk", "merged_counts", "pydeseq", "deseqdataset"],
-                context.bulk_reject_count, context.max_bulk_rejections,
-                "bulk RNA-seq data exists but was not analyzed",
-            )
-            if rejected:
-                bulk_paths = ", ".join(
-                    f.file_path for f in state.get_files_by_section("sequencing")
-                    if f.data_type == DATA_TYPE_BULK_RNASEQ
-                )
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": (
-                        "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
-                        "bulk RNA-seq analysis. Bulk RNA-seq data is available and MUST be analyzed. "
-                        f"Bulk data files: {bulk_paths}. "
-                        "You MUST: (1) Load bulk count matrix with pd.read_csv(), "
-                        "(2) Perform DEG analysis using pydeseq2 (if ImportError, fallback to scipy.stats.ttest_ind + statsmodels FDR correction), "
-                        "(3) Use the single-cell arm only in a way supported by its "
-                        "replicate design, THEN call report_findings."
-                    )
-                })
-                analysis_log.append(AnalysisStep(
-                    step_number=step_count, step_type="report_findings",
-                    agent_reasoning=agent_reasoning,
-                    findings=[], findings_summary="REJECTED: bulk RNA-seq not analyzed",
-                ))
-                return False
-            if escaped:
-                _escaped_notes.append(build_gate_skip_note("bulk RNA-seq analysis"))
-                _attempt_gate_degraded = True
-                _attempt_gate_findings.append(_evidence_gate_record(
-                    gate="bulk-rnaseq-analysis",
-                    rule_id="scai-native/bulk-rnaseq-analysis",
-                    detail="Bulk RNA-seq data was available but was never analyzed.",
-                    severity="block",
-                    rejection_count=context.max_bulk_rejections,
-                    rejection_limit=context.max_bulk_rejections,
-                    forced_release=True,
-                ))
-        if has_scrna_data and has_bulk_data and bulk_has_replicates:
-            integration_keywords = (
-                ["venn", "pseudobulk", "overlap", "intersect",
-                 "matplotlib_venn", "venn2", "venn3"]
-                if scrna_has_replicates else
-                ["cell_type", "cell type", "dotplot", "heatmap",
-                 "descriptive", "localiz"]
-            )
-            context.integration_reject_count, rejected, escaped = self._check_gate_keyword(
-                lowered_codes,
-                integration_keywords,
-                context.integration_reject_count, context.max_integration_rejections,
-                ("bulk/scRNA-seq cross-validation not performed"
-                 if scrna_has_replicates else
-                 "bulk-supported single-cell localization not performed"),
-            )
-            if rejected:
-                if scrna_has_replicates:
-                    integration_guidance = (
-                        "(1) Aggregate scRNA-seq by independent biological sample\n"
-                        "(2) Compare the replicated pseudobulk and bulk results\n"
-                        "(3) Visualize concordance or overlap\n"
-                        "(4) Show cell-type-specific expression for concordant genes"
-                    )
-                else:
-                    integration_guidance = (
-                        "The single-cell arm has fewer than two independent samples "
-                        "per condition. Do NOT run condition-level cell tests or claim "
-                        "inferential pseudobulk DEGs. Use replicated bulk DEG/pathway "
-                        "results as the inferential layer, then localize those supported "
-                        "genes or pathways to single-cell cell types/states using "
-                        "descriptive expression, ranks, or effect sizes. Explicitly label "
-                        "the single-cell comparison descriptive."
-                    )
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": (
-                        "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
-                        "bulk/scRNA-seq cross-validation. "
-                        "Both bulk RNA-seq and scRNA-seq data are available.\n"
-                        f"{integration_guidance}\n"
-                        "THEN call report_findings."
-                    )
-                })
-                analysis_log.append(AnalysisStep(
-                    step_number=step_count, step_type="report_findings",
-                    agent_reasoning=agent_reasoning,
-                    findings=[], findings_summary="REJECTED: bulk/scRNA-seq cross-validation not performed",
-                ))
-                return False
-            if escaped:
-                _escaped_notes.append(build_gate_skip_note("bulk/scRNA-seq cross-validation"))
-                _attempt_gate_degraded = True
-                _attempt_gate_findings.append(_evidence_gate_record(
-                    gate="bulk-scrna-cross-validation",
-                    rule_id="scai-native/bulk-scrna-cross-validation",
-                    detail="Bulk and single-cell results were not cross-validated.",
-                    severity="block",
-                    rejection_count=context.max_integration_rejections,
-                    rejection_limit=context.max_integration_rejections,
-                    forced_release=True,
-                ))
-        if has_scrna_data and has_bulk_data and bulk_has_replicates:
-            context.deconv_reject_count, rejected, escaped = self._check_gate_keyword(
-                lowered_codes,
-                ["deconvolution", "nnls", "scaden", "least_squares"],
-                context.deconv_reject_count, context.max_deconv_rejections,
-                "cell-type deconvolution not performed",
-            )
-            if rejected:
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": (
-                        "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
-                        "cell-type deconvolution. "
-                        "Both bulk RNA-seq and scRNA-seq data are available — you MUST "
-                        "perform deconvolution to estimate cell-type proportions in the bulk samples.\n"
-                        "(1) Use scRNA-seq as a reference profile\n"
-                        "(2) Prioritize pure Python methods like scipy.optimize.nnls or sklearn Non-negative Least Squares\n"
-                        "(3) Visualize inferred cell-type proportions across bulk conditions\n"
-                        "THEN call report_findings."
-                    )
-                })
-                analysis_log.append(AnalysisStep(
-                    step_number=step_count, step_type="report_findings",
-                    agent_reasoning=agent_reasoning,
-                    findings=[], findings_summary="REJECTED: cell-type deconvolution not performed",
-                ))
-                return False
-            if escaped:
-                _escaped_notes.append(build_gate_skip_note("cell-type deconvolution"))
-                _attempt_gate_degraded = True
-                _attempt_gate_findings.append(_evidence_gate_record(
-                    gate="cell-type-deconvolution",
-                    rule_id="scai-native/cell-type-deconvolution",
-                    detail="Cell-type deconvolution was not completed.",
-                    severity="block",
-                    rejection_count=context.max_deconv_rejections,
-                    rejection_limit=context.max_deconv_rejections,
-                    forced_release=True,
-                ))
-    elif (state.analysis_phase == AnalysisPhase.INNOVATION
-          and has_bulk_data and has_scrna_data and bulk_has_replicates):
-        context.innovation_bulk_reject_count, rejected, escaped = self._check_gate_keyword(
-            lowered_codes,
-            ["bulk_", "merged_counts"],
-            context.innovation_bulk_reject_count, context.max_innovation_bulk_rejections,
-            "innovation-phase bulk direction validation missing",
-        )
-        if rejected:
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": (
-                    "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
-                    "bulk RNA-seq direction validation. Both bulk and scRNA-seq data are "
-                    "available — you MUST validate this direction's findings on the bulk data. "
-                    "Reuse the bulk variables already loaded in Round 1 (see the data context "
-                    "section for their exact names); do NOT re-run the bulk DEG pipeline from "
-                    "scratch. Use bulk data as an independent validation layer for your new "
-                    "findings, choosing methods appropriate to your specific results and the "
-                    "bulk sample design. THEN call report_findings."
-                )
-            })
-            analysis_log.append(AnalysisStep(
-                step_number=step_count, step_type="report_findings",
-                agent_reasoning=agent_reasoning,
-                findings=[],
-                findings_summary="REJECTED: innovation-phase bulk direction validation missing",
-            ))
-            return False
-        if escaped:
-            _escaped_notes.append(build_gate_skip_note("innovation-phase bulk direction validation"))
+    if has_bulk_data and context.planning_stage != "stage1":
+        eligible_ids = {item.id for item in attempt.evidence_executions}
+        current_decisions = [
+            item for item in state.method_decisions
+            if item.round_number == state.current_round
+            and item.execution_id in eligible_ids
+            and any(profile.id == item.input_profile_id
+                    for profile in state.bulk_input_profiles)
+        ]
+        if not current_decisions:
             _attempt_gate_degraded = True
             _attempt_gate_findings.append(_evidence_gate_record(
-                gate="innovation-bulk-validation",
-                rule_id="scai-native/innovation-bulk-validation",
-                detail="Innovation findings were not independently validated in bulk data.",
-                severity="block",
-                rejection_count=context.max_innovation_bulk_rejections,
-                rejection_limit=context.max_innovation_bulk_rejections,
-                forced_release=True,
+                gate="bulk-method-decision",
+                rule_id="scai-native/bulk-method-decision",
+                detail=(
+                    "No current bulk method decision was linked to eligible evidence. "
+                    "The findings were retained as unverified; the workflow was not "
+                    "blocked."
+                ),
+                severity="advise",
             ))
     attempt.gate_degraded = _attempt_gate_degraded
     attempt.gate_findings = _attempt_gate_findings
@@ -499,13 +365,8 @@ async def check_mandatory_report_gates(context, tool_call, attempt) -> bool:
 
 
 async def check_report_evidence(context, tool_call, attempt) -> bool:
-    messages = context.messages
-    analysis_log = context.analysis_log
-    step_count = context.step_count
-    agent_reasoning = context.agent_reasoning
     args = tool_call.arguments
     evidence_executions = attempt.evidence_executions
-    _attempt_gate_findings = attempt.gate_findings
     requested_evidence_ids = {
         str(value).strip()
         for value in _ensure_list(args.get("evidence_execution_ids"))
@@ -513,51 +374,29 @@ async def check_report_evidence(context, tool_call, attempt) -> bool:
     }
     eligible_evidence_ids = {execution.id for execution in evidence_executions}
     evidence_by_id = {execution.id: execution for execution in evidence_executions}
-    invalid_evidence_ids = requested_evidence_ids - eligible_evidence_ids
-    per_finding_evidence_errors = finding_evidence_errors(
-        attempt.finding_records,
-        requested_evidence_ids,
-        evidence_by_id,
-    )
-    if (not requested_evidence_ids or invalid_evidence_ids
-            or per_finding_evidence_errors):
-        context.evidence_citation_reject_count += 1
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": (
-                "[REJECTED] Findings must cite at least one successful current-run "
-                "execute_code result using evidence_execution_ids. Failed executions "
-                "or outputs that explicitly say validation failed cannot support a "
-                f"claim. Invalid IDs: {sorted(invalid_evidence_ids)}. "
-                f"Per-finding errors: {per_finding_evidence_errors}. "
-                f"Available IDs: {sorted(eligible_evidence_ids)[-20:]}"
-            ),
+    valid_requested_ids = requested_evidence_ids & eligible_evidence_ids
+    attempt.requested_evidence_ids = set(valid_requested_ids)
+    for record in attempt.finding_records:
+        claimed_ids = {
+            str(value).strip()
+            for value in record.get("evidence_execution_ids", [])
+            if str(value).strip()
+        }
+        if not claimed_ids:
+            claimed_ids = set(requested_evidence_ids)
+        record_ids = claimed_ids & eligible_evidence_ids
+        record_executions = [evidence_by_id[value] for value in record_ids]
+        record["claimed_evidence_execution_ids"] = sorted(claimed_ids)[:40]
+        record["candidate_evidence_execution_ids"] = sorted(record_ids)[:40]
+        # Producer citations nominate evidence. They do not prove the semantic
+        # relation between an execution and a scientific finding.
+        record["evidence_execution_ids"] = []
+        record["candidate_plan_step_ids"] = sorted({
+            int(step_id)
+            for execution in record_executions
+            for step_id in getattr(execution, "plan_step_ids", [])
         })
-        analysis_log.append(AnalysisStep(
-            step_number=step_count,
-            step_type="report_findings",
-            agent_reasoning=agent_reasoning,
-            findings=[],
-            findings_summary="REJECTED: missing or invalid execution evidence",
-            evidence_execution_ids=sorted(requested_evidence_ids),
-        ))
-        if context.evidence_citation_reject_count == context.max_evidence_citation_refusals:
-            _attempt_gate_findings.append(_evidence_gate_record(
-                gate="evidence-citation",
-                rule_id="scai-native/evidence-citation",
-                subject="evidence_execution_ids",
-                detail=(
-                    "report_findings was refused "
-                    f"{context.evidence_citation_reject_count} times for citing no "
-                    "successful current-run execution. The gate does not "
-                    "release; the run continues to spend its step budget "
-                    "until a successful cell is cited or the budget ends."
-                ),
-                severity="block",
-                rejection_count=context.evidence_citation_reject_count,
-                rejection_limit=0,
-            ))
-        return False
-    attempt.requested_evidence_ids = requested_evidence_ids
+        record["evidence_status"] = "unverified"
+        record["semantic_status"] = "unverified"
+        attempt.requested_evidence_ids.update(record_ids)
     return True

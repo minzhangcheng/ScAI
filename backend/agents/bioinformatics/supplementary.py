@@ -421,7 +421,6 @@ class SupplementaryMixin:
         from backend.services.execution_evidence import (
             GENE_INDEX_ALIGNMENT_GUIDANCE,
             LIANA_RUNTIME_GUIDANCE,
-            PYDESEQ2_RUNTIME_GUIDANCE,
         )
         main_var = metadata.get("var")
         task_list = "\n".join(f"{i}. {t}" for i, t in enumerate(tasks, start=1))
@@ -450,7 +449,6 @@ Do not report an uploaded modality as absent until every matching registered pat
 been checked.
 
 ## Installed-runtime guidance
-{PYDESEQ2_RUNTIME_GUIDANCE}
 {LIANA_RUNTIME_GUIDANCE}
 {GENE_INDEX_ALIGNMENT_GUIDANCE}
 

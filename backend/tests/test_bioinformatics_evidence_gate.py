@@ -36,20 +36,18 @@ def test_failed_or_explicitly_failed_validation_cannot_support_findings():
     ) == [good]
 
 
-def test_report_findings_requires_execution_evidence_ids():
+def test_report_findings_accepts_optional_execution_evidence_candidates():
     tool = next(
         item for item in TOOLS
         if item["function"]["name"] == "report_findings"
     )
     parameters = tool["function"]["parameters"]
-    assert "evidence_execution_ids" in parameters["required"]
+    assert "evidence_execution_ids" not in parameters["required"]
     assert parameters["properties"]["evidence_execution_ids"]["items"] == {
         "type": "string"
     }
     finding_item = parameters["properties"]["findings"]["items"]
-    assert finding_item["required"] == [
-        "text", "modality", "evidence_execution_ids",
-    ]
+    assert finding_item["required"] == ["text"]
     assert finding_item["properties"]["modality"]["enum"] == [
         "single_cell", "bulk_rna_seq", "cross_modal",
     ]

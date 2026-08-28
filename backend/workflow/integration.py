@@ -104,6 +104,11 @@ class IntegrationMixin:
             integration_candidates=list(scored_candidates) if scored_candidates else [],
             round_status="completed",
             evidence_status="substantive" if integration_report else "empty",
+            wait_policy=(
+                "no_wait" if analysis_state.round_wait_seconds == 0
+                else "manual" if analysis_state.round_wait_seconds < 0
+                else "countdown"
+            ),
         )
         derive_round_completion_status({"analysis_state": analysis_state}, integration_result)
         lineage_id = current_lineage_id(analysis_state)
@@ -122,8 +127,16 @@ class IntegrationMixin:
 
         # Send round_summary so the frontend shows this integration round
         effective_max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
+        no_wait = analysis_state.round_wait_seconds == 0
+        wait_policy = (
+            "no_wait" if no_wait
+            else "manual" if analysis_state.round_wait_seconds < 0
+            else "countdown"
+        )
         round_summary = build_round_summary_payload(
             integration_result, analysis_state, effective_max_rounds,
+            status="completed" if no_wait else "waiting_input",
+            wait_policy=wait_policy,
         )
         await self._send_message("round_summary", round_summary, AgentType.PI)
 
@@ -172,14 +185,25 @@ class IntegrationMixin:
         analysis_state.integration_gate_candidates = scored_candidates
         analysis_state.integration_gate_literature_evidence = list(literature_evidence or [])
         self._continue_event.clear()
-        self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
-        await self._create_auto_snapshot(analysis_state, "pre_integration_gate")
-        await self._send_message(
-            "integration_gate",
-            build_integration_gate_payload(analysis_state, session_id),
-            AgentType.PI,
+        self._set_status(
+            analysis_state,
+            TaskStatus.RUNNING if no_wait else TaskStatus.WAITING_INPUT,
         )
-        await self._send_state_sync(analysis_state, "integration_gate")
+        await self._create_auto_snapshot(analysis_state, "pre_integration_gate")
+        if no_wait:
+            await self._send_message(
+                "status",
+                "Integration complete. No-wait mode is enabled; PI selection "
+                "will continue automatically.",
+                AgentType.PI,
+            )
+        else:
+            await self._send_message(
+                "integration_gate",
+                build_integration_gate_payload(analysis_state, session_id),
+                AgentType.PI,
+            )
+            await self._send_state_sync(analysis_state, "integration_gate")
         return {**state, "analysis_state": analysis_state, "integration_next": "gate"}
 
     def _after_integration(self, state: WorkflowState) -> str:

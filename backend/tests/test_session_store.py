@@ -22,10 +22,11 @@ from backend.models.schemas import (
     WebSocketMessage,
 )
 from backend.models.schemas import TaskStatus
-from backend.constants import STRIPPED_FIGURE_PLACEHOLDER
+from backend.constants import STRIPPED_FIGURE_PLACEHOLDER, WaitInputReason
 from backend.state import last_save_times, sessions
 from backend.config import ensure_session_dirs, get_session_states, get_session_workspace
 from backend.tests.figure_image_helpers import valid_image_bytes, valid_pdf_bytes
+from backend.utils.sandbox import NotebookState
 
 
 def _make_state(session_id: str, user_id: str = "u-1") -> AnalysisState:
@@ -78,6 +79,87 @@ def test_save_and_load_roundtrip(tmp_path, monkeypatch):
     assert loaded is not None
     assert loaded.id == sid
     assert loaded.user_id == "u-1"
+
+
+def test_session_projection_uses_newer_notebook_runtime_metadata():
+    sid = "sess-runtime-projection"
+    ensure_session_dirs(sid)
+    states = get_session_states(sid)
+    notebook = NotebookState(sid, str(states))
+    notebook.update_runtime_persistence(
+        "current",
+        current_revision=122,
+        saved_revision=122,
+        commit_source="regular_save",
+    )
+    notebook.update_runtime_persistence(
+        "live_dirty",
+        current_revision=123,
+        saved_revision=122,
+    )
+
+    state = _make_state(sid)
+    state.runtime_persistence.update({
+        "status": "live_dirty",
+        "current_revision": 95,
+        "saved_revision": 92,
+    })
+    original_projection = dict(state.runtime_persistence)
+
+    save_session_to_disk(sid, state)
+
+    persisted = json.loads((states.parent / "session.json").read_text())
+    projection = persisted["runtime_persistence"]
+    assert projection["source"] == "notebook_state"
+    assert projection["projection_status"] == "current"
+    assert projection["status"] == "live_dirty"
+    assert projection["current_revision"] == 123
+    assert projection["saved_revision"] == 122
+    assert projection["last_attempt_status"] == "succeeded"
+    assert projection["observed_at"]
+    assert state.runtime_persistence == original_projection
+
+    loaded = load_session_from_disk(sid)
+    assert loaded is not None
+    assert loaded.runtime_persistence["current_revision"] == 123
+    assert loaded.runtime_persistence["saved_revision"] == 122
+
+
+def test_runtime_projection_fails_closed_on_lifecycle_mismatch():
+    sid = "sess-runtime-projection-generation"
+    ensure_session_dirs(sid)
+    states = get_session_states(sid)
+    notebook = NotebookState(sid, str(states), lifecycle_generation=4)
+    notebook.update_runtime_persistence(
+        "current",
+        current_revision=8,
+        saved_revision=8,
+        commit_source="regular_save",
+    )
+
+    state = _make_state(sid)
+    state.lifecycle_generation = 5
+    state.runtime_persistence["current_revision"] = 3
+    state.runtime_persistence["saved_revision"] = 3
+
+    save_session_to_disk(sid, state)
+
+    persisted = json.loads((states.parent / "session.json").read_text())
+    projection = persisted["runtime_persistence"]
+    assert projection["current_revision"] == 3
+    assert projection["saved_revision"] == 3
+    assert projection["projection_status"] == "lifecycle_mismatch"
+    assert "generation 4" in projection["projection_error"]
+
+    loaded = load_session_from_disk(sid)
+    assert loaded is not None
+    assert loaded.status == TaskStatus.WAITING_INPUT
+    assert (
+        loaded.wait_input_reason
+        == WaitInputReason.RUNTIME_PERSISTENCE_FAILURE.value
+    )
+    assert loaded.snapshot_failure is not None
+    assert loaded.snapshot_failure["code"] == "runtime_persistence_failure"
 
 
 def test_load_rejects_empty_user_id(tmp_path, monkeypatch):

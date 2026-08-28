@@ -2,6 +2,12 @@
 from __future__ import annotations
 
 from .executor_dispatch import ToolAction
+from .shared import current_execution_identity_error
+from ...services.figure_contract import (
+    audit_figure_contract,
+    collect_plan_figure_requirements,
+)
+from ...services.figure_revision_tasks import find_figure_revision_task
 
 
 def bind_facade(facade) -> None:
@@ -498,6 +504,7 @@ async def handle_publication_figure(context, tool_call) -> ToolAction:
     logical_figure_id = str(args.get("logical_figure_id") or figure_name).strip()
     description = args.get("description", "")
     figure_type = args.get("figure_type", "other")
+    source_execution_id = str(args.get("evidence_execution_id") or "").strip()
     raw_plan_step_id = args.get("plan_step_id")
     malformed_plan_step = False
     try:
@@ -515,22 +522,133 @@ async def handle_publication_figure(context, tool_call) -> ToolAction:
     invalid_plan_step = malformed_plan_step or (
         plan_step_id is not None and plan_step_id not in approved_step_ids
     )
+    nomination_note = ""
+    if invalid_plan_step:
+        nomination_note = (
+            f"Submitted plan_step_id {raw_plan_step_id!r} was not current and was "
+            "ignored; Supervisor semantic review remained authoritative."
+        )
+        plan_step_id = None
     rendered = False
     current_figure = None
     safe_fig_name = "".join(
         char if char.isalnum() or char == "_" else "_" for char in figure_name
     )
-    if invalid_plan_step:
+    active_lineage = getattr(state, "restore_branch_id", None) or "main"
+    source_execution = next((
+        execution for execution in context.agent.code_history
+        if str(getattr(execution, "id", "") or "") == source_execution_id
+    ), None)
+    source_error = current_execution_identity_error(state, source_execution)
+
+    binding_decision = "supplementary"
+    binding_reason = nomination_note or None
+    requirement_key = None
+    purpose = "supplementary"
+    plan = getattr(state, "current_plan", None)
+    requirements = collect_plan_figure_requirements(plan)
+    if requirements:
+        callback = getattr(context.agent, "figure_plan_binding_callback", None)
+        if callback is not None:
+            try:
+                semantic = await callback(state, {
+                    "code": code,
+                    "figure_name": figure_name,
+                    "figure_type": figure_type,
+                    "description": description,
+                    "purpose": "result",
+                    "plan_step_id": plan_step_id,
+                })
+            except Exception as exc:
+                semantic = {
+                    "decision": "supplementary",
+                    "plan_requirement_key": None,
+                    "reason": f"Supervisor semantic binding failed: {exc}",
+                    "parse_failed": True,
+                }
+        else:
+            semantic = {
+                "decision": "supplementary",
+                "plan_requirement_key": None,
+                "reason": "Supervisor semantic binding callback is unavailable.",
+                "parse_failed": True,
+            }
+        semantic_decision = str(semantic.get("decision") or "supplementary")
+        semantic_reason = str(semantic.get("reason") or "")[:2000]
+        proposed_key = str(
+            semantic.get("plan_requirement_key") or ""
+        ).strip() or None
+        requirement_by_key = {item.key: item for item in requirements}
+        missing_keys = {
+            item.requirement.key
+            for item in audit_figure_contract(
+                state,
+                plan=plan,
+                planning_stage=str(getattr(plan, "stage", "full") or "full"),
+                include_stage_baseline=False,
+            ).missing
+        }
+        requirement = requirement_by_key.get(proposed_key)
+        objective_binding_error = None
+        if semantic_decision in {"accept", "rebind"}:
+            if requirement is None:
+                objective_binding_error = (
+                    "Supervisor returned a plan requirement outside the current "
+                    "materialized visual contract."
+                )
+            elif proposed_key not in missing_keys:
+                objective_binding_error = (
+                    "Supervisor selected a requirement that is already satisfied."
+                )
+            elif source_error is not None:
+                objective_binding_error = source_error
+        if (
+            semantic_decision in {"accept", "rebind"}
+            and requirement is not None
+            and proposed_key in missing_keys
+            and source_error is None
+        ):
+            binding_decision = semantic_decision
+            binding_reason = semantic_reason or nomination_note or None
+            plan_step_id = requirement.plan_step_id
+            requirement_key = requirement.key
+            purpose = "result"
+        else:
+            plan_step_id = None
+            binding_decision = "supplementary"
+            binding_reason = (
+                objective_binding_error
+                or semantic_reason
+                or source_error
+                or nomination_note
+                or "No unambiguous current plan requirement was confirmed."
+            )
+    else:
+        plan_step_id = None
+        binding_reason = (
+            source_error or nomination_note or "No current plan figure requirement exists."
+        )
+
+    revision_task = None
+    if requirement_key is not None:
+        revision_task = find_figure_revision_task(
+            state,
+            plan_id=str(getattr(plan, "id", "") or "") or None,
+            plan_requirement_key=requirement_key,
+        )
+        if revision_task is not None:
+            logical_figure_id = revision_task.logical_figure_id
+
+    if revision_task is not None and revision_task.status == "exhausted_excluded":
         tool_result = (
-            "[REJECTED] plan_step_id must identify an approved plan step. "
-            f"Received {raw_plan_step_id!r}; available IDs: "
-            f"{sorted(approved_step_ids)}. The figure was not generated."
+            "Figure redraw budget already exhausted for this plan requirement. "
+            "The unresolved figure remains excluded from reports; continue the "
+            "analysis without another automatic redraw."
         )
     else:
         await context.agent._notify(
             "status", f"Generating publication figure: {figure_name}"
         )
-        active_lineage = getattr(state, "restore_branch_id", None) or "main"
         previous_figure_ids = {
             getattr(figure, "id", None)
             for figure in state.publication_figures
@@ -545,6 +663,16 @@ async def handle_publication_figure(context, tool_call) -> ToolAction:
             review_callback=context.review_callback,
             plan_step_id=plan_step_id,
             logical_figure_id=logical_figure_id,
+            purpose=purpose,
+            source_execution_id=(source_execution_id if source_error is None else None),
+            submitted_plan_step_id=(
+                int(raw_plan_step_id)
+                if raw_plan_step_id is not None and not malformed_plan_step
+                else None
+            ),
+            plan_requirement_key=requirement_key,
+            supervisor_binding_decision=binding_decision,
+            supervisor_binding_reason=binding_reason,
         )
         current_figure = next((
             figure for figure in reversed(state.publication_figures)

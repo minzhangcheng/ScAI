@@ -72,6 +72,7 @@ _EXCLUDED_FIELDS = {
     # API — verified by grepping frontend/src — and it is per-execution, so
     # keeping it off the load response keeps that payload bounded.
     "post_execution_reviews",
+    "plan_evidence_reconciliations",
     "current_round_cache",
     # Server-side bounded caches used to avoid repeated provider/search work;
     # their rendered guidance/results reach clients through normal outputs.

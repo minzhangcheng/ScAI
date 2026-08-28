@@ -160,6 +160,11 @@ class FigureRequestContext:
     plan_step_id: Optional[int]
     purpose: Optional[str]
     logical_figure_id: Optional[str]
+    source_execution_id: Optional[str]
+    submitted_plan_step_id: Optional[int]
+    plan_requirement_key: Optional[str]
+    supervisor_binding_decision: Optional[str]
+    supervisor_binding_reason: Optional[str]
     dependencies: FigureDependencies
 
 
@@ -197,6 +202,7 @@ class FigureAttemptState:
     best_snapshot: dict[str, Any] | None = None
     last_review: dict[str, Any] = field(default_factory=dict)
     last_must_fix: list[str] = field(default_factory=list)
+    terminal_revision_reason: str = "attempts_exhausted"
 
     @property
     def agent(self) -> Any:
@@ -264,6 +270,20 @@ async def prepare_figure_request(
         if (getattr(item, "lineage_id", None) or "main") == active_lineage
         and str(getattr(item, "logical_figure_id", None) or "") == logical_id
     ]
+    from ...services.figure_revision_tasks import find_figure_revision_task
+
+    revision_task = find_figure_revision_task(
+        request.state,
+        plan_id=current_plan_id,
+        plan_requirement_key=request.plan_requirement_key,
+    )
+    starting_revision_count = (
+        min(revision_task.attempt_count, revision_task.max_attempts)
+        if revision_task is not None
+        and revision_task.logical_figure_id == logical_id
+        and revision_task.status in {"pending", "in_progress", "blocked"}
+        else 0
+    )
     import uuid
 
     return FigureAttemptState(
@@ -279,4 +299,5 @@ async def prepare_figure_request(
         prior_attempt=prior_attempts[-1] if prior_attempts else None,
         render_attempt_id=str(uuid.uuid4()),
         current_code=request.code,
+        revision_count=starting_revision_count,
     ), None

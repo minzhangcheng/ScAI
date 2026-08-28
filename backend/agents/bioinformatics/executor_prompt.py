@@ -26,6 +26,10 @@ You are conducting {modality} analysis. You have access to tools:
    Returns concise summary (signature, key params, example).
    Use when unsure about API usage, especially for: decoupler, gseapy, scvelo, cellrank.
    Example: lookup_documentation(function_path="decoupler.get_collectri")
+13. register_method_decision - Record the PI/Bioinformatics scientific choice for
+    a host-profiled bulk input, linked to the successful execution that used it
+14. register_publication_table - Register an existing workspace CSV for report use;
+    unregistered CSV files remain workspace outputs and are not report evidence
    IMPORTANT: Figure code MUST use actual analysis data from the sandbox (e.g., adata object).
    NEVER generate dummy/fabricated data. Only plot groups that exist in the experimental design.
    Inside the `code` parameter of THIS tool (generate_publication_figure): do NOT include plt.close(), plt.show(), or plt.savefig() — this tool wraps saving internally with its own filename. (Note: the separate execute_code tool DOES allow plt.savefig — the two tools have different conventions.)
@@ -87,6 +91,12 @@ SECURITY RESTRICTIONS:
 def _executor_prompt_workflow(workspace_dir: str) -> str:
     return f"""
 WORKFLOW GUIDELINES:
+- When known, nominate execution_purpose and plan_step_ids on execute_code. These
+  fields record producer intent only. The host captures objective identity and the
+  Supervisor later decides semantic plan credit; uncertain or omitted links remain
+  unverified and never block the analysis.
+- Cite every host BulkInputProfile read by the cell in input_profile_ids. Use an
+  empty list only when the cell does not consume bulk input.
 - Technical steps can be done autonomously: data loading, QC, normalization, PCA, clustering, UMAP, basic DE
 - **Serendipity Check (Variance Partitioning)**: Before executing a highly targeted task, run a quick global variance check (e.g. correlate top PCs with each metadata column). If an unmentioned covariate (batch, technical artifact, unexpected cell state) drives variance far exceeding the chosen hypothesis, `print()` it and flag it as a "Counter-intuitive Finding" in the same cell.
 - **MEMORY MANAGEMENT (CRITICAL to avoid OOM crashes)**:

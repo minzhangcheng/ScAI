@@ -62,6 +62,9 @@ class MessagingMixin:
                     "species_input_info": analysis_state.species_input_info,
                     "snapshot_failure": analysis_state.snapshot_failure,
                     "snapshot_transaction": analysis_state.snapshot_transaction,
+                    "runtime_persistence": dict(
+                        analysis_state.runtime_persistence or {}
+                    ),
                 }
             )
             try:

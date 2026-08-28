@@ -43,6 +43,11 @@ from ..services.sample_design import (
     infer_execution_modalities,
     samples_per_group_by_modality,
 )
+from ..services.cohort_identity import (
+    active_cohort_identity,
+    probe_canonical_cohort,
+    record_cohort_transition,
+)
 from .bioinformatics.executor_collaboration import (
     handle_annotate_clusters,
     handle_consult_pi,
@@ -74,7 +79,9 @@ from .bioinformatics.executor_gene_sets import (
 from .bioinformatics.executor_registration import (
     eligible_execution_ids,
     handle_register_analysis_plan,
+    handle_register_method_decision,
     handle_register_mechanisms,
+    handle_register_publication_table,
     handle_register_score,
     mechanism_execution_id_error,
 )
@@ -365,6 +372,7 @@ class BioinformaticsAgent(
         message_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
         figure_review_callback: Optional[Callable[[PublicationFigure], Awaitable[Dict[str, Any]]]] = None,
         supervisor_callback: Optional[Callable[['AnalysisStep', List[str]], Awaitable[SupervisorEvalResult]]] = None,
+        figure_plan_binding_callback: Optional[Callable[[AnalysisState, Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None,
         technique_agent=None,
         species_validation_callback: Optional[Callable[[List[str], str, Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None,
         marker_db_intervention_callback: Optional[Callable[[], Awaitable["LlmFailureAction"]]] = None,
@@ -380,6 +388,7 @@ class BioinformaticsAgent(
         self.message_callback = message_callback
         self.figure_review_callback = figure_review_callback
         self.supervisor_callback = supervisor_callback
+        self.figure_plan_binding_callback = figure_plan_binding_callback
         self.technique_agent = technique_agent
         self.species_validation_callback = species_validation_callback
         self.marker_db_intervention_callback = marker_db_intervention_callback
@@ -536,9 +545,12 @@ class BioinformaticsAgent(
                         sep_hint = "sep=','"
                     else:
                         sep_hint = "sep='\\t'  # .txt files are usually tab-separated in bioinformatics; change to ',' if needed"
-                    data_parts.append(f"    bulk_{bulk_var_name} = pd.read_csv('{f.file_path}', index_col=0, {sep_hint})")
-                    data_parts.append(f"    # Bulk matrix (genes x samples). Print bulk_{bulk_var_name}.columns to infer sample grouping for pydeseq2 metadata.")
-                    data_parts.append(f"    # CRITICAL: pydeseq2 requires (samples x genes) - transpose with .T before use.")
+                    data_parts.append(f"    bulk_{bulk_var_name} = pd.read_csv('{f.file_path}', {sep_hint})")
+                    data_parts.append(
+                        f"    # Use the host profile for table facts. Verify sample/group "
+                        f"mapping from uploaded metadata and the explicit project design "
+                        f"before selecting a method."
+                    )
         else:
             data_parts.append("⚠️ No sequencing data uploaded")
 

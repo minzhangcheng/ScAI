@@ -79,6 +79,9 @@ export interface SessionLoadResponse {
   final_summary?: string
   publication_figures?: RawPublicationFigure[]
   publication_tables?: RawPublicationTable[]
+  figure_revision_tasks?: RawFigureRevisionTask[]
+  bulk_input_profiles?: RawBulkInputProfile[]
+  method_decisions?: RawMethodDecision[]
   graphic_abstract?: RawGraphicAbstract
   integrated_report?: string | null
   exploration_report_url?: string
@@ -88,6 +91,7 @@ export interface SessionLoadResponse {
   restore_branch_id?: string | null
   annotation_state?: RawAnnotationState | null
   state_version?: number
+  runtime_persistence?: Record<string, unknown>
   round_wait_seconds?: number
   waiting_input_started_at?: string
   agent_errors?: RawAgentError[]
@@ -221,6 +225,7 @@ export interface RawRoundResult {
   direction?: string
   direction_key?: string
   result_identity_key?: string
+  wait_policy?: 'manual' | 'countdown' | 'no_wait'
 }
 
 export interface RawPublicationFigure {
@@ -245,6 +250,16 @@ export interface RawPublicationFigure {
   planStepId?: number
   plan_id?: string
   planId?: string
+  plan_requirement_key?: string
+  planRequirementKey?: string
+  submitted_plan_step_id?: number
+  submittedPlanStepId?: number
+  supervisor_binding_decision?: 'accept' | 'rebind' | 'supplementary' | 'reject'
+  supervisorBindingDecision?: 'accept' | 'rebind' | 'supplementary' | 'reject'
+  supervisor_binding_reason?: string
+  supervisorBindingReason?: string
+  source_execution_id?: string
+  sourceExecutionId?: string
   purpose?: string
   is_publication?: boolean
   isPublication?: boolean
@@ -267,6 +282,53 @@ export interface RawPublicationTable {
   piFeedback?: string
   created_at?: string
   createdAt?: string
+}
+
+export interface RawFigureRevisionTask {
+  id: string
+  logical_figure_id: string
+  plan_id?: string | null
+  plan_requirement_key?: string | null
+  current_figure_id: string
+  source_execution_id?: string | null
+  status: 'pending' | 'in_progress' | 'resolved' | 'blocked' | 'abandoned' | 'exhausted_excluded'
+  reason: 'visual_revision' | 'reanalysis_required' | 'revision_failed' | 'attempts_exhausted' | 'cohort_changed'
+  must_fix: string[]
+  suggestions: string[]
+  attempt_count: number
+  max_attempts: number
+  created_at: string
+  updated_at: string
+}
+
+export interface RawBulkInputProfile {
+  id: string
+  source_file_id: string
+  shape: number[]
+  annotation_columns: string[]
+  candidate_sample_columns: string[]
+  numeric_fraction_by_column: Record<string, number>
+  integer_like_fraction: number
+  negative_value_count: number
+  missing_value_summary: Record<string, number>
+  declared_scale: 'counts' | 'normalized' | 'transformed' | 'unknown'
+  profile_status: 'complete' | 'sampled' | 'failed'
+  complete: boolean
+  rows_scanned: number
+  error_code?: string | null
+  created_at: string
+}
+
+export interface RawMethodDecision {
+  id: string
+  input_profile_id: string
+  claim_level: 'inferential' | 'descriptive' | 'not_feasible'
+  method: string
+  rationale: string
+  execution_id: string
+  decision_source: 'approved_plan_and_bioinformatics'
+  round_number: number
+  created_at: string
 }
 
 export interface RawGraphicAbstract {
@@ -439,6 +501,7 @@ export interface RoundSummary {
     other: string[]
   }
   status: 'analyzing' | 'waiting_input' | 'completed'
+  waitPolicy?: 'manual' | 'countdown' | 'no_wait'
   // Per-agent findings (from round_summary WebSocket message)
   pathologyFindings?: string[]
   bioinformaticsFindings?: string[]

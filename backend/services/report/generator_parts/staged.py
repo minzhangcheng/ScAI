@@ -89,6 +89,7 @@ async def generate_report_staged(
         legacy_artifacts=getattr(report_state, "legacy_artifacts", None),
     )
     existing_tables = generator._scan_existing_tables(
+        publication_tables=getattr(report_state, "publication_tables", None),
         invalidated_stems=bindings.excluded_artifact_stems(
             getattr(report_state, "publication_tables", None),
             bindings.eligible_artifacts(getattr(report_state, "publication_tables", None)),
@@ -468,7 +469,9 @@ async def _assemble_report(
         "degraded_fallback": force_fallback,
         "appendix": appendix_data,
         "analysis_log": generator._build_full_analysis_log(report_state),
-        "score_definitions": [sd.model_dump(mode="json") for sd in report_state.score_definitions] if report_state.score_definitions else []
+        "score_definitions": [sd.model_dump(mode="json") for sd in report_state.score_definitions] if report_state.score_definitions else [],
+        "bulk_input_profiles": [item.model_dump(mode="json") for item in report_state.bulk_input_profiles],
+        "method_decisions": [item.model_dump(mode="json") for item in report_state.method_decisions],
     }
 
     # Sanitize NaN/Infinity values before saving (pandas data can contain these)

@@ -5,7 +5,7 @@ action enums, and LLM failure intervention constants.
 """
 from enum import Enum
 
-VERSION = "0.49.1"
+VERSION = "0.49.2"
 
 
 # ── Authoritative graph node registry — single source of truth ─────
@@ -94,6 +94,7 @@ class StateSyncChangeType(str, Enum):
     SPECIES_AUTO_SKIPPED = "species_auto_skipped"
     SNAPSHOT_FAILURE = "snapshot_failure"
     RUNTIME_PERSISTENCE_FAILURE = "runtime_persistence_failure"
+    RUNTIME_PERSISTENCE_COMMITTED = "runtime_persistence_committed"
 
 
 # Core agents whose absence blocks the workflow. Disabling any of these

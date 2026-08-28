@@ -75,6 +75,52 @@ def _plan(*steps: PlanStep) -> AnalysisPlan:
     return AnalysisPlan(phase="innovation", stage="stage2", steps=list(steps))
 
 
+def _audit_current(
+    plan: AnalysisPlan,
+    *,
+    code_history=(),
+    round_number: int = 2,
+    publication_figures=(),
+    target_lineage_id: str = "main",
+    inherited_plan_ids_by_step=None,
+):
+    """Audit figure completeness after Supervisor confirms the execution."""
+    receipt = CodeExecution(
+        id="current-receipt",
+        code="run_current_plan_step()",
+        round_number=round_number,
+        evidence_schema_version=2,
+        plan_id=plan.id,
+        plan_step_ids=[int(step.id) for step in plan.steps],
+        execution_purpose="planned",
+        plan_binding_status="confirmed",
+        execution_status="succeeded",
+        lineage_id=target_lineage_id,
+    )
+    reconciliation = {
+        "plan_id": plan.id,
+        "round_number": round_number,
+        "lineage_id": target_lineage_id,
+        "links": [
+            {
+                "plan_step_id": int(step.id),
+                "status": "evidenced",
+                "execution_ids": [receipt.id],
+            }
+            for step in plan.steps
+        ],
+    }
+    return audit_plan_execution(
+        plan,
+        [*code_history, receipt],
+        round_number=round_number,
+        publication_figures=publication_figures,
+        inherited_plan_ids_by_step=inherited_plan_ids_by_step,
+        target_lineage_id=target_lineage_id,
+        semantic_reconciliation=reconciliation,
+    )
+
+
 def test_plot_only_step_is_verifiable_and_unmet_without_an_artifact():
     plan = _plan(PlanStep(
         id=1,
@@ -83,10 +129,11 @@ def test_plot_only_step_is_verifiable_and_unmet_without_an_artifact():
         expected_output="Publication-quality annotated UMAP",
     ))
 
-    audit = audit_plan_execution(
+    audit = _audit_current(
         plan,
-        [CodeExecution(code="sc.pl.umap(adata); plt.savefig('umap.png')", round_number=2)],
-        round_number=2,
+        code_history=[CodeExecution(
+            code="sc.pl.umap(adata); plt.savefig('umap.png')", round_number=2
+        )],
         publication_figures=[],
     )
     step = audit.steps[0]
@@ -112,8 +159,8 @@ def test_plot_only_step_completes_from_a_current_report_eligible_figure():
     ))
     figure = _figure("annotated_umap", "umap")
 
-    step = audit_plan_execution(
-        plan, [], round_number=2, publication_figures=[figure]
+    step = _audit_current(
+        plan, publication_figures=[figure]
     ).steps[0]
 
     assert step.status == "completed"
@@ -131,10 +178,9 @@ def test_mixed_step_requires_method_and_each_named_figure_kind():
         code="sc.tl.rank_genes_groups(adata, 'leiden')", round_number=2
     )]
 
-    only_umap = audit_plan_execution(
+    only_umap = _audit_current(
         plan,
-        history,
-        round_number=2,
+        code_history=history,
         publication_figures=[_figure("annotated_umap", "umap")],
     ).steps[0]
     assert only_umap.status == "pending"
@@ -142,10 +188,9 @@ def test_mixed_step_requires_method_and_each_named_figure_kind():
     assert only_umap.planned_figure_kinds == ["dotplot", "umap"]
     assert only_umap.missing_figure_kinds == ["dotplot"]
 
-    complete = audit_plan_execution(
+    complete = _audit_current(
         plan,
-        history,
-        round_number=2,
+        code_history=history,
         publication_figures=[
             _figure("annotated_umap", "umap"),
             _figure("marker_dotplot", "dotplot"),
@@ -174,8 +219,8 @@ def test_only_current_round_report_eligible_figures_count():
     ]
 
     assert eligible_current_round_figures(candidates, 2) == []
-    step = audit_plan_execution(
-        plan, [], round_number=2, publication_figures=candidates
+    step = _audit_current(
+        plan, publication_figures=candidates
     ).steps[0]
     assert step.status == "pending"
     assert step.missing_figure_kinds == ["heatmap"]
@@ -198,10 +243,8 @@ def test_only_target_restore_lineage_figures_count_as_execution_evidence():
     assert eligible_current_round_figures(
         [main, branch], 2, target_lineage_id="restore-branch"
     ) == [branch]
-    verdict = audit_plan_execution(
+    verdict = _audit_current(
         plan,
-        [],
-        round_number=2,
         publication_figures=[main, branch],
         target_lineage_id="restore-branch",
     ).steps[0]
@@ -220,13 +263,13 @@ def test_report_eligible_tables_cannot_satisfy_a_figure_requirement():
     plan = _plan(PlanStep(id=1, title="Result display", method="Create a heatmap"))
 
     assert eligible_current_round_figures([table], 2) == []
-    step = audit_plan_execution(
-        plan, [], round_number=2, publication_figures=[table]
+    step = _audit_current(
+        plan, publication_figures=[table]
     ).steps[0]
     assert step.status == "pending"
 
 
-def test_legacy_dict_figures_are_supported_but_round_zero_is_not_a_wildcard():
+def test_legacy_dict_figures_are_diagnostic_but_cannot_grant_plan_credit():
     plan = _plan(PlanStep(id=1, title="Result display", method="Create a heatmap"))
     frozen = _figure("legacy_heatmap", "heatmap")
     legacy_current = {
@@ -253,7 +296,9 @@ def test_legacy_dict_figures_are_supported_but_round_zero_is_not_a_wildcard():
     current = audit_plan_execution(
         plan, [], round_number=2, publication_figures=[legacy_current]
     ).steps[0]
-    assert current.status == "completed"
+    assert current.status == "pending"
+    assert current.verifiable is False
+    assert current.missing_figure_kinds == []
 
     unattributed = audit_plan_execution(
         plan, [], round_number=2, publication_figures=[legacy_unattributed]
@@ -269,8 +314,8 @@ def test_generic_visualization_accepts_any_eligible_publication_figure():
     ))
     figure = _figure("result_scatter", "other", description="Effect-size scatter plot")
 
-    step = audit_plan_execution(
-        plan, [], round_number=2, publication_figures=[figure]
+    step = _audit_current(
+        plan, publication_figures=[figure]
     ).steps[0]
     assert step.planned_figure_kinds == ["figure"]
     assert step.status == "completed"
@@ -285,8 +330,8 @@ def test_generic_legacy_figure_must_not_predate_the_original_plan():
     old_unattributed = _figure("old_result_scatter", "other")
     old_unattributed.created_at = plan.created_at - timedelta(seconds=1)
 
-    verdict = audit_plan_execution(
-        plan, [], round_number=2, publication_figures=[old_unattributed]
+    verdict = _audit_current(
+        plan, publication_figures=[old_unattributed]
     ).steps[0]
 
     assert verdict.status == "pending"
@@ -304,19 +349,15 @@ def test_generic_visualization_does_not_steal_another_steps_attributed_figure():
 
     # Once this round contains attributed figures, an unattributed figure cannot
     # be used as a wildcard beside one explicitly owned by another step.
-    missing = audit_plan_execution(
+    missing = _audit_current(
         plan,
-        [],
-        round_number=2,
         publication_figures=[another_step, unattributed],
     ).steps[0]
     assert missing.status == "pending"
     assert missing.missing_figure_kinds == ["figure"]
 
-    matched = audit_plan_execution(
+    matched = _audit_current(
         plan,
-        [],
-        round_number=2,
         publication_figures=[another_step, _figure("step_one_plot", "other", plan_step_id=1)],
     ).steps[0]
     assert matched.status == "completed"
@@ -345,27 +386,25 @@ def test_generic_visualization_uses_the_same_plan_lineage_rules_as_typed_figures
         "parent_scatter", "other", plan_step_id=1, plan_id=parent.id
     )
 
-    assert audit_plan_execution(
-        revised, [], round_number=2, publication_figures=[current]
+    assert _audit_current(
+        revised, publication_figures=[current]
     ).steps[0].status == "completed"
 
-    stale = audit_plan_execution(
-        revised, [], round_number=2, publication_figures=[inherited]
+    stale = _audit_current(
+        revised, publication_figures=[inherited]
     ).steps[0]
     assert stale.status == "pending"
     assert stale.missing_figure_kinds == ["figure"]
 
-    accepted_inheritance = audit_plan_execution(
+    accepted_inheritance = _audit_current(
         revised,
-        [],
-        round_number=2,
         publication_figures=[inherited],
         inherited_plan_ids_by_step={1: (parent.id,)},
     ).steps[0]
     assert accepted_inheritance.status == "completed"
 
 
-def test_unavailable_method_skips_the_whole_step_including_its_figure_contract():
+def test_unavailable_method_keyword_diagnostic_cannot_skip_the_plan_step():
     plan = _plan(PlanStep(
         id=1,
         title="Composition analysis and display",
@@ -380,7 +419,8 @@ def test_unavailable_method_skips_the_whole_step_including_its_figure_contract()
     missing_both = audit_plan_execution(
         plan, unavailable, round_number=2, publication_figures=[]
     ).steps[0]
-    assert missing_both.status == "skipped"
+    assert missing_both.status == "pending"
+    assert missing_both.verifiable is False
     assert missing_both.missing_families == ["composition_model"]
     assert missing_both.missing_figure_kinds == ["heatmap"]
 
@@ -390,7 +430,8 @@ def test_unavailable_method_skips_the_whole_step_including_its_figure_contract()
         round_number=2,
         publication_figures=[_figure("composition_heatmap", "heatmap")],
     ).steps[0]
-    assert figure_complete.status == "skipped"
+    assert figure_complete.status == "pending"
+    assert figure_complete.verifiable is False
     assert figure_complete.missing_figure_kinds == []
 
 
@@ -437,7 +478,8 @@ def test_legacy_snapshot_opt_out_waives_unstructured_result_figures_too():
     )
     assert audit.steps[0].verifiable is False
     assert audit.steps[1].verifiable is False
-    assert audit.steps[2].status == "completed"
+    assert audit.steps[2].status == "pending"
+    assert audit.steps[2].verifiable is False
     assert audit.steps[2].planned_families == ["marker_de"]
     assert audit.steps[2].missing_figure_kinds == []
     assert audit.steps[3].verifiable is False
@@ -471,10 +513,9 @@ def test_new_plan_cannot_reintroduce_the_legacy_no_figure_prose_escape():
     )
     execution = CodeExecution(code="import pydeseq2", round_number=2)
 
-    verdict = audit_plan_execution(
+    verdict = _audit_current(
         _plan(step),
-        [execution],
-        round_number=2,
+        code_history=[execution],
         publication_figures=[],
     ).steps[0]
 
@@ -494,8 +535,8 @@ def test_clean_diagnostic_figure_uses_the_shared_report_eligibility_rule():
         layout_violations=[],
     )
 
-    step = audit_plan_execution(
-        plan, [], round_number=2, publication_figures=[diagnostic]
+    step = _audit_current(
+        plan, publication_figures=[diagnostic]
     ).steps[0]
     assert step.status == "pending"
     assert step.missing_figure_kinds == ["umap"]
@@ -515,20 +556,16 @@ def test_structured_requirements_use_count_and_plan_step_attribution():
     wrong_step = _figure("wrong_step", "umap", plan_step_id=8, plan_id=plan.id)
     right_step = _figure("right_step", "umap", plan_step_id=7, plan_id=plan.id)
 
-    one = audit_plan_execution(
+    one = _audit_current(
         plan,
-        [],
-        round_number=2,
         publication_figures=[wrong_step, right_step],
     ).steps[0]
     assert one.status == "pending"
     assert one.planned_figure_kinds == ["umap"]
     assert one.missing_figure_kinds == ["umap"]
 
-    two = audit_plan_execution(
+    two = _audit_current(
         plan,
-        [],
-        round_number=2,
         publication_figures=[
             right_step,
             _figure(
@@ -560,8 +597,8 @@ def test_revised_plan_cannot_reuse_a_parent_plans_attributed_result():
         plan_id=parent.id,
     )
 
-    verdict = audit_plan_execution(
-        revised, [], round_number=2, publication_figures=[old]
+    verdict = _audit_current(
+        revised, publication_figures=[old]
     ).steps[0]
 
     assert verdict.status == "pending"
@@ -581,8 +618,8 @@ def test_structured_requirement_cannot_be_waived_by_text_only_or_optional_prose(
     )
 
     assert extract_planned_figure_kinds(step) == {"heatmap"}
-    verdict = audit_plan_execution(
-        _plan(step), [], round_number=2, publication_figures=[]
+    verdict = _audit_current(
+        _plan(step), publication_figures=[]
     ).steps[0]
     assert verdict.verifiable is True
     assert verdict.status == "pending"

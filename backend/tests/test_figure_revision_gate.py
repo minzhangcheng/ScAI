@@ -160,7 +160,8 @@ def _reviews(*scripted):
 def _review(approved=False, score=6, **extra):
     payload = {
         "approved": approved, "quality_score": score,
-        "feedback": "needs work", "suggestions": [], "must_fix": ["fix the legend"],
+        "feedback": "needs work", "suggestions": [],
+        "must_fix": [] if approved else ["fix the legend"],
         "requires_reanalysis": False,
     }
     payload.update(extra)
@@ -460,16 +461,16 @@ async def test_preview_message_failure_trace_abandons_attempt(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_stalled_score_still_accepts_a_clean_figure(tmp_path):
-    """The shortcut is about diminishing returns and stays available when the
-    renderer has no objection — this is the pre-existing behaviour."""
+async def test_stalled_score_does_not_accept_unresolved_must_fix(tmp_path):
+    """A clean renderer cannot override unresolved PI must-fix items."""
     agent, state, result = await _run(
         tmp_path, [CLEAN], [_review(score=6), _review(score=6)],
     )
     figure = state.publication_figures[0]
-    assert figure.review_status == FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
-    assert "did not improve" in result
-    assert agent.sandbox.executions == 2  # initial + one revision
+    assert figure.review_status == FigureReviewStatus.REVISION_REQUESTED
+    assert "bounded revision budget is exhausted" in result
+    assert agent.sandbox.executions == 3  # initial + two redraw attempts
+    assert state.figure_revision_tasks[0].status == "exhausted_excluded"
 
 
 @pytest.mark.asyncio
@@ -482,7 +483,7 @@ async def test_stalled_score_cannot_ship_a_measured_collision(tmp_path):
     )
     figure = state.publication_figures[0]
     assert figure.review_status == FigureReviewStatus.REVISION_REQUESTED
-    assert agent.sandbox.executions == 4  # initial + 3 revisions, budget spent
+    assert agent.sandbox.executions == 3  # initial + 2 revisions, budget spent
     assert figure.unresolved_must_fix, "unfixed defects must be recorded"
 
 
@@ -561,7 +562,7 @@ async def test_a_worse_revision_is_rolled_back(tmp_path):
         tmp_path, [CLEAN], [_review(score=6), _review(score=5)],
     )
     figure = state.publication_figures[0]
-    assert figure.review_status == FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
+    assert figure.review_status == FigureReviewStatus.REVISION_REQUESTED
     assert "restored" in result
     # the first render's bytes are back on disk
     assert (tmp_path / "figures" / "f.jpg").read_bytes().endswith(b"\x01" * 100)

@@ -143,12 +143,35 @@ async def test_a_rebuilt_namespace_is_persisted_over_the_previous_pkl(tmp_path):
     sandbox, pkl = _latched_sandbox(
         tmp_path, baseline=baseline, live=baseline | {"adata"}
     )
+    from unittest.mock import AsyncMock
+
+    persistence = {
+        "lifecycle_generation": sandbox._expected_lifecycle_generation,
+        "current_revision": 0,
+        "saved_revision": 0,
+    }
+
+    def _update_persistence(status, **updates):
+        persistence.update({"status": status, **updates})
+        sandbox.notebook_state.runtime_persistence = persistence
+        return dict(persistence)
+
+    sandbox.notebook_state.runtime_persistence = persistence
+    sandbox.notebook_state.update_runtime_persistence.side_effect = (
+        _update_persistence
+    )
+    sandbox.runtime_persistence_commit_callback = AsyncMock()
 
     assert await sandbox.save_session() is True
 
     assert pkl.read_bytes() == b"REBUILT"
     assert sandbox._session_restore_failed is False
     assert sandbox._restore_failed_globals is None
+    sandbox.runtime_persistence_commit_callback.assert_awaited_once()
+    event = sandbox.runtime_persistence_commit_callback.await_args.args[0]
+    assert event["session_id"] == sandbox.session_id
+    assert event["current_revision"] == 1
+    assert event["saved_revision"] == 1
 
 
 @pytest.mark.asyncio

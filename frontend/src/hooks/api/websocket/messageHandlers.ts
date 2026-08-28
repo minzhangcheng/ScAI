@@ -210,6 +210,12 @@ function handleStateSync(data: any, context: MessageHandlerContext): void {
     if (syncContent.status !== undefined) sessionUpdate.status = syncContent.status
     if (syncContent.current_round !== undefined) sessionUpdate.currentRound = syncContent.current_round
     if (syncContent.analysis_phase) sessionUpdate.analysisPhase = syncContent.analysis_phase
+    if (
+      syncContent.runtime_persistence
+      && typeof syncContent.runtime_persistence === 'object'
+    ) {
+      sessionUpdate.runtimePersistence = syncContent.runtime_persistence
+    }
     if (Object.keys(sessionUpdate).length > 0) {
       useAppStore.getState().updateSession(sessionUpdate)
     }
@@ -482,7 +488,11 @@ export function handleWebSocketMessage(
         useAppStore.getState().updateSession({
           roundResults: updatedRounds,
           currentRound: roundData.round,
-          status: roundData.status === 'waiting_input' ? 'waiting_input' : latestSession.status,
+          status: roundData.wait_policy === 'no_wait'
+            ? 'running'
+            : roundData.status === 'waiting_input'
+              ? 'waiting_input'
+              : latestSession.status,
         })
       }
     }

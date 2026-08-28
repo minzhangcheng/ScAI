@@ -1,11 +1,4 @@
-"""Tests for the deterministic layer of the post-execution review round.
-
-The audit is the only writer of `PlanStep.status`, and a false "unmet" verdict
-sends a supplementary pass after work that already ran. The verdict tests below
-therefore pin each of the five outcomes -- especially the two exemptions
-(conditional wording, missing tooling) and the unverifiable case, which must
-never be counted as a gap.
-"""
+"""Tests for Host evidence identity and Supervisor plan reconciliation."""
 import base64
 import hashlib
 import itertools
@@ -133,6 +126,119 @@ def _unmet_audit():
     )
 
 
+def _receipt(plan: AnalysisPlan, **overrides) -> CodeExecution:
+    values = {
+        "id": "receipt-1",
+        "code": "run_current_plan_step()",
+        "round_number": 2,
+        "evidence_schema_version": 2,
+        "plan_id": plan.id,
+        "plan_step_ids": [1],
+        "execution_purpose": "planned",
+        "plan_binding_status": "bound",
+        "execution_status": "succeeded",
+        "lineage_id": "main",
+        "cohort_digest": "a" * 64,
+    }
+    values.update(overrides)
+    return CodeExecution(**values)
+
+
+def _semantic_reconciliation(plan: AnalysisPlan, links):
+    return {
+        "plan_id": plan.id,
+        "round_number": 2,
+        "lineage_id": "main",
+        "cohort_digest": "a" * 64,
+        "links": links,
+    }
+
+
+def test_supervisor_confirmation_completes_only_its_semantic_plan_step():
+    plan = AnalysisPlan(
+        id="receipt-plan",
+        phase="innovation",
+        steps=[
+            PlanStep(id=1, title="First", method="Run custom method"),
+            PlanStep(id=2, title="Second", method="Run another method"),
+        ],
+    )
+
+    audit = audit_plan_execution(
+        plan,
+        [_receipt(plan)],
+        round_number=2,
+        target_cohort_digest="a" * 64,
+        semantic_reconciliation=_semantic_reconciliation(plan, [{
+            "plan_step_id": 1,
+            "status": "evidenced",
+            "execution_ids": ["receipt-1"],
+        }]),
+    )
+
+    assert audit.evidence_mode == "supervisor_semantic"
+    assert [step.status for step in audit.steps] == ["completed", "pending"]
+    assert "receipt-1" in audit.steps[0].reason
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"execution_purpose": "supplementary", "plan_binding_status": "supplementary"},
+        {"execution_status": "failed", "error": "boom"},
+        {"cohort_digest": "b" * 64},
+    ],
+)
+def test_ineligible_v2_receipt_never_falls_back_to_keyword_inference(overrides):
+    plan = AnalysisPlan(
+        id="strict-plan",
+        phase="innovation",
+        steps=[PlanStep(id=1, title="Markers", method="sc.tl.rank_genes_groups")],
+    )
+    receipt = _receipt(
+        plan,
+        code="sc.tl.rank_genes_groups(adata, 'cluster')",
+        **overrides,
+    )
+
+    audit = audit_plan_execution(
+        plan,
+        [receipt],
+        round_number=2,
+        target_cohort_digest="a" * 64,
+    )
+
+    assert audit.evidence_mode == "supervisor_semantic"
+    assert audit.steps[0].status == "pending"
+    assert audit.steps[0].verifiable is False
+
+
+def test_semantic_reconciliation_cannot_cross_cohort_generations():
+    plan = AnalysisPlan(
+        id="generation-plan",
+        phase="innovation",
+        steps=[PlanStep(id=1, title="Current", method="Run current analysis")],
+    )
+    reconciliation = _semantic_reconciliation(plan, [{
+        "plan_step_id": 1,
+        "status": "evidenced",
+        "execution_ids": ["receipt-1"],
+    }])
+    reconciliation["cohort_generation"] = 1
+
+    audit = audit_plan_execution(
+        plan,
+        [_receipt(plan, cohort_generation=1)],
+        round_number=2,
+        target_cohort_digest="a" * 64,
+        target_cohort_generation=2,
+        semantic_reconciliation=reconciliation,
+    )
+
+    assert audit.steps[0].status == "pending"
+    assert audit.steps[0].verifiable is False
+
+
 def test_attempt_id_is_stable_under_evidence_reordering():
     a = compute_review_attempt_id(3, "plan-1", "stage2", ["e2", "e1", "e3"], "completed")
     b = compute_review_attempt_id(3, "plan-1", "stage2", ["e3", "e1", "e2"], "completed")
@@ -257,13 +363,14 @@ def test_unavailable_families_come_from_import_errors_across_rounds():
     assert unavailable_method_families(
         [CodeExecution(code="import pyscenic", error="ValueError: boom")]) == set()
 
-    # A round-1 import error still explains a round-9 step's absence.
+    # A round-1 import error remains diagnostic, but cannot skip a plan step.
     plan = AnalysisPlan(phase="innovation", steps=[
         PlanStep(id=1, title="Deconvolve bulk profiles",
                  method="Run cell2location against the reference signatures")])
     audit = audit_plan_execution(plan, history, round_number=9)
-    assert audit.steps[0].status == "skipped"
-    assert "unavailable" in audit.steps[0].reason.lower()
+    assert audit.steps[0].status == "pending"
+    assert audit.steps[0].verifiable is False
+    assert "legacy" in audit.steps[0].reason.lower()
 
 
 def test_one_import_failure_does_not_condemn_its_neighbours():
@@ -300,7 +407,7 @@ def test_the_fallback_does_not_reach_past_the_import_lines():
     assert unavailable_method_families(history) == {"copy_number"}
 
 
-def test_audit_assigns_all_five_verdicts():
+def test_legacy_keyword_diagnostics_never_grant_or_deny_plan_credit():
     plan = _audited_plan()
     audit = audit_plan_execution(
         plan,
@@ -310,25 +417,12 @@ def test_audit_assigns_all_five_verdicts():
     )
     by_id = {s.step_id: s for s in audit.steps}
 
-    assert by_id[1].status == "completed"
-    assert by_id[1].missing_families == []
-
-    assert by_id[2].status == "skipped"
-    assert "tooling unavailable" in by_id[2].reason.lower()
-
-    assert by_id[3].status == "skipped"
-    assert "conditional" in by_id[3].reason.lower()
-
-    assert by_id[4].status == "pending"
-    assert by_id[4].verifiable is True
-    assert by_id[4].missing_families == ["cell_communication"]
-
-    assert by_id[5].status == "pending"
-    assert by_id[5].verifiable is False
-
-    # Only step 4 is a gap: the unverifiable step must never be reported as one.
-    assert [s.step_id for s in audit.unmet] == [4]
-    assert [s.step_id for s in audit.unverifiable] == [5]
+    assert all(item.status == "pending" for item in by_id.values())
+    assert all(item.verifiable is False for item in by_id.values())
+    assert audit.unmet == []
+    assert [s.step_id for s in audit.unverifiable] == [1, 2, 3, 4, 5]
+    assert audit.executed_families == ["enrichment", "marker_de"]
+    assert audit.unavailable_families == ["composition_model"]
 
 
 def test_audit_summary_counts_agree():
@@ -341,19 +435,19 @@ def test_audit_summary_counts_agree():
     )
     summary = audit.summary()
     assert summary["n_steps"] == 5
-    assert summary["n_completed"] == 1
-    assert summary["n_skipped"] == 2
-    assert summary["n_unmet"] == 1
-    assert summary["n_unverifiable"] == 1
+    assert summary["n_completed"] == 0
+    assert summary["n_skipped"] == 0
+    assert summary["n_unmet"] == 0
+    assert summary["n_unverifiable"] == 5
     assert (summary["n_completed"] + summary["n_skipped"]
             + summary["n_unmet"] + summary["n_unverifiable"]) == summary["n_steps"]
-    assert summary["unmet_titles"] == ["Cell-cell communication"]
-    assert summary["unmet_families"] == ["cell_communication"]
+    assert summary["unmet_titles"] == []
+    assert summary["unmet_families"] == []
     assert summary["executed_families"] == ["enrichment", "marker_de"]
     assert summary["unavailable_families"] == ["composition_model"]
 
 
-def test_audit_accepts_structured_evidence():
+def test_structured_keyword_family_is_diagnostic_not_plan_credit():
     plan = AnalysisPlan(phase="innovation", steps=[
         PlanStep(id=1, title="Signature scoring",
                  method="Compute a module score with sc.tl.score_genes")])
@@ -365,7 +459,9 @@ def test_audit_accepts_structured_evidence():
         structured_families={"gene_scoring"},
         publication_figures=[_result_figure(plan, 1)],
     )
-    assert vouched.steps[0].status == "completed"
+    assert vouched.steps[0].status == "pending"
+    assert vouched.steps[0].verifiable is False
+    assert vouched.executed_families == ["gene_scoring"]
 
 
 def test_audit_of_empty_plan_is_empty():
@@ -374,38 +470,60 @@ def test_audit_of_empty_plan_is_empty():
 
 
 def test_apply_audit_writes_status_and_stamps_only_completed():
-    plan = _audited_plan()
+    plan = AnalysisPlan(
+        id="apply-plan",
+        phase="innovation",
+        steps=[
+            PlanStep(id=1, title="First", method="Run current analysis"),
+            PlanStep(id=2, title="Second", method="Run later analysis"),
+        ],
+    )
     audit = audit_plan_execution(
         plan,
-        _audited_history(),
+        [_receipt(plan)],
         round_number=2,
-        publication_figures=_audited_figures(plan),
+        target_cohort_digest="a" * 64,
+        semantic_reconciliation=_semantic_reconciliation(plan, [{
+            "plan_step_id": 1,
+            "status": "evidenced",
+            "execution_ids": ["receipt-1"],
+        }]),
     )
     updated = apply_audit_to_plan(plan, audit, now=datetime(2026, 1, 1, 12, 0, 0))
 
-    assert updated == 5
-    assert [s.status for s in plan.steps] == ["completed", "skipped", "skipped",
-                                              "pending", "pending"]
+    assert updated == 2
+    assert [s.status for s in plan.steps] == ["completed", "pending"]
     assert plan.steps[0].executed_at == datetime(2026, 1, 1, 12, 0, 0)
     assert all(step.executed_at is None for step in plan.steps[1:])
 
 
 def test_apply_audit_is_idempotent():
-    plan = _audited_plan()
+    plan = AnalysisPlan(
+        id="idempotent-plan",
+        phase="innovation",
+        steps=[
+            PlanStep(id=1, title="First", method="Run current analysis"),
+            PlanStep(id=2, title="Second", method="Run later analysis"),
+        ],
+    )
     audit = audit_plan_execution(
         plan,
-        _audited_history(),
+        [_receipt(plan)],
         round_number=2,
-        publication_figures=_audited_figures(plan),
+        target_cohort_digest="a" * 64,
+        semantic_reconciliation=_semantic_reconciliation(plan, [{
+            "plan_step_id": 1,
+            "status": "evidenced",
+            "execution_ids": ["receipt-1"],
+        }]),
     )
     first = datetime(2026, 1, 1, 12, 0, 0)
     apply_audit_to_plan(plan, audit, now=first)
 
     again = apply_audit_to_plan(plan, audit, now=datetime(2026, 6, 30, 8, 0, 0))
-    assert again == 5
+    assert again == 2
     assert plan.steps[0].executed_at == first
-    assert [s.status for s in plan.steps] == ["completed", "skipped", "skipped",
-                                              "pending", "pending"]
+    assert [s.status for s in plan.steps] == ["completed", "pending"]
 
 
 def test_apply_audit_without_verdicts_updates_nothing():

@@ -49,14 +49,19 @@ counts, barcodes, and gene names before treating them as separate replicates.
 - One matrix may hold several multiplexed specimens. Look at obs columns \
 whose values partition the cells (sample, batch, orig.ident, donor, library), \
 and at barcode suffixes.
-- A bulk expression table's replicates are its columns, not its rows. A single \
-bulk matrix often spans every treatment group. When column names or sample \
-metadata verify the membership, register a separate record for each treatment \
-group even though the uploaded file itself is ungrouped. Use an empty group \
-only when the column-to-group membership cannot be established from the data.
+- For a bulk expression table, inspect both axes, labels, value types, and any \
+sample metadata before deciding where biological specimens are represented. \
+When the data verify membership, register a separate record for each treatment \
+group even though the uploaded file itself is ungrouped. Use an empty group only \
+when the sample-to-group membership cannot be established from the data.
 
 Declare every object later steps should reuse in persistent_outputs, so the \
 analysis that follows does not have to read these files again.
+
+Every execute_code call in this profiling pass must set \
+execution_purpose to 'supplementary', plan_step_ids to an empty list, and \
+input_profile_ids to an empty list. This \
+pass runs before plan approval and cannot satisfy a plan requirement.
 
 When you have inspected everything, call register_sample_counts once with one \
 record per (group, data type) pair. Report what the data shows, not what the \

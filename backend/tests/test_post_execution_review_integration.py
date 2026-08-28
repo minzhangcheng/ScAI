@@ -210,6 +210,24 @@ def _result():
 @pytest.mark.asyncio
 async def test_real_agents_complete_the_review_and_merge_back():
     state = _state_and_plan()
+    marker_receipt = state.code_history[0]
+    marker_receipt.id = "marker-exec"
+    marker_receipt.evidence_schema_version = 2
+    marker_receipt.plan_id = state.current_plan.id
+    marker_receipt.plan_step_ids = [1]
+    marker_receipt.execution_purpose = "planned"
+    marker_receipt.plan_binding_status = "candidate"
+    pathway_setup = CodeExecution(
+        id="pathway-setup-exec",
+        code="net = load_regulatory_network()",
+        round_number=2,
+        evidence_schema_version=2,
+        plan_id=state.current_plan.id,
+        plan_step_ids=[2],
+        execution_purpose="planned",
+        plan_binding_status="candidate",
+    )
+    state.code_history.append(pathway_setup)
     pi = _pi_agent([_REVIEW_JSON, _ASSESS_JSON])
 
     def _done_with_citation(prompt):
@@ -230,8 +248,29 @@ async def test_real_agents_complete_the_review_and_merge_back():
     harness = _Harness(pi, bio)
     result = _result()
 
-    audit_summary = harness._audit_round_plan_execution(state, result)
-    assert audit_summary["n_unmet"] == 1, "the un-run decoupler step must be the trigger"
+    reconciliation = {
+        "plan_id": state.current_plan.id,
+        "round_number": 2,
+        "lineage_id": "main",
+        "links": [
+            {
+                "plan_step_id": 1,
+                "status": "evidenced",
+                "execution_ids": [marker_receipt.id],
+                "reason": "Marker detection and its reviewed output are complete.",
+            },
+            {
+                "plan_step_id": 2,
+                "status": "partial",
+                "execution_ids": [pathway_setup.id],
+                "reason": "The network was prepared, but activity was not computed.",
+            },
+        ],
+    }
+    audit_summary = harness._audit_round_plan_execution(
+        state, result, reconciliation
+    )
+    assert audit_summary["n_unmet"] == 1
 
     meta, merge = await harness._run_post_execution_review(state, result, audit_summary, "full")
 
@@ -257,7 +296,29 @@ async def test_real_agents_complete_the_review_and_merge_back():
     # Re-audit: the restricted pass closes the computational gap, but it cannot
     # mint an unreviewed image. The remaining result-figure gap is deliberately
     # returned to the main publication pipeline.
-    reaudit = harness._audit_round_plan_execution(state, result)
+    repaired_execution_id = state.code_history[-1].id
+    repaired_reconciliation = {
+        "plan_id": state.current_plan.id,
+        "round_number": 2,
+        "lineage_id": "main",
+        "links": [
+            {
+                "plan_step_id": 1,
+                "status": "evidenced",
+                "execution_ids": [marker_receipt.id],
+                "reason": "Marker detection and its reviewed output are complete.",
+            },
+            {
+                "plan_step_id": 2,
+                "status": "evidenced",
+                "execution_ids": [repaired_execution_id],
+                "reason": "The supplementary execution completed pathway activity.",
+            },
+        ],
+    }
+    reaudit = harness._audit_round_plan_execution(
+        state, result, repaired_reconciliation
+    )
     assert reaudit["n_unmet"] == 1
     assert reaudit["unmet_figure_kinds"] == ["result"]
     assert [s.status for s in state.current_plan.steps] == ["completed", "pending"]

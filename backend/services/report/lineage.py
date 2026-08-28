@@ -534,6 +534,144 @@ def build_lineage_report_state(
         for figure in report_state.publication_figures
         if (getattr(figure, "lineage_id", None) or "main") == target
     ]
+    report_state.publication_tables = [
+        table
+        for table in report_state.publication_tables
+        if (getattr(table, "lineage_id", None) or "main") == target
+    ]
+    active_cohort = (
+        (report_state.sandbox_state or {}).get("cohort_identity_v1") or {}
+    )
+    active_cohort_digest = str(active_cohort.get("cohort_digest") or "")
+    active_cohort_generation = int(
+        active_cohort.get("cohort_generation", 0) or 0
+    )
+    if active_cohort_generation:
+        report_state.publication_figures = [
+            figure
+            for figure in report_state.publication_figures
+            if str(getattr(figure, "cohort_digest", None) or "")
+            == active_cohort_digest
+            and int(getattr(figure, "cohort_generation", 0) or 0)
+            == active_cohort_generation
+        ]
+        report_state.publication_tables = [
+            table
+            for table in report_state.publication_tables
+            if str(getattr(table, "cohort_digest", None) or "")
+            == active_cohort_digest
+            and int(getattr(table, "cohort_generation", 0) or 0)
+            == active_cohort_generation
+        ]
+        current_execution_ids = {
+            str(execution.id)
+            for execution in report_state.code_history
+            if str(getattr(execution, "cohort_digest", None) or "")
+            == active_cohort_digest
+            and int(getattr(execution, "cohort_generation", 0) or 0)
+            == active_cohort_generation
+            and (getattr(execution, "lineage_id", None) or "main") == target
+            and getattr(execution, "evidence_schema_version", None) == 2
+        }
+        report_state.code_history = [
+            execution for execution in report_state.code_history
+            if str(execution.id) in current_execution_ids
+            and not getattr(execution, "error", None)
+            and getattr(execution, "execution_status", "succeeded") == "succeeded"
+            and bool(getattr(execution, "evidence_eligible", True))
+        ]
+        report_state.method_decisions = [
+            decision for decision in report_state.method_decisions
+            if decision.execution_id in current_execution_ids
+        ]
+        report_state.analysis_log = [
+            step for step in report_state.analysis_log
+            if (
+                step.step_type not in {"execute_code", "report_findings"}
+                or (
+                    step.step_type == "execute_code"
+                    and str(getattr(step, "execution_id", "") or "")
+                    in current_execution_ids
+                )
+                or (
+                    step.step_type == "report_findings"
+                    and bool(
+                        set(getattr(step, "evidence_execution_ids", None) or [])
+                        & current_execution_ids
+                    )
+                )
+            )
+        ]
+        for round_result in report_state.round_results:
+            records = [
+                item for item in (
+                    round_result.bioinformatics_finding_records or []
+                )
+                if isinstance(item, dict)
+            ]
+            if records:
+                verified_records = []
+                for record in records:
+                    cited = {
+                        str(value) for value in (
+                            record.get("evidence_execution_ids") or []
+                        ) if str(value)
+                    }
+                    if (
+                        str(record.get("lineage_id") or "main") == target
+                        and str(record.get("cohort_digest") or "")
+                        == active_cohort_digest
+                        and int(record.get("cohort_generation", 0) or 0)
+                        == active_cohort_generation
+                        and record.get("evidence_status") == "verified"
+                        and record.get("semantic_status") == "evidenced"
+                        and bool(cited)
+                        and cited <= current_execution_ids
+                    ):
+                        verified_records.append(record)
+                excluded_count = len(records) - len(verified_records)
+                round_result.bioinformatics_finding_records = verified_records
+                round_result.bioinformatics_findings = [
+                    str(record.get("text") or "")
+                    for record in verified_records
+                    if str(record.get("text") or "").strip()
+                ]
+                round_result.evidence_execution_ids = sorted({
+                    str(value)
+                    for record in verified_records
+                    for value in (record.get("evidence_execution_ids") or [])
+                    if str(value)
+                })
+                round_result.bioinformatics_evidence_verified = bool(
+                    verified_records
+                ) and excluded_count == 0
+                if excluded_count:
+                    round_result.evidence_notes = list(
+                        round_result.evidence_notes
+                    ) + [
+                        f"{excluded_count} bioinformatics finding(s) were retained "
+                        "only in source-session audit history because current "
+                        "cohort identity or Supervisor semantic evidence was missing."
+                    ]
+            else:
+                if round_result.bioinformatics_findings:
+                    round_result.bioinformatics_findings = []
+                    round_result.bioinformatics_evidence_verified = False
+                    round_result.evidence_execution_ids = []
+                    round_result.evidence_notes = list(round_result.evidence_notes) + [
+                        "Bioinformatics findings have no current Supervisor-confirmed "
+                        "finding records and are retained only in the source-session "
+                        "audit history."
+                    ]
+        sandbox_state = dict(report_state.sandbox_state or {})
+        sandbox_state["report_evidence_execution_ids"] = sorted(
+            current_execution_ids
+        )
+        sandbox_state["report_evidence_cohort_digest"] = active_cohort_digest
+        sandbox_state["report_evidence_cohort_generation"] = (
+            active_cohort_generation
+        )
+        report_state.sandbox_state = sandbox_state
     if target != "main":
         _restrict_unowned_branch_figures(report_state, workspace_path)
     return report_state

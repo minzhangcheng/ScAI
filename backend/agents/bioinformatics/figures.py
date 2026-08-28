@@ -342,6 +342,11 @@ class FiguresMixin:
         plan_step_id: Optional[int] = None,
         purpose: Optional[str] = None,
         logical_figure_id: Optional[str] = None,
+        source_execution_id: Optional[str] = None,
+        submitted_plan_step_id: Optional[int] = None,
+        plan_requirement_key: Optional[str] = None,
+        supervisor_binding_decision: Optional[str] = None,
+        supervisor_binding_reason: Optional[str] = None,
     ) -> str:
         """
         Handle generate_publication_figure tool call.
@@ -377,6 +382,11 @@ class FiguresMixin:
             plan_step_id=plan_step_id,
             purpose=purpose,
             logical_figure_id=logical_figure_id,
+            source_execution_id=source_execution_id,
+            submitted_plan_step_id=submitted_plan_step_id,
+            plan_requirement_key=plan_requirement_key,
+            supervisor_binding_decision=supervisor_binding_decision,
+            supervisor_binding_reason=supervisor_binding_reason,
             dependencies=dependencies,
         )
         attempt, error = await prepare_figure_request(request)

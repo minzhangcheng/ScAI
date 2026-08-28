@@ -63,6 +63,11 @@ export interface PublicationFigure {
   planStepId?: number
   /** Approved plan revision that owns the linked step, when recorded. */
   planId?: string
+  planRequirementKey?: string
+  submittedPlanStepId?: number
+  supervisorBindingDecision?: 'accept' | 'rebind' | 'supplementary' | 'reject'
+  supervisorBindingReason?: string
+  sourceExecutionId?: string
   /** Figure role recorded by the producer (for example result or baseline). */
   purpose?: string
   /** True for a registered publication artifact; false for workspace-only context. */
@@ -78,6 +83,53 @@ export interface PublicationTable {
   previewData: Record<string, any>[]
   reviewStatus: FigureReviewStatus
   piFeedback?: string
+  createdAt: string
+}
+
+export interface FigureRevisionTask {
+  id: string
+  logicalFigureId: string
+  planId?: string
+  planRequirementKey?: string
+  currentFigureId: string
+  sourceExecutionId?: string
+  status: 'pending' | 'in_progress' | 'resolved' | 'blocked' | 'abandoned' | 'exhausted_excluded'
+  reason: 'visual_revision' | 'reanalysis_required' | 'revision_failed' | 'attempts_exhausted' | 'cohort_changed'
+  mustFix: string[]
+  suggestions: string[]
+  attemptCount: number
+  maxAttempts: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface BulkInputProfile {
+  id: string
+  sourceFileId: string
+  shape: number[]
+  annotationColumns: string[]
+  candidateSampleColumns: string[]
+  numericFractionByColumn: Record<string, number>
+  integerLikeFraction: number
+  negativeValueCount: number
+  missingValueSummary: Record<string, number>
+  declaredScale: 'counts' | 'normalized' | 'transformed' | 'unknown'
+  profileStatus: 'complete' | 'sampled' | 'failed'
+  complete: boolean
+  rowsScanned: number
+  errorCode?: string
+  createdAt: string
+}
+
+export interface MethodDecision {
+  id: string
+  inputProfileId: string
+  claimLevel: 'inferential' | 'descriptive' | 'not_feasible'
+  method: string
+  rationale: string
+  executionId: string
+  decisionSource: 'approved_plan_and_bioinformatics'
+  roundNumber: number
   createdAt: string
 }
 
@@ -147,6 +199,7 @@ export interface RoundResult {
   restoredFromSnapshotId?: string
   directionKey: string
   resultIdentityKey: string
+  waitPolicy?: 'manual' | 'countdown' | 'no_wait'
 }
 
 export interface Session {
@@ -165,6 +218,9 @@ export interface Session {
   // Publication-quality outputs
   publicationFigures?: PublicationFigure[]
   publicationTables?: PublicationTable[]
+  figureRevisionTasks?: FigureRevisionTask[]
+  bulkInputProfiles?: BulkInputProfile[]
+  methodDecisions?: MethodDecision[]
   graphicAbstract?: GraphicAbstract
   integratedReport?: string
   explorationReportUrl?: string
@@ -172,6 +228,8 @@ export interface Session {
   multiDirectionCorrelation?: string
   restoreBranchId?: string
   stateVersion?: number
+  /** Projection of the host-owned NotebookState persistence lifecycle. */
+  runtimePersistence?: Record<string, unknown>
   // Species inference state
   species?: string
   speciesResolved?: boolean

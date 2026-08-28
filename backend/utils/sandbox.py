@@ -173,7 +173,11 @@ class LocalJupyterSandbox(
         
         self.km: Optional[KernelManager] = None
         self.kc = None
-        self.notebook_state = NotebookState(session_id, state_dir)
+        self.notebook_state = NotebookState(
+            session_id,
+            state_dir,
+            lifecycle_generation=self._expected_lifecycle_generation,
+        )
         self._kernel_staging_root = (
             self.notebook_state.state_dir / ".kernel-staging"
         )
@@ -202,6 +206,9 @@ class LocalJupyterSandbox(
             "removed": set(),
         }
         self.runtime_dependency_tracker = None  # set by agent / capture pipeline
+        # Workflow-owned projection publisher. The sandbox remains the sole
+        # runtime metadata authority and calls this only after a durable commit.
+        self.runtime_persistence_commit_callback: Optional[Callable] = None
         self._init_exec_lock()
 
 

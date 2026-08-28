@@ -27,6 +27,7 @@ from ...services.report.artifacts import (
     eligible_artifacts,
     excluded_artifact_stems,
     resolve_archival_render,
+    verified_artifact_bytes,
 )
 from ...services.report.figure_discovery import (
     discover_figures_in_workspace,
@@ -553,38 +554,51 @@ class ReportHtmlMixin:
         return figure_map
 
     def _collect_table_paths(
-        self, workspace_path: Optional[Path],
+        self,
+        workspace_path: Optional[Path],
+        publication_tables=None,
         invalidated_stems: Optional[set[str]] = None,
     ) -> List[Dict[str, Any]]:
-        """Scan workspace for CSV tables generated during analysis."""
+        """Collect only host-registered, integrity-valid publication tables."""
         tables = []
         if not workspace_path:
             return tables
 
-        tables_subdir = workspace_path / "tables"
-        csv_search_dir = tables_subdir if tables_subdir.exists() else workspace_path
-
-        for csv_file in sorted(csv_search_dir.glob("*.csv")):
+        for record in eligible_artifacts(publication_tables):
+            csv_file = Path(str(getattr(record, "csv_path", "") or ""))
+            if not csv_file.exists():
+                for candidate in (
+                    workspace_path / "tables" / csv_file.name,
+                    workspace_path / csv_file.name,
+                ):
+                    if candidate.exists():
+                        csv_file = candidate
+                        break
+            if not csv_file.exists():
+                continue
             if csv_file.stem in (invalidated_stems or set()):
+                continue
+            if verified_artifact_bytes(csv_file, record, kind="table") is None:
                 continue
             table_info: Dict[str, Any] = {
                 "filename": csv_file.name,
                 "path": str(csv_file),
-                "name": csv_file.stem.replace("_", " ").title(),
+                "name": getattr(record, "name", "") or csv_file.stem,
+                "description": getattr(record, "description", "") or "",
+                "columns": list(getattr(record, "columns", None) or []),
+                "preview_rows": len(
+                    getattr(record, "preview_data", None) or []
+                ),
+                "total_rows": int(getattr(record, "total_rows", 0) or 0),
+                "table_id": getattr(record, "id", None),
+                "plan_step_ids": list(
+                    getattr(record, "plan_step_ids", None) or []
+                ),
             }
-            # Read preview
-            try:
-                import pandas as pd
-                df_preview = pd.read_csv(csv_file, nrows=5)
-                table_info["columns"] = list(df_preview.columns)
-                table_info["preview_rows"] = len(df_preview)
-                table_info["total_rows"] = sum(1 for _ in open(csv_file)) - 1
-            except Exception:
-                logger.debug("Failed to read CSV preview for table collection: %s", csv_file)
             tables.append(table_info)
 
         if tables:
-            logger.info(f"Collected {len(tables)} tables from workspace")
+            logger.info(f"Collected {len(tables)} registered publication tables")
         return tables
 
     @staticmethod

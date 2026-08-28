@@ -301,6 +301,18 @@ def _build_record(
         lineage_id=lineage,
         round_number=int(getattr(state, "current_round", 0) or 0),
         analysis_generation=int(sandbox_state.get("analysis_generation", 0) or 0),
+        cohort_generation=int(
+            (sandbox_state.get("cohort_identity_v1") or {}).get(
+                "cohort_generation", 0
+            ) or 0
+        ),
+        cohort_digest=(
+            str(
+                (sandbox_state.get("cohort_identity_v1") or {}).get(
+                    "cohort_digest", ""
+                ) or ""
+            ) or None
+        ),
     )
     if not record.preview_sha256:
         logger.warning(

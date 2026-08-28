@@ -172,108 +172,64 @@ def test_an_exhausted_allowance_charges_a_normal_step():
 
 
 # ---------------------------------------------------------------------------
-# The Stage-2 mandatory-analysis gates are one family. Each asks the same
-# question -- did the agent's code mention this analysis -- and each must ask it
-# through the bounded helper, so a model that cannot satisfy one is released
-# after a ceiling with the escape on the record.
-#
-# Gate 1 was the family's only outlier: a hand-rolled keyword test ending in a
-# bare `continue`, with no counter, no ceiling and no record. Its refusal also
-# burns a step and is invisible to the supervisor, whose stuck-detection needs a
-# code_error the refusal step does not carry -- so nothing else in the system
-# could end it either.
+# Bulk reporting is gated by structured host facts and evidence lineage. Method
+# choice belongs to PI/Bioinformatics; source-code vocabulary is not evidence
+# that the selected analysis ran.
 # ---------------------------------------------------------------------------
 
-_KEYWORD_GATES = [
-    ("Gate 1 (bulk RNA-seq)", "max_bulk_rejections", "bulk-rnaseq-analysis"),
-    ("Gate 2 (bulk/scRNA cross-validation)",
-     "max_integration_rejections", "bulk-scrna-cross-validation"),
-    ("Gate 3 (deconvolution)",
-     "max_deconv_rejections", "cell-type-deconvolution"),
-    ("Gate 4 (innovation bulk)",
-     "max_innovation_bulk_rejections", "innovation-bulk-validation"),
-]
+
+def _bulk_method_gate() -> str:
+    return inspect.getsource(executor_report_gates.check_mandatory_report_gates)
 
 
-def _gate_block(ceiling: str, record_id: str) -> str:
-    src = inspect.getsource(executor_report_gates.check_mandatory_report_gates)
-    assert ceiling in src
-    assert record_id in src
-    return src
+def test_bulk_method_decision_gap_is_advisory_and_non_blocking():
+    block = _bulk_method_gate()
+    assert "state.method_decisions" in block
+    assert "state.bulk_input_profiles" in block
+    assert "attempt.evidence_executions" in block
+    assert "_evidence_gate_record" in block
+    assert 'gate="bulk-method-decision"' in block
+    assert 'severity="advise"' in block
+    bulk_branch = block.split("if has_bulk_data", 1)[1]
+    assert "return False" not in bulk_branch
 
 
-@pytest.mark.parametrize(("label", "ceiling", "record_id"), _KEYWORD_GATES)
-def test_every_stage2_keyword_gate_is_bounded(label, ceiling, record_id):
-    block = _gate_block(ceiling, record_id)
-    assert "_check_gate_keyword" in block, (
-        f"{label} tests the agent's code for keywords without the bounded "
-        "helper, so it can refuse report_findings for the whole step budget"
+def test_bulk_gate_does_not_infer_execution_from_code_keywords():
+    block = _bulk_method_gate()
+    forbidden = (
+        "_check_gate_keyword",
+        "code_mentions_bulk",
+        "bulk-rnaseq-analysis",
+        "bulk-scrna-cross-validation",
+        "cell-type-deconvolution",
+        "innovation-bulk-validation",
     )
-    assert f"context.{ceiling}" in block, (
-        f"{label} routes through the helper but names no ceiling"
-    )
-
-
-@pytest.mark.parametrize(("label", "ceiling", "record_id"), _KEYWORD_GATES)
-def test_every_stage2_keyword_gate_records_its_escape(label, ceiling, record_id):
-    block = _gate_block(ceiling, record_id)
-    assert "if escaped:" in block, (
-        f"{label} never handles its own release, so the ceiling is unobservable"
-    )
-    assert "_evidence_gate_record" in block, (
-        f"{label} releases without recording it, and the round then reports as "
-        "though the mandatory analysis had been performed"
-    )
-
-
-def test_the_hand_rolled_bulk_keyword_test_is_gone():
-    """Pin the removal, so the outlier cannot return by copy-paste."""
-    assert "code_mentions_bulk" not in _loop_source()
+    assert not [token for token in forbidden if token in block]
 
 
 # ---------------------------------------------------------------------------
-# The evidence-citation gate is deliberately NOT a member of the releasing
-# family, and these tests pin that asymmetry rather than erase it. Releasing it
-# would accept findings that cite no successful execution -- the one thing it
-# exists to prevent -- and `main` does not release it either.
-#
-# What it lacked was any trace that it had fired. It refuses with a bare
-# `continue`, and the refusal step carries no code_error, so the supervisor's
-# stuck detection (which requires one) cannot see it. A run could spend its
-# entire step budget on the same refusal and report nothing about why.
+# Producer citations are semantic candidates. Missing or mistaken IDs must not
+# spend autonomous-agent turns; the Host retains the finding as unverified and
+# the Supervisor decides whether any current execution actually supports it.
 # ---------------------------------------------------------------------------
 
 def _evidence_citation_gate() -> str:
     return inspect.getsource(executor_report_gates.check_report_evidence)
 
 
-def test_the_evidence_citation_gate_counts_its_refusals():
+def test_evidence_candidates_do_not_count_or_trigger_refusals():
     block = _evidence_citation_gate()
-    assert re.search(r"evidence_citation_reject_count\s*\+=", block), (
-        "the gate refuses without counting, so nothing downstream can tell one "
-        "mis-cited call from a whole budget spent on the same refusal"
-    )
+    assert "evidence_citation_reject_count" not in block
+    assert "return False" not in block
 
 
-def test_a_repeated_evidence_citation_refusal_reaches_the_pi():
+def test_evidence_candidates_remain_explicitly_unverified():
     block = _evidence_citation_gate()
-    assert "_evidence_gate_record" in block, (
-        "a refusal that keeps repeating must be recorded; it is invisible to "
-        "the supervisor, so this record is the only channel that carries it"
-    )
+    assert "candidate_evidence_execution_ids" in block
+    assert 'record["evidence_execution_ids"] = []' in block
+    assert 'record["semantic_status"] = "unverified"' in block
 
 
-def test_the_evidence_citation_gate_never_force_releases():
-    """The asymmetry is the point: this one holds an integrity invariant.
-
-    Every other gate in this file is required to release at a ceiling. This one
-    is required NOT to: accepting findings that cite nothing would defeat the
-    only thing it checks. If a future change gives it an escape hatch for
-    symmetry's sake, this fails.
-    """
+def test_evidence_candidate_normalization_always_returns_to_the_workflow():
     block = _evidence_citation_gate()
-    assert "return False" in block, "the gate must still refuse"
-    assert "forced_release=True" not in block, (
-        "this gate must never force-release: it would accept findings citing "
-        "no successful execution"
-    )
+    assert block.rstrip().endswith("return True")

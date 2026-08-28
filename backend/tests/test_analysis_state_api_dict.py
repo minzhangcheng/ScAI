@@ -78,6 +78,8 @@ class TestAnalysisStateApiDictRoundTrip:
             "last_sync_timestamp", "snapshot_count", "current_plan",
             "plan_dialogue_history", "agent_errors",
             "publication_figures", "publication_tables", "graphic_abstract",
+            "figure_revision_tasks",
+            "bulk_input_profiles", "method_decisions",
             "integrated_report",
             "species", "species_resolved", "species_genes_validated",
             "species_input_info",

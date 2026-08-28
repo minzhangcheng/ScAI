@@ -65,8 +65,14 @@ class CodeExecutionResult:
 
 class NotebookState:
     """Represents the state of a Jupyter notebook session"""
-    def __init__(self, session_id: str, state_dir: str = "states"):
+    def __init__(
+        self,
+        session_id: str,
+        state_dir: str = "states",
+        lifecycle_generation: int = 0,
+    ):
         self.session_id = session_id
+        self.lifecycle_generation = max(0, int(lifecycle_generation or 0))
         self.state_dir = Path(state_dir).absolute()  # Use absolute path
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.working_dir = self.state_dir.parent / "workspace"
@@ -106,8 +112,27 @@ class NotebookState:
             "degraded_to_revision": None,
             "budget_violations": [],
             "top_offenders": [],
+            "source": "notebook_state",
+            "lifecycle_generation": self.lifecycle_generation,
+            "metadata_updated_at": None,
         }
         self._load_runtime_persistence_metadata()
+        persisted_generation = int(
+            self.runtime_persistence.get("lifecycle_generation") or 0
+        )
+        if (
+            self.lifecycle_generation
+            and persisted_generation
+            and persisted_generation != self.lifecycle_generation
+        ):
+            raise RuntimeError(
+                "Runtime persistence metadata belongs to lifecycle generation "
+                f"{persisted_generation}, not {self.lifecycle_generation}."
+            )
+        if self.lifecycle_generation:
+            self.runtime_persistence["lifecycle_generation"] = (
+                self.lifecycle_generation
+            )
 
     @property
     def notebook_path(self) -> Path:
@@ -454,6 +479,9 @@ class NotebookState:
             ),
             "budget_violations": safe_budget_violations,
             "top_offenders": safe_top_offenders,
+            "source": "notebook_state",
+            "lifecycle_generation": self.lifecycle_generation,
+            "metadata_updated_at": now,
         })
         if status == "live_dirty" and not previous.get("dirty_since"):
             self.runtime_persistence["dirty_since"] = now
@@ -543,6 +571,9 @@ class NotebookState:
                 if degraded_recovery
                 else self.runtime_persistence.get("recommended_action")
             ),
+            "source": "notebook_state",
+            "lifecycle_generation": self.lifecycle_generation,
+            "metadata_updated_at": datetime.now().isoformat(),
         })
         self._migrate_committed_runtime_metadata()
         self.save_metadata()

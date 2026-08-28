@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .executor_dispatch import ToolAction
+from .shared import current_execution_identity_error
 
 
 def bind_facade(facade) -> None:
@@ -34,6 +35,196 @@ def mechanism_execution_id_error(programs, eligible_ids: set[str]) -> str | None
         "Mechanism programs cite failed, contradictory, or unknown execution IDs: "
         f"{invalid_ids}. Available IDs: {sorted(eligible_ids)[-20:]}"
     )
+
+
+async def handle_register_method_decision(context, tool_call) -> ToolAction:
+    """Persist an agent-selected bulk method without prescribing one."""
+    from ...models.schemas import MethodDecision
+
+    state = context.state
+    args = tool_call.arguments
+    profile_id = str(args.get("input_profile_id") or "").strip()
+    profile = next((
+        item for item in state.bulk_input_profiles if item.id == profile_id
+    ), None)
+    execution_id = str(args.get("execution_id") or "").strip()
+    execution = next((
+        item for item in context.agent.code_history if item.id == execution_id
+    ), None)
+    error = current_execution_identity_error(state, execution)
+    if profile is None:
+        error = "input_profile_id does not identify a current host profile"
+    elif error is None and profile.id not in (execution.input_profile_ids or []):
+        error = "execution_id is not bound to the selected host input profile"
+    rationale = str(args.get("rationale") or "").strip()
+    method = str(args.get("method") or "").strip()
+    claim_level = str(args.get("claim_level") or "").strip()
+    if not method:
+        error = error or "method is required"
+    elif claim_level not in {"inferential", "descriptive", "not_feasible"}:
+        error = error or "claim_level is outside the closed vocabulary"
+    elif len(rationale) < 20:
+        error = error or "rationale must explain the scientific choice"
+    if error:
+        context.messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": f"register_method_decision rejected: {error}.",
+        })
+        return ToolAction.CONTINUE
+
+    decision = MethodDecision(
+        input_profile_id=profile.id,
+        claim_level=claim_level,
+        method=method,
+        rationale=rationale[:4000],
+        execution_id=execution.id,
+        round_number=state.current_round,
+    )
+    state.method_decisions.append(decision)
+    context.messages.append({
+        "role": "tool",
+        "tool_call_id": tool_call.id,
+        "content": (
+            f"Method decision recorded: {decision.id}. Claim level: "
+            f"{decision.claim_level}; method: {decision.method}."
+        ),
+    })
+    context.analysis_log.append(AnalysisStep(
+        step_number=context.step_count,
+        step_type="register_method_decision",
+        agent_reasoning=context.agent_reasoning,
+        code_description=f"Bulk method decision {decision.id}: {decision.method}",
+    ))
+    return ToolAction.CONTINUE
+
+
+async def handle_register_publication_table(context, tool_call) -> ToolAction:
+    """Register a CSV through host-owned path, digest, and lifecycle checks."""
+    import csv
+    import hashlib
+    from pathlib import Path
+
+    from ...models.schemas import PublicationTable, FigureReviewStatus
+    from ...services.cohort_identity import active_cohort_identity
+
+    state = context.state
+    args = tool_call.arguments
+    workspace = Path(context.agent.sandbox.working_dir).resolve()
+    raw_path = str(args.get("csv_path") or "").strip()
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        candidate = workspace / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+        relative = resolved.relative_to(workspace)
+    except (OSError, ValueError):
+        context.messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": "register_publication_table rejected: csv_path must be an existing workspace file.",
+        })
+        return ToolAction.CONTINUE
+    if candidate.is_symlink() or not resolved.is_file() or resolved.suffix.lower() != ".csv":
+        context.messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": "register_publication_table rejected: only regular, non-symlink CSV files are supported.",
+        })
+        return ToolAction.CONTINUE
+
+    digest = hashlib.sha256()
+    with resolved.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    try:
+        with resolved.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            columns = [str(item)[:300] for item in (reader.fieldnames or [])][:200]
+            preview = []
+            total_rows = 0
+            for row in reader:
+                total_rows += 1
+                if len(preview) < 10:
+                    preview.append({
+                        str(key)[:300]: str(value)[:2000]
+                        for key, value in (row or {}).items()
+                    })
+    except (OSError, csv.Error, UnicodeError) as exc:
+        context.messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": f"register_publication_table rejected: CSV could not be read ({exc}).",
+        })
+        return ToolAction.CONTINUE
+
+    active_lineage = getattr(state, "restore_branch_id", None) or "main"
+    cohort = active_cohort_identity(state)
+    source_id = str(args.get("evidence_execution_id") or "").strip()
+    source = next((
+        item for item in context.agent.code_history
+        if str(getattr(item, "id", "") or "") == source_id
+    ), None)
+    source_error = current_execution_identity_error(state, source)
+    source_current = source_error is None
+    approved_steps = {
+        int(step.id) for step in (getattr(state.current_plan, "steps", None) or [])
+    }
+    candidate_steps = sorted({
+        int(value) for value in (args.get("plan_step_ids") or [])
+        if isinstance(value, int)
+        and not isinstance(value, bool)
+        and value in approved_steps
+    })
+    if not source_current:
+        candidate_steps = []
+    table = PublicationTable(
+        name=str(args.get("name") or relative.stem)[:300],
+        description=str(args.get("description") or "")[:4000],
+        csv_path=str(resolved),
+        csv_sha256=digest.hexdigest(),
+        columns=columns,
+        preview_data=preview,
+        total_rows=total_rows,
+        interpretation=str(args.get("interpretation") or "")[:4000] or None,
+        review_status=FigureReviewStatus.APPROVED,
+        lineage_id=active_lineage,
+        plan_id=str(getattr(state.current_plan, "id", "") or "") or None,
+        plan_step_ids=candidate_steps,
+        plan_binding_status="candidate" if candidate_steps else "unverified",
+        plan_binding_reason=(
+            "Candidate producer link awaiting Supervisor semantic reconciliation."
+            if candidate_steps else
+            (
+                f"No current eligible producer receipt was available: {source_error}."
+                if source_error else
+                "No candidate current-plan step was supplied."
+            )
+        ),
+        round_number=int(state.current_round or 0),
+        analysis_generation=int(
+            (state.sandbox_state or {}).get("analysis_generation", 0) or 0
+        ),
+        cohort_generation=int(cohort.get("cohort_generation", 0) or 0),
+        cohort_digest=str(cohort.get("cohort_digest") or "") or None,
+        source_execution_id=source.id if source_current else None,
+    )
+    state.publication_tables.append(table)
+    context.messages.append({
+        "role": "tool",
+        "tool_call_id": tool_call.id,
+        "content": (
+            f"Publication table registered: {table.id} ({relative.as_posix()}, "
+            f"{table.total_rows} rows). Plan binding: {table.plan_binding_status}."
+        ),
+    })
+    context.analysis_log.append(AnalysisStep(
+        step_number=context.step_count,
+        step_type="register_publication_table",
+        agent_reasoning=context.agent_reasoning,
+        code_description=f"Publication table {table.id}: {table.name}",
+    ))
+    return ToolAction.CONTINUE
 
 
 async def handle_register_analysis_plan(context, tool_call) -> ToolAction:

@@ -222,6 +222,31 @@ class ContextMixin:
             self._build_notebook_context(),
             self._build_analysis_context(),
         ]
+        sandbox_state = state.sandbox_state or {}
+        cohort = sandbox_state.get("cohort_identity_v1") or {}
+        if cohort:
+            parts.append(
+                "## Active analysis cohort\n"
+                f"generation={int(cohort.get('cohort_generation', 0) or 0)}; "
+                f"n_obs={int(cohort.get('n_obs', 0) or 0)}; "
+                f"n_vars={int(cohort.get('n_vars', 0) or 0)}; "
+                f"digest={str(cohort.get('cohort_digest') or '')[:16] or 'none'}; "
+                f"lineage={cohort.get('lineage_id') or 'main'}. "
+                "Only evidence stamped with this cohort can support current "
+                "findings and report artifacts."
+            )
+        transition = sandbox_state.get("cohort_transition_notice") or {}
+        if transition.get("changed"):
+            transition_reason = str(
+                transition.get("reason") or "unspecified"
+            )[:200]
+            parts.append(
+                "## Cohort transition notice\n"
+                f"The canonical analysis cohort changed ({transition_reason}). "
+                "Prior-cohort outputs remain audit history; "
+                "recompute or explicitly compare them before making current-cohort "
+                "claims."
+            )
         if state.species:
             parts.append(
                 f"## Species\nThe species for this analysis is: {state.species}\n"
@@ -229,5 +254,48 @@ class ContextMixin:
                 f"(gene naming conventions, pathway databases, etc.).\n"
                 f"After loading data, call validate_species_genes with ~50 randomly "
                 f"sampled gene names to verify species consistency."
+            )
+        if state.bulk_input_profiles:
+            profile_lines = []
+            for profile in state.bulk_input_profiles[:12]:
+                profile_lines.append(
+                    f"- profile_id={profile.id}; source_file_id={profile.source_file_id}; "
+                    f"shape={profile.shape}; annotation_columns={profile.annotation_columns}; "
+                    f"candidate_sample_columns={profile.candidate_sample_columns}; "
+                    f"integer_like_fraction={profile.integer_like_fraction}; "
+                    f"negative_values={profile.negative_value_count}; "
+                    f"declared_scale={profile.declared_scale}; "
+                    f"profile_status={profile.profile_status}; "
+                    f"rows_scanned={profile.rows_scanned}"
+                )
+            parts.append(
+                "## Host-observed bulk input profiles\n"
+                "These are input facts, not a method choice. PI determines claim "
+                "level and Bioinformatics selects and justifies a compatible method. "
+                "When bulk findings depend on a method choice, record that choice with "
+                "register_method_decision. Register CSV outputs intended for reports "
+                "with register_publication_table. Missing registrations remain visible "
+                "as unverified observations and do not block the workflow.\n"
+                + "\n".join(profile_lines)
+            )
+        pending_repairs = [
+            task for task in (state.figure_revision_tasks or [])
+            if task.status in {"pending", "in_progress"}
+        ]
+        if pending_repairs:
+            repair_lines = []
+            for task in pending_repairs[:12]:
+                repair_lines.append(
+                    f"- task {task.id}: logical figure {task.logical_figure_id}; "
+                    f"requirement {task.plan_requirement_key or 'supplementary'}; "
+                    f"reason {task.reason}; must fix: "
+                    f"{'; '.join(task.must_fix[:5]) or 'see prior PI feedback'}"
+                )
+            parts.append(
+                "## Pending figure repair tasks\n"
+                "Resolve these durable tasks before claiming the corresponding "
+                "plan requirement complete. Reuse the same logical_figure_id and "
+                "cite a plan-bound repair execution when reanalysis is required.\n"
+                + "\n".join(repair_lines)
             )
         return "\n\n".join(p for p in parts if p)

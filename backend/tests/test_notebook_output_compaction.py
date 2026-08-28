@@ -67,7 +67,7 @@ def test_notebook_state_identity_and_serialized_bytes_are_stable(tmp_path):
         "d59f8142e9762fee2ba5584dfdd126ed6bbb57e159d192da77b3c92fb394f255"
     )
     assert hashlib.sha256(state.state_path.read_bytes()).hexdigest() == (
-        "5487f841d71f5f9af1feaecd7a62043a70e1152826f24a2513ae57f832249e1e"
+        "fc67571123ac50e900bf160818fd34400a5873b0b29be003fc9518756b4ef7d5"
     )
 
 

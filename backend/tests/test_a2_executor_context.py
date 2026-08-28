@@ -55,21 +55,19 @@ def test_main_and_supplementary_executors_receive_registered_nested_upload(tmp_p
     assert "nested-note-1" in main_context
     assert "REGISTERED UPLOAD INVENTORY IS AUTHORITATIVE" in main_context
     assert str(bulk_path) in prompt
-    assert "from pydeseq2.ds" in prompt
+    assert "PYDESEQ2" not in prompt.upper()
+    assert "package missing" in prompt
 
 
-def test_executor_guidance_uses_current_pydeseq2_liana_and_index_contracts():
+def test_executor_guidance_keeps_technical_contracts_method_neutral():
     try:
         evidence = importlib.import_module("backend.services.execution_evidence")
     except ModuleNotFoundError as exc:  # Product RED, not test collection noise.
         pytest.fail(f"A2 execution-evidence guidance service is missing: {exc}")
 
-    pydeseq2 = evidence.PYDESEQ2_RUNTIME_GUIDANCE
     liana = evidence.LIANA_RUNTIME_GUIDANCE
     alignment = evidence.GENE_INDEX_ALIGNMENT_GUIDANCE
-    assert "pydeseq2.dds" in pydeseq2
-    assert "pydeseq2.ds" in pydeseq2
-    assert "DeseqStats" in pydeseq2
+    assert not hasattr(evidence, "PYDESEQ2_RUNTIME_GUIDANCE")
     assert "rank_aggregate" in liana
     assert "mouseconsensus" in liana
     assert "groupby(level=0).sum()" in alignment

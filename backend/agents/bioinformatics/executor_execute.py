@@ -14,7 +14,21 @@ def build_execution_tool_result(code_execution, result) -> str:
     content = (
         f"Execution {'successful' if not result.error else 'failed'}.\n"
         f"Evidence execution ID: {code_execution.id}\n"
+        f"Plan binding: {code_execution.plan_binding_status}"
+        + (
+            f" (plan {code_execution.plan_id}, steps {code_execution.plan_step_ids})\n"
+            if code_execution.plan_binding_status in {"candidate", "confirmed", "bound"}
+            else "\n"
+        )
     )
+    if code_execution.plan_binding_reason:
+        content += f"Plan-link note: {code_execution.plan_binding_reason}\n"
+    if code_execution.cohort_digest:
+        content += (
+            "Cohort identity: generation "
+            f"{code_execution.cohort_generation}, "
+            f"digest {code_execution.cohort_digest[:12]}...\n"
+        )
     if result.output:
         content += f"Output:\n{result.output}\n"
     if result.error:
@@ -57,6 +71,180 @@ def reject_sample_design_code(context, tool_call, code, description, step_type) 
     return True
 
 
+def execution_plan_binding(
+    state, args,
+) -> tuple[str, list[int], str, str | None]:
+    """Normalize an agent nomination without blocking scientific execution.
+
+    The nomination is only a candidate for the Supervisor's later semantic
+    reconciliation.  Invalid or missing IDs are recorded as unverified instead
+    of spending another autonomous-agent turn on a schema repair.
+    """
+    purpose = str(args.get("execution_purpose") or "").strip().lower()
+    warnings: list[str] = []
+    if purpose not in {"planned", "supplementary", "repair"}:
+        if purpose:
+            warnings.append(
+                "execution_purpose was not recognized and was treated as supplementary"
+            )
+        purpose = "supplementary"
+    raw_ids = args.get("plan_step_ids")
+    if raw_ids is None:
+        raw_ids = []
+    elif not isinstance(raw_ids, list):
+        warnings.append("plan_step_ids was not an array and was ignored")
+        raw_ids = []
+    step_ids: list[int] = []
+    for value in raw_ids:
+        if isinstance(value, bool):
+            warnings.append("a non-integer plan_step_id was ignored")
+            continue
+        try:
+            step_id = int(value)
+        except (TypeError, ValueError):
+            warnings.append("a non-integer plan_step_id was ignored")
+            continue
+        if step_id <= 0:
+            warnings.append("a non-positive plan_step_id was ignored")
+            continue
+        if step_id not in step_ids:
+            step_ids.append(step_id)
+
+    plan = getattr(state, "current_plan", None)
+    approved_ids = {
+        int(step.id) for step in (getattr(plan, "steps", None) or [])
+    }
+    invalid = sorted(set(step_ids) - approved_ids)
+    if invalid:
+        warnings.append(
+            f"unknown plan_step_ids {invalid} were ignored"
+        )
+        step_ids = [step_id for step_id in step_ids if step_id in approved_ids]
+    has_plan = bool(str(getattr(plan, "id", "") or "").strip())
+    if purpose in {"planned", "repair"}:
+        if has_plan and step_ids:
+            status = "candidate"
+        else:
+            status = "unverified"
+            warnings.append(
+                "planned work had no valid current-plan step nomination; "
+                "Supervisor reconciliation will determine any semantic link"
+            )
+    else:
+        status = "supplementary"
+        if step_ids:
+            warnings.append(
+                "supplementary execution cannot claim plan credit; nominated "
+                "step IDs remain audit context only"
+            )
+    return purpose, step_ids, status, "; ".join(dict.fromkeys(warnings)) or None
+
+
+def execution_input_binding(state, args):
+    """Normalize plan/profile candidates without refusing executable code."""
+    purpose, step_ids, binding_status, warning = execution_plan_binding(
+        state, args
+    )
+    raw_profile_ids = args.get("input_profile_ids")
+    profile_ids = []
+    if raw_profile_ids is None:
+        raw_profile_ids = []
+    elif not isinstance(raw_profile_ids, list):
+        warning = warning or "input_profile_ids was not an array and was ignored"
+        raw_profile_ids = []
+    if isinstance(raw_profile_ids, list):
+        proposed_ids = list(dict.fromkeys(
+            str(value).strip() for value in raw_profile_ids if str(value).strip()
+        ))
+        known_ids = {item.id for item in state.bulk_input_profiles}
+        profile_ids = [value for value in proposed_ids if value in known_ids]
+        invalid_ids = sorted(set(proposed_ids) - known_ids)
+        if invalid_ids:
+            note = f"unknown input_profile_ids {invalid_ids} were ignored"
+            warning = f"{warning}; {note}" if warning else note
+    return purpose, step_ids, profile_ids, binding_status, warning
+
+
+def build_code_execution_receipt(
+    state, code, result, execution_time, purpose, step_ids, cohort, profile_ids,
+    binding_status, binding_reason, persistent_outputs,
+):
+    """Build the schema-v2 receipt from host-observed execution facts."""
+    return CodeExecution(
+        code=code,
+        output=result.output,
+        error=result.error,
+        figures=result.figures,
+        execution_time=execution_time,
+        round_number=state.current_round,
+        analysis_modalities=infer_execution_modalities(code),
+        evidence_schema_version=2,
+        plan_id=str(getattr(state.current_plan, "id", "") or "").strip() or None,
+        plan_step_ids=step_ids,
+        execution_purpose=purpose,
+        plan_binding_status=binding_status,
+        plan_binding_reason=binding_reason,
+        execution_status="failed" if result.error else "succeeded",
+        lineage_id=getattr(state, "restore_branch_id", None) or "main",
+        analysis_generation=int(
+            (state.sandbox_state or {}).get("analysis_generation", 0) or 0
+        ),
+        cohort_generation=int(cohort.get("cohort_generation", 0) or 0),
+        cohort_digest=str(cohort.get("cohort_digest") or "") or None,
+        input_profile_ids=profile_ids,
+        declared_persistent_outputs=[
+            str(name).strip()
+            for name in (persistent_outputs or [])
+            if str(name).strip().isidentifier()
+        ],
+        realized_persistent_outputs=(
+            [
+                str(name).strip()
+                for name in (persistent_outputs or [])
+                if str(name).strip().isidentifier()
+            ]
+            if not result.error else []
+        ),
+    )
+
+
+async def record_execution_result(
+    context, code_exec, result, code, description, step_type, purpose, step_ids,
+):
+    """Publish one execution receipt, log entry, result, and exploratory figures."""
+    agent = context.agent
+    agent.code_history.append(code_exec)
+    agent.last_result = result
+    saved_figures = []
+    if result.output:
+        saved_figures = [
+            Path(path).name for path in re.findall(
+                r'\[Auto-saved\] (?:JPG|PNG): (.+\.(?:jpe?g|png))', result.output,
+            )
+        ]
+    context.analysis_log.append(AnalysisStep(
+        step_number=context.step_count,
+        step_type="execute_code",
+        agent_reasoning=context.agent_reasoning,
+        code=code,
+        code_output=(result.output or "")[-3000:],
+        code_error=compact_traceback(result.error, max_chars=3000) if result.error else None,
+        code_description=description,
+        code_step_type=step_type,
+        plan_id=code_exec.plan_id,
+        plan_step_ids=step_ids,
+        execution_purpose=purpose,
+        execution_id=code_exec.id,
+        saved_figure_filenames=saved_figures,
+    ))
+    if result.output:
+        await agent._notify("result", result.output[:2000])
+    for figure in result.figures:
+        await agent._notify("figure", figure)
+        context.all_figures.append(figure)
+        context.step_figures.append(figure)
+
+
 async def handle_execute_code(context, tool_call) -> ToolAction:
     self = context.agent
     state = context.state
@@ -70,6 +258,15 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
     description = args.get("description", "")
     step_type = args.get("step_type", "technical")
     persistent_outputs = args.get("persistent_outputs", [])
+    (
+        execution_purpose,
+        plan_step_ids,
+        input_profile_ids,
+        plan_binding_status,
+        binding_warning,
+    ) = (
+        execution_input_binding(state, args)
+    )
     if reject_sample_design_code(context, tool_call, code, description, step_type):
         return ToolAction.CONTINUE
     is_safe, security_error = self._validate_code(code)
@@ -138,6 +335,14 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
     wrapped_code = _build_exec_autosave_wrapper(
         guarded_code, str(figures_dir), timestamp
     )
+    try:
+        cohort_before = await probe_canonical_cohort(self.sandbox)
+    except Exception as cohort_error:
+        logger.warning(
+            "[Bioinformatics] Could not inspect pre-execution cohort: %s",
+            compact_traceback(str(cohort_error), max_chars=1000),
+        )
+        cohort_before = None
     representation_will_change = mutates_expression_representation(code)
     preexisting_artifact_versions = (
         workspace_artifact_versions(self.sandbox.working_dir)
@@ -205,6 +410,17 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
         "del _ad\n",
         save_to_history=False, skip_safety_check=True
     )
+    try:
+        cohort_after = await probe_canonical_cohort(self.sandbox)
+        cohort_identity = record_cohort_transition(
+            state, cohort_before, cohort_after
+        )
+    except Exception as cohort_error:
+        logger.warning(
+            "[Bioinformatics] Could not record active cohort identity: %s",
+            compact_traceback(str(cohort_error), max_chars=1000),
+        )
+        cohort_identity = active_cohort_identity(state)
     expression_contracts = parse_expression_contracts(result.output)
     if expression_contracts:
         record_expression_contract(state, expression_contracts)
@@ -218,39 +434,21 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
             result.error = f"{result.error}\n{staleness_note}".strip()
         else:
             result.output = f"{result.output or ''}\n{staleness_note}".strip()
-    code_exec = CodeExecution(
-        code=code,
-        output=result.output,
-        error=result.error,
-        figures=result.figures,
-        execution_time=execution_time,
-        round_number=state.current_round,
-        analysis_modalities=infer_execution_modalities(code),
+    code_exec = build_code_execution_receipt(
+        state, code, result, execution_time, execution_purpose, plan_step_ids,
+        cohort_identity, input_profile_ids, plan_binding_status,
+        binding_warning, persistent_outputs,
     )
-    self.code_history.append(code_exec)
-    self.last_result = result
-    _saved_figs = []
-    if result.output:
-        _saved_figs = [Path(p).name for p in re.findall(r'\[Auto-saved\] (?:JPG|PNG): (.+\.(?:jpe?g|png))', result.output)]
-    analysis_log.append(AnalysisStep(
-        step_number=step_count, step_type="execute_code",
-        agent_reasoning=agent_reasoning,
-        code=code, code_output=(result.output or "")[-3000:],
-        code_error=compact_traceback(result.error, max_chars=3000) if result.error else None,
-        code_description=description,
-        code_step_type=step_type, saved_figure_filenames=_saved_figs,
-    ))
-    if result.output:
-        await self._notify("result", result.output[:2000])
-    for fig in result.figures:
-        await self._notify("figure", fig)
-        context.all_figures.append(fig)
-        context.step_figures.append(fig)
+    await record_execution_result(
+        context, code_exec, result, code, description, step_type,
+        execution_purpose, plan_step_ids,
+    )
     swallowed_type, swallowed_doc_hint = (
         await self._detect_and_lookup_swallowed_error(result, code)
     )
     if swallowed_type:
         code_exec.evidence_eligible = False
+        code_exec.execution_status = "partial"
         code_exec.evidence_rejection_reason = (
             f"Swallowed technical error: {swallowed_type}"
         )

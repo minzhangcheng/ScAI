@@ -151,7 +151,14 @@ def commit_runtime_persistence_metadata(
         or sandbox_state.get("saved_runtime_revision")
         or 0
     )
-    notebook = NotebookState(session_id, str(states))
+    from backend.services.session_lifecycle import read_lifecycle_record
+
+    lifecycle = read_lifecycle_record(session_id) or {}
+    notebook = NotebookState(
+        session_id,
+        str(states),
+        lifecycle_generation=int(lifecycle.get("generation") or 0),
+    )
     live_pkl = notebook.session_path
     from .sandbox import _sha256_file
 

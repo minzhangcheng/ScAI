@@ -578,6 +578,7 @@ async def prepare_report_generation(
     # Collect table paths from workspace
     table_list = self._collect_table_paths(
         workspace_path,
+        publication_tables=analysis_state.publication_tables,
         invalidated_stems=excluded_artifact_stems(
             analysis_state.publication_tables,
             eligible_artifacts(analysis_state.publication_tables),

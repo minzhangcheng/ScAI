@@ -51,6 +51,10 @@ class ProfilingNodeMixin:
     @with_retry("data_profiling")
     async def _data_profiling(self, state: WorkflowState) -> WorkflowState:
         analysis_state = state["analysis_state"]
+        if analysis_state.has_bulk_rnaseq():
+            from backend.services.bulk_input_profile import ensure_bulk_input_profiles
+
+            ensure_bulk_input_profiles(analysis_state)
 
         if not should_profile(analysis_state):
             logger.info("[%s] data_profiling: skipped (round %s, %d existing record(s))",

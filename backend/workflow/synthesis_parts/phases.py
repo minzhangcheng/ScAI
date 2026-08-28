@@ -88,6 +88,16 @@ async def synthesize_agent_results(self, state):
                     "findings": findings,
                     "evidence_verified": evidence_verified,
                     "evidence_execution_ids": result.get("evidence_execution_ids", []),
+                    "cohort_identity": result.get("cohort_identity") or (
+                        (analysis_state.sandbox_state or {}).get(
+                            "cohort_identity_v1", {}
+                        )
+                    ),
+                    "cohort_transition": result.get("cohort_transition") or (
+                        (analysis_state.sandbox_state or {}).get(
+                            "cohort_transition_notice", {}
+                        )
+                    ),
                     "evidence_note": evidence_note,
                     "agent_suggestions": result.get("agent_suggestions", []),
                     # n_unverifiable belongs here even though nothing acts on
@@ -268,6 +278,15 @@ async def persist_round_result(self, ctx):
     round_result = ctx["round_result"]
     bioinformatics_result = ctx["bioinformatics_result"]
     round_result.data_driven_mechanism_programs = bioinformatics_result.get("mechanism_programs", [])
+    round_result.bioinformatics_finding_records = list(
+        bioinformatics_result.get("finding_records") or []
+    )
+    wait_seconds = analysis_state.round_wait_seconds
+    round_result.wait_policy = (
+        "no_wait" if wait_seconds == 0
+        else "manual" if wait_seconds < 0
+        else "countdown"
+    )
     round_result.bioinformatics_evidence_verified = bioinformatics_result.get("evidence_verified")
     round_result.evidence_gate_degraded = bool(
         bioinformatics_result.get("evidence_gate_degraded")
@@ -383,10 +402,17 @@ async def finalize_synthesis(self, ctx):
         for c in round_result.cross_modal_synthesis.candidates:
             cross_modal_candidates.append(c.to_summary_dict())
 
+    wait_seconds = analysis_state.round_wait_seconds
+    no_wait = wait_seconds == 0
+    wait_policy = (
+        "no_wait" if no_wait else "manual" if wait_seconds < 0 else "countdown"
+    )
     round_summary = build_round_summary_payload(
         round_result, analysis_state, effective_max_rounds,
         data_requests=data_requests,
         cross_modal_candidates=cross_modal_candidates,
+        status="completed" if no_wait else "waiting_input",
+        wait_policy=wait_policy,
     )
 
     await self._send_message(
@@ -414,12 +440,21 @@ async def finalize_synthesis(self, ctx):
     # condition where frontend signals between status message and event.wait()
     self._continue_event.clear()
 
-    # Set status to waiting for user input
-    self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
+    # No-wait mode must never advertise a transient user-input boundary.
+    self._set_status(
+        analysis_state,
+        TaskStatus.RUNNING if no_wait else TaskStatus.WAITING_INPUT,
+    )
 
     max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
     is_last_round = analysis_state.current_round >= max_rounds
-    if is_last_round:
+    if no_wait:
+        await self._send_message(
+            "status",
+            f"Round {round_result.round_number} complete. No-wait mode is enabled; continuing automatically.",
+            AgentType.PI,
+        )
+    elif is_last_round:
         await self._send_message(
             "status",
             f"Round {round_result.round_number} complete (final round). You can provide additional data to extend analysis, or skip to generate the final report.",
@@ -549,6 +584,8 @@ async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
         if is_direction_gate and not analysis_state.user_chosen_direction:
             analysis_state.user_chosen_direction = PI_DECIDE_SIGNAL
             analysis_state.pending_human_input = PI_DECIDE_SIGNAL
+        self._set_status(analysis_state, TaskStatus.RUNNING)
+        await self._send_state_sync(analysis_state, "auto_continue")
     else:
         if analysis_state.status != TaskStatus.WAITING_INPUT:
             self._set_status(analysis_state, TaskStatus.WAITING_INPUT)

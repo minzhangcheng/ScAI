@@ -65,8 +65,10 @@ from .supervisor import (  # noqa: F401
     ReportContentMixin,
     ReportHtmlMixin,
     DiagramsMixin,
+    FigureBindingMixin,
 )
 class SupervisorAgent(
+    FigureBindingMixin,
     RuntimeMixin,
     EvaluationMixin,
     ReportContentMixin,
@@ -167,7 +169,6 @@ class SupervisorAgent(
     # ------------------------------------------------------------------
     # Report generation helpers
     # ------------------------------------------------------------------
-
 
 
 

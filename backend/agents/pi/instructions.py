@@ -207,8 +207,11 @@ CRITICAL CONSTRAINTS:
 9. If bulk RNA-seq data is available:
    a. {bulk_analysis_task}
    b. {cross_modal_task}
-   c. Generate comparison visualizations (Venn diagram, correlation plot)
-   d. Perform cell-type deconvolution on the bulk RNA-seq data using the annotated scRNA-seq data as a reference to estimate cell-type proportions (prioritize pure Python NNLS).
+   c. Select and justify any comparison visualizations needed to communicate the
+      cross-modal evidence.
+   d. Decide whether a cell-composition analysis is scientifically supported by
+      the available bulk and single-cell inputs; if so, select and justify the
+      method and limitations.
 
 Note: These tasks span both Stage 1 (steps 1–6: QC through cell type annotation) and Stage 2 (steps 7–9: DEG, enrichment, cell-cell communication, bulk integration). The bioinformatics agent will automatically split and schedule them across the appropriate stages — do NOT try to compress everything into a single stage.
 

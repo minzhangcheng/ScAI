@@ -395,52 +395,56 @@ class FiguresMixin:
         return existing_figures
 
     def _scan_existing_tables(
-        self, invalidated_stems: Optional[set[str]] = None,
+        self,
+        publication_tables: Optional[List[Any]] = None,
+        invalidated_stems: Optional[set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Scan the workspace directory for existing CSV tables from analysis phase.
-        Copies tables to the report output directory.
+        Collect registered, semantically confirmed CSV tables for the report.
+        Copies admitted tables to the report output directory.
         Returns a list of table info dicts.
         """
-        import pandas as pd
-
         existing_tables = []
 
         if not self.workspace_dir or not self.workspace_dir.exists():
             return existing_tables
 
-        tables_subdir = self.workspace_dir / "tables"
-        csv_search_dir = tables_subdir if tables_subdir.exists() else self.workspace_dir
-        for csv_file in sorted(csv_search_dir.glob("*.csv")):
+        for record in eligible_artifacts(publication_tables):
+            csv_file = Path(str(getattr(record, "csv_path", "") or ""))
+            if not csv_file.exists():
+                for candidate in (
+                    self.workspace_dir / "tables" / csv_file.name,
+                    self.workspace_dir / csv_file.name,
+                ):
+                    if candidate.exists():
+                        csv_file = candidate
+                        break
+            if not csv_file.exists():
+                continue
             if csv_file.stem in (invalidated_stems or set()):
                 continue
-            # Copy to report tables directory
             dest_csv = self.tables_dir / csv_file.name
-            try:
-                shutil.copy2(str(csv_file), str(dest_csv))
-            except Exception as e:
+            if not copy_verified_artifact(
+                csv_file, dest_csv, record, kind="table"
+            ):
                 continue
-
-            # Read preview data
-            columns = []
-            preview_data = []
-            total_rows = 0
-            try:
-                df_preview = pd.read_csv(csv_file, nrows=10)
-                columns = list(df_preview.columns)
-                preview_data = df_preview.to_dict('records')
-                total_rows = pd.read_csv(csv_file, usecols=[0]).shape[0]
-            except Exception:
-                pass
-
             tbl_info = {
                 "filename": csv_file.name,
-                "name": csv_file.stem.replace("_", " ").title(),
+                "name": getattr(record, "name", "") or csv_file.stem,
+                "description": getattr(record, "description", "") or "",
                 "csv_path": str(dest_csv),
-                "columns": columns,
-                "preview_data": preview_data,
-                "total_rows": total_rows,
-                "inferred_type": "differential_expression" if csv_file.stem.startswith("de_") else "data"
+                "columns": list(getattr(record, "columns", None) or []),
+                "preview_data": list(
+                    getattr(record, "preview_data", None) or []
+                ),
+                "total_rows": int(getattr(record, "total_rows", 0) or 0),
+                "interpretation": getattr(record, "interpretation", None),
+                "table_id": getattr(record, "id", None),
+                "plan_id": getattr(record, "plan_id", None),
+                "plan_step_ids": list(
+                    getattr(record, "plan_step_ids", None) or []
+                ),
+                "inferred_type": "registered_publication",
             }
             existing_tables.append(tbl_info)
 

@@ -5,6 +5,11 @@ from .figure_persistence import finalize_render, guard_attempt_await
 from .figure_preflight import FigureAttemptState
 from .figure_revision import perform_revision, restore_snapshot, take_snapshot
 from .shared import FigureReviewStatus
+from ...services.figure_revision_tasks import (
+    MAX_FIGURE_REVISION_ATTEMPTS,
+    resolve_figure_revision_tasks,
+    upsert_figure_revision_task,
+)
 
 
 def record_unresolved(attempt: FigureAttemptState, items) -> None:
@@ -47,6 +52,16 @@ async def _accept_approved(
     figure.revision_history = attempt.revision_history
     figure.pi_feedback = review.get("feedback", "") or None
     record_unresolved(attempt, deps.get("_violation_must_fix_items")(blocking))
+    if blocking:
+        upsert_figure_revision_task(
+            attempt.state,
+            figure,
+            reason="visual_revision",
+            must_fix=figure.unresolved_must_fix,
+            suggestions=review.get("suggestions", []),
+        )
+    else:
+        resolve_figure_revision_tasks(attempt.state, figure)
     publish_error = await finalize_render(attempt)
     if publish_error:
         return publish_error
@@ -95,6 +110,13 @@ async def _accept_reanalysis(
     record_unresolved(
         attempt, must_fix + deps.get("_violation_must_fix_items")(blocking)
     )
+    upsert_figure_revision_task(
+        attempt.state,
+        figure,
+        reason="reanalysis_required",
+        must_fix=figure.unresolved_must_fix,
+        suggestions=review.get("suggestions", []),
+    )
     publish_error = await finalize_render(attempt)
     if publish_error:
         return publish_error
@@ -115,61 +137,18 @@ async def _accept_reanalysis(
     )
 
 
-async def _accept_stalled(
-    attempt: FigureAttemptState,
-    review: dict,
-    feedback: str,
-    must_fix: list[str],
-    previous_score,
-    current_score,
-) -> str:
-    regressed = current_score < previous_score
-    rollback_worth_it = (
-        regressed
-        and attempt.best_snapshot is not None
-        and attempt.best_snapshot.get("score", -1) > current_score
-    )
-    rolled_back = (
-        restore_snapshot(attempt, attempt.best_snapshot) if rollback_worth_it else False
-    )
-    attempt.deps.get("logger").warning(
-        "[Bioinformatics] Figure %s: quality score %s (%s -> %s)%s, "
-        "accepting current version",
-        attempt.request.figure_name,
-        "regressed" if regressed else "stalled",
-        previous_score,
-        current_score,
-        ", rolled back to the best version" if rolled_back else "",
-    )
-    attempt.figure.review_status = FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
-    record_unresolved(attempt, must_fix)
-    publish_error = await finalize_render(attempt)
-    if publish_error:
-        return publish_error
-    await attempt.agent._emit_figure_record(
-        "figure_approved", attempt.figure, review=review
-    )
-    await attempt.agent._notify(
-        "status", f"Figure {attempt.request.figure_name} accepted (revision stalled)"
-    )
-    rollback_note = (
-        "\nThe last revision scored lower than the previous one, so the "
-        f"earlier version (score {attempt.best_snapshot.get('score')}) was restored."
-        if rolled_back
-        else ""
-    )
-    return (
-        f"Figure {attempt.request.figure_name} accepted with reservations "
-        f"(quality score did not improve after revision: {previous_score} -> "
-        f"{current_score}).{rollback_note}\nLast feedback: {feedback}\n"
-        "Please move on to the next analysis step."
-        + (f"\n{attempt.staleness_note}" if attempt.staleness_note else "")
-    )
-
-
 async def _finish_exhausted_review(attempt: FigureAttemptState) -> str:
     deps = attempt.deps
     figure = attempt.figure
+    restored_best = False
+    best_score = (attempt.best_snapshot or {}).get("score")
+    current_score = attempt.last_review.get("quality_score")
+    if (
+        isinstance(best_score, (int, float))
+        and isinstance(current_score, (int, float))
+        and best_score > current_score
+    ):
+        restored_best = restore_snapshot(attempt, attempt.best_snapshot)
     figure.review_status = FigureReviewStatus.REVISION_REQUESTED
     remaining_blocking = deps.get("blocking_violations")(figure.layout_violations)
     record_unresolved(
@@ -177,6 +156,15 @@ async def _finish_exhausted_review(attempt: FigureAttemptState) -> str:
         deps.get("normalize_text_list")(attempt.last_must_fix, limit=20)
         + deps.get("_violation_must_fix_items")(remaining_blocking),
     )
+    task = upsert_figure_revision_task(
+        attempt.state,
+        figure,
+        reason=attempt.terminal_revision_reason,
+        must_fix=figure.unresolved_must_fix,
+        suggestions=attempt.last_review.get("suggestions", []),
+    )
+    if attempt.terminal_revision_reason == "attempts_exhausted":
+        task.status = "exhausted_excluded"
     publish_error = await finalize_render(attempt)
     if publish_error:
         return publish_error
@@ -193,19 +181,29 @@ async def _finish_exhausted_review(attempt: FigureAttemptState) -> str:
         if remaining_blocking
         else ""
     )
+    exhausted = task.status == "exhausted_excluded"
+    disposition = (
+        "the bounded revision budget is exhausted"
+        if exhausted
+        else "a durable redraw task remains pending"
+    )
     return (
         f"Figure {attempt.request.figure_name} saved after {attempt.revision_count} "
-        "revision attempts. Status: needs further revision.\n"
+        f"revision attempts. Status: excluded from reports; {disposition}.\n"
         f"Last feedback: {figure.pi_feedback}{layout_note}"
+        + (
+            "\nThe highest-scoring prior render was restored before exclusion."
+            if restored_best else ""
+        )
         + (f"\n{attempt.staleness_note}" if attempt.staleness_note else "")
     )
 
 
 async def run_review_loop(attempt: FigureAttemptState) -> str:
-    """Run PI review until approval, terminal deferral, stall, or exhaustion."""
+    """Run PI review until approval, terminal deferral, or bounded exhaustion."""
     deps = attempt.deps
     figure = attempt.figure
-    while attempt.revision_count <= 3:
+    while attempt.revision_count <= MAX_FIGURE_REVISION_ATTEMPTS:
         figure.review_status = FigureReviewStatus.PENDING
         attempt.agent._upsert_publication_figure(attempt.state, figure)
         deps.get("logger").info(
@@ -223,7 +221,6 @@ async def run_review_loop(attempt: FigureAttemptState) -> str:
         )
         quality_score = review.get("quality_score", 5)
         blocking = deps.get("blocking_violations")(figure.layout_violations)
-        budget_left = attempt.revision_count < 3
         if not blocking and (
             attempt.best_snapshot is None
             or quality_score > attempt.best_snapshot.get("score", -1)
@@ -232,8 +229,11 @@ async def run_review_loop(attempt: FigureAttemptState) -> str:
             if snapshot is not None:
                 attempt.best_snapshot = snapshot
 
-        approved = bool(review.get("approved", False))
-        if approved and blocking and budget_left:
+        must_fix = deps.get("normalize_text_list")(
+            review.get("must_fix"), limit=20
+        )
+        approved = bool(review.get("approved", False)) and not must_fix
+        if approved and blocking:
             deps.get("logger").warning(
                 "[Bioinformatics] Figure %s: reviewer approved (score=%s) but "
                 "layout lint reports %s — continuing revision",
@@ -252,6 +252,7 @@ async def run_review_loop(attempt: FigureAttemptState) -> str:
             review["must_fix"] = deps.get("normalize_text_list")(
                 review.get("must_fix"), limit=20
             ) + deps.get("_violation_must_fix_items")(blocking)
+            must_fix = review["must_fix"]
         if approved:
             return await _accept_approved(
                 attempt, review, quality_score, blocking
@@ -259,9 +260,6 @@ async def run_review_loop(attempt: FigureAttemptState) -> str:
 
         feedback = review.get("feedback", "")
         suggestions = review.get("suggestions", [])
-        must_fix = deps.get("normalize_text_list")(
-            review.get("must_fix"), limit=20
-        )
         review = dict(review)
         review["must_fix"] = must_fix
         attempt.last_review = review
@@ -290,24 +288,8 @@ async def run_review_loop(attempt: FigureAttemptState) -> str:
                 "figure_revision", figure, review=review
             ),
         )
-        if attempt.revision_count >= 3:
+        if attempt.revision_count >= MAX_FIGURE_REVISION_ATTEMPTS:
             break
-        if len(attempt.revision_history) >= 2 and not blocking:
-            previous_score = attempt.revision_history[-2].get("quality_score")
-            current_score = attempt.revision_history[-1].get("quality_score")
-            if (
-                previous_score is not None
-                and current_score is not None
-                and current_score <= previous_score
-            ):
-                return await _accept_stalled(
-                    attempt,
-                    review,
-                    feedback,
-                    must_fix,
-                    previous_score,
-                    current_score,
-                )
         action = await perform_revision(
             attempt,
             feedback=feedback,

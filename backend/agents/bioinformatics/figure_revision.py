@@ -175,6 +175,13 @@ def _accept_revision_output(attempt: FigureAttemptState, result, revised_code: s
     figure.analysis_generation = int(
         sandbox_state.get("analysis_generation", 0) or 0
     )
+    cohort_identity = sandbox_state.get("cohort_identity_v1") or {}
+    figure.cohort_generation = int(
+        cohort_identity.get("cohort_generation", 0) or 0
+    )
+    figure.cohort_digest = (
+        str(cohort_identity.get("cohort_digest", "") or "") or None
+    )
     figure.expression_provenance = dict(
         sandbox_state.get("expression_contract_v1") or {}
     )
@@ -237,6 +244,8 @@ async def perform_revision(
         attempt.request.figure_name,
         feedback,
     )
+    attempt.revision_count += 1
+    attempt.figure.revision_count = attempt.revision_count
     try:
         revised_code = await agent._revise_figure_code(
             attempt.current_code,
@@ -263,15 +272,15 @@ async def perform_revision(
         await agent._notify(
             "status", f"Figure revision failed ({revise_error}), keeping current version"
         )
+        attempt.terminal_revision_reason = "revision_failed"
         return "break"
 
-    attempt.revision_count += 1
-    attempt.figure.revision_count = attempt.revision_count
     is_valid, error_msg = agent._validate_code(revised_code)
     if not is_valid:
         logger.warning(
             "[Bioinformatics] Revised code failed validation: %s", error_msg
         )
+        attempt.terminal_revision_reason = "revision_failed"
         return "break"
     pre_revision_snapshot = take_snapshot(attempt, quality_score)
     try:
@@ -294,6 +303,7 @@ async def perform_revision(
             physical_error,
         )
         restore_snapshot(attempt, pre_revision_snapshot or attempt.best_snapshot)
+        attempt.terminal_revision_reason = "revision_failed"
         return "break"
 
     error_msg = deps.get("compact_traceback")(str(result.error), max_chars=1000)
@@ -366,4 +376,5 @@ async def perform_revision(
             deps.get("compact_traceback")(str(retry_err), max_chars=1000),
         )
     restore_snapshot(attempt, pre_revision_snapshot or attempt.best_snapshot)
+    attempt.terminal_revision_reason = "revision_failed"
     return "break"

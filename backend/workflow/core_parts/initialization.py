@@ -390,6 +390,9 @@ async def initialize(self):
         timeout=self.config.sandbox_timeout,
         runtime_budgets=runtime_budgets,
     )
+    self.sandbox.runtime_persistence_commit_callback = (
+        self._runtime_persistence_commit_callback
+    )
 
     # Create the settings provider — all agents read model/temp/prompt/client from it
     self._settings_provider = AgentSettingsProvider(
@@ -421,6 +424,7 @@ async def initialize(self):
         annotate_clusters_callback=self._annotate_clusters_callback,
         message_callback=self._agent_message_callback,
         supervisor_callback=self._supervisor_callback,
+        figure_plan_binding_callback=self._figure_plan_binding_callback,
         technique_agent=self.technique_agent,
         species_validation_callback=self._species_validation_callback,
         marker_db_intervention_callback=self._marker_db_intervention_callback,

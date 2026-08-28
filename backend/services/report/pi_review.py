@@ -487,6 +487,23 @@ IMPORTANT:
         if exploration_context:
             exploration_context = f"\n## Phase 1 Exploration & User Directions\n{exploration_context}\n"
 
+        method_decision_context = ""
+        if state.method_decisions:
+            lines = []
+            profiles = {item.id: item for item in state.bulk_input_profiles}
+            for decision in state.method_decisions:
+                profile = profiles.get(decision.input_profile_id)
+                lines.append(
+                    f"- Bulk input {decision.input_profile_id} "
+                    f"(scale={getattr(profile, 'declared_scale', 'unknown')}, "
+                    f"profile_status={getattr(profile, 'profile_status', 'unknown')}): "
+                    f"claim_level={decision.claim_level}; method={decision.method}; "
+                    f"rationale={decision.rationale}; execution={decision.execution_id}."
+                )
+            method_decision_context = (
+                "\n## Recorded Bulk Method Decisions\n" + "\n".join(lines) + "\n"
+            )
+
         prompt = f"""You are a Principal Investigator. Your bioinformatics team has completed a single-cell RNA sequencing analysis. Below is the complete analysis notebook (all code and outputs in chronological order), along with all result figures and table data.
 
 Your task: Read through the analysis code carefully from beginning to end, examine every attached figure, and review the table data. Then write a comprehensive summary FROM SCRATCH that demonstrates your deep understanding of the entire analysis.
@@ -505,6 +522,7 @@ Objective: {state.initial_instruction}
 {figures_list if figures_list else "(No figures available)"}
 
 {self._build_score_definitions_context(state)}
+{method_decision_context}
 
 ## Task
 {lang_instruction}

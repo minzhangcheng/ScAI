@@ -52,7 +52,67 @@ class CodeExecution(BaseModel):
     analysis_modalities: List[Literal[
         "single_cell", "bulk_rna_seq",
     ]] = Field(default_factory=list)
+    # Version 2 records are host-bound execution receipts. None identifies
+    # historical executions that predate exact plan/cohort provenance.
+    evidence_schema_version: Optional[int] = None
+    plan_id: Optional[str] = None
+    plan_step_ids: List[int] = Field(default_factory=list)
+    execution_purpose: Literal[
+        "planned", "supplementary", "repair",
+    ] = "supplementary"
+    plan_binding_status: Literal[
+        "candidate", "confirmed", "supplementary", "unverified",
+        "bound", "legacy_unverifiable",
+    ] = "legacy_unverifiable"
+    plan_binding_reason: Optional[str] = None
+    execution_status: Literal["succeeded", "failed", "partial"] = "succeeded"
+    lineage_id: str = "main"
+    analysis_generation: int = 0
+    cohort_generation: int = 0
+    cohort_digest: Optional[str] = None
+    input_profile_ids: List[str] = Field(default_factory=list)
+    declared_persistent_outputs: List[str] = Field(default_factory=list)
+    realized_persistent_outputs: List[str] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=datetime.now)
+
+
+class BulkInputProfile(BaseModel):
+    """Host-observed facts about one uploaded bulk expression table."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    source_file_id: str
+    shape: List[int] = Field(default_factory=list)
+    annotation_columns: List[str] = Field(default_factory=list)
+    candidate_sample_columns: List[str] = Field(default_factory=list)
+    numeric_fraction_by_column: Dict[str, float] = Field(default_factory=dict)
+    integer_like_fraction: float = 0.0
+    negative_value_count: int = 0
+    missing_value_summary: Dict[str, int] = Field(default_factory=dict)
+    declared_scale: Literal[
+        "counts", "normalized", "transformed", "unknown",
+    ] = "unknown"
+    profile_status: Literal["complete", "sampled", "failed"] = "complete"
+    complete: bool = True
+    rows_scanned: int = 0
+    error_code: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class MethodDecision(BaseModel):
+    """Agent scientific choice linked to host-observed input and execution."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    modality: Literal["bulk_rna_seq"] = "bulk_rna_seq"
+    input_profile_id: str
+    claim_level: Literal["inferential", "descriptive", "not_feasible"]
+    method: str
+    rationale: str
+    execution_id: str
+    decision_source: Literal[
+        "approved_plan_and_bioinformatics",
+    ] = "approved_plan_and_bioinformatics"
+    round_number: int = 0
+    created_at: datetime = Field(default_factory=datetime.now)
 
 class AnalysisStep(BaseModel):
     """A single step in the bioinformatics agent analysis log, covering all tool call types"""
@@ -70,6 +130,10 @@ class AnalysisStep(BaseModel):
     code_error: Optional[str] = None
     code_description: Optional[str] = None
     code_step_type: Optional[str] = None  # "technical" | "biological" (from tool arg step_type)
+    plan_id: Optional[str] = None
+    plan_step_ids: List[int] = Field(default_factory=list)
+    execution_purpose: Optional[str] = None
+    execution_id: Optional[str] = None
     saved_figure_filenames: List[str] = Field(default_factory=list)  # disk PNG filenames, no base64
 
     # consult_pi fields

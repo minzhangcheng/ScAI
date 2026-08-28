@@ -16,11 +16,13 @@ import logging
 import os
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from backend.config import (
     SESSION_DIR,
+    get_session_states,
     get_session_metadata_path,
     resolve_session_metadata_path,
 )
@@ -32,6 +34,10 @@ from backend.utils.asyncio_tasks import run_in_owned_thread
 from backend.utils.websocket_delivery import (
     json_safe_payload,
     strip_nested_binary_payload,
+)
+from backend.services.runtime_persistence_projection import (
+    apply_runtime_persistence_projection,
+    project_runtime_persistence,
 )
 from backend.state import (
     sessions, state_lock, session_access_times, last_save_times,
@@ -305,7 +311,34 @@ def _strip_legacy_blob_references(value: Any, *, realtime: bool = False) -> Any:
     return value
 
 
-def _durable_state_dump(state: AnalysisState) -> dict:
+def _runtime_persistence_projection(
+    session_id: str,
+    state: AnalysisState,
+) -> Optional[tuple[Dict[str, Any], Dict[str, Any]]]:
+    return project_runtime_persistence(
+        get_session_states(session_id) / f"{session_id}_state.json",
+        session_id,
+        state,
+    )
+
+
+def refresh_runtime_persistence_projection(
+    session_id: str,
+    state: AnalysisState,
+) -> Dict[str, Any]:
+    """Refresh the mutable live projection without creating a second authority."""
+    return apply_runtime_persistence_projection(
+        get_session_states(session_id) / f"{session_id}_state.json",
+        session_id,
+        state,
+    )
+
+
+def _durable_state_dump(
+    state: AnalysisState,
+    *,
+    session_id: Optional[str] = None,
+) -> dict:
     """Create a detached, sanitized JSON dump without mutating live state."""
     # Totalize arbitrary realtime ``Any`` content before Pydantic serialization
     # while retaining the AnalysisState serializer that seals persisted secrets.
@@ -325,9 +358,14 @@ def _durable_state_dump(state: AnalysisState) -> dict:
         else:
             safe_messages.append(json_safe_payload(message, strip_binary=True))
 
+    updates: Dict[str, Any] = {"realtime_messages": safe_messages}
+    if session_id:
+        projection = _runtime_persistence_projection(session_id, state)
+        if projection is not None:
+            updates["runtime_persistence"], updates["sandbox_state"] = projection
     prepared_state = state.model_copy(
         deep=False,
-        update={"realtime_messages": safe_messages},
+        update=updates,
     )
     sanitized_state = strip_nested_binary_payload(prepared_state)
     if not isinstance(sanitized_state, AnalysisState):
@@ -358,14 +396,17 @@ async def _persist_dump_under_lifecycle(
     """Unthrottled internal write serialized against delete and stale saves."""
     from backend.services.session_lifecycle import get_lifecycle_lock
 
-    dumped = _durable_state_dump(state)
+    dumped = _durable_state_dump(state, session_id=session_id)
     async with get_lifecycle_lock(session_id):
         await run_in_owned_thread(_externalize_and_write, session_id, dumped)
 
 
 def save_session_to_disk(session_id: str, state: AnalysisState) -> None:
     """Synchronous startup/test entrypoint guarded by the lifecycle file lock."""
-    _externalize_and_write(session_id, _durable_state_dump(state))
+    _externalize_and_write(
+        session_id,
+        _durable_state_dump(state, session_id=session_id),
+    )
 
 
 async def _async_save_session_under_lifecycle(
@@ -388,7 +429,7 @@ async def _async_save_session_under_lifecycle(
     last_save_times[session_id] = now
     # model_dump on the event loop (snapshot the mutable model here to avoid
     # racing with in-place mutation); offload the blob writes + JSON write.
-    dumped = _durable_state_dump(state)
+    dumped = _durable_state_dump(state, session_id=session_id)
     await run_in_owned_thread(_externalize_and_write, session_id, dumped)
 
 
@@ -411,6 +452,7 @@ def load_session_from_disk(session_id: str) -> Optional[AnalysisState]:
                 logger.warning(f"Session {session_id} has empty user_id, refusing to load")
                 return None
             state = AnalysisState(**data)
+            refresh_runtime_persistence_projection(session_id, state)
             logger.info(f"Session {session_id} loaded from disk")
             return state
     except (OSError, json.JSONDecodeError, ValueError, KeyError):
@@ -470,6 +512,7 @@ async def ensure_session_loaded_for_read(
         cached = await _get_cached_session(session_id)
         if cached is not None:
             adopt_persisted_generation(cached)
+            refresh_runtime_persistence_projection(session_id, cached)
             return cached
 
     return await ensure_session_loaded(session_id)
@@ -754,6 +797,7 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
             # used by disk-loaded returns.
             async with get_lifecycle_lock(session_id):
                 adopt_persisted_generation(cached)
+                refresh_runtime_persistence_projection(session_id, cached)
             return cached
         # Apply recovery outcome to cached state and return
         if recovery_blocked:
@@ -764,6 +808,7 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
                 await _persist_recovery_marker(session_id, cached)
         async with get_lifecycle_lock(session_id):
             adopt_persisted_generation(cached)
+            refresh_runtime_persistence_projection(session_id, cached)
         return cached
 
     # Load from disk outside state_lock in a joined, cancellation-safe worker.

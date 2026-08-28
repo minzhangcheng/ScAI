@@ -112,3 +112,59 @@ async def test_terminal_multi_direction_synthesis_shows_round_wait_gate():
     assert waiting_round_summaries[0]["summary"] == "Final direction summary"
     assert TaskStatus.WAITING_INPUT in workflow.statuses
     assert analysis_state.pending_integration is True
+
+
+@pytest.mark.asyncio
+async def test_no_wait_round_never_advertises_waiting_input():
+    analysis_state = AnalysisState(
+        session_id="terminal-no-wait",
+        user_id="test",
+        current_round=4,
+        max_rounds=4,
+        round_wait_seconds=0,
+        analysis_phase=AnalysisPhase.INNOVATION,
+        current_round_direction="Direction three",
+        user_chosen_directions=[
+            {"direction": "Direction one", "notes": ""},
+            {"direction": "Direction two", "notes": ""},
+            {"direction": "Direction three", "notes": ""},
+        ],
+        directions_queue=[{"direction": "Direction three", "notes": ""}],
+    )
+    workflow = DummyWorkflow()
+    workflow.pi_agent.build_cross_modal_synthesis = AsyncMock(return_value=None)
+
+    result = await workflow._pi_synthesis(
+        {
+            "analysis_state": analysis_state,
+            "pathology_result": {"findings": []},
+            "bioinformatics_result": {
+                "findings": ["Final direction finding"],
+                "status": "completed",
+            },
+            "biochemistry_result": {"findings": []},
+            "literature_result": {"findings": []},
+        }
+    )
+
+    assert analysis_state.status == TaskStatus.RUNNING
+    assert TaskStatus.WAITING_INPUT not in workflow.statuses
+    round_summary = next(
+        content
+        for message_type, content, _agent in workflow.sent_messages
+        if message_type == "round_summary"
+    )
+    assert round_summary["status"] == "completed"
+    assert round_summary["wait_policy"] == "no_wait"
+    status_messages = [
+        content
+        for message_type, content, _agent in workflow.sent_messages
+        if message_type == "status"
+    ]
+    assert any("No-wait mode is enabled" in content for content in status_messages)
+    assert all("Waiting for your input" not in content for content in status_messages)
+
+    await workflow._wait_for_user_input(result)
+
+    assert analysis_state.status == TaskStatus.RUNNING
+    assert ("state_sync", "auto_continue", AgentType.PI) in workflow.sent_messages

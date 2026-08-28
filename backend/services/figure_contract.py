@@ -720,6 +720,9 @@ def _plan_matches(requirement: RequiredFigure, figure: Any) -> bool:
 
 
 def _matches(requirement: RequiredFigure, figure: Any) -> bool:
+    exact_key = str(getattr(figure, "plan_requirement_key", "") or "").strip()
+    if exact_key and exact_key != requirement.key:
+        return False
     purpose = str(getattr(figure, "purpose", "result") or "result").strip().lower()
     is_supporting = bool(getattr(figure, "diagnostic", False)) or purpose in {
         "baseline", "diagnostic",
@@ -739,6 +742,12 @@ def _matches(requirement: RequiredFigure, figure: Any) -> bool:
 
     figure_step = getattr(figure, "plan_step_id", None)
     if requirement.require_plan_link:
+        if exact_key:
+            return bool(
+                requirement.plan_step_id is not None
+                and figure_step is not None
+                and int(figure_step) == int(requirement.plan_step_id)
+            )
         if bool(
             requirement.plan_step_id is not None
             and figure_step is not None

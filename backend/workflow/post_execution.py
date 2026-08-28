@@ -33,6 +33,9 @@ from .post_execution_review import (
     sanitize_review_result,
     should_run_post_execution_review,
 )
+from .post_execution_review_parts.reconciliation import (
+    reconcile_plan_evidence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +166,10 @@ class PostExecutionReviewMixin:
     # Feature A — plan audit (always runs)
     # ------------------------------------------------------------------
 
+    async def _reconcile_plan_evidence(
+        self, analysis_state, result: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        return await reconcile_plan_evidence(self, analysis_state, result)
     def _structured_method_families(self, analysis_state, round_number: int) -> set:
         """Families vouched for by structured state rather than by code text.
 
@@ -218,7 +225,12 @@ class PostExecutionReviewMixin:
             )
         return gaps
 
-    def _audit_round_plan_execution(self, analysis_state, result: Dict[str, Any]) -> Dict[str, Any]:
+    def _audit_round_plan_execution(
+        self,
+        analysis_state,
+        result: Dict[str, Any],
+        reconciliation: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Audit the approved plan against this round's evidence and record it.
 
         Writes `PlanStep.status` / `executed_at` on `analysis_state.current_plan`.
@@ -243,6 +255,21 @@ class PostExecutionReviewMixin:
                 target_lineage_id=(
                     getattr(analysis_state, "restore_branch_id", None) or "main"
                 ),
+                target_cohort_digest=str(
+                    (
+                        (getattr(analysis_state, "sandbox_state", None) or {})
+                        .get("cohort_identity_v1", {})
+                        .get("cohort_digest", "")
+                    ) or ""
+                ) or None,
+                target_cohort_generation=int(
+                    (
+                        (getattr(analysis_state, "sandbox_state", None) or {})
+                        .get("cohort_identity_v1", {})
+                        .get("cohort_generation", 0)
+                    ) or 0
+                ) or None,
+                semantic_reconciliation=reconciliation,
             )
             updated = apply_audit_to_plan(plan, audit)
             summary = audit.summary()

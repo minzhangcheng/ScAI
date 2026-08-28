@@ -77,6 +77,21 @@ async def emit_figure_record(
                 "revision_count": figure.revision_count,
                 "plan_step_id": getattr(figure, "plan_step_id", None),
                 "plan_id": getattr(figure, "plan_id", None),
+                "plan_requirement_key": getattr(
+                    figure, "plan_requirement_key", None
+                ),
+                "submitted_plan_step_id": getattr(
+                    figure, "submitted_plan_step_id", None
+                ),
+                "supervisor_binding_decision": getattr(
+                    figure, "supervisor_binding_decision", None
+                ),
+                "supervisor_binding_reason": getattr(
+                    figure, "supervisor_binding_reason", None
+                ),
+                "source_execution_id": getattr(
+                    figure, "source_execution_id", None
+                ),
                 "purpose": getattr(figure, "purpose", "result") or "result",
                 "logical_figure_id": getattr(
                     figure, "logical_figure_id", None

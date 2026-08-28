@@ -5,7 +5,9 @@ import asyncio
 import logging
 import time
 from typing import Any, Dict, List, Optional, Set
+from uuid import uuid4
 
+from backend.services.cohort_identity import active_cohort_identity
 from backend.services.sample_design import (
     infer_execution_modalities,
     samples_per_group_by_modality,
@@ -28,7 +30,13 @@ logger = logging.getLogger(__name__)
 def _validated_supplementary_findings(
     findings: List[Any], executions: List[CodeExecution], state: Any,
 ) -> tuple[List[Dict[str, Any]], List[str]]:
-    """Bind supplementary findings to successful executions and sample design."""
+    """Retain findings as candidates for later Supervisor reconciliation.
+
+    Execution IDs embedded in prose are not a reliable binding contract.  The
+    host therefore supplies the bounded set of successful executions from this
+    pass as candidates and leaves the finding unverified until the Supervisor
+    judges the scientific relationship.
+    """
     evidence_by_id = {
         str(record.id): record
         for record in executions
@@ -41,55 +49,85 @@ def _validated_supplementary_findings(
         frozenset({"bulk_rna_seq"}): "bulk_rna_seq",
         frozenset({"single_cell", "bulk_rna_seq"}): "cross_modal",
     }
+    candidate_ids = sorted(evidence_by_id)[:40]
+    modalities = frozenset(
+        modality
+        for execution in evidence_by_id.values()
+        for modality in getattr(execution, "analysis_modalities", [])
+    )
+    modality = modality_names.get(modalities)
+    plan = getattr(state, "current_plan", None)
+    plan_id = str(getattr(plan, "id", "") or "") or None
+    lineage_id = getattr(state, "restore_branch_id", None) or "main"
+    cohort = active_cohort_identity(state)
+    candidate_steps = sorted({
+        int(step_id)
+        for execution in evidence_by_id.values()
+        for step_id in (getattr(execution, "plan_step_ids", None) or [])
+    })
     for index, value in enumerate(findings or [], start=1):
         text = str(value or "").strip()
         if not text:
             continue
-        cited_ids = [
-            execution_id for execution_id in evidence_by_id
-            if execution_id in text
-        ]
-        if not cited_ids:
-            warnings.append(
-                f"Discarded supplementary finding {index}: it cites no successful "
-                "execution ID from this pass."
-            )
-            continue
-        modalities = frozenset(
-            modality
-            for execution_id in cited_ids
-            for modality in getattr(
-                evidence_by_id[execution_id], "analysis_modalities", [],
-            )
-        )
-        modality = modality_names.get(modalities)
-        if modality is None:
-            warnings.append(
-                f"Discarded supplementary finding {index}: the cited execution "
-                "modality could not be established."
-            )
-            continue
         record = {
+            "id": str(uuid4()),
             "text": text,
             "modality": modality,
-            "evidence_execution_ids": cited_ids,
+            "evidence_execution_ids": [],
+            "candidate_evidence_execution_ids": candidate_ids,
+            "claimed_evidence_execution_ids": [],
+            "candidate_plan_step_ids": candidate_steps,
+            "confirmed_plan_step_ids": [],
+            "evidence_status": "unverified",
+            "semantic_status": "unverified",
+            "round_number": int(getattr(state, "current_round", 0) or 0),
+            "lineage_id": lineage_id,
+            "plan_id": plan_id,
+            "analysis_generation": int(
+                (getattr(state, "sandbox_state", None) or {}).get(
+                    "analysis_generation", 0
+                ) or 0
+            ),
+            "cohort_generation": int(
+                cohort.get("cohort_generation", 0) or 0
+            ),
+            "cohort_digest": str(cohort.get("cohort_digest") or "") or None,
         }
-        report = run_statistical_gates(
-            [record],
-            score_definitions=list(getattr(state, "score_definitions", None) or []),
-            scoring_plans=list(getattr(state, "scoring_plans", None) or []),
-            samples_per_group_by_modality=samples_per_group_by_modality(state),
-        )
-        if not report.passed:
+        if modality is not None:
+            report = run_statistical_gates(
+                [record],
+                score_definitions=list(
+                    getattr(state, "score_definitions", None) or []
+                ),
+                scoring_plans=list(
+                    getattr(state, "scoring_plans", None) or []
+                ),
+                samples_per_group_by_modality=(
+                    samples_per_group_by_modality(state)
+                ),
+            )
+        else:
+            report = None
+        if report is not None and not report.passed:
             warnings.append(
                 f"Discarded supplementary finding {index}: "
                 + "; ".join(finding.detail for finding in report.blocking)
             )
             continue
-        if report.advisories:
+        if report is not None and report.advisories:
             warnings.append(
                 f"Supplementary finding {index} advisory: "
                 + "; ".join(finding.detail for finding in report.advisories)
+            )
+        if not candidate_ids:
+            warnings.append(
+                f"Supplementary finding {index} was retained as unverified "
+                "because this pass produced no successful execution receipt."
+            )
+        elif modality is None:
+            warnings.append(
+                f"Supplementary finding {index} was retained for Supervisor "
+                "review because its execution modality was not established."
             )
         records.append(record)
     return records, warnings
@@ -181,6 +219,9 @@ async def _execute_supplementary_pass(
             error = compact_traceback(error, max_chars=3000)
         exec_figures = list(getattr(exec_result, "figures", None) or [])
 
+        state = agent._current_analysis_state
+        cohort = active_cohort_identity(state)
+        plan = getattr(state, "current_plan", None)
         record = CodeExecution(
             code=code,
             output=output,
@@ -192,6 +233,26 @@ async def _execute_supplementary_pass(
             execution_time=execution_time,
             round_number=round_number,
             analysis_modalities=infer_execution_modalities(code),
+            evidence_schema_version=2,
+            plan_id=str(getattr(plan, "id", "") or "") or None,
+            plan_step_ids=[],
+            execution_purpose="repair",
+            plan_binding_status="unverified",
+            plan_binding_reason=(
+                "Supplementary repair execution awaits Supervisor semantic "
+                "reconciliation."
+            ),
+            execution_status="failed" if error else "succeeded",
+            lineage_id=getattr(state, "restore_branch_id", None) or "main",
+            analysis_generation=int(
+                (getattr(state, "sandbox_state", None) or {}).get(
+                    "analysis_generation", 0
+                ) or 0
+            ),
+            cohort_generation=int(
+                cohort.get("cohort_generation", 0) or 0
+            ),
+            cohort_digest=str(cohort.get("cohort_digest") or "") or None,
         )
         produced.append(record)
         agent.code_history.append(record)
@@ -330,13 +391,14 @@ async def _execute_supplementary_pass(
         str(w).strip() for w in (final_result.get("warnings") or []) if str(w).strip()
     ]
 
-    # A finding must trace to a cell this pass actually ran; with nothing
-    # citable the report is the model's recollection of earlier rounds.
+    # With no successful execution there is nothing the Supervisor can promote
+    # to verified evidence. Keep the prose in audit history, but never discard
+    # it or let it support the current report.
     if not any(execution_supports_evidence(r) for r in produced):
         if result["findings"]:
             result["warnings"].append(
-                "Discarded findings with no successful supplementary execution to cite.")
-            result["findings"] = []
+                "Supplementary findings have no successful execution receipt and "
+                "remain unverified audit history.")
         if result["status"] == "completed":
             result["status"] = "partial"
     return result

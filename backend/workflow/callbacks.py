@@ -54,6 +54,14 @@ def compact_figure_event_payload(
         "revision_count": figure.revision_count,
         "plan_step_id": getattr(figure, "plan_step_id", None),
         "plan_id": getattr(figure, "plan_id", None),
+        "plan_requirement_key": getattr(figure, "plan_requirement_key", None),
+        "submitted_plan_step_id": getattr(
+            figure, "submitted_plan_step_id", None
+        ),
+        "supervisor_binding_decision": getattr(
+            figure, "supervisor_binding_decision", None
+        ),
+        "source_execution_id": getattr(figure, "source_execution_id", None),
         "purpose": getattr(figure, "purpose", "result") or "result",
         "round": getattr(figure, "round_number", 0) or None,
         "diagnostic": bool(getattr(figure, "diagnostic", False)),
@@ -86,6 +94,72 @@ class CallbacksMixin:
             use_deep_research=True
         )
         return result.get("report", "")
+
+    async def _runtime_persistence_commit_callback(
+        self, event: Dict[str, Any]
+    ) -> None:
+        """Publish a committed NotebookState generation into session state."""
+        if str(event.get("session_id") or "") != self.session_id:
+            logger.error(
+                "[%s] Ignored runtime projection for foreign session %s",
+                self.session_id,
+                event.get("session_id"),
+            )
+            return
+        analysis_state = getattr(self, "_current_analysis_state", None)
+        if analysis_state is None:
+            analysis_state = getattr(self, "_state", None)
+        if analysis_state is None:
+            # The sidecar remains authoritative. A later session load projects
+            # it even when no live workflow state is available during shutdown.
+            return
+
+        persistence = dict(event.get("runtime_persistence") or {})
+        event_generation = int(event.get("lifecycle_generation") or 0)
+        state_generation = int(
+            getattr(analysis_state, "lifecycle_generation", 0) or 0
+        )
+        if (
+            event_generation
+            and state_generation
+            and event_generation != state_generation
+        ):
+            from ..services.runtime_persistence_gate import (
+                enter_runtime_persistence_gate,
+            )
+
+            mismatch = dict(
+                getattr(analysis_state, "runtime_persistence", None) or {}
+            )
+            mismatch.update({
+                "status": "failed",
+                "requires_recompute": True,
+                "recommended_action": "restore_matching_lifecycle",
+                "error_summary": (
+                    f"Runtime commit lifecycle generation {event_generation} "
+                    f"does not match session generation {state_generation}."
+                ),
+                "projection_status": "lifecycle_mismatch",
+            })
+            enter_runtime_persistence_gate(analysis_state, mismatch)
+            await self._send_state_sync(
+                analysis_state,
+                StateSyncChangeType.RUNTIME_PERSISTENCE_FAILURE.value,
+            )
+            return
+
+        analysis_state.runtime_persistence = persistence
+        sandbox_state = dict(analysis_state.sandbox_state or {})
+        sandbox_state.update({
+            "runtime_revision": int(event.get("current_revision") or 0),
+            "saved_runtime_revision": int(event.get("saved_revision") or 0),
+            "runtime_persistence": persistence,
+        })
+        analysis_state.sandbox_state = sandbox_state
+        await self._send_state_sync(
+            analysis_state,
+            StateSyncChangeType.RUNTIME_PERSISTENCE_COMMITTED.value,
+        )
 
     async def _pi_callback(self, question: str, context: str) -> str:
         """Callback for bioinformatics agent to consult PI for biological decisions"""
@@ -285,6 +359,22 @@ IMPORTANT: Respond in English only. Do not use any other language."""
         )
 
         return review
+
+    async def _figure_plan_binding_callback(
+        self, state: AnalysisState, proposal: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Ask the Supervisor to judge semantic binding before rendering."""
+        self.ensure_agent_ready("supervisor")
+        if self.supervisor_agent is None:
+            return {
+                "decision": "reject",
+                "plan_requirement_key": None,
+                "reason": "Supervisor is unavailable for semantic plan binding.",
+                "parse_failed": True,
+            }
+        return await self.supervisor_agent.review_figure_plan_binding(
+            state, proposal
+        )
 
     async def _vision_figure_review(
         self,

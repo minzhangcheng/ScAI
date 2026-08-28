@@ -72,13 +72,44 @@ def _state(plan=None, **kwargs):
     return SimpleNamespace(**defaults)
 
 
-def _execution(code, error=None, round_number=2, exec_id=None, modalities=None):
+def _execution(
+    code,
+    error=None,
+    round_number=2,
+    exec_id=None,
+    modalities=None,
+    **extra,
+):
     kwargs = {"code": code, "error": error, "round_number": round_number}
     if exec_id:
         kwargs["id"] = exec_id
     if modalities is not None:
         kwargs["analysis_modalities"] = modalities
+    kwargs.update(extra)
     return CodeExecution(**kwargs)
+
+
+def _receipt(plan, code, *, step_ids, exec_id, **extra):
+    return _execution(
+        code,
+        exec_id=exec_id,
+        evidence_schema_version=2,
+        plan_id=plan.id,
+        plan_step_ids=list(step_ids),
+        execution_purpose="planned",
+        plan_binding_status="candidate",
+        lineage_id="main",
+        **extra,
+    )
+
+
+def _reconciliation(plan, links):
+    return {
+        "plan_id": plan.id,
+        "round_number": 2,
+        "lineage_id": "main",
+        "links": links,
+    }
 
 
 def _result_figure(
@@ -116,13 +147,41 @@ def test_audit_writes_step_status_and_stamps_only_completed():
         PlanStep(id=1, title="Cell communication", method="Run liana rank_aggregate"),
         PlanStep(id=2, title="Pathway activity", method="Run decoupler run_ulm"),
     ])
+    completed = _receipt(
+        plan,
+        "import liana as li; li.mt.rank_aggregate(adata)",
+        step_ids=[1],
+        exec_id="communication-exec",
+    )
+    partial = _receipt(
+        plan,
+        "net = load_regulatory_network()",
+        step_ids=[2],
+        exec_id="pathway-setup-exec",
+    )
     state = _state(
         plan,
-        code_history=[_execution("import liana as li; li.mt.rank_aggregate(adata)")],
+        code_history=[completed, partial],
         publication_figures=[_result_figure(plan, 1)],
     )
+    reconciliation = _reconciliation(plan, [
+        {
+            "plan_step_id": 1,
+            "status": "evidenced",
+            "execution_ids": [completed.id],
+            "reason": "The communication analysis was completed.",
+        },
+        {
+            "plan_step_id": 2,
+            "status": "partial",
+            "execution_ids": [partial.id],
+            "reason": "Only the network setup was completed.",
+        },
+    ])
 
-    summary = _Harness()._audit_round_plan_execution(state, {})
+    summary = _Harness()._audit_round_plan_execution(
+        state, {}, reconciliation
+    )
 
     assert summary["n_steps"] == 2
     assert summary["n_completed"] == 1
@@ -148,9 +207,22 @@ def test_audit_wiring_passes_current_publication_figures():
         review_status=FigureReviewStatus.APPROVED,
         round_number=2,
     )
-    state = _state(plan, publication_figures=[figure])
+    receipt = _receipt(
+        plan, "render_annotated_embedding()", step_ids=[1], exec_id="umap-exec"
+    )
+    state = _state(
+        plan, code_history=[receipt], publication_figures=[figure]
+    )
+    reconciliation = _reconciliation(plan, [{
+        "plan_step_id": 1,
+        "status": "evidenced",
+        "execution_ids": [receipt.id],
+        "reason": "The embedding and its reviewed figure were completed.",
+    }])
 
-    summary = _Harness()._audit_round_plan_execution(state, {})
+    summary = _Harness()._audit_round_plan_execution(
+        state, {}, reconciliation
+    )
 
     assert summary["n_figure_steps"] == 1
     assert summary["n_figure_unmet"] == 0
@@ -222,7 +294,7 @@ def test_no_mechanism_programs_records_nothing():
     assert "evidence_gaps" not in summary
 
 
-def test_registered_score_vouches_for_gene_scoring():
+def test_registered_score_without_a_receipt_is_diagnostic_only():
     plan = _plan([PlanStep(id=1, title="Module scores", method="Use score_genes for the panel")])
     state = _state(
         plan,
@@ -232,8 +304,9 @@ def test_registered_score_vouches_for_gene_scoring():
 
     summary = _Harness()._audit_round_plan_execution(state, {})
 
-    assert summary["n_completed"] == 1
-    assert plan.steps[0].status == "completed"
+    assert summary["n_completed"] == 0
+    assert summary["n_unverifiable"] == 1
+    assert plan.steps[0].status == "pending"
 
 
 # ---------------------------------------------------------------------------
@@ -558,11 +631,26 @@ async def test_fully_evidenced_round_does_not_run_the_pass():
 @pytest.mark.asyncio
 async def test_unmet_step_triggers_pass_and_merges_back():
     plan = _plan([PlanStep(id=1, title="Pathway activity", method="Run decoupler run_ulm")])
-    state = _state(plan)
+    setup = _receipt(
+        plan,
+        "net = load_regulatory_network()",
+        step_ids=[1],
+        exec_id="pathway-setup-exec",
+    )
+    state = _state(plan, code_history=[setup])
     pi, bio = _PI(), _Bio()
     harness = _Harness(pi=pi, bio=bio)
 
-    audit_summary = harness._audit_round_plan_execution(state, {})
+    audit_summary = harness._audit_round_plan_execution(
+        state,
+        {},
+        _reconciliation(plan, [{
+            "plan_step_id": 1,
+            "status": "partial",
+            "execution_ids": [setup.id],
+            "reason": "The network was prepared, but activity was not computed.",
+        }]),
+    )
     result = _unmet_result()
     meta, merge = await harness._run_post_execution_review(state, result, audit_summary, "full")
 
@@ -576,14 +664,25 @@ async def test_unmet_step_triggers_pass_and_merges_back():
     findings, figures = harness._merge_supplementary_into_round(
         state, result, result["findings"], result["figures"], merge)
     assert findings[-1].startswith("[Supplementary] ")
-    assert [c.id for c in state.code_history] == ["supp-1"]
+    assert [c.id for c in state.code_history] == [
+        "pathway-setup-exec", "supp-1"
+    ]
     # The raw result must carry the new execution so a re-audit can see it.
     assert result["findings"] == findings
 
     # The computation is now evidenced, while its reviewed result figure remains
     # a main-executor responsibility rather than something this restricted pass
     # may fabricate.
-    reaudit = harness._audit_round_plan_execution(state, {})
+    reaudit = harness._audit_round_plan_execution(
+        state,
+        {},
+        _reconciliation(plan, [{
+            "plan_step_id": 1,
+            "status": "evidenced",
+            "execution_ids": ["supp-1"],
+            "reason": "The supplementary execution completed pathway activity.",
+        }]),
+    )
     assert reaudit["n_unmet"] == 1
     assert reaudit["unmet_figure_kinds"] == ["result"]
     assert plan.steps[0].status == "pending"
@@ -731,11 +830,26 @@ async def test_figure_only_gap_is_deferred_to_main_publication_pipeline():
         method="Summarize the registered score",
         figure_requirements=[{"figure_type": "heatmap"}],
     )])
-    state = _state(plan, publication_figures=[])
+    receipt = _receipt(
+        plan,
+        "summarize_registered_score()",
+        step_ids=[1],
+        exec_id="score-summary-exec",
+    )
+    state = _state(plan, code_history=[receipt], publication_figures=[])
     pi, bio = _PI(), _Bio()
     harness = _Harness(pi=pi, bio=bio)
 
-    audit_summary = harness._audit_round_plan_execution(state, {})
+    audit_summary = harness._audit_round_plan_execution(
+        state,
+        {},
+        _reconciliation(plan, [{
+            "plan_step_id": 1,
+            "status": "evidenced",
+            "execution_ids": [receipt.id],
+            "reason": "The score summary was computed; its heatmap is still missing.",
+        }]),
+    )
     meta, merge = await harness._run_post_execution_review(
         state, _unmet_result(), audit_summary, "full"
     )
@@ -804,14 +918,29 @@ async def test_pi_declining_costs_nothing_further():
 @pytest.mark.asyncio
 async def test_zero_task_budget_keeps_the_audit_and_skips_the_pass():
     plan = _plan([PlanStep(id=1, title="Pathway activity", method="Run decoupler run_ulm")])
-    state = _state(plan)
+    setup = _receipt(
+        plan,
+        "net = load_regulatory_network()",
+        step_ids=[1],
+        exec_id="pathway-setup-exec",
+    )
+    state = _state(plan, code_history=[setup])
     cfg = SimpleNamespace(enable_post_execution_review=True, post_execution_review_max_tasks=0,
                           post_execution_review_max_iterations=5,
                           post_execution_review_timeout_seconds=900, max_rounds=3)
     pi, bio = _PI(), _Bio()
     harness = _Harness(pi=pi, bio=bio, config=cfg)
 
-    audit_summary = harness._audit_round_plan_execution(state, {})
+    audit_summary = harness._audit_round_plan_execution(
+        state,
+        {},
+        _reconciliation(plan, [{
+            "plan_step_id": 1,
+            "status": "partial",
+            "execution_ids": [setup.id],
+            "reason": "The approved analysis is only partially evidenced.",
+        }]),
+    )
     meta, _ = await harness._run_post_execution_review(
         state, _unmet_result(), audit_summary, "full")
 

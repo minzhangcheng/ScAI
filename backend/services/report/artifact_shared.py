@@ -210,6 +210,12 @@ def verified_artifact_bytes(path: Any, artifact: Any=None, *, kind: str, binding
             if artifact is not None else ""
         ).strip().lower()
         expected = {expected_digest} if expected_digest else set()
+    elif kind == "table":
+        expected_digest = str(
+            (_artifact_value(artifact, "csv_sha256", "") or "")
+            if artifact is not None else ""
+        ).strip().lower()
+        expected = {expected_digest} if expected_digest else set()
     else:
         raise ValueError(f"unsupported artifact kind: {kind}")
     if artifact is not None and not expected:

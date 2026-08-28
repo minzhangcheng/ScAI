@@ -52,7 +52,7 @@ from .schema_parts.analysis import (  # noqa: F401
     ScoringPlan,
     AgentError,
     AgentMessage,
-    CodeExecution,
+    CodeExecution, BulkInputProfile, MethodDecision,
     AnalysisStep,
     ScoreDefinition,
     TreatmentGroup,
@@ -94,14 +94,13 @@ from .schema_parts.outputs import (  # noqa: F401
     RoundResult,
     PublicationFigure,
     LegacyArtifactRecord,
-    PublicationTable,
+    PublicationTable, FigureRevisionTask,
     GraphicAbstract,
     APIRequest,
     APIResponse,
     UploadRequest,
     WebSocketMessage,
 )
-
 
 class AnalysisState(BaseModel):
     """Complete state of an analysis session"""
@@ -281,10 +280,10 @@ class AnalysisState(BaseModel):
 
     # Realtime messages for WebSocket (persisted for session restoration)
     realtime_messages: List["WebSocketMessage"] = Field(default_factory=list)
-    
     # Code execution history (for reproducibility)
     code_history: List[CodeExecution] = Field(default_factory=list)
-
+    bulk_input_profiles: List[BulkInputProfile] = Field(default_factory=list)
+    method_decisions: List[MethodDecision] = Field(default_factory=list)
     # Comprehensive analysis log (ALL steps with agent reasoning, chronological)
     analysis_log: List[AnalysisStep] = Field(default_factory=list)
 
@@ -292,13 +291,11 @@ class AnalysisState(BaseModel):
     treatment_groups: List[TreatmentGroup] = Field(default_factory=list)
     data_files: List[DataFile] = Field(default_factory=list)
     biochemistry_indicators: List[BiochemistryIndicator] = Field(default_factory=list)
-    
     # Literature reports
     literature_reports: List[LiteratureReport] = Field(default_factory=list)
 
     # Resolved label of the literature model(s) actually used (DR vs PubMed), for the report
     literature_actual_model: Optional[str] = None
-    
     # Round results
     round_results: List[RoundResult] = Field(default_factory=list)
     current_round_cache: Optional[AgentRoundCache] = None
@@ -317,6 +314,7 @@ class AnalysisState(BaseModel):
     artifact_registry_version: Optional[int] = None
     legacy_artifacts: List[LegacyArtifactRecord] = Field(default_factory=list)
     publication_tables: List[PublicationTable] = Field(default_factory=list)
+    figure_revision_tasks: List[FigureRevisionTask] = Field(default_factory=list)
     invalidated_artifact_stems: List[str] = Field(default_factory=list)
     graphic_abstract: Optional[GraphicAbstract] = None
     integrated_report: Optional[str] = None  # Integrated report with figure/table references
@@ -346,10 +344,9 @@ class AnalysisState(BaseModel):
     # its plan and outcome. Keyed by a deterministic attempt id so node retry and
     # snapshot restore reuse a completed review instead of paying for it twice.
     post_execution_reviews: List[Dict[str, Any]] = Field(default_factory=list)
-
+    plan_evidence_reconciliations: List[Dict[str, Any]] = Field(default_factory=list)
     # Agent prompts (can be customized per session)
     custom_prompts: Dict[str, str] = Field(default_factory=dict)
-    
     # Agent models (can be customized per session)
     custom_models: Dict[str, str] = Field(default_factory=dict)
     
@@ -474,6 +471,8 @@ class AnalysisState(BaseModel):
         "detected_sample_counts": "detected_sample_counts",
         "publication_figures": "publication_figures",
         "publication_tables": "publication_tables",
+        "bulk_input_profiles": "bulk_input_profiles", "method_decisions": "method_decisions",
+        "figure_revision_tasks": "figure_revision_tasks",
         "graphic_abstract": "graphic_abstract",
         "integrated_report": "integrated_report",
         "species": "species",
@@ -908,6 +907,9 @@ class AnalysisState(BaseModel):
              "round": f.get("round_number") or None,
              "plan_step_id": f.get("plan_step_id"),
              "plan_id": f.get("plan_id"),
+             "plan_requirement_key": f.get("plan_requirement_key"), "submitted_plan_step_id": f.get("submitted_plan_step_id"),
+             "supervisor_binding_decision": f.get("supervisor_binding_decision"), "supervisor_binding_reason": f.get("supervisor_binding_reason"),
+             "source_execution_id": f.get("source_execution_id"),
              "purpose": f.get("purpose", "result"),
              "logical_figure_id": f.get("logical_figure_id"),
              "render_attempt_id": f.get("render_attempt_id"),

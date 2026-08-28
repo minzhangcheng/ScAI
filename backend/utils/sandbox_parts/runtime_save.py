@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 import re
 from typing import Any, Dict
 
@@ -27,9 +28,48 @@ async def save_session(sandbox, *, bindings):
     async with sandbox._exec_lock:
         context = await _prepare_save(sandbox, bindings=bindings)
         if isinstance(context, bool):
+            if context:
+                await _publish_committed_projection(
+                    sandbox, bindings=bindings
+                )
             return context
         save_code = _build_save_code(context)
         return await _execute_save(context, save_code, bindings=bindings)
+
+
+async def _publish_committed_projection(sandbox, *, bindings) -> None:
+    """Notify the workflow after the lifecycle lock and durable worker exit."""
+    callback = getattr(sandbox, "runtime_persistence_commit_callback", None)
+    if not callable(callback):
+        return
+    persistence = dict(
+        getattr(sandbox.notebook_state, "runtime_persistence", {}) or {}
+    )
+    event = {
+        "session_id": str(sandbox.session_id),
+        "lifecycle_generation": int(
+            persistence.get("lifecycle_generation")
+            or getattr(sandbox, "_expected_lifecycle_generation", 0)
+            or 0
+        ),
+        "current_revision": int(
+            persistence.get("current_revision") or 0
+        ),
+        "saved_revision": int(persistence.get("saved_revision") or 0),
+        "runtime_persistence": persistence,
+    }
+    try:
+        outcome = callback(event)
+        if inspect.isawaitable(outcome):
+            await outcome
+    except Exception:
+        # The authoritative sidecar is already committed. Projection delivery
+        # is retried naturally by every session read/save and must not turn a
+        # successful runtime generation into a false persistence failure.
+        bindings.logger.exception(
+            "[%s] Runtime commit projection callback failed",
+            sandbox.session_id,
+        )
 
 
 async def _prepare_save(sandbox, *, bindings):
@@ -630,6 +670,7 @@ async def _execute_save(
                 description="runtime generation commit",
             )
             bindings.logger.info("Session saved successfully")
+            await _publish_committed_projection(sandbox, bindings=bindings)
         except BaseException as exc:
             worker_error = commit_outcome.get("error")
             if isinstance(exc, bindings.asyncio.CancelledError):

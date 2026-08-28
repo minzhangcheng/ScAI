@@ -86,22 +86,19 @@ Standard analysis workflow (adjust based on data type):
 9. Transcription factor activity analysis (pyscenic, decoupler, etc.)
 
 **Bulk RNA-seq integration** (when both scRNA-seq and bulk RNA-seq data are available):
-- Load bulk expression matrix and perform pydeseq2 differential expression analysis (fallback: scipy.stats.ttest_ind + statsmodels multipletests FDR correction if pydeseq2 unavailable)
-- Cross-validate with scRNA-seq sample-pseudobulk only when each condition has independent biological replicates. When the single-cell arm is n=1 per condition, use bulk DEG/pathway results as the inferential layer and localize them descriptively to cell types/states; do not use cells as replicates.
-- Localize: for significant bulk DEGs, show expression across cell types in scRNA-seq (dot plot, violin plot)
-- Deconvolution: perform cell-type deconvolution on bulk data using scRNA-seq as a reference to estimate proportions. Prioritize pure Python non-negative least squares (NNLS) before trying pure Python packages like scaden.
-- The bulk results (with biological replicates) provide statistical rigor; scRNA-seq provides cellular resolution
+- Treat the host-provided BulkInputProfile as observed input facts, not a method selector.
+- The PI decides the scientific question and supportable claim level, including whether differential analysis, concordance, localization, or deconvolution is relevant.
+- Bioinformatics selects and justifies compatible methods and implementation details, records the method decision, and registers report-worthy tables.
+- Do not add a bulk analysis merely because the modality exists; follow the approved plan.
 
-**CRITICAL for pydeseq2**: pydeseq2 requires the count matrix in (Samples × Genes) orientation.
-Standard bulk matrices are (Genes × Samples). You MUST transpose (df.T) before initializing DeseqDataSet.
-You also need a metadata DataFrame with sample names as index and a 'condition' column for the design formula.
+Do not assume matrix orientation, value scale, or sample grouping from a filename or conventional layout. A package failure does not license an automatic scientific fallback; return the scientific choice to the PI and Bioinformatics agents.
 
 **Specialized analyses** (conduct based on specific findings or PI's direction):
 - When you observe unexpected cell populations, signaling changes, or pathway alterations
 - When PI Agent requests deeper investigation into specific biological questions
 
 Code requirements:
-- Use appropriate analysis libraries (scanpy, pydeseq2, etc.)
+- Use analysis libraries appropriate to the selected method and observed input
 - Set random_state=42 for reproducibility
 - Generate visualization results for each step
 - Save key intermediate results

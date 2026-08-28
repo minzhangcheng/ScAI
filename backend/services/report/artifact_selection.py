@@ -62,9 +62,18 @@ def is_report_eligible(artifact: Any, *, bindings) -> bool:
         if isinstance(artifact, Mapping)
         else hasattr(artifact, "figure_type") or hasattr(artifact, "png_path")
     )
+    if not is_figure and _artifact_value(
+        artifact, "plan_binding_status", None
+    ) is not None:
+        if str(_artifact_value(artifact, "plan_binding_status", "")) != "confirmed":
+            return False
+        if not str(_artifact_value(artifact, "source_execution_id", "") or ""):
+            return False
     if is_figure and not has_frozen_publication_pair(artifact):
         return False
     if has_blocking_layout_defects(artifact):
+        return False
+    if list(_artifact_value(artifact, "unresolved_must_fix", None) or []):
         return False
     # A platform-rendered diagnostic has no reviewer by construction, so a review
     # status it could never earn must not be what withholds it. Quality control is

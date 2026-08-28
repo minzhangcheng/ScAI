@@ -95,12 +95,24 @@ async def finalize_run(context) -> dict:
         "analysis_log": context.analysis_log,
         "success": status != "error",
         "mechanism_programs": context.mechanism_programs,
-        "evidence_verified": bool(context.reported_evidence_ids)
-        and not context.evidence_gate_degraded,
+        # Producer-supplied execution IDs are candidates only. The workflow's
+        # Supervisor reconciliation promotes semantically valid links later.
+        "evidence_verified": False,
         "evidence_gate_degraded": context.evidence_gate_degraded,
-        "evidence_execution_ids": context.reported_evidence_ids,
+        "evidence_execution_ids": [],
+        "candidate_evidence_execution_ids": context.reported_evidence_ids,
         "evidence_gate_findings": context.evidence_gate_findings,
         "figure_contract": figure_contract.summary(),
+        "cohort_identity": dict(
+            (context.analysis_state.sandbox_state or {}).get(
+                "cohort_identity_v1", {}
+            ) or {}
+        ),
+        "cohort_transition": dict(
+            (context.analysis_state.sandbox_state or {}).get(
+                "cohort_transition_notice", {}
+            ) or {}
+        ),
         "forced_stop": bool(context.force_break),
         **({"error": context.llm_error} if context.llm_error else {}),
         "plan_revision_needed": context.plan_revision_needed,

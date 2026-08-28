@@ -230,9 +230,14 @@ async def execute_initial_render(attempt: FigureAttemptState) -> str | None:
         png_base64=png_b64,
         layout_violations=layout_violations,
         review_status=FigureReviewStatus.PENDING,
+        revision_count=attempt.revision_count,
         diagnostic=request.diagnostic,
+        submitted_plan_step_id=request.submitted_plan_step_id,
         plan_step_id=request.plan_step_id,
         plan_id=attempt.current_plan_id,
+        plan_requirement_key=request.plan_requirement_key,
+        supervisor_binding_decision=request.supervisor_binding_decision,
+        supervisor_binding_reason=request.supervisor_binding_reason,
         purpose=request.purpose or (
             "diagnostic" if request.diagnostic else "result"
         ),
@@ -246,6 +251,19 @@ async def execute_initial_render(attempt: FigureAttemptState) -> str | None:
         analysis_generation=int(
             attempt.sandbox_state.get("analysis_generation", 0) or 0
         ),
+        cohort_generation=int(
+            (
+                attempt.sandbox_state.get("cohort_identity_v1") or {}
+            ).get("cohort_generation", 0) or 0
+        ),
+        cohort_digest=(
+            str(
+                (
+                    attempt.sandbox_state.get("cohort_identity_v1") or {}
+                ).get("cohort_digest", "") or ""
+            ) or None
+        ),
+        source_execution_id=request.source_execution_id,
         expression_provenance=dict(
             attempt.sandbox_state.get("expression_contract_v1") or {}
         ),

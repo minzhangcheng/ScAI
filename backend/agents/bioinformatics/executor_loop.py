@@ -383,6 +383,12 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
             "register_analysis_plan": functools.partial(
                 handle_register_analysis_plan, tool_runtime
             ),
+            "register_method_decision": functools.partial(
+                handle_register_method_decision, tool_runtime
+            ),
+            "register_publication_table": functools.partial(
+                handle_register_publication_table, tool_runtime
+            ),
             "register_score": functools.partial(
                 handle_register_score, tool_runtime
             ),

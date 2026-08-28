@@ -845,7 +845,7 @@ def test_publication_figure_tool_uses_open_type_vocabulary():
     properties = tool["function"]["parameters"]["properties"]
     required = tool["function"]["parameters"]["required"]
     assert "logical_figure_id" in properties
-    assert "logical_figure_id" in required
+    assert "logical_figure_id" not in required
     assert "Filename suffixes are not revision metadata" in properties[
         "logical_figure_id"
     ]["description"]
