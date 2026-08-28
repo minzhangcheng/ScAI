@@ -15,6 +15,8 @@ import sys
 import uuid
 from pathlib import Path
 
+from backend.tests.refactor_size_contract import scan_python_and_shell_debt
+
 
 ROOT = Path(__file__).resolve().parents[2]
 BASE_DIGEST = "sha256:77923445c077d8eb971b14b2b114a1d9cd4a87edb4c75654820ca4832ee8cb15"
@@ -26,7 +28,7 @@ EXPECTED_IMAGE_LABELS = {
     "org.opencontainers.image.source": "https://github.com/minzhangcheng/scai",
     "org.opencontainers.image.revision": FIXED_HEAD,
     "org.opencontainers.image.version": "0.39.15",
-    "io.scai.test-deps.fingerprint": "4a7cbb66ad06298e8b6ccc36ebcd0fe98e5a1f245a51eb1aa2a1bab166eaeec4",
+    "io.scai.test-deps.fingerprint": "cac6042157cb11b9d065bfbb54bd7198a3b15cba1bfda86c8ac7bcb009dcee1a",
     "io.scai.test-deps.lock-sha256": "d4df0f49351c6854bbcb53130959f53aca557e8420bc64470a2698da4900aaf4",
     "io.scai.test-deps.python": PYTHON_PATCH,
     "io.scai.test-deps.platform": PLATFORM,
@@ -46,6 +48,14 @@ def _frontend_implementation_source() -> str:
     paths = [
         ROOT / "scripts/scai_frontend_runner.py",
         *sorted((ROOT / "scripts/scai_frontend_parts").glob("*.py")),
+    ]
+    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+
+def _tree_implementation_source() -> str:
+    paths = [
+        ROOT / "scripts/scai_test_tree.py",
+        *sorted((ROOT / "scripts/scai_test_tree_parts").glob("*.py")),
     ]
     return "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
@@ -773,6 +783,20 @@ def test_new_direct_shell_scripts_are_0755_and_link_helper_remains_0644():
     assert stat.S_IMODE((ROOT / "scripts/link_frontend_node_modules.sh").stat().st_mode) == 0o644
 
 
+def test_lock_check_shell_phases_are_ordered_and_within_the_function_ceiling():
+    source = (ROOT / "scripts/lock-test-deps.sh").read_text(encoding="utf-8")
+    run_start = source.index("run_check() {")
+    run_end = source.index("\n}", run_start)
+    run_check = source[run_start:run_end]
+    phases = (
+        "check_lock_inputs", "check_resolver_contract", "check_constraints_contract",
+        "check_fingerprint_contract", "check_image_contract",
+    )
+    assert [run_check.index(phase) for phase in phases] == sorted(run_check.index(phase) for phase in phases)
+    debt = scan_python_and_shell_debt(ROOT)
+    assert all(path != "scripts/lock-test-deps.sh" for path, _name in debt.long_shell)
+
+
 def test_production_contracts_survive_python_optimize():
     result = subprocess.run(["scripts/lock-test-deps.sh", "--check"], cwd=ROOT, env={**os.environ, "PYTHONOPTIMIZE": "1"}, text=True, capture_output=True)
     output = f"{result.stdout}\n{result.stderr}"
@@ -804,7 +828,7 @@ def test_runner_and_collection_plugin_are_source_owned_contracts():
 
 def test_runner_preserves_unaccepted_diagnostics_until_atomic_publication():
     runner = (ROOT / "scripts/scai-test").read_text(encoding="utf-8")
-    tree = (ROOT / "scripts/scai_test_tree.py").read_text(encoding="utf-8")
+    tree = _tree_implementation_source()
     assert "PUBLISHED=0" in runner
     assert "DIAGNOSTIC_REASON" in runner
     assert 'unaccepted diagnostic: $EVIDENCE_STAGE' in runner
