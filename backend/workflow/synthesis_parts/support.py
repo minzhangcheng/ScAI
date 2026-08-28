@@ -431,9 +431,9 @@ def _consume_signal_then_clear(event: asyncio.Event) -> None:
 
 
 def _multi_direction_analysis_completed(analysis_state) -> bool:
-    """True once the active direction batch is fully covered (spec §14)."""
-    from ..direction_coverage import active_batch_complete
-    return active_batch_complete(analysis_state)
+    """True once every direction in the active batch has been attempted."""
+    from ..direction_coverage import active_batch_ready_for_integration
+    return active_batch_ready_for_integration(analysis_state)
 
 
 
@@ -455,29 +455,142 @@ def _should_build_innovation_segment(analysis_state, round_result) -> bool:
     )
 
 
-def _build_directions_with_results_for_correlation(analysis_state: AnalysisState) -> list[dict]:
-    target_lineage = current_lineage_id(analysis_state)
-    coverage = direction_coverage_status(analysis_state, lineage_id=target_lineage)
-    direction_summaries: Dict[str, str] = {}
+def _direction_result_is_coverage_eligible(result: RoundResult) -> bool:
+    """Apply the direction ledger's compatibility rule to legacy results."""
+    if result.direction_coverage_eligible is not None:
+        return result.direction_coverage_eligible
+    return (
+        result.round_status == "completed"
+        and result.evidence_status == "substantive"
+        and has_substantive_findings(result)
+    )
 
+
+def _direction_result_evidence_gaps(
+    result: Optional[RoundResult],
+) -> list[str]:
+    """Build bounded, evidence-derived gaps for one integration input."""
+    if result is None:
+        return ["No canonical innovation-round result was recorded."]
+
+    gaps: list[str] = []
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in gaps and len(gaps) < 12:
+            gaps.append(text[:500])
+
+    if result.round_status != "completed":
+        add(f"The direction attempt ended with round status '{result.round_status}'.")
+    if result.evidence_status != "substantive":
+        add(f"The retained evidence status is '{result.evidence_status}'.")
+    if not _direction_result_is_coverage_eligible(result):
+        add("The attempt did not satisfy direction-coverage eligibility.")
+    if result.bioinformatics_evidence_verified is False:
+        add("Bioinformatics findings were not fully bound to verified execution evidence.")
+
+    for program in result.data_driven_mechanism_programs or []:
+        missing = (
+            program.get("missing_evidence", [])
+            if isinstance(program, dict)
+            else getattr(program, "missing_evidence", [])
+        )
+        if not isinstance(missing, (list, tuple, set)):
+            missing = [missing]
+        for item in missing or []:
+            add(f"Mechanism evidence gap: {item}")
+    for note in result.evidence_notes or []:
+        add(note)
+    return gaps
+
+
+def _build_directions_with_results_for_correlation(analysis_state: AnalysisState) -> list[dict]:
+    """Build integration inputs from every attempted active-batch direction."""
+    target_lineage = current_lineage_id(analysis_state)
+    selected_directions = (
+        analysis_state.active_direction_batch
+        or analysis_state.user_chosen_directions
+        or []
+    )
+    selected_keys = {
+        normalize_direction_key(item.get("direction", ""))
+        for item in selected_directions
+        if normalize_direction_key(item.get("direction", ""))
+    }
+    latest_results: Dict[str, RoundResult] = {}
     for raw in analysis_state.round_results:
         result = normalize_legacy_round_result(raw)
-        if result.lineage_id != target_lineage:
+        if (
+            result.lineage_id != target_lineage
+            or result.phase != "innovation"
+            or result.direction_key not in selected_keys
+        ):
             continue
-        if result.direction_key in coverage.completed_keys:
-            direction_summaries[result.direction_key] = result.pi_summary or ""
+        previous = latest_results.get(result.direction_key)
+        if previous is None or result.round_number >= previous.round_number:
+            latest_results[result.direction_key] = result
 
-    directions_with_results = []
-    for chosen_dir in analysis_state.user_chosen_directions:
+    directions_with_results: list[dict] = []
+    seen: set[str] = set()
+    for chosen_dir in selected_directions:
         key = normalize_direction_key(chosen_dir.get("direction", ""))
-        if key not in coverage.completed_keys:
+        if not key or key in seen:
             continue
+        seen.add(key)
+        result = latest_results.get(key)
+        finding_groups = (
+            result.pathology_findings,
+            result.bioinformatics_findings,
+            result.biochemistry_findings,
+            result.literature_findings,
+        ) if result is not None else ()
+        available_findings = [
+            str(finding)
+            for group in finding_groups
+            for finding in group
+            if str(finding).strip()
+        ][:20]
+        evidence_gaps = _direction_result_evidence_gaps(result)
+        if result is not None:
+            for review in analysis_state.post_execution_reviews or []:
+                if (
+                    not isinstance(review, dict)
+                    or int(review.get("round_number") or 0) != result.round_number
+                ):
+                    continue
+                remaining = (review.get("assessment") or {}).get("remaining_gaps") or []
+                if not isinstance(remaining, (list, tuple, set)):
+                    remaining = [remaining]
+                for gap in remaining:
+                    text = str(gap or "").strip()
+                    if text and text not in evidence_gaps and len(evidence_gaps) < 12:
+                        evidence_gaps.append(f"Post-execution gap: {text}"[:500])
         directions_with_results.append({
             "direction": chosen_dir.get("direction", ""),
             "notes": chosen_dir.get("notes", ""),
-            "round_summary": direction_summaries.get(key, ""),
+            "round_number": result.round_number if result else None,
+            "round_summary": result.pi_summary if result else "",
+            "round_status": result.round_status if result else "not_attempted",
+            "evidence_status": result.evidence_status if result else "empty",
+            "direction_coverage_eligible": (
+                _direction_result_is_coverage_eligible(result) if result else False
+            ),
+            "available_findings": available_findings,
+            "evidence_gaps": evidence_gaps,
         })
     return directions_with_results
+
+
+def _integration_inputs_are_partial(directions_with_results: list[dict]) -> bool:
+    """Whether source evidence requires a partial integration verdict."""
+    if not directions_with_results:
+        return True
+    return any(
+        item.get("round_status") != "completed"
+        or item.get("evidence_status") != "substantive"
+        or item.get("direction_coverage_eligible") is not True
+        for item in directions_with_results
+    )
 
 
 def build_round_summary_payload(

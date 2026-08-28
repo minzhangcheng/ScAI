@@ -373,7 +373,10 @@ export function ResultsView({ controller }: ResultsViewProps) {
       {(currentSession.status === 'completed' || publicationFigures.length > 0) && (
         <div className="space-y-4">
           {graphicAbstract && (
-            <GraphicAbstract graphicAbstract={graphicAbstract} />
+            <GraphicAbstract
+              graphicAbstract={graphicAbstract}
+              sessionId={currentSession?.id}
+            />
           )}
 
           {integratedReport && (

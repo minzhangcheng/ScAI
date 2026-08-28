@@ -18,6 +18,7 @@ import type {
 } from '../stores/appStore'
 import type { SnapshotTransactionRecord } from '../types/snapshotV2'
 import { resultIdentityKey } from './roundKey'
+import { normalizeImageBase64 } from './image'
 
 function opt<K extends string, V>(key: K, value: V | null | undefined): Partial<Record<K, V>> {
   return value != null ? { [key]: value } as Partial<Record<K, V>> : {}
@@ -135,7 +136,8 @@ function transformPublicationFigures(raw: (RawPublicationFigure & RawFigureBadge
     figureType: f.figure_type || f.figureType || '',
     pngPath: f.png_path || f.pngPath || '',
     pdfPath: f.pdf_path || f.pdfPath || '',
-    pngBase64: f.png_base64 || f.pngBase64,
+    pngBase64: normalizeImageBase64(f.png_base64)
+      ?? normalizeImageBase64(f.pngBase64),
     reviewStatus: (f.review_status || f.reviewStatus || 'pending') as FigureReviewStatus,
     piFeedback: f.pi_feedback || f.piFeedback,
     revisionCount: f.revision_count ?? f.revisionCount ?? 0,
@@ -177,7 +179,8 @@ function transformGraphicAbstract(raw: SessionLoadResponse['graphic_abstract']) 
   return {
     id: raw.id,
     prompt: raw.prompt || '',
-    imageBase64: raw.image_base64 || raw.imageBase64 || '',
+    imageBase64: normalizeImageBase64(raw.image_base64)
+      ?? normalizeImageBase64(raw.imageBase64),
     textDiagram: raw.text_diagram || raw.textDiagram || undefined,
     isTextMode: raw.is_text_mode ?? raw.isTextMode ?? false,
     createdAt: raw.created_at || raw.createdAt || '',

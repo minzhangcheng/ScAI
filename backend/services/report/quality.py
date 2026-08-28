@@ -71,7 +71,8 @@ def _round_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Lis
             else str("" if raw_evidence is _MISSING else raw_evidence or "").lower()
         )
         coverage = _value(result, "direction_coverage_eligible", None)
-        phase = str(_value(result, "phase", "exploration") or "exploration")
+        raw_phase = _value(result, "phase", "exploration") or "exploration"
+        phase = str(getattr(raw_phase, "value", raw_phase)).lower()
         verified = _value(result, "bioinformatics_evidence_verified", None)
         notes = _texts(_value(result, "evidence_notes", []))
         pathology_coverage: List[Dict[str, Any]] = []
@@ -138,12 +139,13 @@ def _round_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Lis
                 blocking.append(
                     f"{label} has no verifiable direction-coverage verdict."
                 )
-        if current_evidence_schema and verified is False:
-            blocking.append(f"{label} bioinformatics evidence is unverified.")
-        elif current_evidence_schema and verified is not True:
-            blocking.append(
-                f"{label} has no verifiable bioinformatics evidence verdict."
-            )
+        if current_evidence_schema and phase != "integration":
+            if verified is False:
+                blocking.append(f"{label} bioinformatics evidence is unverified.")
+            elif verified is not True:
+                blocking.append(
+                    f"{label} has no verifiable bioinformatics evidence verdict."
+                )
         elif legacy_evidence_schema:
             cautions.append(
                 f"{label} predates explicit execution-derived evidence verdicts."
@@ -626,4 +628,53 @@ def render_quality_disclosures_html(value: Dict[str, Any] | None) -> str:
         f'<section class="quality-disclosures quality-{html.escape(status)}">'
         f"<h2>{html.escape(title)}</h2>{details}{rounds_html}{review_html}"
         f"{annotation_html}</section>"
+    )
+
+
+def render_report_limitations_html(report: Dict[str, Any] | None) -> str:
+    """Render one collapsed deterministic qualification block at report end.
+
+    The machine-readable report status and quality record remain unchanged. This
+    presentation avoids repeating the same partial state in multiple banners
+    while keeping every retained issue available for audit.
+    """
+    if not isinstance(report, dict):
+        return ""
+
+    labels = {
+        "figure_coverage": "Figure coverage is incomplete.",
+        "degraded_fallback": "The report writer used a degraded summary.",
+        "approved_partial": "A qualified report was explicitly approved.",
+        "analysis_quality": "Retained analysis-quality gaps limit interpretation.",
+    }
+    reasons = _texts(
+        report.get("partial_reasons")
+        or ([report.get("partial_reason")] if report.get("partial_reason") else [])
+    )
+    details = [
+        labels.get(reason, reason.replace("_", " ").capitalize() + ".")
+        for reason in reasons
+    ]
+    figureless = _texts(report.get("figureless_sections"), limit=100)
+    unreported = _texts(report.get("unreported_figures"), limit=100)
+    if figureless:
+        details.append("Figureless result sections: " + ", ".join(figureless) + ".")
+    if unreported:
+        details.append("Unreported figures: " + ", ".join(unreported) + ".")
+
+    quality = report.get("quality_disclosures") or {}
+    if isinstance(quality, dict):
+        details.extend(list(quality.get("blocking_issues") or []))
+        details.extend(list(quality.get("cautions") or []))
+    details = _texts(details, limit=200)
+    if not details:
+        return ""
+
+    items = "".join(f"<li>{html.escape(item)}</li>" for item in details)
+    return (
+        '<details class="report-limitations-details">'
+        "<summary>Detailed evidence qualifications</summary>"
+        "<p>The PI summary above consolidates the principal limitations; "
+        "the retained machine-derived details are listed here.</p>"
+        f"<ul>{items}</ul></details>"
     )

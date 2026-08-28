@@ -52,4 +52,20 @@ describe('FigureGallery contract', () => {
       'Figure 1.jpg',
     )
   })
+
+  it('uses the image endpoint when a persisted sentinel reaches the gallery', () => {
+    const persisted = { ...figure(1), pngBase64: '[image]' }
+    render(<FigureGallery figures={[persisted]} />)
+
+    expect(screen.getByAltText('Figure 1')).toHaveAttribute(
+      'src',
+      '/api/session/session-gallery/figure/figure-1/png',
+    )
+    fireEvent.click(screen.getByAltText('Figure 1'))
+    const previews = screen.getAllByAltText('Figure 1')
+    expect(previews[previews.length - 1]).toHaveAttribute(
+      'src',
+      '/api/session/session-gallery/figure/figure-1/png',
+    )
+  })
 })

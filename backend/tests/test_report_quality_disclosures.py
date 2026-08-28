@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.models.schemas import (
+    AnalysisPhase,
     AnalysisState,
     AnnotationClusterEntry,
     AnnotationRecord,
@@ -17,6 +18,7 @@ from backend.services.report.generator import (
 from backend.services.report.quality import (
     build_quality_disclosures,
     render_quality_disclosures_html,
+    render_report_limitations_html,
     render_report_status_banner_html,
 )
 from backend.workflow.reporting_parts.final_report import (
@@ -326,6 +328,24 @@ def test_unverified_round_and_unmet_post_review_make_report_quality_incomplete()
     assert report_partial_reason(neutral, quality_disclosures=quality) == "analysis_quality"
 
 
+def test_integration_round_does_not_require_bioinformatics_verification():
+    state = AnalysisState(
+        user_id="u",
+        round_results=[_round(
+            phase=AnalysisPhase.INTEGRATION,
+            direction_coverage_eligible=None,
+            bioinformatics_evidence_verified=None,
+            integration_report_summary="Cross-direction synthesis",
+        )],
+    )
+
+    quality = build_quality_disclosures(state)
+
+    assert quality["rounds"][0]["phase"] == "integration"
+    assert not any("bioinformatics" in item.lower() for item in quality["blocking_issues"])
+    assert not any("direction-coverage" in item for item in quality["blocking_issues"])
+
+
 @pytest.mark.parametrize(
     ("reason", "extra", "expected"),
     [
@@ -345,6 +365,22 @@ def test_partial_banner_covers_every_machine_readable_reason(reason, extra, expe
     html = render_report_status_banner_html(report)
     assert "Partial report" in html
     assert expected in html
+
+
+def test_report_limitations_consolidate_partial_and_quality_details():
+    html = render_report_limitations_html({
+        "status": "partial",
+        "partial_reasons": ["approved_partial", "analysis_quality"],
+        "quality_disclosures": {
+            "blocking_issues": ["Round 2 evidence is unverified."],
+            "cautions": ["Optional modality unavailable."],
+        },
+    })
+
+    assert html.count("Detailed evidence qualifications") == 1
+    assert "Round 2 evidence is unverified" in html
+    assert "Optional modality unavailable" in html
+    assert "Partial report" not in html
 
 
 def test_detailed_report_event_carries_partial_and_quality_contracts():

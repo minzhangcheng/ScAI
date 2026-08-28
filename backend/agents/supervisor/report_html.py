@@ -35,8 +35,7 @@ from ...services.report.figure_discovery import (
     prepare_discovered_figures,
 )
 from ...services.report.quality import (
-    render_quality_disclosures_html,
-    render_report_status_banner_html,
+    render_report_limitations_html,
 )
 
 

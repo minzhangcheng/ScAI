@@ -27,3 +27,12 @@ def test_supervisor_report_prompt_includes_integration_reports():
     assert "build_integration_block" in src, (
         "_build_report_prompt must call build_integration_block"
     )
+
+
+def test_supervisor_report_prompt_consolidates_evidence_limitations():
+    from backend.agents.supervisor import report_prompt
+    src = inspect.getsource(report_prompt._build_report_prompt)
+
+    assert "build_quality_disclosures" in src
+    assert "**Limitations** subsection" in src
+    assert "Rounds marked partial/unverified" not in src

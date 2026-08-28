@@ -1,9 +1,14 @@
 """Supervisor report generation wiring for round-bound figure placement."""
 import hashlib
+import os
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from backend.agents.supervisor import report_content, report_prompt
 from backend.agents.supervisor_agent import SupervisorAgent
 from backend.models.schemas import AnalysisState, FigureReviewStatus, PublicationFigure
 from backend.services.report.report_outline import build_report_outline
@@ -50,6 +55,84 @@ def test_allocation_text_lists_figures_under_their_own_section(tmp_path):
     expl = text.index("[exploration_findings]")
     d1 = text.index("[direction_1]")
     assert expl < text.index("a.png") < d1 < text.index("b.png")
+
+
+def test_allocation_text_preserves_numbered_analysis_order(tmp_path):
+    outline = _outline()
+    figure_map = {
+        "first.png": tmp_path / "first.png",
+        "second.png": tmp_path / "second.png",
+        "third.png": tmp_path / "third.png",
+    }
+
+    text = _agent()._build_figure_allocation_text(
+        outline,
+        figure_map,
+        {name: 2 for name in figure_map},
+    )
+
+    direction = text[text.index("[direction_1]"):]
+    assert "analysis order (preserve exactly)" in direction
+    assert direction.index("1. first.png") < direction.index("2. second.png")
+    assert direction.index("2. second.png") < direction.index("3. third.png")
+
+
+@pytest.mark.asyncio
+async def test_report_placement_uses_analysis_order_not_file_mtime(tmp_path):
+    outline = _outline()
+    first = _png(tmp_path / "first.png")
+    second = _png(tmp_path / "second.png")
+    os.utime(first, (200, 200))
+    os.utime(second, (100, 100))
+    figure_map = {"first.png": first, "second.png": second}
+    sections = [
+        {
+            "id": section.id,
+            "title": section.default_title,
+            "content": "Narrative.",
+            "analysis_type": section.analysis_type,
+            "figures": [],
+            "tables": [],
+        }
+        for section in outline
+    ]
+
+    agent = _agent()
+    agent.session_id = "s"
+    agent._validate_report_content = lambda _content: True
+    agent._parse_report_sections = lambda *_args, **_kwargs: sections
+    report_prompt.bind_facade(report_content)
+
+    async def progress(*_args):
+        return None
+
+    ctx = {
+        "_progress": progress,
+        "report_content": "valid",
+        "language": "en",
+        "outline": outline,
+        "used_fallback": False,
+        "attribution": {name: 2 for name in figure_map},
+        "figure_map": figure_map,
+        "figure_metadata_by_stem": {},
+        "client": SimpleNamespace(base_url=""),
+    }
+
+    await report_prompt.parse_and_place_report(
+        agent,
+        ctx,
+        SimpleNamespace(),
+        workspace_dir=None,
+        chat_messages=None,
+        progress_callback=None,
+        report_model="test-model",
+    )
+
+    direction = next(
+        section for section in ctx["sections"] if section["id"] == "direction_1"
+    )
+    figures = re.findall(r"\[FIGURE:\s*([^\]]+)\]", direction["content"])
+    assert figures == ["first.png", "second.png"]
 
 
 def test_allocation_marks_figureless_sections_explicitly(tmp_path):

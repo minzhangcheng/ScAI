@@ -4,7 +4,7 @@ import { API_BASE } from '../../constants/api'
 import { ErrorBanner } from '../shared/ErrorBanner'
 import { ValidationDialog } from '../ValidationDialog'
 import { ReportStatus } from './ReportStatus'
-import { partialReportNotice, type ReportController } from './useReportController'
+import { type ReportController } from './useReportController'
 
 interface ReportViewProps {
   controller: ReportController
@@ -144,12 +144,6 @@ export function ReportView({ controller }: ReportViewProps) {
         {archiveWarning && (
           <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-sm text-yellow-800">
             {language === 'zh' ? '归档历史报告失败：' : 'Previous report archive failed: '}{archiveWarning}
-          </div>
-        )}
-
-        {report?.status === 'partial' && (
-          <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded text-sm text-amber-800">
-            {partialReportNotice(report, language)}
           </div>
         )}
 

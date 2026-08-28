@@ -34,7 +34,7 @@ def test_unfinished_batch_routes_continue():
     ) == "continue"
 
 
-def test_attempted_partial_batch_routes_stop():
+def test_attempted_partial_batch_routes_integrate():
     direction = "B"
     state = _running(
         current_round=3,
@@ -52,4 +52,4 @@ def test_attempted_partial_batch_routes_stop():
     )
     assert _Router()._check_convergence_condition(
         {"analysis_state": state}
-    ) == "stop"
+    ) == "integrate"

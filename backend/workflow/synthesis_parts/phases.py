@@ -331,13 +331,16 @@ async def persist_round_result(self, ctx):
     )
     if restored_from is not None:
         consume_restore_provenance(analysis_state)
-    from ..direction_coverage import active_batch_complete
+    from ..direction_coverage import active_batch_ready_for_integration
     if (
         analysis_state.analysis_phase == AnalysisPhase.INNOVATION
-        and active_batch_complete(analysis_state)
+        and active_batch_ready_for_integration(analysis_state)
     ):
         analysis_state.pending_integration = True
-        logger.info(f"[{self.session_id}] Direction batch complete -> pending_integration=True")
+        logger.info(
+            f"[{self.session_id}] Direction batch fully attempted "
+            "-> pending_integration=True"
+        )
     # Round is now canonical in round_results; clear the per-round cache
     # so a later snapshot-restored round can't replay stale agent outputs.
     analysis_state.current_round_cache = None

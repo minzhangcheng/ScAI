@@ -115,7 +115,7 @@ def test_live_appendix_includes_complete_direction_selection_history():
     assert "Integration Cycle 1" in html
 
 
-def test_supervisor_html_renders_partial_and_quality_banners(tmp_path):
+def test_supervisor_html_moves_qualifications_after_conclusions(tmp_path):
     state = AnalysisState(id="s5", name="Partial", initial_instruction="x", user_id="u1")
     sup = _make_supervisor(state)
     report = {
@@ -155,7 +155,10 @@ def test_supervisor_html_renders_partial_and_quality_banners(tmp_path):
     )
     html = path.read_text(encoding="utf-8")
 
-    assert "Partial report" in html
+    assert "Detailed evidence qualifications" in html
     assert "explicitly approved" in html
-    assert "Analysis completed with quality qualifications" in html
     assert "Qualification retained" in html
+    assert "Analysis report is partial" not in html
+    assert html.index('<div class="conclusions">') < html.index(
+        "Detailed evidence qualifications"
+    )

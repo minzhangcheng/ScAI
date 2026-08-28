@@ -18,14 +18,13 @@ from typing import Dict, Any, Iterable, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 from backend.utils.image_utils import compress_image_to_base64, categorize_figures
-from backend.utils.report_html import HTML_TEMPLATE, markdown_to_html, render_report_html
+from backend.utils.report_html import markdown_to_html, render_report_html
 from backend.utils.error_parsing import compact_traceback
 from backend.services.report.score_section import build_score_definitions_section_html, write_score_definitions_csv
 from backend.services.report.literature_files import render_literature_download_li
 from backend.services.report.interaction_records import render_direction_selection_history_html
 from backend.services.report.quality import (
-    render_quality_disclosures_html,
-    render_report_status_banner_html,
+    render_report_limitations_html,
 )
 from backend.config import get_session_logs, get_session_workspace
 from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
@@ -909,11 +908,8 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
         "language": language,
         "title": _safe_format_value(report.get("title", "Analysis Report")),
         "generated_at": "Generated: " + report.get("generated_at", datetime.now().isoformat()),
-        "report_status_banner_html": _safe_format_value(
-            render_report_status_banner_html(report)
-        ),
-        "quality_disclosures_html": _safe_format_value(
-            render_quality_disclosures_html(report)
+        "report_limitations_html": _safe_format_value(
+            render_report_limitations_html(report)
         ),
         "toc_title": "Table of Contents",
         "toc_items": _safe_format_value("\n".join(toc_items)),

@@ -2,6 +2,7 @@ import { ChevronDown, ChevronRight, Download, FileImage, X } from 'lucide-react'
 
 import { FigureCard, getStatusColor, getStatusIcon, getStatusLabel } from './FigureCard'
 import { useFigureGallery, type FigureGalleryProps } from './useFigureGallery'
+import { normalizeImageBase64 } from '../../utils/image'
 
 const API_BASE = '/api'
 
@@ -13,6 +14,7 @@ export function FigureGallery(props: FigureGalleryProps) {
     collapsed, currentSession, downloadJPG, downloadPDF, hiddenCount, language,
     selectedFigure, setCollapsed, setSelectedFigure, setShowAll, showAll, t, visibleFigures,
   } = controller
+  const selectedBase64 = normalizeImageBase64(selectedFigure?.pngBase64)
   return (
     <div className="mt-6">
       <button
@@ -103,9 +105,9 @@ export function FigureGallery(props: FigureGalleryProps) {
 
             {/* Modal Body */}
             <div className="publication-canvas p-4 max-h-[60vh] overflow-auto">
-              {selectedFigure.pngBase64 ? (
+              {selectedBase64 ? (
                 <img
-                  src={`data:image/jpeg;base64,${selectedFigure.pngBase64}`}
+                  src={`data:image/jpeg;base64,${selectedBase64}`}
                   alt={selectedFigure.name}
                   className="max-w-full h-auto mx-auto"
                 />
@@ -124,7 +126,7 @@ export function FigureGallery(props: FigureGalleryProps) {
                 />
               ) : null}
               {/* Placeholder shown on API load error */}
-              {!selectedFigure.pngBase64 && (
+              {!selectedBase64 && (
                 <div className="items-center justify-center h-64 text-slate-400" style={{ display: 'none' }}>
                   <FileImage className="w-16 h-16" />
                 </div>

@@ -1,3 +1,22 @@
+import { STRIPPED_FIGURE_PLACEHOLDER } from '../constants/storage'
+
+/**
+ * Return only image payloads that can be rendered as base64 data URIs.
+ * Persisted sessions replace binary payloads with a sentinel and may retain a
+ * blob-store handle; both must fall back to the authenticated image endpoint.
+ */
+export function normalizeImageBase64(value: string | null | undefined): string | undefined {
+  const normalized = typeof value === 'string' ? value.trim() : ''
+  if (
+    !normalized
+    || normalized === STRIPPED_FIGURE_PLACEHOLDER
+    || normalized.startsWith('@scai-blob:')
+  ) {
+    return undefined
+  }
+  return normalized
+}
+
 /**
  * Detect MIME type from base64-encoded image data by inspecting magic byte prefixes.
  */

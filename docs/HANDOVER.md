@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.49.2 · **Last updated**: 2026-08-28
+**Version**: 0.49.3 · **Last updated**: 2026-08-28
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,8 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.49.x — (2026-08-28 onward)**
+
+- `0.49.3` — Report and result presentation now recover missing Graphic Abstract and figure-gallery previews from persisted artifact bytes, while report figure allocation preserves the persisted analysis output order within each round instead of depending on file modification times or model regrouping. Partial direction batches enter the integrated-analysis stage, where the PI synthesizes completed results and literature, proposes new research directions, and supports up to three user-selected integration cycles. Report generation consolidates evidence qualifications into one final Limitations subsection rather than repeating partial notices throughout the findings. Focused backend evidence passed `149/149` nodes at `test-results/20260828T133211Z-2656668/evidence.json` and `28/28` nodes at `test-results/20260828T135612Z-2707136/evidence.json`; both runs were focused edit-loop evidence only. No application image build, registry push, deployment, or historical-session mutation was performed.
 
 - `0.49.2` — Repairs the Round 1 workflow integrity contracts without replacing the agent architecture or prescribing study-specific methods. Host-stamped execution receipts now connect approved plan requirements to successful executions, registered findings/tables/figures, and one current report evidence view; invalid, missing, legacy, failed, partial, or stale links remain auditable but cannot close current plan or report claims. New figure candidates receive Supervisor semantic plan-binding before rendering, while PI visual review remains authoritative; unresolved visual revisions persist bounded repair tasks, retain audit history, exclude unmet figures, and allow the workflow to continue. Canonical cohort generation and digest changes on cleanup/rebinding, invalidating older-cohort evidence for current reports while preserving it as history. Bulk inputs expose neutral file facts and PI/Bioinformatics method decisions replace platform-prescribed method/fallback choices; sample-mapping provenance and transformation self-report enforcement remain deferred. No-wait state/events now reflect the configured policy, and `NotebookState` is the runtime-persistence authority with monotonic live/API projections and truthful `live_dirty` semantics. Regression coverage was added for execution receipts, semantic figure binding and redraw exhaustion, cohort invalidation, bulk-method neutrality, persistence projection, and status/report wiring. Before this version-only update, backend-full passed `5943` nodes with `0` failures and `94` skips at `test-results/20260828T110309Z-2332055/evidence.json`; the focused post-bump version check is recorded separately. No application image build, registry push, deployment, or historical-session mutation was performed.
 

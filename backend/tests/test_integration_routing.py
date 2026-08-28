@@ -27,7 +27,7 @@ def test_unfinished_batch_prevents_maxrounds_stop():
     ) == "continue"
 
 
-def test_attempted_partial_batch_stops_instead_of_looping():
+def test_attempted_partial_batch_advances_to_integration_without_looping():
     direction = "C"
     state = _running(
         current_round=3,
@@ -44,7 +44,7 @@ def test_attempted_partial_batch_stops_instead_of_looping():
             direction_coverage_eligible=False,
         )],
     )
-    assert _Router()._should_continue({"analysis_state": state}) == "stop"
+    assert _Router()._should_continue({"analysis_state": state}) == "continue"
 
 
 def test_plain_maxrounds_stop_still_holds():

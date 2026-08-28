@@ -443,11 +443,8 @@ def _write_html_report(
             "language": "en",
             "title": _safe_format_value(report.get("title", "Analysis Report")),
             "generated_at": ("Generated: ") + report.get("generated_at", ""),
-            "report_status_banner_html": _safe_format_value(
-                bindings.render_report_status_banner_html(report)
-            ),
-            "quality_disclosures_html": _safe_format_value(
-                bindings.render_quality_disclosures_html(report)
+            "report_limitations_html": _safe_format_value(
+                bindings.render_report_limitations_html(report)
             ),
             "toc_title": "Table of Contents",
             "toc_items": _safe_format_value("\n".join(toc_items)),

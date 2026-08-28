@@ -117,7 +117,7 @@ async def generate_report_staged(
     if force_fallback:
         analysis_summary = generator._empty_analysis_summary()
         analysis_summary["methodology_overview"] = (
-            "This partial report was assembled deterministically from the "
+            "This report was assembled deterministically from the "
             "retained analysis state after the report-writing model became "
             "unavailable."
         )

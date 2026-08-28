@@ -10,6 +10,7 @@ import {
 } from '../../stores/appStore'
 import type { GraphicAbstractContent } from '../../types'
 import { downloadBlob } from '../../utils/download'
+import { normalizeImageBase64 } from '../../utils/image'
 
 // Typed content interfaces for message payloads (avoid `as any`)
 interface FigureReviewContent {
@@ -35,6 +36,8 @@ export const mergeFigureMetadata = (
   incoming: PublicationFigure,
   existing?: PublicationFigure,
 ): PublicationFigure => {
+  const incomingBase64 = normalizeImageBase64(incoming.pngBase64)
+  const existingBase64 = normalizeImageBase64(existing?.pngBase64)
   const renderIdentityChanged = !!existing && (
     incoming.id !== existing.id
     || (incoming.revisionCount ?? 0) > (existing.revisionCount ?? 0)
@@ -45,8 +48,8 @@ export const mergeFigureMetadata = (
     // while they still describe the same render. A replacement id or a higher
     // revision count means the old base64 is stale even when the display name
     // is unchanged; let the id-based PNG endpoint load the new bytes instead.
-    pngBase64: incoming.pngBase64
-      ?? (renderIdentityChanged ? undefined : existing?.pngBase64),
+    pngBase64: incomingBase64
+      ?? (renderIdentityChanged ? undefined : existingBase64),
     planStepId: incoming.planStepId ?? existing?.planStepId,
     planId: incoming.planId ?? existing?.planId,
     purpose: incoming.purpose ?? existing?.purpose,
@@ -102,7 +105,8 @@ export function useResultsController() {
       figureType: f.figure_type || f.figureType || '',
       pngPath: f.png_path || f.pngPath || '',
       pdfPath: f.pdf_path || f.pdfPath || '',
-      pngBase64: f.png_base64 || f.pngBase64,
+      pngBase64: normalizeImageBase64(f.png_base64)
+        ?? normalizeImageBase64(f.pngBase64),
       reviewStatus: f.review_status || f.reviewStatus || 'pending',
       piFeedback: f.pi_feedback || f.piFeedback,
       revisionCount: f.revision_count ?? f.revisionCount ?? 0,
@@ -176,11 +180,13 @@ export function useResultsController() {
       if (msg.type === 'graphic_abstract') {
         const content = msg.content as GraphicAbstractContent
         const textDiagram = content?.text_diagram || content?.textDiagram || ''
-        if (content?.image_base64 || content?.imageBase64 || textDiagram) {
+        const imageBase64 = normalizeImageBase64(content?.image_base64)
+          ?? normalizeImageBase64(content?.imageBase64)
+        if (imageBase64 || textDiagram) {
           setGraphicAbstract({
             id: content.id || 'ga-1',
             prompt: content.prompt || '',
-            imageBase64: content.image_base64 || content.imageBase64 || '',
+            imageBase64,
             textDiagram: textDiagram || undefined,
             isTextMode: content.is_text_mode ?? content.isTextMode ?? !!textDiagram,
             createdAt: content.created_at || content.createdAt || new Date().toISOString()

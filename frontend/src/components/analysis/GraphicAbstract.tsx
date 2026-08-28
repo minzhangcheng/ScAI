@@ -7,28 +7,42 @@ import {
   X,
   Sparkles
 } from 'lucide-react'
-import { base64ToDataUri, detectBase64MimeType } from '../../utils/image'
-import { downloadBlob } from '../../utils/download'
+import { base64ToDataUri, detectBase64MimeType, normalizeImageBase64 } from '../../utils/image'
+import { downloadBlob, fetchAndDownload } from '../../utils/download'
 
 interface GraphicAbstractProps {
   graphicAbstract: GraphicAbstractType
+  sessionId?: string
 }
 
-export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
+export function GraphicAbstract({ graphicAbstract, sessionId }: GraphicAbstractProps) {
   const { language } = useAppStore()
   const { t } = useTranslation(language)
   const [showModal, setShowModal] = useState(false)
 
   const isTextMode = !!graphicAbstract?.isTextMode || !!graphicAbstract?.textDiagram
-  const imageB64 = graphicAbstract?.imageBase64 || ''
+  const imageB64 = normalizeImageBase64(graphicAbstract?.imageBase64)
+  const imageUrl = sessionId
+    ? `/api/session/${sessionId}/report/figure/graphic_abstract.jpg`
+    : ''
+  const imageSource = imageB64 ? base64ToDataUri(imageB64) : imageUrl
   const textDiagram = graphicAbstract?.textDiagram || ''
 
-  if (!imageB64 && !textDiagram) {
+  if (!imageSource && !textDiagram) {
     return null
   }
 
-  const downloadImage = () => {
-    if (!imageB64) return
+  const downloadImage = async () => {
+    if (!imageB64) {
+      if (imageUrl) {
+        try {
+          await fetchAndDownload(imageUrl, 'graphic_abstract.jpg')
+        } catch (error) {
+          console.error('Failed to download graphic abstract:', error)
+        }
+      }
+      return
+    }
     const mimeType = detectBase64MimeType(imageB64)
     const ext = mimeType === 'image/jpeg' ? 'jpg' : (mimeType.split('/')[1] ?? 'png')
     const byteString = atob(imageB64)
@@ -76,7 +90,7 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
           onClick={() => setShowModal(true)}
         >
           <img
-            src={base64ToDataUri(imageB64)}
+            src={imageSource}
             alt="Graphic Abstract"
             className="w-full h-auto max-h-96 object-contain"
           />
@@ -110,7 +124,7 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
             </div>
 
             <button
-              onClick={isTextMode ? downloadTextDiagram : downloadImage}
+              onClick={isTextMode ? downloadTextDiagram : () => void downloadImage()}
               className="flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg transition-colors shrink-0"
             >
               <Download className="w-4 h-4" />
@@ -145,7 +159,7 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
               </pre>
             ) : (
               <img
-                src={base64ToDataUri(imageB64)}
+                src={imageSource}
                 alt="Graphic Abstract"
                 className="publication-canvas max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl"
               />
@@ -154,7 +168,7 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
             {/* Bottom bar */}
             <div className="absolute -bottom-14 left-0 right-0 flex items-center justify-center gap-4">
               <button
-                onClick={isTextMode ? downloadTextDiagram : downloadImage}
+                onClick={isTextMode ? downloadTextDiagram : () => void downloadImage()}
                 className="flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition-colors"
               >
                 <Download className="w-4 h-4" />

@@ -60,6 +60,8 @@ def test_mid_run_integration_is_a_gate_final_one_closes():
     assert gate.is_text_only and not gate.expects_figures
     assert final.is_text_only and not final.expects_figures
     assert next(s for s in outline if s.id == "direction_1").expects_figures
+    conclusions = next(s for s in outline if s.id == "conclusions")
+    assert "exactly one **Limitations**" in conclusions.guidance
 
 
 def test_every_round_owns_exactly_one_section():

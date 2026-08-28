@@ -154,7 +154,10 @@ def _legacy_outline(state: Any) -> List[OutlineSection]:
         ),
         OutlineSection(
             "conclusions", "conclusions", "Conclusions and Future Directions",
-            guidance="Conclusions and future directions",
+            guidance=(
+                "Conclusions and future directions, ending with exactly one "
+                "**Limitations** subsection that consolidates evidence qualifications"
+            ),
         ),
     ]
 
@@ -277,7 +280,10 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
     ))
     sections.append(OutlineSection(
         "conclusions", "conclusions", "Conclusions and Future Directions",
-        guidance="Conclusions and future directions",
+        guidance=(
+            "Conclusions and future directions, ending with exactly one "
+            "**Limitations** subsection that consolidates evidence qualifications"
+        ),
     ))
     return sections
 

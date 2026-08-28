@@ -4,6 +4,7 @@ from backend.workflow.direction_coverage import (
     active_batch_incomplete,
     active_batch_complete,
     active_batch_has_unattempted_directions,
+    active_batch_ready_for_integration,
 )
 
 
@@ -35,6 +36,7 @@ def test_active_batch_incomplete_empty_batch_is_false():
     s = _state(active_direction_batch=[])
     assert active_batch_incomplete(s) is False
     assert active_batch_complete(s) is False
+    assert active_batch_ready_for_integration(s) is False
 
 
 def test_batch_predicates_are_complementary_when_batch_present():
@@ -64,6 +66,7 @@ def test_partial_attempt_is_incomplete_but_not_unattempted():
     assert active_batch_incomplete(s) is True
     assert active_batch_complete(s) is False
     assert active_batch_has_unattempted_directions(s) is False
+    assert active_batch_ready_for_integration(s) is True
 
 
 def test_optional_degraded_attempt_can_complete_active_batch():
@@ -87,11 +90,35 @@ def test_optional_degraded_attempt_can_complete_active_batch():
     assert active_batch_has_unattempted_directions(s) is False
 
 
-def test_synthesis_uses_active_batch_complete_predicate():
+def test_old_attempts_cannot_retrigger_an_integration_cycle():
+    direction = "dir-a"
+    s = _state(
+        active_direction_batch=[{"direction": direction}],
+        last_integrated_round=2,
+        round_results=[RoundResult(
+            round_number=2,
+            phase="innovation",
+            direction=direction,
+            direction_key=direction,
+            pi_summary="Old result",
+            bioinformatics_findings=["finding"],
+            round_status="partial",
+            evidence_status="substantive",
+            direction_coverage_eligible=False,
+        )],
+    )
+
+    assert active_batch_ready_for_integration(s) is False
+    assert active_batch_has_unattempted_directions(s) is True
+
+
+def test_synthesis_uses_fully_attempted_batch_predicate():
     import inspect
     from backend.workflow import synthesis
 
-    assert "active_batch_complete" in inspect.getsource(synthesis._multi_direction_analysis_completed)
+    assert "active_batch_ready_for_integration" in inspect.getsource(
+        synthesis._multi_direction_analysis_completed
+    )
     assert "direction_coverage_status_for_batch" not in inspect.getsource(
         synthesis._multi_direction_analysis_completed
     )

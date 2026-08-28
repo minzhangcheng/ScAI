@@ -1,6 +1,8 @@
 """Detailed-report prompt, narrative, parsing, and fallback helpers."""
 from __future__ import annotations
 
+from ...services.report.quality import build_quality_disclosures
+
 
 def bind_facade(facade) -> None:
     globals().update(
@@ -12,7 +14,7 @@ def _build_figure_allocation_text(
     figure_map: Dict[str, Path],
     attribution: Dict[str, int],
 ) -> str:
-    """List, per section, the figures that section owns.
+    """List, per section, the figures that section owns, in analysis order.
 
     A figure belongs to the round that produced it. Handing the model a flat
     list and asking it to pick "the most relevant section" made placement a
@@ -55,8 +57,11 @@ def _build_figure_allocation_text(
         elif not sec.rounds:
             lines.append(f"[{sec.id}] — no figures (this section carries no result figures)")
         elif names:
-            lines.append(f"[{sec.id}] — round(s) {rounds_text}:")
-            lines.extend(f"    - {n}" for n in names)
+            lines.append(
+                f"[{sec.id}] — round(s) {rounds_text}, analysis order "
+                "(preserve exactly):"
+            )
+            lines.extend(f"    {index}. {name}" for index, name in enumerate(names, 1))
         elif shared.issuperset(int(r) for r in sec.rounds):
             lines.append(
                 f"[{sec.id}] — round(s) {rounds_text}, shared with other "
@@ -111,10 +116,7 @@ def _build_report_prompt(
     findings_parts = []
     for rr in state.round_results:
         phase_label = (rr.phase or "exploration").upper()
-        header = (
-            f"### Round {rr.round_number} ({phase_label}; "
-            f"status={rr.round_status}; evidence={rr.evidence_status})"
-        )
+        header = f"### Round {rr.round_number} ({phase_label})"
 
         # Get direction for innovation rounds (stored at synthesis time)
         direction = ""
@@ -126,13 +128,6 @@ def _build_report_prompt(
                 header += f" — Direction: {direction}"
 
         findings_parts.append(header)
-        if getattr(rr, "bioinformatics_evidence_verified", None) is False:
-            findings_parts.append(
-                "**Evidence warning**: Bioinformatics claims are partial/unverified. "
-                "Do not describe them as validated, confirmed, causal, or dominant."
-            )
-        for note in (getattr(rr, "evidence_notes", None) or []):
-            findings_parts.append(f"**Evidence note**: {note}")
         if rr.pi_summary:
             findings_parts.append(f"**PI Summary**: {rr.pi_summary[:400]}")
         for agent_name, findings_list in [
@@ -148,6 +143,24 @@ def _build_report_prompt(
         findings_parts.append("")
 
     findings_text = "\n".join(findings_parts) or ("None")
+
+    quality = build_quality_disclosures(state)
+    limitation_items = []
+    for item in [
+        *(quality.get("blocking_issues") or []),
+        *(quality.get("cautions") or []),
+    ]:
+        text = str(item or "").strip()
+        if text and text not in limitation_items:
+            limitation_items.append(text[:800])
+    if getattr(state, "allow_partial_report", False):
+        limitation_items.append(
+            "The report was explicitly approved with unresolved evidence qualifications."
+        )
+    limitations_text = (
+        "\n".join(f"- {item}" for item in limitation_items[:40])
+        or "- No unresolved machine-recorded evidence qualification was retained."
+    )
 
     # Collect data-driven mechanism programs from last 3 rounds
     mech_parts = []
@@ -235,6 +248,9 @@ def _build_report_prompt(
 ## Cross-Direction Integration Analyses
 {integration_text}
 
+## Evidence Qualifications for the Final Limitations Subsection
+{limitations_text}
+
 ## Mechanism Naming and Hypothesis Policy
 {MECHANISM_EVIDENCE_POLICY}
 
@@ -250,6 +266,9 @@ Every figure belongs to the round that produced it, and each section below owns
 the figures of its round. Place each figure ONLY in the section listed here.
 Do not move a figure to a section that "reads" like a better fit — a filename
 describes the kind of plot, not the stage of the analysis it came from.
+Within each section, write the scientific narrative and place the figures in the
+EXACT numbered order shown. That sequence follows the persisted analysis output
+order; do not regroup figures by plot type or reorder them for rhetorical effect.
 
 {figure_allocation}
 
@@ -258,9 +277,11 @@ describes the kind of plot, not the stage of the analysis it came from.
 
 ## Instructions
 Write the report in English.
-Rounds marked partial/unverified must remain explicitly labeled as such. Never
-upgrade them to validated, confirmed, causal, dominant, or independently
-replicated conclusions, even if a PI summary or literature passage uses stronger wording.
+Treat unresolved evidence conservatively throughout: never upgrade it to validated,
+confirmed, causal, dominant, or independently replicated conclusions, even if a PI
+summary or literature passage uses stronger wording. Do not repeat workflow-status
+labels in every findings section. Consolidate the supplied qualifications in exactly
+one **Limitations** subsection near the end of [conclusions].
 Generate the report with the following sections. Use the EXACT section IDs in brackets.
 Each section MUST have a descriptive, scientific title — do NOT use placeholder text like "Section Title".
 
@@ -534,6 +555,8 @@ Note: The detailed narrative report could not be generated due to an API connect
 
 ## [conclusions] Conclusions
 Report generation model call failed due to API connection error. Please refer to the analysis log in the appendix for complete information, including all figures and tables generated during the analysis.
+
+**Limitations** The report-writing model was unavailable, so no new PI interpretation could be generated.
 """
 
 async def prepare_report_generation(
@@ -736,12 +759,13 @@ async def parse_and_place_report(
         # Placement is enforced in code, not left to the model's compliance:
         # it relocates cross-round references, drops repeats, and appends
         # figures the model never cited to the section owning their round.
-        figure_order = {}
-        for name, path in figure_map.items():
-            try:
-                figure_order[name] = path.stat().st_mtime
-            except OSError:
-                pass
+        # ``figure_map`` is collected from supervision execution order first,
+        # then the persisted PublicationFigure sequence, with legacy discovery
+        # last. Preserve that analysis order; filesystem mtimes change when a
+        # session is restored or report assets are copied.
+        figure_order = {
+            name: float(index) for index, name in enumerate(figure_map)
+        }
         placement = enforce_figure_placement(
             sections, outline, attribution, figure_map.keys(),
             figure_order=figure_order,

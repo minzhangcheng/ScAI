@@ -524,12 +524,40 @@ Please write in academic paper style.
         self.reset_history()
 
         directions_text = ""
+        partial_inputs = False
         for i, d in enumerate(directions_with_results, 1):
+            findings = "\n".join(
+                f"- {item}" for item in (d.get("available_findings") or [])
+            ) or "- No retained findings"
+            gaps = "\n".join(
+                f"- {item}" for item in (d.get("evidence_gaps") or [])
+            ) or "- No recorded gap"
+            partial_inputs = partial_inputs or (
+                d.get("round_status") != "completed"
+                or d.get("evidence_status") != "substantive"
+                or d.get("direction_coverage_eligible") is not True
+            )
             directions_text += f"""
 ### Direction {i}: {d.get('direction', 'Unknown')}
 **User Notes**: {d.get('notes', 'None')}
-**Analysis Summary**: {d.get('round_summary', 'No summary available')[:800]}
+**Round / status**: {d.get('round_number', 'N/A')} / {d.get('round_status', 'unknown')}
+**Evidence status**: {d.get('evidence_status', 'unknown')}
+**Coverage eligible**: {d.get('direction_coverage_eligible', False)}
+**Analysis Summary**: {d.get('round_summary', 'No summary available')[:2000]}
+**Available Findings**:
+{findings}
+**Evidence Gaps**:
+{gaps}
 """
+
+        evidence_instruction = (
+            "One or more directions are partial. Integrate only the available "
+            "findings, do not infer missing results, and include one final "
+            "'Evidence Coverage and Limitations' section that names the gaps."
+            if partial_inputs else
+            "All directions have substantive eligible evidence; still distinguish "
+            "observations from hypotheses."
+        )
 
         prompt = f"""You are the PI analyzing the relationships between multiple research directions that were independently investigated.
 
@@ -538,6 +566,9 @@ Please write in academic paper style.
 
 ## Directions Analyzed
 {directions_text}
+
+## Evidence Handling
+{evidence_instruction}
 
 Analyze the correlations, complementarity, and potential synergies between these research directions:
 

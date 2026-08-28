@@ -179,6 +179,8 @@ def completed_innovation_direction_keys(state: AnalysisState, lineage_id: Option
 def attempted_innovation_direction_keys(
     state: AnalysisState,
     lineage_id: Optional[str] = None,
+    *,
+    after_round: Optional[int] = None,
 ) -> Set[str]:
     """Return directions that reached a canonical innovation RoundResult.
 
@@ -194,6 +196,8 @@ def attempted_innovation_direction_keys(
         if result.lineage_id != target_lineage:
             continue
         if result.phase != "innovation":
+            continue
+        if after_round is not None and result.round_number <= after_round:
             continue
         if result.direction_key:
             attempted.add(result.direction_key)
@@ -323,13 +327,34 @@ def active_batch_complete(state: AnalysisState) -> bool:
     return bool(batch) and direction_coverage_status_for_batch(state, batch).complete
 
 
+def active_batch_ready_for_integration(state: AnalysisState) -> bool:
+    """True once every direction in the active batch has a terminal result.
+
+    Integration must summarize partial attempts and their gaps instead of
+    silently skipping the cross-direction stage. Results at or before the last
+    integration boundary cannot trigger the same cycle again.
+    """
+    batch = getattr(state, "active_direction_batch", None) or []
+    if not batch:
+        return False
+    selected = selected_direction_keys(state, directions=batch)
+    attempted = attempted_innovation_direction_keys(
+        state,
+        after_round=int(getattr(state, "last_integrated_round", 0) or 0),
+    )
+    return bool(selected) and selected.issubset(attempted)
+
+
 def active_batch_has_unattempted_directions(state: AnalysisState) -> bool:
     """True while the active batch still contains a direction never executed."""
     batch = getattr(state, "active_direction_batch", None) or []
     if not batch:
         return False
     selected = selected_direction_keys(state, directions=batch)
-    attempted = attempted_innovation_direction_keys(state)
+    attempted = attempted_innovation_direction_keys(
+        state,
+        after_round=int(getattr(state, "last_integrated_round", 0) or 0),
+    )
     return bool(selected - attempted)
 
 

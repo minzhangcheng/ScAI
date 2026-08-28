@@ -3,10 +3,7 @@ from backend.workflow.synthesis import SynthesisMixin
 from backend.workflow.synthesis_parts import phases
 
 
-def test_pi_synthesis_sets_pending_integration_on_batch_complete():
+def test_pi_synthesis_sets_pending_integration_when_batch_is_fully_attempted():
     src = inspect.getsource(phases.persist_round_result)
     assert "pending_integration" in src
-    # _pi_synthesis now delegates batch-coverage to the active_batch_complete
-    # predicate (extracted in the 0.32.3 refactor) instead of inlining
-    # active_direction_batch / direction_coverage_status_for_batch.
-    assert "active_batch_complete" in src
+    assert "active_batch_ready_for_integration" in src

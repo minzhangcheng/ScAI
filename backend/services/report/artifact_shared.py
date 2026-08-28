@@ -397,6 +397,7 @@ def resolve_verified_archival_artifact(artifact: Any, workspace_path: Any, *, ki
     Path = getattr(bindings, 'Path')
     _artifact_value = getattr(bindings, '_artifact_value')
     _materialize_archival_preview_payload = getattr(bindings, '_materialize_archival_preview_payload')
+    _record_preview_candidates = getattr(bindings, '_record_preview_candidates')
     _restore_artifact_mtime = getattr(bindings, '_restore_artifact_mtime')
     os = getattr(bindings, 'os')
     verified_artifact_bytes = getattr(bindings, 'verified_artifact_bytes')
@@ -426,6 +427,7 @@ def resolve_verified_archival_artifact(artifact: Any, workspace_path: Any, *, ki
             Path(declared),
             workspace / "figures" / os.path.basename(declared),
         ))
+    candidates.extend(_record_preview_candidates(artifact, workspace))
     checked_candidates = list(dict.fromkeys(candidates))
     for index, candidate in enumerate(checked_candidates):
         if path_authorizer is not None and not path_authorizer(candidate):
@@ -629,6 +631,41 @@ def archival_path_matches_record(artifact: Any, path: Any, *, bindings) -> bool:
     Any = getattr(bindings, 'Any')
     _record_path_is_usable = getattr(bindings, '_record_path_is_usable')
     return _record_path_is_usable(artifact, path)
+
+
+def _record_preview_candidates(
+    artifact: Any,
+    workspace_path: Any = None,
+    *,
+    bindings,
+) -> list[Path]:
+    """Locate an already-materialized digest-bound record preview."""
+    Path = getattr(bindings, 'Path')
+    _artifact_value = getattr(bindings, '_artifact_value')
+    digest = str(_artifact_value(artifact, "preview_sha256", "") or "").lower()
+    declared = str(_artifact_value(artifact, "png_path", "") or "")
+    if len(digest) != 64 or not all(char in "0123456789abcdef" for char in digest):
+        return []
+
+    declared_path = Path(declared) if declared else None
+    stem = declared_path.stem if declared_path is not None else str(
+        _artifact_value(artifact, "name", "figure") or "figure"
+    )
+    safe_stem = "".join(
+        char if char.isalnum() or char in "-_." else "_" for char in stem
+    ).strip("._") or "figure"
+    roots = []
+    if declared_path is not None:
+        roots.append(declared_path.parent)
+    if workspace_path is not None:
+        roots.append(Path(workspace_path) / "figures")
+    names = [
+        f"{safe_stem}_record_preview_{digest[:16]}.jpg",
+        f"{safe_stem}_record_preview_{digest[:16]}.png",
+    ]
+    return list(dict.fromkeys(root / name for root in roots for name in names))
+
+
 def archival_render_available(artifact: Any, *, bindings) -> bool:
     """Whether an archival report can obtain real image bytes for a record.
 
@@ -640,10 +677,15 @@ def archival_render_available(artifact: Any, *, bindings) -> bool:
     Any = getattr(bindings, 'Any')
     _artifact_value = getattr(bindings, '_artifact_value')
     _preview_bytes = getattr(bindings, '_preview_bytes')
+    _record_preview_candidates = getattr(bindings, '_record_preview_candidates')
     _record_path_is_usable = getattr(bindings, '_record_path_is_usable')
+    verified_artifact_bytes = getattr(bindings, 'verified_artifact_bytes')
     path = _artifact_value(artifact, "png_path")
     if path and _record_path_is_usable(artifact, path):
         return True
+    for candidate in _record_preview_candidates(artifact):
+        if verified_artifact_bytes(candidate, artifact, kind="image") is not None:
+            return True
     return bool(_preview_bytes(artifact))
 
 def _write_preview_noclobber(destination: Path, payload: bytes, *, bindings) -> bool:

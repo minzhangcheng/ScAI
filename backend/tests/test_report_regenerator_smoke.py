@@ -84,7 +84,9 @@ def test_report_regenerator_smoke(tmp_path):
     assert "<html" in html_content.lower(), "HTML structure missing"
     assert "<div" in html_content, "HTML div elements missing"
     assert "<h1" in html_content, "HTML h1 element missing"
-    assert "Partial report" in html_content
+    assert "Detailed evidence qualifications" in html_content
     assert "overview" in html_content
-    assert "Analysis completed with quality qualifications" in html_content
     assert "Evidence is qualified" in html_content
+    assert html_content.index("Conclusions") < html_content.index(
+        "Detailed evidence qualifications"
+    )

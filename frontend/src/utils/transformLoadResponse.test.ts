@@ -170,6 +170,25 @@ describe('transformLoadResponse', () => {
     expect(result.sessionUpdates.graphicAbstract!.isTextMode).toBe(false)
   })
 
+  it('drops persisted image sentinels so authenticated URL fallbacks are used', () => {
+    const result = transformLoadResponse({
+      ...MINIMAL_RESPONSE,
+      publication_figures: [{
+        id: 'f1', name: 'Fig 1', description: 'A figure',
+        figure_type: 'umap', png_path: '/fig.jpg', pdf_path: '/fig.pdf',
+        png_base64: '[image]', review_status: 'approved',
+        revision_count: 0, created_at: '2026-01-01',
+      }],
+      graphic_abstract: {
+        id: 'ga1', prompt: 'test prompt', image_base64: '[image]',
+        is_text_mode: false, created_at: '2026-01-01',
+      },
+    })
+
+    expect(result.sessionUpdates.publicationFigures![0].pngBase64).toBeUndefined()
+    expect(result.sessionUpdates.graphicAbstract!.imageBase64).toBeUndefined()
+  })
+
   it('extracts store-level fields when present', () => {
     const data: SessionLoadResponse = {
       ...MINIMAL_RESPONSE,

@@ -9,6 +9,7 @@ from backend.services.report.interaction_records import (
     render_direction_selection_history_html,
 )
 from backend.services.reproducibility import KEY_PACKAGES, REPRODUCIBILITY_DIR_NAME
+from backend.services.report.quality import build_quality_disclosures
 from typing import Dict, Any, List, Optional
 
 
@@ -35,7 +36,6 @@ class SectionsMixin:
         import re
 
         analysis_summary = analysis_summary or {}
-
         section_summaries = "\n".join([
             f"- {s['title']}: {len(s.get('figures', []))} figures, {len(s.get('tables', []))} tables"
             for s in sections
@@ -87,7 +87,7 @@ Objective: {state.initial_instruction}
                 "and artifacts listed below."
             )
             return (
-                "This partial report was assembled deterministically because the "
+                "This report was assembled deterministically because the "
                 "report-writing model was unavailable. The analysis objective was: "
                 f"{state.initial_instruction}. {retained}"
             )
@@ -111,6 +111,19 @@ Objective: {state.initial_instruction}
         import re
 
         analysis_summary = analysis_summary or {}
+        quality = build_quality_disclosures(state)
+        limitation_items = []
+        for item in [
+            *(quality.get("blocking_issues") or []),
+            *(quality.get("cautions") or []),
+        ]:
+            text = str(item or "").strip()
+            if text and text not in limitation_items:
+                limitation_items.append(text[:800])
+        limitations_text = (
+            "\n".join(f"- {item}" for item in limitation_items[:40])
+            or "- No unresolved machine-recorded evidence qualification was retained."
+        )
 
         # Include key results from analysis review
         key_results = analysis_summary.get("key_results", "")
@@ -123,7 +136,9 @@ Objective: {state.initial_instruction}
 
         conclusions_instruction = (
             "Write conclusions in English including: 1) Summary of main findings (cite specific numbers) "
-            "2) Biological significance 3) Limitations 4) Future directions. 250-400 words. "
+            "2) Biological significance 3) Future directions, followed by exactly one "
+            "**Limitations** subtopic that consolidates the supplied evidence qualifications. "
+            "Do not repeat workflow-status labels elsewhere. 250-400 words. "
             "IMPORTANT: Output the conclusions text directly. Do NOT start with a header like "
             "'### Conclusions' - the section heading is already provided by the report template. "
             "Use **bold text** for subtopic labels (e.g., '**Summary of Findings**'), followed by paragraph text."
@@ -146,6 +161,9 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
 ## Final Summary from Analysis:
 {findings['summary'][:2000] if findings['summary'] else 'Not available'}
 
+## Evidence Qualifications to Consolidate:
+{limitations_text}
+
 {conclusions_instruction}
 """
 
@@ -158,7 +176,9 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             return (
                 "**Degraded report.** The report-writing model was unavailable; "
                 "these conclusions reproduce retained workflow evidence without "
-                f"new model interpretation. {body}"
+                f"new model interpretation. {body}\n\n"
+                "**Limitations** The report-writing model was unavailable, so this "
+                "section contains no new PI interpretation."
             )
 
         conclusions = await self._pi_chat(prompt, temperature=0.3)

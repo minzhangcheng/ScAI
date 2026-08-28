@@ -269,6 +269,17 @@ def archival_path_matches_record(artifact: Any, path: Any) -> bool:
     return artifact_shared.archival_path_matches_record(artifact, path, bindings=sys.modules[__name__])
 
 
+def _record_preview_candidates(
+    artifact: Any,
+    workspace_path: Any = None,
+) -> list[Path]:
+    return artifact_shared._record_preview_candidates(
+        artifact,
+        workspace_path,
+        bindings=sys.modules[__name__],
+    )
+
+
 
 def archival_render_available(artifact: Any) -> bool:
     """Whether an archival report can obtain real image bytes for a record.

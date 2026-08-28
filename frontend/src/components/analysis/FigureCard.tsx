@@ -3,6 +3,7 @@ import {
 } from 'lucide-react'
 
 import type { FigureReviewStatus, PublicationFigure } from '../../stores/appStore'
+import { normalizeImageBase64 } from '../../utils/image'
 
 const API_BASE = '/api'
 
@@ -67,6 +68,7 @@ interface FigureCardProps {
 export function FigureCard({
   currentSessionId, downloadJPG, downloadPDF, figure, language, onSelect, t,
 }: FigureCardProps) {
+  const pngBase64 = normalizeImageBase64(figure.pngBase64)
   return (
           <div
             key={figure.id}
@@ -77,9 +79,9 @@ export function FigureCard({
               className="publication-canvas relative aspect-square cursor-pointer group"
               onClick={() => onSelect(figure)}
             >
-              {figure.pngBase64 ? (
+              {pngBase64 ? (
                 <img
-                  src={`data:image/jpeg;base64,${figure.pngBase64}`}
+                  src={`data:image/jpeg;base64,${pngBase64}`}
                   alt={figure.name}
                   className="w-full h-full object-contain"
                 />
@@ -99,7 +101,7 @@ export function FigureCard({
                 />
               ) : null}
               {/* Placeholder shown on API load error */}
-              {!figure.pngBase64 && (
+              {!pngBase64 && (
                 <div className="w-full h-full items-center justify-center text-slate-400" style={{ display: 'none' }}>
                   <FileImage className="w-12 h-12" />
                 </div>

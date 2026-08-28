@@ -132,11 +132,13 @@ class RoutingMixin:
         from .direction_coverage import (
             active_batch_has_unattempted_directions,
             active_batch_incomplete,
+            active_batch_ready_for_integration,
             at_integration_gate,
             awaiting_integration_direction,
         )
         if (getattr(analysis_state, "pending_integration", False)
                 or active_batch_has_unattempted_directions(analysis_state)
+                or active_batch_ready_for_integration(analysis_state)
                 or at_integration_gate(analysis_state)
                 or awaiting_integration_direction(analysis_state)):
             logger.info(f"[{self.session_id}] Integration loop active; bypassing max_rounds stop")
@@ -225,23 +227,29 @@ class RoutingMixin:
         if analysis_state.status == TaskStatus.PAUSED:
             return "stop"
         from .direction_coverage import (
-            active_batch_complete,
             active_batch_has_unattempted_directions,
             active_batch_incomplete,
+            active_batch_ready_for_integration,
+            awaiting_integration_direction,
         )
         cap_reached = (
             getattr(analysis_state, "integration_cycle", 0)
-            >= getattr(analysis_state, "max_integration_cycles", 1)
+            >= getattr(analysis_state, "max_integration_cycles", 3)
         )
+        if awaiting_integration_direction(analysis_state):
+            return "stop" if cap_reached else "continue"
         # An integration cycle is pending and we still have budget → integrate.
-        if getattr(analysis_state, "pending_integration", False) and not cap_reached:
+        if (
+            getattr(analysis_state, "pending_integration", False)
+            or active_batch_ready_for_integration(analysis_state)
+        ) and not cap_reached:
             return "integrate"
         # Once the integration cycle cap is reached, stop even if
         # pending_integration remains true; _should_continue would otherwise
         # return "continue" due to its integration-loop max_rounds bypass.
         if cap_reached and (
             getattr(analysis_state, "pending_integration", False)
-            or active_batch_complete(analysis_state)
+            or active_batch_ready_for_integration(analysis_state)
         ):
             return "stop"
         if active_batch_has_unattempted_directions(analysis_state):

@@ -32,7 +32,7 @@ from backend.utils.image_utils import compress_image_to_base64, categorize_figur
 from backend.config import STATE_DIR, WORKSPACE_DIR, get_session_states, get_session_dir, get_session_workspace, get_session_uploads, default_config
 from .score_section import build_score_definitions_section_html, write_score_definitions_csv
 from .literature_files import write_literature_report, LITERATURE_REPORT_FILENAME
-from backend.utils.report_html import HTML_TEMPLATE, markdown_to_html, _make_figure_block, _safe_parse_json, _build_figure_description_map, render_report_html
+from backend.utils.report_html import markdown_to_html, _make_figure_block, _safe_parse_json, _build_figure_description_map, render_report_html
 from .analysis_log import AnalysisLogMixin
 from .figures import FiguresMixin
 from .scoring import ScoringMixin
@@ -56,8 +56,7 @@ from backend.workflow.direction_coverage import normalize_legacy_round_result
 from backend.services.report.quality import (
     build_report_partial_fields,
     build_quality_disclosures,
-    render_quality_disclosures_html,
-    render_report_status_banner_html,
+    render_report_limitations_html,
 )
 from backend.services.report.report_outline import build_report_outline
 from .generator_parts import (

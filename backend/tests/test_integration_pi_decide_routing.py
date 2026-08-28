@@ -33,6 +33,7 @@ def _state_after_integration_autoskip(max_rounds: int) -> AnalysisState:
     s.integration_cycle = 1
     s.max_integration_cycles = 3
     s.current_round = 3
+    s.last_integrated_round = 3
     s.max_rounds = max_rounds
     s.active_direction_batch = [{"direction": "A"}, {"direction": "B"}]
     s.user_chosen_directions = [{"direction": "A"}, {"direction": "B"}]

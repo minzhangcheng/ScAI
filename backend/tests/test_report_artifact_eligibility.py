@@ -354,3 +354,31 @@ def test_hash_mismatch_without_record_preview_is_not_available(tmp_path):
     write_valid_image(path, color=(220, 10, 10), min_bytes=2200)
 
     assert archival_render_available(figure) is False
+
+
+def test_materialized_record_preview_survives_stripped_base64(tmp_path):
+    workspace = tmp_path / "workspace"
+    figures = workspace / "figures"
+    figures.mkdir(parents=True)
+    path = figures / "reviewed.jpg"
+    original = write_valid_image(path, min_bytes=2200)
+    preview = valid_image_bytes("JPEG")
+    preview_digest = hashlib.sha256(preview).hexdigest()
+    figure = _figure(
+        "reviewed", FigureReviewStatus.APPROVED,
+        png_path=str(path),
+        png_base64="[image]",
+        render_sha256=hashlib.sha256(original).hexdigest(),
+        preview_sha256=preview_digest,
+    )
+    write_valid_image(path, color=(220, 10, 10), min_bytes=2200)
+    preview_path = figures / f"reviewed_record_preview_{preview_digest[:16]}.jpg"
+    preview_path.write_bytes(preview)
+
+    assert archival_render_available(figure) is True
+    resolved = resolve_verified_archival_artifact(
+        figure,
+        workspace,
+        kind="image",
+    )
+    assert resolved == (preview, preview_path)

@@ -54,8 +54,12 @@ class IntegrationMixin:
         logger.info(f"[{session_id}] Integration round (cycle {analysis_state.integration_cycle + 1})")
         await self._send_message("status", "PI is integrating results across all research directions...", AgentType.PI)
 
-        from .synthesis import _build_directions_with_results_for_correlation
+        from .synthesis import (
+            _build_directions_with_results_for_correlation,
+            _integration_inputs_are_partial,
+        )
         directions_with_results = _build_directions_with_results_for_correlation(analysis_state)
+        source_inputs_partial = _integration_inputs_are_partial(directions_with_results)
         integration_report = await self.pi_agent.analyze_direction_correlations(
             analysis_state, directions_with_results
         )
@@ -96,11 +100,17 @@ class IntegrationMixin:
 
         # Create RoundResult for the integration cycle
         from .synthesis import _upsert_round_result, build_round_summary_payload, derive_round_completion_status, current_lineage_id
+        summary_preview = integration_report or "Integration analysis completed."
+        if len(summary_preview) > 2000:
+            summary_preview = (
+                summary_preview[:2000]
+                + "\n\n[Condensed preview; the complete integration report is retained.]"
+            )
         integration_result = RoundResult(
             round_number=analysis_state.current_round,
             phase="integration",
-            pi_summary=integration_report[:2000] if integration_report else "Integration analysis completed.",
-            integration_report_summary=integration_report[:4000] if integration_report else "",
+            pi_summary=summary_preview,
+            integration_report_summary=integration_report or "",
             integration_candidates=list(scored_candidates) if scored_candidates else [],
             round_status="completed",
             evidence_status="substantive" if integration_report else "empty",
@@ -111,6 +121,12 @@ class IntegrationMixin:
             ),
         )
         derive_round_completion_status({"analysis_state": analysis_state}, integration_result)
+        if source_inputs_partial:
+            integration_result.round_status = "partial"
+            integration_result.evidence_notes.append(
+                "This integration includes one or more partial direction attempts; "
+                "its synthesis is limited to available findings and recorded gaps."
+            )
         lineage_id = current_lineage_id(analysis_state)
         from .provenance import consume_restore_provenance, restore_provenance_id
         restored_from = restore_provenance_id(analysis_state)

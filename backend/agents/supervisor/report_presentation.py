@@ -730,8 +730,6 @@ def persist_html_render(self, ctx):
     <div class="meta">Generated: {generated_at}</div>
         </div>
         <div class="content">
-    {render_report_status_banner_html(report)}
-    {render_quality_disclosures_html(report)}
     <div class="toc">
         <h3>Table of Contents</h3>
         <ul>{"".join(toc_items)}</ul>
@@ -749,6 +747,8 @@ def persist_html_render(self, ctx):
         <h2>Conclusions</h2>
         {self._markdown_to_html(conclusions)}
     </div>
+
+    {render_report_limitations_html(report)}
 
     {self._build_score_definitions_html(report)}
 
