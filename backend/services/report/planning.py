@@ -288,14 +288,14 @@ Return a COMPACT JSON (keep it short to avoid truncation):
 {{
     "title": "Report title",
     "sections": [
-    {{
-        "id": "unique_id",
-        "title": "Section Title",
-        "description": "Brief description of what this section covers (1 sentence)",
-        "analysis_type": "general",
-        "existing_figures": [{{"filename": "exact_filename.jpg"}}],
-        "existing_tables": [{{"filename": "exact_filename.csv"}}]
-    }}
+        {{
+            "id": "unique_id",
+            "title": "Section Title",
+            "description": "Brief description of what this section covers (1 sentence)",
+            "analysis_type": "general",
+            "existing_figures": [{{"filename": "exact_filename.jpg"}}],
+            "existing_tables": [{{"filename": "exact_filename.csv"}}]
+        }}
     ]
 }}
 
@@ -522,11 +522,11 @@ def _build_existing_figure_section_prompt(
         tables_json_template = """,
 
     "tables": [
-    {{
-        "filename": "exact_filename.csv",
-        "caption": "Detailed table caption describing what data it contains",
-        "interpretation": "How to interpret this data and its significance"
-    }}
+        {{
+            "filename": "exact_filename.csv",
+            "caption": "Detailed table caption describing what data it contains",
+            "interpretation": "How to interpret this data and its significance"
+        }}
     ]"""
 
     tables_requirement = ""
@@ -594,19 +594,19 @@ Generate a comprehensive scientific narrative for this section. Your response mu
 
 {{
     "narrative": "A detailed scientific narrative (300-500 words) that:
-    - Introduces the purpose of this analysis step
-    - References each figure by its EXACT filename from the list above (e.g., 'As shown in umap_cell_types.jpg...')
-    - Explains the methodology used with specific methods and parameters
-    - Presents the key observations with quantitative details
-    - Discusses the biological significance
-    - Connects findings to the research hypothesis",
+        - Introduces the purpose of this analysis step
+        - References each figure by its EXACT filename from the list above (e.g., 'As shown in umap_cell_types.jpg...')
+        - Explains the methodology used with specific methods and parameters
+        - Presents the key observations with quantitative details
+        - Discusses the biological significance
+        - Connects findings to the research hypothesis",
 
     "figures": [
-    {{
-        "filename": "exact_filename.jpg",
-        "caption": "Detailed figure caption (50-100 words) — describe what the figure actually shows",
-        "interpretation": "Scientific interpretation (100-200 words)"
-    }}
+        {{
+            "filename": "exact_filename.jpg",
+            "caption": "Detailed figure caption (50-100 words) — describe what the figure actually shows",
+            "interpretation": "Scientific interpretation (100-200 words)"
+        }}
     ]{tables_json_template}
 }}
 

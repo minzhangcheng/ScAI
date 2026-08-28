@@ -9,7 +9,7 @@ interface DataSectionViewProps {
 export function DataSectionView({ controller }: DataSectionViewProps) {
   const {
     acceptAttr, allowedExts, children, collapsed, customType, description, getGroupName,
-    getInputProps, getRootProps, groups, Icon, iconColor, isDragActive, isNoGroup,
+    getInputProps, getRootProps, groups, icon: Icon, iconColor, isDragActive, isNoGroup,
     language, maxSamples, onDelete, queueRef, section, sectionFiles, selectedGroup,
     selectedSample, selectedType, setCollapsed, setCustomType, setSelectedGroup,
     setSelectedSample, setSelectedType, syncRender, t, title, typeOptions, visibleQueue,

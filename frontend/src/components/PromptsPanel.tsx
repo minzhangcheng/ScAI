@@ -2,5 +2,6 @@ import { PromptEditor } from './prompts/PromptEditor'
 import { usePromptsController } from './prompts/usePromptsController'
 
 export function PromptsPanel() {
-  return <PromptEditor controller={usePromptsController()} />
+  const controller = usePromptsController()
+  return controller ? <PromptEditor controller={controller} /> : null
 }

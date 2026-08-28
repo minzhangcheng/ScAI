@@ -3,7 +3,10 @@ import { Camera, Trash2 } from 'lucide-react'
 import { AnnotationConfirmationDialog } from '../AnnotationConfirmationDialog'
 import { ConfirmDialog } from '../ConfirmDialog'
 import ExplorationFailedDialog from '../ExplorationFailedDialog'
-import { ExplorationReportDialog } from '../ExplorationReportDialog'
+import {
+  ExplorationReportDialog,
+  type ExplorationReport,
+} from '../ExplorationReportDialog'
 import { IntegrationGatePanel } from '../IntegrationGatePanel'
 import LlmModifySubDialog from '../LlmModifySubDialog'
 import LlmTimeoutDialog from '../LlmTimeoutDialog'
@@ -40,9 +43,8 @@ export function AnalysisDialogs({ controller }: AnalysisDialogsProps) {
     showLlmTimeoutDialog, showPlanReviewDialog, showSnapshotCleanupReminder,
     showSnapshotPanel, showSpeciesInputDialog, showStopDialog, snapshotCount,
     snapshotFailure, snapshotV2Enabled, speciesInputInfo, stopping, submitIntegrationDirections,
-    timeRemaining,
+    t, timeRemaining,
   } = controller
-  const isRunning = currentSession?.status === 'running'
 
   return (
     <>

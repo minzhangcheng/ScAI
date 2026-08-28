@@ -100,11 +100,13 @@ async def _close_hitl_socket_for_redrive(session_id: str, reason: str) -> None:
 
 @router.post('/{session_id}/run')
 async def run_analysis(session_id: str, request: Request):
+    """Start running analysis (use WebSocket for real-time updates)"""
     lifecycle_run_resume.bind_facade(sys.modules[__name__])
     return await lifecycle_run_resume.run_analysis(session_id, request)
 
 @router.post('/{session_id}/pause')
 async def pause_analysis(session_id: str, request: Request):
+    """Pause running analysis"""
     lifecycle_run_resume.bind_facade(sys.modules[__name__])
     return await lifecycle_run_resume.pause_analysis(session_id, request)
 
@@ -114,6 +116,7 @@ async def _pause_analysis_locked(session_id: str, user_id: str):
 
 @router.post('/{session_id}/resume')
 async def resume_analysis(session_id: str, request: Request):
+    """Resume paused or completed analysis (for re-analysis)"""
     lifecycle_run_resume.bind_facade(sys.modules[__name__])
     return await lifecycle_run_resume.resume_analysis(session_id, request)
 
@@ -123,6 +126,7 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
 
 @router.post('/{session_id}/stop')
 async def stop_analysis(session_id: str, request: Request, req: StopAnalysisRequest):
+    """Stop a running analysis - either immediately or with summary report"""
     lifecycle_run_resume.bind_facade(sys.modules[__name__])
     return await lifecycle_run_resume.stop_analysis(session_id, request, req)
 
@@ -132,6 +136,12 @@ async def _stop_analysis_locked(session_id: str, user_id: str, req: StopAnalysis
 
 @router.post('/{session_id}/llm-failure-action')
 async def llm_failure_action(session_id: str, request: Request, req: LlmFailureActionRequest):
+    """Handle user's choice for an LLM timeout/failure.
+
+    Idempotency: the `generation` field must match the workflow's
+    current `_llm_failure_generation`. Duplicate or stale requests
+    (e.g. double-click) are rejected with 409.
+    """
     lifecycle_interventions.bind_facade(sys.modules[__name__])
     return await lifecycle_interventions.llm_failure_action(session_id, request, req)
 
@@ -168,21 +178,30 @@ async def runtime_persistence_terminate(session_id: str, request: Request):
 
 @router.post('/{session_id}/retry-node')
 async def retry_node(session_id: str, request: Request, body: RetryNodeRequest):
+    """Retry or skip a failed node"""
     lifecycle_interventions.bind_facade(sys.modules[__name__])
     return await lifecycle_interventions.retry_node(session_id, request, body)
 
 @router.get('/{session_id}/failed-node')
 async def get_failed_node(session_id: str, request: Request):
+    """Get information about the failed node"""
     lifecycle_interventions.bind_facade(sys.modules[__name__])
     return await lifecycle_interventions.get_failed_node(session_id, request)
 
 @router.post('/{session_id}/resume-bioinformatics')
 async def resume_bioinformatics(session_id: str, request: Request):
+    """Resume bioinformatics analysis from last checkpoint"""
     lifecycle_interventions.bind_facade(sys.modules[__name__])
     return await lifecycle_interventions.resume_bioinformatics(session_id, request)
 
 @router.post('/{session_id}/snapshot-failure/retry', dependencies=[Depends(require_snapshot_v2_enabled)])
 async def snapshot_failure_retry(session_id: str, request: Request):
+    """Retry a snapshot failure by re-invoking the exact failed capture producer.
+
+    Validates ``SnapshotRetryContext`` from the failure gate. Missing or
+    invalid context returns 409 and leaves the gate intact. Never defaults
+    a missing producer to workflow-boundary.
+    """
     lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
     return await lifecycle_snapshot_failures.snapshot_failure_retry(session_id, request)
 
@@ -192,6 +211,13 @@ async def _snapshot_failure_retry_locked(session_id: str, user_id: str):
 
 @router.post('/{session_id}/snapshot-failure/proceed', dependencies=[Depends(require_snapshot_v2_enabled)])
 async def snapshot_failure_proceed(session_id: str, request: Request):
+    """Capture anyway after the memory preflight refused, accepting the OOM risk.
+
+    Only valid on a gate that offered ``proceed`` — i.e. one raised by the
+    runtime memory preflight. Arms a one-shot override and then runs the
+    ordinary retry dispatch, so the capture re-runs through the same producer
+    with the preflight lowered for that attempt only.
+    """
     lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
     return await lifecycle_snapshot_failures.snapshot_failure_proceed(session_id, request)
 
@@ -201,6 +227,14 @@ async def _snapshot_failure_proceed_locked(session_id: str, user_id: str):
 
 @router.post('/{session_id}/snapshot-failure/skip', dependencies=[Depends(require_snapshot_v2_enabled)])
 async def snapshot_failure_skip(session_id: str, request: Request):
+    """Skip snapshot creation and continue the analysis.
+
+    Clears the failure gate WITHOUT capturing a snapshot and resumes the
+    workflow, forfeiting only the restore point at that boundary. Producer-aware:
+    workflow_boundary / post_report / chat are skippable; pre_restore is not
+    (skipping would proceed with a restore that overwrites live state without a
+    safety point) and returns 409.
+    """
     lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
     return await lifecycle_snapshot_failures.snapshot_failure_skip(session_id, request)
 
@@ -210,6 +244,11 @@ async def _snapshot_failure_skip_locked(session_id: str, user_id: str):
 
 @router.post('/{session_id}/snapshot-failure/terminate', dependencies=[Depends(require_snapshot_v2_enabled)])
 async def snapshot_failure_terminate(session_id: str, request: Request):
+    """Terminate the session on snapshot failure.
+
+    Delegates to existing workflow teardown — does NOT create a second
+    kernel teardown. Clears the failure gate and stops the workflow.
+    """
     lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
     return await lifecycle_snapshot_failures.snapshot_failure_terminate(session_id, request)
 

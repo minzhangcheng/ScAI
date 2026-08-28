@@ -1,5 +1,6 @@
 import type { Dispatch, SetStateAction } from 'react'
 
+import type { TranslationKey } from '../../i18n/translations'
 import type { Message } from '../../stores/appStore'
 
 export interface ResultContent {
@@ -35,5 +36,5 @@ export interface MessageRenderContext {
   setExpanded: Dispatch<SetStateAction<boolean>>
   isDark: boolean
   bgColor: string
-  t: (key: string) => string
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string
 }

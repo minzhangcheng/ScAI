@@ -26,7 +26,9 @@ describe('DataSection upload queue', () => {
 
   it('uploads accepted files sequentially', async () => {
     const releases: Array<() => void> = []
-    const onUpload = vi.fn(() => new Promise<void>(resolve => releases.push(resolve)))
+    const onUpload = vi.fn((..._args: Parameters<DataSectionProps['onUpload']>) => (
+      new Promise<void>(resolve => releases.push(resolve))
+    ))
     const { result } = renderHook(() => useDataUploadQueue(props(onUpload)))
 
     act(() => result.current.onDrop([

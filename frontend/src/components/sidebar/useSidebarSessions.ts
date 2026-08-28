@@ -6,24 +6,12 @@ import { useAppStore } from '../../stores/appStore'
 import { DEFAULT_SESSION_INSTRUCTION, DEFAULT_SESSION_NAME } from '../../constants/sessionDefaults'
 import { getTargetTab, hasCompletedSession, selectPrioritySession } from '../../utils/sessionPriority'
 import { useSidebarImport } from './useSidebarImport'
+import type { SidebarProgressInfo } from './types'
+
+export type { SidebarProgressInfo } from './types'
 
 function syncTabToSessionStatus(session: { status: string }) {
   useAppStore.getState().setActiveTab(getTargetTab(session.status))
-}
-
-// Human labels for the import worker's skipped-member counters. The kinds are
-// the ones `_note_skip` reports (backend/routes/export_import_parts/import_impl.py);
-// an unknown kind falls back to its raw key so a newly added counter still
-// surfaces instead of being swallowed.
-export interface SidebarProgressInfo {
-  action: string
-  detail: string
-  percent?: number
-  closable?: boolean
-  success?: boolean
-  onConfirm?: () => void
-  onCancel?: () => void
-  cancelLabel?: string
 }
 
 export function useSidebarSessions() {

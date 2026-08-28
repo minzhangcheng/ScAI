@@ -56,6 +56,39 @@ def test_route_registry_matches_snapshot():
     )
 
 
+def test_route_registry_has_no_duplicate_signatures():
+    routes = list(_iter_routes(app.routes))
+    duplicates = sorted({route for route in routes if routes.count(route) > 1})
+
+    assert not duplicates, f"Duplicate route registrations: {duplicates}."
+
+
+def test_extracted_routes_keep_openapi_descriptions():
+    operations = [
+        ("/api/session/{session_id}/chat", "post"),
+        ("/api/session/{session_id}/run", "post"),
+        ("/api/session/{session_id}/pause", "post"),
+        ("/api/session/{session_id}/resume", "post"),
+        ("/api/session/{session_id}/stop", "post"),
+        ("/api/session/{session_id}/llm-failure-action", "post"),
+        ("/api/session/{session_id}/retry-node", "post"),
+        ("/api/session/{session_id}/failed-node", "get"),
+        ("/api/session/{session_id}/resume-bioinformatics", "post"),
+        ("/api/session/{session_id}/snapshot-failure/retry", "post"),
+        ("/api/session/{session_id}/snapshot-failure/proceed", "post"),
+        ("/api/session/{session_id}/snapshot-failure/skip", "post"),
+        ("/api/session/{session_id}/snapshot-failure/terminate", "post"),
+    ]
+    schema = app.openapi()
+    missing = [
+        (path, method)
+        for path, method in operations
+        if not schema["paths"][path][method].get("description")
+    ]
+
+    assert not missing, f"OpenAPI descriptions missing for: {missing}."
+
+
 def test_route_enumeration_sees_the_mounted_routers():
     """Guard the enumeration itself: if it ever collapses to FastAPI's built-in
     doc routes again, the snapshot check above silently stops protecting URLs."""

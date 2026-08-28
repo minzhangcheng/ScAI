@@ -16,7 +16,7 @@ const SNAPSHOT_REMINDER_INTERVAL = 5
 const MAX_RESTORE_COMMIT_REFRESH_KEYS = 64
 
 function handleStateSync(data: any, context: MessageHandlerContext): void {
-  const { session, attempt, isCurrentAttempt, restoreCommitRefreshesRef } = context
+  const { attempt, isCurrentAttempt, restoreCommitRefreshesRef } = context
   // Normalise: some backend paths nest fields under `content`
   // while others place them at the top level of the message.
   const syncContent = data.content ?? data
@@ -222,8 +222,7 @@ export function handleWebSocketMessage(
   context: MessageHandlerContext,
 ): void {
   const {
-    session, attempt, ws, isCurrentAttempt, ownsSocketSession,
-    restoreCommitRefreshesRef, addMessage,
+    session, ws, isCurrentAttempt, ownsSocketSession,
   } = context
   // A store selection can move from A to B before B creates its socket.
   // Socket-attempt ownership alone still regards A as current in that

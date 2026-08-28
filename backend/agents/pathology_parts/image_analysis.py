@@ -212,10 +212,10 @@ Please first describe the overall features of the section:
 
 Please reply in JSON format:
 {{
-"overall_structure": "Overall structure description",
-"regional_changes": "Regional changes description",
-"severity": "one of: normal | mild | moderate | marked | severe (will be mapped to a 0-4 score)",
-"areas_of_interest": ["Area 1 requiring detailed observation", ...]
+    "overall_structure": "Overall structure description",
+    "regional_changes": "Regional changes description",
+    "severity": "one of: normal | mild | moderate | marked | severe (will be mapped to a 0-4 score)",
+    "areas_of_interest": ["Area 1 requiring detailed observation", ...]
 }}
 """
 
@@ -306,10 +306,10 @@ Please summarize:
 
 Reply in JSON format:
 {{
-"findings": ["finding 1", "finding 2", ...],
-"severity_score": 0-4,
-"further_analysis": ["direction 1", ...],
-"suggested_staining": ["staining type 1", ...]
+    "findings": ["finding 1", "finding 2", ...],
+    "severity_score": 0-4,
+    "further_analysis": ["direction 1", ...],
+    "suggested_staining": ["staining type 1", ...]
 }}
 """
 

@@ -4,8 +4,12 @@ import { apiFetch, authHeaders, generateId } from '../../hooks/useApi'
 import type { TranslationKey } from '../../i18n/translations'
 import { useAppStore } from '../../stores/appStore'
 import { getTargetTab } from '../../utils/sessionPriority'
-import type { SidebarProgressInfo } from './useSidebarSessions'
+import type { SidebarProgressInfo } from './types'
 
+// Human labels for the import worker's skipped-member counters. The kinds are
+// the ones `_note_skip` reports (backend/routes/export_import_parts/import_impl.py);
+// an unknown kind falls back to its raw key so a newly added counter still
+// surfaces instead of being swallowed.
 const IMPORT_SKIP_LABELS: Record<string, TranslationKey> = {
   snapshot_v2: 'importSkippedSnapshotV2',
   unsafe_path: 'importSkippedUnsafePath',
@@ -151,7 +155,7 @@ async function runSidebarImport(
   e: ChangeEvent<HTMLInputElement>,
 ) {
   const {
-    clearMessages, fileInputRef, importing, language, loadImportedSession,
+    fileInputRef, importing, language, loadImportedSession,
     setImporting, setProgressInfo, showImportFailed, showImportSuccess,
   } = context
     const file = e.target.files?.[0]
@@ -320,7 +324,7 @@ async function runSidebarImport(
     }
   }export function useSidebarImport(options: SidebarImportOptions) {
   const {
-    clearMessages, fileInputRef, importing, language, loadSession, setImporting,
+    clearMessages, language, loadSession, setImporting,
     setProgressInfo, t,
   } = options
   // Success detail for a finished import, including one human line for what the

@@ -547,8 +547,8 @@ async def _publish_chat_delegation(
 
 
 @router.post("/{session_id}/chat")
-@router.post('/{session_id}/chat')
 async def chat_with_pi(request: Request, session_id: str, message: str=Form(...), target_agents: str=Form(default='[]'), file_groups: str=Form(default='[]'), file_samples: str=Form(default='[]'), file_types: str=Form(default='[]'), message_id: str=Form(default=''), files: List[UploadFile]=File(default=[])):
+    """Chat with PI Agent using analysis context. Supports file uploads with per-file agent targeting."""
     endpoint_flow.bind_facade(sys.modules[__name__])
     return await endpoint_flow.chat_with_pi(request, session_id, message, target_agents, file_groups, file_samples, file_types, message_id, files)
 

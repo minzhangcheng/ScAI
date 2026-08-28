@@ -1,4 +1,5 @@
 """Tests for the simplify/cleanup refactor: shared model methods and helpers."""
+import inspect
 import json
 import uuid as _uuid
 from datetime import datetime
@@ -368,6 +369,45 @@ class TestSelectFallbackPlanFromHistory:
 
         result = mixin._select_fallback_plan_from_history(dialogue_history)
         assert result is None
+
+
+def test_plan_dialogue_html_facade_delegates_to_extracted_helper():
+    """Exercise the production facade instead of a gate stub."""
+    from backend.workflow.planning import PlanningMixin
+
+    html = PlanningMixin._build_plan_dialogue_html([
+        {
+            "round": 1,
+            "pi_decision": "approved",
+            "pi_feedback": "Proceed",
+            "plan": {
+                "steps": [
+                    {
+                        "id": 1,
+                        "title": "Quality control",
+                        "method": "standard QC",
+                        "rationale": "Establish data quality",
+                    }
+                ]
+            },
+        }
+    ])
+
+    assert "Round 1" in html
+    assert "Quality control" in html
+
+
+def test_split_prompt_examples_keep_nested_indentation():
+    from backend.agents.pathology_parts import image_analysis
+    from backend.services.report import planning as report_planning
+
+    pathology_source = inspect.getsource(image_analysis.analyze_image)
+    report_source = inspect.getsource(report_planning)
+
+    assert '\n    "overall_structure": "Overall structure description"' in pathology_source
+    assert '\n    "findings": ["finding 1", "finding 2", ...]' in pathology_source
+    assert '\n        {{\n            "id": "unique_id"' in report_source
+    assert '\n        - Introduces the purpose of this analysis step' in report_source
 
 
 class _SampleModel(BaseModel):

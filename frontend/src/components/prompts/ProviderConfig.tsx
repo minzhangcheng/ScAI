@@ -1,5 +1,5 @@
 import {
-  ChevronDown, ChevronRight, Cpu, Eye, EyeOff, Key, Search, Server,
+  AlertCircle, ChevronDown, ChevronRight, Cpu, Eye, EyeOff, Key, Search, Server,
 } from 'lucide-react'
 
 import { DEFAULT_MODELS } from '../../stores/appStore'
@@ -9,8 +9,8 @@ interface ProviderProps { controller: PromptsController }
 
 function LiteratureResearchMode({ controller }: ProviderProps) {
   const {
-    deepResearchApiKey, deepResearchLlmBaseUrl, deepResearchModel, googleApiKey,
-    language, literatureMode, resolvedDeepResearch, serverExpanded, setDeepResearchApiKey,
+    deepResearchModel, googleApiKey, language, literatureMode, resolvedDeepResearch,
+    serverExpanded, setDeepResearchApiKey,
     setDeepResearchLlmBaseUrl, setDeepResearchModel, setGoogleApiKey, setLiteratureMode,
     setSaved, setServerExpanded, setShowDeepResearchApiKey, setShowGoogleKey,
     showDeepResearchApiKey, showGoogleKey, t,
@@ -220,7 +220,7 @@ function LiteratureResearchMode({ controller }: ProviderProps) {
 
 function PubMedSettings({ controller }: ProviderProps) {
   const {
-    editedApiKey, editedLlmBaseUrl, editedModel, language, literatureMaxSearchRounds,
+    apiConfig, editedApiKey, editedLlmBaseUrl, editedModel, language, literatureMaxSearchRounds,
     literatureMode, serverExpanded, setEditedApiKey, setEditedLlmBaseUrl, setEditedModel,
     setLiteratureMaxSearchRounds, setSaved, setServerExpanded, setShowAgentApiKey,
     showAgentApiKey, t,

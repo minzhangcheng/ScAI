@@ -357,7 +357,7 @@ export function usePromptsController() {
   const selectedStyles = colorStyles[selectedConfig.color] || colorStyles.violet
 
   return {
-    language, t, agentConfig, colorStyles, selectedAgent, handleSelectAgent, selectedConfig, Icon, selectedStyles,
+    language, t, apiConfig, agentConfig, colorStyles, selectedAgent, handleSelectAgent, selectedConfig, Icon, selectedStyles,
     editedPrompt, setEditedPrompt, editedModel, setEditedModel,
     editedTemperature, setEditedTemperature, editedLlmBaseUrl, setEditedLlmBaseUrl,
     editedApiKey, setEditedApiKey, editedVisionEnabled, setEditedVisionEnabled,
@@ -371,4 +371,4 @@ export function usePromptsController() {
   }
 }
 
-export type PromptsController = ReturnType<typeof usePromptsController>
+export type PromptsController = NonNullable<ReturnType<typeof usePromptsController>>

@@ -201,7 +201,7 @@ async def _user_review_gate(self, state: WorkflowState) -> WorkflowState:
 
     return state
 
-def _build_plan_dialogue_html(self, dialogue_history: List[Dict]) -> str:
+def _build_plan_dialogue_html(dialogue_history: List[Dict]) -> str:
     """Build an HTML document from the PI↔Bioinfo planning dialogue.
 
     Includes step-level diff between consecutive rounds to highlight changes.

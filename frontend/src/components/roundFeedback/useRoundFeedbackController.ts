@@ -6,7 +6,7 @@ import { useTranslation, type Language } from '../../i18n/translations'
 import type { TreatmentGroup } from '../../stores/appStore'
 import type { RoundSummary } from '../../types'
 import {
-  CUSTOM_TYPE_SENTINEL, getSection, getTypeOptions, hasCustomOption,
+  CUSTOM_TYPE_SENTINEL, getTypeOptions, hasCustomOption,
 } from '../../utils/dataTypes'
 
 export interface UploadedFileWithAgent {

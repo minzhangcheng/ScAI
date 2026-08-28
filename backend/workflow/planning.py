@@ -73,4 +73,5 @@ class PlanningMixin:
 
     @staticmethod
     def _build_plan_dialogue_html(dialogue_history: List[Dict]) -> str:
+        planning_review.bind_facade(sys.modules[__name__])
         return planning_review._build_plan_dialogue_html(dialogue_history)
