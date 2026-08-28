@@ -17,6 +17,11 @@ from ..agents.bioinformatics.stage1_baseline_figures import (
     ensure_stage1_baseline_figures,
 )
 from ..services.figure_contract import audit_figure_contract
+from ..services.sample_design import (
+    BULK_RNASEQ_MODALITY,
+    SCRNA_MODALITY,
+    has_replicated_condition_design,
+)
 from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, MAX_EXECUTION_REVISION_ATTEMPTS, prepend_species, safe_pi_brief, STAGE1_KEYWORDS, WorkflowSupersededError
 from ..utils.blob_store import BLOB_REF_PREFIX
 from .retry import with_retry
@@ -316,12 +321,20 @@ class AgentNodesMixin(
         # Detect data types for dynamic instruction (single pass)
         has_scrna = analysis_state.has_scrnaseq()
         has_bulk = analysis_state.has_bulk_rnaseq()
+        scrna_replicated = has_replicated_condition_design(
+            analysis_state, SCRNA_MODALITY,
+        )
+        bulk_replicated = has_replicated_condition_design(
+            analysis_state, BULK_RNASEQ_MODALITY,
+        )
 
         phase_instruction = build_phase_instruction(
             planning_stage=planning_stage,
             analysis_phase=analysis_state.analysis_phase.value,
             has_bulk=has_bulk, has_scrna=has_scrna,
             direction=analysis_state.current_round_direction or "",
+            scrna_replicated=scrna_replicated,
+            bulk_replicated=bulk_replicated,
         )
 
         # Build merge strategy context from PI instructions
@@ -341,10 +354,33 @@ class AgentNodesMixin(
         if bioinf_tasks:
             goals_text = "\n".join(f"- {task}" for task in _normalize_tasks(bioinf_tasks))
         elif has_bulk and not has_scrna:
-            goals_text = "- Perform standard bulk RNA-seq analysis (pydeseq2, pathway enrichment)"
+            goals_text = (
+                "- Perform replicated bulk RNA-seq DEG and pathway analysis"
+                if bulk_replicated else
+                "- Keep bulk condition comparisons descriptive until independent "
+                "sample-to-group membership is verified"
+            )
         elif has_bulk and has_scrna:
-            goals_text = ("- Perform standard scRNA-seq analysis pipeline\n"
-                          "- Perform bulk RNA-seq DEG analysis (pydeseq2) and cross-validate with scRNA-seq pseudobulk DEGs")
+            if scrna_replicated and bulk_replicated:
+                goals_text = (
+                    "- Perform standard scRNA-seq analysis pipeline\n"
+                    "- Perform bulk RNA-seq DEG analysis and compare it with "
+                    "sample-level scRNA-seq pseudobulk results"
+                )
+            elif bulk_replicated:
+                goals_text = (
+                    "- Perform standard scRNA-seq QC, clustering and annotation; "
+                    "keep condition comparisons descriptive\n"
+                    "- Perform replicated bulk RNA-seq DEG analysis and localize "
+                    "bulk-supported signals to single-cell cell types/states"
+                )
+            elif scrna_replicated:
+                goals_text = (
+                    "- Use sample-level scRNA-seq pseudobulk for condition inference\n"
+                    "- Keep bulk comparisons descriptive until its sample design is verified"
+                )
+            else:
+                goals_text = "- Keep condition comparisons descriptive in both sequencing modalities"
         else:
             goals_text = "- Perform standard scRNA-seq analysis pipeline"
 
@@ -589,6 +625,7 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
 
         final_result = {
             "findings": all_findings,
+            "finding_records": list(result.get("finding_records") or []),
             "figures": all_figures,
             "summary": summary,
             "steps_executed": result.get("steps_executed", 0),
@@ -629,6 +666,7 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             "result",
             {
                 "findings": all_findings,
+                "finding_records": final_result["finding_records"],
                 "summary": summary,
                 "steps_executed": result.get("steps_executed", 0),
                 "evidence_verified": final_result["evidence_verified"],
@@ -642,7 +680,11 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         analysis_state.add_message(
             AgentType.BIOINFORMATICS,
             MessageRole.ASSISTANT,
-            json.dumps({"findings": all_findings, "summary": summary}, ensure_ascii=False)
+            json.dumps({
+                "findings": all_findings,
+                "finding_records": final_result["finding_records"],
+                "summary": summary,
+            }, ensure_ascii=False)
         )
 
         # Mid-execution plan revision is signalled on the raw agent `result`, not

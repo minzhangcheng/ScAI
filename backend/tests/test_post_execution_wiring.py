@@ -71,10 +71,12 @@ def _state(plan=None, **kwargs):
     return SimpleNamespace(**defaults)
 
 
-def _execution(code, error=None, round_number=2, exec_id=None):
+def _execution(code, error=None, round_number=2, exec_id=None, modalities=None):
     kwargs = {"code": code, "error": error, "round_number": round_number}
     if exec_id:
         kwargs["id"] = exec_id
+    if modalities is not None:
+        kwargs["analysis_modalities"] = modalities
     return CodeExecution(**kwargs)
 
 
@@ -490,10 +492,22 @@ class _Bio:
         return self._result if self._result is not None else {
             "status": "completed",
             "summary": "Ran the pathway activity task.",
-            "findings": ["Pathway activity is elevated in the treated group."],
+            "findings": [
+                "Pathway activity is elevated in the treated group "
+                "[execution_id supp-1]."
+            ],
+            "finding_records": [{
+                "text": "Pathway activity is elevated in the treated group "
+                        "[execution_id supp-1].",
+                "modality": "single_cell",
+                "evidence_execution_ids": ["supp-1"],
+            }],
             "figures": [],
             "warnings": [],
-            "code_history": [_execution("dc.run_ulm(adata)", exec_id="supp-1")],
+            "code_history": [_execution(
+                "dc.run_ulm(adata)", exec_id="supp-1",
+                modalities=["single_cell"],
+            )],
             "analysis_log": [],
         }
 
@@ -552,7 +566,9 @@ async def test_unmet_step_triggers_pass_and_merges_back():
     assert pi.review_calls == 1 and bio.calls == 1
     assert meta["review_status"] == "completed"
     assert meta["assessment"]["verdict"] == "resolved"
-    assert merge["findings"] == ["Pathway activity is elevated in the treated group."]
+    assert merge["findings"] == [
+        "Pathway activity is elevated in the treated group [execution_id supp-1]."
+    ]
 
     findings, figures = harness._merge_supplementary_into_round(
         state, result, result["findings"], result["figures"], merge)
@@ -627,12 +643,81 @@ def test_merge_discards_unreviewed_automatic_supplementary_figures():
         result,
         result["findings"],
         result["figures"],
-        {"findings": ["repair"], "figures": ["raw-inline-base64"]},
+        {
+            "findings": ["repair"],
+            "finding_records": [{
+                "text": "repair", "modality": "single_cell",
+                "evidence_execution_ids": ["supp-1"],
+            }],
+            "figures": ["raw-inline-base64"],
+        },
     )
 
     assert findings == ["main", "[Supplementary] repair"]
     assert figures == ["reviewed-main-figure"]
     assert result["figures"] == ["reviewed-main-figure"]
+
+
+def test_supplementary_n1_inference_is_discarded_before_merge():
+    from backend.agents.bioinformatics.supplementary import (
+        _validated_supplementary_findings,
+    )
+    from backend.models.schemas import (
+        AnalysisState, SampleCountRecord, TreatmentGroup,
+    )
+
+    state = AnalysisState(name="s", user_id="u")
+    state.treatment_groups = [
+        TreatmentGroup(id="g1", name="Con", sample_count=1),
+        TreatmentGroup(id="g2", name="DKO", sample_count=1),
+    ]
+    state.detected_sample_counts = [
+        SampleCountRecord(
+            group_id=group_id, group_name=name, section="sequencing",
+            data_type="scRNA-seq", detected_count=1, declared_count=1,
+            method="obs_column:sample", evidence="one library",
+        )
+        for group_id, name in (("g1", "Con"), ("g2", "DKO"))
+    ]
+    execution = _execution(
+        "sc.tl.rank_genes_groups(adata, 'condition')",
+        exec_id="supp-n1", modalities=["single_cell"],
+    )
+
+    records, warnings = _validated_supplementary_findings(
+        ["Gene X is significantly increased (p = 0.004) [execution_id supp-n1]."],
+        [execution], state,
+    )
+
+    assert records == []
+    assert any("fewer than two independent" in warning for warning in warnings)
+
+
+def test_supplementary_batch_correction_uses_the_same_design_guard():
+    from backend.agents.bioinformatics.supplementary import SupplementaryMixin
+    from backend.models.schemas import AnalysisState, SampleCountRecord, TreatmentGroup
+
+    state = AnalysisState(name="s", user_id="u")
+    state.treatment_groups = [
+        TreatmentGroup(id="g1", name="Con", sample_count=1),
+        TreatmentGroup(id="g2", name="DKO", sample_count=1),
+    ]
+    state.detected_sample_counts = [
+        SampleCountRecord(
+            group_id=group_id, group_name=name, section="sequencing",
+            data_type="scRNA-seq", detected_count=1, declared_count=1,
+            method="obs_column:sample", evidence="one library",
+        )
+        for group_id, name in (("g1", "Con"), ("g2", "DKO"))
+    ]
+
+    class _Agent(SupplementaryMixin):
+        _current_analysis_state = state
+
+    error = _Agent()._supplementary_code_is_safe(
+        "sc.external.pp.harmony_integrate(adata, 'sample')", "adata",
+    )
+    assert error and "cannot be separated from condition" in error
 
 
 @pytest.mark.asyncio

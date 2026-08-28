@@ -34,6 +34,7 @@ import inspect
 import json as _json
 from backend.services import ora_kernel
 from backend.services.marker_priors import MarkerDB, summarize_database_priors
+from ...services.sample_design import sequencing_design_instruction
 
 from ...utils.formatting import (
     as_list,
@@ -565,6 +566,12 @@ You are REVISING the remaining steps based on new findings."""
             state.build_experimental_design_summary(),
             max_chars=8_000,
         )
+        sample_design_constraint = sequencing_design_instruction(state)
+        if sample_design_constraint:
+            sample_design_constraint = (
+                "\n\n## Replication and Design Constraint\n"
+                + sample_design_constraint
+            )
 
         # The pre-planning profiling pass already read these files and left the
         # objects in the kernel. Without this note the planner writes a load
@@ -608,7 +615,7 @@ You are REVISING the remaining steps based on new findings."""
         prompt = f"""You are planning a single-cell RNA-seq bioinformatics analysis. Generate a method-level analysis plan.
 
 ## Data Context
-{data_desc}{loaded_objects_block}
+{data_desc}{sample_design_constraint}{loaded_objects_block}
 {research_context}
 
 ## PI's Analysis Goals
@@ -1000,7 +1007,43 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
             return False
         return True
 
+    def _normalize_report_finding_records(self, args: dict) -> list[dict]:
+        """Normalize legacy shapes while retaining per-finding provenance."""
+        raw = args.get("findings")
+        items = [raw] if isinstance(raw, dict) else _ensure_list(raw)
+        fallback_ids = [
+            str(value).strip()
+            for value in _ensure_list(args.get("evidence_execution_ids"))
+            if str(value).strip()
+        ]
+        records = []
+        for item in items:
+            if isinstance(item, dict):
+                text = item.get("text", item.get("finding", ""))
+                if isinstance(text, str) and text.strip():
+                    records.append({
+                        "text": text,
+                        "modality": item.get("modality"),
+                        "evidence_execution_ids": [
+                            str(value).strip()
+                            for value in _ensure_list(
+                                item.get("evidence_execution_ids"),
+                            )
+                            if str(value).strip()
+                        ],
+                    })
+            elif isinstance(item, str):
+                if item.strip():
+                    records.append({
+                        "text": item,
+                        "modality": None,
+                        "evidence_execution_ids": fallback_ids,
+                    })
+        return records
+
     async def _handle_report_findings(self, args: dict) -> list:
-        findings = _ensure_list(args.get("findings"))
+        records = self._normalize_report_finding_records(args)
+        findings = [record["text"] for record in records]
+        self._last_finding_records = records
         self._last_findings = findings
         return findings

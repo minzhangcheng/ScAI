@@ -8,6 +8,12 @@ import logging
 
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ...utils.formatting import as_list, coerce_json_text
+from ...services.sample_design import (
+    BULK_RNASEQ_MODALITY,
+    SCRNA_MODALITY,
+    has_replicated_condition_design,
+    sequencing_design_instruction,
+)
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -137,6 +143,32 @@ Reply in JSON format as follows:
         focusing on broad data extraction rather than targeted investigation.
         """
         logger.info(f"[PI] Generating exploration-phase instructions for project: {state.name}")
+        scrna_replicated = has_replicated_condition_design(state, SCRNA_MODALITY)
+        bulk_replicated = has_replicated_condition_design(
+            state, BULK_RNASEQ_MODALITY,
+        )
+        sample_design_constraint = sequencing_design_instruction(state)
+        single_cell_condition_task = (
+            "Condition-level sample-pseudobulk DEG + GO/KEGG enrichment for all "
+            "cell types"
+            if scrna_replicated else
+            "Descriptive single-cell condition effect sizes/ranks and cell-type "
+            "localization only; no cell-level or inferential pseudobulk p/FDR"
+        )
+        cross_modal_task = (
+            "Cross-validate bulk DEG with replicated scRNA-seq sample-pseudobulk DEG"
+            if scrna_replicated and bulk_replicated else
+            "Use replicated bulk DEG/pathway results as the inferential layer and "
+            "localize them descriptively to single-cell cell types/states"
+            if bulk_replicated else
+            "Keep bulk comparisons descriptive until independent samples are "
+            "assigned to treatment groups; do not claim independent validation"
+        )
+        bulk_analysis_task = (
+            "Load bulk expression and perform sample-level differential expression"
+            if bulk_replicated else
+            "Inspect bulk expression descriptively; do not report condition-level p/FDR"
+        )
         prompt = f"""
 ## Project Information
 Project Name: {state.name}
@@ -145,6 +177,9 @@ Research Objective: {user_instruction}
 
 ## Available Data
 {state.build_experimental_design_summary()}
+
+## Replication Constraint
+{sample_design_constraint or "No additional constraint."}
 
 You are generating the EXPLORATION PHASE plan (Round 1). This round performs comprehensive, unbiased data exploration.
 
@@ -160,16 +195,18 @@ CRITICAL CONSTRAINTS:
 ## Fixed Mandatory Pipeline (MUST be included in bioinformatics_tasks)
 1. Quality Control (QC) and filtering
 2. Doublet removal assessment (if data quality suggests it is needed)
-3. Batch effect assessment and correction (if multiple samples/batches exist)
+3. Batch effect assessment on the uncorrected representation; do not include a
+   correction/integration step because replicate counts do not verify a full-rank
+   condition-by-batch design
 4. Normalization, HVG selection, PCA, UMAP
 5. Clustering (leiden/louvain)
 6. Cell type annotation via annotate_clusters tool
-7. Condition-level DEG (treatment vs control) + GO/KEGG enrichment for all cell types
+7. {single_cell_condition_task}
    (merge closely related states into a shared parent population only when the observed markers support it)
 8. Cell-cell communication analysis (liana)
 9. If bulk RNA-seq data is available:
-   a. Load bulk expression matrix and perform differential expression analysis (pydeseq2)
-   b. Cross-validate bulk DEG with scRNA-seq pseudobulk DEG
+   a. {bulk_analysis_task}
+   b. {cross_modal_task}
    c. Generate comparison visualizations (Venn diagram, correlation plot)
    d. Perform cell-type deconvolution on the bulk RNA-seq data using the annotated scRNA-seq data as a reference to estimate cell-type proportions (prioritize pure Python NNLS).
 

@@ -46,6 +46,71 @@ def test_report_findings_requires_execution_evidence_ids():
     assert parameters["properties"]["evidence_execution_ids"]["items"] == {
         "type": "string"
     }
+    finding_item = parameters["properties"]["findings"]["items"]
+    assert finding_item["required"] == [
+        "text", "modality", "evidence_execution_ids",
+    ]
+    assert finding_item["properties"]["modality"]["enum"] == [
+        "single_cell", "bulk_rna_seq", "cross_modal",
+    ]
+
+
+def test_execution_modality_is_derived_from_code_not_finding_text():
+    from backend.services.sample_design import infer_execution_modalities
+
+    assert infer_execution_modalities(
+        "dds = DeseqDataSet(counts=bulk_counts, metadata=meta)"
+    ) == ["bulk_rna_seq"]
+    assert infer_execution_modalities(
+        "sc.tl.rank_genes_groups(adata, 'condition')"
+    ) == ["single_cell"]
+    assert infer_execution_modalities(
+        "bulk_degs = set(bulk_results.index); sc.pl.dotplot(adata, bulk_degs)"
+    ) == ["single_cell", "bulk_rna_seq"]
+    assert infer_execution_modalities(
+        "# import pydeseq2\nprint('bulk_results')"
+    ) == []
+    assert infer_execution_modalities(
+        "from pydeseq2.dds import DeseqDataSet as DDS\nDDS(counts=counts)"
+    ) == ["bulk_rna_seq"]
+
+
+def test_finding_cannot_borrow_a_different_executions_modality():
+    from backend.services.sample_design import finding_evidence_errors
+
+    bulk = CodeExecution(
+        id="bulk-exec", code="DeseqDataSet(counts=bulk_counts)",
+        analysis_modalities=["bulk_rna_seq"],
+    )
+    records = [{
+        "text": "single-cell condition effect is significant",
+        "modality": "single_cell",
+        "evidence_execution_ids": [bulk.id],
+    }]
+
+    errors = finding_evidence_errors(records, {bulk.id}, {bulk.id: bulk})
+    assert errors == [
+        "finding 1 declares 'single_cell', but its executed code does not include "
+        "dedicated matching evidence; observed modalities are ['bulk_rna_seq']"
+    ]
+
+
+def test_mixed_execution_can_support_a_modality_specific_finding():
+    from backend.services.sample_design import finding_evidence_errors
+
+    mixed = CodeExecution(
+        id="mixed-exec", code="compare(bulk_counts, adata)",
+        analysis_modalities=["single_cell", "bulk_rna_seq"],
+    )
+    records = [{
+        "text": "single-cell localization is descriptive",
+        "modality": "single_cell",
+        "evidence_execution_ids": [mixed.id],
+    }]
+
+    assert finding_evidence_errors(
+        records, {mixed.id}, {mixed.id: mixed},
+    ) == []
 
 
 def test_force_released_gate_has_structured_audit_identity_and_count():

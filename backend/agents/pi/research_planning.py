@@ -12,6 +12,7 @@ import logging
 logger = logging.getLogger(__name__)
 from ...models.schemas import AnalysisState, RoundResult, DATA_TYPE_SCRNASEQ
 from ...constants import PI_REVIEW_FALLBACK_DECISION
+from ...services.sample_design import sequencing_design_instruction
 from ...utils.formatting import as_list, coerce_json_text, render_plan_steps
 
 from .shared import (  # noqa: F401
@@ -58,13 +59,14 @@ class ResearchPlanningMixin:
         steps_text = render_plan_steps(plan.steps)
 
         decision_points = "\n".join(f"  - {d}" for d in plan.key_decision_points)
+        sample_design_constraint = sequencing_design_instruction(state)
 
         stage_label = (plan.stage or "full")
         stage_scope_section = ""
         if stage_label == "stage1":
             stage_scope_section = """
 ## Stage Scope (Stage 1)
-This plan is for **Stage 1** only. Stage 1 covers: data loading of count matrices, QC, doublet handling, normalization / HVG, batch correction, dimensionality reduction, clustering, and cell type annotation.
+This plan is for **Stage 1** only. Stage 1 covers: data loading of count matrices, QC, doublet handling, normalization / HVG, batch assessment on the uncorrected representation, dimensionality reduction, clustering, and cell type annotation. Replicate counts do not verify a full-rank condition-by-batch design, so do not include a correction/integration step.
 
 Stage 1 must NOT contain steps whose only purpose is to feed Stage 2 analyses, including:
 - Loading Loom files or assigning spliced / unspliced layers (RNA velocity belongs to Stage 2)
@@ -96,6 +98,7 @@ This plan is for **Stage 2**. Stage 2 covers downstream analyses (DEG, GO/KEGG, 
 - Phase: {plan.phase}
 - Round: {state.current_round}
 - Data: {state.build_experimental_design_summary()}
+- Replication constraint: {sample_design_constraint or "No additional constraint."}
 {stage_scope_section}
 
 ## Review Criteria
@@ -126,7 +129,7 @@ Respond in JSON:
     "decision": "approved|revise|reject",
     "feedback": "Overall assessment and reasoning",
     "modifications": [
-        {{"step_id": 3, "suggestion": "Use harmony for batch correction instead of BBKNN because..."}},
+        {{"step_id": 3, "suggestion": "Use a sample-level method supported by the measured replicate design because..."}},
         ...
     ]
 }}
@@ -199,6 +202,9 @@ dialogue history below — no more discussion is permitted.
 
 ## Experimental Design
 {analysis_state.build_experimental_design_summary()}
+
+## Replication Constraint
+{sequencing_design_instruction(analysis_state) or "No additional constraint."}
 
 ## Current Complete Plan
 {current_plan_json}
@@ -757,6 +763,7 @@ If no additional data is needed, return empty lists.
 
         # Experimental design summary
         design_summary = state.build_experimental_design_summary()
+        sample_design_constraint = sequencing_design_instruction(state)
 
         prompt = f"""
 ## Project Information
@@ -765,6 +772,9 @@ Research Objective: {state.initial_instruction}
 
 ## Experimental Design
 {design_summary}
+
+## Replication Constraint
+{sample_design_constraint or "No additional constraint."}
 
 ## Uploaded Sequencing Data
 {chr(10).join(data_info) if data_info else "No sequencing data uploaded"}
@@ -775,7 +785,7 @@ Research Objective: {state.initial_instruction}
 
 Please plan the single-cell sequencing analysis workflow for this project. Return an ordered list of analysis steps.
 Note: The first step must be loading data.
-{"If multiple groups exist, include steps for merging/integrating data, batch correction, and multi-group comparison analysis." if has_multiple_groups else ""}
+{"If multiple groups exist, concatenate them with explicit group/sample labels and preserve the uncorrected condition contrast. Do not include batch correction: the current replicate-count channel does not verify a full-rank condition-by-batch design." if has_multiple_groups else ""}
 
 Format requirement: Return a JSON array, each element is a brief description of an analysis step.
 Example: ["Load data", "Quality control", "Normalization", ...]

@@ -110,8 +110,46 @@ TOOLS = [
                 "properties": {
                     "findings": {
                         "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of key findings"
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": {
+                                    "type": "string",
+                                    "description": "The finding or conclusion.",
+                                },
+                                "modality": {
+                                    "type": "string",
+                                    "enum": [
+                                        "single_cell", "bulk_rna_seq",
+                                        "cross_modal",
+                                    ],
+                                    "description": (
+                                        "The analysis modality that directly supports "
+                                        "this finding. Use cross_modal only for a "
+                                        "concordance/integration result, not to borrow "
+                                        "replication from another modality."
+                                    ),
+                                },
+                                "evidence_execution_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 1,
+                                    "description": (
+                                        "Successful current-run execute_code IDs that "
+                                        "directly support this finding. The host derives "
+                                        "their analysis modality from the executed code "
+                                        "and rejects a mismatched finding modality."
+                                    ),
+                                },
+                            },
+                            "required": [
+                                "text", "modality", "evidence_execution_ids",
+                            ],
+                        },
+                        "description": (
+                            "List of key findings with a structured evidence modality "
+                            "so the correct replicate design is applied."
+                        )
                     },
                     "summary": {
                         "type": "string",
@@ -659,7 +697,11 @@ REGISTER_SAMPLE_COUNTS_TOOL = {
                                 "type": "string",
                                 "description": (
                                     "Treatment group name exactly as given in the "
-                                    "experimental design. Empty string for ungrouped data."
+                                    "experimental design. A matrix spanning groups "
+                                    "must produce one record per group when its columns "
+                                    "or metadata verify membership, even if the uploaded "
+                                    "file is ungrouped. Use an empty string only when "
+                                    "membership cannot be established from the data."
                                 ),
                             },
                             "data_type": {

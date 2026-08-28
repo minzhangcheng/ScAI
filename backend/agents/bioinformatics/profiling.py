@@ -19,6 +19,7 @@ import logging
 from typing import Any, Dict, List
 
 from ...models.schemas import SampleCountRecord
+from ...services.sample_design import canonical_modality
 from .shared import (
     _ensure_list, UpstreamExhaustedError, compact_traceback,
     mutates_expression_representation,
@@ -31,7 +32,7 @@ logger = logging.getLogger(__name__)
 #: sequencing data type, with headroom for a retry after a read error; the pass
 #: is expected to finish in three or four. Exhausting it ends the pass with
 #: whatever was registered -- a group left without a record falls back to the
-#: previous resolution in _gate_samples_per_group, which is a correct outcome,
+#: previous per-modality resolution, which is a correct outcome,
 #: not a failure.
 MAX_PROFILING_STEPS = 12
 
@@ -48,7 +49,11 @@ counts, barcodes, and gene names before treating them as separate replicates.
 - One matrix may hold several multiplexed specimens. Look at obs columns \
 whose values partition the cells (sample, batch, orig.ident, donor, library), \
 and at barcode suffixes.
-- A bulk expression table's replicates are its columns, not its rows.
+- A bulk expression table's replicates are its columns, not its rows. A single \
+bulk matrix often spans every treatment group. When column names or sample \
+metadata verify the membership, register a separate record for each treatment \
+group even though the uploaded file itself is ungrouped. Use an empty group \
+only when the column-to-group membership cannot be established from the data.
 
 Declare every object later steps should reuse in persistent_outputs, so the \
 analysis that follows does not have to read these files again.
@@ -66,7 +71,7 @@ class ProfilingMixin:
         """Inspect the sequencing inputs and return measured replicate counts.
 
         Never raises for a modelling or execution problem: the caller treats a
-        thin result as "no records", and _gate_samples_per_group falls back.
+        thin result as "no records", and the design resolver falls back.
         """
         design = state.build_experimental_design_summary()
         messages: List[Dict[str, Any]] = [
@@ -160,7 +165,10 @@ class ProfilingMixin:
                     else:
                         raw_records = args.get("records")
                         accepted = _to_records(state, _ensure_list(raw_records))
-                        if accepted:
+                        coverage_error = _registration_coverage_error(
+                            state, accepted,
+                        ) if accepted else ""
+                        if accepted and not coverage_error:
                             records = accepted
                             messages.append(_tool_reply(
                                 call, f"Registered {len(records)} record(s)."))
@@ -174,7 +182,9 @@ class ProfilingMixin:
                             failed_registration_attempts += 1
                             messages.append(_tool_reply(
                                 call,
-                                _explain_empty_registration(state, raw_records)))
+                                coverage_error or _explain_empty_registration(
+                                    state, raw_records,
+                                )))
                             if failed_registration_attempts >= 2:
                                 done = True
                 except UpstreamExhaustedError:
@@ -311,7 +321,7 @@ def _to_records(state: Any, raw: List[Dict[str, Any]]) -> List[SampleCountRecord
     """Bind reported counts to real groups. Unknown group names are dropped.
 
     A name the design does not contain cannot be matched to a group id, so the
-    record could never reach _gate_samples_per_group; keeping it would put an
+    record could never reach the sample-design resolver; keeping it would put an
     unusable row in front of the PI.
     """
     by_name = {g.name: g for g in (state.treatment_groups or [])}
@@ -346,3 +356,53 @@ def _to_records(state: Any, raw: List[Dict[str, Any]]) -> List[SampleCountRecord
                            and detected != declared),
         ))
     return records
+
+
+def _registration_coverage_error(
+    state: Any, records: List[SampleCountRecord],
+) -> str:
+    """Require every sequencing modality to have a complete design record.
+
+    An ungrouped record is complete evidence that membership could not be
+    established.  Otherwise every declared treatment group must be represented,
+    including by an explicit detected_count=0 record.  Accepting a non-empty
+    subset would make the omitted group invisible to the downstream gate.
+    """
+    expected_groups = {
+        getattr(group, "id", None)
+        for group in (getattr(state, "treatment_groups", None) or [])
+    }
+    expected_groups.discard(None)
+    expected_modalities = {
+        canonical_modality("sequencing", getattr(item, "data_type", ""))
+        for item in (getattr(state, "data_files", None) or [])
+        if getattr(item, "section", None) == "sequencing"
+    }
+    grouped: Dict[str, set] = {}
+    unresolved: set[str] = set()
+    for record in records:
+        modality = canonical_modality(
+            "sequencing", getattr(record, "data_type", ""),
+        )
+        group_id = getattr(record, "group_id", None)
+        if group_id is None:
+            unresolved.add(modality)
+        else:
+            grouped.setdefault(modality, set()).add(group_id)
+
+    missing_modalities = sorted(
+        modality for modality in expected_modalities
+        if modality not in unresolved
+        and not expected_groups.issubset(grouped.get(modality, set()))
+    )
+    if not missing_modalities:
+        return ""
+    return (
+        "The sample-count registration is incomplete for: "
+        + ", ".join(missing_modalities)
+        + ". For each listed modality, send one record for every treatment "
+        "group, using detected_count 0 when a group's count is undetermined; "
+        "or send one empty-group record when column-to-group membership cannot "
+        "be established at all. Inspect every sequencing input and call "
+        "register_sample_counts again with the complete records array."
+    )

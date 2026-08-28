@@ -47,6 +47,11 @@ class CodeExecution(BaseModel):
     round_number: int = 0
     evidence_eligible: bool = True
     evidence_rejection_reason: Optional[str] = None
+    # Derived by the host from the executed code. Findings cite execution IDs
+    # and may use only the replicate design of a modality present here.
+    analysis_modalities: List[Literal[
+        "single_cell", "bulk_rna_seq",
+    ]] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=datetime.now)
 
 class AnalysisStep(BaseModel):
@@ -86,6 +91,7 @@ class AnalysisStep(BaseModel):
 
     # report_findings fields
     findings: List[str] = Field(default_factory=list)
+    finding_records: List[Dict[str, Any]] = Field(default_factory=list)
     findings_summary: Optional[str] = None
     findings_suggestions: List[str] = Field(default_factory=list)
     evidence_execution_ids: List[str] = Field(default_factory=list)
@@ -185,7 +191,7 @@ class SampleCountRecord(BaseModel):
     (group, data_type) key is what separates those cases.
 
     ``detected_count == 0`` means undetermined, not zero samples. Such a record
-    is excluded from the per-group minimum rather than dragging it to zero.
+    preserves an unresolved modality design rather than manufacturing n=0.
     """
     group_id: Optional[str] = None          # None = ungrouped data
     group_name: str = ""

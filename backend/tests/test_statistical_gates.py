@@ -382,30 +382,20 @@ def _frozen_plan(plan_id, name, method, *, family=()):
                        testing_family=list(family))
 
 
-def test_a_single_sample_group_still_reaches_the_design_check():
-    """The n=1 group is the input check_analysis_unit exists to flag.
-
-    A 1-vs-1 pilot uploaded with "No sample distinction" leaves every group at
-    sample_count 1 with no numbered file. Withholding those groups empties the
-    mapping, and both check_analysis_unit and check_permutation_at_small_n
-    return early on an empty one -- so the one design the check was written for
-    would be the one design it never sees.
-
-    What it does on arrival is advise, not refuse; the assertion below tracks
-    reachability, which is what this test is for.
-    """
+def test_declarations_without_profiling_fail_closed_as_unresolved():
+    """Group declarations alone cannot establish biological replication."""
     state = _live_state(
         treatment_groups=[_group("ga", "Vehicle", 1), _group("gb", "Treated", 1)],
         data_files=[_uploaded("ga", None), _uploaded("gb", None)],
         current_round=2,
     )
-    samples = bio_mod._gate_samples_per_group(state)
-    assert samples == {"Vehicle": 1, "Treated": 1}
+    samples = bio_mod._gate_samples_per_group_by_modality(state)
+    assert samples == {"scRNA-seq": {}}
     report = run_gates(["Treatment significantly increases Il6 (p = 0.003)."],
                        score_definitions=[], scoring_plans=[],
-                       samples_per_group=samples)
-    assert [f.gate for f in report.advisories] == ["unidentifiable-design"]
-    assert report.blocking == []
+                       samples_per_group_by_modality=samples)
+    assert report.advisories == []
+    assert [f.gate for f in report.blocking] == ["sample-design-unresolved"]
 
 
 def test_numbered_uploads_raise_a_count_left_at_the_schema_default():
@@ -420,11 +410,11 @@ def test_numbered_uploads_raise_a_count_left_at_the_schema_default():
         data_files=[_uploaded(g, n) for g in ("gc", "gd") for n in (1, 2, 3)],
         current_round=2,
     )
-    samples = bio_mod._gate_samples_per_group(state)
-    assert samples == {"Control": 3, "KO": 3}
+    samples = bio_mod._gate_samples_per_group_by_modality(state)
+    assert samples == {"scRNA-seq": {"Control": 3, "KO": 3}}
     report = run_gates(["the effect of condition is significant (p = 0.01)"],
                        score_definitions=[], scoring_plans=[],
-                       samples_per_group=samples)
+                       samples_per_group_by_modality=samples)
     assert report.passed
 
 
@@ -613,10 +603,12 @@ def test_a_detected_singleton_reaches_the_analysis_unit_check():
                           evidence="single value", conflicts=True)
         for gid, name in (("g1", "Con"), ("g2", "DKO"))
     ]
-    samples = bio_mod._gate_samples_per_group(state)
-    assert samples == {"Con": 1, "DKO": 1}
+    samples = bio_mod._gate_samples_per_group_by_modality(state)
+    assert samples == {"scRNA-seq": {"Con": 1, "DKO": 1}}
     report = run_gates(["DKO significantly increases Mt1 (p = 0.004)."],
                        score_definitions=[], scoring_plans=[],
-                       samples_per_group=samples)
+                       samples_per_group_by_modality=samples)
     assert [f.gate for f in report.advisories] == ["unidentifiable-design"]
-    assert report.blocking == []
+    assert [f.gate for f in report.blocking] == [
+        "unreplicated-single-cell-inference"
+    ]

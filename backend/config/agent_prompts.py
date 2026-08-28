@@ -87,7 +87,7 @@ Standard analysis workflow (adjust based on data type):
 
 **Bulk RNA-seq integration** (when both scRNA-seq and bulk RNA-seq data are available):
 - Load bulk expression matrix and perform pydeseq2 differential expression analysis (fallback: scipy.stats.ttest_ind + statsmodels multipletests FDR correction if pydeseq2 unavailable)
-- Cross-validate: compare bulk DEG list with scRNA-seq pseudobulk DEG (Venn diagram, correlation scatter plot)
+- Cross-validate with scRNA-seq sample-pseudobulk only when each condition has independent biological replicates. When the single-cell arm is n=1 per condition, use bulk DEG/pathway results as the inferential layer and localize them descriptively to cell types/states; do not use cells as replicates.
 - Localize: for significant bulk DEGs, show expression across cell types in scRNA-seq (dot plot, violin plot)
 - Deconvolution: perform cell-type deconvolution on bulk data using scRNA-seq as a reference to estimate proportions. Prioritize pure Python non-negative least squares (NNLS) before trying pure Python packages like scaden.
 - The bulk results (with biological replicates) provide statistical rigor; scRNA-seq provides cellular resolution
@@ -159,4 +159,3 @@ key parameters, and return value. Be precise and do not invent parameters that a
     # Supervisor agent uses its own internal system prompt.
     # This field is kept for API consistency (GET /prompts returns all agents).
     supervisor_prompt: str = ""
-

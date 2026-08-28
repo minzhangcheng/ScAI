@@ -94,7 +94,8 @@ def _pi_agent(replies):
 
     async def _chat(prompt, **kwargs):
         calls.append(prompt)
-        return replies[min(len(calls) - 1, len(replies) - 1)]
+        reply = replies[min(len(calls) - 1, len(replies) - 1)]
+        return reply(prompt) if callable(reply) else reply
 
     agent.chat = _chat
     agent.refresh_runtime_config_if_needed = lambda *a, **k: None
@@ -133,7 +134,8 @@ def _bio_agent(
 
     async def _chat(prompt, **kwargs):
         calls.append(prompt)
-        return replies[min(len(calls) - 1, len(replies) - 1)]
+        reply = replies[min(len(calls) - 1, len(replies) - 1)]
+        return reply(prompt) if callable(reply) else reply
 
     agent.chat = _chat
     agent.refresh_runtime_config_if_needed = lambda *a, **k: None
@@ -209,12 +211,20 @@ def _result():
 async def test_real_agents_complete_the_review_and_merge_back():
     state = _state_and_plan()
     pi = _pi_agent([_REVIEW_JSON, _ASSESS_JSON])
+
+    def _done_with_citation(prompt):
+        execution_id = prompt.rsplit("[execution_id ", 1)[1].split("]", 1)[0]
+        return json.dumps({"done": True, "result": {
+            "summary": "Ran the pathway activity task.",
+            "findings": [
+                "Regulon A is elevated in the compared group "
+                f"[execution_id {execution_id}]."
+            ],
+        }})
+
     bio = _bio_agent([
         json.dumps({"code": "import decoupler as dc\ndc.run_ulm(adata, net=net)"}),
-        json.dumps({"done": True, "result": {
-            "summary": "Ran the pathway activity task.",
-            "findings": ["Regulon A is elevated in the compared group."],
-        }}),
+        _done_with_citation,
     ])
     bio._current_analysis_state = state
     harness = _Harness(pi, bio)
@@ -232,13 +242,16 @@ async def test_real_agents_complete_the_review_and_merge_back():
     assert bio.executed_code and "run_ulm" in bio.executed_code[0]
 
     # The executor's findings survive sanitizing and reach the merge payload.
-    assert merge["findings"] == ["Regulon A is elevated in the compared group."]
+    assert len(merge["findings"]) == 1
+    assert merge["findings"][0].startswith(
+        "Regulon A is elevated in the compared group [execution_id "
+    )
     assert merge["code_history"], "executions must come back for evidence provenance"
     assert all(c.round_number == 2 for c in merge["code_history"])
 
     findings, _ = harness._merge_supplementary_into_round(
         state, result, result["findings"], result["figures"], merge)
-    assert findings[-1] == "[Supplementary] Regulon A is elevated in the compared group."
+    assert findings[-1] == "[Supplementary] " + merge["findings"][0]
     assert [c.code for c in state.code_history][-1] == bio.executed_code[-1]
 
     # Re-audit: the restricted pass closes the computational gap, but it cannot

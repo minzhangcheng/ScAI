@@ -117,17 +117,27 @@ class GateReport:
         )
 
 
-def _texts(findings) -> list[str]:
-    """Flatten a findings payload to plain strings."""
-    out: list[str] = []
+def _finding_entries(findings) -> list[tuple[str, str | None]]:
+    """Return finding text with its structured analysis modality."""
     if isinstance(findings, str):
-        return [findings]
+        return [(findings, None)]
+    if isinstance(findings, dict):
+        findings = [findings]
+    out: list[tuple[str, str | None]] = []
     for item in findings or []:
         if isinstance(item, str):
-            out.append(item)
+            out.append((item, None))
         elif isinstance(item, dict):
-            out.extend(str(v) for v in item.values() if isinstance(v, str))
+            text = item.get("text", item.get("finding", ""))
+            if isinstance(text, str):
+                source = item.get("modality")
+                out.append((text, str(source) if source is not None else None))
     return out
+
+
+def _texts(findings) -> list[str]:
+    """Flatten a findings payload to finding text only."""
+    return [text for text, _source in _finding_entries(findings)]
 
 
 def asserts_absence(text: str) -> bool:
@@ -282,6 +292,22 @@ _DISCLAIMED = re.compile(
     r'no\s+biological\s+replicat|lacks?\s+independent\s+replication|'
     r'unidentifiable|not\s+estimable|cannot\s+support\s+statistical\s+inference|'
     r'were\s+blocked|proportions?\s+are\s+descriptive|technical\s+arte?fact|not\s+a\s+biological)', re.I)
+
+
+def _has_undisclaimed_inference(text):
+    """Whether any clause retains an inferential claim after caveats are removed.
+
+    A caveat in one clause must not license a p-value in another. Removing the
+    matched caveat also distinguishes ``no p-values`` (nothing inferential
+    remains) from ``descriptive only; p=...`` (the p-value remains).
+    """
+    for sentence in _sentences(text):
+        for clause in _clauses(sentence):
+            if not _has_inference(clause):
+                continue
+            if _has_inference(_DISCLAIMED.sub("", clause)):
+                return True
+    return False
 _COMPOSITIONAL_METHOD = re.compile(
     r'\b(?:sccoda|sccomp|dirichlet[-\s]?multinomial|dirichlet|'
     r'beta[-\s]?binomial|milo(?:py|r)?|propeller|scanpro|'
@@ -1043,25 +1069,10 @@ def check_panel_redundancy(score_definitions, scoring_plans):
 def check_analysis_unit(findings, samples_per_group):
     """A single sample per condition cannot support a condition-level claim.
 
-    Advisory, not a refusal. The rule is arithmetic -- with one library per
-    condition the condition effect and the sample effect are the same parameter
-    -- but this check cannot tell which modality a finding rests on, and
-    ``samples_per_group`` reaches it as one number per group, reduced across
-    the session's modalities at the minimum. In a session pairing replicated
-    bulk with a single-nucleus library per group, that number describes the
-    single-cell arm and refuses the bulk one.
-
-    Measured on session 3d675631: a bulk contrast at three replicates per group
-    was refused by a count of 1 taken from the single-cell arm. The refusal had
-    no satisfiable response -- restating an estimable bulk contrast as
-    descriptive is wrong -- so the executor reworded its single-cell findings
-    instead, resubmitted, was refused again, and the ceiling force-released,
-    marking the whole round's evidence degraded.
-
-    n=1 single-cell work is ordinary and publishable as descriptive analysis.
-    A note the model cannot suppress is proportionate to that; a refusal that
-    can be wrong and cannot be worked off is not. See
-    test_analysis_unit_advisory.py.
+    Advisory, not a refusal. The rule is arithmetic -- with one independent
+    unit per condition the condition effect and the specimen effect are the
+    same parameter. ``run_gates`` selects the counts for the finding's modality;
+    a direct caller is responsible for doing the same.
     """
     if not samples_per_group:
         return []
@@ -1087,18 +1098,40 @@ def check_analysis_unit(findings, samples_per_group):
             severity="advise",
             also_see=("biological-replicate-is-the-unit",),
             detail=(
-                f"the replicate counts these checks were given are {counts}. "
-                f"Each is the lowest across this session's modalities for that "
-                f"group, so it can understate a modality holding more. Where a "
-                f"contrast rests on the modality a count came from, condition "
-                f"is perfectly confounded with sample and the effect is not "
-                f"estimable -- state such contrasts as descriptive "
-                f"observations about the specimens. Where it rests on a "
-                f"modality with replicates, this note does not apply."
+                f"the replicate counts for this finding's analysis modality are "
+                f"{counts}. With one independent unit in a condition, condition "
+                f"is confounded with specimen and a condition effect is not "
+                f"estimable -- state that contrast as a descriptive observation "
+                f"about the specimens."
             ),
         ))
         break
     return out
+
+
+def _samples_for_finding(source, samples_per_group_by_modality):
+    """Select a modality design from structured finding metadata."""
+    designs = samples_per_group_by_modality or {}
+    if not designs:
+        return None, None
+    lowered_keys = {str(key).casefold(): value for key, value in designs.items()}
+    if source == "single_cell":
+        for key, value in lowered_keys.items():
+            if "scrna" in key or "single" in key or "snrna" in key:
+                return "single_cell", value
+        return "single_cell", {}
+    if source == "bulk_rna_seq":
+        for key, value in lowered_keys.items():
+            if "bulk" in key:
+                return "bulk_rna_seq", value
+        return "bulk_rna_seq", {}
+    if source == "cross_modal":
+        return source, None
+    if len(designs) == 1:
+        key, value = next(iter(lowered_keys.items()))
+        inferred = "bulk_rna_seq" if "bulk" in key else "single_cell"
+        return inferred, value
+    return None, None
 
 
 def run_gates(
@@ -1107,6 +1140,7 @@ def run_gates(
     score_definitions=(),
     scoring_plans=(),
     samples_per_group=None,
+    samples_per_group_by_modality=None,
     cluster_labels=(),
 ):
     """Run every statistical gate over a report_findings payload.
@@ -1125,14 +1159,103 @@ def run_gates(
         check_underpowered_negative_claims(findings, score_definitions))
     report.findings.extend(
         check_declared_testing_family(score_definitions, scoring_plans))
-    report.findings.extend(
-        check_permutation_at_small_n(findings, score_definitions, samples_per_group))
+    if samples_per_group_by_modality:
+        for text, finding_modality in _finding_entries(findings):
+            selected_modality, modality_samples = _samples_for_finding(
+                finding_modality, samples_per_group_by_modality,
+            )
+            if selected_modality == "cross_modal":
+                designs = list(samples_per_group_by_modality.values())
+                lacks_replication = any(
+                    not counts or min(counts.values()) < 2
+                    for counts in designs
+                )
+                if (
+                    lacks_replication
+                    and _has_undisclaimed_inference(str(text))
+                ):
+                    report.findings.append(GateFinding(
+                        gate="cross-modal-inference-unreplicated",
+                        rule_id="biological-replicate-is-the-unit",
+                        detail=(
+                            "cross-modal agreement cannot restore independent "
+                            "replication missing from either contributing modality. "
+                            "Report the concordance descriptively and do not call it "
+                            "significant or independent validation."
+                        ),
+                    ))
+                continue
+            if modality_samples == {}:
+                if (_has_inference(str(text))
+                        or "effect of" in str(text).casefold()):
+                    report.findings.append(GateFinding(
+                        gate="sample-design-unresolved",
+                        rule_id="biological-replicate-is-the-unit",
+                        detail=(
+                            "the finding identifies its sequencing modality, "
+                            "but independent-unit counts could not be assigned "
+                            "to treatment groups. Verify the sample metadata "
+                            "before reporting an inferential condition claim."
+                        ),
+                    ))
+                continue
+            if modality_samples is None:
+                if (
+                    len(samples_per_group_by_modality) > 1
+                    and (_has_inference(str(text))
+                         or "effect of" in str(text).casefold())
+                ):
+                    report.findings.append(GateFinding(
+                        gate="modality-unresolved",
+                        rule_id="biological-replicate-is-the-unit",
+                        detail=(
+                            "this inferential finding does not identify which "
+                            "sequencing modality supports it. The session's "
+                            "modalities have different replicate counts, so name "
+                            "the source as Bulk RNA-seq, scRNA-seq, or Cross-modal "
+                            "before reporting the claim."
+                        ),
+                    ))
+                continue
+            unreplicated_single_cell = (
+                selected_modality == "single_cell"
+                and bool(modality_samples)
+                and min(modality_samples.values()) < 2
+            )
+            if (
+                unreplicated_single_cell
+                and _has_undisclaimed_inference(str(text))
+            ):
+                report.findings.append(GateFinding(
+                    gate="unreplicated-single-cell-inference",
+                    rule_id="biological-replicate-is-the-unit",
+                    detail=(
+                        "the single-cell arm has fewer than two independent "
+                        "biological units in at least one condition. Neither "
+                        "cell-level testing nor one-pseudobulk-per-condition "
+                        "can estimate a condition effect. Report the single-cell "
+                        "contrast descriptively, or base condition-level "
+                        "inference on a separately replicated modality."
+                    ),
+                ))
+            report.findings.extend(check_permutation_at_small_n(
+                [text], score_definitions, modality_samples,
+            ))
+            report.findings.extend(check_analysis_unit([text], modality_samples))
+            if not unreplicated_single_cell:
+                report.findings.extend(check_cell_level_inference(
+                    [text], modality_samples,
+                ))
+    else:
+        report.findings.extend(
+            check_permutation_at_small_n(findings, score_definitions, samples_per_group))
     report.findings.extend(
         check_resampling_resolution(findings, score_definitions))
     report.findings.extend(
         check_panel_redundancy(score_definitions, scoring_plans))
-    report.findings.extend(check_analysis_unit(findings, samples_per_group))
-    report.findings.extend(check_cell_level_inference(findings, samples_per_group))
+    if not samples_per_group_by_modality:
+        report.findings.extend(check_analysis_unit(findings, samples_per_group))
+        report.findings.extend(check_cell_level_inference(findings, samples_per_group))
     report.findings.extend(check_ora_background(score_definitions))
     report.findings.extend(
         check_composition_claims(findings, score_definitions=score_definitions))

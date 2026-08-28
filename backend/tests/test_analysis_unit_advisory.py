@@ -1,42 +1,8 @@
-"""check_analysis_unit advises; it does not refuse.
+"""Analysis-unit advisories use the finding's own modality sample design.
 
-Measured on session 3d675631-8c5f-4a6a-ad66-ef4c8996bb44 (scai-2, 0.48.1). The
-session holds two modalities: bulk RNA-seq with three replicates per group
-(merged_counts.csv, six sample columns) and single-nucleus RNA-seq with one
-library per group. data_profiling measured both correctly and wrote a
-SampleCountRecord for each.
-
-_gate_samples_per_group then collapsed them. The bulk record carries
-group_id=None -- one matrix spanning both groups cannot belong to either -- so
-it is skipped outright, and same-group modalities are reduced with min(). The
-gates were handed {Con: 1, DKO: 1}.
-
-check_analysis_unit refused report_findings on this finding:
-
-    Bulk RNA-seq identifies 564 significant DEGs including Slc7a11, Gsta13,
-    Nupr1 upregulated and Mup family downregulated
-
-which rests on n=3 per group and is perfectly estimable. The refusal was not
-actionable: the only edit that satisfies it -- restating a bulk contrast as
-descriptive -- is wrong, so the executor did not make it. It reworded the
-single-cell findings instead (its own words: "I understand the statistical
-validity concern. The scRNA-seq data has n=1 sample per condition, so condition
-effects cannot be statistically estimated"), resubmitted, and was refused again
-because the gate scans findings one at a time and the bulk one had not changed.
-The rejection ceiling then force-released, marking the round's evidence
-degraded.
-
-The rule itself is sound and stays in the corpus: with one library per
-condition a condition-level claim is not estimable, and that is arithmetic, not
-convention. What changes is the channel. n=1 single-cell work is ordinary and
-publishable as descriptive analysis, so a note the model cannot suppress is the
-proportionate instrument; a refusal is not, because the gate cannot tell which
-modality a finding rests on and a wrong refusal has no satisfiable response.
-
-The collapse in _gate_samples_per_group is NOT fixed here -- widening it means
-changing the run_gates parameter shape. Until then the advisory's numbers are
-still the per-group minimum across modalities, which is why its wording must
-not assert unconditional inestimability.
+The measured mixed-modality session has replicated bulk RNA-seq and one
+single-cell library per condition. Bulk replication must not be lowered by the
+single-cell arm, and the single-cell arm must not borrow the bulk sample size.
 """
 import re
 
@@ -52,7 +18,7 @@ BULK = ("Bulk RNA-seq identifies 564 significant DEGs including Slc7a11 "
 
 
 def _multimodal_state():
-    """The measured session: bulk n=3/group ungrouped, single-cell n=1/group."""
+    """Verified bulk n=3/group and single-cell n=1/group."""
     from backend.models.schemas import SampleCountRecord
 
     state = _live_state(
@@ -67,10 +33,11 @@ def _multimodal_state():
         for gid, name in (("g1", "Con"), ("g2", "DKO"))
     ] + [
         SampleCountRecord(
-            group_id=None, group_name="", section="sequencing",
-            data_type="bulk RNA-seq", detected_count=6, declared_count=None,
+            group_id=gid, group_name=name, section="sequencing",
+            data_type="bulk RNA-seq", detected_count=3, declared_count=3,
             method="matrix_columns",
-            evidence="six sample columns, three per group", conflicts=False),
+            evidence=f"three verified columns for {name}", conflicts=False)
+        for gid, name in (("g1", "Con"), ("g2", "DKO"))
     ]
     return state
 
@@ -121,18 +88,142 @@ def test_advisory_message_still_reaches_the_model():
 def test_measured_multimodal_session_is_not_refused():
     """The bulk finding that was refused at n=3 per group."""
     state = _multimodal_state()
-    samples = bio_mod._gate_samples_per_group(state)
-    # Unchanged on purpose: the collapse is a separate defect. The bulk record
-    # is group_id=None so it is skipped, and the declaration loses to the
-    # single-cell measurement.
-    assert samples == {"Con": 1, "DKO": 1}
+    samples = bio_mod._gate_samples_per_group_by_modality(state)
+    assert samples == {
+        "bulk RNA-seq": {"Con": 3, "DKO": 3},
+        "scRNA-seq": {"Con": 1, "DKO": 1},
+    }
 
-    report = run_gates([BULK], score_definitions=[], scoring_plans=[],
-                       samples_per_group=samples)
+    report = run_gates(
+        [{"text": BULK, "modality": "bulk_rna_seq"}],
+        score_definitions=[], scoring_plans=[],
+                       samples_per_group_by_modality=samples)
     assert report.passed is True, (
         "a bulk contrast at n=3 per group must not be refused by a count "
         "taken from another modality"
     )
+    assert not any(f.gate == "unidentifiable-design" for f in report.findings)
+
+
+def test_single_cell_finding_at_n1_is_blocked_and_keeps_the_advisory():
+    samples = bio_mod._gate_samples_per_group_by_modality(_multimodal_state())
+    report = run_gates(
+        [{"text": "condition effect is significant (p = 0.004)",
+          "modality": "single_cell"}],
+        score_definitions=[], scoring_plans=[],
+        samples_per_group_by_modality=samples,
+    )
+    assert [f.gate for f in report.blocking] == [
+        "unreplicated-single-cell-inference"
+    ]
+    assert [f.gate for f in report.advisories] == ["unidentifiable-design"]
+
+
+def test_descriptive_prefix_cannot_disclaim_a_later_inferential_clause():
+    samples = bio_mod._gate_samples_per_group_by_modality(_multimodal_state())
+    report = run_gates(
+        [{"text": "The single-cell comparison is descriptive only; Gene X is "
+                  "significantly increased (p = 0.004).",
+          "modality": "single_cell"}],
+        score_definitions=[], scoring_plans=[],
+        samples_per_group_by_modality=samples,
+    )
+
+    assert [f.gate for f in report.blocking] == [
+        "unreplicated-single-cell-inference"
+    ]
+
+
+def test_single_structured_finding_object_still_reaches_the_gate():
+    samples = bio_mod._gate_samples_per_group_by_modality(_multimodal_state())
+    report = run_gates(
+        {"text": "condition effect is significant (p = 0.004)",
+         "modality": "single_cell"},
+        score_definitions=[], scoring_plans=[],
+        samples_per_group_by_modality=samples,
+    )
+    assert [f.gate for f in report.blocking] == [
+        "unreplicated-single-cell-inference"
+    ]
+
+
+def test_finding_text_cannot_override_structured_single_cell_modality():
+    samples = bio_mod._gate_samples_per_group_by_modality(_multimodal_state())
+    report = run_gates(
+        [{"text": "Bulk RNA-seq condition effect is significant (p = 0.004)",
+          "modality": "single_cell"}],
+        score_definitions=[], scoring_plans=[],
+        samples_per_group_by_modality=samples,
+    )
+    assert [f.gate for f in report.blocking] == [
+        "unreplicated-single-cell-inference"
+    ]
+
+
+def test_multimodal_inferential_finding_must_name_its_source():
+    samples = bio_mod._gate_samples_per_group_by_modality(_multimodal_state())
+    report = run_gates(
+        [{"text": "The condition effect is significant (p = 0.004)"}],
+        score_definitions=[], scoring_plans=[],
+        samples_per_group_by_modality=samples,
+    )
+    assert [f.gate for f in report.blocking] == ["modality-unresolved"]
+
+
+def test_descriptive_cross_modal_finding_does_not_borrow_one_modality_n():
+    samples = bio_mod._gate_samples_per_group_by_modality(_multimodal_state())
+    report = run_gates(
+        [{"text": "descriptive direction concordance across modalities",
+          "modality": "cross_modal"}],
+        score_definitions=[], scoring_plans=[],
+        samples_per_group_by_modality=samples,
+    )
+    assert not any(
+        finding.gate in {
+            "modality-unresolved", "unidentifiable-design",
+            "unreplicated-single-cell-inference",
+        }
+        for finding in report.findings
+    )
+
+
+def test_inferential_cross_modal_finding_cannot_hide_unreplicated_arm():
+    samples = bio_mod._gate_samples_per_group_by_modality(_multimodal_state())
+    report = run_gates(
+        [{"text": "bulk and single-cell direction concordance is significant "
+                  "(p = 0.004)", "modality": "cross_modal"}],
+        score_definitions=[], scoring_plans=[],
+        samples_per_group_by_modality=samples,
+    )
+    assert [finding.gate for finding in report.blocking] == [
+        "cross-modal-inference-unreplicated"
+    ]
+
+
+def test_known_modality_with_unresolved_counts_cannot_borrow_bulk_n():
+    report = run_gates(
+        [{"text": "condition effect is significant (p = 0.004)",
+          "modality": "single_cell"}],
+        score_definitions=[], scoring_plans=[],
+        samples_per_group_by_modality={
+            "bulk RNA-seq": {"Con": 3, "DKO": 3},
+            "scRNA-seq": {},
+        },
+    )
+    assert [f.gate for f in report.blocking] == ["sample-design-unresolved"]
+
+
+def test_partial_group_mapping_is_treated_as_unresolved():
+    report = run_gates(
+        [{"text": "Bulk condition effect is significant (p = 0.004)",
+          "modality": "bulk_rna_seq"}],
+        score_definitions=[], scoring_plans=[],
+        samples_per_group_by_modality={
+            "bulk RNA-seq": {},
+            "scRNA-seq": {"Con": 1, "DKO": 1},
+        },
+    )
+    assert [f.gate for f in report.blocking] == ["sample-design-unresolved"]
 
 
 def test_descriptive_wording_still_produces_nothing():
@@ -144,16 +235,10 @@ def test_descriptive_wording_still_produces_nothing():
 
 # ------------------------------------------------------------- the wording
 
-def test_detail_does_not_assert_unconditional_inestimability():
-    """While the count is a cross-modality minimum, the note must not state as
-    fact that no effect is estimable -- in the measured session that is false
-    for the modality the refused finding actually rested on."""
+def test_detail_names_the_selected_modality_boundary():
     detail = check_analysis_unit([INFERENTIAL], {"Con": 1, "DKO": 1})[0].detail
-    assert "not estimable at all" not in detail
     lowered = detail.lower()
-    assert "modalit" in lowered, (
-        "the note must say the count is the lowest across modalities"
-    )
+    assert "modality" in lowered
     assert "descriptive" in lowered, "the actionable instruction must survive"
 
 

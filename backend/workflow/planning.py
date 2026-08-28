@@ -16,6 +16,7 @@ from ..services.interaction_record_capture import (
     get_or_open_direction_record,
 )
 from ..services.figure_contract import record_plan_figure_inheritance
+from ..services.sample_design import plan_sample_design_violations
 from ..utils.llm_client import UpstreamExhaustedError
 from ..utils.formatting import truncate_for_llm
 from .direction_coverage import (
@@ -874,6 +875,19 @@ class PlanningMixin:
                     )
                     if action == LlmFailureAction.RETRY:
                         continue  # retry same PI review call
+                    unavailable_review_violations = plan_sample_design_violations(
+                        plan, analysis_state,
+                    )
+                    if unavailable_review_violations:
+                        review = {
+                            "decision": "revise",
+                            "feedback": (
+                                "PI review was unavailable, but the deterministic "
+                                "sample-design check rejected this plan."
+                            ),
+                            "modifications": unavailable_review_violations,
+                        }
+                        break
                     # SKIP — plan exists but unreviewed; auto-accept it
                     await self._send_message(
                         "error",
@@ -931,6 +945,22 @@ class PlanningMixin:
                     analysis_state.status = TaskStatus.FAILED
                     await self._send_state_sync(analysis_state, "planning_aborted")
                     return state
+
+            design_violations = plan_sample_design_violations(
+                plan, analysis_state,
+            )
+            if design_violations:
+                review = {
+                    "decision": "revise",
+                    "feedback": (
+                        "The plan contradicts the measured modality-specific "
+                        "replicate design. Unreplicated single-cell conditions "
+                        "cannot support inferential condition testing, and replicate "
+                        "counts alone do not verify a separable condition-by-batch "
+                        "design for correction."
+                    ),
+                    "modifications": design_violations,
+                }
 
             # --- Process PI review decision ---
             dialogue_history.append({
@@ -1012,6 +1042,17 @@ class PlanningMixin:
                     current_plan=seed_plan,
                 )
                 populate_plan_scope(final_plan, analysis_state)
+                final_design_violations = plan_sample_design_violations(
+                    final_plan, analysis_state,
+                )
+                if final_design_violations:
+                    raise ValueError(
+                        "Final plan violates the measured sequencing sample "
+                        "design: " + "; ".join(
+                            str(item.get("suggestion") or "")
+                            for item in final_design_violations
+                        )
+                    )
                 analysis_state.current_plan = final_plan
                 analysis_state.plan_dialogue_history = dialogue_history
                 state["plan_approved"] = True
@@ -1133,6 +1174,26 @@ class PlanningMixin:
             state["should_continue"] = False
             analysis_state.status = TaskStatus.FAILED
             await self._send_state_sync(analysis_state, "planning_aborted")
+            return state
+
+        review_design_violations = plan_sample_design_violations(
+            plan, analysis_state,
+        )
+        if review_design_violations:
+            state["plan_approved"] = False
+            state["user_plan_feedback"] = (
+                "Deterministic sample-design validation requires revision: "
+                + "; ".join(
+                    str(item.get("suggestion") or "")
+                    for item in review_design_violations
+                )
+            )
+            await self._send_message(
+                "status",
+                "Plan review was returned for revision because it conflicts "
+                "with the measured modality-specific replicate counts.",
+                AgentType.PI,
+            )
             return state
 
         # Wipe any action/event left behind by a previous gate invocation in the

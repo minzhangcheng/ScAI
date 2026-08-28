@@ -204,6 +204,7 @@ class LifecycleMixin:
         return {
             "status": result["status"],
             "findings": result["findings"],
+            "finding_records": result.get("finding_records", []),
             "figures": result["figures"],
             "code_execution": self.code_history[-1] if self.code_history else None,
             "code_history": self.code_history,

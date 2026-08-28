@@ -33,6 +33,15 @@ from backend.services.marker_priors import MarkerDB, summarize_database_priors
 from ..utils.formatting import format_revision_history, truncate_for_llm
 from ..utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ..services.statistical_gates import run_gates as run_statistical_gates
+from ..services.sample_design import (
+    BULK_RNASEQ_MODALITY,
+    SCRNA_MODALITY,
+    code_sample_design_violation,
+    finding_evidence_errors,
+    has_replicated_condition_design,
+    infer_execution_modalities,
+    samples_per_group_by_modality,
+)
 
 
 def _method_rule_text(rule_id: str) -> str:
@@ -85,53 +94,13 @@ def _gate_score_definitions(state) -> List[Any]:
     return carried
 
 
-def _gate_samples_per_group(state) -> Dict[str, int]:
-    """Samples per condition as the record has them, for the design gates.
+def _gate_samples_per_group_by_modality(state) -> Dict[str, Dict[str, int]]:
+    """Replicate counts keyed by modality, then treatment group.
 
-    A measured record from the data_profiling pass wins outright: the
-    declaration could only ever be raised, so a user who declared more samples
-    than they uploaded made every consumer wrong in the same direction and this
-    function returned the inflated number to the very gates written to catch it.
-
-    Without such a record the previous resolution stands. sample_count defaults
-    to 1 in the schema, so a declaration left alone can undercount a group whose
-    upload plainly holds more; per-sample-numbered files are the harder evidence
-    and raise the count. That path is what every session already on disk takes.
-
-    They do not decide membership. A group the record shows as a single
-    specimen is exactly the input check_analysis_unit and
-    check_permutation_at_small_n exist to refuse, and leaving it out empties the
-    mapping -- both gates return early on an empty one, so the design they were
-    written for is the one design they would stop seeing.
+    The statistical gates must never collapse a replicated bulk arm and an
+    unreplicated single-cell arm into one session-wide number.
     """
-    numbered: Dict[Any, set] = {}
-    for data_file in (state.data_files or []):
-        if getattr(data_file, "sample_number", None) is None:
-            continue
-        numbered.setdefault(data_file.group_id, set()).add(data_file.sample_number)
-
-    # Measured counts, one per (group, data_type). detected_count == 0 means
-    # the read did not resolve a count -- skipping such a record is what keeps
-    # one unreadable file from manufacturing an n=0 group. The per-group
-    # minimum is the fail-safe direction: a group whose sequencing holds one
-    # specimen is judged at one even when another modality has more.
-    detected: Dict[Any, int] = {}
-    for record in (getattr(state, "detected_sample_counts", None) or []):
-        group_id = getattr(record, "group_id", None)
-        count = int(getattr(record, "detected_count", 0) or 0)
-        if group_id is None or count < 1:
-            continue
-        prior = detected.get(group_id)
-        detected[group_id] = count if prior is None else min(prior, count)
-
-    return {
-        g.name: (
-            detected[g.id] if g.id in detected
-            else max(g.sample_count, len(numbered.get(g.id, ())))
-        )
-        for g in (state.treatment_groups or [])
-        if getattr(g, "sample_count", None) is not None
-    }
+    return samples_per_group_by_modality(state)
 
 
 # Configure logger
@@ -739,7 +708,8 @@ WORKFLOW GUIDELINES:
   * Only use `init_pos='spectral'` for n_obs <= 5000
 - **BATCH EFFECT CHECK**: When loading multiple samples/batches/conditions, assess batch effects BEFORE clustering:
   * After initial PCA/UMAP, visualize cells colored by batch/sample/condition to check for batch effects
-  * If batch effects are apparent (samples cluster by batch rather than cell type), consult PI about correction strategy (harmonypy, bbknn, scvi, scanpy.pp.combat, etc.)
+  * If samples separate by batch, document the structure on the uncorrected embedding and consult PI about its interpretation; do not run Harmony, BBKNN, scVI, ComBat, or another correction because the current replicate-count channel does not verify a full-rank condition-by-batch design.
+  * With one independent single-cell sample per condition, concatenate with labels and keep condition comparisons descriptive; batch correction cannot identify which difference is technical.
   * Do NOT skip this step when multiple samples exist — batch effects can dominate clustering results
 - For CELL TYPE ANNOTATION, use annotate_clusters (NOT consult_pi):
   * After clustering and sc.tl.rank_genes_groups(), collect ALL cluster top markers into a dict
@@ -1647,6 +1617,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                     )
 
         completed = False
+        accepted_finding_records: List[Dict[str, Any]] = []
         annotation_completed = False  # Mandatory step tracker for exploration phase
         # Restore annotation_completed from analysis_log to avoid Gate 0
         # falsely rejecting report_findings after resume. Failed annotation
@@ -2130,6 +2101,28 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         step_type = args.get("step_type", "technical")
                         persistent_outputs = args.get("persistent_outputs", [])
 
+                        design_error = code_sample_design_violation(code, state)
+                        if design_error:
+                            logger.warning(
+                                "[Bioinformatics] Blocked code incompatible with "
+                                "sample design: %s", design_error,
+                            )
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": f"Execution blocked: {design_error}",
+                            })
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count,
+                                step_type="execute_code",
+                                agent_reasoning=agent_reasoning,
+                                code=code,
+                                code_error=design_error,
+                                code_description=description,
+                                code_step_type=step_type,
+                            ))
+                            continue
+
                         # Validate code for security before execution
                         is_safe, security_error = self._validate_code(code)
                         if not is_safe:
@@ -2313,6 +2306,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             figures=result.figures,
                             execution_time=execution_time,
                             round_number=state.current_round,
+                            analysis_modalities=infer_execution_modalities(code),
                         )
                         self.code_history.append(code_exec)
                         self.last_result = result
@@ -2879,9 +2873,34 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 
                         has_scrna_data = state.has_scrnaseq()
                         has_bulk_data = state.has_bulk_rnaseq()
+                        scrna_has_replicates = has_replicated_condition_design(
+                            state, SCRNA_MODALITY,
+                        )
+                        bulk_has_replicates = has_replicated_condition_design(
+                            state, BULK_RNASEQ_MODALITY,
+                        )
                         evidence_executions = successful_evidence_executions(
                             self.code_history, round_number=state.current_round
                         )
+                        finding_records = self._normalize_report_finding_records(args)
+                        if not finding_records:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": (
+                                    "[REJECTED] findings must contain at least one "
+                                    "non-empty finding object. A single object is "
+                                    "accepted for compatibility, but it must contain text."
+                                ),
+                            })
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count,
+                                step_type="report_findings",
+                                agent_reasoning=agent_reasoning,
+                                findings=[],
+                                findings_summary="REJECTED: empty findings payload",
+                            ))
+                            continue
                         lowered_codes = [ce.code.lower() for ce in evidence_executions if ce.code]
 
                         # Notes appended when a mandatory gate is released after max
@@ -2960,7 +2979,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         # a check that can never be satisfied must not trap the
                         # loop, and an escape is recorded in the report.
                         _stats_report = run_statistical_gates(
-                            args.get("findings"),
+                            finding_records,
                             # A stale record that refuses itself is dropped; the
                             # rest of the session's scores are evidence these
                             # findings are judged against. See
@@ -2970,9 +2989,12 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             # a plan_id lookup table, and a current-round score
                             # may legitimately cite a plan frozen earlier.
                             scoring_plans=state.scoring_plans,
-                            # A measured record supersedes the declaration either way, not just
-                            # upward. Fallback below is for a group with none. See _gate_samples_per_group.
-                            samples_per_group=_gate_samples_per_group(state),
+                            # Replication is modality-specific. A single-cell
+                            # n=1 arm must neither lower a replicated bulk arm
+                            # nor borrow the bulk arm's sample size.
+                            samples_per_group_by_modality=(
+                                _gate_samples_per_group_by_modality(state)
+                            ),
                             # cluster_labels deliberately not supplied: measured,
                             # feeding annotation vocabulary to the composition
                             # check costs 7 false positives and gains nothing,
@@ -3101,7 +3123,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         if state.analysis_phase == AnalysisPhase.EXPLORATION and planning_stage != "stage1":
 
                             # Gate 1: Bulk RNA-seq analysis
-                            if has_bulk_data:
+                            if has_bulk_data and bulk_has_replicates:
                                 # Bounded like its three siblings below. A
                                 # hand-rolled keyword test ending in a bare
                                 # `continue` could refuse for the whole step
@@ -3128,8 +3150,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                             f"Bulk data files: {bulk_paths}. "
                                             "You MUST: (1) Load bulk count matrix with pd.read_csv(), "
                                             "(2) Perform DEG analysis using pydeseq2 (if ImportError, fallback to scipy.stats.ttest_ind + statsmodels FDR correction), "
-                                            "(3) Compare bulk DEGs with scRNA-seq pseudobulk DEGs (Venn diagram), "
-                                            "THEN call report_findings."
+                                            "(3) Use the single-cell arm only in a way supported by its "
+                                            "replicate design, THEN call report_findings."
                                         )
                                     })
                                     analysis_log.append(AnalysisStep(
@@ -3152,28 +3174,49 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                     ))
 
                             # Gate 2: Bulk/scRNA-seq cross-validation
-                            if has_scrna_data and has_bulk_data:
+                            if (has_scrna_data and has_bulk_data
+                                    and bulk_has_replicates):
+                                integration_keywords = (
+                                    ["venn", "pseudobulk", "overlap", "intersect",
+                                     "matplotlib_venn", "venn2", "venn3"]
+                                    if scrna_has_replicates else
+                                    ["cell_type", "cell type", "dotplot", "heatmap",
+                                     "descriptive", "localiz"]
+                                )
                                 integration_reject_count, rejected, escaped = self._check_gate_keyword(
                                     lowered_codes,
-                                    ["venn", "pseudobulk", "overlap", "intersect",
-                                     "matplotlib_venn", "venn2", "venn3"],
+                                    integration_keywords,
                                     integration_reject_count, MAX_INTEGRATION_REJECTIONS,
-                                    "bulk/scRNA-seq cross-validation not performed",
+                                    ("bulk/scRNA-seq cross-validation not performed"
+                                     if scrna_has_replicates else
+                                     "bulk-supported single-cell localization not performed"),
                                 )
                                 if rejected:
+                                    if scrna_has_replicates:
+                                        integration_guidance = (
+                                            "(1) Aggregate scRNA-seq by independent biological sample\n"
+                                            "(2) Compare the replicated pseudobulk and bulk results\n"
+                                            "(3) Visualize concordance or overlap\n"
+                                            "(4) Show cell-type-specific expression for concordant genes"
+                                        )
+                                    else:
+                                        integration_guidance = (
+                                            "The single-cell arm has fewer than two independent samples "
+                                            "per condition. Do NOT run condition-level cell tests or claim "
+                                            "inferential pseudobulk DEGs. Use replicated bulk DEG/pathway "
+                                            "results as the inferential layer, then localize those supported "
+                                            "genes or pathways to single-cell cell types/states using "
+                                            "descriptive expression, ranks, or effect sizes. Explicitly label "
+                                            "the single-cell comparison descriptive."
+                                        )
                                     messages.append({
                                         "role": "tool",
                                         "tool_call_id": tool_call.id,
                                         "content": (
                                             "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
                                             "bulk/scRNA-seq cross-validation. "
-                                            "Both bulk RNA-seq and scRNA-seq data are available — you MUST "
-                                            "compare their DEG results before reporting. Specifically:\n"
-                                            "(1) Aggregate scRNA-seq to pseudobulk DEGs (or use your existing "
-                                            "condition-level DEG results across all cells)\n"
-                                            "(2) Find overlapping DEGs between bulk and scRNA-seq using set intersection\n"
-                                            "(3) Visualize overlap with a Venn diagram (from matplotlib_venn import venn2)\n"
-                                            "(4) For overlapping DEGs, show cell-type-specific expression patterns\n"
+                                            "Both bulk RNA-seq and scRNA-seq data are available.\n"
+                                            f"{integration_guidance}\n"
                                             "THEN call report_findings."
                                         )
                                     })
@@ -3197,7 +3240,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                     ))
 
                             # Gate 3: Cell-type deconvolution
-                            if has_scrna_data and has_bulk_data:
+                            if (has_scrna_data and has_bulk_data
+                                    and bulk_has_replicates):
                                 deconv_reject_count, rejected, escaped = self._check_gate_keyword(
                                     lowered_codes,
                                     ["deconvolution", "nnls", "scaden", "least_squares"],
@@ -3239,7 +3283,9 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                     ))
 
                         # Gate 4: INNOVATION-phase bulk direction validation
-                        elif state.analysis_phase == AnalysisPhase.INNOVATION and has_bulk_data and has_scrna_data:
+                        elif (state.analysis_phase == AnalysisPhase.INNOVATION
+                              and has_bulk_data and has_scrna_data
+                              and bulk_has_replicates):
                             innovation_bulk_reject_count, rejected, escaped = self._check_gate_keyword(
                                 lowered_codes,
                                 ["bulk_", "merged_counts"],
@@ -3286,9 +3332,21 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             for value in _ensure_list(args.get("evidence_execution_ids"))
                             if str(value).strip()
                         }
-                        eligible_evidence_ids = {execution.id for execution in evidence_executions}
+                        eligible_evidence_ids = {
+                            execution.id for execution in evidence_executions
+                        }
+                        evidence_by_id = {
+                            execution.id: execution for execution in evidence_executions
+                        }
                         invalid_evidence_ids = requested_evidence_ids - eligible_evidence_ids
-                        if not requested_evidence_ids or invalid_evidence_ids:
+                        per_finding_evidence_errors = finding_evidence_errors(
+                            finding_records,
+                            requested_evidence_ids,
+                            evidence_by_id,
+                        )
+
+                        if (not requested_evidence_ids or invalid_evidence_ids
+                                or per_finding_evidence_errors):
                             evidence_citation_reject_count += 1
                             messages.append({
                                 "role": "tool",
@@ -3298,6 +3356,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                                     "execute_code result using evidence_execution_ids. Failed executions "
                                     "or outputs that explicitly say validation failed cannot support a "
                                     f"claim. Invalid IDs: {sorted(invalid_evidence_ids)}. "
+                                    f"Per-finding errors: {per_finding_evidence_errors}. "
                                     f"Available IDs: {sorted(eligible_evidence_ids)[-20:]}"
                                 ),
                             })
@@ -3332,6 +3391,9 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 
                         has_substantive_work = True
                         findings = await self._handle_report_findings(args)
+                        accepted_finding_records = list(
+                            getattr(self, "_last_finding_records", []) or []
+                        )
                         summary = args.get("summary", "")
                         suggestions = args.get("suggestions", [])
 
@@ -3387,6 +3449,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                             step_number=step_count, step_type="report_findings",
                             agent_reasoning=agent_reasoning,
                             findings=findings, findings_summary=summary,
+                            finding_records=accepted_finding_records,
                             findings_suggestions=suggestions or [],
                             evidence_execution_ids=reported_evidence_ids,
                         ))
@@ -4551,6 +4614,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         return {
             "status": status,
             "findings": all_findings,
+            "finding_records": accepted_finding_records,
             "figures": all_figures,
             "steps_executed": attempt_steps_executed,
             "code_history": self.code_history,

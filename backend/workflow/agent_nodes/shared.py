@@ -112,22 +112,57 @@ register_mechanism_programs with an empty programs list and explain why in no_pr
 """
 
 
-def _build_exploration_instruction(has_bulk: bool, has_scrna: bool) -> str:
-    instr = """
+def _build_exploration_instruction(
+    has_bulk: bool, has_scrna: bool, scrna_replicated: bool = True,
+    bulk_replicated: bool = True,
+) -> str:
+    condition_analysis = (
+        "Perform sample-level pseudobulk condition DEG for supported cell type groups"
+        if scrna_replicated else
+        "For single-cell condition comparisons, report descriptive effect sizes/ranks only; "
+        "do not report cell-level or inferential pseudobulk p/FDR"
+    )
+    enrichment_analysis = (
+        "Run GO/KEGG pathway enrichment on supported replicated DEG results"
+        if scrna_replicated else
+        "Use replicated bulk DEG for inferential enrichment when bulk exists; treat "
+        "single-cell pathway localization as exploratory"
+        if bulk_replicated else
+        "Keep pathway comparisons exploratory because neither sequencing arm has "
+        "verified condition replication"
+    )
+    result_figure_analysis = (
+        "For each supported single-cell pseudobulk DEG and enrichment result, "
+        "generate the corresponding result figure"
+        if scrna_replicated else
+        "Generate inferential DEG/enrichment figures only for a replicated bulk "
+        "arm; single-cell figures must show descriptive localization or effect sizes"
+        if bulk_replicated else
+        "Generate descriptive result figures only; do not create volcano or "
+        "significance-ranked enrichment figures for unreplicated contrasts"
+    )
+    analysis_scope = (
+        "Keep analyses simple and high-throughput (sample-level DEG + GO/KEGG)"
+        if scrna_replicated else
+        "Keep inference in replicated bulk DEG + GO/KEGG and use single-cell "
+        "data only for descriptive localization"
+        if bulk_replicated else
+        "Keep all condition comparisons descriptive and exploratory"
+    )
+    instr = f"""
 ## EXPLORATION PHASE INSTRUCTIONS
 This is Round 1 — comprehensive, unbiased exploration. You MUST:
 1. Complete the FULL standard pipeline (QC → normalization → clustering → annotation)
 2. After annotation: merge biologically similar clusters (e.g., subtypes of the same cell type
-   differing only in activation/maturation state) into unified cell type groups before DEG analysis
-3. Perform condition-level DEG (treatment vs control) for ALL merged cell type groups
-4. Run GO/KEGG pathway enrichment on ALL DEG results
-5. Keep analyses simple and high-throughput (DEG + GO/KEGG)
+   differing only in activation/maturation state) into unified cell type groups before downstream comparison
+3. {condition_analysis}
+4. {enrichment_analysis}
+5. {analysis_scope}
 6. Do NOT skip any cell type — but DO merge related subtypes/states of the same cell type
 7. Complete cell communication analysis (liana)
-8. For EACH cell type group's DEG results, generate a visualization figure (volcano plot or bar chart)
-9. For EACH cell type group's KEGG/GO enrichment, generate a bar plot of top enriched pathways
+8. {result_figure_analysis}
 """
-    if has_bulk and has_scrna:
+    if has_bulk and has_scrna and scrna_replicated and bulk_replicated:
         instr += """
 10. **MANDATORY — Bulk RNA-seq DEG Analysis** (DO NOT SKIP):
     - Load the bulk RNA-seq count matrix and perform DEG analysis using pydeseq2
@@ -136,7 +171,7 @@ This is Round 1 — comprehensive, unbiased exploration. You MUST:
     NOTE: report_findings will be REJECTED if bulk DEG analysis is not performed.
 
 11. **MANDATORY — Bulk/scRNA-seq Cross-Validation** (DO NOT SKIP):
-    - Aggregate scRNA-seq data to pseudobulk level OR use condition-level DEGs across all cells
+    - Aggregate scRNA-seq by independent biological sample; never use cells as replicates
     - Find overlapping DEGs between bulk and scRNA-seq results using set intersection
     - Visualize the overlap with a Venn diagram (from matplotlib_venn import venn2)
     - For overlapping DEGs, visualize their cell-type-specific expression in scRNA-seq (e.g., dotplot or heatmap)
@@ -149,7 +184,30 @@ This is Round 1 — comprehensive, unbiased exploration. You MUST:
     - Generate a stacked bar plot or box plot showing the inferred cell-type proportions across bulk samples/conditions.
     NOTE: This is a SEPARATE mandatory gate. report_findings will be REJECTED if deconvolution is not performed.
 """
-    elif has_bulk:
+    elif has_bulk and has_scrna and bulk_replicated:
+        instr += """
+10. **MANDATORY — Replicated Bulk RNA-seq Inference** (DO NOT SKIP):
+    - Run bulk DEG with biological samples as the unit and generate its result figures.
+    - Do NOT run inferential single-cell pseudobulk or condition-level tests across cells.
+    - Localize bulk-supported genes/pathways to single-cell cell types or states using
+      descriptive expression, ranks, or effect sizes, with an explicit n=1 limitation.
+    - Cell-type deconvolution may use the annotated single-cell reference, but disclose
+      reference uncertainty and do not call the single-cell arm independent validation.
+"""
+    elif has_bulk and has_scrna and scrna_replicated:
+        instr += """
+10. **UNRESOLVED BULK DESIGN**:
+    - Keep bulk comparisons descriptive until independent samples are assigned
+      to treatment groups; use replicated single-cell pseudobulk for inference.
+    - Do not claim bulk DEG significance or independent cross-modal validation.
+"""
+    elif has_bulk and has_scrna:
+        instr += """
+10. **UNREPLICATED OR UNRESOLVED MIXED DESIGN**:
+    - Keep condition comparisons descriptive in both modalities.
+    - Do not report condition-level p/FDR or independent cross-modal validation.
+"""
+    elif has_bulk and bulk_replicated:
         instr += """
 10. **Bulk RNA-seq DEG Analysis**:
     - Load the bulk RNA-seq count matrix and run pydeseq2 DEG analysis
@@ -158,11 +216,20 @@ This is Round 1 — comprehensive, unbiased exploration. You MUST:
     - Run pathway enrichment via gseapy with organism-appropriate libraries
     Cross-validation against scRNA-seq and cell-type deconvolution are NOT applicable in bulk-only mode.
 """
+    elif has_bulk:
+        instr += """
+10. **UNRESOLVED BULK DESIGN**:
+    - Inspect and summarize the bulk matrix descriptively.
+    - Do not report condition-level DEG p/FDR until independent samples are
+      assigned to treatment groups.
+"""
     instr += _MECHANISM_CAPTURE_INSTRUCTION
     return instr
 
 
-def _build_innovation_instruction(direction: str, has_bulk: bool) -> str:
+def _build_innovation_instruction(
+    direction: str, has_bulk: bool, bulk_replicated: bool = True,
+) -> str:
     direction_ctx = direction or "PI-directed"
     instr = f"""
 ## INNOVATION PHASE INSTRUCTIONS
@@ -181,7 +248,7 @@ ANALYSIS REQUIREMENTS:
 9. Before computing any score, consult PI about scoring method and gene list source
 10. After computing any score, call register_score to document methodology for the report
 """
-    if has_bulk:
+    if has_bulk and bulk_replicated:
         instr += """
 11. **MANDATORY — Bulk RNA-seq Direction Validation** (if bulk data exists; DO NOT SKIP):
     Bulk RNA-seq data remains available and loaded from Round 1. When this round
@@ -197,18 +264,31 @@ ANALYSIS REQUIREMENTS:
 You may skip irrelevant cell populations and focus on those relevant to the hypothesis.
 Do NOT re-run completed steps from Round 1 (QC, clustering, cell annotation, etc.).
 """
-    if has_bulk:
+    if has_bulk and bulk_replicated:
         instr += """BUT: "completed steps" does NOT include bulk validation — each direction must independently
 validate its findings on bulk data, even if Round 1 already ran a bulk DEG pipeline.
+"""
+    elif has_bulk:
+        instr += """Bulk data is available but its sample-to-group design is unresolved.
+Use it descriptively only; it is not an independent validation layer.
 """
     return instr
 
 
-def _build_stage2_instruction(has_bulk: bool, has_scrna: bool) -> str:
+def _build_stage2_instruction(
+    has_bulk: bool, has_scrna: bool, scrna_replicated: bool = True,
+    bulk_replicated: bool = True,
+) -> str:
     """Stage 2 downstream-analysis instruction (DEG/GO/cellchat/trajectory),
     plus the mandatory bulk DEG + cross-validation + deconvolution block when
     both modalities are present. Pure function so it is unit-testable."""
-    instr = """
+    condition_step = (
+        "Sample-level pseudobulk condition differential expression per supported cell type"
+        if scrna_replicated else
+        "Descriptive single-cell condition effect sizes/ranks per supported cell type; "
+        "no cell-level or inferential pseudobulk p/FDR"
+    )
+    instr = f"""
 ## STAGE 2 - DOWNSTREAM ANALYSIS (builds on Stage 1 results)
 
 Stage 1 (QC, clustering, cell type annotation) is COMPLETE. The annotated data
@@ -217,13 +297,13 @@ the kernel / working directory.
 
 Do NOT re-run QC, clustering, or cell type annotation. Load the Stage 1 results
 and proceed to downstream analysis ONLY:
-1. Condition-level differential expression (treatment vs control) per cell type group
+1. {condition_step}
 2. GO/KEGG pathway enrichment on DEG results (organism-appropriate libraries)
 3. Cell-cell communication analysis (liana) where biologically relevant
 4. Trajectory/pseudotime analysis if applicable
 5. For each result, generate a publication-quality figure
 """
-    if has_bulk and has_scrna:
+    if has_bulk and has_scrna and scrna_replicated and bulk_replicated:
         instr += """
 6. **MANDATORY — Bulk RNA-seq DEG + cross-validation + deconvolution** (DO NOT SKIP):
    reuse the loaded bulk matrix; run pydeseq2 DEG (fallback: scipy.stats.ttest_ind
@@ -231,17 +311,43 @@ and proceed to downstream analysis ONLY:
    cell-type deconvolution (scipy.optimize.nnls).
    NOTE: report_findings will be REJECTED if these are not performed.
 """
-    elif has_bulk:
+    elif has_bulk and has_scrna and bulk_replicated:
+        instr += """
+6. **MANDATORY — Replicated bulk inference + descriptive single-cell localization**:
+   run bulk DEG/pathway analysis with bulk biological samples as the unit. Localize
+   bulk-supported signals to annotated single-cell cell types/states using descriptive
+   expression, ranks, or effect sizes. Do not manufacture scRNA replication through
+   cells or one-pseudobulk-per-condition tests.
+"""
+    elif has_bulk and has_scrna and scrna_replicated:
+        instr += """
+6. **UNRESOLVED BULK DESIGN**: keep bulk comparisons descriptive and use
+   replicated single-cell pseudobulk as the inferential layer. Do not claim
+   bulk DEG significance or independent cross-modal validation.
+"""
+    elif has_bulk and has_scrna:
+        instr += """
+6. **UNREPLICATED OR UNRESOLVED MIXED DESIGN**: keep condition comparisons
+   descriptive in both modalities; do not report condition-level p/FDR.
+"""
+    elif has_bulk and bulk_replicated:
         instr += """
 6. **Bulk RNA-seq DEG**: run pydeseq2 (fallback ttest_ind+FDR), volcano + heatmap,
    pathway enrichment via gseapy. Cross-validation/deconvolution not applicable in bulk-only mode.
+"""
+    elif has_bulk:
+        instr += """
+6. **UNRESOLVED BULK DESIGN**: inspect bulk expression descriptively; do not
+   report condition-level DEG p/FDR until sample-to-group membership is verified.
 """
     instr += _MECHANISM_CAPTURE_INSTRUCTION
     return instr
 
 
 def build_phase_instruction(planning_stage: str, analysis_phase: str,
-                            has_bulk: bool, has_scrna: bool, direction: str) -> str:
+                            has_bulk: bool, has_scrna: bool, direction: str,
+                            scrna_replicated: bool = True,
+                            bulk_replicated: bool = True) -> str:
     """Build the bioinformatics phase instruction. Pure function so it is unit-testable.
 
     Branch order matters: stage1 and stage2 are checked BEFORE the
@@ -250,9 +356,28 @@ def build_phase_instruction(planning_stage: str, analysis_phase: str,
     pi_synthesis).
     """
     if planning_stage == "stage1":
-        return _STAGE1_INSTRUCTION
+        if not has_scrna or scrna_replicated:
+            return _STAGE1_INSTRUCTION
+        return _STAGE1_INSTRUCTION + """
+
+## DESIGN OVERRIDE — UNREPLICATED SINGLE-CELL CONDITIONS
+Each single-cell condition has fewer than two independent biological units.
+Assess the uncorrected sample/condition structure, but do NOT use Harmony,
+BBKNN, ComBat, scVI batch correction, or another integration method to remove
+sample/library differences that are confounded with condition. Concatenation
+with explicit sample and condition labels is allowed. This override takes
+precedence over any generic request for batch correction.
+"""
     if planning_stage == "stage2":
-        return _build_stage2_instruction(has_bulk, has_scrna)
+        return _build_stage2_instruction(
+            has_bulk, has_scrna, scrna_replicated=scrna_replicated,
+            bulk_replicated=bulk_replicated,
+        )
     if analysis_phase == "exploration":
-        return _build_exploration_instruction(has_bulk, has_scrna)
-    return _build_innovation_instruction(direction, has_bulk)
+        return _build_exploration_instruction(
+            has_bulk, has_scrna, scrna_replicated=scrna_replicated,
+            bulk_replicated=bulk_replicated,
+        )
+    return _build_innovation_instruction(
+        direction, has_bulk, bulk_replicated=bulk_replicated,
+    )

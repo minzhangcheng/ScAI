@@ -430,7 +430,7 @@ class AnalysisState(BaseModel):
     evidence_gate_findings: List[Dict[str, Any]] = Field(default_factory=list)
     # Replicate counts measured from the data, one record per
     # (group, data_type). Supersedes TreatmentGroup.sample_count wherever a
-    # record exists; see _gate_samples_per_group.
+    # record exists; consumers resolve these per modality.
     detected_sample_counts: List[SampleCountRecord] = Field(default_factory=list)
     # How many execution-driven plan revisions each round+stage has already
     # spent, keyed "<round>:<stage>". The revision cycle bypasses
@@ -672,9 +672,8 @@ class AnalysisState(BaseModel):
                     f"{r.data_type}: {r.detected_count}"
                     for r in sorted(usable, key=lambda r: r.data_type)
                 )
-                effective = min(r.detected_count for r in usable)
-                line = (f"  - {g.name} (detected {effective} sample(s) "
-                        f"[{per_type}]): {g.description}")
+                line = (f"  - {g.name} (declared {g.sample_count} sample(s); "
+                        f"detected by modality [{per_type}]): {g.description}")
                 # r.conflicts is fixed at detection time, but sample_count can be
                 # edited afterward with no round or profiling guard (PUT
                 # /session/{id}/groups/{id}) -- comparing against the stored flag
@@ -706,6 +705,19 @@ class AnalysisState(BaseModel):
                 if section_files:
                     types = Counter(f.data_type for f in section_files)
                     parts.append(f"    {section}: {dict(types)}")
+        ungrouped_counts = [
+            record for record in (self.detected_sample_counts or [])
+            if record.group_id is None
+        ]
+        if ungrouped_counts:
+            rendered = ", ".join(
+                f"{record.data_type}: "
+                f"{record.detected_count if record.detected_count >= 1 else 'undetermined'}"
+                for record in sorted(ungrouped_counts, key=lambda r: r.data_type)
+            )
+            parts.append(
+                "    detected counts not safely assignable to groups: " + rendered
+            )
 
         # Show biochemistry indicators summary
         if self.biochemistry_indicators:

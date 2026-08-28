@@ -40,6 +40,41 @@ async def test_report_findings_accepts_list_findings():
 
 
 @pytest.mark.asyncio
+async def test_report_findings_normalizes_structured_findings_to_text():
+    agent = BioinformaticsAgent.__new__(BioinformaticsAgent)
+    agent._last_findings = []
+    out = await agent._handle_report_findings({
+        "findings": [
+            {"text": "bulk result", "modality": "bulk_rna_seq"},
+            {"text": "single-cell localization", "modality": "single_cell"},
+        ]
+    })
+    assert out == ["bulk result", "single-cell localization"]
+    assert agent._last_findings == out
+
+
+@pytest.mark.asyncio
+async def test_report_findings_accepts_one_structured_finding_object():
+    agent = BioinformaticsAgent.__new__(BioinformaticsAgent)
+    agent._last_findings = []
+    out = await agent._handle_report_findings({
+        "findings": {
+            "text": "bulk result",
+            "modality": "bulk_rna_seq",
+            "evidence_execution_ids": ["bulk-exec"],
+        },
+        "evidence_execution_ids": ["bulk-exec"],
+    })
+
+    assert out == ["bulk result"]
+    assert agent._last_finding_records == [{
+        "text": "bulk result",
+        "modality": "bulk_rna_seq",
+        "evidence_execution_ids": ["bulk-exec"],
+    }]
+
+
+@pytest.mark.asyncio
 async def test_report_findings_missing_findings():
     agent = BioinformaticsAgent.__new__(BioinformaticsAgent)
     agent._last_findings = []

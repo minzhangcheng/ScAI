@@ -1,11 +1,4 @@
-"""Detected replicate counts supersede the user's declaration.
-
-`TreatmentGroup.sample_count` is a declaration nothing verified, and the
-resolver could only ever raise it. A user who declared more samples than they
-uploaded made every consumer wrong in the same direction, and the two gates
-written for exactly that design -- check_analysis_unit and
-check_permutation_at_small_n -- saw the inflated number and passed.
-"""
+"""Detected replicate counts are resolved independently per modality."""
 from backend.models.schemas import AnalysisState, SampleCountRecord
 
 
@@ -84,6 +77,13 @@ def test_to_api_dict_serializes_detected_sample_counts_to_camelcase():
 
 import backend.agents.bioinformatics_agent as bio_mod
 from backend.models.schemas import DataFile, TreatmentGroup
+from backend.services.sample_design import (
+    BULK_RNASEQ_MODALITY,
+    SCRNA_MODALITY,
+    code_sample_design_violation,
+    has_replicated_condition_design,
+    plan_sample_design_violations,
+)
 
 
 def _state_with(records, groups, files=()):
@@ -111,15 +111,13 @@ def test_detected_count_supersedes_the_declaration():
         groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
                 TreatmentGroup(id="g2", name="DKO", sample_count=3)],
     )
-    assert bio_mod._gate_samples_per_group(state) == {"Con": 1, "DKO": 1}
+    assert bio_mod._gate_samples_per_group_by_modality(state) == {
+        "scRNA-seq": {"Con": 1, "DKO": 1},
+    }
 
 
-def test_the_group_minimum_is_taken_across_data_types():
-    """Three stains of one animal are three records of n=1, not n=3.
-
-    The minimum is the fail-safe direction: a group whose sequencing is n=1 is
-    judged at n=1 even when another modality has more.
-    """
+def test_sample_counts_do_not_collapse_across_modalities():
+    """Non-sequencing records cannot change the scRNA replicate count."""
     state = _state_with(
         records=[_rec("g1", "Con", "sequencing", "scRNA-seq", 1, 3),
                  _rec("g1", "Con", "pathology", "H&E", 1, 3, "file_records"),
@@ -127,7 +125,9 @@ def test_the_group_minimum_is_taken_across_data_types():
                       "extracted_data")],
         groups=[TreatmentGroup(id="g1", name="Con", sample_count=3)],
     )
-    assert bio_mod._gate_samples_per_group(state) == {"Con": 1}
+    assert bio_mod._gate_samples_per_group_by_modality(state) == {
+        "scRNA-seq": {"Con": 1},
+    }
 
 
 def test_an_undetermined_record_is_skipped_not_counted_as_zero():
@@ -140,26 +140,307 @@ def test_an_undetermined_record_is_skipped_not_counted_as_zero():
                  _rec("g1", "Con", "sequencing", "scRNA-seq", 2, 3)],
         groups=[TreatmentGroup(id="g1", name="Con", sample_count=3)],
     )
-    assert bio_mod._gate_samples_per_group(state) == {"Con": 2}
+    assert bio_mod._gate_samples_per_group_by_modality(state) == {
+        "scRNA-seq": {"Con": 2},
+    }
 
 
-def test_a_group_with_nothing_determined_keeps_the_previous_resolution():
-    """No profiling pass ran -- which is every session already on disk."""
+def test_a_group_with_nothing_determined_remains_unresolved():
+    """A declaration cannot replace a failed profiling result."""
     state = _state_with(
         records=[_rec("g1", "Con", "sequencing", "Loom", 0, 4, "undetermined")],
         groups=[TreatmentGroup(id="g1", name="Con", sample_count=4)],
     )
-    assert bio_mod._gate_samples_per_group(state) == {"Con": 4}
+    assert bio_mod._gate_samples_per_group_by_modality(state) == {
+        "scRNA-seq": {},
+    }
 
 
-def test_ungrouped_records_stay_out_of_the_mapping():
-    """merged_counts.csv had group_id=None; the mapping is keyed by group name."""
+def test_explicit_undetermined_record_does_not_fall_back_to_upload_numbers():
+    """A failed measurement must outrank UI file numbering."""
+    state = _state_with(
+        records=[
+            _rec(group_id, name, "sequencing", "scRNA-seq", 0, 3,
+                 "undetermined")
+            for group_id, name in (("g1", "Con"), ("g2", "DKO"))
+        ],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+        files=[
+            DataFile(
+                filename=f"{group_id}_{number}.h5ad",
+                file_path=f"/{group_id}_{number}.h5ad",
+                section="sequencing", data_type="scRNA-seq",
+                group_id=group_id, sample_number=number,
+            )
+            for group_id in ("g1", "g2") for number in (1, 2, 3)
+        ],
+    )
+
+    assert bio_mod._gate_samples_per_group_by_modality(state) == {
+        "scRNA-seq": {},
+    }
+    assert has_replicated_condition_design(state, SCRNA_MODALITY) is False
+
+
+def test_ungrouped_bulk_total_does_not_invent_group_membership():
+    """A total of six columns does not prove the declared three-plus-three split."""
     state = _state_with(
         records=[_rec(None, "", "sequencing", "bulk RNA-seq", 6, None),
-                 _rec("g1", "Con", "sequencing", "scRNA-seq", 1, 3)],
-        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3)],
+                 _rec("g1", "Con", "sequencing", "scRNA-seq", 1, 3),
+                 _rec("g2", "DKO", "sequencing", "scRNA-seq", 1, 3)],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
     )
-    assert bio_mod._gate_samples_per_group(state) == {"Con": 1}
+    assert bio_mod._gate_samples_per_group_by_modality(state) == {
+        "bulk RNA-seq": {},
+        "scRNA-seq": {"Con": 1, "DKO": 1},
+    }
+    assert has_replicated_condition_design(state, BULK_RNASEQ_MODALITY) is False
+
+
+def test_ungrouped_total_must_match_declared_group_sum_before_distribution():
+    state = _state_with(
+        records=[_rec(None, "", "sequencing", "bulk RNA-seq", 2, None)],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+    )
+
+    assert bio_mod._gate_samples_per_group_by_modality(state) == {
+        "bulk RNA-seq": {},
+    }
+
+
+def test_mixed_design_replication_is_decided_per_modality():
+    state = _state_with(
+        records=[
+            _rec(group_id, name, "sequencing", "scRNA-seq", 1, 3)
+            for group_id, name in (("g1", "Con"), ("g2", "DKO"))
+        ] + [
+            _rec(group_id, name, "sequencing", "bulk RNA-seq", 3, 3)
+            for group_id, name in (("g1", "Con"), ("g2", "DKO"))
+        ],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+    )
+
+    assert has_replicated_condition_design(state, SCRNA_MODALITY) is False
+    assert has_replicated_condition_design(state, BULK_RNASEQ_MODALITY) is True
+
+
+def test_partial_group_counts_fail_the_whole_modality_closed():
+    """One resolved arm cannot make an omitted comparison group disappear."""
+    state = _state_with(
+        records=[_rec("g1", "Con", "sequencing", "bulk RNA-seq", 3, 3)],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+    )
+
+    assert bio_mod._gate_samples_per_group_by_modality(state) == {
+        "bulk RNA-seq": {},
+    }
+    assert has_replicated_condition_design(state, BULK_RNASEQ_MODALITY) is False
+
+
+def test_profiling_rejects_a_nonempty_but_partial_registration():
+    from backend.agents.bioinformatics.profiling import (
+        _registration_coverage_error,
+    )
+
+    state = _state_with(
+        records=[],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+        files=[DataFile(
+            filename="bulk.csv", file_path="/bulk.csv", section="sequencing",
+            data_type="bulk RNA-seq",
+        )],
+    )
+    records = [
+        _rec("g1", "Con", "sequencing", "bulk RNA-seq", 3, 3),
+    ]
+
+    assert "incomplete" in _registration_coverage_error(state, records)
+
+
+def test_declarations_alone_do_not_enable_condition_inference():
+    state = _state_with(
+        records=[],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+        files=[
+            DataFile(filename=f"{group}.h5ad", file_path=f"/{group}.h5ad",
+                     section="sequencing", data_type="scRNA-seq",
+                     group_id=group)
+            for group in ("g1", "g2")
+        ],
+    )
+
+    assert has_replicated_condition_design(state, SCRNA_MODALITY) is False
+
+
+def test_unreplicated_single_cell_plan_rejects_harmony_and_inferential_deg():
+    from backend.models.schemas import AnalysisPlan, PlanStep
+
+    state = _state_with(
+        records=[
+            _rec(group_id, name, "sequencing", "scRNA-seq", 1, 3)
+            for group_id, name in (("g1", "Con"), ("g2", "DKO"))
+        ],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+    )
+    plan = AnalysisPlan(phase="exploration", steps=[
+        PlanStep(id=1, title="Harmony correction", method="harmony_integrate batch=sample"),
+        PlanStep(id=2, title="Per-cell-type condition DEG",
+                 method="rank_genes_groups with condition p-values"),
+    ])
+
+    violations = plan_sample_design_violations(plan, state)
+    assert [item["step_id"] for item in violations] == [1, 2]
+
+
+def test_unreplicated_single_cell_plan_allows_descriptive_localization():
+    from backend.models.schemas import AnalysisPlan, PlanStep
+
+    state = _state_with(
+        records=[
+            _rec(group_id, name, "sequencing", "scRNA-seq", 1, 3)
+            for group_id, name in (("g1", "Con"), ("g2", "DKO"))
+        ],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+    )
+    plan = AnalysisPlan(phase="exploration", steps=[
+        PlanStep(
+            id=1,
+            title="Descriptive cell-type localization",
+            method="rank bulk-supported genes by descriptive scRNA effect size",
+        ),
+    ])
+
+    assert plan_sample_design_violations(plan, state) == []
+
+
+def test_unresolved_ungrouped_bulk_plan_rejects_inferential_deg():
+    from backend.models.schemas import AnalysisPlan, PlanStep
+
+    state = _state_with(
+        records=[_rec(None, "", "sequencing", "bulk RNA-seq", 6, None)],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+    )
+    plan = AnalysisPlan(phase="exploration", steps=[
+        PlanStep(id=1, title="Bulk differential expression",
+                 method="pydeseq2 condition DEG with adjusted p-values"),
+    ])
+
+    violations = plan_sample_design_violations(plan, state)
+    assert [item["step_id"] for item in violations] == [1]
+    assert "bulk samples" in violations[0]["suggestion"]
+
+
+def test_unreplicated_single_cell_runtime_blocks_harmony():
+    state = _state_with(
+        records=[
+            _rec(group_id, name, "sequencing", "scRNA-seq", 1, 3)
+            for group_id, name in (("g1", "Con"), ("g2", "DKO"))
+        ],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+    )
+
+    error = code_sample_design_violation(
+        "sc.external.pp.harmony_integrate(adata, 'library_id')", state,
+    )
+    assert "cannot be separated from condition" in error
+
+
+def test_negated_harmony_plan_and_code_are_not_rejected():
+    from backend.models.schemas import AnalysisPlan, PlanStep
+
+    state = _state_with(
+        records=[
+            _rec(group_id, name, "sequencing", "scRNA-seq", 1, 3)
+            for group_id, name in (("g1", "Con"), ("g2", "DKO"))
+        ],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+    )
+    plan = AnalysisPlan(phase="exploration", steps=[
+        PlanStep(id=1, title="Uncorrected embedding",
+                 method="Do not use Harmony; assess the uncorrected embedding"),
+    ])
+
+    assert plan_sample_design_violations(plan, state) == []
+    assert code_sample_design_violation(
+        "# Harmony is intentionally not used\nsc.pp.neighbors(adata)", state,
+    ) == ""
+
+
+def test_postposed_batch_negation_and_assessment_are_not_rejected():
+    from backend.models.schemas import AnalysisPlan, PlanStep
+
+    state = _state_with(
+        records=[
+            _rec(group_id, name, "sequencing", "scRNA-seq", 1, 3)
+            for group_id, name in (("g1", "Con"), ("g2", "DKO"))
+        ],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+    )
+    plan = AnalysisPlan(phase="exploration", steps=[
+        PlanStep(id=1, title="Uncorrected embedding",
+                 method="Harmony integration will not be used"),
+        PlanStep(id=2, title="Batch assessment",
+                 method="Assess whether batch correction is required; retain the uncorrected embedding"),
+    ])
+
+    assert plan_sample_design_violations(plan, state) == []
+
+
+def test_replicates_alone_do_not_license_batch_correction():
+    from backend.models.schemas import AnalysisPlan, PlanStep
+
+    state = _state_with(
+        records=[
+            _rec(group_id, name, "sequencing", "scRNA-seq", 3, 3)
+            for group_id, name in (("g1", "Con"), ("g2", "DKO"))
+        ],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+    )
+    plan = AnalysisPlan(phase="exploration", steps=[
+        PlanStep(id=1, title="Harmony correction",
+                 method="sc.external.pp.harmony_integrate by library"),
+    ])
+
+    assert [v["step_id"] for v in plan_sample_design_violations(plan, state)] == [1]
+    assert "full-rank" in code_sample_design_violation(
+        "sc.external.pp.harmony_integrate(adata, 'library_id')", state,
+    )
+
+
+def test_inferential_statistics_are_not_excused_by_descriptive_wording():
+    from backend.models.schemas import AnalysisPlan, PlanStep
+
+    state = _state_with(
+        records=[
+            _rec(group_id, name, "sequencing", "scRNA-seq", 1, 3)
+            for group_id, name in (("g1", "Con"), ("g2", "DKO"))
+        ],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+    )
+    plan = AnalysisPlan(phase="exploration", steps=[
+        PlanStep(
+            id=1,
+            title="Single-cell condition differential expression",
+            method="Compute cell-level p-values and also report descriptive effect sizes",
+        ),
+    ])
+
+    assert [v["step_id"] for v in plan_sample_design_violations(plan, state)] == [1]
 
 
 def test_the_profiling_tool_set_is_two_tools_and_excludes_the_analysis_tools():

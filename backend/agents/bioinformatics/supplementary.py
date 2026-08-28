@@ -19,6 +19,12 @@ from pathlib import Path
 
 from backend.services.report.artifacts import artifact_stems
 from backend.services.report.figure_discovery import discover_figures_in_workspace
+from backend.services.sample_design import (
+    code_sample_design_violation,
+    infer_execution_modalities,
+    samples_per_group_by_modality,
+)
+from backend.services.statistical_gates import run_gates as run_statistical_gates
 
 from .shared import (
     AnalysisStep,
@@ -32,6 +38,76 @@ from .shared import (
 logger = logging.getLogger(__name__)
 
 _VALID_STATUSES = ("completed", "partial", "failed")
+
+
+def _validated_supplementary_findings(
+    findings: List[Any], executions: List[CodeExecution], state: Any,
+) -> tuple[List[Dict[str, Any]], List[str]]:
+    """Bind supplementary findings to successful executions and sample design."""
+    evidence_by_id = {
+        str(record.id): record
+        for record in executions
+        if execution_supports_evidence(record)
+    }
+    records: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    modality_names = {
+        frozenset({"single_cell"}): "single_cell",
+        frozenset({"bulk_rna_seq"}): "bulk_rna_seq",
+        frozenset({"single_cell", "bulk_rna_seq"}): "cross_modal",
+    }
+    for index, value in enumerate(findings or [], start=1):
+        text = str(value or "").strip()
+        if not text:
+            continue
+        cited_ids = [
+            execution_id for execution_id in evidence_by_id
+            if execution_id in text
+        ]
+        if not cited_ids:
+            warnings.append(
+                f"Discarded supplementary finding {index}: it cites no successful "
+                "execution ID from this pass."
+            )
+            continue
+        modalities = frozenset(
+            modality
+            for execution_id in cited_ids
+            for modality in getattr(
+                evidence_by_id[execution_id], "analysis_modalities", [],
+            )
+        )
+        modality = modality_names.get(modalities)
+        if modality is None:
+            warnings.append(
+                f"Discarded supplementary finding {index}: the cited execution "
+                "modality could not be established."
+            )
+            continue
+        record = {
+            "text": text,
+            "modality": modality,
+            "evidence_execution_ids": cited_ids,
+        }
+        report = run_statistical_gates(
+            [record],
+            score_definitions=list(getattr(state, "score_definitions", None) or []),
+            scoring_plans=list(getattr(state, "scoring_plans", None) or []),
+            samples_per_group_by_modality=samples_per_group_by_modality(state),
+        )
+        if not report.passed:
+            warnings.append(
+                f"Discarded supplementary finding {index}: "
+                + "; ".join(finding.detail for finding in report.blocking)
+            )
+            continue
+        if report.advisories:
+            warnings.append(
+                f"Supplementary finding {index} advisory: "
+                + "; ".join(finding.detail for finding in report.advisories)
+            )
+        records.append(record)
+    return records, warnings
 
 
 class SupplementaryMixin:
@@ -152,6 +228,11 @@ class SupplementaryMixin:
 
     def _supplementary_code_is_safe(self, code: str, main_var: str) -> Optional[str]:
         """Return a reason string if a supplementary cell is statically unsafe, else None."""
+        design_error = code_sample_design_violation(
+            code, getattr(self, "_current_analysis_state", None),
+        )
+        if design_error:
+            return design_error
         unsafe = code_is_statically_unsafe(code, main_var, self._SUPPLEMENTARY_DENYLIST)
         if unsafe:
             return unsafe
@@ -383,6 +464,7 @@ class SupplementaryMixin:
                 "status": status,
                 "summary": summary,
                 "findings": [],
+                "finding_records": [],
                 "figures": [],
                 "warnings": warnings + list(extra_warnings),
                 "code_history": list(produced),
@@ -482,6 +564,7 @@ class SupplementaryMixin:
                     figures=[],
                     execution_time=execution_time,
                     round_number=round_number,
+                    analysis_modalities=infer_execution_modalities(code),
                 )
                 produced.append(record)
                 self.code_history.append(record)
@@ -607,9 +690,15 @@ class SupplementaryMixin:
                 status = "completed"
             result = _envelope(status, str(final_result.get("summary", "") or "").strip()
                                or "Supplementary analysis completed.", [])
-            result["findings"] = [
+            raw_findings = [
                 str(f).strip() for f in (final_result.get("findings") or []) if str(f).strip()
             ]
+            finding_records, finding_warnings = _validated_supplementary_findings(
+                raw_findings, produced, state,
+            )
+            result["finding_records"] = finding_records
+            result["findings"] = [record["text"] for record in finding_records]
+            result["warnings"] += finding_warnings
             result["warnings"] += [
                 str(w).strip() for w in (final_result.get("warnings") or []) if str(w).strip()
             ]

@@ -1243,6 +1243,37 @@ def _sanitize_evidence_records(values: Any) -> List[Dict[str, str]]:
     return records
 
 
+def _sanitize_finding_records(values: Any) -> List[Dict[str, Any]]:
+    """Allowlist supplementary finding provenance for merge and persistence."""
+    if not isinstance(values, (list, tuple)):
+        return []
+    records: List[Dict[str, Any]] = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        text = str(value.get("text", "") or "").strip()
+        modality = str(value.get("modality", "") or "").strip()
+        evidence_ids = [
+            str(item).strip()[:100]
+            for item in (value.get("evidence_execution_ids") or [])
+            if str(item).strip()
+        ]
+        if (
+            not text
+            or modality not in {"single_cell", "bulk_rna_seq", "cross_modal"}
+            or not evidence_ids
+        ):
+            continue
+        records.append({
+            "text": text[:_MAX_TASK_LEN],
+            "modality": modality,
+            "evidence_execution_ids": evidence_ids[:_MAX_LIST],
+        })
+        if len(records) >= _MAX_FINDINGS:
+            break
+    return records
+
+
 def sanitize_review_result(result: Any) -> Dict[str, Any]:
     """Bound a supplementary-execution result for storage and transport.
 
@@ -1273,6 +1304,9 @@ def sanitize_review_result(result: Any) -> Dict[str, Any]:
         "status": str(result.get("status", "completed") or "completed"),
         "summary": str(result.get("summary", "") or "Supplementary analysis completed.")[:4000],
         "findings": _clean_list(result.get("findings"), _MAX_FINDINGS, _MAX_TASK_LEN),
+        "finding_records": _sanitize_finding_records(
+            result.get("finding_records")
+        ),
         # The automatic supplementary pass has no publication-figure review
         # callback. Never serialize its raw notebook images into report state.
         "figures": [],

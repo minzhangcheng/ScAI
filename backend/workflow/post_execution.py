@@ -481,6 +481,7 @@ class PostExecutionReviewMixin:
 
         merge_payload = {
             "findings": supplementary.get("findings", []),
+            "finding_records": supplementary.get("finding_records", []),
             # Restricted supplementary work repairs computational evidence only.
             # Any visual gap is returned to the main reviewed figure pipeline.
             "figures": [],
@@ -519,7 +520,15 @@ class PostExecutionReviewMixin:
         """
         from ..models.schemas import AnalysisStep
 
-        tagged = [f"[Supplementary] {f}" for f in (merge_payload.get("findings") or [])]
+        tagged_records = [
+            {
+                **record,
+                "text": f"[Supplementary] {record.get('text', '')}",
+            }
+            for record in (merge_payload.get("finding_records") or [])
+            if isinstance(record, dict) and str(record.get("text", "")).strip()
+        ]
+        tagged = [record["text"] for record in tagged_records]
         merged_findings = list(all_findings) + tagged
         # Defense in depth for old checkpoints or mocked executors carrying the
         # pre-isolation payload shape: unreviewed supplementary images never join
@@ -551,6 +560,9 @@ class PostExecutionReviewMixin:
         # Keep the raw result consistent so the re-audit and any later reader see
         # the supplementary executions as part of this round.
         result["findings"] = merged_findings
+        result["finding_records"] = list(
+            result.get("finding_records") or []
+        ) + tagged_records
         result["figures"] = merged_figures
         if added_executions:
             result["code_history"] = list(result.get("code_history") or []) + added_executions

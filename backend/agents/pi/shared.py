@@ -10,6 +10,11 @@ from ...utils.formatting import as_list
 logger = logging.getLogger(__name__)
 from ...models.schemas import AnalysisState
 from ...constants import CONTINUE_SIGNAL, PI_DECIDE_SIGNAL
+from ...services.sample_design import (
+    BULK_RNASEQ_MODALITY,
+    SCRNA_MODALITY,
+    has_replicated_condition_design,
+)
 
 # Synthetic control sentinels that bypass the stop/continue LLM classifier and
 # deterministically continue the workflow → (response text, reason) per signal.
@@ -236,27 +241,49 @@ def _build_default_bio_tasks(state: AnalysisState, detailed: bool = False) -> li
     """Build default bioinformatics task list based on available sequencing data types."""
     has_bulk = state.has_bulk_rnaseq()
     has_scrna = state.has_scrnaseq()
+    scrna_replicated = has_replicated_condition_design(state, SCRNA_MODALITY)
+    bulk_replicated = has_replicated_condition_design(
+        state, BULK_RNASEQ_MODALITY,
+    )
     tasks = []
     if has_scrna:
         if detailed:
-            tasks.append(
-                "Execute standard scRNA-seq analysis: QC, normalization, clustering, annotation, "
-                "then condition-level DEG + GO/KEGG for ALL clusters, cell communication analysis"
-            )
+            if scrna_replicated:
+                tasks.append(
+                    "Execute standard scRNA-seq analysis: QC, normalization, clustering, annotation, "
+                    "then sample-level pseudobulk condition DEG + GO/KEGG for all supported cell types"
+                )
+            else:
+                tasks.append(
+                    "Execute standard scRNA-seq analysis: QC, normalization, clustering and annotation; "
+                    "keep condition comparisons descriptive because each condition lacks independent replication"
+                )
         else:
             tasks.append("Execute standard scRNA-seq/snRNA-seq analysis workflow")
     if has_bulk:
-        tasks.append("Perform bulk RNA-seq DEG analysis using pydeseq2 (fallback: scipy.stats.ttest_ind + FDR correction if pydeseq2 unavailable)")
+        tasks.append(
+            "Perform bulk RNA-seq DEG analysis using biological samples as the unit"
+            if bulk_replicated else
+            "Inspect bulk RNA-seq descriptively; sample-to-group membership is unresolved, so do not report condition-level p/FDR"
+        )
         if has_scrna:
-            tasks.append(
-                "Cross-validate bulk DEGs with scRNA-seq pseudobulk DEGs: "
-                "compute set intersection, generate Venn diagram (from matplotlib_venn import venn2), "
-                "and visualize overlapping DEGs' cell-type-specific expression. "
-                "CRITICAL: Perform cell-type deconvolution of bulk RNA-seq data using scRNA-seq as a reference "
-                "(prioritize scipy.optimize.nnls or sklearn Non-negative Least Squares; if unavailable, try scaden) to estimate cell-type proportion changes."
-            )
+            if scrna_replicated and bulk_replicated:
+                tasks.append(
+                    "Cross-validate bulk DEGs with sample-level scRNA-seq pseudobulk DEGs, "
+                    "visualize concordance and cell-type-specific expression, and assess "
+                    "cell-type deconvolution where appropriate."
+                )
+            elif bulk_replicated:
+                tasks.append(
+                    "Use replicated bulk DEG/pathway results as the inferential layer; "
+                    "localize supported signals descriptively to single-cell cell types/states, "
+                    "without inferential scRNA pseudobulk or cell-level condition p-values."
+                )
+            elif scrna_replicated:
+                tasks.append(
+                    "Use replicated single-cell sample-pseudobulk for condition inference; "
+                    "treat bulk observations as descriptive until its design is verified."
+                )
     if not tasks:
         tasks.append("Execute standard sequencing analysis workflow")
     return tasks
-
-
