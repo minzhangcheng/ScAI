@@ -440,15 +440,104 @@ print("__SCAI_RUNTIME_METRICS__:" + _scai_json.dumps({
 
     @staticmethod
     def _loaded_global_names_from_code(code: str) -> set[str]:
-        """Best-effort static names read by a cell; dynamic reads must be declared."""
+        """Best-effort prior globals read by a cell; dynamic reads must be declared.
+
+        A plain ``ast.walk`` cannot distinguish a prior global from a name that
+        the same cell rebinds before reading it.  That promoted scratch loop
+        variables and context-manager targets (notably closed loompy/h5py
+        handles) into required cross-cell state.  Follow module execution order
+        for the binding forms commonly emitted by analysis code instead.
+        """
         import ast
 
         try:
             tree = ast.parse(code)
         except SyntaxError:
             return set()
-        return {
-            node.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
-        }
+
+        loaded: set[str] = set()
+
+        def _target_names(node: ast.AST | None) -> set[str]:
+            if isinstance(node, ast.Name):
+                return {node.id}
+            if isinstance(node, (ast.Tuple, ast.List)):
+                return set().union(*(_target_names(item) for item in node.elts))
+            return set()
+
+        def _loads(node: ast.AST | None, bound: set[str]) -> None:
+            if node is None:
+                return
+            loaded.update(
+                child.id
+                for child in ast.walk(node)
+                if isinstance(child, ast.Name)
+                and isinstance(child.ctx, ast.Load)
+                and child.id not in bound
+            )
+
+        def _block(statements: list[ast.stmt], incoming: set[str]) -> set[str]:
+            bound = set(incoming)
+            for statement in statements:
+                if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                    _loads(getattr(statement, "value", None), bound)
+                    targets = (
+                        statement.targets
+                        if isinstance(statement, ast.Assign)
+                        else [statement.target]
+                    )
+                    for target in targets:
+                        _loads(target, bound)
+                        bound.update(_target_names(target))
+                elif isinstance(statement, ast.AugAssign):
+                    if isinstance(statement.target, ast.Name):
+                        if statement.target.id not in bound:
+                            loaded.add(statement.target.id)
+                    else:
+                        _loads(statement.target, bound)
+                    _loads(statement.value, bound)
+                    bound.update(_target_names(statement.target))
+                elif isinstance(statement, (ast.With, ast.AsyncWith)):
+                    body_bound = set(bound)
+                    for item in statement.items:
+                        _loads(item.context_expr, body_bound)
+                        body_bound.update(_target_names(item.optional_vars))
+                    bound = _block(statement.body, body_bound)
+                elif isinstance(statement, (ast.For, ast.AsyncFor)):
+                    _loads(statement.iter, bound)
+                    _block(
+                        statement.body,
+                        bound | _target_names(statement.target),
+                    )
+                    _block(statement.orelse, bound)
+                    # A zero-iteration loop does not bind its target afterward.
+                elif isinstance(statement, (ast.Import, ast.ImportFrom)):
+                    bound.update(
+                        alias.asname or alias.name.split(".", 1)[0]
+                        for alias in statement.names
+                    )
+                elif isinstance(statement, ast.If):
+                    _loads(statement.test, bound)
+                    _block(statement.body, bound)
+                    _block(statement.orelse, bound)
+                elif isinstance(statement, ast.While):
+                    _loads(statement.test, bound)
+                    _block(statement.body, bound)
+                    _block(statement.orelse, bound)
+                elif isinstance(statement, (ast.Try, ast.TryStar)):
+                    _block(statement.body, bound)
+                    for handler in statement.handlers:
+                        _loads(handler.type, bound)
+                        handler_bound = set(bound)
+                        if handler.name:
+                            handler_bound.add(handler.name)
+                        _block(handler.body, handler_bound)
+                    _block(statement.orelse, bound)
+                    _block(statement.finalbody, bound)
+                else:
+                    # Other nested scopes stay conservative: they may read a
+                    # prior global depending on their eventual execution.
+                    _loads(statement, bound)
+            return bound
+
+        _block(tree.body, set())
+        return loaded

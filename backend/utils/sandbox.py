@@ -1174,9 +1174,28 @@ print("__SCAI_SAVED_NAMES__:" + _scai_json.dumps(sorted(_saved_names)))
                     sv["name"] for sv in skipped if sv.get("name") in required_names
                 }
                 error_text = str(result.error or "")
-                failed_names.update(
-                    name for name in required_names if name in error_text
+                exact_failure_patterns = (
+                    r"required runtime variable could not be persisted:\s*"
+                    r"([A-Za-z_]\w*)",
+                    r"backed AnnData could not be materialized for persistence:\s*"
+                    r"([A-Za-z_]\w*)",
                 )
+                for pattern in exact_failure_patterns:
+                    failed_names.update(
+                        match.group(1)
+                        for match in re.finditer(pattern, error_text)
+                        if match.group(1) in required_names
+                    )
+                missing_match = re.search(
+                    r"required runtime variables are missing:\s*([^\n]+)",
+                    error_text,
+                )
+                if missing_match:
+                    failed_names.update(
+                        name.strip()
+                        for name in missing_match.group(1).split(",")
+                        if name.strip() in required_names
+                    )
                 poisoned: set[str] = set()
                 tracker = getattr(self, "runtime_dependency_tracker", None)
                 if tracker is not None and failed_names:

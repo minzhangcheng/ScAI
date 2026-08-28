@@ -254,6 +254,68 @@ async def test_incomplete_required_runtime_save_raises(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output", "error", "required", "expected"),
+    [
+        (
+            "__SCAI_SAVE_SKIPPED__\tds\tLoomConnection\tTypeError\tbad state",
+            (
+                "h5py objects could not be persisted; "
+                "required runtime variable could not be persisted: ds"
+            ),
+            {"col", "ds"},
+            ["ds"],
+        ),
+        (
+            "",
+            "required runtime variables are missing: first, second",
+            {"first", "second"},
+            ["first", "second"],
+        ),
+        (
+            "",
+            "backed AnnData could not be materialized for persistence: adata (OSError)",
+            {"adata"},
+            ["adata"],
+        ),
+    ],
+)
+async def test_failed_runtime_variable_attribution_uses_exact_names(
+    tmp_path,
+    monkeypatch,
+    output,
+    error,
+    required,
+    expected,
+):
+    from backend.utils.sandbox import CodeExecutionResult, LocalJupyterSandbox
+    from backend.services.snapshot_v2.runtime_registry import RuntimeDependencyTracker
+
+    sb = LocalJupyterSandbox(
+        session_id="failed-save-attribution",
+        state_dir=str(tmp_path / "states"),
+        working_dir=str(tmp_path / "workspace"),
+    )
+    tracker = RuntimeDependencyTracker()
+    tracker.merge_declared(required)
+    sb.runtime_dependency_tracker = tracker
+
+    async def _fail(_code, **_kwargs):
+        return CodeExecutionResult(
+            success=False,
+            output=output,
+            error=error,
+        )
+
+    monkeypatch.setattr(sb, "_execute_unlocked", _fail)
+
+    with pytest.raises(RuntimeError, match="runtime save failed"):
+        await sb.save_session()
+
+    assert sb.notebook_state.runtime_persistence["failed_variables"] == expected
+
+
+@pytest.mark.asyncio
 async def test_real_kernel_save_restore_round_trip(tmp_path):
     """Spin up a real kernel, write a variable, save_session, kill kernel, restart, restore."""
     from backend.utils.sandbox import LocalJupyterSandbox

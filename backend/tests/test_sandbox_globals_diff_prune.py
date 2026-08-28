@@ -43,6 +43,65 @@ def test_only_names_actually_loaded_are_promoted():
     assert sb.runtime_dependency_tracker.required_outputs == {"used"}
 
 
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (
+            "with loompy.connect(path) as ds:\n    print(ds.shape)",
+            {"loompy", "path", "print"},
+        ),
+        (
+            "for col in columns:\n    print(col)",
+            {"columns", "print"},
+        ),
+        (
+            "result = build_result()\nprint(result)",
+            {"build_result", "print"},
+        ),
+        (
+            "result = result + 1",
+            {"result"},
+        ),
+        (
+            "import loompy\nwith loompy.connect(path) as ds:\n    print(ds.shape)",
+            {"path", "print"},
+        ),
+        (
+            "from IPython.display import display\ndisplay(result)",
+            {"result"},
+        ),
+        (
+            "try:\n    with loompy.connect(path) as ds:\n        print(ds.shape)\n"
+            "except OSError:\n    pass",
+            {"loompy", "path", "print", "OSError"},
+        ),
+    ],
+)
+def test_loaded_globals_respect_same_cell_rebinding(code, expected):
+    sb = _bare_sandbox()
+
+    assert sb._loaded_global_names_from_code(code) == expected
+
+
+def test_rebound_loom_handle_is_not_promoted_to_required_runtime():
+    sb = _bare_sandbox()
+    live = {"ds", "loompy", "path"}
+    sb._record_globals_diff(before=set(), after=live)
+
+    code = (
+        "import loompy\n"
+        "with loompy.connect(path) as ds:\n"
+        "    print(ds.shape)"
+    )
+    sb._record_globals_diff(
+        before=live,
+        after=live,
+        loaded=sb._loaded_global_names_from_code(code),
+    )
+
+    assert sb.runtime_dependency_tracker.required_outputs == {"path"}
+
+
 def test_legacy_unobserved_declarations_are_pruned_but_created_dependencies_fail_closed():
     sb = _bare_sandbox()
     sb.runtime_dependency_tracker = RuntimeDependencyTracker.from_state_dict(
