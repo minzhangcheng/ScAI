@@ -16,6 +16,7 @@ import inspect
 import pytest
 
 import backend.agents.bioinformatics_agent as bio_mod
+from backend.agents.bioinformatics import executor_gene_sets
 from backend.services.analysis_plan import canonical_panel, panel_hash
 from backend.services.gene_set_provenance import parse_provenance
 from backend.services.gene_set_resolver import (
@@ -142,10 +143,7 @@ def test_describe_partition_reports_every_part():
 # ------------------------------------------------------------------- wiring
 
 def _fetch_block() -> str:
-    src = inspect.getsource(bio_mod)
-    start = src.index('elif tool_name == "fetch_gene_set":')
-    end = src.index('elif tool_name == "register_analysis_plan":', start)
-    return src[start:end]
+    return inspect.getsource(executor_gene_sets.handle_fetch_gene_set)
 
 
 def test_partition_mode_is_exposed():

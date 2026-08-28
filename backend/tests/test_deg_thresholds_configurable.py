@@ -2,6 +2,7 @@
 from backend.models.schemas import AnalysisState
 import backend.services.report.figures as fig_mod
 import backend.agents.bioinformatics_agent as bio_mod
+from backend.tests.split_facade import split_source
 
 
 def test_analysis_state_has_deg_thresholds():
@@ -20,5 +21,5 @@ def test_figures_reads_thresholds_from_state():
 
 
 def test_bioinformatics_agent_reads_thresholds_from_state():
-    src = open(bio_mod.__file__).read()
+    src = split_source("backend.agents.bioinformatics_agent")
     assert "deg_thresholds" in src, "P2-11: bioinformatics_agent.py must reference deg_thresholds"

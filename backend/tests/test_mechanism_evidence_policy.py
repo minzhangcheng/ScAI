@@ -4,7 +4,9 @@ from backend.agents.bioinformatics_agent import BioinformaticsAgent
 from backend.agents.pi_agent import PIAgent
 from backend.agents.supervisor_agent import SupervisorAgent
 from backend.services.report.planning import PlanningMixin
+from backend.services.report import planning as report_planning
 from backend.utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
+from backend.agents.supervisor import report_prompt
 
 
 def test_shared_policy_is_domain_neutral_and_balances_recall_with_caution():
@@ -66,8 +68,8 @@ def test_exploration_plan_preserves_prespecified_hypotheses_without_biasing_base
 
 def test_live_and_fallback_report_prompts_use_shared_policy():
     assert "MECHANISM_EVIDENCE_POLICY" in inspect.getsource(
-        SupervisorAgent._build_report_prompt
+        report_prompt._build_report_prompt
     )
     assert "MECHANISM_EVIDENCE_POLICY" in inspect.getsource(
-        PlanningMixin._generate_section_from_existing_figures
+        report_planning._build_existing_figure_section_prompt
     )

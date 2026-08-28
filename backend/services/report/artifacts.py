@@ -8,6 +8,7 @@ import hashlib
 import io
 import os
 import stat
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -19,18 +20,25 @@ from PIL import Image
 from backend.models.schemas import FigureReviewStatus
 from backend.services.figure_layout import blocking_violations
 
+from . import artifact_selection, artifact_shared
+from .artifact_shared import (
+    ARTIFACT_REGISTRY_VERSION,
+    LAYOUT_UNVERIFIED_KIND,
+    MAX_ARCHIVAL_PREVIEW_ENCODED_CHARS,
+    MAX_VERIFIED_ARTIFACT_BYTES,
+    MAX_VERIFIED_IMAGE_PIXELS,
+    MIN_ARCHIVAL_PREVIEW_HEIGHT,
+    MIN_ARCHIVAL_PREVIEW_WIDTH,
+    MIN_PUBLICATION_PDF_BYTES,
+    MIN_RENDERED_FIGURE_BYTES,
+    REPORTABLE_REVIEW_STATUSES,
+)
 
-REPORTABLE_REVIEW_STATUSES = frozenset({
-    FigureReviewStatus.APPROVED.value,
-    FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS.value,
-})
-
-ARTIFACT_REGISTRY_VERSION = 1
 
 
 def _status_value(artifact: Any) -> str:
-    status = _artifact_value(artifact, "review_status")
-    return str(getattr(status, "value", status) or "").lower()
+    return artifact_shared._status_value(artifact, bindings=sys.modules[__name__])
+
 
 
 def has_blocking_layout_defects(artifact: Any) -> bool:
@@ -41,18 +49,19 @@ def has_blocking_layout_defects(artifact: Any) -> bool:
     the figure is readable. This asks the one question the status cannot: is
     some text drawn underneath something else.
     """
-    return bool(blocking_violations(_artifact_value(artifact, "layout_violations")))
+    return artifact_shared.has_blocking_layout_defects(artifact, bindings=sys.modules[__name__])
+
 
 
 def is_diagnostic(artifact: Any) -> bool:
     """Whether the platform rendered this artifact, rather than the analysis agent."""
-    return bool(_artifact_value(artifact, "diagnostic", False))
+    return artifact_shared.is_diagnostic(artifact, bindings=sys.modules[__name__])
+
 
 
 #: Kind the renderer records when its in-kernel layout lint could not run. An
 #: unmeasured layout must not be stored as an empty violation list, because that
 #: is exactly what a measured-clean figure carries.
-LAYOUT_UNVERIFIED_KIND = "lint_skipped"
 
 
 def layout_was_measured(artifact: Any) -> bool:
@@ -62,30 +71,18 @@ def layout_was_measured(artifact: Any) -> bool:
     means either "measured, nothing wrong" or "never measured", and only one of
     those is evidence.
     """
-    violations = _artifact_value(artifact, "layout_violations", None) or []
-    return not any(
-        str((violation or {}).get("kind", "")) == LAYOUT_UNVERIFIED_KIND
-        for violation in violations
-        if isinstance(violation, dict)
-    )
+    return artifact_shared.layout_was_measured(artifact, bindings=sys.modules[__name__])
+
 
 
 #: The blank-render floor the producer applies to every figure it accepts (see
 #: ``agents/bioinformatics/figures.py``): a JPEG smaller than this is white space
 #: with axes at most.
-MIN_RENDERED_FIGURE_BYTES = 2000
-MAX_ARCHIVAL_PREVIEW_ENCODED_CHARS = 24_000_000
-MIN_PUBLICATION_PDF_BYTES = 512
-MIN_ARCHIVAL_PREVIEW_WIDTH = 16
-MIN_ARCHIVAL_PREVIEW_HEIGHT = 16
-MAX_VERIFIED_ARTIFACT_BYTES = 1024 * 1024 * 1024
-MAX_VERIFIED_IMAGE_PIXELS = 16_000_000
 
 
 def _artifact_value(artifact: Any, key: str, default: Any = None) -> Any:
-    if isinstance(artifact, Mapping):
-        return artifact.get(key, default)
-    return getattr(artifact, key, default)
+    return artifact_shared._artifact_value(artifact, key, default, bindings=sys.modules[__name__])
+
 
 
 def _image_bytes_are_decodable(
@@ -96,22 +93,8 @@ def _image_bytes_are_decodable(
     max_pixels: int | None = None,
 ) -> bool:
     """Require both container verification and a complete pixel decode."""
-    if not payload:
-        return False
-    try:
-        with Image.open(io.BytesIO(payload)) as image:
-            if max_pixels is not None and image.width * image.height > max_pixels:
-                return False
-            image.verify()
-        # ``verify`` checks the container but deliberately does not decode the
-        # pixels. Reopen and load so truncated/corrupt image data is rejected.
-        with Image.open(io.BytesIO(payload)) as image:
-            if max_pixels is not None and image.width * image.height > max_pixels:
-                return False
-            image.load()
-            return image.width >= min_width and image.height >= min_height
-    except Exception:
-        return False
+    return artifact_shared._image_bytes_are_decodable(payload, min_width=min_width, min_height=min_height, max_pixels=max_pixels, bindings=sys.modules[__name__])
+
 
 
 def _read_regular_file_nofollow(path: Any) -> bytes | None:
@@ -121,69 +104,8 @@ def _read_regular_file_nofollow(path: Any) -> bytes | None:
     description.  Callers can therefore hand the bytes to a delayed consumer
     without reopening a path that may have been replaced after validation.
     """
-    try:
-        absolute = Path(os.path.abspath(os.fspath(Path(str(path)))))
-    except (OSError, TypeError, ValueError):
-        return None
-    parts = absolute.parts
-    if not absolute.is_absolute() or len(parts) < 2:
-        return None
-    directory_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-    )
-    file_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-    )
-    directory_fd: int | None = None
-    file_fd: int | None = None
-    try:
-        directory_fd = os.open(absolute.anchor, directory_flags)
-        for component in parts[1:-1]:
-            child_fd = os.open(component, directory_flags, dir_fd=directory_fd)
-            os.close(directory_fd)
-            directory_fd = child_fd
-        file_fd = os.open(parts[-1], file_flags, dir_fd=directory_fd)
-        before = os.fstat(file_fd)
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_size < 0
-            or before.st_size > MAX_VERIFIED_ARTIFACT_BYTES
-        ):
-            return None
-        # A regular file read is bounded by the already-checked size plus one
-        # growth sentinel. This yields one immutable bytes object instead of a
-        # chunk list followed by a second full-size ``join`` allocation.
-        payload = os.read(file_fd, before.st_size + 1)
-        after = os.fstat(file_fd)
-        identity_before = (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        )
-        identity_after = (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        )
-        if identity_before != identity_after or len(payload) != before.st_size:
-            return None
-        return payload
-    except (OSError, ValueError):
-        return None
-    finally:
-        if file_fd is not None:
-            os.close(file_fd)
-        if directory_fd is not None:
-            os.close(directory_fd)
+    return artifact_shared._read_regular_file_nofollow(path, bindings=sys.modules[__name__])
+
 
 
 def verified_artifact_bytes(
@@ -193,38 +115,8 @@ def verified_artifact_bytes(
     kind: str,
 ) -> bytes | None:
     """Return structurally valid, record-bound bytes from one no-follow FD."""
-    payload = _read_regular_file_nofollow(path)
-    if payload is None:
-        return None
-    digest = hashlib.sha256(payload).hexdigest()
-    if kind == "image":
-        if not _image_bytes_are_decodable(
-            payload,
-            min_width=MIN_ARCHIVAL_PREVIEW_WIDTH,
-            min_height=MIN_ARCHIVAL_PREVIEW_HEIGHT,
-            max_pixels=MAX_VERIFIED_IMAGE_PIXELS,
-        ):
-            return None
-        expected = _record_hashes(artifact) if artifact is not None else set()
-    elif kind == "pdf":
-        if (
-            len(payload) < MIN_PUBLICATION_PDF_BYTES
-            or not payload.startswith(b"%PDF-")
-            or not payload[-2048:].rstrip().endswith(b"%%EOF")
-        ):
-            return None
-        expected_digest = str(
-            (_artifact_value(artifact, "pdf_sha256", "") or "")
-            if artifact is not None else ""
-        ).strip().lower()
-        expected = {expected_digest} if expected_digest else set()
-    else:
-        raise ValueError(f"unsupported artifact kind: {kind}")
-    if artifact is not None and not expected:
-        return None
-    if expected and digest not in expected:
-        return None
-    return payload
+    return artifact_shared.verified_artifact_bytes(path, artifact, kind=kind, bindings=sys.modules[__name__])
+
 
 
 def copy_verified_artifact(
@@ -235,62 +127,18 @@ def copy_verified_artifact(
     kind: str,
 ) -> bool:
     """Atomically copy the exact bytes validated from one no-follow source FD."""
-    payload = verified_artifact_bytes(source, artifact, kind=kind)
-    if payload is None:
-        return False
-    target = Path(str(destination))
-    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-    descriptor: int | None = None
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(
-            os.fspath(temporary),
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0),
-            0o600,
-        )
-        view = memoryview(payload)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("short artifact snapshot write")
-            view = view[written:]
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = None
-        os.replace(temporary, target)
-        return True
-    except OSError:
-        return False
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        try:
-            temporary.unlink()
-        except OSError:
-            pass
+    return artifact_shared.copy_verified_artifact(source, destination, artifact, kind=kind, bindings=sys.modules[__name__])
+
 
 
 def _record_hashes(artifact: Any) -> set[str]:
-    return {
-        str(value).strip().lower()
-        for value in (
-            _artifact_value(artifact, "render_sha256"),
-            _artifact_value(artifact, "preview_sha256"),
-        )
-        if str(value or "").strip()
-    }
+    return artifact_shared._record_hashes(artifact, bindings=sys.modules[__name__])
+
 
 
 def _bytes_match_record(payload: bytes, artifact: Any) -> bool:
-    expected = _record_hashes(artifact)
-    # A missing digest is missing provenance, not a legacy wildcard. Freezing
-    # whatever happens to occupy a mutable path today would let replacement
-    # bytes inherit the record's historical review decision.
-    return bool(expected) and hashlib.sha256(payload).hexdigest() in expected
+    return artifact_shared._bytes_match_record(payload, artifact, bindings=sys.modules[__name__])
+
 
 
 def image_file_sha256(
@@ -301,80 +149,38 @@ def image_file_sha256(
     min_height: int = 1,
 ) -> str | None:
     """Return a digest only for a sufficiently large, fully decodable image."""
-    try:
-        candidate = Path(str(path))
-        if not candidate.is_file() or candidate.stat().st_size < min_bytes:
-            return None
-        payload = candidate.read_bytes()
-    except OSError:
-        return None
-    if not _image_bytes_are_decodable(
-        payload, min_width=min_width, min_height=min_height
-    ):
-        return None
-    return hashlib.sha256(payload).hexdigest()
+    return artifact_shared.image_file_sha256(path, min_bytes=min_bytes, min_width=min_width, min_height=min_height, bindings=sys.modules[__name__])
+
 
 
 def preview_render_sha256(encoded: Any) -> str | None:
     """Digest a valid record preview; unlike the primary JPG, small is valid."""
-    payload = _decode_preview_bytes(encoded)
-    if not payload or not _image_bytes_are_decodable(
-        payload,
-        min_width=MIN_ARCHIVAL_PREVIEW_WIDTH,
-        min_height=MIN_ARCHIVAL_PREVIEW_HEIGHT,
-    ):
-        return None
-    return hashlib.sha256(payload).hexdigest()
+    return artifact_shared.preview_render_sha256(encoded, bindings=sys.modules[__name__])
+
 
 
 def publication_pdf_is_valid(path: Any) -> bool:
     """Check the minimum structural promise of a downloadable PDF render."""
-    try:
-        candidate = Path(str(path))
-        size = candidate.stat().st_size
-        if not candidate.is_file() or size < MIN_PUBLICATION_PDF_BYTES:
-            return False
-        with candidate.open("rb") as handle:
-            header = handle.read(8)
-            handle.seek(max(0, size - 2048))
-            tail = handle.read()
-    except (OSError, ValueError):
-        return False
-    return header.startswith(b"%PDF-") and tail.rstrip().endswith(b"%%EOF")
+    return artifact_shared.publication_pdf_is_valid(path, bindings=sys.modules[__name__])
+
 
 
 def pdf_file_sha256(path: Any) -> str | None:
     """Return a digest only for a structurally valid publication PDF."""
-    if not publication_pdf_is_valid(path):
-        return None
-    try:
-        return hashlib.sha256(Path(str(path)).read_bytes()).hexdigest()
-    except OSError:
-        return None
+    return artifact_shared.pdf_file_sha256(path, bindings=sys.modules[__name__])
+
 
 
 def archival_pdf_path_matches_record(artifact: Any, path: Any) -> bool:
     """Validate a PDF and bind it to the exact reviewed bytes."""
-    digest = pdf_file_sha256(path)
-    if digest is None:
-        return False
-    expected = str(_artifact_value(artifact, "pdf_sha256") or "").strip().lower()
-    return bool(expected) and digest == expected
+    return artifact_shared.archival_pdf_path_matches_record(artifact, path, bindings=sys.modules[__name__])
+
 
 
 def resolve_archival_pdf(artifact: Any, workspace_path: Any) -> Path | None:
     """Resolve the record PDF without trusting a stale same-name file."""
-    declared = str(_artifact_value(artifact, "pdf_path") or "")
-    candidates: list[Path] = []
-    if declared:
-        candidates.append(Path(declared))
-        candidates.append(
-            Path(workspace_path) / "figures" / os.path.basename(declared)
-        )
-    for candidate in candidates:
-        if archival_pdf_path_matches_record(artifact, candidate):
-            return candidate
-    return None
+    return artifact_shared.resolve_archival_pdf(artifact, workspace_path, bindings=sys.modules[__name__])
+
 
 
 def resolve_verified_archival_artifact(
@@ -385,95 +191,25 @@ def resolve_verified_archival_artifact(
     path_authorizer: Callable[[Path], bool] | None = None,
 ) -> tuple[bytes, Path] | None:
     """Resolve and verify a publication artifact with one read per candidate."""
-    workspace = Path(workspace_path)
-    if kind == "pdf":
-        declared = str(_artifact_value(artifact, "pdf_path") or "")
-        candidates = []
-        if declared:
-            candidates.extend((
-                Path(declared),
-                workspace / "figures" / os.path.basename(declared),
-            ))
-        for candidate in dict.fromkeys(candidates):
-            if path_authorizer is not None and not path_authorizer(candidate):
-                continue
-            payload = verified_artifact_bytes(candidate, artifact, kind="pdf")
-            if payload is not None:
-                return payload, candidate
-        return None
-    if kind != "image":
-        raise ValueError(f"unsupported artifact kind: {kind}")
+    return artifact_shared.resolve_verified_archival_artifact(artifact, workspace_path, kind=kind, path_authorizer=path_authorizer, bindings=sys.modules[__name__])
 
-    declared = str(_artifact_value(artifact, "png_path") or "")
-    candidates = []
-    if declared:
-        candidates.extend((
-            Path(declared),
-            workspace / "figures" / os.path.basename(declared),
-        ))
-    checked_candidates = list(dict.fromkeys(candidates))
-    for index, candidate in enumerate(checked_candidates):
-        if path_authorizer is not None and not path_authorizer(candidate):
-            continue
-        payload = verified_artifact_bytes(candidate, artifact, kind="image")
-        if payload is None:
-            continue
-        if index == 0 and len(payload) < MIN_RENDERED_FIGURE_BYTES:
-            continue
-        if index > 0:
-            _restore_artifact_mtime(candidate, artifact)
-        return payload, candidate
-
-    return _materialize_archival_preview_payload(
-        artifact,
-        workspace,
-        check_declared_path=False,
-        checked_paths=set(checked_candidates),
-    )
 
 
 def _legacy_relative_path(record: Any, field: str, workspace_path: Any) -> Path | None:
-    relative = str(_artifact_value(record, field) or "").strip()
-    if not relative:
-        return None
-    raw = Path(relative)
-    if raw.is_absolute() or ".." in raw.parts:
-        return None
-    root = Path(workspace_path).resolve()
-    candidate = (root / raw).resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError:
-        return None
-    return candidate
+    return artifact_shared._legacy_relative_path(record, field, workspace_path, bindings=sys.modules[__name__])
+
 
 
 def resolve_legacy_artifact_render(record: Any, workspace_path: Any) -> Path | None:
     """Resolve one frozen legacy image by exact relative path and digest."""
-    if str(_artifact_value(record, "provenance_kind", "")) != "legacy_unregistered":
-        return None
-    expected = str(_artifact_value(record, "render_sha256", "") or "").lower()
-    candidate = _legacy_relative_path(record, "relative_path", workspace_path)
-    if not expected or candidate is None:
-        return None
-    digest = image_file_sha256(
-        candidate,
-        min_bytes=1,
-        min_width=MIN_ARCHIVAL_PREVIEW_WIDTH,
-        min_height=MIN_ARCHIVAL_PREVIEW_HEIGHT,
-    )
-    return candidate if digest == expected else None
+    return artifact_shared.resolve_legacy_artifact_render(record, workspace_path, bindings=sys.modules[__name__])
+
 
 
 def resolve_legacy_artifact_pdf(record: Any, workspace_path: Any) -> Path | None:
     """Resolve one optional frozen legacy PDF by exact path and digest."""
-    if str(_artifact_value(record, "provenance_kind", "")) != "legacy_unregistered":
-        return None
-    expected = str(_artifact_value(record, "pdf_sha256", "") or "").lower()
-    candidate = _legacy_relative_path(record, "pdf_relative_path", workspace_path)
-    if not expected or candidate is None:
-        return None
-    return candidate if pdf_file_sha256(candidate) == expected else None
+    return artifact_shared.resolve_legacy_artifact_pdf(record, workspace_path, bindings=sys.modules[__name__])
+
 
 
 def resolve_verified_legacy_artifact(
@@ -483,100 +219,44 @@ def resolve_verified_legacy_artifact(
     kind: str,
 ) -> tuple[bytes, Path] | None:
     """Resolve frozen legacy inventory bytes with one record-bound read."""
-    field = "pdf_relative_path" if kind == "pdf" else "relative_path"
-    candidate = _legacy_relative_path(record, field, workspace_path)
-    if candidate is None:
-        return None
-    payload = verified_artifact_bytes(candidate, record, kind=kind)
-    return (payload, candidate) if payload is not None else None
+    return artifact_shared.resolve_verified_legacy_artifact(record, workspace_path, kind=kind, bindings=sys.modules[__name__])
+
 
 
 def _decode_preview_bytes(encoded: Any) -> bytes:
-    encoded = str(encoded or "").strip()
-    if not encoded or len(encoded) > MAX_ARCHIVAL_PREVIEW_ENCODED_CHARS:
-        return b""
-    if encoded.startswith("data:"):
-        _header, separator, encoded = encoded.partition(",")
-        if not separator:
-            return b""
-    try:
-        return base64.b64decode(encoded, validate=True)
-    except (ValueError, binascii.Error):
-        return b""
+    return artifact_shared._decode_preview_bytes(encoded, bindings=sys.modules[__name__])
+
 
 
 def _preview_bytes(artifact: Any) -> bytes:
     """Decode a record-owned PNG/JPEG preview without trusting its file path."""
-    payload = _decode_preview_bytes(_artifact_value(artifact, "png_base64"))
-    if not _image_bytes_are_decodable(
-        payload,
-        min_width=MIN_ARCHIVAL_PREVIEW_WIDTH,
-        min_height=MIN_ARCHIVAL_PREVIEW_HEIGHT,
-    ):
-        return b""
-    if not _bytes_match_record(payload, artifact):
-        return b""
-    return payload
+    return artifact_shared._preview_bytes(artifact, bindings=sys.modules[__name__])
+
 
 
 def _artifact_created_epoch(artifact: Any) -> float | None:
     """Return the record creation time as epoch seconds when available."""
-    value = _artifact_value(artifact, "created_at")
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, datetime):
-        return value.timestamp()
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return None
-        if text.endswith("Z"):
-            text = text[:-1] + "+00:00"
-        try:
-            return datetime.fromisoformat(text).timestamp()
-        except ValueError:
-            return None
-    return None
+    return artifact_shared._artifact_created_epoch(artifact, bindings=sys.modules[__name__])
+
 
 
 def _restore_artifact_mtime(path: Path, artifact: Any) -> None:
     """Keep recovered previews attributable to their original analysis round."""
-    created_epoch = _artifact_created_epoch(artifact)
-    if created_epoch is None:
-        return
-    try:
-        os.utime(path, (created_epoch, created_epoch))
-    except OSError:
-        # The image bytes are still usable if a read-only or unusual filesystem
-        # refuses timestamp restoration; attribution will simply stay unresolved.
-        pass
+    return artifact_shared._restore_artifact_mtime(path, artifact, bindings=sys.modules[__name__])
+
 
 
 def _record_path_is_usable(
     artifact: Any, path: Any, *, allow_small_preview: bool = False
 ) -> bool:
-    digest = image_file_sha256(path, min_bytes=1 if allow_small_preview else MIN_RENDERED_FIGURE_BYTES)
-    if digest is None:
-        return False
-    expected = _record_hashes(artifact)
-    return bool(expected) and digest in expected
+    return artifact_shared._record_path_is_usable(artifact, path, allow_small_preview=allow_small_preview, bindings=sys.modules[__name__])
+
 
 
 def has_frozen_publication_pair(artifact: Any) -> bool:
     """Whether a publication record carries immutable raster and PDF IDs."""
-    render = str(_artifact_value(artifact, "render_sha256", "") or "").lower()
-    preview = str(_artifact_value(artifact, "preview_sha256", "") or "").lower()
-    pdf = str(_artifact_value(artifact, "pdf_sha256", "") or "").lower()
+    return artifact_shared.has_frozen_publication_pair(artifact, bindings=sys.modules[__name__])
 
-    def valid_digest(value: str) -> bool:
-        return bool(
-            len(value) == 64
-            and all(char in "0123456789abcdef" for char in value)
-        )
-
-    # A damaged legacy render identity must not hide a valid record-owned
-    # preview. Availability and eligibility must agree on the same fallback.
-    return valid_digest(pdf) and (valid_digest(render) or valid_digest(preview))
 
 
 def archival_path_matches_record(artifact: Any, path: Any) -> bool:
@@ -586,7 +266,8 @@ def archival_path_matches_record(artifact: Any, path: Any) -> bool:
     can overwrite that stem after review, so callers must not attach the old
     authoritative metadata merely because the new file has the same name.
     """
-    return _record_path_is_usable(artifact, path)
+    return artifact_shared.archival_path_matches_record(artifact, path, bindings=sys.modules[__name__])
+
 
 
 def archival_render_available(artifact: Any) -> bool:
@@ -597,47 +278,14 @@ def archival_render_available(artifact: Any) -> bool:
     exists.  Such a record can satisfy a figure contract only when it also
     carries a valid preview that the report can safely materialize.
     """
-    path = _artifact_value(artifact, "png_path")
-    if path and _record_path_is_usable(artifact, path):
-        return True
-    return bool(_preview_bytes(artifact))
+    return artifact_shared.archival_render_available(artifact, bindings=sys.modules[__name__])
+
 
 
 def _write_preview_noclobber(destination: Path, payload: bytes) -> bool:
     """Create one preview without following or replacing an existing entry."""
-    descriptor: int | None = None
-    created = False
-    try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(
-            destination,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0),
-            0o600,
-        )
-        created = True
-        view = memoryview(payload)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("short archival preview write")
-            view = view[written:]
-        os.fsync(descriptor)
-        return True
-    except (FileExistsError, OSError):
-        return False
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        if created and destination.exists():
-            try:
-                if destination.stat().st_size != len(payload):
-                    destination.unlink()
-            except OSError:
-                pass
+    return artifact_shared._write_preview_noclobber(destination, payload, bindings=sys.modules[__name__])
+
 
 
 def _materialize_archival_preview_payload(
@@ -648,53 +296,8 @@ def _materialize_archival_preview_payload(
     checked_paths: set[Path] | None = None,
 ) -> tuple[bytes, Path] | None:
     """Recover and return the already-verified record preview bytes and path."""
-    path = _artifact_value(artifact, "png_path")
-    if check_declared_path and path:
-        candidate = Path(str(path))
-        payload = verified_artifact_bytes(candidate, artifact, kind="image")
-        if payload is not None and len(payload) >= MIN_RENDERED_FIGURE_BYTES:
-            return payload, candidate
+    return artifact_shared._materialize_archival_preview_payload(artifact, workspace_path, check_declared_path=check_declared_path, checked_paths=checked_paths, bindings=sys.modules[__name__])
 
-    payload = _preview_bytes(artifact)
-    if not payload:
-        return None
-    extension = ".png" if payload.startswith(b"\x89PNG") else ".jpg"
-    original_name = os.path.basename(str(path or ""))
-    stem = Path(original_name).stem if original_name else str(
-        _artifact_value(artifact, "name", "figure")
-    )
-    safe_stem = "".join(
-        char if char.isalnum() or char in "-_." else "_" for char in stem
-    ).strip("._")
-    destination = (
-        Path(workspace_path) / "figures" / f"{safe_stem or 'figure'}{extension}"
-    )
-
-    checked_paths = checked_paths or set()
-    existing = (
-        None
-        if destination in checked_paths
-        else verified_artifact_bytes(destination, artifact, kind="image")
-    )
-    if existing is not None:
-        _restore_artifact_mtime(destination, artifact)
-        return existing, destination
-    if destination.exists():
-        digest = hashlib.sha256(payload).hexdigest()[:16]
-        destination = destination.with_name(
-            f"{destination.stem}_record_preview_{digest}{destination.suffix}"
-        )
-        existing = verified_artifact_bytes(destination, artifact, kind="image")
-        if existing is not None:
-            _restore_artifact_mtime(destination, artifact)
-            return existing, destination
-        if destination.exists():
-            return None
-
-    if not _write_preview_noclobber(destination, payload):
-        return None
-    _restore_artifact_mtime(destination, artifact)
-    return payload, destination
 
 
 def materialize_archival_preview(artifact: Any, workspace_path: Any) -> Path | None:
@@ -703,35 +306,14 @@ def materialize_archival_preview(artifact: Any, workspace_path: Any) -> Path | N
     The persisted path is used only for its basename; recovery never writes to
     an arbitrary absolute path from session state.
     """
-    recovered = _materialize_archival_preview_payload(
-        artifact,
-        workspace_path,
-        check_declared_path=True,
-        checked_paths=None,
-    )
-    return recovered[1] if recovered is not None else None
+    return artifact_shared.materialize_archival_preview(artifact, workspace_path, bindings=sys.modules[__name__])
+
 
 
 def resolve_archival_render(artifact: Any, workspace_path: Any) -> Path | None:
     """Resolve a reportable image path, recovering the record preview if needed."""
-    declared = str(_artifact_value(artifact, "png_path") or "")
-    candidates = []
-    if declared:
-        candidates.append(Path(declared))
-        candidates.append(Path(workspace_path) / "figures" / os.path.basename(declared))
-    for index, candidate in enumerate(candidates):
-        # The workspace candidate may be a deliberately materialized compact
-        # record preview. The declared producer JPG retains the 2 KB floor.
-        if _record_path_is_usable(
-            artifact, candidate, allow_small_preview=(index > 0)
-        ):
-            if index > 0:
-                # This is a workspace recovery path rather than the producer's
-                # declared render. Repair previews materialized by older builds
-                # as well as ones written during this call.
-                _restore_artifact_mtime(candidate, artifact)
-            return candidate
-    return materialize_archival_preview(artifact, workspace_path)
+    return artifact_shared.resolve_archival_render(artifact, workspace_path, bindings=sys.modules[__name__])
+
 
 
 def render_is_intact(artifact: Any) -> bool:
@@ -750,15 +332,8 @@ def render_is_intact(artifact: Any) -> bool:
     workspace moved is the over-filtering the browsing surface was widened to
     undo.
     """
-    path = _artifact_value(artifact, "png_path", None)
-    if not path:
-        return archival_render_available(artifact)
-    try:
-        if not Path(str(path)).exists():
-            return archival_render_available(artifact)
-    except OSError:
-        return archival_render_available(artifact)
-    return _record_path_is_usable(artifact, path)
+    return artifact_shared.render_is_intact(artifact, bindings=sys.modules[__name__])
+
 
 
 def compact_figure_event_payload(
@@ -768,76 +343,14 @@ def compact_figure_event_payload(
     pi_feedback: str | None = None,
 ) -> dict[str, Any]:
     """Serialize a live figure event without its potentially large preview."""
-    raw_status = review_status
-    if raw_status is None:
-        status = getattr(figure, "review_status", None)
-        raw_status = str(getattr(status, "value", status) or "pending")
-    created_at = getattr(figure, "created_at", None)
-    return {
-        "id": getattr(figure, "id", ""),
-        "name": getattr(figure, "name", ""),
-        "description": getattr(figure, "description", ""),
-        "figure_type": getattr(figure, "figure_type", "other"),
-        "png_path": getattr(figure, "png_path", ""),
-        "pdf_path": getattr(figure, "pdf_path", ""),
-        "review_status": raw_status,
-        "pi_feedback": (
-            pi_feedback if pi_feedback is not None
-            else getattr(figure, "pi_feedback", None)
-        ),
-        "revision_count": int(getattr(figure, "revision_count", 0) or 0),
-        "plan_step_id": getattr(figure, "plan_step_id", None),
-        "plan_id": getattr(figure, "plan_id", None),
-        "purpose": getattr(figure, "purpose", "result") or "result",
-        "logical_figure_id": getattr(figure, "logical_figure_id", None),
-        "producer_status": getattr(figure, "producer_status", "published"),
-        "revision_of_id": getattr(figure, "revision_of_id", None),
-        "supersedes_id": getattr(figure, "supersedes_id", None),
-        "is_published_head": bool(getattr(figure, "is_published_head", False)),
-        "round": int(getattr(figure, "round_number", 0) or 0) or None,
-        "layout_blocking": has_blocking_layout_defects(figure),
-        "diagnostic": bool(getattr(figure, "diagnostic", False)),
-        "created_at": (
-            created_at.isoformat() if hasattr(created_at, "isoformat")
-            else str(created_at or "")
-        ),
-    }
+    return artifact_selection.compact_figure_event_payload(figure, review_status=review_status, pi_feedback=pi_feedback, bindings=sys.modules[__name__])
+
 
 
 def is_report_eligible(artifact: Any) -> bool:
     """Return whether a reviewed artifact is current enough for final reports."""
-    if str(_artifact_value(artifact, "producer_status", "published") or "published") != "published":
-        return False
-    if not _artifact_value(artifact, "is_current", True):
-        return False
-    if _artifact_value(artifact, "invalidated_at", None):
-        return False
-    is_figure = (
-        "figure_type" in artifact or "png_path" in artifact
-        if isinstance(artifact, Mapping)
-        else hasattr(artifact, "figure_type") or hasattr(artifact, "png_path")
-    )
-    if is_figure and not has_frozen_publication_pair(artifact):
-        return False
-    if has_blocking_layout_defects(artifact):
-        return False
-    # A platform-rendered diagnostic has no reviewer by construction, so a review
-    # status it could never earn must not be what withholds it. Quality control is
-    # the chapter every later claim rests on, and holding its only figure back for
-    # want of a sign-off nobody was asked to give is the same mistake as letting a
-    # stale stem overrule a record that says the figure is current.
-    #
-    # The layout gate above is deliberately still applied: whether text is covered
-    # is measured by the renderer, not attested by a reviewer, so it is exactly the
-    # question an unreviewed figure can still be asked.
-    #
-    # That is also the whole of the waiver's justification, so it cannot survive
-    # the measurement failing. A diagnostic is rendered with no review callback,
-    # so if its lint did not run nothing looked at the figure at all -- and the
-    # figure most likely to crash the lint is the one most likely to need it.
-    if is_diagnostic(artifact):
-        return layout_was_measured(artifact)
-    return _status_value(artifact) in REPORTABLE_REVIEW_STATUSES
+    return artifact_selection.is_report_eligible(artifact, bindings=sys.modules[__name__])
+
 
 
 def logical_figure_key(artifact: Any) -> tuple[str, str]:
@@ -846,11 +359,8 @@ def logical_figure_key(artifact: Any) -> tuple[str, str]:
     A missing logical ID means an old record with no safe supersession evidence;
     keep it independent rather than guessing from a version-looking filename.
     """
-    lineage = str(_artifact_value(artifact, "lineage_id", None) or "main")
-    logical_id = str(_artifact_value(artifact, "logical_figure_id", None) or "").strip()
-    if not logical_id:
-        logical_id = f"record:{_artifact_value(artifact, 'id', id(artifact))}"
-    return lineage, logical_id
+    return artifact_selection.logical_figure_key(artifact, bindings=sys.modules[__name__])
+
 
 
 def published_head_artifacts(artifacts: Iterable[Any] | None) -> list[Any]:
@@ -859,40 +369,14 @@ def published_head_artifacts(artifacts: Iterable[Any] | None) -> list[Any]:
     Pending or failed redraws are absent from the eligible input, so the previous
     reportable revision remains the head until a replacement actually qualifies.
     """
-    eligible = [artifact for artifact in (artifacts or []) if is_report_eligible(artifact)]
-    eligible_ids = {
-        str(_artifact_value(artifact, "id", "")) for artifact in eligible
-        if str(_artifact_value(artifact, "id", ""))
-    }
-    superseded_ids = {
-        str(_artifact_value(artifact, "supersedes_id", ""))
-        for artifact in eligible
-        if str(_artifact_value(artifact, "supersedes_id", "")) in eligible_ids
-    }
-    best: dict[tuple[str, str], tuple[tuple[int, int, str, int], Any]] = {}
-    for index, artifact in enumerate(eligible):
-        created_at = _artifact_value(artifact, "created_at", None)
-        created_key = (
-            created_at.isoformat()
-            if hasattr(created_at, "isoformat")
-            else str(created_at or "")
-        )
-        rank = (
-            0 if str(_artifact_value(artifact, "id", "")) in superseded_ids else 1,
-            1 if _artifact_value(artifact, "is_published_head", False) else 0,
-            created_key,
-            index,
-        )
-        key = logical_figure_key(artifact)
-        if key not in best or rank > best[key][0]:
-            best[key] = (rank, artifact)
-    selected_ids = {id(entry[1]) for entry in best.values()}
-    return [artifact for artifact in eligible if id(artifact) in selected_ids]
+    return artifact_selection.published_head_artifacts(artifacts, bindings=sys.modules[__name__])
+
 
 
 def eligible_artifacts(artifacts: Iterable[Any] | None) -> list[Any]:
     """Return the single reportable published head of every logical artifact."""
-    return published_head_artifacts(artifacts)
+    return artifact_selection.eligible_artifacts(artifacts, bindings=sys.modules[__name__])
+
 
 
 def eligible_artifact_by_id(
@@ -902,18 +386,8 @@ def eligible_artifact_by_id(
     lineage_id: str | None = None,
 ) -> Any | None:
     """Resolve an API/download ID only through the explicit eligible head set."""
-    target = str(artifact_id or "")
-    lineage = str(lineage_id or "main")
-    return next(
-        (
-            artifact
-            for artifact in eligible_artifacts(artifacts)
-            if str(_artifact_value(artifact, "id", "")) == target
-            and str(_artifact_value(artifact, "lineage_id", None) or "main")
-            == lineage
-        ),
-        None,
-    )
+    return artifact_selection.eligible_artifact_by_id(artifacts, artifact_id, lineage_id=lineage_id, bindings=sys.modules[__name__])
+
 
 
 def is_gallery_eligible(artifact: Any) -> bool:
@@ -923,24 +397,14 @@ def is_gallery_eligible(artifact: Any) -> bool:
     Review status and layout findings travel as badges; only incomplete
     producers and figures invalidated by newer analysis data are withheld.
     """
-    return bool(
-        str(
-            _artifact_value(artifact, "producer_status", "published")
-            or "published"
-        )
-        == "published"
-        and _artifact_value(artifact, "is_current", True)
-        and not _artifact_value(artifact, "invalidated_at", None)
-    )
+    return artifact_selection.is_gallery_eligible(artifact, bindings=sys.modules[__name__])
+
 
 
 def gallery_artifacts(artifacts: Iterable[Any] | None) -> list[Any]:
     """Return every completed, current render for operator browsing."""
-    return [
-        artifact
-        for artifact in (artifacts or [])
-        if is_gallery_eligible(artifact)
-    ]
+    return artifact_selection.gallery_artifacts(artifacts, bindings=sys.modules[__name__])
+
 
 
 def gallery_artifact_by_id(
@@ -950,31 +414,13 @@ def gallery_artifact_by_id(
     lineage_id: str | None = None,
 ) -> Any | None:
     """Resolve a download ID through the browsing predicate and lineage."""
-    target = str(artifact_id or "")
-    lineage = str(lineage_id or "main")
-    return next(
-        (
-            artifact
-            for artifact in gallery_artifacts(artifacts)
-            if str(_artifact_value(artifact, "id", "")) == target
-            and str(_artifact_value(artifact, "lineage_id", None) or "main")
-            == lineage
-        ),
-        None,
-    )
+    return artifact_selection.gallery_artifact_by_id(artifacts, artifact_id, lineage_id=lineage_id, bindings=sys.modules[__name__])
+
 
 
 def artifact_stems(artifacts: Iterable[Any] | None) -> set[str]:
-    stems: set[str] = set()
-    for artifact in artifacts or []:
-        for value in (
-            getattr(artifact, "name", None),
-            getattr(artifact, "png_path", None),
-            getattr(artifact, "csv_path", None),
-        ):
-            if value:
-                stems.add(os.path.splitext(os.path.basename(str(value)))[0])
-    return stems
+    return artifact_selection.artifact_stems(artifacts, bindings=sys.modules[__name__])
+
 
 
 def excluded_artifact_stems(
@@ -1007,13 +453,8 @@ def excluded_artifact_stems(
     guessing in the permissive direction would put a figure of the wrong generation
     into a report.
     """
-    artifacts = list(artifacts or [])
-    excluded = artifact_stems(artifacts) - artifact_stems(kept)
-    stale = {str(stem) for stem in (invalidated_stems or [])}
-    live = artifact_stems(
-        artifact for artifact in artifacts if is_gallery_eligible(artifact)
-    )
-    return excluded | (stale - live)
+    return artifact_selection.excluded_artifact_stems(artifacts, kept, invalidated_stems=invalidated_stems, bindings=sys.modules[__name__])
+
 
 
 def invalidate_current_artifacts(
@@ -1024,23 +465,4 @@ def invalidate_current_artifacts(
     lineage_id: str | None = None,
 ) -> int:
     """Invalidate current artifacts from one round after upstream data drift."""
-    invalidated = 0
-    now = datetime.now()
-    for artifact in artifacts or []:
-        if (
-            lineage_id is not None
-            and hasattr(artifact, "lineage_id")
-            and (getattr(artifact, "lineage_id", None) or "main")
-            != (lineage_id or "main")
-        ):
-            continue
-        artifact_round = int(getattr(artifact, "round_number", 0) or 0)
-        if artifact_round not in (0, round_number):
-            continue
-        if not getattr(artifact, "is_current", True):
-            continue
-        artifact.is_current = False
-        artifact.invalidated_at = now
-        artifact.invalidation_reason = reason
-        invalidated += 1
-    return invalidated
+    return artifact_selection.invalidate_current_artifacts(artifacts, round_number=round_number, reason=reason, lineage_id=lineage_id, bindings=sys.modules[__name__])

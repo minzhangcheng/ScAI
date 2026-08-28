@@ -6,6 +6,7 @@ and neither can fail the round it reviews.
 """
 import base64
 import hashlib
+import inspect
 import pytest
 from types import SimpleNamespace
 
@@ -209,9 +210,10 @@ def test_evidence_gaps_are_recorded_but_never_shown_to_the_pi():
 
     # The PI's bioinformatics context enumerates its keys explicitly; evidence_gaps
     # must not be among them.
-    source = open(syn_mod.__file__).read()
-    fn = re.search(r"async def _pi_synthesis\b.*?(?=\n    (?:async )?def )", source, re.DOTALL)
-    assert "evidence_gaps" not in fn.group(0), "observation leaked into the PI prompt"
+    from backend.workflow.synthesis_parts import phases
+
+    source = inspect.getsource(phases.synthesize_agent_results)
+    assert "evidence_gaps" not in source, "observation leaked into the PI prompt"
 
 
 def test_no_mechanism_programs_records_nothing():
@@ -245,7 +247,9 @@ def test_final_result_carries_evidence_binding_keys():
     import re
     import backend.workflow.agents as agents_mod
 
-    source = open(agents_mod.__file__).read()
+    from backend.workflow.agent_nodes import bioinformatics_node
+
+    source = inspect.getsource(bioinformatics_node)
     block = re.search(r"final_result = \{.*?\n        \}", source, re.DOTALL)
     assert block, "could not locate the final_result literal"
     body = block.group(0)
@@ -297,10 +301,9 @@ def test_unknown_evidence_binding_is_not_reported_as_verified():
     import re
     import backend.workflow.synthesis as syn_mod
 
-    source = open(syn_mod.__file__).read()
-    fn = re.search(r"async def _pi_synthesis\b.*?(?=\n    (?:async )?def )", source, re.DOTALL)
-    assert fn, "could not locate _pi_synthesis"
-    body = fn.group(0)
+    from backend.workflow.synthesis_parts import phases
+
+    body = inspect.getsource(phases.synthesize_agent_results)
     # A two-branch form on `is False` is exactly the bug: it maps None to verified.
     assert "elif evidence_verified is False:" in body, "the note must handle all three states"
     assert "unknown" in body.lower()

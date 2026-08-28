@@ -2638,7 +2638,7 @@
     "docker/test-deps/requirements-test.in": "24001314dbc2c58a596b9b4bef2899492e10b190cbd03f93c667eb87726028b4",
     "requirements-nodeps.txt": "57b229b994ab7ef2797edf08e4fdb8b25eb71407aa05838efc13a9f60545ae02",
     "requirements.txt": "7ddc468bbc8dfd92221b4e9e05744b0d26ca40898afc440d8b9d582fcb09636e",
-    "scripts/lock-test-deps.sh": "490b81f4079eb76a18669e83e75c71a2b3a7abd8367346dee96f133a8d24c042"
+    "scripts/lock-test-deps.sh": "6307bce2785f79d515ef4e87c56068d641c4852e6ff47f28d4293ae5f1747452"
   },
   "installer": {
     "argv": [
@@ -2652,7 +2652,7 @@
   "lock_tool": {
     "contract_version": 1,
     "path": "scripts/lock-test-deps.sh",
-    "sha256": "490b81f4079eb76a18669e83e75c71a2b3a7abd8367346dee96f133a8d24c042"
+    "sha256": "6307bce2785f79d515ef4e87c56068d641c4852e6ff47f28d4293ae5f1747452"
   },
   "nodeps": [
     {

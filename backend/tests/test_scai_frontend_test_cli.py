@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
 import os
 import shutil
@@ -19,21 +20,28 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER_FILE = ROOT / "scripts" / "scai-frontend-test"
+PYTHON_RUNNER_FILE = ROOT / "scripts" / "scai_frontend_runner.py"
+PARTS_DIR = ROOT / "scripts" / "scai_frontend_parts"
 FIXTURE_FILE = ROOT / "backend/tests/fixtures/npm9-layout.json"
 FIXTURE = json.loads(FIXTURE_FILE.read_text(encoding="utf-8"))
-def load_frontend_module(path: Path = RUNNER_FILE):
-    text = path.read_text(encoding="utf-8")
-    prefix = "<<'PYTHON_EOF'\n"
-    suffix = "\nPYTHON_EOF\n"
-    assert prefix in text and suffix in text
-    body = text.split(prefix, 1)[1].rsplit(suffix, 1)[0]
-    module = types.ModuleType("scai_frontend_contract")
-    module.__file__ = str(path)
+
+
+def _frontend_source() -> str:
+    paths = [PYTHON_RUNNER_FILE, *sorted(PARTS_DIR.glob("*.py"))]
+    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+
+def load_frontend_module(path: Path = PYTHON_RUNNER_FILE):
+    spec = importlib.util.spec_from_file_location("scai_frontend_contract", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
     previous = sys.modules.get(module.__name__)
     sys.modules[module.__name__] = module
+    sys.path.insert(0, str(path.parent))
     try:
-        exec(compile(body, str(path), "exec"), module.__dict__)
+        spec.loader.exec_module(module)
     finally:
+        sys.path.remove(str(path.parent))
         if previous is None:
             sys.modules.pop(module.__name__, None)
         else:
@@ -42,6 +50,8 @@ def load_frontend_module(path: Path = RUNNER_FILE):
 
 
 FRONTEND = load_frontend_module()
+FRONTEND_RUNNER = sys.modules["scai_frontend_parts.runner"]
+FRONTEND_NPM = sys.modules["scai_frontend_parts.npm"]
 _FAKE_TOOL_ROOTS: set[Path] = set()
 NPM9_EMPTY_CONFIG_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 NPM9_ENV_KEYS = ("audit", "cache", "fund", "globalconfig", "registry", "update-notifier", "userconfig")
@@ -329,8 +339,10 @@ def make_frontend_repo(tmp_path: Path, behavior: dict | None = None, *, source_n
     (repo / "scripts").mkdir()
     (repo / "backend/tests/fixtures").mkdir(parents=True)
     (repo / ".gitignore").write_text("test-results/\nnode_modules/\n__pycache__/\n", encoding="utf-8")
-    for name in ("scai-frontend-test", "scai_test_tree.py", "link_frontend_node_modules.sh"):
+    for name in ("scai-frontend-test", "scai_frontend_runner.py", "scai_test_tree.py", "link_frontend_node_modules.sh"):
         shutil.copy2(ROOT / "scripts" / name, repo / "scripts" / name)
+    shutil.copytree(PARTS_DIR, repo / "scripts/scai_frontend_parts")
+    shutil.copytree(ROOT / "scripts/scai_test_tree_parts", repo / "scripts/scai_test_tree_parts")
     frontend = repo / "frontend"
     frontend.mkdir()
     package = {"name": "scai-frontend", "version": "1.0.0", "private": True, "scripts": {"test": "vitest run"}}
@@ -997,17 +1009,17 @@ def test_frontend_runner_uses_run_start_head_for_later_commits(tmp_path):
 
 
 def test_frontend_lock_order_is_read_hash_global_namespace_keyed_recheck_then_run():
-    text = RUNNER_FILE.read_text(encoding="utf-8")
+    text = _frontend_source()
     assert text.index("source_before") < text.index("safe_lock(Path(\"/tmp\")") < text.index("safe_lock(self.input_namespace") < text.index("self.install_dir.mkdir")
 
 
 def test_missing_input_namespace_is_created_only_under_global_lock_before_keyed_open():
-    text = RUNNER_FILE.read_text(encoding="utf-8")
+    text = _frontend_source()
     assert text.index("safe_lock(Path(\"/tmp\")") < text.index("ensure_directory(self.input_namespace") < text.index("safe_lock(self.input_namespace")
 
 
 def test_keyed_lock_rechecks_source_and_inputs_before_fresh_run_or_copy():
-    text = RUNNER_FILE.read_text(encoding="utf-8")
+    text = _frontend_source()
     assert text.index("safe_lock(self.input_namespace") < text.index("latest_source = source_snapshot") < text.index("self.install_dir.mkdir") < text.index("shutil.copyfile")
 
 
@@ -1051,7 +1063,7 @@ def test_npm_ls_failure_prevents_test(tmp_path):
 
 
 def test_tree_canonicalization_rejects_extra_or_version_drift():
-    text = RUNNER_FILE.read_text(encoding="utf-8")
+    text = _frontend_source()
     assert "installed/lock drift" in text and "locked package is absent" in text
 
 
@@ -1070,7 +1082,7 @@ def test_tree_walker_accepts_captured_npm9_hidden_lock_scoped_and_nested_layout(
 
 
 def test_tree_walker_rejects_package_metadata_symlink_special_or_realpath_escape():
-    text = RUNNER_FILE.read_text(encoding="utf-8")
+    text = _frontend_source()
     assert "invalid package metadata" in text and "escapes installation" in text and "is not a regular file" in text
 
 
@@ -1083,24 +1095,24 @@ def test_bin_walker_records_vitest_shim_and_declared_contained_target(tmp_path):
 
 
 def test_bin_walker_requires_declaration_and_discovered_level_sets_to_match():
-    text = RUNNER_FILE.read_text(encoding="utf-8")
+    text = _frontend_source()
     assert "set(declarations) != bin_dirs" in text and "bin name set drift" in text
 
 
 def test_bin_walker_rejects_escape_wrong_target_extra_missing_shim_or_nested_bin_dir():
-    text = RUNNER_FILE.read_text(encoding="utf-8")
+    text = _frontend_source()
     for phrase in ("absolute bin target", "wrong bin target", "bin name set drift", "vitest shim is missing"):
         assert phrase in text
 
 
 def test_npm_test_uses_the_same_verified_vitest_shim():
-    text = RUNNER_FILE.read_text(encoding="utf-8")
+    text = _frontend_source()
     assert text.index("self.verify_vitest_shim()") < text.index('[str(self.npm), "test"')
 
 
 def test_frontend_runner_invokes_0644_link_helper_through_bash():
     assert stat.S_IMODE((ROOT / "scripts/link_frontend_node_modules.sh").stat().st_mode) == 0o644
-    text = RUNNER_FILE.read_text(encoding="utf-8")
+    text = _frontend_source()
     assert '["bash", str(helper)' in text
 
 
@@ -1136,7 +1148,7 @@ def test_runtime_home_cache_xdg_and_npmrc_are_outside_result_directory(tmp_path)
 
 
 def _artifact_test_run(tmp_path, monkeypatch):
-    monkeypatch.setattr(FRONTEND, "load_tree_helper", lambda _repo: object())
+    monkeypatch.setattr(FRONTEND_RUNNER, "load_tree_helper", lambda _repo: object())
     run = FRONTEND.FrontendRun(tmp_path)
     run.result_dir = tmp_path / "result"
     run.result_dir.mkdir(parents=True)
@@ -1188,9 +1200,9 @@ def test_result_artifact_allowlist_rejects_extra_directory_symlink_special_hardl
 
 
 def test_artifact_manifest_and_evidence_share_one_loaded_byte_snapshot():
-    text = RUNNER_FILE.read_text(encoding="utf-8")
-    body = text.split("<<'PYTHON_EOF'\n", 1)[1].rsplit("\nPYTHON_EOF\n", 1)[0]
-    module = ast.parse(body, filename=str(RUNNER_FILE))
+    text = _frontend_source()
+    runner_source = (PARTS_DIR / "runner.py").read_text(encoding="utf-8")
+    module = ast.parse(runner_source, filename=str(PARTS_DIR / "runner.py"))
     frontend = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "FrontendRun")
     calls = [
         node for node in ast.walk(frontend)
@@ -1198,6 +1210,14 @@ def test_artifact_manifest_and_evidence_share_one_loaded_byte_snapshot():
     ]
     assert len(calls) == 1
     assert "load_result_artifacts" in text and "ArtifactBytes" in text
+
+
+def test_shell_facade_executes_the_fixed_python_entrypoint():
+    source = RUNNER_FILE.read_text(encoding="utf-8")
+    assert 'export SCAI_FRONTEND_RUNNER_PATH="$0"' in source
+    assert 'runner_dir="$(cd "$(dirname "$0")" && pwd -P)"' in source
+    assert 'exec python3 "$runner_dir/scai_frontend_runner.py" "$@"' in source
+    assert "PYTHON_EOF" not in source
 
 
 def test_missing_optional_package_requires_platform_or_arch_inapplicability(tmp_path):
@@ -1257,24 +1277,24 @@ def test_node_platform_identity_is_command_owned_and_recorded(tmp_path):
 
 
 def test_global_and_input_key_locks_serialize_concurrent_frontend_runs():
-    text = RUNNER_FILE.read_text(encoding="utf-8")
+    text = _frontend_source()
     assert "fcntl.flock(fd, fcntl.LOCK_EX)" in text and "scai-frontend-" in text and ".install.lock" in text
 
 
 def test_frontend_environment_clears_node_options_and_all_npm_config_inputs():
-    text = RUNNER_FILE.read_text(encoding="utf-8")
+    text = _frontend_source()
     assert "os.environ" not in text[text.index("def command_env"):text.index("def empty_config_file")]
     assert "env=self.env" in text
 
 
 def test_frontend_uses_isolated_home_cache_and_userconfig():
-    text = RUNNER_FILE.read_text(encoding="utf-8")
+    text = _frontend_source()
     for key in ("HOME", "XDG_CACHE_HOME", "npm_config_cache", "npm_config_userconfig", "npm_config_globalconfig"):
         assert f'"{key}"' in text
 
 
 def test_npm_config_commands_have_exact_argv_env_cwd_exit_and_output_paths():
-    text = RUNNER_FILE.read_text(encoding="utf-8")
+    text = _frontend_source()
     assert '[str(self.npm), "config", "list", "--json"]' in text
     assert '[str(self.npm), "config", "list"]' in text
     assert "stdout_sha256" in text and "stderr_sha256" in text and '"cwd"' in text
@@ -1372,7 +1392,7 @@ def test_npm9_config_sources_rejects_closed_provenance_negative_matrix(
 
     captured_builtin_inputs: list[dict[str, object]] = []
     monkeypatch.setattr(
-        FRONTEND,
+        FRONTEND_NPM,
         "json_hash",
         lambda value: captured_builtin_inputs.append(value) or "0" * 64,
     )
@@ -1704,7 +1724,7 @@ def test_npm_config_values_and_sources_agree_on_exact_effective_overrides(tmp_pa
 
 
 def test_npm_config_plain_env_source_annotation_is_optional_but_if_present_exact():
-    text = RUNNER_FILE.read_text(encoding="utf-8")
+    text = _frontend_source()
     assert "environment" in text and "unexpected npm config source" in text
 
 
@@ -1716,7 +1736,7 @@ def test_npm_config_sources_reject_unexpected_project_user_global_or_env_source(
 
 
 def test_npm_config_artifacts_and_index_hashes_reject_tampering():
-    text = RUNNER_FILE.read_text(encoding="utf-8")
+    text = _frontend_source()
     assert "artifact_manifest" in text and "sha256_file" in text and "artifact-manifest.json" in text
 
 
@@ -1828,5 +1848,5 @@ def test_frontend_evidence_does_not_self_hash(tmp_path):
 
 
 def test_frontend_runner_never_invokes_npm_run_build_or_a_node_image():
-    text = RUNNER_FILE.read_text(encoding="utf-8")
+    text = _frontend_source()
     assert "npm run build" not in text and "docker" not in text and '[str(self.npm), "ci"]' in text

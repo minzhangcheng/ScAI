@@ -19,6 +19,7 @@ def _session_id(prefix: str) -> str:
 
 def test_every_production_reservation_uses_the_lifecycle_barrier():
     """New call sites must not recreate a check-then-publish window."""
+    from backend.tests.split_facade import split_source
     from backend.routes.chat_parts.snapshots import capture_post_chat_snapshot
     from backend.services.snapshot_v2.jobs import RestoreJobManager
     from backend.services.snapshot_v2.service_parts.session_state import (
@@ -33,7 +34,11 @@ def test_every_production_reservation_uses_the_lifecycle_barrier():
         RestoreJobManager.enqueue,
     )
     for reserver in reservers:
-        source = inspect.getsource(reserver)
+        source = (
+            split_source("backend.services.snapshot_v2.jobs")
+            if reserver is RestoreJobManager.enqueue
+            else inspect.getsource(reserver)
+        )
         assert "establish_snapshot_operation" in source, reserver.__qualname__
 
     enqueue_source = inspect.getsource(RestoreJobManager.enqueue)

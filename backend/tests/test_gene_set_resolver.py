@@ -13,6 +13,7 @@ import inspect
 import pytest
 
 import backend.agents.bioinformatics_agent as bio_mod
+from backend.agents.bioinformatics import executor_loop
 from backend.services.gene_set_resolver import (
     DEFAULT_HOMOLOGY_TYPES,
     LOW_MAPPING_RATE,
@@ -174,28 +175,29 @@ def test_fetch_gene_set_is_a_registered_tool():
 
 
 def test_fetch_gene_set_has_a_dispatch_branch():
-    src = inspect.getsource(bio_mod)
-    assert 'elif tool_name == "fetch_gene_set":' in src
+    src = inspect.getsource(executor_loop)
+    assert '"fetch_gene_set": functools.partial(' in src
+    assert "handle_fetch_gene_set" in src
 
 
 def test_fetch_runs_off_the_event_loop():
     """Network I/O in the dispatch loop would stall every other session."""
-    src = inspect.getsource(bio_mod)
-    start = src.index('elif tool_name == "fetch_gene_set":')
-    end = src.index('elif tool_name == "register_analysis_plan":', start)
-    block = src[start:end]
+    from backend.agents.bioinformatics import executor_gene_sets
+
+    block = inspect.getsource(executor_gene_sets.handle_fetch_gene_set)
     assert "asyncio.to_thread" in block
 
 
 def test_fetched_genes_are_injected_not_retyped():
     """Making the model retype the panel reintroduces exactly what this prevents."""
-    src = inspect.getsource(bio_mod)
-    start = src.index('elif tool_name == "fetch_gene_set":')
-    end = src.index('elif tool_name == "register_analysis_plan":', start)
-    block = src[start:end]
+    from backend.agents.bioinformatics import executor_gene_sets
+
+    block = inspect.getsource(executor_gene_sets.handle_fetch_gene_set)
     assert "self._bind_gene_set(" in block
-    bind = inspect.getsource(bio_mod.BioinformaticsAgent._bind_gene_set)
-    assert "self.sandbox.execute" in bind
+    from backend.agents.bioinformatics import executor_priors
+
+    bind = inspect.getsource(executor_priors._bind_gene_set)
+    assert "agent.sandbox.execute" in bind
     assert "skip_safety_check=True" in bind
 
 
@@ -238,10 +240,9 @@ def test_a_bind_the_kernel_refused_reports_no_variable():
 
 def test_a_refused_bind_falls_back_to_the_inline_gene_list():
     """None is the caller's signal to inline the genes, and it must be used."""
-    src = inspect.getsource(bio_mod)
-    start = src.index('elif tool_name == "fetch_gene_set":')
-    end = src.index('elif tool_name == "register_analysis_plan":', start)
-    block = src[start:end]
+    from backend.agents.bioinformatics import executor_gene_sets
+
+    block = inspect.getsource(executor_gene_sets.handle_fetch_gene_set)
     assert "if injected:" in block and "Genes: " in block, (
         "the inline list is the documented fallback for a bind that did not take"
     )

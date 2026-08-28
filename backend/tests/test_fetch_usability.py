@@ -18,6 +18,7 @@ import inspect
 import pytest
 
 import backend.agents.bioinformatics_agent as bio_mod
+from backend.agents.bioinformatics import executor_gene_sets
 from backend.services.gene_set_resolver import (
     cache_path,
     msigdb_gmt_url,
@@ -83,10 +84,7 @@ def test_parse_release_index_accepts_a_stamped_version():
 # ------------------------------------------------------------------- wiring
 
 def _fetch_block() -> str:
-    src = inspect.getsource(bio_mod)
-    start = src.index('elif tool_name == "fetch_gene_set":')
-    end = src.index('elif tool_name == "register_analysis_plan":', start)
-    return src[start:end]
+    return inspect.getsource(executor_gene_sets.handle_fetch_gene_set)
 
 
 def test_list_collections_mode_exists():

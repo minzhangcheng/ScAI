@@ -151,7 +151,7 @@ def test_restore_context_wires_resolved_previous_manifest():
     # Follow the split so the assertion keeps finding the wiring wherever it lives,
     # instead of passing once it moves out of the facade.
     source = split_source("backend.services.snapshot_v2.service")
-    assert "prev_manifest=self._resolve_previous_manifest(analysis_state)" in source
+    assert "prev_manifest=service._resolve_previous_manifest(analysis_state)" in source
 
 
 # ── Revision-Qualified Reuse Tests ────────────────────────────────────────────

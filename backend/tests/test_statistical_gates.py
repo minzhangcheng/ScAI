@@ -15,6 +15,8 @@ from types import SimpleNamespace
 import pytest
 
 import backend.agents.bioinformatics_agent as bio_mod
+from backend.agents.bioinformatics import executor_report_gates
+from backend.services import statistical_gates
 from backend.services.statistical_gates import (
     MIN_SAMPLES_PER_GROUP_FOR_PERMUTATION,
     GateFinding,
@@ -245,6 +247,32 @@ def test_run_gates_aggregates_and_reports_clean():
     assert report.message() == ""
 
 
+def test_run_gates_calls_families_in_frozen_order(monkeypatch):
+    calls = []
+    names = [
+        "check_underpowered_negative_claims",
+        "check_declared_testing_family",
+        "check_permutation_at_small_n",
+        "check_resampling_resolution",
+        "check_panel_redundancy",
+        "check_analysis_unit",
+        "check_cell_level_inference",
+        "check_ora_background",
+        "check_composition_claims",
+        "check_magnitude_claims",
+    ]
+    for name in names:
+        monkeypatch.setattr(
+            statistical_gates,
+            name,
+            lambda *args, _name=name, **kwargs: calls.append(_name) or [],
+        )
+
+    statistical_gates.run_gates([], score_definitions=[], scoring_plans=[])
+
+    assert calls == names
+
+
 def test_run_gates_message_is_actionable():
     scores = [_score("panel_x", underpowered=True, plan_id="p1")]
     plans = [_plan("p1", family=[])]
@@ -271,9 +299,7 @@ def test_gate_finding_message_includes_rule_guidance():
 # ----------------------------------------------------------------- wiring
 
 def test_gate_is_wired_into_report_findings():
-    src = inspect.getsource(bio_mod)
-    start = src.index('elif tool_name == "report_findings":')
-    block = src[start:start + 20000]
+    block = inspect.getsource(executor_report_gates.prepare_report_attempt)
     assert "run_statistical_gates" in block
     assert "stats_gate_reject_count" in block
 
@@ -289,11 +315,11 @@ def test_gate_is_bounded_and_records_its_escape():
     cell-level-inference rejection is to reword the claim, and asking twice more
     trains the phrasing rather than the analysis.
     """
-    src = inspect.getsource(bio_mod)
-    assert "MAX_STATS_GATE_REJECTIONS" in src
+    src = inspect.getsource(executor_report_gates.prepare_report_attempt)
+    assert "max_stats_gate_rejections" in src
     assert "_unsatisfiable" in src, "the per-violation ceiling is missing"
     assert "cell-level-inference" in src
-    start = src.index("if stats_gate_reject_count < _cap:")
+    start = src.index("if context.stats_gate_reject_count < _cap:")
     block = src[start:start + 3000]
     assert "_escaped_notes.append" in block, (
         "a force-released gate must record the escape in the report"
@@ -302,7 +328,7 @@ def test_gate_is_bounded_and_records_its_escape():
 
 def test_advisories_reach_the_report_without_blocking():
     """A narrow check earns a note, not a rejection."""
-    src = inspect.getsource(bio_mod)
+    src = inspect.getsource(executor_report_gates.prepare_report_attempt)
     assert "advisory_message()" in src
     idx = src.index("advisory_message()")
     window = src[idx:idx + 400]

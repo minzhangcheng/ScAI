@@ -14,6 +14,7 @@ from backend.constants import LlmFailureAction
 from backend.models.schemas import AgentType
 from backend.utils.llm_client import UpstreamExhaustedError
 from backend.workflow.helpers import WorkflowTerminatedError
+from backend.tests.split_facade import setattr_facade
 
 
 def _bare_agent() -> PathologyAgent:
@@ -182,9 +183,13 @@ def _patch_analyze_image_setup(monkeypatch, agent):
     monkeypatch.setattr(agent, "refresh_runtime_config_if_needed", lambda: None)
     monkeypatch.setattr(agent, "_set_llm_context", lambda: None)
     monkeypatch.setattr(mod.os.path, "exists", lambda path: True)
-    monkeypatch.setattr(mod, "load_image", lambda path: object())
-    monkeypatch.setattr(mod, "process_pathology_image", lambda *a, **k: ["tile"])
-    monkeypatch.setattr(mod, "create_overview_image", lambda image: "overview")
+    setattr_facade(monkeypatch, mod.__name__, "load_image", lambda path: object())
+    setattr_facade(
+        monkeypatch, mod.__name__, "process_pathology_image", lambda *a, **k: ["tile"]
+    )
+    setattr_facade(
+        monkeypatch, mod.__name__, "create_overview_image", lambda image: "overview"
+    )
 
     class FakeImg:
         id = "img-1"

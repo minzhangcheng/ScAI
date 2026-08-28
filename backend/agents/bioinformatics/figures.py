@@ -19,6 +19,7 @@ import textwrap
 import time
 import os
 import shutil
+import sys
 from pathlib import Path
 from datetime import datetime
 
@@ -73,6 +74,18 @@ from ...services.report.figure_transactions import (
     register_pending_figure_attempt,
     rollback_figure_publish_transaction,
 )
+from .figure_dependencies import FigureDependencies
+from . import figure_preflight as _figure_preflight_owner
+from . import figure_generation as _figure_generation_owner
+from . import figure_persistence as _figure_persistence_owner
+from .figure_generation import execute_initial_render
+from .figure_persistence import (
+    finalize_render,
+    guard_attempt_await,
+    journal_pending_figure,
+)
+from .figure_preflight import FigureRequestContext, prepare_figure_request
+from .figure_review import run_review_loop
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -98,19 +111,15 @@ _PDF_SAVED_MARKER = "Saved PDF"
 
 def _new_render_attempt_paths(figures_dir: Path, safe_name: str, attempt_id: str):
     """Return a hidden staging directory and its JPG/PDF paths."""
-    attempt_dir = figures_dir / ".attempts" / attempt_id
-    attempt_dir.mkdir(parents=True, exist_ok=False)
-    return attempt_dir, attempt_dir / f"{safe_name}.jpg", attempt_dir / f"{safe_name}.pdf"
+    return _figure_preflight_owner._new_render_attempt_paths(
+        figures_dir, safe_name, attempt_id
+    )
 
 
 def _discard_render_attempt(attempt_dir: Path) -> None:
-    try:
-        shutil.rmtree(attempt_dir)
-        parent = attempt_dir.parent
-        if parent.exists() and not any(parent.iterdir()):
-            parent.rmdir()
-    except OSError:
-        logger.warning("Could not remove failed figure attempt directory %s", attempt_dir)
+    return _figure_generation_owner._discard_render_attempt(
+        attempt_dir, bindings=sys.modules[__name__]
+    )
 
 
 def _publish_render_attempt(
@@ -129,68 +138,21 @@ def _publish_render_attempt(
     record-owned archive before either public path is replaced.  If either
     replacement fails, the old pair is restored before the attempt is removed.
     """
-    backups: list[tuple[Path, Path]] = []
-    published: list[Path] = []
-    archive_dir: Path | None = None
-    archive_paths: dict[str, Path] = {}
-    try:
-        final_jpg.parent.mkdir(parents=True, exist_ok=True)
-        for final in (final_jpg, final_pdf):
-            if final.exists():
-                backup = attempt_dir / f"previous_{final.name}"
-                shutil.copy2(final, backup)
-                backups.append((backup, final))
-        if archived_record is not None and backups:
-            archive_dir = (
-                final_jpg.parent
-                / ".revisions"
-                / str(getattr(archived_record, "id", "unknown"))
-            )
-            archive_dir.mkdir(parents=True, exist_ok=True)
-            for backup, final in backups:
-                archived_path = archive_dir / final.name
-                shutil.copy2(backup, archived_path)
-                archive_paths[final.suffix.lower()] = archived_path
-        os.replace(staged_jpg, final_jpg)
-        published.append(final_jpg)
-        os.replace(staged_pdf, final_pdf)
-        published.append(final_pdf)
-    except OSError as exc:
-        for path in published:
-            try:
-                path.unlink()
-            except OSError:
-                pass
-        for backup, final in backups:
-            try:
-                shutil.copy2(backup, final)
-            except OSError:
-                logger.exception("Could not restore prior figure render %s", final)
-        if archive_dir is not None:
-            try:
-                shutil.rmtree(archive_dir)
-            except OSError:
-                pass
-        _discard_render_attempt(attempt_dir)
-        return f"Could not publish validated figure render: {exc}"
-    if archived_record is not None:
-        archived_jpg = archive_paths.get(".jpg") or archive_paths.get(".jpeg")
-        archived_pdf = archive_paths.get(".pdf")
-        if archived_jpg is not None:
-            archived_record.png_path = str(archived_jpg)
-        if archived_pdf is not None:
-            archived_record.pdf_path = str(archived_pdf)
-    _discard_render_attempt(attempt_dir)
-    return None
+    return _figure_generation_owner._publish_render_attempt(
+        attempt_dir,
+        staged_jpg,
+        staged_pdf,
+        final_jpg,
+        final_pdf,
+        archived_record=archived_record,
+        bindings=sys.modules[__name__],
+    )
 
 
 def _render_landed(output: str | None) -> bool:
     """Whether this execution actually replaced the figure on disk."""
-    text = output or ""
-    return (
-        _JPG_SAVED_MARKER in text
-        and _NO_FIGURE_MARKER not in text
-        and _SAVE_FAILED_MARKER not in text
+    return _figure_preflight_owner._render_landed(
+        output, bindings=sys.modules[__name__]
     )
 
 
@@ -198,38 +160,9 @@ def _publication_output_error(
     jpg_path: Path, pdf_path: Path, output: str | None
 ) -> str | None:
     """Explain why a promised JPG+PDF render is not publication-ready."""
-    if not _render_landed(output):
-        return (
-            "Figure generation produced no new JPG render; an older file with "
-            "the same name, if present, was not re-registered."
-        )
-    content_error = empty_render_reason(output)
-    if content_error:
-        return content_error
-    if not jpg_path.exists():
-        return f"JPG file was not created: {jpg_path}"
-    try:
-        jpg_size = jpg_path.stat().st_size
-    except OSError:
-        jpg_size = 0
-    if jpg_size < 2000:
-        return (
-            f"Figure appears to be blank (file size: {jpg_size} bytes). "
-            "The plotting code may not have generated visible content."
-        )
-    if image_file_sha256(jpg_path) is None:
-        return f"JPG render is corrupt or cannot be decoded: {jpg_path}"
-    if (
-        _PDF_SAVE_FAILED_MARKER in (output or "")
-        or _PDF_SAVED_MARKER not in (output or "")
-    ):
-        return (
-            "Figure generation did not produce a new publication PDF; an older "
-            "same-name PDF, if present, was not re-registered."
-        )
-    if not publication_pdf_is_valid(pdf_path):
-        return f"Publication PDF is missing or invalid: {pdf_path}"
-    return None
+    return _figure_preflight_owner._publication_output_error(
+        jpg_path, pdf_path, output, bindings=sys.modules[__name__]
+    )
 
 
 def _layout_unverified_marker() -> Dict[str, Any]:
@@ -247,43 +180,21 @@ def _layout_unverified_marker() -> Dict[str, Any]:
     the revision budget on an unfixable objection and drop the figure from every
     report — the false-positive cost this gate is built to avoid.
     """
-    return {
-        "kind": "lint_skipped",
-        "severity": "advise",
-        "text": "",
-        "what": "layout",
-        "detail": (
-            "the renderer returned no verdict for this render, so its layout "
-            "is unverified rather than known to be clean"
-        ),
-    }
+    return _figure_preflight_owner._layout_unverified_marker()
 
 
 def _layout_feedback_block(violations) -> str:
     """Render measured layout violations as a feedback section, or ''."""
-    body = format_violations_for_prompt(violations)
-    if not body:
-        return ""
-    return (
-        "\n**Measured layout defects (from the rendering engine, not an "
-        "opinion — these are pixel coordinates of artists that were drawn on "
-        "top of each other):**\n" + body + "\n"
+    return _figure_preflight_owner._layout_feedback_block(
+        violations, bindings=sys.modules[__name__]
     )
 
 
 def _violation_must_fix_items(violations) -> List[str]:
     """One must-fix line per measured violation, for the reviewer's list."""
-    body = format_violations_for_prompt(violations)
-    if not body:
-        return []
-    items = []
-    for line in body.splitlines():
-        cleaned = line.strip()
-        if cleaned.startswith("- "):
-            cleaned = cleaned[2:].strip()
-        if cleaned:
-            items.append(cleaned)
-    return items
+    return _figure_preflight_owner._violation_must_fix_items(
+        violations, bindings=sys.modules[__name__]
+    )
 
 
 from .shared import (  # noqa: F401
@@ -409,36 +320,13 @@ class FiguresMixin:
         failed_code: str = "",
     ) -> str:
         """Return one bounded, session-scoped note for a recognizable API mismatch."""
-        from backend.services.api_change_notes import (
-            api_change_signature,
-            format_api_note,
-            record_api_note,
-            recorded_api_note,
+        return await _figure_preflight_owner.environment_api_hint(
+            self,
+            state,
+            error,
+            failed_code,
+            bindings=sys.modules[__name__],
         )
-
-        signature = api_change_signature(error)
-        if not signature:
-            return ""
-        note = recorded_api_note(state, signature)
-        if note:
-            return format_api_note(signature, note)
-        if not getattr(self, "technique_agent", None):
-            return ""
-        try:
-            note = await self.technique_agent.lookup_from_error(
-                self.sandbox, str(error or ""), failed_code or ""
-            )
-        except Exception as lookup_error:
-            logger.warning(
-                "[Bioinformatics] Environment-API lookup failed for %s: %s",
-                signature,
-                lookup_error,
-            )
-            return ""
-        if not str(note or "").strip():
-            return ""
-        record_api_note(state, signature, note)
-        return format_api_note(signature, note)
 
     async def _handle_generate_publication_figure(
         self,
@@ -447,7 +335,9 @@ class FiguresMixin:
         description: str,
         figure_type: str,
         state: AnalysisState,
-        review_callback: Optional[Callable[[PublicationFigure], Awaitable[Dict[str, Any]]]] = None,
+        review_callback: Optional[
+            Callable[[PublicationFigure], Awaitable[Dict[str, Any]]]
+        ] = None,
         diagnostic: bool = False,
         plan_step_id: Optional[int] = None,
         purpose: Optional[str] = None,
@@ -474,1034 +364,64 @@ class FiguresMixin:
         Returns:
             Tool result message
         """
-        logger.info(f"[Bioinformatics] Generating publication figure: {figure_name}")
-
-        # Validate code before execution
-        is_valid, error_msg = self._validate_code(code)
-        if not is_valid:
-            return f"Error: Code validation failed - {error_msg}"
-
-        # Ensure figures directory exists
-        figures_dir = Path(self.sandbox.working_dir) / "figures"
-        # A previous worker may have died after either public-file replace or
-        # after the durable record write but before its commit marker. Recover
-        # that transaction before resolving the current logical head.
-        try:
-            from ...config import get_session_workspace
-            if figures_dir.resolve() == (
-                get_session_workspace(state.id) / "figures"
-            ).resolve():
-                from ...services.session_store import (
-                    recover_publication_transactions_for_state,
-                )
-                await recover_publication_transactions_for_state(state.id, state)
-        except Exception:
-            logger.exception(
-                "Could not recover publication transactions for %s", state.id
-            )
-            return "Could not recover pending publication figure transactions"
-
-        # Clean up figure name
-        safe_name = "".join(c if c.isalnum() or c == '_' else '_' for c in figure_name)
-        final_jpg_path = figures_dir / f"{safe_name}.jpg"
-        final_pdf_path = figures_dir / f"{safe_name}.pdf"
-
-        sandbox_state = state.sandbox_state or {}
-        current_plan = getattr(state, "current_plan", None)
-        current_plan_id = str(getattr(current_plan, "id", "") or "").strip() or None
-        active_lineage = getattr(state, "restore_branch_id", None) or "main"
-        logical_id = str(logical_figure_id or "").strip()[:240]
-        if not logical_id:
-            # Tool calls require an explicit semantic ID.  Direct/internal
-            # callers that predate the schema remain usable, but their attempts
-            # are deliberately independent rather than grouped by filename.
-            logical_id = f"render:{uuid.uuid4()}"
-        prior_attempts = [
-            item for item in eligible_artifacts(state.publication_figures)
-            if (getattr(item, "lineage_id", None) or "main") == active_lineage
-            and str(getattr(item, "logical_figure_id", None) or "") == logical_id
-        ]
-        prior_attempt = prior_attempts[-1] if prior_attempts else None
-        render_attempt_id = str(uuid.uuid4())
-
-        instrumented_code, sensitive_call_count = (
-            instrument_expression_contract_calls(code)
-        )
-        preinstall_expression_runtime = has_direct_expression_contract_call(code)
-        guarded_code = (
-            instrumented_code
-            if preinstall_expression_runtime or not sensitive_call_count
-            else build_expression_runtime_code() + "\n" + instrumented_code
-        )
-        if preinstall_expression_runtime:
-            runtime_setup = await self.sandbox.execute(
-                build_expression_runtime_code(),
-                save_to_history=False,
-                skip_safety_check=True,
-            )
-            if runtime_setup.error:
-                return (
-                    "Figure generation blocked: "
-                    + compact_traceback(runtime_setup.error, max_chars=3000)
-                )
-
-        representation_will_change = mutates_expression_representation(code)
-        preexisting_artifact_versions = (
-            workspace_artifact_versions(self.sandbox.working_dir)
-            if representation_will_change else {}
-        )
-        attempt_dir, staged_jpg_path, staged_pdf_path = _new_render_attempt_paths(
-            figures_dir, safe_name, render_attempt_id
-        )
-        # Wrap code to save both JPG and PDF; paths are repr()'d inside the
-        # shared wrapper to prevent injection.
-        wrapped_code = _build_publication_figure_wrapper(
-            guarded_code, attempt_dir, staged_jpg_path, staged_pdf_path
-        )
-
-        # Execute the code. A transport/runtime exception must not strand an
-        # attempt directory even though no CodeExecutionResult was returned.
-        staleness_note = ""
-        user_code_execution_started = False
-        try:
-            try:
-                # Conservatively treat a transport failure or cancellation after
-                # dispatch as a possibly executed, non-transactional mutation.
-                user_code_execution_started = True
-                result = await self.sandbox.execute(
-                    wrapped_code, skip_safety_check=True
-                )
-            finally:
-                try:
-                    (
-                        _invalidated_count,
-                        _stale_stems,
-                        staleness_note,
-                    ) = record_executed_representation_change(
-                        state,
-                        code,
-                        self.sandbox.working_dir,
-                        preexisting_artifact_versions,
-                        execution_started=user_code_execution_started,
-                    )
-                except Exception as provenance_error:
-                    logger.warning(
-                        "[Bioinformatics] Could not record figure expression "
-                        "representation invalidation: %s",
-                        compact_traceback(str(provenance_error), max_chars=1000),
-                    )
-        except BaseException:
-            _discard_render_attempt(attempt_dir)
-            raise
-
-        expression_contracts = parse_expression_contracts(result.output)
-        if expression_contracts:
-            record_expression_contract(state, expression_contracts)
-        result.output = strip_expression_contract_markers(result.output)
-
-        if result.error:
-            _discard_render_attempt(attempt_dir)
-            result.error = compact_traceback(result.error, max_chars=3000)
-            if staleness_note:
-                result.error = f"{result.error}\n{staleness_note}".strip()
-            error_msg = f"Figure generation failed: {result.error}"
-            api_hint = await self._environment_api_hint(state, result.error, code)
-            if api_hint:
-                error_msg = f"{error_msg}{api_hint}"
-            logger.error(f"[Bioinformatics] {error_msg}")
-            await self._notify("error", error_msg)
-            return error_msg
-
-        output_error = _publication_output_error(
-            staged_jpg_path, staged_pdf_path, result.output
-        )
-        if output_error:
-            _discard_render_attempt(attempt_dir)
-            logger.warning("[Bioinformatics] %s", output_error)
-            return output_error
-
-        # Keep all review/revision work under the hidden attempt directory.  A
-        # report or workspace scan must continue to see the prior published
-        # bytes until this logical attempt reaches a terminal producer state.
-        jpg_path = staged_jpg_path
-        pdf_path = staged_pdf_path
-
-        # Ask the rendering engine where the text actually landed. This is the
-        # deterministic half of the figure gate: the vision reviewer can say a
-        # legend overlaps something, only the renderer knows which artists, by
-        # how much, and where.
-        layout_violations = parse_layout_violations(result.output)
-        if lint_ran(result.output):
-            logger.info(
-                f"[Bioinformatics] Figure {safe_name} layout lint: "
-                f"{summarize_violations(layout_violations)}"
-            )
-        else:
-            # "Unverified" has to be written down, not just logged. The revision
-            # path keeps the previous measurement for exactly this reason; the
-            # first render has none to keep, so it records the absence itself —
-            # otherwise the figure carries [], which is what a clean measurement
-            # carries, and the layout gate is the only check a diagnostic figure
-            # is subject to at all.
-            layout_violations = [_layout_unverified_marker()]
-            logger.warning(
-                f"[Bioinformatics] Figure {safe_name}: layout lint did not "
-                f"report — treating layout as unverified, not as clean"
-            )
-
-        # Read JPG and compress to base64
-        try:
-            png_b64 = self._compress_image_to_base64(jpg_path, max_width=800)
-        except BaseException:
-            _discard_render_attempt(attempt_dir)
-            raise
-
-        # Create PublicationFigure object (png_path field stores JPG path for web display)
-        figure = PublicationFigure(
-            id=str(uuid.uuid4()),
-            name=safe_name,
+        dependencies = FigureDependencies.from_facade()
+        request = FigureRequestContext(
+            agent=self,
+            code=code,
+            figure_name=figure_name,
             description=description,
             figure_type=figure_type,
-            png_path=str(jpg_path),
-            pdf_path=str(pdf_path),
-            png_base64=png_b64,
-            layout_violations=layout_violations,
-            review_status=FigureReviewStatus.PENDING,
+            state=state,
+            review_callback=review_callback,
             diagnostic=diagnostic,
             plan_step_id=plan_step_id,
-            plan_id=current_plan_id,
-            purpose=purpose or ("diagnostic" if diagnostic else "result"),
-            logical_figure_id=logical_id,
-            render_attempt_id=render_attempt_id,
-            producer_status="pending",
-            revision_of_id=getattr(prior_attempt, "id", None),
-            is_published_head=False,
-            lineage_id=active_lineage,
-            round_number=int(state.current_round or 0),
-            analysis_generation=int(sandbox_state.get("analysis_generation", 0) or 0),
-            expression_provenance=dict(
-                sandbox_state.get("expression_contract_v1") or {}
-            ),
+            purpose=purpose,
+            logical_figure_id=logical_figure_id,
+            dependencies=dependencies,
         )
-        self._refresh_figure_integrity_hashes(figure)
-
-        # Register and durably journal the pending render before asking any
-        # reviewer to inspect it. A process death during that await is recovered
-        # as an abandoned audit record on the next load.
-        try:
-            pending_transaction = register_pending_figure_attempt(
-                attempt_dir=attempt_dir,
-                staged_jpg=staged_jpg_path,
-                staged_pdf=staged_pdf_path,
-                final_jpg=final_jpg_path,
-                final_pdf=final_pdf_path,
-                published_record=figure,
-                session_id=state.id,
-            )
-        except Exception as exc:
-            _discard_render_attempt(attempt_dir)
-            return f"Could not journal publication figure attempt: {exc}"
-
-        # Register the pending render before asking any reviewer to inspect it.
-        # Review events intentionally omit the large preview and the frontend
-        # fetches it through the figure API; without this upsert that request
-        # races the review callback and returns 404 (or shows an older revision).
-        self._upsert_publication_figure(
-            state, figure, refresh_integrity=False,
+        attempt, error = await prepare_figure_request(request)
+        if error:
+            return error
+        error = await execute_initial_render(attempt)
+        if error:
+            return error
+        error = await journal_pending_figure(attempt)
+        if error:
+            return error
+        await guard_attempt_await(
+            attempt, self._notify("figure", attempt.figure.png_base64)
         )
-        try:
-            await self._persist_figure_record_boundary(state, figures_dir)
-        except Exception as exc:
-            rollback_figure_publish_transaction(
-                Path(pending_transaction["journal_path"]),
-                state=state,
-                producer_status="failed",
-            )
-            return f"Could not persist pending publication figure record: {exc}"
-
-        render_published = False
-
-        async def _persist_terminal_rollback() -> None:
-            try:
-                persisted = await self._persist_figure_record_boundary(
-                    state, figures_dir
-                )
-                if persisted:
-                    mark_figure_record_recovery_durable(
-                        figures_dir,
-                        [str(getattr(figure, "render_attempt_id", "") or "")],
-                    )
-            except Exception:
-                # The terminal marker remains deliberately non-durable. The
-                # next session load will reapply the rollback and retry the
-                # lifecycle-locked session write.
-                logger.exception(
-                    "Could not persist terminal figure rollback for %s",
-                    figure.id,
-                )
-
-        async def _finalize_render() -> str | None:
-            """Commit this reviewed render once, preserving any path owner."""
-            nonlocal render_published
-            if render_published:
-                return None
-            lock_error = acquire_figure_publish_locks(
-                figures_dir=figures_dir,
-                final_jpg=final_jpg_path,
-                published_record=figure,
-            )
-            if lock_error:
-                rollback_figure_publish_transaction(
-                    Path(pending_transaction["journal_path"]),
-                    state=state,
-                    producer_status="failed",
-                )
-                await _persist_terminal_rollback()
-                return lock_error
-            try:
-                frozen_transaction = refreeze_pending_figure_attempt(
-                    pending_transaction,
-                    attempt_dir=attempt_dir,
-                    staged_jpg=jpg_path,
-                    staged_pdf=pdf_path,
-                    final_jpg=final_jpg_path,
-                    final_pdf=final_pdf_path,
-                    published_record=figure,
-                )
-                pending_transaction.clear()
-                pending_transaction.update(frozen_transaction)
-            except Exception as exc:
-                freeze_error = (
-                    "Could not authenticate final reviewed figure bytes: "
-                    f"{exc}"
-                )
-                rollback_figure_publish_transaction(
-                    Path(pending_transaction["journal_path"]),
-                    state=state,
-                    producer_status="failed",
-                )
-                await _persist_terminal_rollback()
-                return freeze_error
-            archival_owner = next(
-                (
-                    item for item in reversed(state.publication_figures)
-                    if item is not figure
-                    and (getattr(item, "lineage_id", None) or "main")
-                    == active_lineage
-                    and str(getattr(item, "png_path", "")) == str(final_jpg_path)
-                    and archival_render_available(item)
-                ),
-                None,
-            )
-            figure.producer_status = "publishing"
-            self._upsert_publication_figure(state, figure)
-            transaction = None
-            try:
-                transaction, publish_error = begin_figure_publish_transaction(
-                    attempt_dir=attempt_dir,
-                    staged_jpg=jpg_path,
-                    staged_pdf=pdf_path,
-                    final_jpg=final_jpg_path,
-                    final_pdf=final_pdf_path,
-                    published_record=figure,
-                    archived_record=archival_owner,
-                )
-            except BaseException:
-                figure.producer_status = "abandoned"
-                self._clear_unpublished_figure_payload(figure)
-                self._upsert_publication_figure(state, figure)
-                rollback_figure_publish_transaction(
-                    Path(pending_transaction["journal_path"]),
-                    state=state,
-                    producer_status="abandoned",
-                )
-                await _persist_terminal_rollback()
-                raise
-            if publish_error:
-                figure.producer_status = "failed"
-                self._clear_unpublished_figure_payload(figure)
-                figure.review_status = FigureReviewStatus.REVISION_REQUESTED
-                figure.pi_feedback = (
-                    f"{figure.pi_feedback}\n\n{publish_error}"
-                    if figure.pi_feedback else publish_error
-                )
-                self._upsert_publication_figure(state, figure)
-                await _persist_terminal_rollback()
-                return publish_error
-            try:
-                apply_publish_record_paths(transaction, figure, archival_owner)
-                figure.producer_status = "published"
-                self._refresh_figure_integrity_hashes(figure)
-                self._upsert_publication_figure(state, figure)
-                mark_publish_record_applied(
-                    transaction,
-                    published_record=figure,
-                    archived_record=archival_owner,
-                )
-                # The transaction marker is written only after session.json has
-                # crossed its own fsync boundary.  Tests and non-session direct
-                # callers do not own that canonical workspace and safely skip
-                # the persistence callback.
-                await self._persist_figure_record_boundary(state, figures_dir)
-                commit_figure_publish_transaction(transaction)
-            except BaseException:
-                if transaction is not None:
-                    rollback_figure_publish_transaction(
-                        Path(transaction["journal_path"]),
-                        state=state,
-                        producer_status="abandoned",
-                    )
-                else:
-                    figure.producer_status = "abandoned"
-                    self._clear_unpublished_figure_payload(figure)
-                    self._upsert_publication_figure(state, figure)
-                await _persist_terminal_rollback()
-                raise
-            render_published = True
-            return None
-
-        def _abandon_render() -> None:
-            """Remove a non-terminal attempt without disturbing any old head."""
-            if not render_published:
-                rollback_figure_publish_transaction(
-                    Path(pending_transaction["journal_path"]),
-                    state=state,
-                    producer_status="abandoned",
-                )
-            else:
-                self._upsert_publication_figure(state, figure)
-
-        async def _guard_attempt_await(awaitable):
-            """Clean staging if an external await aborts the producer attempt."""
-            try:
-                return await awaitable
-            except BaseException:
-                _abandon_render()
-                await _persist_terminal_rollback()
-                raise
-
-        # Send figure to frontend for display
-        await _guard_attempt_await(self._notify("figure", png_b64))
-
-        async def _execute_revision_candidate(source: str):
-            nonlocal staleness_note
-            candidate_id = str(uuid.uuid4())
-            candidate_dir, candidate_jpg, candidate_pdf = _new_render_attempt_paths(
-                figures_dir, safe_name, candidate_id
-            )
-            instrumented_source, candidate_sensitive_call_count = (
-                instrument_expression_contract_calls(source)
-            )
-            candidate_preinstall_runtime = has_direct_expression_contract_call(
-                source
-            )
-            guarded_source = (
-                instrumented_source
-                if candidate_preinstall_runtime or not candidate_sensitive_call_count
-                else build_expression_runtime_code() + "\n" + instrumented_source
-            )
-            if candidate_preinstall_runtime:
-                try:
-                    runtime_setup = await self.sandbox.execute(
-                        build_expression_runtime_code(),
-                        save_to_history=False,
-                        skip_safety_check=True,
-                    )
-                except BaseException:
-                    _discard_render_attempt(candidate_dir)
-                    raise
-                if runtime_setup.error:
-                    runtime_setup.error = compact_traceback(
-                        runtime_setup.error, max_chars=3000
-                    )
-                    _discard_render_attempt(candidate_dir)
-                    return runtime_setup, None
-
-            candidate_representation_will_change = (
-                mutates_expression_representation(source)
-            )
-            candidate_preexisting_versions = (
-                workspace_artifact_versions(self.sandbox.working_dir)
-                if candidate_representation_will_change else {}
-            )
-            candidate_wrapper = _build_publication_figure_wrapper(
-                guarded_source, candidate_dir, candidate_jpg, candidate_pdf
-            )
-            candidate_staleness_note = ""
-            candidate_execution_started = False
-            try:
-                try:
-                    candidate_execution_started = True
-                    candidate_result = await self.sandbox.execute(
-                        candidate_wrapper, skip_safety_check=True
-                    )
-                finally:
-                    try:
-                        (
-                            _candidate_invalidated_count,
-                            _candidate_stale_stems,
-                            candidate_staleness_note,
-                        ) = record_executed_representation_change(
-                            state,
-                            source,
-                            self.sandbox.working_dir,
-                            candidate_preexisting_versions,
-                            execution_started=candidate_execution_started,
-                        )
-                        if candidate_staleness_note:
-                            staleness_note = candidate_staleness_note
-                    except Exception as provenance_error:
-                        logger.warning(
-                            "[Bioinformatics] Could not record revised figure "
-                            "expression representation invalidation: %s",
-                            compact_traceback(
-                                str(provenance_error), max_chars=1000
-                            ),
-                        )
-            except BaseException:
-                _discard_render_attempt(candidate_dir)
-                raise
-            candidate_contracts = parse_expression_contracts(
-                candidate_result.output
-            )
-            if candidate_contracts:
-                record_expression_contract(state, candidate_contracts)
-            candidate_result.output = strip_expression_contract_markers(
-                candidate_result.output
-            )
-            if candidate_result.error:
-                candidate_result.error = compact_traceback(
-                    candidate_result.error, max_chars=3000
-                )
-                if candidate_staleness_note:
-                    candidate_result.error = (
-                        f"{candidate_result.error}\n{candidate_staleness_note}"
-                    ).strip()
-                _discard_render_attempt(candidate_dir)
-                return candidate_result, None
-            candidate_error = _publication_output_error(
-                candidate_jpg, candidate_pdf, candidate_result.output
-            )
-            if candidate_error:
-                _discard_render_attempt(candidate_dir)
-                return candidate_result, candidate_error
-            candidate_error = _publish_render_attempt(
-                candidate_dir, candidate_jpg, candidate_pdf, jpg_path, pdf_path
-            )
-            return candidate_result, candidate_error
-
-        # If review callback provided, get PI review
-        # Allow up to 3 revisions (4 reviews total: initial + 3 revisions)
         if review_callback:
-            revision_count = 0
-            current_code = code
-            revision_history = []  # Accumulate all rounds of PI feedback
-            # Highest-scoring rendered version seen so far, kept in memory so a
-            # revision that makes the figure worse can be undone.
-            best_snapshot = None
-
-            def _record_unresolved(items) -> None:
-                figure.unresolved_must_fix = normalize_text_list(items, limit=20)
-                # A figure held back by measured collisions is dropped from
-                # every report, and nothing else on the record would say why:
-                # the review status reads "accepted with reservations" and the
-                # UI shows it as reviewed. Put the reason where the figure
-                # itself carries it.
-                remaining = blocking_violations(figure.layout_violations)
-                if remaining:
-                    note = (
-                        f"[Layout gate] {summarize_violations(remaining)} — text is "
-                        f"covered and cannot be read, so this figure is held back "
-                        f"from reports until it is redrawn."
-                    )
-                    existing = figure.pi_feedback or ""
-                    if note not in existing:
-                        figure.pi_feedback = (
-                            f"{existing}\n\n{note}" if existing else note
-                        )
-
-            def _take_snapshot(score):
-                try:
-                    jpg_bytes = jpg_path.read_bytes() if jpg_path.exists() else None
-                    pdf_bytes = pdf_path.read_bytes() if pdf_path.exists() else None
-                except Exception as snap_err:
-                    logger.debug(f"[Bioinformatics] Figure snapshot skipped: {snap_err}")
-                    return None
-                if len(jpg_bytes or b"") + len(pdf_bytes or b"") > _MAX_ROLLBACK_SNAPSHOT_BYTES:
-                    return None
-                return {
-                    "score": score,
-                    "code": current_code,
-                    "jpg": jpg_bytes,
-                    "pdf": pdf_bytes,
-                    "b64": figure.png_base64,
-                    "violations": list(figure.layout_violations or []),
-                }
-
-            def _restore_snapshot(snap) -> bool:
-                if not snap:
-                    return False
-                try:
-                    if snap.get("jpg"):
-                        jpg_path.write_bytes(snap["jpg"])
-                    if snap.get("pdf"):
-                        pdf_path.write_bytes(snap["pdf"])
-                except Exception as restore_err:
-                    logger.warning(
-                        f"[Bioinformatics] Could not roll back {figure_name} to the "
-                        f"previous version: {restore_err}"
-                    )
-                    return False
-                figure.png_base64 = snap.get("b64") or figure.png_base64
-                figure.layout_violations = list(snap.get("violations") or [])
-                return True
-
-            while revision_count <= 3:
-                figure.review_status = FigureReviewStatus.PENDING
-                self._upsert_publication_figure(state, figure)
-                logger.info(f"[Bioinformatics] Submitting figure for PI review (attempt {revision_count + 1})")
-                await _guard_attempt_await(
-                    self._notify("status", f"PI reviewing figure: {figure_name}...")
-                )
-                review = await _guard_attempt_await(review_callback(figure))
-                quality_score = review.get('quality_score', 5)
-                blocking = blocking_violations(figure.layout_violations)
-                budget_left = revision_count < 3
-
-                if not blocking and (
-                    best_snapshot is None
-                    or quality_score > best_snapshot.get("score", -1)
-                ):
-                    snapshot = _take_snapshot(quality_score)
-                    if snapshot is not None:
-                        best_snapshot = snapshot
-
-                approved = bool(review.get('approved', False))
-
-                if approved and blocking and budget_left:
-                    # The reviewer signed off on a figure in which the renderer
-                    # measured text drawn on top of other text. Measurement
-                    # wins: the reviewer judges a downscaled JPEG, the renderer
-                    # reports the artists themselves. This is not a second
-                    # opinion about taste — the covered text cannot be read.
-                    logger.warning(
-                        f"[Bioinformatics] Figure {figure_name}: reviewer approved "
-                        f"(score={quality_score}) but layout lint reports "
-                        f"{summarize_violations(blocking)} — continuing revision"
-                    )
-                    approved = False
-                    review = dict(review)
-                    review['feedback'] = (
-                        (review.get('feedback') or '')
-                        + "\n\nThe reviewer approved this figure, but the rendering "
-                        "engine measured text drawn on top of other text. Those "
-                        "collisions must be resolved before the figure can be used."
-                    )
-                    review['must_fix'] = (
-                        normalize_text_list(review.get('must_fix'), limit=20)
-                        + _violation_must_fix_items(blocking)
-                    )
-
-                if approved:
-                    # Mark figures approved under leniency (after multiple revisions with non-perfect score)
-                    if blocking or (revision_count >= 2 and quality_score < 8):
-                        figure.review_status = FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
-                        logger.info(f"[Bioinformatics] Figure {figure_name} accepted with reservations (score={quality_score}, revisions={revision_count})")
-                    else:
-                        figure.review_status = FigureReviewStatus.APPROVED
-                        logger.info(f"[Bioinformatics] Figure {figure_name} approved by PI")
-                    figure.revision_history = revision_history
-                    figure.pi_feedback = review.get('feedback', '') or None
-                    _record_unresolved(_violation_must_fix_items(blocking))
-                    publish_error = await _finalize_render()
-                    if publish_error:
-                        return publish_error
-                    await self._emit_figure_record(
-                        "figure_approved", figure, review=review
-                    )
-                    await self._notify("status", f"Figure {figure_name} approved by PI")
-                    layout_note = (
-                        f"\nUnresolved layout defects: {summarize_violations(blocking)}. "
-                        f"This figure is excluded from reports until they are fixed."
-                        if blocking else ""
-                    )
-                    return (
-                        f"Figure {figure_name} has been approved by PI and saved.\n"
-                        f"Quality score: {quality_score}/10\n"
-                        f"Feedback: {review.get('feedback', 'Approved')}{layout_note}"
-                        + (f"\n{staleness_note}" if staleness_note else "")
-                    )
-
-                # PI requested revision
-                feedback = review.get('feedback', '')
-                suggestions = review.get('suggestions', [])
-                must_fix = normalize_text_list(review.get('must_fix'), limit=20)
-                review = dict(review)
-                review['must_fix'] = must_fix
-
-                # If PI flagged a data/analysis issue that can't be fixed by revising plot code,
-                # break out of the revision loop and defer to the main analysis flow
-                if review.get('requires_reanalysis', False):
-                    logger.warning(f"[Bioinformatics] Figure {figure_name} requires upstream reanalysis, skipping revision loop")
-                    await _guard_attempt_await(self._notify(
-                        "status",
-                        f"Figure {figure_name}: PI identified data-level issue, deferring to analysis",
-                    ))
-                    figure.review_status = FigureReviewStatus.REVISION_REQUESTED
-                    figure.pi_feedback = f"[REQUIRES REANALYSIS] {feedback}"
-                    figure.revision_history = revision_history
-                    _record_unresolved(
-                        must_fix + _violation_must_fix_items(blocking)
-                    )
-                    publish_error = await _finalize_render()
-                    if publish_error:
-                        return publish_error
-                    await self._emit_figure_record(
-                        "figure_revision", figure, review=review
-                    )
-                    # A data-level objection exits before the revision loop, so
-                    # any layout feedback from the same review would otherwise
-                    # be discarded with it. Carry the measured defects forward
-                    # so the regenerated figure does not reproduce them.
-                    layout_note = ""
-                    if blocking:
-                        layout_note = (
-                            "\n\nSeparately from the data issue, the rendering engine "
-                            "measured these layout defects. The regenerated figure must "
-                            "avoid them too:\n"
-                            + format_violations_for_prompt(blocking)
-                        )
-                    return (
-                        f"Figure {figure_name} has a data-level issue that cannot be fixed by revising the plot code. "
-                        f"PI feedback: {feedback}\n"
-                        f"Please address this in the analysis pipeline and regenerate the figure later."
-                        f"{layout_note}"
-                        + (f"\n{staleness_note}" if staleness_note else "")
-                    )
-
-                # Record this round's feedback in cumulative history
-                revision_history.append({
-                    "round": revision_count + 1,
-                    "feedback": feedback,
-                    "suggestions": suggestions,
-                    "must_fix": must_fix,
-                    "quality_score": review.get('quality_score', None)
-                })
-
-                figure.pi_feedback = feedback
-                figure.revision_history = revision_history
-                figure.review_status = FigureReviewStatus.REVISION_REQUESTED
-                self._upsert_publication_figure(state, figure)
-                await _guard_attempt_await(self._emit_figure_record(
-                    "figure_revision", figure, review=review
-                ))
-
-                if revision_count >= 3:
-                    # Out of revision budget
-                    break
-
-                # Detect stalled revision loop: if the quality score hasn't
-                # improved across the last 2 rounds, further revisions are
-                # unlikely to help — accept the current version to avoid
-                # burning time and tokens.
-                #
-                # Two limits on that shortcut. It is a judgement call about
-                # diminishing returns, so it is unavailable while the renderer
-                # still measures text drawn over other text: that is not a
-                # matter of taste and the reviewer's opinion does not settle it.
-                # And a score that went *down* is a regression, not a stall —
-                # roll back to the best rendered version rather than shipping
-                # the worse one, which the old `<=` comparison did.
-                if len(revision_history) >= 2 and not blocking:
-                    prev_score = revision_history[-2].get("quality_score")
-                    curr_score = revision_history[-1].get("quality_score")
-                    if prev_score is not None and curr_score is not None and curr_score <= prev_score:
-                        regressed = curr_score < prev_score
-                        # Only roll back to something actually better. The
-                        # snapshot is skipped for figures over the size cap, so
-                        # best_snapshot can hold a version older and worse than
-                        # the one being discarded.
-                        rollback_worth_it = (
-                            regressed
-                            and best_snapshot is not None
-                            and best_snapshot.get("score", -1) > curr_score
-                        )
-                        rolled_back = _restore_snapshot(best_snapshot) if rollback_worth_it else False
-                        logger.warning(
-                            f"[Bioinformatics] Figure {figure_name}: quality score "
-                            f"{'regressed' if regressed else 'stalled'} "
-                            f"({prev_score} -> {curr_score})"
-                            f"{', rolled back to the best version' if rolled_back else ''}"
-                            f", accepting current version"
-                        )
-                        figure.review_status = FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
-                        _record_unresolved(must_fix)
-                        publish_error = await _finalize_render()
-                        if publish_error:
-                            return publish_error
-                        await self._emit_figure_record(
-                            "figure_approved", figure, review=review
-                        )
-                        await self._notify("status", f"Figure {figure_name} accepted (revision stalled)")
-                        rollback_note = (
-                            f"\nThe last revision scored lower than the previous one, so the "
-                            f"earlier version (score {best_snapshot.get('score')}) was restored."
-                            if rolled_back else ""
-                        )
-                        return (
-                            f"Figure {figure_name} accepted with reservations (quality score did not improve "
-                            f"after revision: {prev_score} -> {curr_score}).{rollback_note}\n"
-                            f"Last feedback: {feedback}\n"
-                            f"Please move on to the next analysis step."
-                            + (f"\n{staleness_note}" if staleness_note else "")
-                        )
-
-                # Try to revise the figure
-                await _guard_attempt_await(self._notify(
-                    "status", "Revising figure based on PI feedback..."
-                ))
-                logger.info(f"[Bioinformatics] Revising figure {figure_name}: {feedback}")
-
-                # Generate revised code with full revision history
-                try:
-                    revised_code = await self._revise_figure_code(
-                        current_code, feedback, suggestions, must_fix, figure_type, state, figure.png_base64,
-                        revision_history=revision_history,
-                        layout_violations=figure.layout_violations,
-                    )
-                except UpstreamExhaustedError:
-                    _abandon_render()
-                    raise
-                except Exception as revise_err:
-                    revise_error = compact_traceback(
-                        str(revise_err), max_chars=1000
-                    )
-                    logger.error(
-                        "[Bioinformatics] _revise_figure_code failed: %s; "
-                        "keeping current version",
-                        revise_error,
-                    )
-                    await self._notify(
-                        "status",
-                        f"Figure revision failed ({revise_error}), keeping current version",
-                    )
-                    break
-
-                # Only increment revision count after successful code generation
-                revision_count += 1
-                figure.revision_count = revision_count
-
-                # Validate revised code before execution
-                is_valid, error_msg = self._validate_code(revised_code)
-                if not is_valid:
-                    logger.warning(f"[Bioinformatics] Revised code failed validation: {error_msg}")
-                    break
-
-                # Keep the previous bytes for quality-score rollback. Physical
-                # failures no longer need this snapshot: candidates stay hidden
-                # in staging until their JPG/PDF pair has passed validation.
-                pre_revision_snapshot = _take_snapshot(quality_score)
-
-                try:
-                    result, physical_error = await _execute_revision_candidate(revised_code)
-                except BaseException:
-                    _abandon_render()
-                    raise
-                if not result.error and not physical_error:
-                    # Update figure with new image and re-measure its layout
-                    figure.png_base64 = self._compress_image_to_base64(jpg_path, max_width=800)
-                    revised_sandbox_state = state.sandbox_state or {}
-                    figure.analysis_generation = int(
-                        revised_sandbox_state.get("analysis_generation", 0) or 0
-                    )
-                    figure.expression_provenance = dict(
-                        revised_sandbox_state.get("expression_contract_v1") or {}
-                    )
-                    # The previous bytes of this pending attempt were correctly
-                    # invalidated when the revision mutated the canonical
-                    # representation.  The replacement render was produced
-                    # afterwards and is therefore current for the new
-                    # generation.
-                    figure.is_current = True
-                    figure.invalidated_at = None
-                    figure.invalidation_reason = None
-                    self._refresh_figure_integrity_hashes(figure)
-                    figure.review_status = FigureReviewStatus.PENDING
-                    self._upsert_publication_figure(state, figure)
-                    if lint_ran(result.output):
-                        figure.layout_violations = parse_layout_violations(result.output)
-                        logger.info(
-                            f"[Bioinformatics] Figure {figure_name} revision "
-                            f"{revision_count} layout lint: "
-                            f"{summarize_violations(figure.layout_violations)}"
-                        )
-                    else:
-                        # No verdict for this render. Clearing the previous
-                        # measurement would read as "the revision fixed it" and
-                        # re-open both the stall shortcut and report eligibility
-                        # -- the exact path this change exists to close.
-                        logger.warning(
-                            f"[Bioinformatics] Figure {figure_name} revision "
-                            f"{revision_count}: layout unverified, keeping the "
-                            f"previous measurement"
-                        )
-                    await _guard_attempt_await(
-                        self._notify("figure", figure.png_base64)
-                    )
-                    current_code = revised_code
-                elif physical_error:
-                    logger.warning(
-                        "[Bioinformatics] Figure %s revision rejected: %s",
-                        figure_name,
-                        physical_error,
-                    )
-                    _restore_snapshot(pre_revision_snapshot or best_snapshot)
-                    break
-                else:
-                    error_msg = compact_traceback(str(result.error), max_chars=1000)
-                    result.error = error_msg
-                    logger.warning(
-                        "[Bioinformatics] Revision failed: %s", error_msg
-                    )
-
-                    # Technique Agent documentation lookup for technical errors
-                    extra_context = ""
-                    api_hint = await self._environment_api_hint(
-                        state, error_msg, revised_code
-                    )
-                    if api_hint:
-                        extra_context = api_hint
-                    elif self.technique_agent:
-                        err_type = extract_error_type(error_msg)
-                        if err_type in TECHNICAL_ERROR_TYPES:
-                            logger.info(f"[Bioinformatics] Looking up docs for {err_type} error")
-                            doc_hint = await self.technique_agent.lookup_from_error(
-                                self.sandbox, error_msg, revised_code
-                            )
-                            if doc_hint:
-                                extra_context = f"\n\n[API Documentation]\n{doc_hint}"
-                                logger.info(f"[Bioinformatics] Got documentation hint for {err_type}")
-
-                    # Auto-retry: feed error + docs back to LLM
-                    logger.info(f"[Bioinformatics] Auto-retrying revision with error context")
-                    try:
-                        retry_code = await self._revise_figure_code(
-                            revised_code,
-                            f"The previous code revision caused a runtime error:\n{error_msg}\nFix this error while keeping ALL the style improvements from the revision.{extra_context}",
-                            [f"Fix the runtime error: {error_msg}"],
-                            ["The code must execute without errors"],
-                            figure_type, state, figure.png_base64,
-                            revision_history=revision_history,
-                            layout_violations=figure.layout_violations,
-                        )
-                        is_valid_retry, err_retry = self._validate_code(retry_code)
-                        if is_valid_retry:
-                            retry_result, retry_physical_error = (
-                                await _execute_revision_candidate(retry_code)
-                            )
-                            if not retry_result.error and not retry_physical_error:
-                                logger.info(f"[Bioinformatics] Auto-retry succeeded for {figure_name}")
-                                figure.png_base64 = self._compress_image_to_base64(jpg_path, max_width=800)
-                                self._refresh_figure_integrity_hashes(figure)
-                                figure.review_status = FigureReviewStatus.PENDING
-                                self._upsert_publication_figure(state, figure)
-                                if lint_ran(retry_result.output):
-                                    figure.layout_violations = parse_layout_violations(retry_result.output)
-                                await _guard_attempt_await(
-                                    self._notify("figure", figure.png_base64)
-                                )
-                                current_code = retry_code
-                                continue  # Back to review loop
-                            else:
-                                logger.warning(
-                                    "[Bioinformatics] Auto-retry also failed: %s",
-                                    retry_result.error or retry_physical_error,
-                                )
-                    except UpstreamExhaustedError:
-                        _abandon_render()
-                        raise
-                    except asyncio.CancelledError:
-                        _abandon_render()
-                        raise
-                    except Exception as retry_err:
-                        logger.warning(
-                            "[Bioinformatics] Auto-retry exception: %s",
-                            compact_traceback(str(retry_err), max_chars=1000),
-                        )
-                    _restore_snapshot(pre_revision_snapshot or best_snapshot)
-                    break  # Both attempts failed
-
-            # After 3 attempts, save with revision_requested status
-            figure.review_status = FigureReviewStatus.REVISION_REQUESTED
-            remaining_blocking = blocking_violations(figure.layout_violations)
-            _record_unresolved(
-                normalize_text_list(must_fix, limit=20)
-                + _violation_must_fix_items(remaining_blocking)
-            )
-            publish_error = await _finalize_render()
-            if publish_error:
-                return publish_error
-            await self._emit_figure_record(
-                "figure_revision", figure, review=review
-            )
-            logger.warning(f"[Bioinformatics] Figure {figure_name} not fully approved after {revision_count} revisions")
-            layout_note = (
-                f"\nUnresolved layout defects: {summarize_violations(remaining_blocking)}."
-                if remaining_blocking else ""
-            )
-            return (
-                f"Figure {figure_name} saved after {revision_count} revision attempts. "
-                f"Status: needs further revision.\n"
-                f"Last feedback: {figure.pi_feedback}{layout_note}"
-                + (f"\n{staleness_note}" if staleness_note else "")
-            )
-
-        # No review callback, just save the figure
-        publish_error = await _finalize_render()
+            return await run_review_loop(attempt)
+        publish_error = await finalize_render(attempt)
         if publish_error:
             return publish_error
-        await self._emit_figure_record("figure_review", figure)
+        await self._emit_figure_record("figure_review", attempt.figure)
         return (
             f"Figure {figure_name} has been generated and saved.\n"
-            f"JPG: {final_jpg_path}\nPDF: {final_pdf_path}"
-            + (f"\n{staleness_note}" if staleness_note else "")
+            f"JPG: {attempt.final_jpg_path}\nPDF: {attempt.final_pdf_path}"
+            + (f"\n{attempt.staleness_note}" if attempt.staleness_note else "")
         )
 
     @staticmethod
     def _refresh_figure_integrity_hashes(figure) -> None:
         """Bind a record to its full render and compact persisted preview."""
-        figure.render_sha256 = image_file_sha256(figure.png_path)
-        figure.preview_sha256 = preview_render_sha256(figure.png_base64)
-        figure.pdf_sha256 = pdf_file_sha256(figure.pdf_path)
+        return _figure_persistence_owner.refresh_figure_integrity_hashes(
+            figure, bindings=sys.modules[__name__]
+        )
 
     @staticmethod
     def _clear_unpublished_figure_payload(figure) -> None:
         """Keep audit metadata while removing staged bytes and direct paths."""
-        figure.png_base64 = None
-        figure.png_path = ""
-        figure.pdf_path = ""
-        figure.render_sha256 = None
-        figure.preview_sha256 = None
-        figure.pdf_sha256 = None
-        figure.is_published_head = False
+        return _figure_persistence_owner.clear_unpublished_figure_payload(figure)
 
     async def _persist_figure_record_boundary(
         self, state: AnalysisState, figures_dir: Path
     ) -> bool:
         """Durably persist the record half for canonical session workspaces."""
-        try:
-            from ...config import get_session_workspace
-
-            canonical = (get_session_workspace(state.id) / "figures").resolve()
-            actual = figures_dir.resolve()
-        except Exception:
-            return False
-        if actual != canonical:
-            return False
-        from ...services.session_store import async_save_session
-
-        await async_save_session(state.id, state, force=True)
-        return True
+        return await _figure_persistence_owner.persist_figure_record_boundary(
+            self, state, figures_dir
+        )
 
     async def _emit_figure_record(
         self,
@@ -1517,107 +437,25 @@ class FiguresMixin:
         which revision bytes are current.  Keep the event compact; the record is
         already upserted, so the image endpoint can serve the bound render.
         """
-        review = dict(review or {})
-        review["must_fix"] = normalize_text_list(review.get("must_fix"), limit=20)
-        status = getattr(figure.review_status, "value", figure.review_status)
-        await self._notify(
+        return await _figure_persistence_owner.emit_figure_record(
+            self,
             event_type,
-            {
-                "figure_id": figure.id,
-                "figure_name": figure.name,
-                "approved": status in {
-                    FigureReviewStatus.APPROVED.value,
-                    FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS.value,
-                },
-                "quality_score": review.get("quality_score"),
-                "feedback": figure.pi_feedback or review.get("feedback", ""),
-                "suggestions": review.get("suggestions", []),
-                "must_fix": review.get("must_fix", []),
-                "figure": {
-                    "id": figure.id,
-                    "name": figure.name,
-                    "description": figure.description,
-                    "figure_type": figure.figure_type,
-                    "png_path": figure.png_path,
-                    "pdf_path": figure.pdf_path,
-                    "review_status": status,
-                    "pi_feedback": figure.pi_feedback,
-                    "revision_count": figure.revision_count,
-                    "plan_step_id": getattr(figure, "plan_step_id", None),
-                    "plan_id": getattr(figure, "plan_id", None),
-                    "purpose": getattr(figure, "purpose", "result") or "result",
-                    "logical_figure_id": getattr(figure, "logical_figure_id", None),
-                    "render_attempt_id": getattr(figure, "render_attempt_id", None),
-                    "producer_status": getattr(
-                        figure, "producer_status", "published"
-                    ),
-                    "revision_of_id": getattr(figure, "revision_of_id", None),
-                    "supersedes_id": getattr(figure, "supersedes_id", None),
-                    "is_published_head": bool(
-                        getattr(figure, "is_published_head", False)
-                    ),
-                    "round": getattr(figure, "round_number", 0) or None,
-                    "diagnostic": bool(getattr(figure, "diagnostic", False)),
-                    "layout_blocking": bool(
-                        blocking_violations(figure.layout_violations)
-                    ),
-                    "created_at": figure.created_at.isoformat(),
-                },
-            },
+            figure,
+            review=review,
+            bindings=sys.modules[__name__],
         )
 
     def _upsert_publication_figure(
         self, state, figure, *, refresh_integrity: bool = True,
     ):
         """Update one attempt and advance its published head only when eligible."""
-        if refresh_integrity:
-            self._refresh_figure_integrity_hashes(figure)
-        existing_idx = next(
-            (
-                i for i, f in enumerate(state.publication_figures)
-                if getattr(f, "id", None) == getattr(figure, "id", None)
-            ),
-            None
+        return _figure_persistence_owner.upsert_publication_figure(
+            self,
+            state,
+            figure,
+            refresh_integrity=refresh_integrity,
+            bindings=sys.modules[__name__],
         )
-        if existing_idx is not None:
-            state.publication_figures[existing_idx] = figure
-        else:
-            state.publication_figures.append(figure)
-
-        if not is_report_eligible(figure):
-            return
-
-        # A pending or failed redraw must never make an invalidated logical
-        # artifact current again merely because it reused the old filename.
-        refreshed_stems = {
-            Path(str(figure.name)).stem,
-            Path(str(figure.png_path)).stem,
-        }
-        state.invalidated_artifact_stems = [
-            stem for stem in (state.invalidated_artifact_stems or [])
-            if stem not in refreshed_stems
-        ]
-
-        family_key = logical_figure_key(figure)
-        prior_heads = [
-            item for item in state.publication_figures
-            if item is not figure
-            and logical_figure_key(item) == family_key
-            and is_report_eligible(item)
-        ]
-        prior_head = next(
-            (
-                item for item in reversed(prior_heads)
-                if getattr(item, "is_published_head", False)
-            ),
-            prior_heads[-1] if prior_heads else None,
-        )
-        if prior_head is not None and not figure.supersedes_id:
-            figure.supersedes_id = prior_head.id
-        for item in state.publication_figures:
-            if item is not figure and logical_figure_key(item) == family_key:
-                item.is_published_head = False
-        figure.is_published_head = True
 
     def _compress_image_to_base64(self, image_path: Path, max_width: int = 800) -> str:
         """

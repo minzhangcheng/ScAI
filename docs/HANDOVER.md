@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.48.4 · **Last updated**: 2026-08-28
+**Version**: 0.49.1 · **Last updated**: 2026-08-28
 
 ## 1. Runtime Architecture
 
@@ -335,6 +335,10 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.49.x — (2026-08-28 onward)**
+
+- `0.49.1` — Merges `refactor/ver-0.48.1` into `main` as the completed behavior-preserving code decomposition. Oversized backend agents, workflow nodes, persistence/report services, sandbox/runtime code, frontend panels/hooks/store, and the Python and frontend test runners now delegate to bounded subsystem modules while retaining their public facades, import paths, graph-facing methods, state shapes, and error behavior. The merge also retains the `0.48.2`–`0.48.4` mainline repairs in the split owners: workspace figure adoption, exact runtime-persistence failure attribution, modality-specific replicate design, deterministic planning/runtime sample-design guards, per-finding execution evidence, and supplementary-finding validation. Merge-resolution compatibility work keeps the production/tooling size contract green and updates the figure-adoption structural test to inspect the extracted workflow owner. Focused merge-boundary evidence passed `252/252` nodes at `test-results/20260828T065248Z-1716239/evidence.json`; the run included the refactor size and route contracts, statistical/sample-design and evidence gates, supplementary merge, persistence tracking/save, simplify-refactor, and version-consistency coverage, and recorded identical pre/post source manifests. Frontend, client, kernel, and backend-full profiles were not rerun for this merge commit. No application image build, registry push, deployment, or historical-session mutation was performed.
 
 **0.48.x — (2026-08-27 onward)**
 

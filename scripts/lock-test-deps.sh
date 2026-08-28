@@ -63,10 +63,16 @@ check_inputs_exist() {
     done
 }
 
-run_check() {
+LOCK_CHECK_PROGRAM=""
+
+check_lock_inputs() {
     check_inputs_exist
-    python3 - "$REPO_ROOT" "$DOCKERFILE" "$DOCKERIGNORE" "$BUILD_SCRIPT" "$MAIN_LOCK" "$NODEPS_LOCK" "$MANIFEST" \
-        "$BASE_DIGEST" "$PYTHON_PATCH" "$PLATFORM" <<'PY'
+    LOCK_CHECK_PROGRAM=""
+}
+
+check_resolver_contract() {
+    local fragment
+    IFS= read -r -d '' fragment <<'PY' || true
 import hashlib
 import json
 import re
@@ -165,6 +171,14 @@ def require_image_builder_constraint_contract(*, expected_hash: str | None = Non
     require("'--upgrade'" not in lock_source[installer_start:installer_end], "clean installer may not upgrade")
     require("Path('/tmp/scai-test-lock-venv')" in lock_source, "clean installer venv identity missing")
 
+PY
+    LOCK_CHECK_PROGRAM+="$fragment"$'\n'
+}
+
+check_constraints_contract() {
+    local fragment
+    IFS= read -r -d '' fragment <<'PY' || true
+
     docker_text = dockerfile.read_text(encoding="utf-8")
     expected_from = f"python:3.11.15-slim-bookworm@{base_digest}"
     from_lines = [line.strip() for line in docker_text.splitlines() if line.strip().startswith("FROM ")]
@@ -215,6 +229,13 @@ def require_image_builder_constraint_contract(*, expected_hash: str | None = Non
             "tracked build constraint hash does not equal manifest input hash",
         )
 
+PY
+    LOCK_CHECK_PROGRAM+="$fragment"$'\n'
+}
+
+check_fingerprint_contract() {
+    local fragment
+    IFS= read -r -d '' fragment <<'PY' || true
 
 try:
     require_image_builder_constraint_contract()
@@ -309,6 +330,14 @@ try:
     require(lock_tool.get("contract_version") == 1, "lock_tool contract version mismatch")
     require(lock_tool.get("sha256") == hashlib.sha256((repo / "scripts/lock-test-deps.sh").read_bytes()).hexdigest(), "lock_tool hash mismatch")
 
+PY
+    LOCK_CHECK_PROGRAM+="$fragment"$'\n'
+}
+
+check_image_contract() {
+    local fragment
+    IFS= read -r -d '' fragment <<'PY' || true
+
     def by_name(records: list[dict[str, str]]) -> dict[str, str]:
         result: dict[str, str] = {}
         for record in records:
@@ -370,6 +399,19 @@ if errors:
     raise SystemExit(1)
 print("OK: immutable dependency lock is internally consistent")
 PY
+    LOCK_CHECK_PROGRAM+="$fragment"$'\n'
+    python3 -c "$LOCK_CHECK_PROGRAM" \
+        "$REPO_ROOT" "$DOCKERFILE" "$DOCKERIGNORE" "$BUILD_SCRIPT" \
+        "$MAIN_LOCK" "$NODEPS_LOCK" "$MANIFEST" \
+        "$BASE_DIGEST" "$PYTHON_PATCH" "$PLATFORM"
+}
+
+run_check() {
+    check_lock_inputs
+    check_resolver_contract
+    check_constraints_contract
+    check_fingerprint_contract
+    check_image_contract
 }
 
 run_update() {

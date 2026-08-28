@@ -8,12 +8,13 @@ import re
 
 import backend.workflow.callbacks as cb_mod
 import backend.workflow.annotation as anno_mod
+from backend.tests.split_facade import source_for_path
 
 
 def test_no_bare_analysis_state_construction_in_workflow():
     """Workflow callbacks must not contain bare `AnalysisState()` calls."""
     for mod in (cb_mod, anno_mod):
-        src = open(mod.__file__).read()
+        src = source_for_path(mod.__name__.replace(".", "/") + ".py")
         matches = re.findall(r"\bAnalysisState\(\s*\)", src)
         assert not matches, (
             f"P1-7: {mod.__name__} contains bare AnalysisState() construction"
@@ -23,7 +24,7 @@ def test_no_bare_analysis_state_construction_in_workflow():
 def test_workflow_callbacks_raise_runtime_error_when_state_missing():
     """Modules previously using AnalysisState() fallback must now raise RuntimeError."""
     for mod in (cb_mod, anno_mod):
-        src = open(mod.__file__).read()
+        src = source_for_path(mod.__name__.replace(".", "/") + ".py")
         assert "RuntimeError" in src, (
             f"P1-7: {mod.__name__} must raise RuntimeError when "
             "_current_analysis_state is missing"

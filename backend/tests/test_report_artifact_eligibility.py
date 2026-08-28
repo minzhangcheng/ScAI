@@ -42,6 +42,21 @@ def _figure(name, status, **kwargs):
     )
 
 
+def test_artifact_facade_keeps_shared_and_selection_imports_nominal():
+    from backend.services.report import artifacts
+
+    for name in (
+        "verified_artifact_bytes",
+        "resolve_archival_render",
+        "render_is_intact",
+        "compact_figure_event_payload",
+        "published_head_artifacts",
+        "invalidate_current_artifacts",
+    ):
+        exported = getattr(artifacts, name)
+        assert exported.__module__ == "backend.services.report.artifacts"
+
+
 def test_only_current_approved_artifacts_are_reportable():
     approved = _figure("approved", FigureReviewStatus.APPROVED)
     reserved = _figure("reserved", FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS)

@@ -595,42 +595,10 @@ def _build_graphic_abstract_html(report: dict) -> str:
         return ""
 
 
-def generate_html_report(report_dir: Path, language: str = "en") -> Path:
-    """
-    Generate HTML report with embedded base64 images.
-    """
-
-    # Load report.json
-    report_json_path = report_dir / "report.json"
-    if not report_json_path.exists():
-        raise FileNotFoundError(f"report.json not found in {report_dir}")
-
-    with open(report_json_path, 'r', encoding='utf-8') as f:
-        report = json.load(f)
-
-    figures_dir = report_dir / "figures"
-    tables_dir = report_dir / "tables"
-
-    # Scan figures directory
-    all_figures = categorize_figures(figures_dir)
-    total_figs = sum(len(v) for v in all_figures.values())
-    logger.info("Found %d figures in categories:", total_figs)
-    for cat, figs in all_figures.items():
-        if figs:
-            logger.info("  - %s: %d", cat, len(figs))
-
-    # Map section IDs to figure categories
-    section_figure_map = {
-        "qc_overview": ["qc"],
-        "clustering_overview": ["umap", "clustering"],
-        "marker_genes": ["markers", "heatmap"],
-        "differential_expression": ["de", "violin"],
-        "key_findings": ["de", "violin", "heatmap", "other"]
-    }
-
-    used_figures = set()
-
-    # Prepare table of contents
+def _render_regenerated_sections(
+    report, all_figures, section_figure_map, used_figures,
+):
+    # Render table of contents and report sections.
     toc_items = []
     for section in report.get("sections", []):
         analysis_type = section.get("analysis_type", "general")
@@ -861,6 +829,48 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
         </div>
         '''
         sections_html.append(supp_section_html)
+
+    return toc_items, sections_html
+
+
+def generate_html_report(report_dir: Path, language: str = "en") -> Path:
+    """
+    Generate HTML report with embedded base64 images.
+    """
+
+    # Load report.json
+    report_json_path = report_dir / "report.json"
+    if not report_json_path.exists():
+        raise FileNotFoundError(f"report.json not found in {report_dir}")
+
+    with open(report_json_path, 'r', encoding='utf-8') as f:
+        report = json.load(f)
+
+    figures_dir = report_dir / "figures"
+    tables_dir = report_dir / "tables"
+
+    # Scan figures directory
+    all_figures = categorize_figures(figures_dir)
+    total_figs = sum(len(v) for v in all_figures.values())
+    logger.info("Found %d figures in categories:", total_figs)
+    for cat, figs in all_figures.items():
+        if figs:
+            logger.info("  - %s: %d", cat, len(figs))
+
+    # Map section IDs to figure categories
+    section_figure_map = {
+        "qc_overview": ["qc"],
+        "clustering_overview": ["umap", "clustering"],
+        "marker_genes": ["markers", "heatmap"],
+        "differential_expression": ["de", "violin"],
+        "key_findings": ["de", "violin", "heatmap", "other"]
+    }
+
+    used_figures = set()
+
+    toc_items, sections_html = _render_regenerated_sections(
+        report, all_figures, section_figure_map, used_figures,
+    )
 
     # Convert markdown in abstract and conclusions
     abstract_html = markdown_to_html(report.get("abstract", ""))

@@ -13,6 +13,7 @@ from backend.agents.pathology_agent import (
     _validate_tile_batch,
 )
 from backend.models.schemas import AgentType, DataFile
+from backend.tests.split_facade import setattr_facade
 
 
 def _bare_agent() -> PathologyAgent:
@@ -129,13 +130,16 @@ def _patch_image_setup(monkeypatch, agent: PathologyAgent) -> DataFile:
     monkeypatch.setattr(agent, "refresh_runtime_config_if_needed", lambda: None)
     monkeypatch.setattr(agent, "_set_llm_context", lambda: None)
     monkeypatch.setattr(mod.os.path, "exists", lambda path: True)
-    monkeypatch.setattr(mod, "load_image", lambda path: object())
-    monkeypatch.setattr(
-        mod,
+    setattr_facade(monkeypatch, mod.__name__, "load_image", lambda path: object())
+    setattr_facade(
+        monkeypatch,
+        mod.__name__,
         "process_pathology_image",
         lambda *args, **kwargs: ["tile-a", "tile-b"],
     )
-    monkeypatch.setattr(mod, "create_overview_image", lambda image: "overview")
+    setattr_facade(
+        monkeypatch, mod.__name__, "create_overview_image", lambda image: "overview"
+    )
 
     async def direct_hitl(call_factory, image_label, step_label):
         return await call_factory()

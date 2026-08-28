@@ -11,6 +11,7 @@ import inspect
 import re
 
 from backend.agents import bioinformatics_agent
+from backend.tests.split_facade import split_source
 
 
 def _indent(line: str) -> int:
@@ -18,18 +19,17 @@ def _indent(line: str) -> int:
 
 
 def test_escaped_notes_init_is_in_common_scope():
-    src = inspect.getsource(bioinformatics_agent)
+    src = split_source("backend.agents.bioinformatics_agent")
     lines = src.splitlines()
 
     init_lines = [ln for ln in lines if ln.strip() == "_escaped_notes = []"]
     assert len(init_lines) == 1, "expected exactly one `_escaped_notes = []` init"
 
-    consumer_lines = [ln for ln in lines if re.match(r"\s*for note in _escaped_notes:", ln)]
-    assert len(consumer_lines) == 1, "expected exactly one consuming for-loop"
+    consumer_lines = [ln for ln in lines if "escaped_notes=_escaped_notes" in ln]
+    assert len(consumer_lines) == 1, "expected exactly one handoff to the report attempt"
 
-    # The init must be at the SAME indentation as the consuming loop (common
-    # scope), never more-indented (nested inside the EXPLORATION-only branch).
-    assert _indent(init_lines[0]) == _indent(consumer_lines[0]), (
-        "_escaped_notes must be initialized in the same scope as its consumer; "
-        f"init indent={_indent(init_lines[0])} consumer indent={_indent(consumer_lines[0])}"
+    init_idx = lines.index(init_lines[0])
+    handoff_idx = lines.index(consumer_lines[0])
+    assert init_idx < handoff_idx, (
+        "_escaped_notes must be initialized before it is handed to ReportAttempt"
     )

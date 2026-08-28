@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import AnalysisPanelSrc from '../AnalysisPanel.tsx?raw';
+import AnalysisDialogsSrc from '../analysisPanel/AnalysisDialogs.tsx?raw';
 import annotationGateSrc from '../../utils/annotationGate.ts?raw';
 
 describe('AnalysisPanel annotation proportion payload wiring', () => {
@@ -13,7 +13,7 @@ describe('AnalysisPanel annotation proportion payload wiring', () => {
   });
 
   it('passes the proportion payload through to the dialog', () => {
-    const src = AnalysisPanelSrc as string;
+    const src = AnalysisDialogsSrc as string;
 
     expect(src).toContain('proportionGroupLabels={annotationData.proportion_group_labels');
     expect(src).toContain('proportionDimension={annotationData.proportion_dimension');

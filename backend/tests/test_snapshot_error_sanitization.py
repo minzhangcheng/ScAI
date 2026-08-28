@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from backend.models import schemas
 from backend.models.schemas import AnalysisState
 from backend.services.snapshot_v2.errors import (
     SnapshotCaptureError,
@@ -29,6 +30,19 @@ def _assert_redacted(value) -> None:
     exposed = _serialized(value)
     assert SECRET not in exposed
     assert "synthetic-user" not in exposed
+
+
+def test_snapshot_failure_sanitizer_facade_and_state_roundtrip():
+    failure = {"code": "x", "details": {"path": Path("relative/a")}}
+    payload = {"snapshot_failure": failure}
+
+    assert schemas._sanitize_snapshot_failure(payload) == {
+        "code": "x",
+        "details": {"path": "relative/a"},
+    }
+    state = AnalysisState(name="s", user_id="u", snapshot_failure=failure)
+    restored = AnalysisState.model_validate_json(state.model_dump_json())
+    assert restored.model_dump(mode="json") == state.model_dump(mode="json")
 
 
 def test_snapshot_error_detail_recursively_sanitizes_every_string():

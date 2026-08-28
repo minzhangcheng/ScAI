@@ -17,6 +17,7 @@ from backend.agents.painter_agent import (
     _is_fatal_image_error,
 )
 from backend.models.schemas import AgentType
+from backend.tests.split_facade import patch_facade
 
 
 def _make_painter(base_url: str = f"https://{_GOOGLE_AI_STUDIO_BASE_URL}/v1beta"):
@@ -212,7 +213,7 @@ async def test_timeout_switches_protocol():
         await real_sleep(0)
 
     # Shrink the timeout so the hanging protocol trips it fast.
-    with patch("backend.agents.painter_agent._PROTOCOL_TIMEOUT", 0.05), \
+    with patch_facade("backend.agents.painter_agent", "_PROTOCOL_TIMEOUT", 0.05), \
          patch("backend.agents.painter_agent.asyncio.sleep", new=_fast_sleep):
         result = await painter._generate_image("a prompt")
 

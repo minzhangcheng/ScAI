@@ -24,6 +24,14 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 TREE_FILE = ROOT / "scripts" / "scai_test_tree.py"
+TREE_PARTS = ROOT / "scripts" / "scai_test_tree_parts"
+
+
+def _tree_source() -> str:
+    return "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (TREE_FILE, *sorted(TREE_PARTS.glob("*.py")))
+    )
 
 
 def _load_contract_module(spec):
@@ -31,9 +39,12 @@ def _load_contract_module(spec):
     module = importlib.util.module_from_spec(spec)
     previous = sys.modules.get(spec.name)
     sys.modules[spec.name] = module
+    module_parent = str(Path(spec.origin).parent)
+    sys.path.insert(0, module_parent)
     try:
         spec.loader.exec_module(module)
     finally:
+        sys.path.remove(module_parent)
         if previous is None:
             sys.modules.pop(spec.name, None)
         else:
@@ -44,6 +55,7 @@ def _load_contract_module(spec):
 SPEC = importlib.util.spec_from_file_location("scai_test_tree_contract", TREE_FILE)
 assert SPEC is not None and SPEC.loader is not None
 TREE = _load_contract_module(SPEC)
+TREE_IDENTITY = sys.modules["scai_test_tree_parts.identity"]
 RUNNER = (ROOT / "scripts/scai-test").read_text(encoding="utf-8")
 PLUGIN = (ROOT / "scripts/scai_pytest_collection.py").read_text(encoding="utf-8")
 PLUGIN_SPEC = importlib.util.spec_from_file_location("scai_pytest_collection_contract", ROOT / "scripts/scai_pytest_collection.py")
@@ -179,7 +191,7 @@ def test_worktree_manifest_rejects_directory_or_special_file_entry(tmp_path, mon
     repo, base = make_repo(tmp_path)
     fifo = repo / "fifo"
     os.mkfifo(fifo)
-    monkeypatch.setattr(TREE, "_worktree_changes", lambda _repo, _base: [("fifo", "untracked")])
+    monkeypatch.setattr(TREE_IDENTITY, "_worktree_changes", lambda _repo, _base: [("fifo", "untracked")])
     with pytest.raises(TREE.ContractError):
         TREE.build_worktree_manifest(repo, base)
 
@@ -458,6 +470,7 @@ def _fake_runner_repo(tmp_path: Path) -> tuple[Path, Path]:
         target = repo / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative, target)
+    shutil.copytree(ROOT / "scripts/scai_test_tree_parts", repo / "scripts/scai_test_tree_parts")
     dockerfile = repo / "docker/test-deps.Dockerfile"
     dockerfile.write_text(
         "FROM python:3.11.15-slim-bookworm@sha256:"
@@ -1294,7 +1307,7 @@ def test_evidence_records_command_environment_duration_counts_and_claim_scope():
 
 
 def test_zero_collection_or_normal_missing_malformed_junit_is_not_a_pass():
-    assert "JUnit XML reports zero tests" in TREE_FILE.read_text(encoding="utf-8") and "container output allowlist" in RUNNER
+    assert "JUnit XML reports zero tests" in _tree_source() and "container output allowlist" in RUNNER
 
 
 def test_evidence_hashes_payloads_but_never_itself_or_its_detached_manifest():

@@ -49,15 +49,15 @@ async def test_snapshot_v2_disabled_keeps_regular_runtime_budgets(
     monkeypatch,
     tmp_path,
 ):
-    monkeypatch.setattr("backend.workflow.core.LLMManager", _FakeLLMManager)
-    monkeypatch.setattr("backend.workflow.core.LocalJupyterSandbox", _FakeSandbox)
-    monkeypatch.setattr("backend.workflow.core.AsyncSqliteSaver", _FakeCheckpointer)
-    monkeypatch.setattr(
-        "backend.workflow.core.get_session_states",
+    setattr_facade(monkeypatch, "backend.workflow.core", "LLMManager", _FakeLLMManager)
+    setattr_facade(monkeypatch, "backend.workflow.core", "LocalJupyterSandbox", _FakeSandbox)
+    setattr_facade(monkeypatch, "backend.workflow.core", "AsyncSqliteSaver", _FakeCheckpointer)
+    setattr_facade(
+        monkeypatch, "backend.workflow.core", "get_session_states",
         lambda session_id: tmp_path / "states",
     )
-    monkeypatch.setattr(
-        "backend.workflow.core.get_session_workspace",
+    setattr_facade(
+        monkeypatch, "backend.workflow.core", "get_session_workspace",
         lambda session_id: tmp_path / "workspace",
     )
     monkeypatch.setattr("backend.config._config.SNAPSHOT_V2_ENABLED", False)
@@ -99,11 +99,11 @@ async def test_snapshot_v2_disabled_keeps_regular_runtime_budgets(
 
 @pytest.mark.asyncio
 async def test_preconfigured_deep_research_client_gets_retry_callback_before_agent_creation(monkeypatch, tmp_path):
-    monkeypatch.setattr("backend.workflow.core.LLMManager", _FakeLLMManager)
-    monkeypatch.setattr("backend.workflow.core.LocalJupyterSandbox", _FakeSandbox)
-    monkeypatch.setattr("backend.workflow.core.AsyncSqliteSaver", _FakeCheckpointer)
-    monkeypatch.setattr("backend.workflow.core.get_session_states", lambda session_id: tmp_path / "states")
-    monkeypatch.setattr("backend.workflow.core.get_session_workspace", lambda session_id: tmp_path / "workspace")
+    setattr_facade(monkeypatch, "backend.workflow.core", "LLMManager", _FakeLLMManager)
+    setattr_facade(monkeypatch, "backend.workflow.core", "LocalJupyterSandbox", _FakeSandbox)
+    setattr_facade(monkeypatch, "backend.workflow.core", "AsyncSqliteSaver", _FakeCheckpointer)
+    setattr_facade(monkeypatch, "backend.workflow.core", "get_session_states", lambda session_id: tmp_path / "states")
+    setattr_facade(monkeypatch, "backend.workflow.core", "get_session_workspace", lambda session_id: tmp_path / "workspace")
     setattr_facade(monkeypatch, "backend.agents.literature_agent", "OpenAICompatibleClient", _FakeDeepResearchClient)
     monkeypatch.setattr(SingleCellAnalysisWorkflow, "ensure_agent_ready", lambda self, agent_name: None)
     monkeypatch.setattr(SingleCellAnalysisWorkflow, "_build_graph", lambda self: None)
@@ -143,11 +143,11 @@ async def test_retry_notice_is_labelled_with_the_agent_that_stalled(monkeypatch,
     It used to be hardcoded to BIOINFORMATICS, so a pathology vision request
     timing out sent the user to the wrong agent's logs.
     """
-    monkeypatch.setattr("backend.workflow.core.LLMManager", _FakeLLMManager)
-    monkeypatch.setattr("backend.workflow.core.LocalJupyterSandbox", _FakeSandbox)
-    monkeypatch.setattr("backend.workflow.core.AsyncSqliteSaver", _FakeCheckpointer)
-    monkeypatch.setattr("backend.workflow.core.get_session_states", lambda session_id: tmp_path / "states")
-    monkeypatch.setattr("backend.workflow.core.get_session_workspace", lambda session_id: tmp_path / "workspace")
+    setattr_facade(monkeypatch, "backend.workflow.core", "LLMManager", _FakeLLMManager)
+    setattr_facade(monkeypatch, "backend.workflow.core", "LocalJupyterSandbox", _FakeSandbox)
+    setattr_facade(monkeypatch, "backend.workflow.core", "AsyncSqliteSaver", _FakeCheckpointer)
+    setattr_facade(monkeypatch, "backend.workflow.core", "get_session_states", lambda session_id: tmp_path / "states")
+    setattr_facade(monkeypatch, "backend.workflow.core", "get_session_workspace", lambda session_id: tmp_path / "workspace")
     monkeypatch.setattr(SingleCellAnalysisWorkflow, "ensure_agent_ready", lambda self, agent_name: None)
     monkeypatch.setattr(SingleCellAnalysisWorkflow, "_build_graph", lambda self: None)
 

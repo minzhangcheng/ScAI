@@ -139,6 +139,8 @@ def test_user_requested_supplementary_keeps_publication_figure_review_callback()
     publication-figure review callback."""
     import inspect
 
-    source = inspect.getsource(SingleCellAnalysisWorkflow._run_supplementary_analysis)
+    from backend.workflow.core_parts import supplementary
+
+    source = inspect.getsource(supplementary._run_supplementary_analysis)
     assert "run_autonomous_analysis" in source
     assert "figure_review_callback=self._figure_review_callback" in source

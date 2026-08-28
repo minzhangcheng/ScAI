@@ -367,11 +367,9 @@ def test_adoption_runs_before_the_workflow_audit():
     runs after it registers figures no requirement will ever consult -- the pass
     would be inert and its tests would still pass. Order is the whole point, and
     only the call site can carry that evidence."""
-    import inspect
+    from backend.tests.split_facade import source_for_path
 
-    import backend.workflow.agents as agents_mod
-
-    src = inspect.getsource(agents_mod)
+    src = source_for_path("backend/workflow/agent_nodes/bioinformatics_node.py")
     adopt = src.find("await self._adopt_workspace_figures(")
     assert adopt != -1, "the adoption pass is not wired into the workflow"
     audit = src.find("figure_contract = audit_figure_contract(")

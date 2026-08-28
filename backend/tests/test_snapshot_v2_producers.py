@@ -4,7 +4,7 @@ Task 4: every required producer must block forward progress on capture failure,
 use a process-wide SafePointManager, and never offer Skip.
 """
 from __future__ import annotations
-from backend.tests.split_facade import source_for_path
+from backend.tests.split_facade import patch_facade, source_for_path
 
 import ast
 from pathlib import Path
@@ -374,9 +374,8 @@ async def test_run_boundary_catches_required_snapshot_blocked():
 
     run = SingleCellAnalysisWorkflow.run.__get__(wf, SingleCellAnalysisWorkflow)
 
-    with patch(
-        "backend.workflow.core.is_forward_resume_blocked",
-        return_value=False,
+    with patch_facade(
+        "backend.workflow.core", "is_forward_resume_blocked", return_value=False
     ):
         result = await run(state, "thread-1")
 
@@ -1075,23 +1074,24 @@ async def test_real_plan_revision_producer_roundtrips_exact_context_to_dialogue(
         def summary():
             return {"passed": True, "missing": []}
 
-    monkeypatch.setattr(
-        "backend.workflow.agents.audit_figure_contract",
+    with patch_facade(
+        "backend.workflow.agents",
+        "audit_figure_contract",
         lambda *args, **kwargs: _FigureContract(),
-    )
-    source_graph_state = {
-        "analysis_state": analysis_state,
-        "current_round": 2,
-        "pi_instructions": {
-            "bioinformatics_tasks": ["Run the approved method"],
-            "overview": "Preserve completed work while revising the method",
-        },
-        "planning_stage": "full",
-        "plan_approved": True,
-        "skip_nodes": [],
-    }
+    ):
+        source_graph_state = {
+            "analysis_state": analysis_state,
+            "current_round": 2,
+            "pi_instructions": {
+                "bioinformatics_tasks": ["Run the approved method"],
+                "overview": "Preserve completed work while revising the method",
+            },
+            "planning_stage": "full",
+            "plan_approved": True,
+            "skip_nodes": [],
+        }
 
-    produced = await workflow._bioinformatics_analysis(source_graph_state)
+        produced = await workflow._bioinformatics_analysis(source_graph_state)
 
     assert produced["plan_revision_needed"] is True
     assert produced["plan_revision_context"] == revision_context
@@ -1241,9 +1241,8 @@ async def test_run_entry_guard_when_snapshot_failure_already_present():
     wf._set_status = _set_status
 
     run = SingleCellAnalysisWorkflow.run.__get__(wf, SingleCellAnalysisWorkflow)
-    with patch(
-        "backend.workflow.core.is_forward_resume_blocked",
-        return_value=False,
+    with patch_facade(
+        "backend.workflow.core", "is_forward_resume_blocked", return_value=False
     ):
         result = await run(state, "thread-1")
 

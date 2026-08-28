@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from backend.constants import StateSyncChangeType
 from backend.models.schemas import AnalysisState, TaskStatus
+from backend.tests.split_facade import patch_facade
 from backend.workflow.planning import PlanningMixin
 
 
@@ -79,11 +80,10 @@ async def test_species_state_restored_on_cancellation(monkeypatch):
 
     async def _raise(*a, **k):
         raise asyncio.CancelledError()
-    monkeypatch.setattr("backend.workflow.planning.wait_with_skip_time", _raise)
-
     wstate = {"analysis_state": state}
-    with pytest.raises(asyncio.CancelledError):
-        await PlanningMixin._pi_planning.__wrapped__(inst, wstate)
+    with patch_facade("backend.workflow.planning", "wait_with_skip_time", _raise):
+        with pytest.raises(asyncio.CancelledError):
+            await PlanningMixin._pi_planning.__wrapped__(inst, wstate)
     assert state.species_input_info is None
     assert state.wait_input_reason is None
 
@@ -98,7 +98,6 @@ async def test_empty_suggestions_emits_user_status(monkeypatch):
 
     async def _timeout(*a, **k):
         return False  # never signaled
-    monkeypatch.setattr("backend.workflow.planning.wait_with_skip_time", _timeout)
     # Suppress the rest of planning by raising after species block via _send_message.
     seen = {"phrase": False}
     async def _capture(kind, content, *_a, **_k):
@@ -107,6 +106,7 @@ async def test_empty_suggestions_emits_user_status(monkeypatch):
         if kind == "status" and "creating analysis plan" in (content or ""):
             raise RuntimeError("stop_here")
     inst._send_message = AsyncMock(side_effect=_capture)
-    with pytest.raises(RuntimeError, match="stop_here"):
-        await PlanningMixin._pi_planning.__wrapped__(inst, {"analysis_state": state})
+    with patch_facade("backend.workflow.planning", "wait_with_skip_time", _timeout):
+        with pytest.raises(RuntimeError, match="stop_here"):
+            await PlanningMixin._pi_planning.__wrapped__(inst, {"analysis_state": state})
     assert seen["phrase"] is True

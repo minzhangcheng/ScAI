@@ -3,6 +3,7 @@ import inspect
 import types
 from backend.models.schemas import AnalysisState, AnalysisPhase, TaskStatus
 from backend.workflow.core import SingleCellAnalysisWorkflow
+from backend.workflow.core_parts import initialization
 
 
 def test_resume_helper_skips_stop_guard_at_integration_gate():
@@ -10,7 +11,7 @@ def test_resume_helper_skips_stop_guard_at_integration_gate():
     import inspect
     from backend.workflow.core import SingleCellAnalysisWorkflow
 
-    src = inspect.getsource(SingleCellAnalysisWorkflow.resume_restored_wait_state)
+    src = inspect.getsource(initialization.resume_restored_wait_state)
     assert "prepare_restored_semantic_action" in src
     assert "_invoke_restore_entry" in src
     assert "_should_continue(" not in src

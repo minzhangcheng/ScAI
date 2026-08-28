@@ -2,19 +2,14 @@
 generate_publication_figure and warn against nested results/ figure save paths.
 Verified by inspecting the prompt-building source (agent construction needs LLM
 config, so we avoid instantiation)."""
-import inspect
-
-from backend.agents.bioinformatics_agent import BioinformaticsAgent
+from backend.tests.split_facade import split_source
 
 _GUIDANCE_MARKER = "generate_publication_figure for figures intended for the final report"
 _SUBDIR_WARNING_MARKER = "do NOT save figures into nested results/"
 
 
 def _all_prompt_source() -> str:
-    prop_obj = getattr(BioinformaticsAgent, "_static_system_prompt")
-    fget = prop_obj.fget
-    parts = [inspect.getsource(fget)]
-    return "\n".join(parts)
+    return split_source("backend.agents.bioinformatics_agent")
 
 
 def test_prompt_recommends_publication_figure_for_final_figures():

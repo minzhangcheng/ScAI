@@ -230,9 +230,9 @@ def test_shared_hitl_scaffold_has_no_bare_event_wait():
     ``wait_with_skip_time`` calls against hooks, which cannot see a scaffold
     that calls neither — 0 == 0 passes. Assert on the bare wait instead.
     """
-    from backend.workflow.core import SingleCellAnalysisWorkflow
+    from backend.workflow.core_parts import interventions
 
-    source = inspect.getsource(SingleCellAnalysisWorkflow._drive_hitl_gate)
+    source = inspect.getsource(interventions._drive_hitl_gate)
     assert "await event.wait()" not in source, (
         "_drive_hitl_gate blocks on a bare event.wait(); a restore requested "
         "while the user sits at this gate cannot be acknowledged"

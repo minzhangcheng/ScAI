@@ -46,7 +46,6 @@ def _pathology_coverage_context(analysis_record: Dict[str, Any]) -> str:
                 )
     return "\n".join(lines[:100])
 
-
 def _bind_figure_reference(
     reference: Any, authoritative: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -107,6 +106,757 @@ def insert_cross_modal_section(plan, round_summaries):
     new_plan["sections"] = sections
     return new_plan
 
+
+def _build_report_planning_prompt(
+    generator, state, analysis_record, findings, existing_figures,
+    existing_tables, language, analysis_summary,
+):
+    analysis_summary = analysis_summary or {}
+    # Format figures list with visual descriptions from analysis review
+    fig_descriptions = analysis_summary.get("figure_descriptions", {})
+    figures_list_parts = []
+    for i, fig in enumerate(existing_figures):
+        fname = fig['filename']
+        ftype = fig['inferred_type']
+        desc = fig_descriptions.get(fname, "")
+        line = f"  {i+1}. {fname} (type: {ftype})"
+        if desc:
+            line += f" — {desc[:150]}"
+        figures_list_parts.append(line)
+    figures_list = "\n".join(figures_list_parts) if figures_list_parts else "No existing figures found."
+
+    # Format tables list
+    tables_list = "\n".join([
+        f"  {i+1}. {tbl['filename']} (type: {tbl.get('inferred_type', 'data')})"
+        + (f" — columns: {', '.join(tbl['columns'][:5])}" if tbl.get('columns') else "")
+        for i, tbl in enumerate(existing_tables)
+    ]) if existing_tables else "No tables found."
+
+    # Format publication figures with descriptions
+    pub_figs_text = ""
+    if analysis_record.get("publication_figures"):
+        pub_figs_lines = []
+        for pf in analysis_record["publication_figures"]:
+            pub_figs_lines.append(
+                f"  - {pf['filename']} [{pf['figure_type']}]: {pf['description'][:200]}"
+            )
+        pub_figs_text = "\n".join(pub_figs_lines)
+
+    # Use analysis summary for methodology and workflow (if available),
+    # otherwise fall back to round summaries and analysis steps
+    methodology_text = analysis_summary.get("methodology_overview", "")
+    workflow_text = analysis_summary.get("workflow_summary", "")
+    key_results_text = analysis_summary.get("key_results", "")
+    coverage_context = _pathology_coverage_context(analysis_record)
+
+    if methodology_text or workflow_text or key_results_text:
+        analysis_context = f"""## Analysis Methodology (from code review)
+{methodology_text}
+
+## Analysis Workflow
+{workflow_text}
+
+## Key Quantitative Results
+{key_results_text}
+"""
+    else:
+        # Fallback to round summaries and analysis steps
+        rounds_text = ""
+        for rs in analysis_record.get("round_summaries", []):
+            rounds_text += (
+                f"\n### Round {rs['round_number']} "
+                f"(status={rs.get('round_status', 'completed')}; "
+                f"evidence={rs.get('evidence_status', 'empty')})\n"
+            )
+            if rs.get("bioinformatics_evidence_verified") is False:
+                rounds_text += (
+                    "**EVIDENCE WARNING**: Bioinformatics findings are partial/unverified; "
+                    "never label them validated, confirmed, causal, dominant, or replicated.\n"
+                )
+            rounds_text += f"**PI Summary**: {rs['pi_summary'][:500]}\n"
+            if rs['bioinformatics_findings']:
+                rounds_text += f"**Bioinformatics findings**:\n"
+                for f in rs['bioinformatics_findings'][:5]:
+                    rounds_text += f"  - {f[:200]}\n"
+            if rs['pathology_findings']:
+                rounds_text += f"**Pathology findings**:\n"
+                for f in rs['pathology_findings'][:3]:
+                    rounds_text += f"  - {f[:200]}\n"
+            if rs['biochemistry_findings']:
+                rounds_text += f"**Biochemistry findings**:\n"
+                for f in rs['biochemistry_findings'][:3]:
+                    rounds_text += f"  - {f[:200]}\n"
+            if rs['literature_findings']:
+                rounds_text += f"**Literature findings**:\n"
+                for f in rs['literature_findings'][:3]:
+                    rounds_text += f"  - {f[:200]}\n"
+
+        steps_text = ""
+        for step in analysis_record.get("analysis_steps", [])[:30]:
+            figs_str = ", ".join(step['saved_figures']) if step['saved_figures'] else "(display only)"
+            steps_text += f"  - [{step['timestamp'][:16]}] {step['description']} → figures: {figs_str}\n"
+
+        analysis_context = f"""## Analysis Flow ({analysis_record['total_rounds']} rounds, {analysis_record['total_code_cells']} code cells)
+{rounds_text}
+
+## Key Analysis Steps (code cells that generated figures)
+{steps_text}
+"""
+
+    if coverage_context:
+        analysis_context += (
+            "\n## Pathology Tile Coverage (host observation)\n"
+            f"{coverage_context}\n"
+            "This is a coverage observation only. Do not infer findings for "
+            "omitted tiles.\n"
+        )
+
+    evidence_warnings = []
+    for rs in analysis_record.get("round_summaries", []):
+        if rs.get("bioinformatics_evidence_verified") is False:
+            evidence_warnings.append(
+                f"- Round {rs['round_number']}: partial/unverified bioinformatics evidence. "
+                "Do not upgrade claims to validated, confirmed, causal, dominant, or replicated."
+            )
+    if evidence_warnings:
+        analysis_context += (
+            "\n## Mandatory Evidence Qualification\n"
+            + "\n".join(evidence_warnings)
+            + "\nThese qualifications override stronger wording in summaries or literature.\n"
+        )
+
+    # Parameters used
+    params_text = ""
+    params = analysis_summary.get("parameters_used", {})
+    if params:
+        params_text = "## Key Analysis Parameters\n" + "\n".join(f"- {k}: {v}" for k, v in params.items())
+
+    exploration_context = ""
+    if state.exploration_report and hasattr(state.exploration_report, "research_direction_candidates") and state.exploration_report.research_direction_candidates:
+        exploration_context += "### Initial Exploration Report (Possible Directions):\n"
+        for idx, c in enumerate(state.exploration_report.research_direction_candidates):
+            exploration_context += f"{idx+1}. {c.get('direction', '')}\n   Rationale: {c.get('rationale', '')}\n"
+
+    if state.user_chosen_directions:
+        exploration_context += "\n### User Selected Directions (Modifications):\n"
+        for d in state.user_chosen_directions:
+            exploration_context += f"- {d.get('direction', '')} (Notes: {d.get('notes', '')})\n"
+    elif getattr(state, "user_chosen_direction", None):
+        exploration_context += f"\n### User Selected Direction:\n- {state.user_chosen_direction}\n"
+
+    if exploration_context:
+        exploration_context = f"\n## Phase 1 Exploration & User Directions\n{exploration_context}\nNote: Make sure to allocate a dedicated section near the beginning to discuss the exploration phase, the possible directions, and the user's chosen direction.\n"
+
+    prompt = f"""You are a Principal Investigator writing a comprehensive scientific research report.
+
+## CRITICAL INSTRUCTION
+You must organize the report to walk through the COMPLETE ANALYSIS FLOW chronologically.
+- Present the analysis process step by step
+- Show ALL figures and tables that were generated during analysis
+- Provide scientific interpretation for EACH figure and table
+- Reference specific methods, parameters, and quantitative results in your narratives
+- Do NOT request any new analysis or figure generation — use only existing results
+
+## Research Project
+Title: {state.name}
+Objective: {state.initial_instruction}
+{exploration_context}
+{analysis_context}
+{generator._build_score_definitions_context(state)}
+
+{params_text}
+
+## Publication-Quality Figures (PI-reviewed)
+{pub_figs_text or "None"}
+
+## ALL Available Figures ({len(existing_figures)} total)
+{figures_list}
+
+## Available Tables ({len(existing_tables)} total)
+{tables_list}
+
+## Final Summary
+{findings.get('summary', '')[:2000]}
+
+## Task
+Write all content in English
+
+Create a report plan. The plan ONLY needs to define section structure and assign figures/tables to sections.
+Do NOT write captions, interpretations, or narratives — those will be generated later.
+
+Return a COMPACT JSON (keep it short to avoid truncation):
+{{
+    "title": "Report title",
+    "sections": [
+        {{
+            "id": "unique_id",
+            "title": "Section Title",
+            "description": "Brief description of what this section covers (1 sentence)",
+            "analysis_type": "general",
+            "existing_figures": [{{"filename": "exact_filename.jpg"}}],
+            "existing_tables": [{{"filename": "exact_filename.csv"}}]
+        }}
+    ]
+}}
+
+## Section Organization — FOLLOW THE ANALYSIS WORKFLOW ORDER
+
+You MUST organize sections to match the CHRONOLOGICAL ORDER of the analysis workflow above.
+Each major analysis step should have its own dedicated section.
+Do NOT reorganize into fixed categories — the report should tell the story of how the analysis progressed.
+
+For example, if the workflow was:
+  1. QC → 2. Clustering → 3. Data-supported Sub-clustering → 4. DEG → 5. Enrichment → 6. Interaction Analysis → 7. Targeted Follow-up
+Then create sections in this EXACT order.
+
+### CRITICAL RULES:
+- Include ALL {len(existing_figures)} figures — assign every figure to a section by EXACT filename
+- Include ALL {len(existing_tables)} tables — assign every table to a section by EXACT filename
+- ONLY use filenames from the "Available Figures" and "Available Tables" lists above. Do NOT invent or guess filenames
+- Each major analysis step gets its OWN section (sub-clustering, CCC, metabolic analysis, etc.)
+- Do NOT merge unrelated analyses into a single section
+- Keep descriptions brief (1 sentence) — detailed narratives will be written separately
+"""
+
+    return prompt
+
+
+async def _plan_report_from_analysis_impl(
+    generator, state, analysis_record, findings, existing_figures,
+    existing_tables, language, analysis_summary=None,
+):
+    import logging
+
+    logger = logging.getLogger(__name__)
+    prompt = _build_report_planning_prompt(
+        generator, state, analysis_record, findings, existing_figures,
+        existing_tables, language, analysis_summary,
+    )
+    response = await generator._pi_chat(prompt, temperature=0.4, max_tokens=32768)
+    round_summaries = build_round_summaries(state)
+
+    try:
+        plan = _safe_parse_json(response)
+        if plan and plan.get("sections"):
+            logger.info(f"Analysis-based report plan: {len(plan['sections'])} sections")
+
+            for section in plan.get("sections", []):
+                if "analysis_type" not in section:
+                    section["analysis_type"] = "general"
+                if "existing_figures" not in section:
+                    section["existing_figures"] = []
+                if "existing_tables" not in section:
+                    section["existing_tables"] = []
+
+            # Validate figure/table references: filter non-existent and deduplicate
+            actual_figures_by_name = {
+                f.get("filename"): f
+                for f in existing_figures if f.get("filename")
+            }
+            actual_fig_names = set(actual_figures_by_name)
+            actual_tbl_names = {t.get("filename") for t in existing_tables if t.get("filename")}
+            seen_figs = set()
+            seen_tbls = set()
+            for section in plan.get("sections", []):
+                valid_figs = []
+                for fig_ref in section.get("existing_figures", []):
+                    name = fig_ref if isinstance(fig_ref, str) else fig_ref.get("filename", "")
+                    if not name:
+                        continue
+                    if name not in actual_fig_names:
+                        logger.warning(f"Figure '{name}' in section '{section.get('title', '?')}' not found on disk — removing")
+                    elif name in seen_figs:
+                        logger.warning(f"Duplicate figure '{name}' in section '{section.get('title', '?')}' — skipping")
+                    else:
+                        valid_figs.append(_bind_figure_reference(
+                            fig_ref, actual_figures_by_name[name]
+                        ))
+                        seen_figs.add(name)
+                section["existing_figures"] = valid_figs
+
+                valid_tbls = []
+                for tbl_ref in section.get("existing_tables", []):
+                    name = tbl_ref if isinstance(tbl_ref, str) else tbl_ref.get("filename", "")
+                    if not name:
+                        continue
+                    if name not in actual_tbl_names:
+                        logger.warning(f"Table '{name}' in section '{section.get('title', '?')}' not found — removing")
+                    elif name in seen_tbls:
+                        logger.warning(f"Duplicate table '{name}' in section '{section.get('title', '?')}' — skipping")
+                    else:
+                        valid_tbls.append(tbl_ref)
+                        seen_tbls.add(name)
+                section["existing_tables"] = valid_tbls
+
+            unassigned_figs = actual_fig_names - seen_figs
+            unassigned_tbls = actual_tbl_names - seen_tbls
+            if unassigned_figs or unassigned_tbls:
+                # Do not trust an LLM omission to decide which rendered
+                # evidence reaches the report. Add a deterministic catch-all
+                # section containing every validated unassigned artifact.
+                figures_by_name = {
+                    item.get("filename"): item for item in existing_figures
+                    if item.get("filename")
+                }
+                tables_by_name = {
+                    item.get("filename"): item for item in existing_tables
+                    if item.get("filename")
+                }
+                plan["sections"].append({
+                    "id": "additional_results",
+                    "title": "Additional Analysis Results",
+                    "description": (
+                        "Validated analysis figures and tables not assigned "
+                        "by the report-planning model"
+                    ),
+                    "analysis_type": "specific",
+                    "existing_figures": [
+                        figures_by_name[name] for name in sorted(unassigned_figs)
+                    ],
+                    "existing_tables": [
+                        tables_by_name[name] for name in sorted(unassigned_tbls)
+                    ],
+                })
+                logger.warning(
+                    "Deterministically recovered %d unassigned figure(s) and "
+                    "%d table(s) into additional_results",
+                    len(unassigned_figs), len(unassigned_tbls),
+                )
+
+            plan["_existing_figures"] = existing_figures
+            plan["_existing_tables"] = existing_tables
+            return insert_cross_modal_section(plan, round_summaries)
+        else:
+            logger.warning(
+                f"Plan JSON parsing returned {'empty plan' if plan else 'None'}. "
+                f"Response length: {len(response)} chars, starts with: {response[:200]!r}"
+            )
+    except Exception as e:
+        logger.exception("Failed to parse analysis-based report plan")
+
+    # Fallback to auto-assignment based on figure types
+    logger.warning("Using fallback plan (auto-assignment by figure type)")
+    fallback = generator._create_fallback_plan_with_existing_figures(state, existing_figures)
+    return insert_cross_modal_section(fallback, round_summaries)
+
+def _build_existing_figure_section_prompt(
+    generator, state, section_plan, findings, language, analysis_summary,
+):
+    import json
+    import logging
+    import re
+    from pathlib import Path
+    import uuid
+
+    logger = logging.getLogger(__name__)
+    analysis_summary = analysis_summary or {}
+    section_id = section_plan.get("id", str(uuid.uuid4())[:8])
+    section_title = section_plan.get("title", "Section")
+    section_description = section_plan.get("description", "")
+    analysis_type = section_plan.get("analysis_type", "general")
+    existing_figures = section_plan.get("existing_figures", [])
+    existing_tables = section_plan.get("existing_tables", [])
+    cross_modal_candidates = section_plan.get("cross_modal_candidates", [])
+    cross_modal_context = ""
+    if cross_modal_candidates:
+        lines = []
+        for c in cross_modal_candidates:
+            lines.append(
+                f"- Theme: {c.get('theme','')}\n"
+                f"  Mechanism: {c.get('mechanism_statement','')}\n"
+                f"  Confidence: {c.get('confidence','low')}; "
+                f"relation to current direction: {c.get('relation_to_current_direction','uncovered')}; "
+                f"recommendation: {c.get('report_recommendation','future_direction')}"
+            )
+        cross_modal_context = (
+            "\n## Cross-Modal Mechanism Candidates (write the narrative around these)\n"
+            "Present EACH candidate below. For low/medium-confidence candidates, frame them "
+            "explicitly as hypotheses with evidence gaps — NOT confirmed conclusions. Order: "
+            "headline → secondary → future_direction.\n"
+            + "\n".join(lines)
+        )
+    mechanism_programs = section_plan.get("mechanism_programs", [])
+    if mechanism_programs:
+        mech_lines = []
+        for p in mechanism_programs:
+            mech_lines.append(
+                f"- {p.get('label','')} (evidence {p.get('evidence_strength','weak')}, "
+                f"bulk {p.get('bulk_support','unknown')}): "
+                f"{'; '.join(p.get('triggering_observations', [])[:2])}. "
+                f"Missing evidence: {'; '.join(p.get('missing_evidence', [])[:2])}"
+            )
+        cross_modal_context += "\nData-driven mechanism programs (candidates, not confirmed):\n" + "\n".join(mech_lines)
+    provided_narrative = section_plan.get("narrative", "")
+
+    logger.info(f"Generating section '{section_title}' with {len(existing_figures)} figures, {len(existing_tables)} tables")
+
+    # Build figure info for PI Agent — include visual descriptions from analysis review
+    fig_descriptions = analysis_summary.get("figure_descriptions", {})
+    figures_info_parts = []
+    for fig in existing_figures:
+        fname = fig.get('filename', 'unknown')
+        caption = fig.get('caption', fig.get('interpretation', 'No caption provided'))
+        visual_desc = fig_descriptions.get(fname, "")
+        line = f"  - {fname}: {caption}"
+        if visual_desc:
+            line += f"\n    Visual description: {visual_desc[:200]}"
+        figures_info_parts.append(line)
+    figures_info = "\n".join(figures_info_parts) if figures_info_parts else "No figures in this section."
+
+    # Build table info for PI Agent
+    tables_info = "\n".join([
+        f"  - {tbl.get('filename', 'unknown')}: {tbl.get('caption', tbl.get('interpretation', 'No description'))}"
+        for tbl in existing_tables
+    ]) if existing_tables else ""
+
+    # Ask PI Agent to write comprehensive content for this section
+    tables_section = ""
+    if tables_info:
+        tables_section = f"""
+## Tables in This Section
+{tables_info}
+"""
+
+    tables_json_template = ""
+    if existing_tables:
+        tables_json_template = """,
+
+    "tables": [
+        {{
+            "filename": "exact_filename.csv",
+            "caption": "Detailed table caption describing what data it contains",
+            "interpretation": "How to interpret this data and its significance"
+        }}
+    ]"""
+
+    tables_requirement = ""
+    if existing_tables:
+        tables_requirement = f"\n6. Each table must have a caption and interpretation"
+
+    # Include methodology context from analysis review
+    methodology_context = ""
+    methodology_overview = analysis_summary.get("methodology_overview", "")
+    key_results = analysis_summary.get("key_results", "")
+    params_used = analysis_summary.get("parameters_used", {})
+    if methodology_overview or key_results:
+        methodology_context = f"""
+## Analysis Methodology (from code review)
+{methodology_overview[:1000] if methodology_overview else ""}
+
+## Key Quantitative Results
+{key_results[:1000] if key_results else ""}
+"""
+        if params_used:
+            methodology_context += "\n## Key Parameters Used\n"
+            methodology_context += "\n".join(f"- {k}: {v}" for k, v in list(params_used.items())[:15])
+
+    # Note about attached images
+    section_images = []
+    for fig in existing_figures:
+        fname = fig.get("filename", "")
+        if fname and fname in generator.figure_images_cache:
+            section_images.append(generator.figure_images_cache[fname])
+    image_note = f"\n[{len(section_images)} figure image(s) attached — describe what you actually see in each figure]" if section_images else ""
+
+    prompt = f"""You are a Principal Investigator writing a section for a scientific research report.
+
+## Section Information
+Title: {section_title}
+Description: {section_description}
+Analysis Type: {analysis_type}
+
+## Figures in This Section
+{figures_info}
+{image_note}
+{tables_section}
+## Research Context
+Project: {state.name}
+Objective: {state.initial_instruction}
+{methodology_context}
+
+## Key Findings
+{json.dumps(findings.get('bioinformatics', [])[:15], ensure_ascii=False, indent=2)}
+
+## Summary
+{findings.get('summary', '')[:1500]}
+
+## Cluster Annotations
+{findings.get('cluster_annotations', 'Not available')}
+{cross_modal_context}
+
+## Mechanism Naming and Hypothesis Policy
+{MECHANISM_EVIDENCE_POLICY}
+
+## Your Task
+Write in English
+
+Generate a comprehensive scientific narrative for this section. Your response must be a JSON object with this exact structure:
+
+{{
+    "narrative": "A detailed scientific narrative (300-500 words) that:
+        - Introduces the purpose of this analysis step
+        - References each figure by its EXACT filename from the list above (e.g., 'As shown in umap_cell_types.jpg...')
+        - Explains the methodology used with specific methods and parameters
+        - Presents the key observations with quantitative details
+        - Discusses the biological significance
+        - Connects findings to the research hypothesis",
+
+    "figures": [
+        {{
+            "filename": "exact_filename.jpg",
+            "caption": "Detailed figure caption (50-100 words) — describe what the figure actually shows",
+            "interpretation": "Scientific interpretation (100-200 words)"
+        }}
+    ]{tables_json_template}
+}}
+
+## Important Requirements:
+1. Write as a rigorous scientific paper section
+2. Include quantitative details where available (cell counts, percentages, p-values)
+3. Reference specific methods and parameters (e.g., "Leiden clustering at resolution 0.8")
+4. Each figure must have BOTH a detailed caption AND an interpretation — describe what you see in the figures
+5. The narrative should flow logically and reference all figures in the section{tables_requirement}
+"""
+
+    return (section_id, section_title, section_description, analysis_type,
+            existing_figures, existing_tables, provided_narrative,
+            section_images, prompt)
+
+
+async def _generate_section_from_existing_figures_impl(
+    generator, state, section_plan, findings, language,
+    analysis_summary=None, force_fallback=False,
+):
+    import json
+    import logging
+    import re
+    from pathlib import Path
+    import uuid
+
+    logger = logging.getLogger(__name__)
+    values = _build_existing_figure_section_prompt(
+        generator, state, section_plan, findings, language, analysis_summary,
+    )
+    (section_id, section_title, section_description, analysis_type,
+     existing_figures, existing_tables, provided_narrative,
+     section_images, prompt) = values
+    # Use vision API if we have figure images (fallback chain handled internally), otherwise text-only
+    if force_fallback:
+        response = ""
+    else:
+        try:
+            if section_images:
+                response = await generator._chat_with_vision_fallback(
+                    text_prompt=prompt, images=section_images[:6],
+                    temperature=0.3, max_tokens=32768, request_timeout=600.0,
+                )
+            else:
+                response = await generator._pi_chat(prompt, temperature=0.3)
+        except Exception as e:
+            logger.warning(f"Report section '{section_title}' generation failed: {e}")
+            response = ""
+
+    # Parse the response
+    try:
+        content = _safe_parse_json(response)
+        if content:
+            narrative = content.get("narrative", "")
+            figure_details = content.get("figures", [])
+            table_details = content.get("tables", [])
+
+            # Merge PI Agent's interpretations with existing figure info
+            section_figures = []
+            for fig in existing_figures:
+                filename = fig.get("filename", "")
+                # Find matching details from PI Agent
+                matching_detail = next(
+                    (d for d in figure_details if d.get("filename", "").lower() == filename.lower()),
+                    {}
+                )
+
+                # Resolve png_path: check if we have it in figures_dir
+                png_path = fig.get("png_path", "")
+                if not png_path and filename:
+                    candidate = generator.figures_dir / filename
+                    if candidate.exists():
+                        png_path = str(candidate)
+
+                pdf_path = fig.get("pdf_path")
+                if not pdf_path and filename:
+                    stem = Path(filename).stem
+                    candidate = generator.figures_dir / f"{stem}.pdf"
+                    if candidate.exists():
+                        pdf_path = str(candidate)
+
+                fig_id = str(uuid.uuid4())[:8]
+                section_figures.append({
+                    "id": fig_id,
+                    "name": fig.get("caption", fig.get("filename", "Figure")).replace("_", " ").title(),
+                    "caption": matching_detail.get("caption", fig.get("caption", "")),
+                    "interpretation": matching_detail.get("interpretation", fig.get("interpretation", "")),
+                    "png_path": png_path,
+                    "pdf_path": pdf_path,
+                    "plan_step_id": fig.get("plan_step_id"),
+                    "plan_id": fig.get("plan_id"),
+                    "purpose": fig.get("purpose") or "result",
+                    "provenance_kind": fig.get("provenance_kind") or "unregistered",
+                    "is_legacy": bool(fig.get("is_legacy")),
+                    "legacy_artifact_id": fig.get("legacy_artifact_id"),
+                    "logical_figure_id": fig.get("logical_figure_id"),
+                    "render_attempt_id": fig.get("render_attempt_id"),
+                    "revision_of_id": fig.get("revision_of_id"),
+                    "supersedes_id": fig.get("supersedes_id"),
+                    "is_published_head": bool(fig.get("is_published_head")),
+                    "section": section_id,
+                    "analysis_type": analysis_type
+                })
+
+                # Add to global generated figures list
+                generator.generated_figures.append(section_figures[-1])
+
+            # Process tables
+            section_tables = []
+            for tbl in existing_tables:
+                tbl_filename = tbl.get("filename", "")
+                matching_tbl = next(
+                    (d for d in table_details if d.get("filename", "").lower() == tbl_filename.lower()),
+                    {}
+                )
+
+                csv_path = tbl.get("csv_path", "")
+                if not csv_path and tbl_filename:
+                    candidate = generator.tables_dir / tbl_filename
+                    if candidate.exists():
+                        csv_path = str(candidate)
+
+                tbl_id = str(uuid.uuid4())[:8]
+                tbl_info = {
+                    "id": tbl_id,
+                    "name": matching_tbl.get("caption", tbl.get("name", tbl_filename)),
+                    "caption": matching_tbl.get("caption", tbl.get("caption", "")),
+                    "interpretation": matching_tbl.get("interpretation", tbl.get("interpretation", "")),
+                    "csv_path": csv_path,
+                    "columns": tbl.get("columns", []),
+                    "preview_data": tbl.get("preview_data", []),
+                    "section": section_id,
+                    "analysis_type": analysis_type
+                }
+                section_tables.append(tbl_info)
+                generator.generated_tables.append(tbl_info)
+
+            return {
+                "id": section_id,
+                "title": section_title,
+                "description": section_description,
+                "analysis_type": analysis_type,
+                "content": narrative,
+                "figures": section_figures,
+                "tables": section_tables,
+                "pi_iterations": 1,
+                "steps_executed": 1
+            }
+
+    except Exception as e:
+        logger.exception("Failed to parse PI Agent response")
+
+    # Attempt to salvage narrative text from raw LLM response before falling back
+    if response and len(response.strip()) > 100:
+        # Try to extract narrative field value from partially valid JSON
+        narrative_match = re.search(r'"narrative"\s*:\s*"((?:[^"\\]|\\.)*)"', response, re.DOTALL)
+        if narrative_match:
+            try:
+                salvaged = json.loads('"' + narrative_match.group(1) + '"')
+                if len(salvaged.strip()) > 50:
+                    provided_narrative = salvaged
+                    logger.info(f"Salvaged narrative from raw LLM response ({len(salvaged)} chars)")
+            except Exception:
+                logger.warning("Failed to salvage narrative from JSON", exc_info=True)
+        # If no JSON field found but response is substantial prose, use it directly
+        if not (provided_narrative and len((provided_narrative or '').strip()) > 50):
+            # Strip markdown code fences and JSON artifacts
+            cleaned = re.sub(r'```(?:json)?\s*', '', response)
+            cleaned = re.sub(r'[{}\[\]]', '', cleaned).strip()
+            if len(cleaned) > 200:
+                provided_narrative = cleaned
+                logger.info(f"Using cleaned raw LLM response as narrative ({len(cleaned)} chars)")
+
+    # Fallback: use provided narrative and basic figure info
+    section_figures = []
+    for fig in existing_figures:
+        png_path = fig.get("png_path", "")
+        if not png_path and fig.get("filename"):
+            candidate = generator.figures_dir / fig["filename"]
+            if candidate.exists():
+                png_path = str(candidate)
+
+        fig_id = str(uuid.uuid4())[:8]
+        section_figures.append({
+            "id": fig_id,
+            "name": fig.get("filename", "Figure").replace("_", " ").title(),
+            "caption": fig.get("caption", ""),
+            "interpretation": fig.get("interpretation", ""),
+            "png_path": png_path,
+            "pdf_path": fig.get("pdf_path"),
+            "plan_step_id": fig.get("plan_step_id"),
+            "plan_id": fig.get("plan_id"),
+            "purpose": fig.get("purpose") or "result",
+            "provenance_kind": fig.get("provenance_kind") or "unregistered",
+            "is_legacy": bool(fig.get("is_legacy")),
+            "legacy_artifact_id": fig.get("legacy_artifact_id"),
+            "logical_figure_id": fig.get("logical_figure_id"),
+            "render_attempt_id": fig.get("render_attempt_id"),
+            "revision_of_id": fig.get("revision_of_id"),
+            "supersedes_id": fig.get("supersedes_id"),
+            "is_published_head": bool(fig.get("is_published_head")),
+            "section": section_id,
+            "analysis_type": analysis_type
+        })
+        generator.generated_figures.append(section_figures[-1])
+
+    section_tables = []
+    for tbl in existing_tables:
+        csv_path = tbl.get("csv_path", "")
+        if not csv_path and tbl.get("filename"):
+            candidate = generator.tables_dir / tbl.get("filename")
+            if candidate.exists():
+                csv_path = str(candidate)
+
+        tbl_id = str(uuid.uuid4())[:8]
+        tbl_info = {
+            "id": tbl_id,
+            "name": tbl.get("name", tbl.get("filename", "Table")),
+            "caption": tbl.get("caption", ""),
+            "interpretation": tbl.get("interpretation", ""),
+            "csv_path": csv_path,
+            "columns": tbl.get("columns", []),
+            "preview_data": tbl.get("preview_data", []),
+            "section": section_id,
+            "analysis_type": analysis_type
+        }
+        section_tables.append(tbl_info)
+        generator.generated_tables.append(tbl_info)
+
+    fallback_content = provided_narrative or section_description
+    if not fallback_content or len(fallback_content.strip()) < 20:
+        logger.warning(
+            f"Section '{section_title}' fallback has minimal content "
+            f"({len((fallback_content or '').strip())} chars). "
+            f"LLM narrative generation failed — section may appear sparse."
+        )
+        if not (fallback_content or "").strip():
+            fallback_content = f"Analysis results for {section_title}. Detailed narrative could not be generated."
+
+    return {
+        "id": section_id,
+        "title": section_title,
+        "description": section_description,
+        "analysis_type": analysis_type,
+        "content": fallback_content,
+        "figures": section_figures,
+        "tables": section_tables,
+        "pi_iterations": 1,
+        "steps_executed": 1
+    }
 
 class PlanningMixin:
     """Provides report planning and section generation methods."""
@@ -214,325 +964,16 @@ class PlanningMixin:
         Uses analysis flow, existing figures, tables, round findings, and analysis_summary
         (from code/figure review) to create a comprehensive report.
         """
-        import logging
-        import re
-        from pathlib import Path
-
-        logger = logging.getLogger(__name__)
-        analysis_summary = analysis_summary or {}
-
-        # Format figures list with visual descriptions from analysis review
-        fig_descriptions = analysis_summary.get("figure_descriptions", {})
-        figures_list_parts = []
-        for i, fig in enumerate(existing_figures):
-            fname = fig['filename']
-            ftype = fig['inferred_type']
-            desc = fig_descriptions.get(fname, "")
-            line = f"  {i+1}. {fname} (type: {ftype})"
-            if desc:
-                line += f" — {desc[:150]}"
-            figures_list_parts.append(line)
-        figures_list = "\n".join(figures_list_parts) if figures_list_parts else "No existing figures found."
-
-        # Format tables list
-        tables_list = "\n".join([
-            f"  {i+1}. {tbl['filename']} (type: {tbl.get('inferred_type', 'data')})"
-            + (f" — columns: {', '.join(tbl['columns'][:5])}" if tbl.get('columns') else "")
-            for i, tbl in enumerate(existing_tables)
-        ]) if existing_tables else "No tables found."
-
-        # Format publication figures with descriptions
-        pub_figs_text = ""
-        if analysis_record.get("publication_figures"):
-            pub_figs_lines = []
-            for pf in analysis_record["publication_figures"]:
-                pub_figs_lines.append(
-                    f"  - {pf['filename']} [{pf['figure_type']}]: {pf['description'][:200]}"
-                )
-            pub_figs_text = "\n".join(pub_figs_lines)
-
-        # Use analysis summary for methodology and workflow (if available),
-        # otherwise fall back to round summaries and analysis steps
-        methodology_text = analysis_summary.get("methodology_overview", "")
-        workflow_text = analysis_summary.get("workflow_summary", "")
-        key_results_text = analysis_summary.get("key_results", "")
-        coverage_context = _pathology_coverage_context(analysis_record)
-
-        if methodology_text or workflow_text or key_results_text:
-            analysis_context = f"""## Analysis Methodology (from code review)
-{methodology_text}
-
-## Analysis Workflow
-{workflow_text}
-
-## Key Quantitative Results
-{key_results_text}
-"""
-        else:
-            # Fallback to round summaries and analysis steps
-            rounds_text = ""
-            for rs in analysis_record.get("round_summaries", []):
-                rounds_text += (
-                    f"\n### Round {rs['round_number']} "
-                    f"(status={rs.get('round_status', 'completed')}; "
-                    f"evidence={rs.get('evidence_status', 'empty')})\n"
-                )
-                if rs.get("bioinformatics_evidence_verified") is False:
-                    rounds_text += (
-                        "**EVIDENCE WARNING**: Bioinformatics findings are partial/unverified; "
-                        "never label them validated, confirmed, causal, dominant, or replicated.\n"
-                    )
-                rounds_text += f"**PI Summary**: {rs['pi_summary'][:500]}\n"
-                if rs['bioinformatics_findings']:
-                    rounds_text += f"**Bioinformatics findings**:\n"
-                    for f in rs['bioinformatics_findings'][:5]:
-                        rounds_text += f"  - {f[:200]}\n"
-                if rs['pathology_findings']:
-                    rounds_text += f"**Pathology findings**:\n"
-                    for f in rs['pathology_findings'][:3]:
-                        rounds_text += f"  - {f[:200]}\n"
-                if rs['biochemistry_findings']:
-                    rounds_text += f"**Biochemistry findings**:\n"
-                    for f in rs['biochemistry_findings'][:3]:
-                        rounds_text += f"  - {f[:200]}\n"
-                if rs['literature_findings']:
-                    rounds_text += f"**Literature findings**:\n"
-                    for f in rs['literature_findings'][:3]:
-                        rounds_text += f"  - {f[:200]}\n"
-
-            steps_text = ""
-            for step in analysis_record.get("analysis_steps", [])[:30]:
-                figs_str = ", ".join(step['saved_figures']) if step['saved_figures'] else "(display only)"
-                steps_text += f"  - [{step['timestamp'][:16]}] {step['description']} → figures: {figs_str}\n"
-
-            analysis_context = f"""## Analysis Flow ({analysis_record['total_rounds']} rounds, {analysis_record['total_code_cells']} code cells)
-{rounds_text}
-
-## Key Analysis Steps (code cells that generated figures)
-{steps_text}
-"""
-
-        if coverage_context:
-            analysis_context += (
-                "\n## Pathology Tile Coverage (host observation)\n"
-                f"{coverage_context}\n"
-                "This is a coverage observation only. Do not infer findings for "
-                "omitted tiles.\n"
-            )
-
-        evidence_warnings = []
-        for rs in analysis_record.get("round_summaries", []):
-            if rs.get("bioinformatics_evidence_verified") is False:
-                evidence_warnings.append(
-                    f"- Round {rs['round_number']}: partial/unverified bioinformatics evidence. "
-                    "Do not upgrade claims to validated, confirmed, causal, dominant, or replicated."
-                )
-        if evidence_warnings:
-            analysis_context += (
-                "\n## Mandatory Evidence Qualification\n"
-                + "\n".join(evidence_warnings)
-                + "\nThese qualifications override stronger wording in summaries or literature.\n"
-            )
-
-        # Parameters used
-        params_text = ""
-        params = analysis_summary.get("parameters_used", {})
-        if params:
-            params_text = "## Key Analysis Parameters\n" + "\n".join(f"- {k}: {v}" for k, v in params.items())
-
-        exploration_context = ""
-        if state.exploration_report and hasattr(state.exploration_report, "research_direction_candidates") and state.exploration_report.research_direction_candidates:
-            exploration_context += "### Initial Exploration Report (Possible Directions):\n"
-            for idx, c in enumerate(state.exploration_report.research_direction_candidates):
-                exploration_context += f"{idx+1}. {c.get('direction', '')}\n   Rationale: {c.get('rationale', '')}\n"
-
-        if state.user_chosen_directions:
-            exploration_context += "\n### User Selected Directions (Modifications):\n"
-            for d in state.user_chosen_directions:
-                exploration_context += f"- {d.get('direction', '')} (Notes: {d.get('notes', '')})\n"
-        elif getattr(state, "user_chosen_direction", None):
-            exploration_context += f"\n### User Selected Direction:\n- {state.user_chosen_direction}\n"
-
-        if exploration_context:
-            exploration_context = f"\n## Phase 1 Exploration & User Directions\n{exploration_context}\nNote: Make sure to allocate a dedicated section near the beginning to discuss the exploration phase, the possible directions, and the user's chosen direction.\n"
-
-        prompt = f"""You are a Principal Investigator writing a comprehensive scientific research report.
-
-## CRITICAL INSTRUCTION
-You must organize the report to walk through the COMPLETE ANALYSIS FLOW chronologically.
-- Present the analysis process step by step
-- Show ALL figures and tables that were generated during analysis
-- Provide scientific interpretation for EACH figure and table
-- Reference specific methods, parameters, and quantitative results in your narratives
-- Do NOT request any new analysis or figure generation — use only existing results
-
-## Research Project
-Title: {state.name}
-Objective: {state.initial_instruction}
-{exploration_context}
-{analysis_context}
-{self._build_score_definitions_context(state)}
-
-{params_text}
-
-## Publication-Quality Figures (PI-reviewed)
-{pub_figs_text or "None"}
-
-## ALL Available Figures ({len(existing_figures)} total)
-{figures_list}
-
-## Available Tables ({len(existing_tables)} total)
-{tables_list}
-
-## Final Summary
-{findings.get('summary', '')[:2000]}
-
-## Task
-Write all content in English
-
-Create a report plan. The plan ONLY needs to define section structure and assign figures/tables to sections.
-Do NOT write captions, interpretations, or narratives — those will be generated later.
-
-Return a COMPACT JSON (keep it short to avoid truncation):
-{{
-    "title": "Report title",
-    "sections": [
-        {{
-            "id": "unique_id",
-            "title": "Section Title",
-            "description": "Brief description of what this section covers (1 sentence)",
-            "analysis_type": "general",
-            "existing_figures": [{{"filename": "exact_filename.jpg"}}],
-            "existing_tables": [{{"filename": "exact_filename.csv"}}]
-        }}
-    ]
-}}
-
-## Section Organization — FOLLOW THE ANALYSIS WORKFLOW ORDER
-
-You MUST organize sections to match the CHRONOLOGICAL ORDER of the analysis workflow above.
-Each major analysis step should have its own dedicated section.
-Do NOT reorganize into fixed categories — the report should tell the story of how the analysis progressed.
-
-For example, if the workflow was:
-  1. QC → 2. Clustering → 3. Data-supported Sub-clustering → 4. DEG → 5. Enrichment → 6. Interaction Analysis → 7. Targeted Follow-up
-Then create sections in this EXACT order.
-
-### CRITICAL RULES:
-- Include ALL {len(existing_figures)} figures — assign every figure to a section by EXACT filename
-- Include ALL {len(existing_tables)} tables — assign every table to a section by EXACT filename
-- ONLY use filenames from the "Available Figures" and "Available Tables" lists above. Do NOT invent or guess filenames
-- Each major analysis step gets its OWN section (sub-clustering, CCC, metabolic analysis, etc.)
-- Do NOT merge unrelated analyses into a single section
-- Keep descriptions brief (1 sentence) — detailed narratives will be written separately
-"""
-
-        response = await self._pi_chat(prompt, temperature=0.4, max_tokens=32768)
-        round_summaries = build_round_summaries(state)
-
-        try:
-            plan = _safe_parse_json(response)
-            if plan and plan.get("sections"):
-                logger.info(f"Analysis-based report plan: {len(plan['sections'])} sections")
-
-                for section in plan.get("sections", []):
-                    if "analysis_type" not in section:
-                        section["analysis_type"] = "general"
-                    if "existing_figures" not in section:
-                        section["existing_figures"] = []
-                    if "existing_tables" not in section:
-                        section["existing_tables"] = []
-
-                # Validate figure/table references: filter non-existent and deduplicate
-                actual_figures_by_name = {
-                    f.get("filename"): f
-                    for f in existing_figures if f.get("filename")
-                }
-                actual_fig_names = set(actual_figures_by_name)
-                actual_tbl_names = {t.get("filename") for t in existing_tables if t.get("filename")}
-                seen_figs = set()
-                seen_tbls = set()
-                for section in plan.get("sections", []):
-                    valid_figs = []
-                    for fig_ref in section.get("existing_figures", []):
-                        name = fig_ref if isinstance(fig_ref, str) else fig_ref.get("filename", "")
-                        if not name:
-                            continue
-                        if name not in actual_fig_names:
-                            logger.warning(f"Figure '{name}' in section '{section.get('title', '?')}' not found on disk — removing")
-                        elif name in seen_figs:
-                            logger.warning(f"Duplicate figure '{name}' in section '{section.get('title', '?')}' — skipping")
-                        else:
-                            valid_figs.append(_bind_figure_reference(
-                                fig_ref, actual_figures_by_name[name]
-                            ))
-                            seen_figs.add(name)
-                    section["existing_figures"] = valid_figs
-
-                    valid_tbls = []
-                    for tbl_ref in section.get("existing_tables", []):
-                        name = tbl_ref if isinstance(tbl_ref, str) else tbl_ref.get("filename", "")
-                        if not name:
-                            continue
-                        if name not in actual_tbl_names:
-                            logger.warning(f"Table '{name}' in section '{section.get('title', '?')}' not found — removing")
-                        elif name in seen_tbls:
-                            logger.warning(f"Duplicate table '{name}' in section '{section.get('title', '?')}' — skipping")
-                        else:
-                            valid_tbls.append(tbl_ref)
-                            seen_tbls.add(name)
-                    section["existing_tables"] = valid_tbls
-
-                unassigned_figs = actual_fig_names - seen_figs
-                unassigned_tbls = actual_tbl_names - seen_tbls
-                if unassigned_figs or unassigned_tbls:
-                    # Do not trust an LLM omission to decide which rendered
-                    # evidence reaches the report. Add a deterministic catch-all
-                    # section containing every validated unassigned artifact.
-                    figures_by_name = {
-                        item.get("filename"): item for item in existing_figures
-                        if item.get("filename")
-                    }
-                    tables_by_name = {
-                        item.get("filename"): item for item in existing_tables
-                        if item.get("filename")
-                    }
-                    plan["sections"].append({
-                        "id": "additional_results",
-                        "title": "Additional Analysis Results",
-                        "description": (
-                            "Validated analysis figures and tables not assigned "
-                            "by the report-planning model"
-                        ),
-                        "analysis_type": "specific",
-                        "existing_figures": [
-                            figures_by_name[name] for name in sorted(unassigned_figs)
-                        ],
-                        "existing_tables": [
-                            tables_by_name[name] for name in sorted(unassigned_tbls)
-                        ],
-                    })
-                    logger.warning(
-                        "Deterministically recovered %d unassigned figure(s) and "
-                        "%d table(s) into additional_results",
-                        len(unassigned_figs), len(unassigned_tbls),
-                    )
-
-                plan["_existing_figures"] = existing_figures
-                plan["_existing_tables"] = existing_tables
-                return insert_cross_modal_section(plan, round_summaries)
-            else:
-                logger.warning(
-                    f"Plan JSON parsing returned {'empty plan' if plan else 'None'}. "
-                    f"Response length: {len(response)} chars, starts with: {response[:200]!r}"
-                )
-        except Exception as e:
-            logger.exception("Failed to parse analysis-based report plan")
-
-        # Fallback to auto-assignment based on figure types
-        logger.warning("Using fallback plan (auto-assignment by figure type)")
-        fallback = self._create_fallback_plan_with_existing_figures(state, existing_figures)
-        return insert_cross_modal_section(fallback, round_summaries)
+        return await _plan_report_from_analysis_impl(
+            self,
+            state,
+            analysis_record,
+            findings,
+            existing_figures,
+            existing_tables,
+            language,
+            analysis_summary=analysis_summary,
+        )
 
     async def _generate_section_from_existing_figures(
         self,
@@ -548,396 +989,12 @@ Then create sections in this EXACT order.
         PI Agent writes the narrative, captions, and scientific interpretations.
         When figure images are available in cache, uses vision API for accurate descriptions.
         """
-        import json
-        import logging
-        import re
-        from pathlib import Path
-        import uuid
-
-        logger = logging.getLogger(__name__)
-        analysis_summary = analysis_summary or {}
-        section_id = section_plan.get("id", str(uuid.uuid4())[:8])
-        section_title = section_plan.get("title", "Section")
-        section_description = section_plan.get("description", "")
-        analysis_type = section_plan.get("analysis_type", "general")
-        existing_figures = section_plan.get("existing_figures", [])
-        existing_tables = section_plan.get("existing_tables", [])
-        cross_modal_candidates = section_plan.get("cross_modal_candidates", [])
-        cross_modal_context = ""
-        if cross_modal_candidates:
-            lines = []
-            for c in cross_modal_candidates:
-                lines.append(
-                    f"- Theme: {c.get('theme','')}\n"
-                    f"  Mechanism: {c.get('mechanism_statement','')}\n"
-                    f"  Confidence: {c.get('confidence','low')}; "
-                    f"relation to current direction: {c.get('relation_to_current_direction','uncovered')}; "
-                    f"recommendation: {c.get('report_recommendation','future_direction')}"
-                )
-            cross_modal_context = (
-                "\n## Cross-Modal Mechanism Candidates (write the narrative around these)\n"
-                "Present EACH candidate below. For low/medium-confidence candidates, frame them "
-                "explicitly as hypotheses with evidence gaps — NOT confirmed conclusions. Order: "
-                "headline → secondary → future_direction.\n"
-                + "\n".join(lines)
-            )
-        mechanism_programs = section_plan.get("mechanism_programs", [])
-        if mechanism_programs:
-            mech_lines = []
-            for p in mechanism_programs:
-                mech_lines.append(
-                    f"- {p.get('label','')} (evidence {p.get('evidence_strength','weak')}, "
-                    f"bulk {p.get('bulk_support','unknown')}): "
-                    f"{'; '.join(p.get('triggering_observations', [])[:2])}. "
-                    f"Missing evidence: {'; '.join(p.get('missing_evidence', [])[:2])}"
-                )
-            cross_modal_context += "\nData-driven mechanism programs (candidates, not confirmed):\n" + "\n".join(mech_lines)
-        provided_narrative = section_plan.get("narrative", "")
-
-        logger.info(f"Generating section '{section_title}' with {len(existing_figures)} figures, {len(existing_tables)} tables")
-
-        # Build figure info for PI Agent — include visual descriptions from analysis review
-        fig_descriptions = analysis_summary.get("figure_descriptions", {})
-        figures_info_parts = []
-        for fig in existing_figures:
-            fname = fig.get('filename', 'unknown')
-            caption = fig.get('caption', fig.get('interpretation', 'No caption provided'))
-            visual_desc = fig_descriptions.get(fname, "")
-            line = f"  - {fname}: {caption}"
-            if visual_desc:
-                line += f"\n    Visual description: {visual_desc[:200]}"
-            figures_info_parts.append(line)
-        figures_info = "\n".join(figures_info_parts) if figures_info_parts else "No figures in this section."
-
-        # Build table info for PI Agent
-        tables_info = "\n".join([
-            f"  - {tbl.get('filename', 'unknown')}: {tbl.get('caption', tbl.get('interpretation', 'No description'))}"
-            for tbl in existing_tables
-        ]) if existing_tables else ""
-
-        # Ask PI Agent to write comprehensive content for this section
-        tables_section = ""
-        if tables_info:
-            tables_section = f"""
-## Tables in This Section
-{tables_info}
-"""
-
-        tables_json_template = ""
-        if existing_tables:
-            tables_json_template = """,
-
-    "tables": [
-        {{
-            "filename": "exact_filename.csv",
-            "caption": "Detailed table caption describing what data it contains",
-            "interpretation": "How to interpret this data and its significance"
-        }}
-    ]"""
-
-        tables_requirement = ""
-        if existing_tables:
-            tables_requirement = f"\n6. Each table must have a caption and interpretation"
-
-        # Include methodology context from analysis review
-        methodology_context = ""
-        methodology_overview = analysis_summary.get("methodology_overview", "")
-        key_results = analysis_summary.get("key_results", "")
-        params_used = analysis_summary.get("parameters_used", {})
-        if methodology_overview or key_results:
-            methodology_context = f"""
-## Analysis Methodology (from code review)
-{methodology_overview[:1000] if methodology_overview else ""}
-
-## Key Quantitative Results
-{key_results[:1000] if key_results else ""}
-"""
-            if params_used:
-                methodology_context += "\n## Key Parameters Used\n"
-                methodology_context += "\n".join(f"- {k}: {v}" for k, v in list(params_used.items())[:15])
-
-        # Note about attached images
-        section_images = []
-        for fig in existing_figures:
-            fname = fig.get("filename", "")
-            if fname and fname in self.figure_images_cache:
-                section_images.append(self.figure_images_cache[fname])
-        image_note = f"\n[{len(section_images)} figure image(s) attached — describe what you actually see in each figure]" if section_images else ""
-
-        prompt = f"""You are a Principal Investigator writing a section for a scientific research report.
-
-## Section Information
-Title: {section_title}
-Description: {section_description}
-Analysis Type: {analysis_type}
-
-## Figures in This Section
-{figures_info}
-{image_note}
-{tables_section}
-## Research Context
-Project: {state.name}
-Objective: {state.initial_instruction}
-{methodology_context}
-
-## Key Findings
-{json.dumps(findings.get('bioinformatics', [])[:15], ensure_ascii=False, indent=2)}
-
-## Summary
-{findings.get('summary', '')[:1500]}
-
-## Cluster Annotations
-{findings.get('cluster_annotations', 'Not available')}
-{cross_modal_context}
-
-## Mechanism Naming and Hypothesis Policy
-{MECHANISM_EVIDENCE_POLICY}
-
-## Your Task
-Write in English
-
-Generate a comprehensive scientific narrative for this section. Your response must be a JSON object with this exact structure:
-
-{{
-    "narrative": "A detailed scientific narrative (300-500 words) that:
-        - Introduces the purpose of this analysis step
-        - References each figure by its EXACT filename from the list above (e.g., 'As shown in umap_cell_types.jpg...')
-        - Explains the methodology used with specific methods and parameters
-        - Presents the key observations with quantitative details
-        - Discusses the biological significance
-        - Connects findings to the research hypothesis",
-
-    "figures": [
-        {{
-            "filename": "exact_filename.jpg",
-            "caption": "Detailed figure caption (50-100 words) — describe what the figure actually shows",
-            "interpretation": "Scientific interpretation (100-200 words)"
-        }}
-    ]{tables_json_template}
-}}
-
-## Important Requirements:
-1. Write as a rigorous scientific paper section
-2. Include quantitative details where available (cell counts, percentages, p-values)
-3. Reference specific methods and parameters (e.g., "Leiden clustering at resolution 0.8")
-4. Each figure must have BOTH a detailed caption AND an interpretation — describe what you see in the figures
-5. The narrative should flow logically and reference all figures in the section{tables_requirement}
-"""
-
-        # Use vision API if we have figure images (fallback chain handled internally), otherwise text-only
-        if force_fallback:
-            response = ""
-        else:
-            try:
-                if section_images:
-                    response = await self._chat_with_vision_fallback(
-                        text_prompt=prompt, images=section_images[:6],
-                        temperature=0.3, max_tokens=32768, request_timeout=600.0,
-                    )
-                else:
-                    response = await self._pi_chat(prompt, temperature=0.3)
-            except Exception as e:
-                logger.warning(f"Report section '{section_title}' generation failed: {e}")
-                response = ""
-
-        # Parse the response
-        try:
-            content = _safe_parse_json(response)
-            if content:
-                narrative = content.get("narrative", "")
-                figure_details = content.get("figures", [])
-                table_details = content.get("tables", [])
-
-                # Merge PI Agent's interpretations with existing figure info
-                section_figures = []
-                for fig in existing_figures:
-                    filename = fig.get("filename", "")
-                    # Find matching details from PI Agent
-                    matching_detail = next(
-                        (d for d in figure_details if d.get("filename", "").lower() == filename.lower()),
-                        {}
-                    )
-
-                    # Resolve png_path: check if we have it in figures_dir
-                    png_path = fig.get("png_path", "")
-                    if not png_path and filename:
-                        candidate = self.figures_dir / filename
-                        if candidate.exists():
-                            png_path = str(candidate)
-
-                    pdf_path = fig.get("pdf_path")
-                    if not pdf_path and filename:
-                        stem = Path(filename).stem
-                        candidate = self.figures_dir / f"{stem}.pdf"
-                        if candidate.exists():
-                            pdf_path = str(candidate)
-
-                    fig_id = str(uuid.uuid4())[:8]
-                    section_figures.append({
-                        "id": fig_id,
-                        "name": fig.get("caption", fig.get("filename", "Figure")).replace("_", " ").title(),
-                        "caption": matching_detail.get("caption", fig.get("caption", "")),
-                        "interpretation": matching_detail.get("interpretation", fig.get("interpretation", "")),
-                        "png_path": png_path,
-                        "pdf_path": pdf_path,
-                        "plan_step_id": fig.get("plan_step_id"),
-                        "plan_id": fig.get("plan_id"),
-                        "purpose": fig.get("purpose") or "result",
-                        "provenance_kind": fig.get("provenance_kind") or "unregistered",
-                        "is_legacy": bool(fig.get("is_legacy")),
-                        "legacy_artifact_id": fig.get("legacy_artifact_id"),
-                        "logical_figure_id": fig.get("logical_figure_id"),
-                        "render_attempt_id": fig.get("render_attempt_id"),
-                        "revision_of_id": fig.get("revision_of_id"),
-                        "supersedes_id": fig.get("supersedes_id"),
-                        "is_published_head": bool(fig.get("is_published_head")),
-                        "section": section_id,
-                        "analysis_type": analysis_type
-                    })
-
-                    # Add to global generated figures list
-                    self.generated_figures.append(section_figures[-1])
-
-                # Process tables
-                section_tables = []
-                for tbl in existing_tables:
-                    tbl_filename = tbl.get("filename", "")
-                    matching_tbl = next(
-                        (d for d in table_details if d.get("filename", "").lower() == tbl_filename.lower()),
-                        {}
-                    )
-
-                    csv_path = tbl.get("csv_path", "")
-                    if not csv_path and tbl_filename:
-                        candidate = self.tables_dir / tbl_filename
-                        if candidate.exists():
-                            csv_path = str(candidate)
-
-                    tbl_id = str(uuid.uuid4())[:8]
-                    tbl_info = {
-                        "id": tbl_id,
-                        "name": matching_tbl.get("caption", tbl.get("name", tbl_filename)),
-                        "caption": matching_tbl.get("caption", tbl.get("caption", "")),
-                        "interpretation": matching_tbl.get("interpretation", tbl.get("interpretation", "")),
-                        "csv_path": csv_path,
-                        "columns": tbl.get("columns", []),
-                        "preview_data": tbl.get("preview_data", []),
-                        "section": section_id,
-                        "analysis_type": analysis_type
-                    }
-                    section_tables.append(tbl_info)
-                    self.generated_tables.append(tbl_info)
-
-                return {
-                    "id": section_id,
-                    "title": section_title,
-                    "description": section_description,
-                    "analysis_type": analysis_type,
-                    "content": narrative,
-                    "figures": section_figures,
-                    "tables": section_tables,
-                    "pi_iterations": 1,
-                    "steps_executed": 1
-                }
-
-        except Exception as e:
-            logger.exception("Failed to parse PI Agent response")
-
-        # Attempt to salvage narrative text from raw LLM response before falling back
-        if response and len(response.strip()) > 100:
-            # Try to extract narrative field value from partially valid JSON
-            narrative_match = re.search(r'"narrative"\s*:\s*"((?:[^"\\]|\\.)*)"', response, re.DOTALL)
-            if narrative_match:
-                try:
-                    salvaged = json.loads('"' + narrative_match.group(1) + '"')
-                    if len(salvaged.strip()) > 50:
-                        provided_narrative = salvaged
-                        logger.info(f"Salvaged narrative from raw LLM response ({len(salvaged)} chars)")
-                except Exception:
-                    logger.warning("Failed to salvage narrative from JSON", exc_info=True)
-            # If no JSON field found but response is substantial prose, use it directly
-            if not (provided_narrative and len((provided_narrative or '').strip()) > 50):
-                # Strip markdown code fences and JSON artifacts
-                cleaned = re.sub(r'```(?:json)?\s*', '', response)
-                cleaned = re.sub(r'[{}\[\]]', '', cleaned).strip()
-                if len(cleaned) > 200:
-                    provided_narrative = cleaned
-                    logger.info(f"Using cleaned raw LLM response as narrative ({len(cleaned)} chars)")
-
-        # Fallback: use provided narrative and basic figure info
-        section_figures = []
-        for fig in existing_figures:
-            png_path = fig.get("png_path", "")
-            if not png_path and fig.get("filename"):
-                candidate = self.figures_dir / fig["filename"]
-                if candidate.exists():
-                    png_path = str(candidate)
-
-            fig_id = str(uuid.uuid4())[:8]
-            section_figures.append({
-                "id": fig_id,
-                "name": fig.get("filename", "Figure").replace("_", " ").title(),
-                "caption": fig.get("caption", ""),
-                "interpretation": fig.get("interpretation", ""),
-                "png_path": png_path,
-                "pdf_path": fig.get("pdf_path"),
-                "plan_step_id": fig.get("plan_step_id"),
-                "plan_id": fig.get("plan_id"),
-                "purpose": fig.get("purpose") or "result",
-                "provenance_kind": fig.get("provenance_kind") or "unregistered",
-                "is_legacy": bool(fig.get("is_legacy")),
-                "legacy_artifact_id": fig.get("legacy_artifact_id"),
-                "logical_figure_id": fig.get("logical_figure_id"),
-                "render_attempt_id": fig.get("render_attempt_id"),
-                "revision_of_id": fig.get("revision_of_id"),
-                "supersedes_id": fig.get("supersedes_id"),
-                "is_published_head": bool(fig.get("is_published_head")),
-                "section": section_id,
-                "analysis_type": analysis_type
-            })
-            self.generated_figures.append(section_figures[-1])
-
-        section_tables = []
-        for tbl in existing_tables:
-            csv_path = tbl.get("csv_path", "")
-            if not csv_path and tbl.get("filename"):
-                candidate = self.tables_dir / tbl.get("filename")
-                if candidate.exists():
-                    csv_path = str(candidate)
-
-            tbl_id = str(uuid.uuid4())[:8]
-            tbl_info = {
-                "id": tbl_id,
-                "name": tbl.get("name", tbl.get("filename", "Table")),
-                "caption": tbl.get("caption", ""),
-                "interpretation": tbl.get("interpretation", ""),
-                "csv_path": csv_path,
-                "columns": tbl.get("columns", []),
-                "preview_data": tbl.get("preview_data", []),
-                "section": section_id,
-                "analysis_type": analysis_type
-            }
-            section_tables.append(tbl_info)
-            self.generated_tables.append(tbl_info)
-
-        fallback_content = provided_narrative or section_description
-        if not fallback_content or len(fallback_content.strip()) < 20:
-            logger.warning(
-                f"Section '{section_title}' fallback has minimal content "
-                f"({len((fallback_content or '').strip())} chars). "
-                f"LLM narrative generation failed — section may appear sparse."
-            )
-            if not (fallback_content or "").strip():
-                fallback_content = f"Analysis results for {section_title}. Detailed narrative could not be generated."
-
-        return {
-            "id": section_id,
-            "title": section_title,
-            "description": section_description,
-            "analysis_type": analysis_type,
-            "content": fallback_content,
-            "figures": section_figures,
-            "tables": section_tables,
-            "pi_iterations": 1,
-            "steps_executed": 1
-        }
+        return await _generate_section_from_existing_figures_impl(
+            self,
+            state,
+            section_plan,
+            findings,
+            language,
+            analysis_summary=analysis_summary,
+            force_fallback=force_fallback,
+        )

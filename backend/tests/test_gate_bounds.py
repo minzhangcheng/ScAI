@@ -18,17 +18,27 @@ import re
 import pytest
 
 import backend.agents.bioinformatics_agent as bio_mod
+from backend.agents.bioinformatics import (
+    executor_auxiliary,
+    executor_dispatch,
+    executor_loop,
+    executor_registration,
+    executor_report_gates,
+)
 
 
 def _loop_source() -> str:
-    return inspect.getsource(bio_mod)
+    return "\n".join((
+        inspect.getsource(bio_mod),
+        inspect.getsource(executor_dispatch),
+        inspect.getsource(executor_loop),
+        inspect.getsource(executor_registration),
+        inspect.getsource(executor_report_gates),
+    ))
 
 
 def _register_score_block() -> str:
-    src = _loop_source()
-    start = src.index('elif tool_name == "register_score":')
-    end = src.index('elif tool_name == "register_mechanism_programs":', start)
-    return src[start:end]
+    return inspect.getsource(executor_registration.handle_register_score)
 
 
 def _joined(block: str) -> str:
@@ -45,7 +55,7 @@ def _joined(block: str) -> str:
 
 def test_score_gate_has_a_ceiling():
     src = _loop_source()
-    assert "MAX_SCORE_GATE_REJECTIONS" in src
+    assert "max_score_gate_rejections" in src
     assert "score_gate_reject_count" in src
 
 
@@ -53,7 +63,9 @@ def test_every_score_gate_rejection_is_counted():
     """An uncounted `continue` is an unbounded loop by another name."""
     block = _register_score_block()
     # Each rejection path must sit inside a counter comparison.
-    assert block.count("score_gate_reject_count < MAX_SCORE_GATE_REJECTIONS") >= 2, (
+    assert block.count(
+        "score_gate_reject_count < context.max_score_gate_rejections"
+    ) >= 2, (
         "both the provenance and the plan rejection paths must be bounded"
     )
 
@@ -78,29 +90,30 @@ def test_score_is_still_registered_after_the_ceiling():
 
 
 @pytest.mark.parametrize("ceiling", [
-    "MAX_MECHANISM_REJECTIONS",
-    "MAX_STATS_GATE_REJECTIONS",
-    "MAX_INTEGRATION_REJECTIONS",
-    "MAX_DECONV_REJECTIONS",
-    "MAX_SCORE_GATE_REJECTIONS",
+    "max_mechanism_rejections",
+    "max_stats_gate_rejections",
+    "max_integration_rejections",
+    "max_deconv_rejections",
+    "max_score_gate_rejections",
 ])
 def test_all_gate_ceilings_are_defined(ceiling):
     """Keep the set of bounded gates visible in one place."""
     src = _loop_source()
-    assert re.search(rf"{ceiling}\s*=\s*\d+", src), f"{ceiling} has no numeric ceiling"
+    assert re.search(rf"{ceiling}:\s*int\s*=\s*\d+", src), f"{ceiling} has no numeric ceiling"
 
 
 def test_no_unbounded_rejection_added_to_register_analysis_plan():
     """Plan rejections are payload errors, fixable in one retry -- but check they
     cannot silently accumulate either."""
-    src = _loop_source()
-    start = src.index('elif tool_name == "register_analysis_plan":')
-    end = src.index('elif tool_name == "register_score":', start)
-    block = src[start:end]
+    block = inspect.getsource(
+        executor_registration.handle_register_analysis_plan
+    )
     # These are structural payload errors the model fixes by correcting its own
     # arguments, so they follow the existing register_mechanism_programs pattern.
     # What must hold is that each one still emits a tool message before continuing.
-    assert block.count('"role": "tool"') >= block.count("continue"), (
+    assert block.count('"role": "tool"') >= (
+        block.count("return ToolAction.CONTINUE") - 1
+    ), (
         "every rejection path must emit a tool message, or the tool_call is orphaned"
     )
 
@@ -116,9 +129,9 @@ def test_no_unbounded_rejection_added_to_register_analysis_plan():
 
 def _metadata_refund_block() -> str:
     """The `not has_substantive_work` branch, where free turns are refunded."""
-    src = _loop_source()
+    src = inspect.getsource(executor_loop.finish_turn)
     start = src.index("if not has_substantive_work and response.has_tool_calls:")
-    end = src.index("if llm_error:", start)
+    end = src.index("context.text_response_count", start)
     return src[start:end]
 
 
@@ -172,39 +185,38 @@ def test_an_exhausted_allowance_charges_a_normal_step():
 # ---------------------------------------------------------------------------
 
 _KEYWORD_GATES = [
-    ("Gate 1 (bulk RNA-seq)",
-     "# Gate 1: Bulk RNA-seq analysis", "# Gate 2:"),
+    ("Gate 1 (bulk RNA-seq)", "max_bulk_rejections", "bulk-rnaseq-analysis"),
     ("Gate 2 (bulk/scRNA cross-validation)",
-     "# Gate 2: Bulk/scRNA-seq cross-validation", "# Gate 3:"),
+     "max_integration_rejections", "bulk-scrna-cross-validation"),
     ("Gate 3 (deconvolution)",
-     "# Gate 3: Cell-type deconvolution", "# Gate 4:"),
+     "max_deconv_rejections", "cell-type-deconvolution"),
     ("Gate 4 (innovation bulk)",
-     "# Gate 4: INNOVATION-phase bulk direction validation",
-     "eligible_evidence_ids = "),
+     "max_innovation_bulk_rejections", "innovation-bulk-validation"),
 ]
 
 
-def _gate_block(start_marker: str, end_marker: str) -> str:
-    src = _loop_source()
-    start = src.index(start_marker)
-    return src[start:src.index(end_marker, start)]
+def _gate_block(ceiling: str, record_id: str) -> str:
+    src = inspect.getsource(executor_report_gates.check_mandatory_report_gates)
+    assert ceiling in src
+    assert record_id in src
+    return src
 
 
-@pytest.mark.parametrize(("label", "start", "end"), _KEYWORD_GATES)
-def test_every_stage2_keyword_gate_is_bounded(label, start, end):
-    block = _gate_block(start, end)
+@pytest.mark.parametrize(("label", "ceiling", "record_id"), _KEYWORD_GATES)
+def test_every_stage2_keyword_gate_is_bounded(label, ceiling, record_id):
+    block = _gate_block(ceiling, record_id)
     assert "_check_gate_keyword" in block, (
         f"{label} tests the agent's code for keywords without the bounded "
         "helper, so it can refuse report_findings for the whole step budget"
     )
-    assert re.search(r"MAX_[A-Z_]+_REJECTIONS", block), (
+    assert f"context.{ceiling}" in block, (
         f"{label} routes through the helper but names no ceiling"
     )
 
 
-@pytest.mark.parametrize(("label", "start", "end"), _KEYWORD_GATES)
-def test_every_stage2_keyword_gate_records_its_escape(label, start, end):
-    block = _gate_block(start, end)
+@pytest.mark.parametrize(("label", "ceiling", "record_id"), _KEYWORD_GATES)
+def test_every_stage2_keyword_gate_records_its_escape(label, ceiling, record_id):
+    block = _gate_block(ceiling, record_id)
     assert "if escaped:" in block, (
         f"{label} never handles its own release, so the ceiling is unobservable"
     )
@@ -232,9 +244,7 @@ def test_the_hand_rolled_bulk_keyword_test_is_gone():
 # ---------------------------------------------------------------------------
 
 def _evidence_citation_gate() -> str:
-    src = _loop_source()
-    start = src.index("eligible_evidence_ids = {")
-    return src[start:src.index("has_substantive_work = True", start)]
+    return inspect.getsource(executor_report_gates.check_report_evidence)
 
 
 def test_the_evidence_citation_gate_counts_its_refusals():
@@ -262,7 +272,7 @@ def test_the_evidence_citation_gate_never_force_releases():
     symmetry's sake, this fails.
     """
     block = _evidence_citation_gate()
-    assert "continue" in block, "the gate must still refuse"
+    assert "return False" in block, "the gate must still refuse"
     assert "forced_release=True" not in block, (
         "this gate must never force-release: it would accept findings citing "
         "no successful execution"

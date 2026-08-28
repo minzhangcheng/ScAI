@@ -17,6 +17,7 @@ import pytest
 
 from backend.services.export_lifecycle import (
     LifecycleFileResponse,
+    OwnedArchiveFileResponse,
     claim_export_stream,
     cleanup_export_record,
     create_export_ownership_marker,
@@ -61,6 +62,59 @@ def _allocated_stage(directory: Path) -> tuple[int, Path, tuple[int, int]]:
 def _assert_secure_archive_changed(exc_info):
     assert exc_info.value.status_code == 409
     assert "changed" in exc_info.value.detail.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("range_header", "expected_chunks"),
+    [
+        (b"bytes=2-5", (b"cdef",)),
+        (b"bytes=0-1,8-9", (b"ab", b"ij")),
+    ],
+)
+async def test_owned_response_preserves_range_body_and_cleanup_order(
+    tmp_path, range_header, expected_chunks,
+):
+    archive = tmp_path / "range-owned.bin"
+    archive.write_bytes(b"abcdefghij")
+    metadata = archive.stat()
+    file_fd = os.open(archive, os.O_RDONLY)
+    response = OwnedArchiveFileResponse(
+        archive,
+        file_fd=file_fd,
+        owned_identity=(metadata.st_dev, metadata.st_ino),
+        media_type="application/octet-stream",
+    )
+    messages = []
+
+    async def receive():
+        return {"type": "http.request"}
+
+    async def send(message):
+        messages.append(message)
+
+    await response(
+        {
+            "type": "http",
+            "method": "GET",
+            "headers": [(b"range", range_header)],
+            "extensions": {},
+        },
+        receive,
+        send,
+    )
+
+    assert messages[0]["type"] == "http.response.start"
+    assert messages[0]["status"] == 206
+    body = b"".join(
+        message.get("body", b"")
+        for message in messages
+        if message["type"] == "http.response.body"
+    )
+    assert all(chunk in body for chunk in expected_chunks)
+    assert not archive.exists()
+    with pytest.raises(OSError):
+        os.fstat(file_fd)
 
 
 def test_secure_archive_fails_closed_without_descriptor_primitives(

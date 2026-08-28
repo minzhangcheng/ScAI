@@ -22,7 +22,52 @@ from dataclasses import dataclass, field
 
 from .gene_set_provenance import MIN_PANEL_SIZE_FOR_NEGATIVE_CLAIM
 from .method_rules import rule_text
-
+from .statistical_gate_vocabulary import (  # noqa: F401
+    FAMILY_REQUIRED_KINDS,
+    _ACTIVITY,
+    _ALT_INFERENCE,
+    _BOUNDED_COMPARATORS,
+    _CONVENTIONAL_CUTOFFS,
+    _COUNT_TEST,
+    _DA,
+    _DE,
+    _FLOOR_ROUNDING_TOLERANCE,
+    _MODULE,
+    _NAMED_TEST,
+    _NEGATIVE_CLAIM_PATTERNS,
+    _NEG_SIG,
+    _NEG_SIG_TRAILING,
+    _NOT_SIG,
+    _ORA,
+    _P_APPROX_ZERO,
+    _P_NUMERIC,
+    _P_NUMERIC_VALUE,
+    _RANKED,
+    _RESAMPLED_RESULT,
+    _RESAMPLE_PARAM_KEYS,
+    _SENT_SPLIT,
+    _CLAUSE_SPLIT,
+    _SIG_WORD,
+    _SSGSEA,
+    _WORD_RE,
+    _clauses,
+    _DISCLAIMED,
+    _finding_entries,
+    _has_inference,
+    _has_undisclaimed_inference,
+    _has_p,
+    _has_sig_word,
+    _has_word,
+    _mentions,
+    _sentences,
+    _samples_for_finding,
+    _states_a_null,
+    _texts,
+    _tokens,
+    asserts_absence,
+    infer_method_kind,
+    score_kind,
+)
 #: Below this many samples per group, a permutation-based q-value cannot be
 #: trusted. Phenotype permutation degrades under it, and the number of distinct
 #: label partitions becomes small enough to floor the attainable p-value: at 3
@@ -34,18 +79,6 @@ MIN_SAMPLES_PER_GROUP_FOR_PERMUTATION = 7
 #: a majority: below it the panels still have independent content, above it the
 #: smaller one's result is mostly the larger one's result.
 PANEL_REDUNDANCY_CONTAINMENT = 0.5
-
-#: Wording that asserts a mechanism is absent. Matching is deliberately narrow:
-#: a false positive here blocks a legitimate finding, which is worse than
-#: missing one, since the underpowered caveat is attached to the score either
-#: way and travels into the report.
-_NEGATIVE_CLAIM_PATTERNS = (
-    "not significant", "no significant", "not enriched", "no enrichment",
-    "not supported", "no evidence for", "no evidence of", "rules out",
-    "ruled out", "excluded as", "is absent", "not detected", "argues against",
-    "does not support", "no change", "unchanged",
-)
-
 
 @dataclass
 class GateFinding:
@@ -117,197 +150,7 @@ class GateReport:
         )
 
 
-def _finding_entries(findings) -> list[tuple[str, str | None]]:
-    """Return finding text with its structured analysis modality."""
-    if isinstance(findings, str):
-        return [(findings, None)]
-    if isinstance(findings, dict):
-        findings = [findings]
-    out: list[tuple[str, str | None]] = []
-    for item in findings or []:
-        if isinstance(item, str):
-            out.append((item, None))
-        elif isinstance(item, dict):
-            text = item.get("text", item.get("finding", ""))
-            if isinstance(text, str):
-                source = item.get("modality")
-                out.append((text, str(source) if source is not None else None))
-    return out
-
-
-def _texts(findings) -> list[str]:
-    """Flatten a findings payload to finding text only."""
-    return [text for text, _source in _finding_entries(findings)]
-
-
-def asserts_absence(text: str) -> bool:
-    """Whether a sentence claims a mechanism is absent rather than unmeasured."""
-    lowered = str(text).lower()
-    return any(pattern in lowered for pattern in _NEGATIVE_CLAIM_PATTERNS)
-
-
-def _mentions(text: str, needle: str) -> bool:
-    return needle.lower() in str(text).lower()
-
-
-# ------------------------------------------------------------- segmentation
-_SENT_SPLIT = re.compile(r'(?<=[.!?])\s+(?=[A-Z0-9*•\-\'"])')
-_CLAUSE_SPLIT = re.compile(
-    r'(?:'
-    r'\s*[;:]\s*'
-    r'|,\s+(?:and|but|with|while|whereas|although|though|which|reflecting|'
-    r'supporting|suggesting|indicating|consistent|alongside|characteri[sz]ed|'
-    r'accompanied|driven|together|particularly|including|led\s+by|so|therefore|hence|thus)\s+'
-    r'|\s+(?:while|whereas|although)\s+'
-    r')'
-)
-_WORD_RE = re.compile(r"[a-z0-9]+")
-
-
-def _sentences(text):
-    parts = [p.strip() for p in _SENT_SPLIT.split(str(text)) if p and p.strip()]
-    return parts or [str(text)]
-
-
-def _clauses(sent):
-    parts = [p.strip() for p in _CLAUSE_SPLIT.split(sent) if p and p.strip()]
-    return parts or [sent]
-
-
-def _tokens(text):
-    return set(_WORD_RE.findall(str(text).lower()))
-
-
-def _has_word(text, words):
-    return bool(_tokens(text) & set(words))
-
-
-# --------------------------------------------------------- inference markers
-_P_NUMERIC = re.compile(
-    r'\b(?:p|p[-_ ]?val(?:ue)?s?|p[-_ ]?adj|padj|adj[-_. ]?p(?:[-_ ]?val(?:ue)?)?|'
-    r'adjusted\s+p(?:[-_ ]?val(?:ue)?)?|q|q[-_ ]?val(?:ue)?|fdr|bh)\b'
-    r'\s*(?:[-_ ]?adjusted)?\s*'
-    r'(?:[<>=~≤≥≈]{1,2}|\b(?:below|under|above|less\s+than|'
-    r'greater\s+than|at\s+most|at\s+least|of|was|were|is|are)\b'
-    r'|(?<=\s))\s*~?\s*\d', re.I)
-_P_APPROX_ZERO = re.compile(
-    r'\bp\s*(?:[-_ ]?val(?:ue)?)?\s*(?:approx\.?|~|≈)?'
-    r'\s*[<>=~≤≈]{0,2}\s*(?:approx\.?\s*)?0\b', re.I)
-_NAMED_TEST = re.compile(
-    r"\b(?:fisher'?s?(?:\s+exact)?|chi[-\s]?squared?|chi2|chisq|"
-    r"mann[-\s]?whitney|mwu|wilcoxon|kruskal[-\s]?wallis|"
-    r"kolmogorov[-\s]?smirnov|ks\s+test|t[-\s]?test|welch|"
-    r"permanova|binomial\s+test|proportions?[-\s]test|permutation\s+test)\b", re.I)
-_COUNT_TEST = re.compile(
-    r"\b(?:fisher'?s?(?:\s+exact)?|chi[-\s]?squared?|chi2|chisq|"
-    r"binomial\s+test|proportions?[-\s]test|g[-\s]test)\b", re.I)
-_SIG_WORD = re.compile(r'\bsignifican(?:t|tly|ce)\b', re.I)
-_NEG_SIG = re.compile(
-    r'\b(?:no|not|non|never|without|lack|lacks|lacking|absent|nor|only|neither)\b'
-    r'[^.;:]{0,32}\bsignifican', re.I)
-_NEG_SIG_TRAILING = re.compile(r'\bsignifican\w*\b[^,.;:]{0,25}\b(?:not|no)\b', re.I)
-_NOT_SIG = re.compile(r'\((?:ns|n\.s\.)\)|\bnon[-\s]?significant\b', re.I)
-
-
-#: Inference stated without a p-value. Every one of these is the same claim --
-#: "this difference is not sampling noise" -- and a gate keyed only on p/FDR/
-#: "significant" is keyed on one dialect of it.
-_ALT_INFERENCE = re.compile(
-    r'(?:\b(?:credible|confidence|highest[-\s]density)\s+interval\b'
-    r'|\bposterior\s+(?:probability|odds)\b'
-    r'|\bbayes\s+factor\b'
-    r'|\b\d{2,3}\s*%\s*(?:ci|credible|confidence)\b'
-    r'|\bexcludes?\s+(?:zero|0|the\s+null)\b'
-    r'|\breject(?:s|ed|ing)?\s+the\s+null\b'
-    r'|\bbeyond\s+(?:sampling|chance)\s+(?:noise|variation)\b'
-    r'|\bunlikely\s+to\s+be\s+(?:due\s+to|explained\s+by)\s+chance\b'
-    r'|\bstatistically\s+(?:reliable|credible|robust)\b'
-    r'|\b(?:fwer|family[-\s]wise\s+error)\b'
-    r'|\bz\s*[=<>]\s*[-+]?[\d.]'
-    r'|\bt\s*=\s*[-+]?[\d.]{2,})', re.I)
-
-
-#: Same grammar as _P_NUMERIC, but capturing the comparator and the number so a
-#: quoted value can be checked against the resolution the method could attain.
-_P_NUMERIC_VALUE = re.compile(
-    r'\b(?:p|p[-_ ]?val(?:ue)?s?|p[-_ ]?adj|padj|adj[-_. ]?p(?:[-_ ]?val(?:ue)?)?|'
-    r'adjusted\s+p(?:[-_ ]?val(?:ue)?)?|q|q[-_ ]?val(?:ue)?|fdr|bh)\b'
-    r'\s*(?:[-_ ]?adjusted)?\s*'
-    r'(?:([<>=~≤≥≈]{1,2})|\b(below|under|less\s+than|at\s+most|above|'
-    r'greater\s+than|at\s+least|of|was|were|is|are)\b'
-    r'|(?<=\s))\s*~?\s*(\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)', re.I)
-
-#: Comparators that already state the value as a bound. A floor reported as an
-#: inequality is the correct reporting, and must not be refused.
-_BOUNDED_COMPARATORS = ("<", "<=", "≤", "below", "under", "less than", "at most")
-
-#: Vocabulary specific to a resampling-based enrichment result. Used so the
-#: floor check cannot fire on an analytic p-value, which has no floor: a
-#: model-fit adjusted p-value may legitimately be arbitrarily small.
-_RESAMPLED_RESULT = re.compile(
-    r'\b(?:nes\b|gsea|pre-?rank(?:ed)?|enrichment\s+score|'
-    r'permutation|resampl(?:e|ed|ing)|bootstrap|monte\s*carlo)', re.I)
-
-#: Keys under which a resample count may have been declared on a score.
-_RESAMPLE_PARAM_KEYS = (
-    "n_resamples", "permutation_num", "n_perm", "nperm", "permutations",
-    "n_permutations", "n_bootstrap", "n_boot",
-)
-
-#: Conventional error-rate cutoffs. A repeated value equal to one of these is a
-#: threshold being restated, not a shared resolution floor.
-_CONVENTIONAL_CUTOFFS = (0.05, 0.01, 0.001, 0.1, 0.25, 0.2)
-
-#: Tolerance on the floor comparison, because a floor value is almost always
-#: quoted rounded: 1/501 is written "0.002". The next attainable value up is
-#: 2/501, roughly double, so this cannot reach a value that is genuinely above
-#: the floor -- it only catches the floor wearing fewer digits.
-_FLOOR_ROUNDING_TOLERANCE = 1.02
-
-
-def _has_p(clause):
-    return bool(_P_NUMERIC.search(clause) or _P_APPROX_ZERO.search(clause))
-
-
-def _states_a_null(clause):
-    return bool(_NEG_SIG.search(clause) or _NEG_SIG_TRAILING.search(clause)
-                or _NOT_SIG.search(clause))
-
-
-def _has_sig_word(clause):
-    return bool(_SIG_WORD.search(clause)) and not _states_a_null(clause)
-
-
-def _has_inference(clause):
-    return (_has_p(clause) or bool(_NAMED_TEST.search(clause))
-            or _has_sig_word(clause) or bool(_ALT_INFERENCE.search(clause)))
-
-
 # -------------------------------------------------------------- exemptions
-_DISCLAIMED = re.compile(
-    r'\b(?:descriptive|exploratory|not\s+inferential|'
-    r'no\s+(?:cell[-\s]level\s+|compositional\s+)?p[-\s]?values?|'
-    r'compositional\s+significance\s+testing[^.;:]{0,40}block|'
-    r'not\s+differential[-\s]abundance|single[-\s]sample\s+caveat|'
-    r'no\s+biological\s+replicat|lacks?\s+independent\s+replication|'
-    r'unidentifiable|not\s+estimable|cannot\s+support\s+statistical\s+inference|'
-    r'were\s+blocked|proportions?\s+are\s+descriptive|technical\s+arte?fact|not\s+a\s+biological)', re.I)
-
-
-def _has_undisclaimed_inference(text):
-    """Whether any clause retains an inferential claim after caveats are removed.
-
-    A caveat in one clause must not license a p-value in another. Removing the
-    matched caveat also distinguishes ``no p-values`` (nothing inferential
-    remains) from ``descriptive only; p=...`` (the p-value remains).
-    """
-    for sentence in _sentences(text):
-        for clause in _clauses(sentence):
-            if not _has_inference(clause):
-                continue
-            if _has_inference(_DISCLAIMED.sub("", clause)):
-                return True
-    return False
 _COMPOSITIONAL_METHOD = re.compile(
     r'\b(?:sccoda|sccomp|dirichlet[-\s]?multinomial|dirichlet|'
     r'beta[-\s]?binomial|milo(?:py|r)?|propeller|scanpro|'
@@ -608,74 +451,6 @@ def _threshold_test_registered(score_definitions):
         if str(params.get("test", "")).lower() in ("treat", "glmtreat"):
             return True
     return False
-
-
-# ============================================================ METHOD KIND
-# Distinct from workflow.post_execution_review.METHOD_SIGNATURES on purpose, and
-# not a drifted copy of it: that table asks whether a planned step ran and reads
-# substrings of code, this one asks what a registered score licenses and reads
-# whole tokens of one declared field. Agreement between them is not a goal --
-# betabinom and quasibinomial belong in its composition family and must stay out
-# of _DA below. Do not unify them.
-FAMILY_REQUIRED_KINDS = ("ranked_enrichment", "over_representation")
-_RANKED = frozenset({"prerank", "preranked", "gsea", "gseapreranked", "fgsea",
-                     "camera", "roast", "fry"})
-_ORA = frozenset({"ora", "enrich", "enrichr", "hypergeometric", "hypergeom",
-                  "overrepresentation", "clusterprofiler", "enrichgo", "enrichkegg",
-                  "goatools", "gost", "gprofiler", "panther", "david"})
-_SSGSEA = frozenset({"ssgsea", "aucell", "ucell", "gsva", "singscore"})
-_MODULE = frozenset({"score_genes", "addmodulescore", "scoregenes", "module_score"})
-_ACTIVITY = frozenset({"ulm", "mlm", "viper", "dorothea", "scenic", "pyscenic",
-                       "decoupler", "progeny"})
-_DE = frozenset({"deseq2", "pydeseq2", "deseqstats", "edger", "limma", "voom",
-                 "rank_genes_groups", "mannwhitneyu", "wilcoxon", "ttest"})
-#: Matching is whole-token, so a package's code spelling and its prose spelling
-#: are separate entries and neither implies the other: "miloR::testNhoods" does
-#: not contain the token "milo". Deliberately absent: quasibinomial and glmmTMB,
-#: which fit one population at a time and so are the design this gate refuses
-#: rather than an escape from it; pertpy, whose composition entry points already
-#: match through sccoda and milo while the bare name would also capture its
-#: perturbation and enrichment tools; and scipy.stats.betabinom, a univariate
-#: distribution that carries no joint model however it is spelled.
-_DA = frozenset({"sccoda", "sccomp", "propeller", "scanpro", "milo", "milopy",
-                 "milor", "dirichlet", "betabinomial"})
-
-
-def infer_method_kind(method):
-    """Classify a declared method string into one analysis family.
-
-    Whole-token match over the declared `method`, first hit wins, "other" when
-    nothing matches. `method` is free text the model writes -- register_score
-    takes no enum -- so this classifies a self-report rather than verifying one.
-    That is why the tables stay narrow: at check_declared_testing_family and
-    check_ora_background a name this misses costs a missed check, but at
-    check_composition_claims the kind is an exemption, so a name it matches too
-    eagerly costs a refusal that should have stood.
-    """
-    raw = str(method or "").lower()
-    tok = _tokens(raw)
-
-    def has(names):
-        return bool(tok & names) or any(n in raw for n in names if "_" in n)
-    if has(_DA):
-        return "differential_abundance"
-    if has(_RANKED):
-        return "ranked_enrichment"
-    if has(_SSGSEA):
-        return "single_sample_enrichment"
-    if has(_MODULE):
-        return "module_score"
-    if has(_ORA):
-        return "over_representation"
-    if has(_ACTIVITY):
-        return "regulatory_activity"
-    if has(_DE):
-        return "differential_expression"
-    return "other"
-
-
-def score_kind(score):
-    return infer_method_kind(getattr(score, "method", ""))
 
 
 def check_declared_testing_family(score_definitions, scoring_plans):
@@ -1069,10 +844,8 @@ def check_panel_redundancy(score_definitions, scoring_plans):
 def check_analysis_unit(findings, samples_per_group):
     """A single sample per condition cannot support a condition-level claim.
 
-    Advisory, not a refusal. The rule is arithmetic -- with one independent
-    unit per condition the condition effect and the specimen effect are the
-    same parameter. ``run_gates`` selects the counts for the finding's modality;
-    a direct caller is responsible for doing the same.
+    Advisory, not a refusal. ``run_gates`` selects the counts for the finding's
+    modality; a direct caller is responsible for doing the same.
     """
     if not samples_per_group:
         return []
@@ -1109,31 +882,6 @@ def check_analysis_unit(findings, samples_per_group):
     return out
 
 
-def _samples_for_finding(source, samples_per_group_by_modality):
-    """Select a modality design from structured finding metadata."""
-    designs = samples_per_group_by_modality or {}
-    if not designs:
-        return None, None
-    lowered_keys = {str(key).casefold(): value for key, value in designs.items()}
-    if source == "single_cell":
-        for key, value in lowered_keys.items():
-            if "scrna" in key or "single" in key or "snrna" in key:
-                return "single_cell", value
-        return "single_cell", {}
-    if source == "bulk_rna_seq":
-        for key, value in lowered_keys.items():
-            if "bulk" in key:
-                return "bulk_rna_seq", value
-        return "bulk_rna_seq", {}
-    if source == "cross_modal":
-        return source, None
-    if len(designs) == 1:
-        key, value = next(iter(lowered_keys.items()))
-        inferred = "bulk_rna_seq" if "bulk" in key else "single_cell"
-        return inferred, value
-    return None, None
-
-
 def run_gates(
     findings,
     *,
@@ -1167,13 +915,9 @@ def run_gates(
             if selected_modality == "cross_modal":
                 designs = list(samples_per_group_by_modality.values())
                 lacks_replication = any(
-                    not counts or min(counts.values()) < 2
-                    for counts in designs
+                    not counts or min(counts.values()) < 2 for counts in designs
                 )
-                if (
-                    lacks_replication
-                    and _has_undisclaimed_inference(str(text))
-                ):
+                if lacks_replication and _has_undisclaimed_inference(str(text)):
                     report.findings.append(GateFinding(
                         gate="cross-modal-inference-unreplicated",
                         rule_id="biological-replicate-is-the-unit",
@@ -1186,56 +930,47 @@ def run_gates(
                     ))
                 continue
             if modality_samples == {}:
-                if (_has_inference(str(text))
-                        or "effect of" in str(text).casefold()):
+                if _has_inference(str(text)) or "effect of" in str(text).casefold():
                     report.findings.append(GateFinding(
                         gate="sample-design-unresolved",
                         rule_id="biological-replicate-is-the-unit",
                         detail=(
-                            "the finding identifies its sequencing modality, "
-                            "but independent-unit counts could not be assigned "
-                            "to treatment groups. Verify the sample metadata "
-                            "before reporting an inferential condition claim."
+                            "the finding identifies its sequencing modality, but "
+                            "independent-unit counts could not be assigned to treatment "
+                            "groups. Verify the sample metadata before reporting an "
+                            "inferential condition claim."
                         ),
                     ))
                 continue
             if modality_samples is None:
-                if (
-                    len(samples_per_group_by_modality) > 1
-                    and (_has_inference(str(text))
-                         or "effect of" in str(text).casefold())
-                ):
+                if (len(samples_per_group_by_modality) > 1
+                        and (_has_inference(str(text))
+                             or "effect of" in str(text).casefold())):
                     report.findings.append(GateFinding(
                         gate="modality-unresolved",
                         rule_id="biological-replicate-is-the-unit",
                         detail=(
-                            "this inferential finding does not identify which "
-                            "sequencing modality supports it. The session's "
-                            "modalities have different replicate counts, so name "
-                            "the source as Bulk RNA-seq, scRNA-seq, or Cross-modal "
-                            "before reporting the claim."
+                            "this inferential finding does not identify which sequencing "
+                            "modality supports it. The session's modalities have different "
+                            "replicate counts, so name the source as Bulk RNA-seq, scRNA-seq, "
+                            "or Cross-modal before reporting the claim."
                         ),
                     ))
                 continue
             unreplicated_single_cell = (
-                selected_modality == "single_cell"
-                and bool(modality_samples)
+                selected_modality == "single_cell" and bool(modality_samples)
                 and min(modality_samples.values()) < 2
             )
-            if (
-                unreplicated_single_cell
-                and _has_undisclaimed_inference(str(text))
-            ):
+            if unreplicated_single_cell and _has_undisclaimed_inference(str(text)):
                 report.findings.append(GateFinding(
                     gate="unreplicated-single-cell-inference",
                     rule_id="biological-replicate-is-the-unit",
                     detail=(
-                        "the single-cell arm has fewer than two independent "
-                        "biological units in at least one condition. Neither "
-                        "cell-level testing nor one-pseudobulk-per-condition "
-                        "can estimate a condition effect. Report the single-cell "
-                        "contrast descriptively, or base condition-level "
-                        "inference on a separately replicated modality."
+                        "the single-cell arm has fewer than two independent biological "
+                        "units in at least one condition. Neither cell-level testing nor "
+                        "one-pseudobulk-per-condition can estimate a condition effect. "
+                        "Report the single-cell contrast descriptively, or base "
+                        "condition-level inference on a separately replicated modality."
                     ),
                 ))
             report.findings.extend(check_permutation_at_small_n(
@@ -1247,8 +982,9 @@ def run_gates(
                     [text], modality_samples,
                 ))
     else:
-        report.findings.extend(
-            check_permutation_at_small_n(findings, score_definitions, samples_per_group))
+        report.findings.extend(check_permutation_at_small_n(
+            findings, score_definitions, samples_per_group,
+        ))
     report.findings.extend(
         check_resampling_resolution(findings, score_definitions))
     report.findings.extend(

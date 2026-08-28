@@ -13,6 +13,8 @@ import backend.routes.interaction as ix
 import backend.routes.lifecycle as lc
 import backend.routes.websockets as ws
 import backend.routes.snapshots as snap
+from backend.routes.lifecycle_parts import interventions, run_resume
+from backend.routes.websocket_parts import analysis_connection
 
 
 def _extract_async_fn(src: str, name: str) -> str:
@@ -57,28 +59,28 @@ def test_send_human_input_uses_session_lock():
 
 
 def test_llm_failure_action_uses_session_lock():
-    src = inspect.getsource(lc)
+    src = inspect.getsource(interventions)
     body = _extract_async_fn(src, "llm_failure_action")
     assert "get_session_lock" in body, \
         "P1-9: llm_failure_action must acquire get_session_lock"
 
 
 def test_pause_analysis_uses_session_lock():
-    src = inspect.getsource(lc)
+    src = inspect.getsource(run_resume)
     body = _extract_async_fn(src, "pause_analysis")
     assert "get_session_lock" in body, \
         "P1-9: pause_analysis must acquire get_session_lock"
 
 
 def test_resume_analysis_uses_session_lock():
-    src = inspect.getsource(lc)
+    src = inspect.getsource(run_resume)
     body = _extract_async_fn(src, "resume_analysis")
     assert "get_session_lock" in body, \
         "P1-9: resume_analysis must acquire get_session_lock"
 
 
 def test_stop_analysis_uses_session_lock():
-    src = inspect.getsource(lc)
+    src = inspect.getsource(run_resume)
     body = _extract_async_fn(src, "stop_analysis")
     assert "get_session_lock" in body, \
         "P1-9: stop_analysis must acquire get_session_lock"
@@ -93,7 +95,7 @@ def test_websocket_creation_holds_lock():
     graph/report activity classifier and reserve ``initializing_sessions``
     before releasing it.
     """
-    src = inspect.getsource(ws)
+    src = inspect.getsource(analysis_connection)
     body = _extract_async_fn(src, "websocket_endpoint")
     # The handler must obtain a session-scoped lock, and it must be used to
     # guard the workflow-creation decision (not just the post-creation writes).

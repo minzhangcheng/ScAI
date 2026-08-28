@@ -1,13 +1,15 @@
 """P2-5: supplementary requests must be queued, not overwritten."""
+import inspect
 import re
 from collections import deque
 
 import backend.workflow.core as core_mod
+from backend.workflow.core_parts import supplementary
 
 
 def test_supplementary_queue_is_deque():
     """P2-5: supplementary requests must be queued, not overwritten."""
-    src = open(core_mod.__file__).read()
+    src = inspect.getsource(supplementary.signal_supplementary_analysis)
     # Field type / initialization should be a deque (or list with append/pop)
     assert "_supplementary_queue" in src or "deque" in src, \
         "P2-5: must use a queue/deque for supplementary requests"

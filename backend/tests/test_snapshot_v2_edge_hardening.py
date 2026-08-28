@@ -441,10 +441,12 @@ def test_rollback_reports_that_it_rewrote_session_json():
     """The in-memory cache still holds the target state after a rollback."""
     import inspect
 
-    from backend.services.snapshot_v2 import recovery
     from backend.services import session_store
+    from backend.tests.split_facade import split_source
 
-    assert "session_state_rewritten" in inspect.getsource(recovery), (
+    assert "session_state_rewritten" in split_source(
+        "backend.services.snapshot_v2.recovery"
+    ), (
         "recovery must report when it rewrote session.json"
     )
     assert "session_state_rewritten" in inspect.getsource(session_store), (
@@ -454,11 +456,9 @@ def test_rollback_reports_that_it_rewrote_session_json():
 
 
 def test_rollback_quarantines_a_residual_the_pre_restore_never_had():
-    import inspect
+    from backend.tests.split_facade import split_source
 
-    from backend.services.snapshot_v2 import recovery
-
-    source = inspect.getsource(recovery)
+    source = split_source("backend.services.snapshot_v2.recovery")
     assert "quarantine_live_runtime_pkl" in source, (
         "rollback must mirror apply()'s else-branch: with no pre_restore "
         "residual the TARGET's pkl stays installed with a valid signature"
@@ -489,9 +489,9 @@ def test_human_input_refuses_while_the_snapshot_gate_is_armed():
 def test_restore_template_prefers_the_pkl_over_a_stale_sidecar():
     import inspect
 
-    from backend.utils import sandbox
+    from backend.utils.sandbox_parts import runtime_restore
 
-    source = inspect.getsource(sandbox)
+    source = inspect.getsource(runtime_restore)
     assert "if _name in _restored_names:\n                continue" in source, (
         "the sidecar set is never retired, so an unconditional rebind rolled "
         "the namespace back to the restored snapshot on every later rehydrate"
@@ -843,9 +843,9 @@ def test_pre_write_estimate_counts_the_projected_runtime(v2_paths):
 def test_present_canonical_artifact_failing_dill_is_fail_closed():
     import inspect
 
-    from backend.services.snapshot_v2.runtime_parts import capture
+    from backend.services.snapshot_v2.runtime_parts import capture_steps
 
-    source = inspect.getsource(capture)
+    source = inspect.getsource(capture_steps)
     assert "strict_names = mandatory_names |" in source, (
         "checkpoint_dependencies has no production writer, so the fail-closed "
         "tier was empty and a live canonical artifact that dill failed on was "
@@ -873,9 +873,9 @@ def test_checkpoint_dependencies_are_read_from_the_safe_point_descriptor():
 def test_pre_restore_failure_reports_the_code_the_client_branches_on():
     import inspect
 
-    from backend.services.snapshot_v2 import service
+    from backend.services.snapshot_v2.service_parts import restore_flow
 
-    source = inspect.getsource(service.SnapshotService.restore_snapshot)
+    source = inspect.getsource(restore_flow._restore_locked)
     assert source.count('"code": "PRE_RESTORE_UNAVAILABLE"') == 3, (
         "every way the pre-restore safety capture can fail must report the one "
         "code the client branches on to offer discard_current; without it that "
@@ -905,9 +905,9 @@ def test_session_reconciliation_pending_is_consumed():
 def test_boundary_capture_retries_once_after_losing_the_safe_point():
     import inspect
 
-    from backend.workflow import core
+    from backend.workflow.core_parts import initialization
 
-    source = inspect.getsource(core.SingleCellAnalysisWorkflow._create_auto_snapshot)
+    source = inspect.getsource(initialization._create_auto_snapshot)
     assert 'getattr(exc, "code", "") == "SAFE_POINT_BUSY"' in source, (
         "the pending-request yield is a check-then-act; a restore reserving the "
         "safe point in the window turned the required capture into a gate that "

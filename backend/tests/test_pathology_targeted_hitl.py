@@ -10,6 +10,7 @@ import backend.agents.pathology_agent as mod
 from backend.agents.pathology_agent import PathologyAgent, _ImageSkipRequested
 from backend.models.schemas import AgentType, DataFile
 from backend.workflow.helpers import WorkflowTerminatedError
+from backend.tests.split_facade import setattr_facade
 
 
 def _bare_agent() -> PathologyAgent:
@@ -38,7 +39,12 @@ async def test_targeted_analysis_uses_hitl(monkeypatch):
     monkeypatch.setattr(agent, "refresh_runtime_config_if_needed", lambda: None)
     monkeypatch.setattr(agent, "_call_llm_with_hitl", fake_hitl)
     monkeypatch.setattr(os.path, "exists", lambda p: True)
-    monkeypatch.setattr(mod, "process_pathology_image", lambda *a, **k: ["tile1", "tile2"])
+    setattr_facade(
+        monkeypatch,
+        mod.__name__,
+        "process_pathology_image",
+        lambda *a, **k: ["tile1", "tile2"],
+    )
 
     image_info = DataFile(
         id="img-1",
@@ -70,7 +76,12 @@ def _patch_targeted_setup(monkeypatch, agent):
     monkeypatch.setattr(agent, "_set_llm_context", lambda: None)
     monkeypatch.setattr(agent, "refresh_runtime_config_if_needed", lambda: None)
     monkeypatch.setattr(os.path, "exists", lambda path: True)
-    monkeypatch.setattr(mod, "process_pathology_image", lambda *args, **kwargs: ["tile"])
+    setattr_facade(
+        monkeypatch,
+        mod.__name__,
+        "process_pathology_image",
+        lambda *args, **kwargs: ["tile"],
+    )
 
 
 @pytest.mark.asyncio

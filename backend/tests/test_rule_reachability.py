@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 import backend.agents.bioinformatics_agent as bio_mod
+from backend.agents.bioinformatics import executor_collaboration
 from backend.services import statistical_gates
 from backend.services.method_rules import (
     ENFORCEMENT_ADVISORY, ENFORCEMENT_GATE, ENFORCEMENT_GUIDANCE,
@@ -140,10 +141,8 @@ def test_method_question_is_exposed_on_a_tool():
 
 def test_method_question_alone_is_a_valid_call():
     """Asking a method question must not require inventing a function path."""
-    src = inspect.getsource(bio_mod)
-    start = src.index('elif tool_name == "lookup_documentation":')
-    block = src[start:start + 4000]
-    assert "method_question and not function_path" in block
+    source = inspect.getsource(executor_collaboration.handle_lookup_documentation)
+    assert "method_question and not function_path" in source
 
 
 def test_gates_cite_only_existing_rules():
