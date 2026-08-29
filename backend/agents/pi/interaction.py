@@ -4,6 +4,7 @@ Moved verbatim out of backend/agents/pi_agent.py; composed into PIAgent.
 """
 from typing import Dict, Any, List
 import logging
+import re
 
 
 # Configure logger
@@ -32,6 +33,39 @@ _ADJUSTED_INSTRUCTION_FIELDS = (
     "biochemistry_tasks",
     "literature_topics",
 )
+
+
+def _contains_stop_command(value: str) -> bool:
+    """Match explicit stop commands with boundaries and clause-local negation."""
+    text = str(value or "").casefold()
+    for keyword in STOP_KEYWORDS:
+        token = str(keyword or "").casefold().strip()
+        if not token:
+            continue
+        is_cjk = any("\u4e00" <= char <= "\u9fff" for char in token)
+        matches = (
+            re.finditer(re.escape(token), text)
+            if is_cjk
+            else re.finditer(rf"(?<![\w]){re.escape(token)}(?![\w])", text)
+        )
+        for match in matches:
+            prefix = text[max(0, match.start() - 80):match.start()]
+            clause_prefix = re.split(r"[.!?。！？,，;；]", prefix)[-1]
+            if is_cjk:
+                negated = bool(re.search(
+                    r"(?:(?:请\s*)?勿|不要|别|无需|暂不|先不|不必|不用|不可|不)\s*"
+                    r"[^，。！？；,;]{0,12}$",
+                    clause_prefix,
+                ))
+            else:
+                negated = bool(re.search(
+                    r"(?:\bdo\s+not|\bdon['’]?t|\bdont|\bnever|\bnot|\bno)\b"
+                    r"(?:\s+[\w'-]+){0,3}\s*$",
+                    clause_prefix,
+                ))
+            if not negated:
+                return True
+    return False
 
 
 def _normalize_adjusted_instructions(value: Any) -> Dict[str, Any] | None:
@@ -143,9 +177,7 @@ If adjusting direction, provide specific and actionable tasks.
             logger.warning(f"[PI] No valid JSON found in response, using fallback parsing. Response: {response[:200] if response else 'None'}...")
         
         # Fallback: check for stop keywords manually (English + Chinese)
-        human_lower = human_input.lower()
-
-        if any(keyword in human_lower for keyword in STOP_KEYWORDS):
+        if _contains_stop_command(human_input):
             return {
                 "interpretation": "Human requested to stop the analysis",
                 "response": "Understood. I will conclude the current analysis and generate a final report.",
@@ -278,11 +310,17 @@ Note: Extract biochemistry values from user message if they mention specific num
         response = await self.chat(prompt, temperature=0.3)
 
         # Use base class safe JSON parser
-        data = self._safe_parse_json(response, default={})
+        parsed = self._safe_parse_json(response, default={})
+        data = dict(parsed) if isinstance(parsed, dict) else {}
+        action = (
+            coerce_json_text(data.get("action")).casefold()
+            if "action" in data
+            else ""
+        )
 
-        if data and "action" in data:
+        if action in {"continue", "stop", "analyze_new_data"}:
             return {
-                "action": coerce_json_text(data.get("action")) or "continue",
+                "action": action,
                 "response": coerce_json_text(data.get("response")) or "Acknowledged",
                 "file_assignments": _normalize_file_assignments(
                     data.get("file_assignments")
@@ -299,29 +337,50 @@ Note: Extract biochemistry values from user message if they mention specific num
                 "reason": coerce_json_text(data.get("reason")),
             }
         
-        # Fallback: check for stop keywords (English + Chinese)
-        user_lower = user_message.lower()
-        if any(keyword in user_lower for keyword in STOP_KEYWORDS):
-            return {
-                "action": "stop",
-                "response": "Understood. Generating final report.",
-                "file_assignments": {},
-                "biochemistry_values": {},
-                "adjusted_instructions": None,
-                "focus_areas": [],
-                "reason": "User requested to stop"
+        logger.warning(
+            "[PI] Structured user-input action was missing or unsupported; "
+            "falling back to the original user message"
+        )
+
+        if _contains_stop_command(user_message):
+            fallback_action = "stop"
+        elif uploaded_files:
+            fallback_action = "analyze_new_data"
+        else:
+            fallback_action = "continue"
+        fallback_assignments = _normalize_file_assignments(
+            data.get("file_assignments")
+        )
+        if not fallback_assignments:
+            fallback_assignments = {
+                "pathology": [
+                    {"filename": f["filename"], "image_type": "user_upload"}
+                    for f in uploaded_files
+                    if f.get("type") == "image" and f.get("filename")
+                ]
             }
-        
-        # Default: continue
+            if not fallback_assignments["pathology"]:
+                fallback_assignments = {}
         return {
-            "action": "continue" if not uploaded_files else "analyze_new_data",
-            "response": "Acknowledged. Proceeding with analysis.",
-            "file_assignments": {
-                "pathology": [{"filename": f["filename"], "image_type": "user_upload"} 
-                             for f in uploaded_files if f.get("type") == "image"]
-            },
-            "biochemistry_values": {},
-            "adjusted_instructions": None,
-            "focus_areas": [],
-            "reason": "Continuing analysis"
+            "action": fallback_action,
+            "response": coerce_json_text(data.get("response")) or (
+                "Understood. Generating final report."
+                if fallback_action == "stop"
+                else "Acknowledged. Proceeding with analysis."
+            ),
+            "file_assignments": fallback_assignments,
+            "biochemistry_values": (
+                dict(data["biochemistry_values"])
+                if isinstance(data.get("biochemistry_values"), dict)
+                else {}
+            ),
+            "adjusted_instructions": _normalize_adjusted_instructions(
+                data.get("adjusted_instructions")
+            ),
+            "focus_areas": as_list(data.get("focus_areas")),
+            "reason": coerce_json_text(data.get("reason")) or (
+                "User requested to stop"
+                if fallback_action == "stop"
+                else "Continuing analysis"
+            ),
         }

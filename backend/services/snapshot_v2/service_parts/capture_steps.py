@@ -168,6 +168,19 @@ class CaptureStepsMixin:
             if isinstance(seg, dict):
                 seg.pop("content_html", None)
 
+        failure = state_dict.get("snapshot_failure")
+        runtime_persistence_failure = bool(
+            isinstance(failure, dict)
+            and str(failure.get("code") or "").startswith("runtime_persistence_")
+        )
+        if not runtime_persistence_failure:
+            state_dict["snapshot_failure"] = None
+            if state_dict.get("wait_input_reason") == "snapshot_failure":
+                state_dict["wait_input_reason"] = None
+        transaction = state_dict.get("snapshot_transaction")
+        if isinstance(transaction, dict) and transaction.get("status") == "failed":
+            state_dict["snapshot_transaction"] = None
+
         # Externalize large blobs into object store via inline base64 reduction
         # by writing canonical JSON bytes directly (blob refs stay as tokens).
         raw = json.dumps(

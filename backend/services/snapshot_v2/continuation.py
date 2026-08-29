@@ -143,6 +143,27 @@ _NON_ROUND_WAIT_INPUT_REASONS: frozenset[str] = frozenset({
     WaitInputReason.SNAPSHOT_FAILURE.value,
 })
 
+_TERMINAL_CAPSULE_STATUSES: frozenset[str] = frozenset({
+    "completed", "stopped", "failed",
+})
+
+
+def _terminal_capsule_status(
+    analysis_state: Any,
+    descriptor: dict[str, Any] | None = None,
+) -> str:
+    """Resolve the exact terminal outcome, preferring the live state."""
+    state_status = getattr(analysis_state, "status", None)
+    state_status = getattr(state_status, "value", state_status)
+    descriptor_status = (descriptor or {}).get("terminal_status")
+    if descriptor_status is None:
+        descriptor_status = (descriptor or {}).get("status")
+    for candidate in (state_status, descriptor_status):
+        normalized = str(candidate or "").lower()
+        if normalized in _TERMINAL_CAPSULE_STATUSES:
+            return normalized
+    return "completed"
+
 
 def _gate_from_status(analysis_state: Any) -> str | None:
     """Return the semantic gate a parked session is sitting at, or None."""
@@ -200,7 +221,10 @@ class ContinuationRegistry:
         if phase in _SEMANTIC_GATE_PHASES:
             return self._freeze_semantic_gate(phase, analysis_state, workflow_state)
         if phase in _TERMINAL_PHASES:
-            return TerminalCapsule(graph_version=GRAPH_VERSION, status="completed")
+            return TerminalCapsule(
+                graph_version=GRAPH_VERSION,
+                status=_terminal_capsule_status(analysis_state),
+            )
         return IdleCapsule(graph_version=GRAPH_VERSION)
 
     def freeze_dynamic(
@@ -221,8 +245,14 @@ class ContinuationRegistry:
 
         # Explicit kind on descriptor wins
         kind = desc.get("continuation_kind") or desc.get("kind")
-        if kind == "terminal" or desc.get("status") == "completed":
-            return TerminalCapsule(graph_version=GRAPH_VERSION, status="completed")
+        if (
+            kind == "terminal"
+            or str(desc.get("status") or "").lower() in _TERMINAL_CAPSULE_STATUSES
+        ):
+            return TerminalCapsule(
+                graph_version=GRAPH_VERSION,
+                status=_terminal_capsule_status(analysis_state, desc),
+            )
         if kind == "idle":
             return IdleCapsule(graph_version=GRAPH_VERSION)
 

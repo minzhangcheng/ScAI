@@ -82,7 +82,7 @@ class SemanticGateCapsule(BaseModel):
 class TerminalCapsule(BaseModel):
     kind: Literal["terminal"] = "terminal"
     graph_version: str
-    status: Literal["completed", "stopped"]
+    status: Literal["completed", "stopped", "failed"]
 
 
 class IdleCapsule(BaseModel):

@@ -96,3 +96,61 @@ async def test_null_user_feedback_preserves_requested_change():
     assert result["intent"] == "modify"
     assert result["action"] == "revise_with_bioinfo"
     assert result["guidance_for_bioinfo"] == user_input
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", ["[]", "null", '"stop"'])
+async def test_nonmapping_user_action_response_uses_original_text(response):
+    agent = _make_pi_agent()
+    agent.chat = AsyncMock(return_value=response)
+
+    result = await agent.process_user_input(
+        AnalysisState(user_id="test-user"),
+        "Continue endothelial analysis.",
+        [],
+    )
+
+    assert result["action"] == "continue"
+
+
+@pytest.mark.asyncio
+async def test_unsupported_structured_action_falls_back_to_original_stop_text():
+    agent = _make_pi_agent()
+    agent.chat = AsyncMock(return_value=json.dumps({"action": "stop_later"}))
+
+    result = await agent.process_user_input(
+        AnalysisState(user_id="test-user"),
+        "Please stop now.",
+        [],
+    )
+
+    assert result["action"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_missing_action_with_upload_falls_back_to_analyze_new_data():
+    agent = _make_pi_agent()
+    agent.chat = AsyncMock(return_value=json.dumps({"response": "Received"}))
+
+    result = await agent.process_user_input(
+        AnalysisState(user_id="test-user"),
+        "Please inspect this image.",
+        [{"type": "image", "filename": "figure.png"}],
+    )
+
+    assert result["action"] == "analyze_new_data"
+    assert result["file_assignments"]["pathology"][0]["filename"] == "figure.png"
+
+
+@pytest.mark.asyncio
+async def test_supported_structured_action_is_casefolded():
+    agent = _make_pi_agent()
+    agent.chat = AsyncMock(return_value=json.dumps({"action": "STOP"}))
+
+    result = await agent.process_user_input(
+        AnalysisState(user_id="test-user"),
+        "continue",
+        [],
+    )
+
+    assert result["action"] == "stop"

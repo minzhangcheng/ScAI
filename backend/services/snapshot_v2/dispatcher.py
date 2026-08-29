@@ -343,14 +343,18 @@ class ContinuationDispatcher:
             analysis_state.restore_resume_kind = "terminal"
             analysis_state.restore_resume_node = None
             analysis_state.restore_resume_gate = None
-            analysis_state.restore_resume_workflow_state = None
+            terminal_status = str(staged.terminal_status or "completed")
+            analysis_state.restore_resume_workflow_state = {
+                "terminal_status": terminal_status,
+            }
             self._clear_gate_payload(analysis_state)
             from backend.models.schemas import TaskStatus
             try:
-                status = staged.terminal_status or "completed"
-                analysis_state.status = (
-                    TaskStatus.COMPLETED if status == "completed" else TaskStatus.STOPPED
-                )
+                analysis_state.status = {
+                    "completed": TaskStatus.COMPLETED,
+                    "stopped": TaskStatus.STOPPED,
+                    "failed": TaskStatus.FAILED,
+                }[terminal_status]
             except Exception:
                 pass
         elif staged.kind == "idle":

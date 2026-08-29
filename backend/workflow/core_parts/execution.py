@@ -8,6 +8,20 @@ def bind_facade(facade) -> None:
     )
 
 
+def _restored_terminal_task_status(state: AnalysisState) -> TaskStatus:
+    """Return the exact terminal outcome carried through lifecycle RUNNING."""
+    payload = dict(getattr(state, "restore_resume_workflow_state", None) or {})
+    raw_status = payload.get("terminal_status")
+    if raw_status is None:
+        current = getattr(state, "status", None)
+        raw_status = getattr(current, "value", current)
+    return {
+        "completed": TaskStatus.COMPLETED,
+        "stopped": TaskStatus.STOPPED,
+        "failed": TaskStatus.FAILED,
+    }.get(str(raw_status or "").lower(), TaskStatus.COMPLETED)
+
+
 async def run(
     self,
     initial_state: AnalysisState,
@@ -62,13 +76,15 @@ async def run(
             pass
         return initial_state
 
-    # Guard: terminal restore → no workflow, mark complete immediately.
+    # Guard: terminal restore → no workflow, preserve its exact outcome.
     if initial_state.restore_resume_kind == "terminal":
+        terminal_status = _restored_terminal_task_status(initial_state)
         logger.info(
-            f"[{self.session_id}] Terminal restore — marking complete "
+            f"[{self.session_id}] Terminal restore — preserving "
+            f"{terminal_status.value} "
             f"(current_round={initial_state.current_round})"
         )
-        self._set_status(initial_state, TaskStatus.COMPLETED)
+        self._set_status(initial_state, terminal_status)
         self._consume_restore_resume_metadata(initial_state)
         return initial_state
 
@@ -486,13 +502,15 @@ async def resume(
         analysis_state.wait_input_reason = "snapshot_failure"
         return analysis_state
 
-    # Terminal restore → no workflow, mark complete immediately.
+    # Terminal restore → no workflow, preserve its exact outcome.
     if analysis_state is not None and analysis_state.restore_resume_kind == "terminal":
+        terminal_status = _restored_terminal_task_status(analysis_state)
         logger.info(
-            f"[{self.session_id}] Terminal restore in resume — marking complete "
+            f"[{self.session_id}] Terminal restore in resume — preserving "
+            f"{terminal_status.value} "
             f"(round={analysis_state.current_round})"
         )
-        self._set_status(analysis_state, TaskStatus.COMPLETED)
+        self._set_status(analysis_state, terminal_status)
         self._consume_restore_resume_metadata(analysis_state)
         return analysis_state
 
