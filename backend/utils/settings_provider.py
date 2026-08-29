@@ -8,11 +8,12 @@ object. Changes made via session_config API routes are immediately
 visible on the next get_* call.
 """
 import asyncio
+from dataclasses import dataclass
 import hashlib
 import ipaddress
 import json
 import logging
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 from backend.config._config import APIConfig, SystemConfig
@@ -21,6 +22,16 @@ from backend.utils.llm_client import OpenAICompatibleClient
 from backend.state import sessions
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BudgetedTextDispatch:
+    """Prepared text request plus post-success PI acknowledgement metadata."""
+
+    messages: List[Dict[str, Any]]
+    report: Any
+    max_tokens: Optional[int]
+    pi_observation_ids: Tuple[str, ...] = ()
 
 # API contract: must stay in sync with MASKED_SECRET_VALUE in
 # frontend/src/utils/literatureConfig.ts — secrets masked with this sentinel on
@@ -47,15 +58,14 @@ def resolve_context_window(
     )
     if raw is None:
         return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError, OverflowError):
+    if not isinstance(raw, int) or isinstance(raw, bool):
         logger.warning(
             "Ignoring invalid legacy context window for agent %s: %r",
             agent_name,
             raw,
         )
         return default
+    value = raw
     if value < 8_192:
         logger.warning(
             "Ignoring legacy context window below minimum for agent %s: %r",
@@ -245,6 +255,114 @@ class AgentSettingsProvider:
             self._get_state().agent_server_configs,
             self._config,
             agent_name,
+        )
+
+    async def budget_text_dispatch(
+        self,
+        agent_name: str,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        max_tokens: Optional[int] = None,
+        budget_factor: float = 1.0,
+        anchor_count: int = 1,
+        summarize=None,
+        declare: bool = True,
+    ) -> BudgetedTextDispatch:
+        """Budget one text dispatch and record non-blocking technical facts."""
+
+        from backend.utils.context_budget import (
+            CompactionAction,
+            CompactionReport,
+            apply_budget,
+            observation_from_report,
+            pending_observation_anchor,
+            record_observation,
+        )
+
+        state = self._get_state()
+        prepared = [dict(message) for message in messages]
+        observation_ids: Tuple[str, ...] = ()
+        if agent_name == "pi":
+            anchor, observation_ids = pending_observation_anchor(state)
+            if anchor is not None:
+                insert_at = 1 if prepared and prepared[0].get("role") == "system" else 0
+                prepared.insert(insert_at, anchor)
+                anchor_count += 1
+
+        context_window = self.get_context_window(agent_name)
+        budgeted, report = apply_budget(
+            prepared,
+            context_window=context_window,
+            agent_label=agent_name,
+            completion_reserve=max_tokens,
+            budget_factor=budget_factor,
+            anchor_count=anchor_count,
+            summarize=summarize,
+            declare=declare,
+        )
+
+        raw_context_window = (
+            ((state.agent_server_configs or {}).get(agent_name) or {}).get(
+                "context_window"
+            )
+        )
+        valid_raw = (
+            isinstance(raw_context_window, int)
+            and not isinstance(raw_context_window, bool)
+            and raw_context_window >= 8_192
+        )
+        if raw_context_window is not None and not valid_raw:
+            fallback_report = CompactionReport(
+                measured_tokens=0,
+                final_tokens=0,
+                ceiling=report.ceiling,
+                requested_completion_reserve=report.requested_completion_reserve,
+                effective_completion_reserve=report.effective_completion_reserve,
+                actions=(CompactionAction(
+                    kind="configuration_fallback",
+                    detail="invalid legacy context_window ignored in favor of the configured default",
+                    removed_tokens=0,
+                ),),
+                fits=True,
+            )
+            await record_observation(
+                state,
+                observation_from_report(agent_name, fallback_report),
+                session_id=self._session_id,
+            )
+
+        if not report.fits:
+            await record_observation(
+                state,
+                observation_from_report(agent_name, report),
+                session_id=self._session_id,
+            )
+
+        effective_max_tokens = max_tokens
+        if report.effective_completion_reserve != report.requested_completion_reserve:
+            effective_max_tokens = report.effective_completion_reserve
+        return BudgetedTextDispatch(
+            messages=budgeted,
+            report=report,
+            max_tokens=effective_max_tokens,
+            pi_observation_ids=observation_ids,
+        )
+
+    async def acknowledge_text_dispatch(
+        self,
+        agent_name: str,
+        dispatch: BudgetedTextDispatch,
+    ) -> None:
+        """Mark observations PI-visible after the provider call succeeds."""
+
+        if agent_name != "pi" or not dispatch.pi_observation_ids:
+            return
+        from backend.utils.context_budget import mark_observations_delivered
+
+        await mark_observations_delivered(
+            self._get_state(),
+            dispatch.pi_observation_ids,
+            session_id=self._session_id,
         )
 
     def get_system_prompt(self, agent_name: str) -> str:

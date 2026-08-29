@@ -232,7 +232,8 @@ class EvaluationMixin:
 
         for attempt in range(_SUPERVISOR_STRUCTURED_ATTEMPTS):
             self._set_llm_context()
-            response = await self.llm_client.chat_with_tools(
+            response = await self._budgeted_text_call(
+                self.llm_client.chat_with_tools,
                 model=self.model,
                 messages=messages,
                 tools=[_SUPERVISOR_EVALUATION_TOOL],
@@ -331,7 +332,8 @@ class EvaluationMixin:
         )
         try:
             self._set_llm_context()
-            response = await self.llm_client.chat(
+            response = await self._budgeted_text_call(
+                self.llm_client.chat,
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=self.temperature,

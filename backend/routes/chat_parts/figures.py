@@ -218,11 +218,20 @@ async def _generate_figures_in_chat(
                         status_code=500,
                         detail="Bioinformatics model not configured for this session.",
                     )
+                dispatch = await provider.budget_text_dispatch(
+                    "bioinformatics",
+                    [{"role": "user", "content": code_prompt}],
+                    max_tokens=32768,
+                )
                 code_resp = await llm_client.chat(
                     model=bio_model,
-                    messages=[{"role": "user", "content": code_prompt}],
+                    messages=dispatch.messages,
                     temperature=0.1,
-                    max_tokens=32768,
+                    max_tokens=dispatch.max_tokens,
+                )
+                await provider.acknowledge_text_dispatch(
+                    "bioinformatics",
+                    dispatch,
                 )
             finally:
                 try:

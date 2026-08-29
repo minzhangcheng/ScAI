@@ -954,7 +954,8 @@ Example: ["umap_cell_types", "cell_type_proportions", "volcano_<celltype>_<condi
 
         try:
             self._set_llm_context()
-            response = await self.llm_client.chat(
+            response = await self._budgeted_text_call(
+                self.llm_client.chat,
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,

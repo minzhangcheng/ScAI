@@ -237,7 +237,8 @@ class FigureBindingMixin:
         for _ in range(2):
             self.refresh_runtime_config_if_needed()
             self._set_llm_context()
-            response = await self.llm_client.chat_with_tools(
+            response = await self._budgeted_text_call(
+                self.llm_client.chat_with_tools,
                 model=self.model,
                 messages=messages,
                 tools=[_TOOL],
@@ -290,7 +291,8 @@ class FigureBindingMixin:
         for _ in range(2):
             self.refresh_runtime_config_if_needed()
             self._set_llm_context()
-            response = await self.llm_client.chat_with_tools(
+            response = await self._budgeted_text_call(
+                self.llm_client.chat_with_tools,
                 model=self.model,
                 messages=messages,
                 tools=[_PLAN_EVIDENCE_TOOL],

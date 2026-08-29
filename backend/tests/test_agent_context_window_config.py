@@ -86,6 +86,8 @@ def test_provider_resolves_override_default_and_invalid_legacy_value():
     assert provider.get_context_window("pi") == 98_304
     state.agent_server_configs["pi"] = {"context_window": "broken"}
     assert provider.get_context_window("pi") == 131_072
+    state.agent_server_configs["pi"] = {"context_window": "98304"}
+    assert provider.get_context_window("pi") == 131_072
 
 
 def test_effective_default_participates_in_config_signature():

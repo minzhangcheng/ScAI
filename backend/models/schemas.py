@@ -50,6 +50,7 @@ from .schema_parts.enums import (  # noqa: F401
 )
 from .schema_parts.analysis import (  # noqa: F401
     ScoringPlan,
+    ContextBudgetObservation,
     AgentError,
     AgentMessage,
     CodeExecution, BulkInputProfile, MethodDecision,
@@ -277,6 +278,11 @@ class AnalysisState(BaseModel):
 
     # Agent messages history
     messages: List[AgentMessage] = Field(default_factory=list)
+    # Technical prompt-budget observations are advisory context for the PI.
+    context_budget_observations: List[ContextBudgetObservation] = Field(
+        default_factory=list,
+        max_length=20,
+    )
 
     # Realtime messages for WebSocket (persisted for session restoration)
     realtime_messages: List["WebSocketMessage"] = Field(default_factory=list)

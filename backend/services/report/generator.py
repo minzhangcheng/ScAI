@@ -98,6 +98,8 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         vision_settings: Optional[Dict[str, bool]] = None,
         supervisor_model: Optional[str] = None,
         target_lineage_id: str = "main",
+        context_budget_callback: Optional[Callable] = None,
+        context_budget_ack_callback: Optional[Callable] = None,
     ):
         self._session_id = session_id
         self.llm_client = llm_client
@@ -111,6 +113,8 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         self.vision_settings = vision_settings or {}
         self.supervisor_model = supervisor_model or ""
         self.target_lineage_id = target_lineage_id or "main"
+        self.context_budget_callback = context_budget_callback
+        self.context_budget_ack_callback = context_budget_ack_callback
 
         # Create subdirectories
         self.figures_dir = self.output_dir / "figures"

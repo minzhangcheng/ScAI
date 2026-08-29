@@ -86,7 +86,8 @@ Respond in JSON:
 """
         self.refresh_runtime_config_if_needed()
         self._set_llm_context()
-        response = await self.llm_client.chat(
+        response = await self._budgeted_text_call(
+            self.llm_client.chat,
             model=self.model,
             messages=[
                 {"role": "system", "content": system_prompt},

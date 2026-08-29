@@ -140,12 +140,31 @@ async def chat_with_pi(
                 max_tokens=32768
             )
         else:
+            from backend.utils.settings_provider import AgentSettingsProvider
+            from backend.config import SystemConfig
+
+            provider = AgentSettingsProvider(
+                state,
+                (
+                    config
+                    if hasattr(config, "api") and hasattr(config, "context_windows")
+                    else SystemConfig()
+                ),
+                global_client=llm_client,
+                session_id=session_id,
+            )
+            dispatch = await provider.budget_text_dispatch(
+                PI_AGENT_NAME,
+                chat_messages_list,
+                max_tokens=32768,
+            )
             response = await llm_client.chat(
                 model=pi_model,
-                messages=chat_messages_list,
+                messages=dispatch.messages,
                 temperature=pi_temp,
-                max_tokens=32768
+                max_tokens=dispatch.max_tokens,
             )
+            await provider.acknowledge_text_dispatch(PI_AGENT_NAME, dispatch)
 
         assistant_content = response.content if response.content else "I'm sorry, I couldn't generate a response. Please try again."
 

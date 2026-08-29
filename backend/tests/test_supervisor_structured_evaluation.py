@@ -72,6 +72,10 @@ class _SupervisorHarness(EvaluationMixin):
         self.context_calls += 1
 
     @staticmethod
+    async def _budgeted_text_call(method, **kwargs):
+        return await method(**kwargs)
+
+    @staticmethod
     def _compress_base64_figure(value):
         return value
 

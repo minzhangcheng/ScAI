@@ -77,6 +77,29 @@ class SupervisorAgent(
 ):
     """Lightweight analysis supervisor using a cheap vision-capable LLM."""
 
+    def _resolve_context_window(self) -> int:
+        return self._provider.get_context_window("supervisor")
+
+    async def _budgeted_text_call(
+        self,
+        method,
+        *,
+        messages: List[Dict[str, Any]],
+        max_tokens: Optional[int] = None,
+        **kwargs,
+    ):
+        dispatch = await self._provider.budget_text_dispatch(
+            "supervisor",
+            messages,
+            max_tokens=max_tokens,
+        )
+        kwargs["messages"] = dispatch.messages
+        if max_tokens is not None or dispatch.max_tokens is not None:
+            kwargs["max_tokens"] = dispatch.max_tokens
+        response = await method(**kwargs)
+        await self._provider.acknowledge_text_dispatch("supervisor", dispatch)
+        return response
+
     def __init__(
         self,
         settings_provider: 'AgentSettingsProvider',
@@ -169,7 +192,6 @@ class SupervisorAgent(
     # ------------------------------------------------------------------
     # Report generation helpers
     # ------------------------------------------------------------------
-
 
 
 

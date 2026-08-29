@@ -157,12 +157,18 @@ async def _execute_delegation_success(
     pi_model = delegation_provider.get_model(PI_AGENT_NAME)
     pi_temp = delegation_provider.get_temperature(PI_AGENT_NAME)
 
-    pi_response = await llm_manager.openrouter.chat(
-        model=pi_model,
-        messages=[{"role": "user", "content": synthesis_prompt}],
-        temperature=pi_temp,
+    dispatch = await delegation_provider.budget_text_dispatch(
+        PI_AGENT_NAME,
+        [{"role": "user", "content": synthesis_prompt}],
         max_tokens=32768,
     )
+    pi_response = await llm_manager.openrouter.chat(
+        model=pi_model,
+        messages=dispatch.messages,
+        temperature=pi_temp,
+        max_tokens=dispatch.max_tokens,
+    )
+    await delegation_provider.acknowledge_text_dispatch(PI_AGENT_NAME, dispatch)
     final_content = pi_response.content or "Analysis completed but synthesis failed."
 
     # 7. Post-process: FIGURE and GENERATE_FIGURE markers (reuse existing patterns)

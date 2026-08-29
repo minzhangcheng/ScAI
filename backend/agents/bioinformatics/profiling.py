@@ -100,7 +100,8 @@ class ProfilingMixin:
 
         for step in range(MAX_PROFILING_STEPS):
             try:
-                response = await self.llm_client.chat_with_tools(
+                response = await self._budgeted_text_call(
+                    self.llm_client.chat_with_tools,
                     model=self.model,
                     messages=messages,
                     tools=PROFILING_TOOLS,
