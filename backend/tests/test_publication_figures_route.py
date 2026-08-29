@@ -842,21 +842,21 @@ async def test_branch_and_source_downloads_keep_archived_pair_after_same_name_re
         artifact_registry_version=1,
     )
 
+    state.restore_branch_id = "branch-a"
     source_png = await download_publication_figure_png(
-        "session-download", source.id, state=state
+        "session-download", source.id, state=state, branch_id="main"
     )
     source_pdf_response = await download_publication_figure_pdf(
-        "session-download", source.id, state=state
+        "session-download", source.id, state=state, branch_id="main"
     )
     assert Path(source_png.path).read_bytes() == source_jpg
     assert Path(source_pdf_response.path).read_bytes() == source_pdf
 
-    state.restore_branch_id = "branch-a"
     branch_png = await download_publication_figure_png(
-        "session-download", inherited.id, state=state
+        "session-download", inherited.id, state=state, branch_id="branch-a"
     )
     branch_pdf = await download_publication_figure_pdf(
-        "session-download", inherited.id, state=state
+        "session-download", inherited.id, state=state, branch_id="branch-a"
     )
     assert Path(branch_png.path).read_bytes() == source_jpg
     assert Path(branch_pdf.path).read_bytes() == source_pdf

@@ -9,13 +9,15 @@ import {
 } from 'lucide-react'
 import { base64ToDataUri, detectBase64MimeType, normalizeImageBase64 } from '../../utils/image'
 import { downloadBlob, fetchAndDownload } from '../../utils/download'
+import { withReportBranch } from '../../utils/reportBranch'
 
 interface GraphicAbstractProps {
+  branchId?: string | null
   graphicAbstract: GraphicAbstractType
   sessionId?: string
 }
 
-export function GraphicAbstract({ graphicAbstract, sessionId }: GraphicAbstractProps) {
+export function GraphicAbstract({ branchId, graphicAbstract, sessionId }: GraphicAbstractProps) {
   const { language } = useAppStore()
   const { t } = useTranslation(language)
   const [showModal, setShowModal] = useState(false)
@@ -23,7 +25,7 @@ export function GraphicAbstract({ graphicAbstract, sessionId }: GraphicAbstractP
   const isTextMode = !!graphicAbstract?.isTextMode || !!graphicAbstract?.textDiagram
   const imageB64 = normalizeImageBase64(graphicAbstract?.imageBase64)
   const imageUrl = sessionId
-    ? `/api/session/${sessionId}/report/figure/graphic_abstract.jpg`
+    ? withReportBranch(`/api/session/${sessionId}/report/figure/graphic_abstract.jpg`, branchId)
     : ''
   const imageSource = imageB64 ? base64ToDataUri(imageB64) : imageUrl
   const textDiagram = graphicAbstract?.textDiagram || ''

@@ -45,6 +45,8 @@ def get_agent_llm_stats(session_id: str) -> Dict[str, Dict[str, Any]]:
         "temperature": float,
         "call_count": int,
         "total_input_tokens": int,
+        "total_cached_input_tokens": int,
+        "input_cache_hit_rate": Optional[float],
         "total_output_tokens": int,
         "avg_response_time_ms": float,
     }
@@ -54,8 +56,11 @@ def get_agent_llm_stats(session_id: str) -> Dict[str, Dict[str, Any]]:
         "temperature": 0.0,
         "call_count": 0,
         "total_input_tokens": 0,
+        "total_cached_input_tokens": 0,
         "total_output_tokens": 0,
         "total_response_time_ms": 0.0,
+        "_has_positive_input": False,
+        "_cache_usage_complete": True,
     })
 
     log_path = get_session_logs(session_id) / "llm.jsonl"
@@ -86,8 +91,26 @@ def get_agent_llm_stats(session_id: str) -> Dict[str, Dict[str, Any]]:
                 if not s["temperature"]:
                     s["temperature"] = temperature
                 s["call_count"] += 1
-                s["total_input_tokens"] += usage.get("prompt_tokens", 0)
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                s["total_input_tokens"] += prompt_tokens
                 s["total_output_tokens"] += usage.get("completion_tokens", 0)
+                cached_tokens = usage.get("cached_tokens")
+                try:
+                    has_positive_input = int(prompt_tokens) > 0
+                except (TypeError, ValueError, OverflowError):
+                    has_positive_input = False
+                if has_positive_input:
+                    s["_has_positive_input"] = True
+                if cached_tokens is not None:
+                    try:
+                        cached_tokens = max(0, int(cached_tokens))
+                    except (TypeError, ValueError, OverflowError):
+                        if has_positive_input:
+                            s["_cache_usage_complete"] = False
+                    else:
+                        s["total_cached_input_tokens"] += cached_tokens
+                elif has_positive_input:
+                    s["_cache_usage_complete"] = False
                 if duration_ms is not None:
                     s["total_response_time_ms"] += duration_ms
 
@@ -102,6 +125,17 @@ def get_agent_llm_stats(session_id: str) -> Dict[str, Dict[str, Any]]:
             s["avg_response_time_ms"] = s["total_response_time_ms"] / count
         else:
             s["avg_response_time_ms"] = 0.0
+        has_positive_input = s.pop("_has_positive_input")
+        cache_usage_complete = s.pop("_cache_usage_complete")
+        total_input = s["total_input_tokens"]
+        if has_positive_input and cache_usage_complete and total_input > 0:
+            cached_input = max(
+                0,
+                min(s["total_cached_input_tokens"], total_input),
+            )
+            s["input_cache_hit_rate"] = cached_input / total_input
+        else:
+            s["input_cache_hit_rate"] = None
         del s["total_response_time_ms"]
 
     return dict(stats)
@@ -126,7 +160,8 @@ def render_agent_config_table_html(
     """Build the Agent Configuration HTML table including LLM usage stats.
 
     rows: iterable of (display_name, stats_key, model, temperature) tuples.
-    stats: mapping from get_agent_llm_stats(); missing keys render as zero/'-'.
+    stats: mapping from get_agent_llm_stats(); missing cache metrics are shown as
+        not reported rather than as a measured zero.
     """
     esc = html_module.escape
     body_parts = []
@@ -135,11 +170,25 @@ def render_agent_config_table_html(
         calls = s.get("call_count", 0)
         in_tok = s.get("total_input_tokens", 0)
         out_tok = s.get("total_output_tokens", 0)
+        cache_hit_rate = s.get("input_cache_hit_rate")
+        if cache_hit_rate is None:
+            cache_rate_html = (
+                '<span style="white-space:nowrap;color:#64748b" '
+                'title="The provider did not report cached input tokens">'
+                '(cache hit: not reported)</span>'
+            )
+        else:
+            cache_rate_html = (
+                '<span style="white-space:nowrap;color:#64748b" '
+                'title="Cached input tokens divided by total input tokens">'
+                f'(cache hit: {cache_hit_rate:.1%})</span>'
+            )
         avg_ms = s.get("avg_response_time_ms", 0)
         avg_str = f"{avg_ms:.0f}ms" if avg_ms > 0 else "-"
         body_parts.append(
             f"<tr><td>{esc(display_name)}</td><td><code>{esc(str(model))}</code></td>"
-            f"<td>{temp}</td><td>{calls}</td><td>{in_tok:,}</td><td>{out_tok:,}</td>"
+            f"<td>{temp}</td><td>{calls}</td><td>{in_tok:,} {cache_rate_html}</td>"
+            f"<td>{out_tok:,}</td>"
             f"<td>{avg_str}</td></tr>"
         )
     return (

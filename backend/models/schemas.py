@@ -748,7 +748,10 @@ class AnalysisState(BaseModel):
                     lineage_id=(self.restore_branch_id or "main"),
                 )
             elif field_name == "publication_tables":
-                result[api_key] = self._serialize_publication_tables(val)
+                result[api_key] = self._serialize_publication_tables(
+                    val,
+                    lineage_id=(self.restore_branch_id or "main"),
+                )
             elif field_name == "graphic_abstract":
                 result[api_key] = self._serialize_graphic_abstract(val)
             elif field_name == "plan_dialogue_history":
@@ -926,7 +929,8 @@ class AnalysisState(BaseModel):
         ]
 
     @staticmethod
-    def _serialize_publication_tables(tables):
+    def _serialize_publication_tables(tables, *, lineage_id: str = "main"):
+        target = lineage_id or "main"
         return [
             {"id": t["id"], "name": t["name"], "description": t["description"],
              "csv_path": t["csv_path"], "columns": t["columns"],
@@ -934,6 +938,7 @@ class AnalysisState(BaseModel):
              "review_status": t["review_status"],
              "pi_feedback": t["pi_feedback"], "created_at": t["created_at"]}
             for t in tables
+            if (t.get("lineage_id") or "main") == target
         ]
 
     @staticmethod

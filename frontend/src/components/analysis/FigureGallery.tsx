@@ -11,7 +11,7 @@ export function FigureGallery(props: FigureGalleryProps) {
   const { figures } = props
   if (figures.length === 0) return null
   const {
-    collapsed, currentSession, downloadJPG, downloadPDF, hiddenCount, language,
+    branchQuery, collapsed, currentSession, downloadJPG, downloadPDF, hiddenCount, language,
     selectedFigure, setCollapsed, setSelectedFigure, setShowAll, showAll, t, visibleFigures,
   } = controller
   const selectedBase64 = normalizeImageBase64(selectedFigure?.pngBase64)
@@ -44,6 +44,7 @@ export function FigureGallery(props: FigureGalleryProps) {
 
         {visibleFigures.map(figure => (
           <FigureCard
+            branchQuery={branchQuery}
             key={figure.id}
             currentSessionId={currentSession?.id}
             downloadJPG={downloadJPG}
@@ -113,7 +114,7 @@ export function FigureGallery(props: FigureGalleryProps) {
                 />
               ) : currentSession?.id ? (
                 <img
-                  src={`${API_BASE}/session/${currentSession.id}/figure/${selectedFigure.id}/png`}
+                  src={`${API_BASE}/session/${currentSession.id}/figure/${selectedFigure.id}/png${branchQuery}`}
                   alt={selectedFigure.name}
                   className="max-w-full h-auto mx-auto"
                   onError={(e) => {

@@ -3,6 +3,7 @@ import { useAppStore } from '../../stores/appStore'
 import { useTranslation } from '../../i18n/translations'
 import { downloadBlob } from '../../utils/download'
 import { authHeaders } from '../../hooks/useApi'
+import { reportBranchQuery } from '../../utils/reportBranch'
 import ReactMarkdown from 'react-markdown'
 import {
   FileText,
@@ -47,7 +48,7 @@ export function IntegratedReport({ report }: IntegratedReportProps) {
   const downloadAsHTML = async () => {
     if (!currentSession) return
     try {
-      const response = await fetch(`${API_BASE}/session/${currentSession.id}/report/html`, {
+      const response = await fetch(`${API_BASE}/session/${currentSession.id}/report/html${reportBranchQuery(currentSession.restoreBranchId)}`, {
         headers: authHeaders(),
       })
       if (response.ok) {

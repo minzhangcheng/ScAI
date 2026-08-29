@@ -17,6 +17,7 @@ import { SnapshotFailureDialog } from '../snapshots/SnapshotFailureDialog'
 import { StopDialog } from '../StopDialog'
 import { TextInputDialog } from '../TextInputDialog'
 import type { AnalysisPanelController } from './useAnalysisPanelController'
+import { withReportBranch } from '../../utils/reportBranch'
 
 interface AnalysisDialogsProps {
   controller: AnalysisPanelController
@@ -55,8 +56,8 @@ export function AnalysisDialogs({ controller }: AnalysisDialogsProps) {
           tissue={annotationData.tissue || ''}
           organism={annotationData.organism || ''}
           tissueSummary={annotationData.tissue_summary || ''}
-          reportHtmlUrl={annotationData.report_html_url || undefined}
-          detailedReportUrl={annotationData.detailed_report_url || undefined}
+          reportHtmlUrl={withReportBranch(annotationData.report_html_url || '', currentSession.restoreBranchId) || undefined}
+          detailedReportUrl={withReportBranch(annotationData.detailed_report_url || '', currentSession.restoreBranchId) || undefined}
           validationStatus={annotationData.validation_status}
           validationSummary={annotationData.validation_summary}
           validationTextSummary={annotationData.validation_text_summary}
@@ -94,8 +95,8 @@ export function AnalysisDialogs({ controller }: AnalysisDialogsProps) {
         <ExplorationReportDialog
           report={(explorationReportData.report_a || explorationReportData) as ExplorationReport}
           roundSummary={explorationReportData.round_summary?.summary || ''}
-          explorationReportUrl={explorationReportData.html_url || undefined}
-          detailedReportUrl={explorationReportData.detailed_report_url || undefined}
+          explorationReportUrl={withReportBranch(explorationReportData.html_url || '', currentSession.restoreBranchId) || undefined}
+          detailedReportUrl={withReportBranch(explorationReportData.detailed_report_url || '', currentSession.restoreBranchId) || undefined}
           language={language}
           countdownSeconds={roundWaitSeconds}
           onChooseDirections={handleChooseDirections}
@@ -115,7 +116,7 @@ export function AnalysisDialogs({ controller }: AnalysisDialogsProps) {
           onLetPiDecide={handleLetPiDecideIntegration}
           countdownSeconds={roundWaitSeconds}
           language={language}
-          reportUrl={integrationGateData.html_url || undefined}
+          reportUrl={withReportBranch(integrationGateData.html_url || '', currentSession?.restoreBranchId) || undefined}
           onClose={() => setShowIntegrationGateDialog(false)}
           open={showIntegrationGateDialog}
         />

@@ -56,6 +56,7 @@ export function getStatusColor(status: FigureReviewStatus, diagnostic?: boolean)
   }
 
 interface FigureCardProps {
+  branchQuery?: string
   currentSessionId?: string
   downloadJPG: (figure: PublicationFigure) => Promise<void>
   downloadPDF: (figure: PublicationFigure) => Promise<void>
@@ -66,7 +67,7 @@ interface FigureCardProps {
 }
 
 export function FigureCard({
-  currentSessionId, downloadJPG, downloadPDF, figure, language, onSelect, t,
+  branchQuery = '', currentSessionId, downloadJPG, downloadPDF, figure, language, onSelect, t,
 }: FigureCardProps) {
   const pngBase64 = normalizeImageBase64(figure.pngBase64)
   return (
@@ -88,7 +89,7 @@ export function FigureCard({
               ) : currentSessionId ? (
                 <img
                   key={`api-${figure.id}-${figure.reviewStatus}-${figure.revisionCount}`}
-                  src={`${API_BASE}/session/${currentSessionId}/figure/${figure.id}/png`}
+                  src={`${API_BASE}/session/${currentSessionId}/figure/${figure.id}/png${branchQuery}`}
                   alt={figure.name}
                   className="w-full h-full object-contain"
                   onError={(e) => {

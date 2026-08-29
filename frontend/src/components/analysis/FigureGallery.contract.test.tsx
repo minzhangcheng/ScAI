@@ -68,4 +68,22 @@ describe('FigureGallery contract', () => {
       '/api/session/session-gallery/figure/figure-1/png',
     )
   })
+
+  it('scopes restored previews and downloads to the active branch', async () => {
+    useAppStore.setState({
+      currentSession: { ...session, restoreBranchId: 'restore/a b' },
+    })
+    const persisted = { ...figure(1), pngBase64: '[image]' }
+    render(<FigureGallery figures={[persisted]} />)
+
+    expect(screen.getByAltText('Figure 1')).toHaveAttribute(
+      'src',
+      '/api/session/session-gallery/figure/figure-1/png?branch_id=restore%2Fa%20b',
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'JPG' }))
+    expect(fetchAndDownload).toHaveBeenCalledWith(
+      '/api/session/session-gallery/figure/figure-1/png?branch_id=restore%2Fa%20b',
+      'Figure 1.jpg',
+    )
+  })
 })
