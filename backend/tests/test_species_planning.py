@@ -110,3 +110,51 @@ async def test_empty_suggestions_emits_user_status(monkeypatch):
         with pytest.raises(RuntimeError, match="stop_here"):
             await PlanningMixin._pi_planning.__wrapped__(inst, {"analysis_state": state})
     assert seen["phrase"] is True
+
+
+@pytest.mark.asyncio
+async def test_species_hint_processing_exits_waiting_before_pi_call(monkeypatch):
+    inst = _build_mixin({"confidence": "low", "suggestions": ["Mus musculus"]})
+    state = AnalysisState(user_id="u", current_round=1, status=TaskStatus.RUNNING)
+    syncs = []
+
+    async def _record_sync(current, change_type):
+        syncs.append((
+            current.status,
+            current.wait_input_reason,
+            current.species_input_info,
+            change_type,
+        ))
+
+    async def _infer_from_hint(current, _user_input):
+        assert current.status == TaskStatus.RUNNING
+        assert current.wait_input_reason is None
+        assert current.species_input_info is None
+        assert syncs[-1] == (
+            TaskStatus.RUNNING,
+            None,
+            None,
+            "species_input_received",
+        )
+        return {"confidence": "high", "species": "Mus musculus"}
+
+    async def _signal(*_args, **_kwargs):
+        inst._species_user_response = "mouse"
+        return True
+
+    async def _stop_after_species(kind, content, *_args, **_kwargs):
+        if kind == "status" and "creating analysis plan" in (content or ""):
+            raise RuntimeError("stop_here")
+
+    inst._send_state_sync = AsyncMock(side_effect=_record_sync)
+    inst._send_message = AsyncMock(side_effect=_stop_after_species)
+    inst.pi_agent.infer_species_from_hint = AsyncMock(side_effect=_infer_from_hint)
+
+    with patch_facade("backend.workflow.planning", "wait_with_skip_time", _signal):
+        with pytest.raises(RuntimeError, match="stop_here"):
+            await PlanningMixin._pi_planning.__wrapped__(
+                inst, {"analysis_state": state}
+            )
+
+    assert state.status == TaskStatus.RUNNING
+    assert state.species == "Mus musculus"

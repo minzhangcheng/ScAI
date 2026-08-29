@@ -17,10 +17,22 @@ class TestSpeciesSignal:
         wf._species_user_response = None
         wf.session_id = "test"
 
-        wf.signal_species_input("Homo sapiens")
+        accepted = wf.signal_species_input("Homo sapiens")
 
+        assert accepted is True
         assert wf._species_event.is_set()
         assert wf._species_user_response == "Homo sapiens"
+
+    def test_signal_species_input_keeps_first_response(self):
+        from backend.workflow.core import SingleCellAnalysisWorkflow
+        wf = SingleCellAnalysisWorkflow.__new__(SingleCellAnalysisWorkflow)
+        wf._species_event = asyncio.Event()
+        wf._species_user_response = None
+        wf.session_id = "test"
+
+        assert wf.signal_species_input("first") is True
+        assert wf.signal_species_input("second") is False
+        assert wf._species_user_response == "first"
 
     def test_species_event_initialized(self):
         from backend.workflow.core import SingleCellAnalysisWorkflow

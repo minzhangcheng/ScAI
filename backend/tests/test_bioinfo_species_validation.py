@@ -93,6 +93,50 @@ async def test_gene_validation_cleanup_on_cancel(monkeypatch):
     assert state.wait_input_reason is None
 
 
+@pytest.mark.asyncio
+async def test_gene_validation_exits_waiting_before_pi_decision(monkeypatch):
+    state = AnalysisState(user_id="u", species="Homo sapiens")
+    state.status = TaskStatus.RUNNING
+    inst = _build_callbacks_mixin(state)
+    syncs = []
+
+    async def _record_sync(current, change_type):
+        syncs.append((
+            current.status,
+            current.wait_input_reason,
+            current.species_input_info,
+            change_type,
+        ))
+
+    async def _decide(*_args, **_kwargs):
+        assert state.status == TaskStatus.RUNNING
+        assert state.wait_input_reason is None
+        assert state.species_input_info is None
+        assert syncs[-1] == (
+            TaskStatus.RUNNING,
+            None,
+            None,
+            "species_input_received",
+        )
+        return {"action": "keep"}
+
+    async def _signal(*_args, **_kwargs):
+        inst._species_user_response = "keep current species"
+        return True
+
+    inst._send_state_sync = AsyncMock(side_effect=_record_sync)
+    inst.pi_agent.decide_species_action = AsyncMock(side_effect=_decide)
+    monkeypatch.setattr("backend.workflow.callbacks.wait_with_skip_time", _signal)
+
+    await inst._species_validation_callback(
+        ["TP53"],
+        "Homo sapiens",
+        {"reasoning": "looks human", "likely_species": "Homo sapiens"},
+    )
+
+    assert state.status == TaskStatus.RUNNING
+
+
 import json
 from unittest.mock import AsyncMock, MagicMock
 from backend.agents.bioinformatics_agent import BioinformaticsAgent

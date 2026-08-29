@@ -671,6 +671,8 @@ async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
                 await self._send_state_sync(analysis_state, "waiting_input")
                 continue
             else:
+                self._set_status(analysis_state, TaskStatus.RUNNING)
+                await self._send_state_sync(analysis_state, "continue")
                 logger.info(f"[{self.session_id}] Continue signal received")
                 break
 

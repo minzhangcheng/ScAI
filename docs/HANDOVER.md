@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.49.4 · **Last updated**: 2026-08-29
+**Version**: 0.49.5 · **Last updated**: 2026-08-29
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,8 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.49.x — (2026-08-28 onward)**
+
+- `0.49.5` — Fixes human-intervention state transitions and duplicate-signal handling across plan review, species input, and round continuation. Plan-review submissions now reject requests outside the active review wait state; plan-review and species-input signals retain the first accepted action and report conflicts for duplicates. Consumed species and continuation signals clear wait metadata and restore `RUNNING` before PI processing or workflow continuation, keeping persisted/API status aligned with execution. Regression coverage was added for first-signal-wins behavior, stale review requests, species resolution, plan-feedback processing, and continuation status transitions. No application image build, registry push, deployment, or historical-session mutation was performed.
 
 - `0.49.4` — Restores PI ownership of scientific planning and result acceptance across the planning, execution, evidence, and reporting paths. Host sample-design plan vetoes and the execution-stage design override are removed; measured replication, batch, provenance, statistical, mechanism, and direction-coverage checks remain visible as non-blocking PI review observations. Final reports proceed without a host scientific acceptance router, while objective schema, execution-identity, security, persistence, runtime, and artifact-layout safeguards remain intact. Regression coverage was added for PI authority, neutral measured-design prompts, advisory statistical/provenance behavior, and report routing. Focused affected evidence passed `349/349` nodes at `test-results/20260828T234330Z-3873372/evidence.json`; version consistency is verified separately. No application image build, registry push, deployment, or historical-session mutation was performed.
 

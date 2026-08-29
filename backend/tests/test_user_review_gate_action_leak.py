@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from backend.models.schemas import TaskStatus
+
 
 def _make_stub():
     from backend.workflow.planning import PlanningMixin
@@ -21,6 +23,7 @@ def _make_stub():
             self._plan_review_event = asyncio.Event()
             self._plan_review_action = None
             self._sent = []
+            self._syncs = []
             self._approve_calls = []
             self.pi_agent = SimpleNamespace(
                 process_user_plan_feedback=AsyncMock(),
@@ -29,11 +32,11 @@ def _make_stub():
         async def _send_message(self, msg_type, content, agent=None):
             self._sent.append((msg_type, content))
 
-        async def _send_state_sync(self, *args, **kwargs):
-            pass
+        async def _send_state_sync(self, state, change_type):
+            self._syncs.append((state.status, change_type))
 
-        def _set_status(self, *args, **kwargs):
-            pass
+        def _set_status(self, state, status):
+            state.status = status
 
         def _build_plan_dialogue_html(self, *args, **kwargs):
             return "<html></html>"
@@ -143,3 +146,28 @@ async def test_clarify_continue_does_not_reuse_modify_action():
 
     assert stub.pi_agent.process_user_plan_feedback.await_count == 2
     assert stub._approve_calls == ["approved_after_clarification"]
+
+
+@pytest.mark.asyncio
+async def test_modify_exits_waiting_status_before_pi_feedback_processing():
+    stub = _make_stub()
+    state, _ = _make_state()
+    analysis_state = state["analysis_state"]
+    analysis_state.status = TaskStatus.RUNNING
+
+    async def _review_feedback(**_kwargs):
+        assert analysis_state.status == TaskStatus.RUNNING
+        assert stub._syncs[-1] == (
+            TaskStatus.RUNNING,
+            "plan_feedback_processing",
+        )
+        return {"action": "revise_with_bioinfo", "guidance_for_bioinfo": "revise"}
+
+    stub.pi_agent.process_user_plan_feedback.side_effect = _review_feedback
+
+    task = asyncio.create_task(stub._user_review_gate(state))
+    await asyncio.sleep(0.05)
+    stub.signal_plan_review("modify", user_input="please revise the plan")
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert analysis_state.status == TaskStatus.RUNNING

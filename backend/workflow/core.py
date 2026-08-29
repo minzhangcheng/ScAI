@@ -183,11 +183,11 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         core_interventions.bind_facade(sys.modules[__name__])
         return core_interventions.signal_annotation_confirmed(self)
 
-    def signal_plan_review(self, action: str, user_input: Optional[str]=None):
+    def signal_plan_review(self, action: str, user_input: Optional[str]=None) -> bool:
         core_interventions.bind_facade(sys.modules[__name__])
         return core_interventions.signal_plan_review(self, action, user_input)
 
-    def signal_species_input(self, user_input: str):
+    def signal_species_input(self, user_input: str) -> bool:
         core_interventions.bind_facade(sys.modules[__name__])
         return core_interventions.signal_species_input(self, user_input)
 

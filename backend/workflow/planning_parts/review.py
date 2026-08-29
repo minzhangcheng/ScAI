@@ -173,6 +173,11 @@ async def _user_review_gate(self, state: WorkflowState) -> WorkflowState:
 
         elif action_type == "modify" and user_input:
             # User wants modifications → PI judges intent
+            self._set_status(analysis_state, TaskStatus.RUNNING)
+            await self._send_state_sync(
+                analysis_state,
+                "plan_feedback_processing",
+            )
             pi_judgment = await self.pi_agent.process_user_plan_feedback(
                 user_input=user_input,
                 current_plan=plan,

@@ -1,5 +1,6 @@
 """Tests that _approve_plan transitions TaskStatus from WAITING_PLAN_REVIEW to RUNNING."""
 import sys
+import asyncio
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -129,3 +130,15 @@ class TestApprovePlanStatus:
 
         assert call_order == ["_send_state_sync", "_send_message"], \
             f"Expected state_sync before plan_approved, got {call_order}"
+
+
+def test_plan_review_signal_keeps_first_action(wf):
+    wf._plan_review_event = asyncio.Event()
+    wf._plan_review_action = None
+
+    assert wf.signal_plan_review("modify", "first") is True
+    assert wf.signal_plan_review("skip") is False
+    assert wf._plan_review_action == {
+        "action": "modify",
+        "user_input": "first",
+    }

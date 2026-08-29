@@ -645,20 +645,26 @@ def signal_annotation_confirmed(self):
     """Signal that user has confirmed cell type annotations"""
     self._annotation_event.set()
 
-def signal_plan_review(self, action: str, user_input: Optional[str] = None):
+def signal_plan_review(self, action: str, user_input: Optional[str] = None) -> bool:
     """Signal that user has reviewed the plan.
 
     Args:
         action: "approve", "skip", or "modify"
         user_input: User's modification text (only for "modify")
     """
+    if self._plan_review_event.is_set() or self._plan_review_action is not None:
+        return False
     self._plan_review_action = {"action": action, "user_input": user_input}
     self._plan_review_event.set()
+    return True
 
-def signal_species_input(self, user_input: str):
+def signal_species_input(self, user_input: str) -> bool:
     """Signal that user has submitted species-related input."""
+    if self._species_event.is_set():
+        return False
     self._species_user_response = user_input
     self._species_event.set()
+    return True
 
 def signal_llm_failure_action(self, node_name: str, action: str, generation: int) -> bool:
     """Signal the workflow to handle an LLM failure with the given action.

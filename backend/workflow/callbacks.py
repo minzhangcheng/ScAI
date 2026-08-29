@@ -581,11 +581,20 @@ Approve if quality_score >= 7."""
             )
 
             if not signaled:
+                analysis_state.species_input_info = None
+                analysis_state.wait_input_reason = None
+                self._set_status(analysis_state, original_status)
                 await self._send_state_sync(analysis_state, StateSyncChangeType.SPECIES_AUTO_SKIPPED.value)
                 return {"action": "keep", "user_input": ""}
 
             user_input = self._species_user_response or ""
-            await self._send_state_sync(analysis_state, StateSyncChangeType.SPECIES_RESOLVED.value)
+            analysis_state.species_input_info = None
+            analysis_state.wait_input_reason = None
+            self._set_status(analysis_state, original_status)
+            await self._send_state_sync(
+                analysis_state,
+                "species_input_received",
+            )
 
             try:
                 action = await self.pi_agent.decide_species_action(user_input, species, assessment)
@@ -601,6 +610,10 @@ Approve if quality_score >= 7."""
                     AgentType.PI,
                 )
 
+            await self._send_state_sync(
+                analysis_state,
+                StateSyncChangeType.SPECIES_RESOLVED.value,
+            )
             return {**action, "user_input": user_input}
         finally:
             analysis_state.species_input_info = None

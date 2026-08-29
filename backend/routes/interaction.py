@@ -457,6 +457,12 @@ async def submit_plan_review(session_id: str, request: Request, body: PlanReview
         action = body.action
         user_input = _UNSAFE_PATTERN.sub('', body.user_input) if body.user_input else ""
 
+        if state.status != TaskStatus.WAITING_PLAN_REVIEW:
+            raise HTTPException(
+                status_code=409,
+                detail="Session is not waiting for plan review",
+            )
+
         async with _state_lock:
             workflow = workflows.get(session_id)
         if not workflow:
@@ -479,7 +485,12 @@ async def submit_plan_review(session_id: str, request: Request, body: PlanReview
                 return APIResponse(success=True, message="Plan review recorded, restarting")
             raise HTTPException(status_code=404, detail="Session not found")
 
-        workflow.signal_plan_review(action, user_input)
+        accepted = workflow.signal_plan_review(action, user_input)
+        if accepted is False:
+            raise HTTPException(
+                status_code=409,
+                detail="A plan review action has already been accepted",
+            )
     return APIResponse(success=True, message=f"Plan review action '{action}' received")
 
 
@@ -498,5 +509,10 @@ async def species_input(session_id: str, request: Request, body: SpeciesInputReq
         if not workflow:
             raise HTTPException(status_code=404, detail="No active workflow")
 
-        workflow.signal_species_input(body.input)
+        accepted = workflow.signal_species_input(body.input)
+        if accepted is False:
+            raise HTTPException(
+                status_code=409,
+                detail="Species input has already been accepted",
+            )
     return APIResponse(success=True, message="Species input received")

@@ -84,6 +84,13 @@ async def start_pi_planning(self, state):
                         break
 
                     user_input = self._species_user_response or ""
+                    analysis_state.species_input_info = None
+                    analysis_state.wait_input_reason = None
+                    self._set_status(analysis_state, original_status)
+                    await self._send_state_sync(
+                        analysis_state,
+                        "species_input_received",
+                    )
                     inference = await self.pi_agent.infer_species_from_hint(analysis_state, user_input)
 
                     if inference.get("confidence") == "high" and inference.get("species"):
@@ -106,6 +113,9 @@ async def start_pi_planning(self, state):
                             AgentType.PI,
                         )
 
+                analysis_state.species_input_info = None
+                analysis_state.wait_input_reason = None
+                self._set_status(analysis_state, original_status)
                 if analysis_state.species_resolved:
                     await self._send_state_sync(analysis_state, StateSyncChangeType.SPECIES_RESOLVED.value)
                 else:
