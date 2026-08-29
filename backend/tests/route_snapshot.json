@@ -199,6 +199,18 @@
     ]
   ],
   [
+    "/api/session/{session_id}/agent-settings",
+    [
+      "GET"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/agent-settings",
+    [
+      "POST"
+    ]
+  ],
+  [
     "/api/session/{session_id}/agent-server-config",
     [
       "GET"

@@ -353,7 +353,11 @@ async def test_workflow_construction_and_kernel_start_refuse_when_recovery_block
         with pytest.raises(SnapshotTransactionError, match="RECOVERY_BLOCKED"):
             SingleCellAnalysisWorkflow(config=SystemConfig(), session_id=sid)
 
-        sb = LocalJupyterSandbox(session_id=sid, working_dir=str(tmp_path))
+        sb = LocalJupyterSandbox(
+            session_id=sid,
+            state_dir=str(tmp_path / "states"),
+            working_dir=str(tmp_path),
+        )
         with pytest.raises(SnapshotTransactionError, match="RECOVERY_BLOCKED"):
             await sb.start()
     finally:

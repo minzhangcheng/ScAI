@@ -100,15 +100,24 @@ class ProfilingMixin:
 
         for step in range(MAX_PROFILING_STEPS):
             try:
-                response = await self._budgeted_text_call(
-                    self.llm_client.chat_with_tools,
-                    model=self.model,
-                    messages=messages,
-                    tools=PROFILING_TOOLS,
-                    tool_choice="auto",
-                    temperature=self.config.temperature,
-                    max_tokens=8192,
-                )
+                call_kwargs = {
+                    "model": self.model,
+                    "messages": messages,
+                    "tools": PROFILING_TOOLS,
+                    "tool_choice": "auto",
+                    "temperature": self.config.temperature,
+                    "max_tokens": 8192,
+                }
+                if callable(getattr(self, "_budgeted_text_call", None)):
+                    response = await self._budgeted_text_call(
+                        self.llm_client.chat_with_tools,
+                        **call_kwargs,
+                    )
+                else:
+                    # Lightweight mixin consumers used by compatibility tests do
+                    # not inherit BaseAgent. Production agents always take the
+                    # shared observational budget path above.
+                    response = await self.llm_client.chat_with_tools(**call_kwargs)
             except Exception as exc:                      # noqa: BLE001
                 logger.warning("[Profiling] LLM call failed at step %d: %s", step, exc)
                 return {"status": "failed", "records": records,

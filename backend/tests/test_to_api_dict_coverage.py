@@ -78,6 +78,9 @@ _EXCLUDED_FIELDS = {
     # their rendered guidance/results reach clients through normal outputs.
     "literature_search_cache",
     "environment_api_notes",
+    # Persisted server-side observations are injected into the next PI prompt;
+    # the browser does not consume their internal delivery bookkeeping.
+    "context_budget_observations",
     "messages",
     "revision_history",
     "all_candidates",

@@ -103,7 +103,16 @@ class BaseAgent(ABC):
         return str(label) if label is not None else "unknown"
 
     def _resolve_context_window(self) -> int:
-        return self._provider.get_context_window(self._agent_label())
+        try:
+            value = self._provider.get_context_window(self._agent_label())
+        except Exception:
+            value = None
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 8_192:
+            return value
+        # Context budgeting is observational and must not make a dispatch fail
+        # when a legacy/test provider does not implement the new setting yet.
+        from ..config import DEFAULT_AGENT_CONTEXT_WINDOW
+        return DEFAULT_AGENT_CONTEXT_WINDOW
 
     async def _apply_context_budget(
         self,
@@ -146,18 +155,36 @@ class BaseAgent(ABC):
     ):
         """Budget exactly once, dispatch, then acknowledge PI visibility."""
 
-        dispatch = await self._apply_context_budget(
-            messages,
-            max_tokens=max_tokens,
-            anchor_count=anchor_count,
-            summarize=summarize,
-            declare=declare,
-        )
+        try:
+            dispatch = await self._apply_context_budget(
+                messages,
+                max_tokens=max_tokens,
+                anchor_count=anchor_count,
+                summarize=summarize,
+                declare=declare,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] Context budgeting unavailable; sending best-effort request: %s",
+                self._agent_label(),
+                exc,
+            )
+            kwargs["messages"] = messages
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            return await method(**kwargs)
         kwargs["messages"] = dispatch.messages
         if max_tokens is not None or dispatch.max_tokens is not None:
             kwargs["max_tokens"] = dispatch.max_tokens
         response = await method(**kwargs)
-        await self._acknowledge_context_budget(dispatch)
+        try:
+            await self._acknowledge_context_budget(dispatch)
+        except Exception as exc:
+            logger.warning(
+                "[%s] Context-budget observation acknowledgement failed: %s",
+                self._agent_label(),
+                exc,
+            )
         return response
     
     def set_session(self, session_id: str):

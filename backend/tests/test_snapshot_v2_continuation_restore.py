@@ -557,7 +557,9 @@ class TestActivate:
         assert analysis_state.restore_resume_kind == "terminal"
         assert analysis_state.restore_resume_node is None
         assert analysis_state.restore_resume_gate is None
-        assert analysis_state.restore_resume_workflow_state is None
+        assert analysis_state.restore_resume_workflow_state == {
+            "terminal_status": "completed"
+        }
         assert "restore_gate_payload" not in analysis_state.sandbox_state
         assert analysis_state.sandbox_state["unrelated"] == "preserved"
 
@@ -1230,7 +1232,8 @@ class TestRestoreEntryPlan:
         )
         plan = build_restore_entry_plan(state)
         assert plan.intent == "terminal"
-        assert plan.target_node == "generate_final_report"
+        assert plan.target_node is None
+        assert plan.terminal_status == "completed"
 
     def test_idle_intent(self):
         from backend.models.schemas import AnalysisState

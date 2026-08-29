@@ -88,16 +88,34 @@ class SupervisorAgent(
         max_tokens: Optional[int] = None,
         **kwargs,
     ):
-        dispatch = await self._provider.budget_text_dispatch(
-            "supervisor",
-            messages,
-            max_tokens=max_tokens,
-        )
+        try:
+            dispatch = await self._provider.budget_text_dispatch(
+                "supervisor",
+                messages,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[supervisor] Context budgeting unavailable; sending best-effort request: %s",
+                exc,
+            )
+            kwargs["messages"] = messages
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            return await method(**kwargs)
         kwargs["messages"] = dispatch.messages
         if max_tokens is not None or dispatch.max_tokens is not None:
             kwargs["max_tokens"] = dispatch.max_tokens
         response = await method(**kwargs)
-        await self._provider.acknowledge_text_dispatch("supervisor", dispatch)
+        try:
+            await self._provider.acknowledge_text_dispatch(
+                "supervisor", dispatch
+            )
+        except Exception as exc:
+            logger.warning(
+                "[supervisor] Context-budget observation acknowledgement failed: %s",
+                exc,
+            )
         return response
 
     def __init__(
@@ -192,7 +210,6 @@ class SupervisorAgent(
     # ------------------------------------------------------------------
     # Report generation helpers
     # ------------------------------------------------------------------
-
 
 
 
