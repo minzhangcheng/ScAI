@@ -5,7 +5,9 @@ import { devLog } from '../../utils/logger'
 import { transformRawMessage } from '../../utils/messageTransform'
 import { ApiError, apiFetch } from './client'
 
-export const REALTIME_MESSAGE_PAGE_SIZE = 20
+export const INITIAL_REALTIME_MESSAGE_PAGE_SIZE = 100
+export const RECONNECT_REALTIME_MESSAGE_PAGE_SIZE = 20
+export const REALTIME_MESSAGE_PAGE_SIZE = RECONNECT_REALTIME_MESSAGE_PAGE_SIZE
 
 interface HistoryOptions {
   signal?: AbortSignal
@@ -47,19 +49,45 @@ function compareMessages(left: Message, right: Message): number {
   return time || left.id.localeCompare(right.id)
 }
 
+function isChronological(messages: Message[]): boolean {
+  return messages.every((message, index) => (
+    index === 0 || compareMessages(messages[index - 1], message) <= 0
+  ))
+}
+
+function yieldForPagePaint(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 0))
+}
+
 /** Merge page/live arrivals without replacing the store array unnecessarily. */
 export function mergeRealtimeMessages(incoming: Array<RawMessage | Message>): number {
   const transformed = incoming.map(message => transformRawMessage(message as RawMessage))
   let added = 0
   useAppStore.setState(state => {
-    const byId = new Map(state.messages.map(message => [message.id, message]))
+    const existingIds = new Set(state.messages.map(message => message.id))
+    const additionsById = new Map<string, Message>()
     for (const message of transformed) {
-      if (byId.has(message.id)) continue
-      byId.set(message.id, message)
-      added += 1
+      if (existingIds.has(message.id) || additionsById.has(message.id)) continue
+      additionsById.set(message.id, message)
     }
+    added = additionsById.size
     if (!added) return state
-    return { messages: [...byId.values()].sort(compareMessages) }
+    const existing = isChronological(state.messages)
+      ? state.messages
+      : [...state.messages].sort(compareMessages)
+    const additions = [...additionsById.values()].sort(compareMessages)
+    const messages: Message[] = []
+    let existingIndex = 0
+    let additionIndex = 0
+    while (existingIndex < existing.length && additionIndex < additions.length) {
+      if (compareMessages(existing[existingIndex], additions[additionIndex]) <= 0) {
+        messages.push(existing[existingIndex++])
+      } else {
+        messages.push(additions[additionIndex++])
+      }
+    }
+    messages.push(...existing.slice(existingIndex), ...additions.slice(additionIndex))
+    return { messages }
   })
   return added
 }
@@ -76,6 +104,9 @@ export async function loadRealtimeMessageHistory(
   let initial = true
   let verifiedComplete = false
   const overlapIds = new Set(useAppStore.getState().messages.map(message => message.id))
+  const pageSize = options.stopWhenOverlapping
+    ? RECONNECT_REALTIME_MESSAGE_PAGE_SIZE
+    : INITIAL_REALTIME_MESSAGE_PAGE_SIZE
   const reportFailure = (error: unknown, wasInitial: boolean) => {
     if (wasInitial && options.onInitialFailure) {
       options.onInitialFailure(error)
@@ -84,9 +115,10 @@ export async function loadRealtimeMessageHistory(
     options.onFailure?.(error)
   }
 
+  await yieldForPagePaint()
   while (pages < 100 && ownsSession(sessionId, options)) {
     if (!ownsSession(sessionId, options)) break
-    const query = new URLSearchParams({ limit: String(REALTIME_MESSAGE_PAGE_SIZE) })
+    const query = new URLSearchParams({ limit: String(pageSize) })
     if (before) query.set('before', before)
     try {
       const page = await apiFetch<RealtimeMessagePage>(
@@ -95,7 +127,7 @@ export async function loadRealtimeMessageHistory(
         options.ownsResponse,
       )
       if (!ownsSession(sessionId, options)) break
-      const pageMessages = (page.messages || []).map(transformRawMessage)
+      const pageMessages = page.messages || []
       const pageOverlaps = pageMessages.some(message => overlapIds.has(message.id))
       added += mergeRealtimeMessages(pageMessages)
       pages += 1
@@ -118,6 +150,7 @@ export async function loadRealtimeMessageHistory(
         break
       }
       before = page.next_before
+      await yieldForPagePaint()
     } catch (error) {
       if (!ownsSession(sessionId, options)) break
       if (error instanceof ApiError && error.code === 'MESSAGE_CURSOR_EXPIRED' && !restartedCursor) {

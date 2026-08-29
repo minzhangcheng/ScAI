@@ -1,12 +1,12 @@
 import { useAppStore } from '../../../stores/appStore'
 import { restoreAgentErrors } from '../../../utils/messageTransform'
-import { transformLoadResponse } from '../../../utils/transformLoadResponse'
 import { devLog } from '../../../utils/logger'
 import { getToken } from '../../../utils/authStorage'
 import { WS_AUTH_SUBPROTOCOL } from '../../../constants/auth'
-import { WS_CONNECT_TIMEOUT_MS, ApiError, apiFetch, applyStoreUpdates } from '../client'
+import { WS_CONNECT_TIMEOUT_MS, ApiError } from '../client'
 import { loadRealtimeMessageHistory, mergeRealtimeMessages } from '../realtimeHistory'
 import { handleWebSocketMessage } from './messageHandlers'
+import { reloadSessionState } from './sessionReload'
 import type { ConnectionContext, ConnectionRefs } from './types'
 
 const RECONNECTABLE_SESSION_STATUSES = new Set([
@@ -17,7 +17,7 @@ const RECONNECTABLE_SESSION_STATUSES = new Set([
 export function connectWebSocket(ctx: ConnectionContext): void {
   const {
     wsRef, connectionAttemptRef, connectTimeoutRef, reconnectCountRef,
-    reconnectTimerRef, restoreCommitRefreshesRef, setConnected,
+    reconnectTimerRef, restoreCommitRefreshesRef, stateSyncEpochRef, setConnected,
     setWsConnected, addMessage,
   } = ctx
   // Use fresh state to avoid stale closure references
@@ -108,38 +108,41 @@ export function connectWebSocket(ctx: ConnectionContext): void {
     // disconnected realtime gap.
     if (isReconnect && freshSession) {
       const loadingSessionId = freshSession.id
-      const ownsReconnectLoad = () => (
+      const reconnectLoadEpoch = stateSyncEpochRef.current
+      const ownsReconnectStateLoad = () => (
+        isCurrentAttempt()
+        && useAppStore.getState().currentSession?.id === loadingSessionId
+        && stateSyncEpochRef.current === reconnectLoadEpoch
+      )
+      const ownsReconnectSocket = () => (
         isCurrentAttempt()
         && useAppStore.getState().currentSession?.id === loadingSessionId
       )
       try {
         devLog('WebSocket: Reconnect detected, reloading session state...')
-        const data = await apiFetch<any>(
-          `/session/${freshSession.id}/load`,
-          undefined,
-          ownsReconnectLoad,
+        const data = await reloadSessionState(
+          loadingSessionId,
+          'WebSocket: Failed to reload session state after reconnect:',
+          ownsReconnectStateLoad,
         )
 
-        if (!ownsReconnectLoad()) return
-        const { sessionUpdates, storeUpdates } = transformLoadResponse(data)
-        useAppStore.getState().updateSession(sessionUpdates)
-        applyStoreUpdates(storeUpdates)
-        if (data.agent_errors && Array.isArray(data.agent_errors)) {
+        if (!ownsReconnectSocket()) return
+        if (data && Array.isArray(data.agent_errors)) {
           restoreAgentErrors(data.agent_errors)
         }
-        if (data.messages && Array.isArray(data.messages)) {
+        if (data && Array.isArray(data.messages)) {
           mergeRealtimeMessages(data.messages)
         }
         useAppStore.getState().setRealtimeHistoryError(null)
         const reportHistoryFailure = (error: unknown) => {
-          if (ownsReconnectLoad()) {
+          if (ownsReconnectSocket()) {
             useAppStore.getState().setRealtimeHistoryError(
               error instanceof Error ? error.message : 'Failed to load realtime history',
             )
           }
         }
         await loadRealtimeMessageHistory(loadingSessionId, {
-          ownsResponse: ownsReconnectLoad,
+          ownsResponse: ownsReconnectSocket,
           stopWhenOverlapping: true,
           onInitialFailure: reportHistoryFailure,
           onFailure: reportHistoryFailure,
@@ -157,7 +160,7 @@ export function connectWebSocket(ctx: ConnectionContext): void {
           ws.close()
           return
         }
-        if (ownsReconnectLoad()) {
+        if (ownsReconnectSocket()) {
           useAppStore.getState().setRealtimeHistoryError(
             e instanceof Error ? e.message : 'Failed to reload session state/history',
           )
@@ -172,7 +175,7 @@ export function connectWebSocket(ctx: ConnectionContext): void {
 
   ws.onmessage = (event) => handleWebSocketMessage(event, {
     session, attempt, ws, isCurrentAttempt, ownsSocketSession,
-    restoreCommitRefreshesRef, addMessage,
+    restoreCommitRefreshesRef, stateSyncEpochRef, addMessage,
   })
 
   ws.onerror = (error) => {

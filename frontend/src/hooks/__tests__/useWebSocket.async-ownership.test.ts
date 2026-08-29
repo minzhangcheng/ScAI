@@ -174,6 +174,146 @@ describe('WebSocket async response ownership', () => {
     expect(useAppStore.getState().stateVersion).toBe(10)
   })
 
+  it('accepts an authoritative lower reload and then applies the next sync', async () => {
+    let resolveReload!: (response: Response) => void
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(
+      new Promise<Response>(resolve => { resolveReload = resolve }),
+    ))
+    useAppStore.setState({
+      currentSession: { ...session('same'), currentRound: 4 },
+      stateVersion: 50,
+    })
+    const { result } = renderHook(() => useWebSocket())
+    act(() => result.current.connect())
+    const socket = SocketMock.instances[0]
+
+    act(() => socket.onmessage?.({
+      data: JSON.stringify({ type: 'state_sync', version: 49 }),
+    } as MessageEvent))
+    await act(async () => {
+      resolveReload(jsonResponse({
+        session_id: 'same',
+        status: 'running',
+        current_round: 3,
+        state_version: 47,
+      }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(useAppStore.getState().stateVersion).toBe(47)
+    expect(useAppStore.getState().currentSession?.currentRound).toBe(3)
+
+    act(() => socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'state_sync',
+        content: { version: 48, current_round: 4 },
+      }),
+    } as MessageEvent))
+
+    expect(useAppStore.getState().stateVersion).toBe(48)
+    expect(useAppStore.getState().currentSession?.currentRound).toBe(4)
+  })
+
+  it('drops a pending reload after a newer sync in the same generation', async () => {
+    let resolveReload!: (response: Response) => void
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(
+      new Promise<Response>(resolve => { resolveReload = resolve }),
+    ))
+    useAppStore.setState({
+      currentSession: { ...session('same'), currentRound: 4 },
+      stateVersion: 10,
+    })
+    const { result } = renderHook(() => useWebSocket())
+    act(() => result.current.connect())
+    const socket = SocketMock.instances[0]
+
+    act(() => socket.onmessage?.({
+      data: JSON.stringify({ type: 'state_sync', version: 9 }),
+    } as MessageEvent))
+    act(() => socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'state_sync', content: { version: 11, current_round: 5 },
+      }),
+    } as MessageEvent))
+
+    await act(async () => {
+      resolveReload(jsonResponse({
+        session_id: 'same', current_round: 99, state_version: 10,
+      }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(useAppStore.getState().currentSession?.currentRound).toBe(5)
+    expect(useAppStore.getState().stateVersion).toBe(11)
+  })
+
+  it('drops a pending reload after an equal-version sync in the same generation', async () => {
+    let resolveReload!: (response: Response) => void
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(
+      new Promise<Response>(resolve => { resolveReload = resolve }),
+    ))
+    useAppStore.setState({
+      currentSession: { ...session('same'), currentRound: 4 },
+      stateVersion: 10,
+    })
+    const { result } = renderHook(() => useWebSocket())
+    act(() => result.current.connect())
+    const socket = SocketMock.instances[0]
+
+    act(() => socket.onmessage?.({
+      data: JSON.stringify({ type: 'state_sync', version: 9 }),
+    } as MessageEvent))
+    act(() => socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'state_sync', content: { version: 10, current_round: 5 },
+      }),
+    } as MessageEvent))
+
+    await act(async () => {
+      resolveReload(jsonResponse({
+        session_id: 'same', current_round: 99, state_version: 10,
+      }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(useAppStore.getState().currentSession?.currentRound).toBe(5)
+    expect(useAppStore.getState().stateVersion).toBe(10)
+  })
+
+  it('drops a pending reload when the same session ID gets a new object', async () => {
+    let resolveReload!: (response: Response) => void
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(
+      new Promise<Response>(resolve => { resolveReload = resolve }),
+    ))
+    useAppStore.setState({
+      currentSession: { ...session('same'), currentRound: 4 },
+      stateVersion: 10,
+    })
+    const { result } = renderHook(() => useWebSocket())
+    act(() => result.current.connect())
+    const socket = SocketMock.instances[0]
+
+    act(() => socket.onmessage?.({
+      data: JSON.stringify({ type: 'state_sync', version: 9 }),
+    } as MessageEvent))
+    act(() => useAppStore.getState().setCurrentSession({
+      ...session('same'), currentRound: 7,
+    }))
+
+    await act(async () => {
+      resolveReload(jsonResponse({
+        session_id: 'same', current_round: 99, state_version: 9,
+      }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(useAppStore.getState().currentSession?.currentRound).toBe(7)
+  })
+
   it('does not let an old lifecycle error retire the new generation', async () => {
     let resolveOld!: (response: Response) => void
     vi.stubGlobal('fetch', vi.fn().mockReturnValue(
@@ -321,6 +461,48 @@ describe('WebSocket async response ownership', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
+  it('releases restore-commit dedupe when a later sync overtakes its reload', async () => {
+    const resolvers: Array<(response: Response) => void> = []
+    const fetchMock = vi.fn().mockImplementation(() => (
+      new Promise<Response>(resolve => { resolvers.push(resolve) })
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+    useAppStore.setState({
+      currentSession: { ...session('same'), currentRound: 4 },
+      stateVersion: 10,
+    })
+    const { result } = renderHook(() => useWebSocket())
+    act(() => result.current.connect())
+    const socket = SocketMock.instances[0]
+    const commit = JSON.stringify({
+      type: 'state_sync',
+      content: {
+        change_type: 'snapshot_transaction',
+        snapshot_transaction: {
+          transaction_id: 'tx-retry', session_id: 'same', status: 'committed',
+        },
+      },
+    })
+
+    act(() => socket.onmessage?.({ data: commit } as MessageEvent))
+    act(() => socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'state_sync', content: { version: 10, current_round: 5 },
+      }),
+    } as MessageEvent))
+    await act(async () => {
+      resolvers[0](jsonResponse({
+        session_id: 'same', current_round: 99, state_version: 10,
+      }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(useAppStore.getState().currentSession?.currentRound).toBe(5)
+
+    act(() => socket.onmessage?.({ data: commit } as MessageEvent))
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('reloads authoritative state before overlap-bounded reconnect paging', async () => {
     vi.useFakeTimers()
     setToken('test-token')
@@ -361,6 +543,59 @@ describe('WebSocket async response ownership', () => {
       resolvers[1](jsonResponse({ session_id: 'history', status: 'running', messages: [], has_more: false }))
       await reconnectOpen
     })
+    vi.useRealTimers()
+  })
+
+  it('continues reconnect history paging when a sync overtakes the state reload', async () => {
+    vi.useFakeTimers()
+    setToken('test-token')
+    const resolvers: Array<(response: Response) => void> = []
+    const fetchMock = vi.fn<typeof fetch>(() => new Promise<Response>(resolve => {
+      resolvers.push(resolve)
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    useAppStore.setState({
+      currentSession: { ...session('history'), currentRound: 1 },
+      stateVersion: 1,
+    })
+    const { result } = renderHook(() => useWebSocket())
+
+    act(() => result.current.connect())
+    const first = SocketMock.instances[0]
+    await act(async () => {
+      await first.onopen?.(new Event('open'))
+    })
+    act(() => first.onclose?.({ code: 1006, reason: '' } as CloseEvent))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000)
+    })
+    const second = SocketMock.instances[1]
+    let reconnectOpen!: Promise<unknown>
+    await act(async () => {
+      reconnectOpen = Promise.resolve(second.onopen?.(new Event('open')))
+      await Promise.resolve()
+    })
+
+    act(() => second.onmessage?.({
+      data: JSON.stringify({
+        type: 'state_sync', content: { version: 2, current_round: 2 },
+      }),
+    } as MessageEvent))
+    await act(async () => {
+      resolvers[0](jsonResponse({
+        session_id: 'history', current_round: 99, state_version: 1,
+      }))
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    })
+
+    expect(String(fetchMock.mock.calls[1][0])).toContain('/messages?limit=20')
+    await act(async () => {
+      resolvers[1](jsonResponse({ messages: [], has_more: false }))
+      await reconnectOpen
+    })
+    expect(useAppStore.getState().currentSession?.currentRound).toBe(2)
+    expect(useAppStore.getState().stateVersion).toBe(2)
     vi.useRealTimers()
   })
 

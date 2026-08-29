@@ -1,5 +1,4 @@
 import { useAppStore, Message, Session, AgentType, RoundResult } from '../../../stores/appStore'
-import { transformRawMessage } from '../../../utils/messageTransform'
 import { transformRoundResults } from '../../../utils/transformLoadResponse'
 import { devLog } from '../../../utils/logger'
 import { resultIdentityKey } from '../../../utils/roundKey'
@@ -16,7 +15,10 @@ const SNAPSHOT_REMINDER_INTERVAL = 5
 const MAX_RESTORE_COMMIT_REFRESH_KEYS = 64
 
 function handleStateSync(data: any, context: MessageHandlerContext): void {
-  const { attempt, isCurrentAttempt, restoreCommitRefreshesRef } = context
+  const {
+    attempt, isCurrentAttempt, restoreCommitRefreshesRef, stateSyncEpochRef,
+  } = context
+  stateSyncEpochRef.current += 1
   // Normalise: some backend paths nest fields under `content`
   // while others place them at the top level of the message.
   const syncContent = data.content ?? data
@@ -40,9 +42,11 @@ function handleStateSync(data: any, context: MessageHandlerContext): void {
     console.warn('WebSocket: Received outdated state sync, current:', currentVersion, 'received:', syncContent.version, '. Reloading session state.')
     const sessionId = useAppStore.getState().currentSession?.id
     if (sessionId) {
+      const reloadEpoch = stateSyncEpochRef.current
       const ownsReload = () => (
         isCurrentAttempt()
         && useAppStore.getState().currentSession?.id === sessionId
+        && stateSyncEpochRef.current === reloadEpoch
       )
       void reloadSessionState(
         sessionId,
@@ -152,9 +156,11 @@ function handleStateSync(data: any, context: MessageHandlerContext): void {
             const expired = refreshes.order.shift()
             if (expired) refreshes.keys.delete(expired)
           }
+          const restoreReloadEpoch = stateSyncEpochRef.current
           const ownsRestoreReload = () => (
             isCurrentAttempt()
             && useAppStore.getState().currentSession?.id === activeSessionId
+            && stateSyncEpochRef.current === restoreReloadEpoch
           )
           void reloadSessionState(
             activeSessionId,
@@ -268,9 +274,8 @@ export function handleWebSocketMessage(
     // Handle message_history - batch restore messages (e.g. reconnect to completed session)
     if (data.type === 'message_history') {
       if (data.content?.messages && Array.isArray(data.content.messages)) {
-        const serverMessages = data.content.messages.map(transformRawMessage)
-        mergeRealtimeMessages(serverMessages)
-        devLog(`WebSocket: Merged ${serverMessages.length} legacy history messages`)
+        mergeRealtimeMessages(data.content.messages)
+        devLog(`WebSocket: Merged ${data.content.messages.length} legacy history messages`)
       }
       return  // Don't add message_history itself to the message stream
     }
