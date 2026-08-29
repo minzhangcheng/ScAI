@@ -1,18 +1,8 @@
 import pytest
-import hashlib
 import json
 import re
 from pathlib import Path
 from backend.services.report.regenerator import _build_analysis_log_from_report
-
-
-def _normalized_html_digest(path):
-    html = Path(path).read_text(encoding="utf-8")
-    html = re.sub(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", "<TIMESTAMP>", html)
-    html = re.sub(
-        r"\b[0-9a-f]{8}-[0-9a-f-]{27,}\b", "<UUID>", html,
-    )
-    return hashlib.sha256(html.encode()).hexdigest()
 
 
 def test_build_analysis_log_from_report_ignores_extra_fields():
@@ -107,9 +97,90 @@ async def test_regeneration_and_figureless_generator_html_are_stable(tmp_path):
     )
     generated = await generator._generate_html_report(report, "en", state=None)
 
-    assert _normalized_html_digest(regenerated) == (
-        "637825a2d64c3d400d7e00afacbaf92772c7715d2006972f5c5e66d96101eb98"
+    # What this used to assert: two hardcoded sha256 digests of the whole page.
+    # 0.49.3 deliberately replaced the status banner and quality-disclosure
+    # sections with one consolidated limitations block, the digests were never
+    # re-baselined, and the test sat red for two releases saying only "the bytes
+    # changed" -- which is why the content 0.49.3 dropped went unnoticed. Assert
+    # the properties a regression would actually violate instead.
+    regenerated_html = Path(regenerated).read_text(encoding="utf-8")
+    generated_html = Path(generated).read_text(encoding="utf-8")
+
+    for label, page in (("regenerator", regenerated_html), ("generator", generated_html)):
+        # Every template slot is filled: an unfilled one renders as literal
+        # "{placeholder}" in a shipped report.
+        leftovers = sorted(set(re.findall(r"\{[a-z_]{4,}\}", page)))
+        assert not leftovers, f"{label}: unresolved template placeholders {leftovers}"
+        # No Python object repr or traceback leaked into the page.
+        assert "Traceback" not in page, f"{label}: traceback in report"
+        assert "<built-in" not in page and "object at 0x" not in page
+        # The report's own content survived the template.
+        assert "Figureless" in page, f"{label}: title missing"
+        assert "Results" in page, f"{label}: section title missing"
+        assert "No figures" in page, f"{label}: section content missing"
+        # A report with nothing to qualify carries no limitations block.
+        assert "Detailed evidence qualifications" not in page, (
+            f"{label}: clean report grew an empty limitations block"
+        )
+
+    # The two producers render the same report from the same template and must
+    # not drift apart. They differ only in indentation, so compare on collapsed
+    # whitespace -- the old test pinned them to two INDEPENDENT digests, which
+    # could not have caught a divergence between them at all.
+    def _collapsed(page):
+        page = re.sub(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", "<TIMESTAMP>", page)
+        page = re.sub(r"\b[0-9a-f]{8}-[0-9a-f-]{27,}\b", "<UUID>", page)
+        return re.sub(r"\s+", " ", page).strip()
+
+    assert _collapsed(regenerated_html) == _collapsed(generated_html), (
+        "regenerator and generator HTML have diverged"
     )
-    assert _normalized_html_digest(generated) == (
-        "62beb06001ae0f21ec7abc96b9d8e8b05d6d35421b68853d1a03d32b97645a1b"
-    )
+
+
+@pytest.mark.asyncio
+async def test_qualified_report_shows_the_limitations_block(tmp_path):
+    """The counterpart to the clean case above: when there IS something to
+    disclose, the block appears and names the specifics an audit needs."""
+    from backend.services.report.regenerator import generate_html_report
+
+    report = {
+        "session_id": "session",
+        "title": "Qualified",
+        "abstract": "A",
+        "conclusions": "C",
+        "generated_at": "2026-01-01T00:00:00",
+        "status": "partial",
+        "partial_reasons": ["analysis_quality"],
+        "sections": [{
+            "id": "results",
+            "title": "Results",
+            "analysis_type": "general",
+            "content": "Body",
+            "figures": [],
+            "tables": [],
+        }],
+        "score_definitions": [],
+        "quality_disclosures": {
+            "blocking_issues": ["Round 2 evidence is unverified."],
+            "cautions": ["Only one biological replicate per condition."],
+            "post_execution_reviews": [{
+                "round_number": 2,
+                "plan_audit": {"unmet_titles": ["Cell communication"]},
+                "assessment": {"remaining_gaps": ["Validate interaction"]},
+            }],
+        },
+    }
+    out_dir = tmp_path / "qualified"
+    (out_dir / "figures").mkdir(parents=True)
+    (out_dir / "tables").mkdir()
+    (out_dir / "report.json").write_text(json.dumps(report), encoding="utf-8")
+
+    page = Path(generate_html_report(out_dir)).read_text(encoding="utf-8")
+
+    assert "Detailed evidence qualifications" in page
+    assert "Round 2 evidence is unverified" in page
+    assert "Only one biological replicate per condition" in page
+    # The specifics, not just the summary: a reader must be able to see WHICH
+    # plan step was missed and WHICH gap remains.
+    assert "Cell communication" in page
+    assert "Validate interaction" in page

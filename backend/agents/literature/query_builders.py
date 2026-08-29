@@ -313,11 +313,18 @@ Experimental background:
 Rules for PubMed query:
 1. Use MeSH terms where appropriate (e.g., "Mice, Knockout"[MeSH])
 2. Use Boolean operators (AND, OR, NOT)
-3. Keep the query focused but not overly restrictive — aim for 20-200 results
+3. Keep the query focused but not overly restrictive. Do NOT tune the query toward a
+   target number of hits: a precise query that returns few results on a genuinely narrow
+   topic is a correct outcome, and broadening it until some count is reached only buys
+   tangentially related papers that later get cited as support
 4. Identify species, tissue/organ, and disease model from the background and include as filters
-5. If specific gene names appear in the findings, pick the 2-3 most relevant ones
+5. If specific gene names appear in the findings, include the ones that carry the question —
+   as many as that takes, and no more; a gene added to widen the net is noise
 6. Use field tags like [Title/Abstract], [MeSH] when helpful
-7. Prefer broader terms over highly specific ones to avoid zero-result queries
+7. Prefer the terms that match the question. If a precise query returns nothing, first
+   check the terminology (synonyms, MeSH wording, gene aliases) before broadening the
+   scope — a genuinely novel topic with no directly relevant literature is a finding,
+   and widening the query until something matches only replaces it with a different topic
 
 Return ONLY the PubMed query string, nothing else."""
 

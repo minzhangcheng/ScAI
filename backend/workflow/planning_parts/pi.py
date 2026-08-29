@@ -191,6 +191,80 @@ async def prepare_pi_planning(self, ctx, state):
     )
     return ctx
 
+def _selection_rationale(decision) -> str:
+    if isinstance(decision, dict):
+        return str(decision.get("selection_rationale") or "")
+    return ""
+
+
+def _decision_outcome(decision, selected_dirs, rationale: str) -> str:
+    """Distinguish a scientific "none" from a malfunction, after the fact.
+
+    Both leave pi_selected empty, and the report has to be able to tell them
+    apart months later. The selector now returns this explicitly; reading it back
+    out of the English rationale was one rewording away from being wrong.
+    """
+    if isinstance(decision, dict):
+        outcome = str(decision.get("decision_outcome") or "")
+        if outcome in {"selected", "none_selected", "tooling_failure"}:
+            return outcome
+    if selected_dirs:
+        return "selected"
+    return "tooling_failure" if "UNAVAILABLE" in (rationale or "") else "none_selected"
+
+
+def _note_round_evidence(analysis_state, note: str) -> None:
+    """Put a selection tooling failure where the final report will find it."""
+    latest = analysis_state.get_latest_round() if analysis_state else None
+    if latest is None or not note:
+        return
+    notes = list(getattr(latest, "evidence_notes", []) or [])
+    if note not in notes:
+        notes.append(note)
+        latest.evidence_notes = notes
+
+
+async def _apply_round1_direction_selection(node, analysis_state, selected_dirs):
+    """Install the Round-1 PI direction choice, including choosing none.
+
+    Returns (instructions, skip_nodes). An empty selection is a real outcome, not
+    a failure: it means nothing in Round 1 was worth an innovation round, and the
+    run finalizes on what it has -- the same route the integration gate takes.
+    Inventing a "Continue analysis" placeholder here would send a whole round
+    after a direction nobody selected.
+    """
+    if not selected_dirs:
+        logger.info(
+            f"[{node.session_id}] PI selected 0 directions; finalizing on Round 1"
+        )
+        analysis_state.final_report_requested = True
+        analysis_state.user_chosen_direction = None
+        analysis_state.pending_integration = False
+        return (
+            {
+                "pathology_tasks": [],
+                "bioinformatics_tasks": [],
+                "biochemistry_tasks": [],
+                "literature_topics": [],
+            },
+            ["pathology_analysis", "biochemistry_analysis", "literature_research"],
+        )
+
+    analysis_state.user_chosen_directions = selected_dirs
+    analysis_state.active_direction_batch = list(selected_dirs)
+    analysis_state.pending_integration = False
+    first_dir = selected_dirs[0]
+    analysis_state.directions_queue = selected_dirs[1:] if len(selected_dirs) > 1 else []
+    analysis_state.max_rounds = len(selected_dirs) + 1  # Round 1 + N direction rounds
+    dir_text = first_dir.get("direction", "")
+    instructions = await node.pi_agent.innovation_instruction(
+        analysis_state, dir_text, notes=first_dir.get("notes", "")
+    )
+    analysis_state.current_round_direction = dir_text
+    analysis_state.user_chosen_direction = None
+    return instructions, []
+
+
 async def build_pi_instructions(self, ctx, state):
     analysis_state = ctx["analysis_state"]
     adjusted_instructions = ctx["adjusted_instructions"]
@@ -297,6 +371,12 @@ async def build_pi_instructions(self, ctx, state):
                         for d in selected_dirs
                     ]
                     _rec.event_type = "pi_decide"
+                    _rec.selection_rationale = _selection_rationale(selection_decision)
+                    _rec.decision_outcome = _decision_outcome(
+                        selection_decision, selected_dirs, _rec.selection_rationale
+                    )
+                    if _rec.decision_outcome == "tooling_failure":
+                        _note_round_evidence(analysis_state, _rec.selection_rationale)
 
                     # Clear gate state now that PI has decided
                     analysis_state.integration_gate_candidates = []
@@ -352,24 +432,17 @@ async def build_pi_instructions(self, ctx, state):
                         for d in selected_dirs
                     ]
                     rec.event_type = "pi_decide"
+                    rec.selection_rationale = _selection_rationale(selection_decision)
+                    rec.decision_outcome = _decision_outcome(
+                        selection_decision, selected_dirs, rec.selection_rationale
+                    )
+                    if rec.decision_outcome == "tooling_failure":
+                        _note_round_evidence(analysis_state, rec.selection_rationale)
                     if analysis_state.exploration_report and isinstance(selection_decision, dict):
                         analysis_state.exploration_report.direction_selection_summary = selection_decision
-                    # Set up multi-direction queue
-                    analysis_state.user_chosen_directions = selected_dirs
-                    analysis_state.active_direction_batch = list(selected_dirs)
-                    analysis_state.pending_integration = False
-                    # Pop first direction, rest goes to queue
-                    first_dir = selected_dirs[0] if selected_dirs else {"direction": "Continue analysis", "notes": ""}
-                    analysis_state.directions_queue = selected_dirs[1:] if len(selected_dirs) > 1 else []
-                    analysis_state.max_rounds = len(selected_dirs) + 1  # Round 1 + N direction rounds
-                    dir_text = first_dir.get("direction", "")
-                    dir_notes = first_dir.get("notes", "")
-                    instructions = await self.pi_agent.innovation_instruction(
-                        analysis_state, dir_text, notes=dir_notes
+                    instructions, skip_nodes = await _apply_round1_direction_selection(
+                        self, analysis_state, selected_dirs
                     )
-                    analysis_state.current_round_direction = dir_text
-                    analysis_state.user_chosen_direction = None
-                    skip_nodes = []
             else:
                 # Subsequent innovation rounds (3+): use previous round's next_steps
                 last_round = analysis_state.get_latest_round()

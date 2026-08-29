@@ -27,6 +27,7 @@ from unittest.mock import patch as _mock_patch
 # facade module -> package its implementation was split into
 SPLIT_PACKAGES: dict[str, str] = {
     "backend.agents.bioinformatics_agent": "backend.agents.bioinformatics",
+    "backend.agents.biochemistry_agent": "backend.agents.biochemistry_parts",
     "backend.agents.literature_agent": "backend.agents.literature",
     "backend.agents.pi_agent": "backend.agents.pi",
     "backend.agents.pathology_agent": "backend.agents.pathology_parts",

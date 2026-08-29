@@ -102,7 +102,9 @@ async def prepare_bioinformatics_instruction(self, state, analysis_state):
     if planning_stage == "stage1":
         stage1_tasks = [t for t in bioinf_tasks if _has_stage1_keyword(_get_task_text(t))]
         if not stage1_tasks:
-            stage1_tasks = ["Execute scRNA-seq QC, clustering, and cell type annotation"]
+            stage1_tasks = [
+                "Execute scRNA-seq QC, clustering, and cell type annotation"
+            ]
         bioinf_tasks = stage1_tasks
     elif planning_stage == "stage2":
         # The user-reviewed stage2 plan lives in current_plan; pi_instructions

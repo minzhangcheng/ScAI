@@ -57,6 +57,7 @@ from backend.services.report.quality import (
     build_report_partial_fields,
     build_quality_disclosures,
     render_report_limitations_html,
+    render_report_status_line_html,
 )
 from backend.services.report.report_outline import build_report_outline
 from .generator_parts import (

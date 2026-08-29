@@ -130,7 +130,16 @@ def _normalize_integration_scored_candidates(
         raw = raw_by_id.get(str(candidate.get("direction_id", "")))
         if raw is None:
             raw = raw_by_direction.get(str(candidate.get("direction", "")).strip())
-        merged = dict(raw or {})
+        if raw is None:
+            # The scorer is asked to SCORE the candidates it was given. A scored
+            # entry matching none of them is a new direction the scoring step
+            # invented -- previously `dict(raw or {})` accepted it and it became a
+            # real candidate, which is how an empty proposal could still end up
+            # producing directions to investigate.
+            label = str(candidate.get("direction", ""))[:120] or "unnamed"
+            logger.warning("[PI] Scorer returned an unmatched candidate %r; dropping it", label)
+            continue
+        merged = dict(raw)
         for key, value in candidate.items():
             if value not in (None, "", [], {}):
                 merged[key] = value

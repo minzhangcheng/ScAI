@@ -27,6 +27,21 @@ from .shared import (  # noqa: F401
 )
 
 
+def _candidates_are_usable(data) -> bool:
+    """Whether a candidate response can be read at all.
+
+    A missing key, a non-list, or a non-empty list with no object in it are all
+    the same kind of answer: we could not read it. An EMPTY list is different --
+    that is the PI saying there is nothing worth investigating.
+    """
+    if not isinstance(data, dict):
+        return False
+    candidates = data.get("candidates")
+    if not isinstance(candidates, list):
+        return False
+    return not candidates or any(isinstance(c, dict) for c in candidates)
+
+
 class DirectionCandidatesMixin:
     """Generation and evidence-scoring of research-direction candidates."""
 
@@ -57,7 +72,13 @@ class DirectionCandidatesMixin:
                 lines.append(f"- {p.to_prompt_text(style='direction', max_observations=2, max_genes=12, max_missing=2)}")
             mech_block = "\n".join(lines)
 
-        prompt = f"""Based on the Round 1 exploration results, propose 3-5 raw research direction candidates.
+        prompt = f"""Based on the Round 1 exploration results, propose raw research direction candidates.
+
+Propose as many as the results actually support — usually a handful. If Round 1 produced
+nothing that would justify a further round of investigation, return an EMPTY candidates
+list and say why in no_candidate_reason. That is a legitimate and useful answer: a
+manufactured direction consumes a whole round chasing something the data never suggested.
+Do not pad the list to reach a count.
 
 ## Project Context
 - Name: {state.name}
@@ -85,7 +106,7 @@ For each candidate, provide ALL of the following fields:
 - direction: A specific, actionable research question
 - core_observation: Concrete Round 1 data observation motivating the candidate. Must cite specific data elements such as cluster ID, cell type, gene, pathway, fold-change, p-value, correlation, module score, or sample-level observation.
 - main_hypothesis: Primary testable hypothesis.
-- alternative_hypotheses: Array of at least two strings unless the data clearly excludes alternatives. Consider different transcriptional regulators, different ions/metals, different biological process classes, different causal direction, and technical artifacts. Never return a single string.
+- alternative_hypotheses: Array of at least two strings unless the data clearly excludes alternatives. Draw the alternatives from THIS study's measured entities and design. Consider at least: a different molecular driver of the same observation, a different biological process class, the reverse causal direction, an unmodelled covariate or composition shift, and technical artifacts (ambient signal, doublets, batch, depth). Never return a single string.
 - artifact_risks: Array of strings describing technical or interpretive risks such as batch effect, doublets, low-quality cluster, annotation uncertainty, ambient RNA, dropout, or confounded design. Never return a single string.
 - rationale: Why this direction is interesting based on the data
 - supporting_data: Array of objects with string fields source, evidence, and strength (high|medium|low). Never return a scalar.
@@ -120,32 +141,45 @@ Return a JSON object with a single key "candidates" containing the list of candi
     ]
 }}
 """
-        response = await self.chat(prompt, temperature=0.3)
-        data = self._safe_parse_json(response, default={})
-        candidates = data.get("candidates", []) if isinstance(data, dict) else []
-        if not isinstance(candidates, list):
-            candidates = []
+        self.last_candidate_generation_error = None
+        data = {}
+        for attempt in range(2):
+            response = await self.chat(prompt, temperature=0.3)
+            data = self._safe_parse_json(response, default={})
+            # A list holding no usable object is as unreadable as no list at all,
+            # so it has to be judged HERE -- checking it after the retry loop meant
+            # {"candidates": ["bad"]} was declared a structural failure without ever
+            # being retried.
+            if _candidates_are_usable(data):
+                break
+            logger.warning(
+                "[PI] Direction-candidate response unreadable (attempt %s/2)", attempt + 1
+            )
+        # "The PI proposed no direction" and "we could not read the PI's reply" are
+        # different facts and only the second is a malfunction. Conflating them
+        # meant an honest empty answer was overwritten with a fabricated
+        # "Continue analysis based on Round 1 findings" candidate, which then flowed
+        # through scoring and selection as though the PI had proposed it.
+        response_readable = _candidates_are_usable(data)
+        candidates = data.get("candidates", []) if response_readable else []
+        if not candidates and response_readable:
+            logger.info(
+                "[PI] No research direction candidates proposed: %s",
+                (data.get("no_candidate_reason") or "no reason given")
+                if isinstance(data, dict) else "no reason given",
+            )
+            return []
         if not candidates:
-            logger.warning("[PI] Raw direction candidates empty, using fallback")
-            candidates = [{
-                "direction_id": "dir_001",
-                "direction": "Continue analysis based on Round 1 findings",
-                "hypothesis": "Further exploration needed",
-                "rationale": "No specific candidates generated",
-                "supporting_data": "",
-                "key_genes": [],
-                "key_cell_types": [],
-                "key_pathways": [],
-                "key_uncertainties": [],
-                "suggested_literature_topics": [],
-                "suggested_methods": [],
-                "biology_expectedness": "unknown",
-                "functional_impact_hypothesis": "",
-                "prerequisite_dependencies": [],
-                "organism": state.species or "Not specified",
-                "tissue": "",
-                "experimental_context": "",
-            }]
+            logger.error(
+                "[PI] Direction-candidate response could not be parsed; returning no "
+                "candidates and recording the failure out-of-band"
+            )
+            self.last_candidate_generation_error = (
+                "The PI's Round 1 direction-candidate response could not be read. No "
+                "candidates were produced by this attempt. This is a tooling failure, not "
+                "a finding that the data supports no direction."
+            )
+            return []
         return [
             _normalize_direction_candidate(candidate)
             for candidate in candidates
@@ -174,7 +208,12 @@ Return a JSON object with a single key "candidates" containing the list of candi
                 f"- Literature: {json.dumps(rr.literature_findings[:3], ensure_ascii=False)}\n"
                 f"- Summary: {(rr.pi_summary or '')[:600]}"
             )
-        prompt = f"""Based on the CUMULATIVE integration of ALL innovation rounds so far, propose 3-5 NEW research direction candidates that go BEYOND what has already been investigated.
+        prompt = f"""Based on the CUMULATIVE integration of ALL innovation rounds so far, propose NEW research direction candidates that go BEYOND what has already been investigated.
+
+Propose as many as the integrated results support, and none if they support none:
+returning an EMPTY candidates list means the rounds so far have answered what they
+set out to answer, which is a legitimate outcome and ends the study cleanly. Do not
+pad the list to reach a count.
 
 ## Project Context
 - Name: {state.name}
@@ -219,16 +258,39 @@ Example field shapes:
   "suggested_wet_lab_validation": ["..."], "decision_criteria": ["..."]}}
 
 Return a JSON array. Return [] if no sufficiently novel direction exists."""
-        response = await self.chat(prompt, temperature=0.3)
-        # This prompt contracts for a top-level JSON array; the dict parser drops valid arrays.
-        data = safe_parse_json_array(response, default=[])
+        # This prompt contracts for a top-level JSON array; the dict parser drops
+        # valid arrays. No `default` is passed on purpose: None then means "could
+        # not parse" and [] means "the PI proposed none", which default=[] merged
+        # into one indistinguishable answer.
+        self.last_candidate_generation_error = None
+        data = None
+        for attempt in range(2):
+            response = await self.chat(prompt, temperature=0.3)
+            data = safe_parse_json_array(response)
+            if isinstance(data, list) and (
+                not data or any(isinstance(c, dict) for c in data)
+            ):
+                break
+            logger.warning(
+                "[PI] Integration candidate response unreadable (attempt %s/2)", attempt + 1
+            )
         if not isinstance(data, list):
+            logger.error("[PI] Integration candidate generation unreadable after retry")
+            self.last_candidate_generation_error = (
+                "The PI's integration direction-candidate response could not be read after a "
+                "retry, so no candidates were produced by this attempt. This is a tooling "
+                "failure, not a finding that no new direction remains."
+            )
             return []
-        return [
-            _normalize_direction_candidate(candidate)
-            for candidate in data
-            if isinstance(candidate, dict)
-        ]
+        usable = [candidate for candidate in data if isinstance(candidate, dict)]
+        if data and not usable:
+            self.last_candidate_generation_error = (
+                "The PI's integration direction-candidate response contained no usable "
+                "candidate objects. This is a structural failure, not a finding that no new "
+                "direction remains."
+            )
+            return []
+        return [_normalize_direction_candidate(candidate) for candidate in usable]
 
     async def score_integration_directions_with_evidence(
         self,
@@ -319,12 +381,12 @@ Apply ALL of the following scoring rules:
 1. **Data reliability is the baseline**: If data_reliability=low, this direction cannot be a top recommendation unless the user explicitly chooses it.
 2. **Failed literature confidence forces unknown novelty**: If literature_confidence=failed, literature_novelty must be "unknown".
 3. **Speculative combinations**: High literature_novelty with low data_reliability is speculative and must not be the default recommendation; add a risk flag.
-4. **Strong combination dominates**: high data reliability + high data novelty + high mechanistic importance should dominate overall_priority.
+4. **Strong combination dominates**: a candidate that is high on data_reliability AND high on data_novelty AND high on mechanistic_importance ranks above one that is high on only some of them. Novelty never substitutes for reliability.
 5. **Complementarity**: when recommending multiple directions, they must be complementary (e.g., one describes network architecture, one tests causal origin), not redundant.
 6. **Independence**: functional_impact must be assessed separately from mechanistic_importance.
 7. **Independence**: biology_expectedness must be assessed separately from literature_novelty and data_novelty.
 8. **Prerequisites**: if a direction has prerequisites, its prerequisite direction must also be selected or explicitly noted as already satisfied by prior results.
-9. **Composite priority**: overall_priority derives from the interaction of data_reliability, data_novelty, and functional_impact; when dimensions conflict, give explicit reasoning.
+9. **Composite priority (single definition)**: overall_priority is derived from ALL of the scoring dimensions below, with data_reliability, data_sufficiency and artifact_risk acting as limiting factors — a candidate cannot be high priority while any of those is unfavourable, however novel or impactful it looks. When dimensions conflict, give explicit reasoning. This rule is the only definition of overall_priority; no other rule overrides it.
 10. **Conflict reconciliation**: when literature_novelty and biology_expectedness conflict, reconcile the discrepancy explicitly in literature_support_summary, data_support_summary, or risk_flags.
 11. **Negative-validation caveat**: when an evidence record has negative_validation_confidence=medium, any literature_novelty=high must be explicitly justified in literature_support_summary because at least one evidence axis is incomplete.
 
@@ -342,7 +404,7 @@ For each candidate, score ALL of these dimensions:
 8. **methodological_gap**: "none" / "minor" / "major" — What methodological gaps exist?
 
 Also derive:
-- **overall_priority**: "high" / "medium" / "low" — Composite priority based on ALL dimensions.
+- **overall_priority**: "high" / "medium" / "low" — derived as scoring rule 9 specifies.
 - **risk_flags**: List of specific risk flags (e.g., "cross_species_extrapolation", "low_statistical_power").
 - **prerequisite_dependencies**: Which other direction_ids must be completed first.
 - **evidence_ref**: Must match the direction_id from literature evidence.
@@ -361,7 +423,7 @@ validation_feasibility:
 
 If direction evidence contains novelty_status=known_area, literature_novelty should usually be low or medium unless novelty comes from a new model, species, tissue, cell type, perturbation, or validation strategy.
 If direction evidence contains novelty_status=unknown_due_to_timeout or unknown_due_to_failure, literature_novelty must be unknown and recommendation must be conservative.
-Support evidence and contradictory evidence must have equal weight in the scoring decision.
+Contradictory evidence must never be discounted for being contradictory, and must never be left out of the summaries. Weight every piece of evidence — supporting and contradictory alike — by the same criteria: study design and statistical power, how directly it addresses this claim, and how well its model, tissue, and species apply here. One well-powered direct contradiction outweighs several indirect or correlational supports, and the reverse also holds; do not average them as if the categories were symmetric.
 
 Finally, produce the **direction_dependency_graph** — a mapping from each direction_id to a list of direction_ids it depends on (from prerequisite_dependencies).
 

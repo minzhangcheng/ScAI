@@ -35,7 +35,8 @@ class TestPiPromptsIncludeAllScoringRules:
             "High literature_novelty with low data_reliability",
             "functional_impact must be assessed separately",
             "biology_expectedness must be assessed separately",
-            "overall_priority derives from",
+            "overall_priority is derived from",
+            "the only definition of overall_priority",
             "negative_validation_confidence",
             "prerequisite",
         ]:

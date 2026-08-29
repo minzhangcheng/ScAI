@@ -740,6 +740,8 @@ def persist_html_render(self, ctx):
         {self._markdown_to_html(abstract)}
     </div>
 
+    {render_report_status_line_html(report)}
+
     {ga_html}
     {"".join(sections_html)}
 

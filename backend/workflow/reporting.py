@@ -83,11 +83,15 @@ class ReportingMixin(
     # ------------------------------------------------------------------
 
     _DEFAULT_TEXT_DIAGRAM_PROMPT = (
-        "Draw an ASCII/Unicode flow diagram summarizing the study's key signaling "
-        "pathway and cellular processes. Reason from the final summary provided and "
-        "highlight ligand -> receptor -> downstream effector -> transcription factor "
-        "-> cellular outcome relationships. Include at least 5 nodes and use "
-        "directional arrows. English labels only.\n\n"
+        "Draw an ASCII/Unicode flow diagram summarizing what this study actually found. "
+        "Reason ONLY from the final summary provided: the nodes and the relationships "
+        "between them must be ones the summary names. Let the summary decide the shape "
+        "- a signalling cascade, a comparison between groups, a compositional shift, a "
+        "temporal or spatial progression, or a set of associations are all valid "
+        "diagrams. Do NOT impose a ligand/receptor/effector/transcription-factor chain "
+        "on a study that did not measure one, and do not invent intermediate nodes to "
+        "reach a node count. Use directional arrows only where the summary supports "
+        "direction. English labels only.\n\n"
         "Study summary:\n{summary}"
     )
 

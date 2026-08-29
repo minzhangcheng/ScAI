@@ -16,6 +16,7 @@ from ...constants import REASONING_MODEL_MIN_TOKENS
 from ...utils.llm_client import is_vision_capability_mismatch
 from .figure_adoption_prompt import build_figure_adoption_prompt
 
+from .figure_text import build_ga_revision_history_text, describe_candidate
 from .shared import (  # noqa: F401
     _CONTROL_SIGNAL_RESULTS,
     _BRIEF_PREFERRED_TYPES,
@@ -268,15 +269,7 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
         }
 
     def _build_ga_revision_history_text(self, revision_history: List[Dict[str, Any]]) -> str:
-        """Build a text summary of graphic abstract revision history for prompts."""
-        if not revision_history:
-            return ""
-        lines = []
-        for entry in revision_history:
-            round_num = entry.get('round', '?')
-            hist_feedback = entry.get('feedback', '')
-            lines.append(f"  Round {round_num}: {hist_feedback}")
-        return "- Previous revision feedback:\n" + "\n".join(lines)
+        return build_ga_revision_history_text(revision_history)
 
     async def review_graphic_abstract(
         self,
@@ -534,15 +527,20 @@ Keep your summary brief and focused — long summaries will be truncated and los
 
 The summary should:
 1. State the main research question or hypothesis
-2. Highlight 2-3 key discoveries (cell types, pathways, mechanisms)
-3. Describe the main conclusion or clinical/biological significance
+2. Report the findings the analysis actually established — however many that is. If the study's
+   main result is negative or descriptive, say that; do not manufacture discoveries to fill a count
+3. Describe the main conclusion and its significance, at the claim level the evidence supports
 4. Be written in a way that can guide visual illustration
 
-Focus on:
-- Key cell populations identified in the supplied analysis
+Draw ONLY on what the supplied results contain. Depending on the study that may include:
+- Key populations or groups identified in the supplied analysis
 - Important molecular pathways or genes
-- Treatment effects or disease mechanisms
-- Comparisons between conditions (control vs treatment)
+- Differences between the conditions the design actually compared
+- Mechanism, where the results support one
+Omit any of these the study did not measure. In particular, do not describe a treatment effect,
+a disease mechanism, or a control-vs-treatment comparison unless the experimental design contains
+one — the downstream image model will draw whatever this text names, including things that do
+not exist.
 
 Return ONLY the summary text, no additional formatting.
 """
@@ -564,7 +562,10 @@ Return ONLY the summary text, no additional formatting.
         for r in state.round_results:
             findings.extend(r.bioinformatics_findings[:2])
             findings.extend(r.pathology_findings[:1])
-        findings_text = "; ".join(findings[:5]) if findings else "Single-cell analysis completed"
+        findings_text = (
+            "; ".join(findings[:5]) if findings
+            else "No findings were available to summarize for this figure"
+        )
         return f"Study: {state.name}. Objective: {state.initial_instruction[:200]}. Key findings: {findings_text}."
 
     async def generate_text_diagram_prompt(
@@ -607,8 +608,15 @@ draw. The output will be rendered inside a <pre> block on a web page, so it must
 pure ASCII/Unicode text.
 
 Your instruction MUST:
-1. List 5-10 key nodes (ligands, receptors, transcription factors, cell states, phenotypes)
-2. State the directional relationships between them (A -> B, B phosphorylates C, etc.)
+1. List the nodes the findings actually name — however many that is. They may be
+   ligands, receptors, transcription factors, cell states or phenotypes, but equally
+   sample groups, measured quantities, or observed structures; use whatever this study
+   produced. Do not add nodes to reach a count
+2. Use a directional arrow ONLY where the findings establish direction (a measured
+   perturbation, a time course, an explicitly causal result). For descriptive or
+   associative findings use grouping, adjacency, or a dashed association link, and
+   label direction as unresolved. Drawing a correlation as an arrow asserts a
+   causal claim the study did not make
 3. Mention only cellular processes supported by the supplied analysis results
 4. Use English labels only (non-ASCII characters will break alignment)
 5. NOT include drawing symbols — the diagram author will choose them
@@ -878,23 +886,7 @@ an earlier version may win.
         )
         return bindings
 
-    @staticmethod
-    def _describe_candidate(figure: Dict[str, Any]) -> str:
-        """One prompt line per candidate, using whatever the caller supplied.
-
-        Every field beyond name and type is optional: this is also called with
-        bare ``{name, type, is_publication}`` dicts, so nothing may be required.
-        """
-        parts = [f"- {figure['name']} (type: {figure['type']}"]
-        if figure.get("round"):
-            parts.append(f", round: {figure['round']}")
-        if figure.get("diagnostic"):
-            parts.append(", diagnostic")
-        parts.append(")")
-        description = (figure.get("description") or "").strip()
-        if description:
-            parts.append(f" — {description}")
-        return "".join(parts)
+    _describe_candidate = staticmethod(describe_candidate)
 
     async def select_brief_figures(
         self,

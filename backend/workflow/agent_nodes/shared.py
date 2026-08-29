@@ -36,18 +36,24 @@ def _stable_code_hash(code: str) -> str:
 _STAGE1_INSTRUCTION = """
 ## STAGE 1 - EXPLORATION PHASE (QC + Clustering + Annotation ONLY)
 
-You are in STAGE 1 of the exploration phase. Execute ONLY the following analyses:
+You are in STAGE 1 of the exploration phase, on single-cell resolution data.
+Execute ONLY the following analyses:
 
-MANDATORY STEPS:
+REQUIRED STEPS (the sequence is fixed; every threshold, resolution and method choice
+inside it is yours to make from the data. If a step does not apply to this dataset,
+say which one and why rather than silently skipping it):
 1. Load the input data (h5ad file)
-2. Basic QC: filter cells by min_genes, filter genes by min_cells, compute QC metrics
+2. Basic QC: filter cells by min_genes, filter genes by min_cells, compute QC metrics.
+   Choose the cutoffs from the observed distributions, not from a remembered default
 3. Doublet detection assessment (scrublet or equivalent)
 4. Batch effect assessment: check if multiple samples/batches exist, evaluate need for correction
-5. Normalization (scanpy.pp.normalize_total), log1p
+5. Normalization (scanpy.pp.normalize_total), log1p. Keep the raw integer counts in
+   adata.layers['counts'] before you normalize — downstream count-based models need them
 6. Highly variable gene selection (scanpy.pp.highly_variable_genes)
 7. PCA (scanpy.pp.pca)
 8. UMAP (scanpy.pp.neighbors + scanpy.tl.umap)
-9. Clustering (scanpy.tl.leiden with appropriate resolution)
+9. Clustering (scanpy.tl.leiden). Justify the resolution you picked; if the cluster count
+   is unstable across nearby resolutions, report that rather than presenting one as settled
 10. Cell type annotation: find marker genes per cluster (scanpy.tl.rank_genes_groups), then call annotate_clusters tool
 
 QUALITY-CONTROL FIGURE: the platform renders one for this stage itself, from what the
@@ -119,44 +125,47 @@ def _build_exploration_instruction(
     # Retain the replication keywords for caller compatibility. Measured
     # counts are presented separately as facts; they must not let the host
     # rewrite the PI-approved scientific plan.
-    del scrna_replicated, bulk_replicated
+    del has_scrna, scrna_replicated, bulk_replicated
     condition_analysis = (
-        "Execute the PI-approved bulk objectives; PI owns the supported claim "
-        "level and Bioinformatics owns the method and implementation details"
-        if not has_scrna else
         "Execute the condition analyses and claim level selected in the PI-approved plan; "
         "consult the PI if the measured design facts make a planned method ambiguous"
     )
-    enrichment_analysis = (
-        "Perform only the downstream analyses selected in the approved PI plan"
-    )
-    result_figure_analysis = (
-        "Register result figures and tables that the approved bulk analysis produces"
-        if not has_scrna else
-        "Generate the result figures requested by the PI-approved plan"
-    )
+    enrichment_analysis = "Perform only the downstream analyses selected in the approved PI plan"
+    result_figure_analysis = "Generate the result figures requested by the PI-approved plan"
     analysis_scope = (
-        "Use the host input profile as facts, not as a method selector"
-        if not has_scrna else
         "Treat measured sample-design metadata as facts for PI review, not as a "
         "host-selected method or claim level"
     )
     instr = f"""
 ## EXPLORATION PHASE INSTRUCTIONS
 This is Round 1 — comprehensive, unbiased exploration. You MUST:
-1. Complete the FULL standard pipeline (QC → normalization → clustering → annotation)
-2. After annotation: merge biologically similar clusters (e.g., subtypes of the same cell type
-   differing only in activation/maturation state) into unified cell type groups before downstream comparison
+1. Complete the FULL standard single-cell pipeline (QC → normalization → clustering → annotation)
+2. After annotation, decide DELIBERATELY at what resolution to compare, and say which you chose:
+   - Merging subtypes that differ only in activation/maturation state into one cell type gives
+     a coarser, less fragmented comparison. Note that it does NOT add statistical power for a
+     between-condition claim: power there comes from independent biological units (samples,
+     donors, animals), and cells within one sample are not independent replicates of it.
+     More cells make an estimate for THAT sample more precise; they do not make a difference
+     between conditions more significant.
+   - But that state IS the signal in many designs (naive vs activated, quiescent vs cycling,
+     resting vs responding). Merging first destroys exactly what the study may be asking about,
+     and it contradicts the mechanism programs you are asked to register below, which take
+     cell-state changes as evidence.
+   Default to reporting BOTH resolutions when the merge is not obviously safe: the merged
+   comparison for statistical stability, and the unmerged one to show whether a state shifted.
+   State the merge rule you applied so the PI can overrule it.
 3. {condition_analysis}
 4. {enrichment_analysis}
 5. {analysis_scope}
-6. Do NOT skip any cell type — but DO merge related subtypes/states of the same cell type
-7. Complete cell communication analysis (liana)
+6. Do NOT silently drop a cell type. Every population is either analysed or explicitly
+   reported as not analysable, with the reason (too few cells, ambiguous identity, doublet-like)
+7. Cell-cell communication analysis (liana) when the data has single-cell resolution and the
+   design supports the comparison; if it does not apply, say so instead of running it anyway
 8. {result_figure_analysis}
 """
     if has_bulk:
         instr += """
-10. **Bulk scientific ownership**:
+9. **Bulk scientific ownership**:
     - Treat the Host BulkInputProfile as observed input facts only.
     - The PI decides the scientific question and supportable claim level, including
       whether differential analysis, concordance, or deconvolution is relevant.
@@ -180,12 +189,22 @@ Research direction: {direction_ctx}
 
 ANALYSIS REQUIREMENTS:
 1. Execute ALL tasks assigned by PI below — do not skip any
-2. For each task, generate at least one publication-quality figure
-3. Use advanced analysis methods as specified (GSEA, gene scoring, trajectory, TF activity, etc.)
-4. After completing PI's tasks, if you identify additional relevant analyses, execute them
-5. When performing DEG, always include volcano plots and heatmaps of top genes
-6. When performing pathway analysis, include bar plots of top enriched terms
-7. For any scoring analysis (gene signatures, TF activity), show UMAP feature plots AND violin/box plots by condition
+2. Generate a publication-quality figure for each result that a figure communicates better
+   than text. A task whose outcome is a single number, a null result, or a statement about
+   feasibility does not need one — say so rather than producing a figure to satisfy a count
+3. Use the method each task actually calls for. GSEA, gene scoring, trajectory and TF activity
+   are available, but they are options, not a checklist to work through
+4. After completing PI's tasks, if you identify an additional analysis worth running, propose it
+   to the PI with what prompted it — do not run unplanned analyses and report them as findings.
+   Analyses chosen after seeing the data are exploratory by construction; that has to be on the
+   record, and register_analysis_plan is how
+5. When performing DEG, include a volcano plot (or equivalent effect-size vs significance view).
+   A heatmap of the top DE genes across the same samples that selected them is circular — the block structure is guaranteed by the selection and is not evidence. Include one only as an illustration, label it as descriptive, and never cite it as support for the difference it was selected to show
+6. When performing pathway analysis, a bar plot of top enriched terms is usually the
+   clearest view — use it unless something else reads better
+7. For a scoring analysis, show the score's distribution across the groups being compared.
+   A UMAP feature plot is the right companion ONLY where single-cell coordinates exist; for
+   data without them, the distribution plot alone is the result
 8. Report detailed statistical results (p-values, effect sizes, gene counts) — not just summaries
 9. Before computing any score, consult PI about scoring method and gene list source
 10. After computing any score, call register_score to document methodology for the report
@@ -213,29 +232,35 @@ def _build_stage2_instruction(
     """Stage 2 downstream-analysis instruction (DEG/GO/cellchat/trajectory),
     plus method-neutral bulk ownership guidance when bulk data is present. Pure
     function so it is unit-testable."""
-    del scrna_replicated, bulk_replicated
+    del has_scrna, scrna_replicated, bulk_replicated
     condition_step = (
-        "Execute the PI-approved bulk objectives using methods selected and "
-        "justified by Bioinformatics"
-        if not has_scrna else
         "Execute the condition analyses, including differential expression when "
         "selected in the PI-approved plan, at the claim level chosen by the PI; "
         "consult the PI if measured design facts require a scientific choice"
     )
-    instr = f"""
-## STAGE 2 - DOWNSTREAM ANALYSIS (builds on Stage 1 results)
-
-Stage 1 (QC, clustering, cell type annotation) is COMPLETE. The annotated data
+    stage1_state = """Stage 1 (QC, clustering, cell type annotation) is COMPLETE. The annotated data
 (adata with a 'cell_type' column, saved as adata_annotated.h5ad) is already in
 the kernel / working directory.
 
 Do NOT re-run QC, clustering, or cell type annotation. Load the Stage 1 results
-and proceed to downstream analysis ONLY:
+and proceed to downstream analysis ONLY:"""
+    downstream_menu = """2. The downstream analyses the PI-approved plan calls for. Where the plan leaves the
+   method open, these are available and appropriate to single-cell data — pick from
+   them by what the question needs, not by working down the list:
+   - pathway enrichment over the differential results (organism-appropriate libraries)
+   - cell-cell communication (liana), when the design supports comparing interactions
+   - trajectory / pseudotime, when a continuum is the question and a root can be justified
+   Say which you did not run and why; an analysis that does not fit the question is
+   correctly left undone, not silently skipped.
+3. Generate a publication-quality figure for each result a figure communicates better
+   than text; say which results you left as text and why"""
+
+    instr = f"""
+## STAGE 2 - DOWNSTREAM ANALYSIS (builds on Stage 1 results)
+
+{stage1_state}
 1. {condition_step}
-2. GO/KEGG pathway enrichment on DEG results (organism-appropriate libraries)
-3. Cell-cell communication analysis (liana) where biologically relevant
-4. Trajectory/pseudotime analysis if applicable
-5. For each result, generate a publication-quality figure
+{downstream_menu}
 """
     if has_bulk:
         instr += """

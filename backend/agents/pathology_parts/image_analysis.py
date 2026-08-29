@@ -1,7 +1,85 @@
 """Pathology image preparation, tile analysis, and aggregation."""
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+
+def _severity_number(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _rubric_name(block: Any) -> str:
+    """The rubric's short identity, lowercased. Never guessed from prose."""
+    if not isinstance(block, dict):
+        return ""
+    return str(block.get("severity_rubric_name") or "").strip().casefold()
+
+
+def _severity_observations(overview: Any, synthesis: Any) -> List[str]:
+    """Describe how a reported severity fails to hang together.
+
+    A severity number only means something with the scale it was graded on,
+    so a score without a maximum, a score outside its own range, or a score
+    with no stated rubric is worth flagging. These are OBSERVATIONS carried
+    alongside the result for the PI to weigh -- nothing here rejects an
+    image, blocks a report, or edits the model's answer.
+    """
+    notes: List[str] = []
+    for label, block in (("overview", overview), ("synthesis", synthesis)):
+        if not isinstance(block, dict):
+            continue
+        score = _severity_number(block.get("severity_score"))
+        maximum = _severity_number(block.get("severity_max"))
+        basis = str(block.get("severity_basis") or "").strip()
+        if score is None and maximum is None and not basis:
+            continue
+        if score is not None and maximum is None:
+            notes.append(
+                f"{label}: severity {score:g} reported without a maximum, so the "
+                "scale it was graded on is unknown"
+            )
+        if score is None and maximum is not None:
+            notes.append(f"{label}: a severity maximum was given without a score")
+        if score is not None and maximum is not None and not 0 <= score <= maximum:
+            notes.append(
+                f"{label}: severity {score:g} lies outside its own stated range "
+                f"0-{maximum:g}"
+            )
+        if score is not None and not basis:
+            notes.append(
+                f"{label}: severity {score:g} reported without naming the rubric it "
+                "was graded against, so it is not comparable to any other image"
+            )
+    # Compare rubric IDENTITY -- the short name and the range -- not the prose.
+    # Two descriptions of the same scale differ in wording constantly; comparing
+    # the explanations made every rephrasing look like a second rubric, and
+    # fuzzy-matching free text would only trade one wrong answer for another.
+    o_name = _rubric_name(overview)
+    s_name = _rubric_name(synthesis)
+    o_max = _severity_number((overview or {}).get("severity_max")) if isinstance(overview, dict) else None
+    s_max = _severity_number((synthesis or {}).get("severity_max")) if isinstance(synthesis, dict) else None
+    o_scored = _severity_number((overview or {}).get("severity_score")) is not None
+    s_scored = _severity_number((synthesis or {}).get("severity_score")) is not None
+    if o_name and s_name and o_name != s_name:
+        notes.append(
+            f"overview graded on {o_name!r} and synthesis on {s_name!r}; the two "
+            "severities are on different rubrics and are not comparable"
+        )
+    elif o_name and s_name and o_max is not None and s_max is not None and o_max != s_max:
+        notes.append(
+            f"both layers name the rubric {o_name!r} but grade out of {o_max:g} and "
+            f"{s_max:g}; the scores are on different ranges"
+        )
+    for label, scored, name in (("overview", o_scored, o_name), ("synthesis", s_scored, s_name)):
+        if scored and not name:
+            notes.append(
+                f"{label}: rubric identity unavailable -- a score was given with no "
+                "short rubric name, so it cannot be matched to any other grading"
+            )
+    return notes
 
 logger = __import__("logging").getLogger(__name__)
 
@@ -140,7 +218,6 @@ async def analyze_image(
     process_pathology_image = getattr(bindings, "process_pathology_image")
     create_overview_image = getattr(bindings, "create_overview_image")
     json = bindings.json
-    severity_label_to_score = bindings.severity_label_to_score
     _ImageSkipRequested = bindings._ImageSkipRequested
     agent.refresh_runtime_config_if_needed()
     # Set LLM context before vision calls (client is shared between agents)
@@ -206,15 +283,28 @@ This is an overview of a tissue section stained with {image_info.data_type}.
 Analysis instruction: {instruction}
 
 Please first describe the overall features of the section:
-1. Is the overall tissue structure normal?
-2. Are there obvious regional lesions or abnormalities?
-3. Overall severity assessment (if applicable)
+1. What is the overall tissue architecture, and does it depart from the expected architecture
+   for this tissue and stain? Say what you are comparing against
+2. Are there regional lesions or abnormalities, and are they focal or diffuse?
+3. Overall severity — ONLY if a defensible scale applies here
+
+Severity is a graded judgement against a rubric, and a rubric belongs to one tissue and one
+lesion class (they are not interchangeable across tissues, stains, or lesion types). If you can
+name the scale you are applying and it fits this tissue, stain and lesion, grade on it, report
+the score WITH its maximum, and say in severity_basis which scale it is and what each level
+means. If you cannot name such a scale, set severity_score AND severity_max to null and say why
+in severity_basis. Do NOT fall back to a generic normal/mild/moderate/severe ladder: relabelling
+an ungraded impression as a tier makes it look comparable across images and studies when it is
+not, which is the same defect as an unanchored number.
 
 Please reply in JSON format:
 {{
     "overall_structure": "Overall structure description",
     "regional_changes": "Regional changes description",
-    "severity": "one of: normal | mild | moderate | marked | severe (will be mapped to a 0-4 score)",
+    "severity_rubric_name": "<short canonical name of the scale, e.g. \"Ishak fibrosis\", or null>",
+    "severity_score": <int, or null when no named scale applies>,
+    "severity_max": <int, or null>,
+    "severity_basis": "what the scale measures and what each level means, or why none applies",
     "areas_of_interest": ["Area 1 requiring detailed observation", ...]
 }}
 """
@@ -300,14 +390,21 @@ Based on the following regional analysis results, please summarize the pathologi
 
 Please summarize:
 1. Main pathological findings (list format)
-2. Severity score (0-4)
+2. Severity, graded only against a scale you can name and defend for THIS tissue, stain and
+   lesion class. Report the score together with its maximum and what the scale measures, so the
+   number can be read. If no such scale applies, set severity_score to null and say why in
+   severity_basis — do not emit an unanchored 0-4 number, which looks quantitative and is not
+   comparable across images, stains, or studies
 3. Directions for further analysis
 4. Suggested special staining
 
 Reply in JSON format:
 {{
     "findings": ["finding 1", "finding 2", ...],
-    "severity_score": 0-4,
+    "severity_rubric_name": "<the SAME short scale name the overview used, copied verbatim; or a new name if you are deliberately grading on a different scale, which you must say in severity_basis>",
+    "severity_score": <int or null>,
+    "severity_max": <int or null>,
+    "severity_basis": "what the scale measures and what each level means, or why none applies",
     "further_analysis": ["direction 1", ...],
     "suggested_staining": ["staining type 1", ...]
 }}
@@ -322,13 +419,26 @@ Reply in JSON format:
 
         logger.info(f"[PathologyAgent] Image analysis complete: {len(final_data.get('findings', []))} findings")
 
-        # Map the overview-level textual severity onto the canonical 0-4
-        # numeric scale so downstream consumers have a single, consistent
-        # scalar. The detailed tile-level severity_score is emitted separately
-        # below (final_data). overview_data keeps the raw LLM "severity" text.
-        if isinstance(overview_data, dict) and "severity_score" not in overview_data:
-            overview_data["severity_score"] = severity_label_to_score(
-                overview_data.get("severity", "")
+        # Overview and synthesis now grade on the SAME rubric-bound shape
+        # (score + max + basis, or null). There is no generic tier ladder left to
+        # project onto a canonical 0-4, and no projection to do: a severity that is
+        # not anchored to a named scale stays absent rather than becoming a number.
+        if isinstance(overview_data, dict):
+            overview_data.setdefault("severity_score", None)
+            overview_data.setdefault("severity_max", None)
+            overview_data.setdefault("severity_basis", "")
+            overview_data.setdefault("severity_rubric_name", None)
+
+        # Read the two severity reports and describe any way they do not hang
+        # together. This deliberately does NOT reject, clamp, or drop a value:
+        # the PI decides what a questionable grade is worth, and a host that
+        # silently discarded it would hide the very thing worth looking at.
+        severity_observations = _severity_observations(overview_data, final_data)
+        if severity_observations:
+            logger.info(
+                "[PathologyAgent] Severity reporting observations for %s: %s",
+                image_info.filename,
+                "; ".join(severity_observations),
             )
 
         return {
@@ -340,7 +450,11 @@ Reply in JSON format:
             "tile_validation": tile_validation,
             "status": tile_validation["status"],
             "findings": final_data.get("findings", []),
-            "severity_score": final_data.get("severity_score", 0),
+            "severity_score": final_data.get("severity_score"),
+            "severity_max": final_data.get("severity_max"),
+            "severity_basis": final_data.get("severity_basis", ""),
+            "severity_rubric_name": final_data.get("severity_rubric_name"),
+            "severity_observations": severity_observations,
             "further_analysis": final_data.get("further_analysis", []),
             "suggested_staining": final_data.get("suggested_staining", [])
         }

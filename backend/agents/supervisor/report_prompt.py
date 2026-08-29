@@ -279,7 +279,16 @@ order; do not regroup figures by plot type or reorder them for rhetorical effect
 Write the report in English.
 Treat unresolved evidence conservatively throughout: never upgrade it to validated,
 confirmed, causal, dominant, or independently replicated conclusions, even if a PI
-summary or literature passage uses stronger wording. Do not repeat workflow-status
+summary or literature passage uses stronger wording.
+In the Limitations subsection, state the expression representation each quantitative
+result rests on (raw counts, library-size normalized + log, scaled, or pseudobulk
+aggregated), and flag any result produced by a method run on a representation it does
+not strictly assume — count-based models given normalized input, or continuous methods
+given counts. Both directions change the result and neither raises an error, so it has
+to be recorded rather than inferred.
+Where two modalities agree, state whether they came from the same biological samples
+(a cross-assay consistency check) or from different ones (independent replication).
+Never describe the same-sample case as independent validation. Do not repeat workflow-status
 labels in every findings section. Consolidate the supplied qualifications in exactly
 one **Limitations** subsection near the end of [conclusions].
 Generate the report with the following sections. Use the EXACT section IDs in brackets.
@@ -312,8 +321,8 @@ assigns it to. Do NOT create separate figure/table appendix or listing sections.
 
 IMPORTANT:
 - Write as a formal scientific research report, NOT a monitoring or system log.
-- Make the report thorough and comprehensive with detailed scientific content (300-500 words minimum per section){brevity_note}.
-- Innovation phase sections are CRITICAL — they contain the novel research findings and MUST be written in detail.
+- Make the report thorough and comprehensive with detailed scientific content, aiming for roughly 300-500 words per section{brevity_note}. This is a target for substance, not a quota: a section whose analysis produced little should say so concisely rather than being padded to length.
+- Innovation phase sections are CRITICAL and must be written in detail — detail meaning what those rounds actually established, at the claim level the evidence supports. Do NOT assume they produced novel findings: report a null, inconclusive, or merely confirmatory innovation round as exactly that. A round that ruled something out is a result worth stating plainly, not a section to pad.
 - Reference specific figures, genes, pathways, cell types, statistical results, and quantitative findings.
 - Include ALL available figures, each in the section assigned to it by the Figure Allocation above, using [FIGURE: filename] markers.
 - Explicit text-only synthesis/transition sections require no figure when none was produced.
@@ -324,7 +333,10 @@ IMPORTANT:
 
 def _get_report_system_prompt(self, language: str) -> str:
     return (
-        "You are a senior bioinformatics researcher writing a detailed scRNA-seq analysis report. "
+        "You are a senior bioinformatics researcher writing a detailed analysis report. "
+        "Describe the study in terms of the modalities it actually used — single-cell, "
+        "bulk, imaging, biochemical, or a combination — and never frame it as a "
+        "single-cell study unless single-cell data was analysed. "
         "The report should be professional, rigorous, and comprehensive, including key analysis "
         "decisions and PI guidance. Use Markdown format, referencing specific figure filenames "
         "and analysis step numbers."

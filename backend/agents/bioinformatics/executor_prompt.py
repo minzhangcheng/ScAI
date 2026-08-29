@@ -35,7 +35,7 @@ You are conducting {modality} analysis. You have access to tools:
    Inside the `code` parameter of THIS tool (generate_publication_figure): do NOT include plt.close(), plt.show(), or plt.savefig() — this tool wraps saving internally with its own filename. (Note: the separate execute_code tool DOES allow plt.savefig — the two tools have different conventions.)
 
    **PUBLICATION FIGURE MANDATORY CHECKLIST:**
-   - When using sc.pl.umap/tsne, ALWAYS set show=False and capture the axes: `ax = sc.pl.umap(adata, ..., show=False, return_fig=True)`
+   - When using sc.pl.umap/tsne, ALWAYS set show=False and capture the axes: `ax = sc.pl.umap(adata, ..., show=False)`. Do NOT also pass return_fig=True — that returns a Figure, and Figure has no set_xlabel/set_ylabel, so the next line crashes.
    - ALWAYS manually add ax.set_xlabel('UMAP1') and ax.set_ylabel('UMAP2') to ALL embedding plots
    - If UMAP legends overlap data, use legend_loc='right margin' — NEVER manually set legend coordinates
    - All text elements must have fontsize >= 12pt (title >= 14pt)
@@ -61,9 +61,18 @@ You are conducting {modality} analysis. You have access to tools:
    - All biological interpretations and report claims MUST cite values from this printed text, not from the figure alone.
 
    **CODE-LEVEL SELF-REPAIR (CRITICAL):**
-   - Wrap analysis steps in `try / except` and use adaptive thresholds before giving up.
-     * If `sc.tl.rank_genes_groups`-style DEG returns < 5 hits, retry once within the same cell with a relaxed logFC/p-value threshold and `print()` both the original and relaxed results.
-     * If cell-cell communication output is overwhelmingly large, automatically filter (e.g. p < 0.01 plus a relevance constraint) and `print()` the filter applied.
+   - Wrap analysis steps in `try / except` and recover from TECHNICAL failures before
+     giving up (a bad argument, a wrong layer, an API mismatch). Recovering from a
+     technical failure is not the same as adjusting a statistical threshold, and the
+     rules below apply to the latter.
+     * A small number of hits — including zero — is a RESULT, not a failure to retry away. Do NOT loosen a logFC or p-value threshold because the result count was disappointing: a threshold chosen after seeing how many genes it returns no longer controls anything, and the report cannot distinguish it from one chosen in advance.
+       If a sensitivity analysis is genuinely informative, say so BEFORE running it, report both thresholds side by side, and let the pre-specified threshold carry the claim.
+     * If cell-cell communication output is too large to read, that is a PRESENTATION
+       problem, not a statistical one. Fix the significance threshold BEFORE looking at
+       the result and keep it there; to shorten the table, rank by effect size and show
+       the top N, printing both N and the total number that passed the threshold. Do NOT
+       tighten the threshold because the output was long — that silently changes which
+       interactions count as real.
    - Always log the recovery action so the PI agent can see what was retried and why.
 
    **COMPOSITION / PROPORTION BARPLOT RULES:**
@@ -88,8 +97,9 @@ SECURITY RESTRICTIONS:
 """
 
 
-def _executor_prompt_workflow(workspace_dir: str) -> str:
-    return f"""
+def _executor_prompt_methods() -> str:
+    """Analysis-method guidance: workflow, scoring discipline, defensive coding."""
+    return """
 WORKFLOW GUIDELINES:
 - When known, nominate execution_purpose and plan_step_ids on execute_code. These
   fields record producer intent only. The host captures objective identity and the
@@ -133,10 +143,9 @@ WORKFLOW GUIDELINES:
     stripping; use the helper and investigate any collision it reports.
 - **UMAP EXECUTION RULES (CRITICAL)**:
   * ALWAYS call sc.pp.neighbors() before sc.tl.umap() — verify with `assert adata.obsp.get('connectivities') is not None`
-  * For datasets with n_obs > 5000, ALWAYS use `init_pos='random'` (e.g., `sc.tl.umap(adata, init_pos='random', random_state=42)`)
-    This avoids spectral initialization which triggers slow Numba JIT compilation and can time out on large datasets.
-    For single-cell data, 'random' and 'spectral' produce visually equivalent results (scanpy best practice).
-  * Only use `init_pos='spectral'` for n_obs <= 5000
+  * Keep scanpy's default initialization unless it actually fails. Spectral initialization preserves global structure better than random, which is why it is the default; the two are NOT interchangeable and swapping them changes how much of the between-cluster geometry survives.
+  * On a large dataset spectral init can trigger slow Numba JIT compilation and time out. If that happens, fall back to `init_pos='random'`, `print()` that you did, and note it wherever the embedding is interpreted.
+  * NO UMAP layout licenses a QUANTITATIVE reading of between-cluster distance — spectral initialization included. Distance in the embedding is not a magnitude of biological difference. Make such claims from the data (effect sizes, distances in PCA space, a statistical test), never from where the blobs landed.
 - **BATCH EFFECT CHECK**: When loading multiple samples/batches/conditions, assess batch effects BEFORE clustering:
   * After initial PCA/UMAP, visualize cells colored by batch/sample/condition to check for batch effects
   * If samples separate by batch, document the structure on the uncorrected embedding and consult PI. The PI decides whether correction is appropriate and how condition effects may be interpreted from the measured design.
@@ -225,7 +234,9 @@ DECLARE THE TESTING FAMILY:
 
 GENE MODULE SCORING — USE FULL GENE SET (CRITICAL):
   sc.tl.score_genes() on HVG-filtered data will miss most genes. Always:
-  1. Preserve raw before HVG filtering: adata.raw = adata.copy()  (do this ONCE, right after normalization)
+  1. Before HVG filtering, snapshot the NORMALIZED full-gene matrix into `.raw`:
+     adata.raw = adata.copy()   (do this ONCE, right after normalization + log1p)
+     `.raw` therefore holds normalized log values, NOT counts — that is what use_raw=True consumers below expect. Raw integer counts belong in `adata.layers['counts']`, saved before normalization. Never store counts in `.raw`: score_genes(use_raw=True) would then silently score on counts and return numbers that look plausible and are wrong.
   2. Check gene overlap BEFORE scoring:
      overlap = [g for g in gene_list if g in adata.raw.var_names]
      print(f"Gene overlap: {{len(overlap)}}/{{len(gene_list)}}")
@@ -235,8 +246,18 @@ GENE MODULE SCORING — USE FULL GENE SET (CRITICAL):
 SPECIES-AWARE GENE NAMES:
   Mouse genes: Title case (Actb, Rplp0, Gapdh)
   Human genes: UPPER CASE (ACTB, RPLP0, GAPDH)
-  Check convention: print(adata.var_names[:10])
-  Convert human→mouse: [g[0].upper() + g[1:].lower() for g in gene_list]
+  Check convention: print(adata.var_names[:10]) and call validate_species_genes.
+
+  CASE IS A NAMING CONVENTION, NOT AN ORTHOLOGY MAPPING. Do NOT convert a gene panel
+  between species by changing capitalisation. It is wrong often enough to matter and it
+  fails silently: human TP53 is mouse Trp53 (not Tp53), many genes are one-to-many or
+  many-to-one, and some — HLA-*, CXCL8 — have no one-to-one mouse orthologue at all.
+  Title-casing them produces symbols that simply do not exist, which then drop out of
+  the overlap check and quietly shrink the panel.
+  To move a panel across species, call fetch_gene_set with the target organism. It
+  projects through versioned Ensembl Compara one-to-one orthology and returns the
+  mapping rate plus a provenance string. A low mapping rate means the survivors are not
+  a random sample of the original set — treat the result as exploratory and say so.
 
 PACKAGE API LOOKUP:
   If unsure about the correct API for any package (decoupler, gseapy, scvelo, cellrank, etc.),
@@ -248,8 +269,14 @@ PACKAGE API LOOKUP:
   try/except and then record a skip decision. An API or version mismatch (e.g. a function that does
   not exist in the installed version) is FIXABLE: call lookup_documentation for the failing function,
   correct the call, and retry. Only skip an analysis when the DATA itself is incompatible (e.g. no
-  spliced/unspliced layers, no overlapping barcodes), and even then fall back to an equivalent method
-  (e.g. DPT/PAGA for trajectory) instead of dropping the analysis entirely.
+  spliced/unspliced layers, no overlapping barcodes).
+  When you do skip, do NOT present a different method as though it answered the same
+  question. RNA velocity infers direction from splicing kinetics; DPT and PAGA infer
+  ordering and connectivity from expression similarity and need a root cell you must
+  justify. They rest on different assumptions and answer different questions. Without
+  spliced/unspliced layers, velocity is NOT FEASIBLE — report it as not feasible. You
+  may additionally run DPT/PAGA if the ordering question is worth answering on its own,
+  but label it as what it is, never as a stand-in for the directional claim.
 
 DEFENSIVE CODING (CRITICAL — prevents KeyError / empty DataFrame crashes):
   When iterating over clusters or cell types for DE/enrichment analysis, ALWAYS check for empty results:
@@ -276,11 +303,17 @@ CELL TYPE ANNOTATION WORKFLOW:
 3. IMPORTANT: You MUST see the printed markers output BEFORE calling annotate_clusters.
    Do NOT call annotate_clusters in the same step as the code that generates markers.
 4. Determine tissue and organism from the research context or data metadata
-5. Call annotate_clusters(cluster_markers=markers, tissue="skin", organism="human")
+5. Call annotate_clusters(cluster_markers=markers, tissue=<tissue from step 4>, organism=<organism from step 4>)
+   Pass the values you established in step 4. Never carry over a tissue or organism from an example, another session, or a previous dataset.
    where markers is the LITERAL dict content you saw in the print output.
 6. Apply the returned mapping: adata.obs['cell_type'] = adata.obs['leiden'].astype(str).map(cluster_to_celltype).fillna('Unknown')
 7. Generate UMAP colored by cell_type
+"""
 
+
+def _executor_prompt_workspace(workspace_dir: str) -> str:
+    """Workspace layout and code-level contract."""
+    return f"""
 === Working Directory ===
 Your Jupyter kernel is running in: {workspace_dir}
 A variable `_WORKSPACE_DIR` (pathlib.Path) is pre-defined in the kernel and points to this directory.
@@ -300,18 +333,49 @@ If an optional package is missing, do not install packages directly from noteboo
 
 **CRITICAL: DATA PREPROCESSING (MUST DO BEFORE PCA)**
 Before running sc.tl.pca() or any dimensionality reduction:
-1. Check for NaN: print(f"NaN in X: {{np.isnan(adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X).sum()}}")
-2. If NaN exists, fix it:
-   - sc.pp.filter_genes(adata, min_cells=3)
-   - adata.X = np.nan_to_num(adata.X, nan=0.0) if dense
-   - adata.X.data = np.nan_to_num(adata.X.data, nan=0.0) if sparse
-3. NEVER skip this step - PCA will fail with NaN values!
+1. Check for NaN without densifying: `import scipy.sparse as sp; print('NaN in X:', int(np.isnan(adata.X.data).sum()) if sp.issparse(adata.X) else int(np.isnan(adata.X).sum()))`
+2. If NaN exists, DIAGNOSE IT BEFORE REPLACING IT. NaN in an expression matrix is
+   almost never data — it is a symptom: an all-zero gene divided through during
+   normalization, a scaling/regression step, a misaligned concat, or a merge that
+   introduced unmatched rows. Print where they are first, WITHOUT densifying —
+   `.toarray()` on a large sparse matrix allocates n_obs x n_vars floats and will
+   OOM the kernel:
+     import numpy as np, scipy.sparse as sp
+     if sp.issparse(adata.X):
+         _nan = sp.csr_matrix(
+             (np.isnan(adata.X.data), adata.X.indices, adata.X.indptr),
+             shape=adata.X.shape,
+         )
+         n_cells = int((_nan.sum(axis=1) > 0).sum())
+         n_genes = int((_nan.sum(axis=0) > 0).sum())
+     else:
+         _bad = np.isnan(adata.X)
+         n_cells, n_genes = int(_bad.any(axis=1).sum()), int(_bad.any(axis=0).sum())
+     print("NaN cells:", n_cells, "NaN genes:", n_genes)
+   Then fix the cause. Dropping the affected genes/cells (choose the filter threshold
+   from what you just printed, not from a fixed number) is preferred, because
+   np.nan_to_num turns "not measured / not computable" into a biological zero, which
+   shifts the distribution and every statistic derived from it.
+   If you do fall back to nan_to_num, `print()` how many values you replaced and record
+   it as a limitation on every result that depends on the matrix.
+3. NEVER run PCA with NaN still present, and never replace NaN without reporting it.
 
-**EXPRESSION-SCALE CONTRACT (ENFORCED AT RUNTIME)**:
-- Differential expression, gene scoring, and NMF MUST use a normalized continuous
-  expression representation, never raw integer counts.
-- Preserve raw counts in a layer or `.raw`, create an explicit normalized copy
-  (for example library-size normalization followed by log1p), and use that copy.
+**EXPRESSION-SCALE CONTRACT (PARTIALLY ENFORCED AT RUNTIME)**:
+- Pick the representation each method assumes. There is no single correct scale.
+- The runtime preflight covers exactly the calls that assume a continuous normalized
+  matrix: `rank_genes_groups`, `score_genes`, `score_genes_cell_cycle`, and
+  non-negative matrix factorization. Handing those raw integer counts, or centered /
+  scaled values, is rejected.
+- It does NOT cover count-based models, and those must NOT be fed normalized values.
+  DESeq2 / pydeseq2 / edgeR / limma-voom, and pseudobulk workflows built on them,
+  require raw integer counts and apply their own internal normalization; giving them
+  CP10K+log1p input is the error in that direction.
+- Keep raw integer counts in `adata.layers['counts']` and the normalized log matrix in
+  `.X` (and in `.raw` for full-gene scoring), so either family can be served from one
+  object without re-deriving anything.
+- Record which representation each result rests on when you register it. Where a method
+  had to run on a representation it does not strictly assume, say so — it belongs in the
+  report's limitations, not in a silent footnote.
 - If you change normalization or replace `.X`, regenerate every downstream table
   and figure from that representation. The runtime invalidates earlier same-round
   publication artifacts when it detects such a representation change.
@@ -345,6 +409,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 def build_static_executor_prompt(
     sp: str, modality: str, workspace_dir: str
 ) -> str:
-    return _executor_prompt_tools(sp, modality) + _executor_prompt_workflow(
-        workspace_dir
+    return (
+        _executor_prompt_tools(sp, modality)
+        + _executor_prompt_methods()
+        + _executor_prompt_workspace(workspace_dir)
     )

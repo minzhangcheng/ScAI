@@ -25,6 +25,7 @@ from backend.services.report.literature_files import render_literature_download_
 from backend.services.report.interaction_records import render_direction_selection_history_html
 from backend.services.report.quality import (
     render_report_limitations_html,
+    render_report_status_line_html,
 )
 from backend.config import get_session_logs, get_session_workspace
 from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
@@ -910,6 +911,9 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
         "generated_at": "Generated: " + report.get("generated_at", datetime.now().isoformat()),
         "report_limitations_html": _safe_format_value(
             render_report_limitations_html(report)
+        ),
+        "report_status_line_html": _safe_format_value(
+            render_report_status_line_html(report)
         ),
         "toc_title": "Table of Contents",
         "toc_items": _safe_format_value("\n".join(toc_items)),

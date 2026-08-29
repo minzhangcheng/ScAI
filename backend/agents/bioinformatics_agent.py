@@ -882,7 +882,9 @@ class BioinformaticsAgent(
         - Use real newline characters to separate lines.
         - Wrap node labels in square brackets, e.g. [upstream receptor]. Protein/gene tokens
           may additionally be wrapped in curly braces, e.g. {signal mediator}.
-        - Show at least 5 nodes and make the directional flow obvious with arrows.
+        - Show the nodes the evidence supports and make the flow obvious with arrows.
+          Do not pad the diagram to reach a node count; use directional arrows only
+          where the supplied evidence establishes direction.
         - Include cellular processes only when they are present in the supplied evidence.
         - Do NOT wrap the output in markdown code fences (no ``` lines).
         - Output ONLY the diagram — no prose explanation before or after.

@@ -12,7 +12,7 @@ from backend.services.report.analysis_log import build_round_summaries
 from backend.services.report.planning import PlanningMixin
 from backend.services.report.quality import (
     build_quality_disclosures,
-    render_quality_disclosures_html,
+    render_report_limitations_html,
 )
 from backend.workflow.synthesis import build_round_summary_payload
 
@@ -111,11 +111,11 @@ def test_partial_pathology_coverage_is_exactly_disclosed_in_report_limitations()
     quality = build_quality_disclosures(state)
     assert any("25/45 validated tiles" in item for item in quality["cautions"])
 
-    html = render_quality_disclosures_html({
+    html = render_report_limitations_html({
         "status": "partial",
         "quality_disclosures": quality,
     })
-    assert 'class="quality-disclosures quality-qualified"' in html
+    assert 'class="report-limitations-details"' in html
     assert "25/45 validated tiles" in html
     assert "55.6%" in html
     assert "omitted tiles were not assessed" in html

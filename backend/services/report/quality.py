@@ -508,126 +508,48 @@ def build_report_partial_fields(
     return "partial", "; ".join(details), reasons[0], reasons
 
 
-def render_report_status_banner_html(report: Dict[str, Any] | None) -> str:
-    """Render the report-level partial state independently of quality status."""
+def render_report_status_line_html(report: Dict[str, Any] | None) -> str:
+    """One always-visible line saying the report is qualified, or nothing.
+
+    Deliberately minimal and deliberately NOT collapsible: the detail belongs in
+    the folded block near the conclusions, but whether a reader should trust the
+    conclusions at all has to be legible before they read them. Returns "" for a
+    report with nothing to qualify, so a clean report gains no banner.
+    """
     if not isinstance(report, dict):
         return ""
     reasons = _texts(
         report.get("partial_reasons")
         or ([report.get("partial_reason")] if report.get("partial_reason") else [])
     )
+    quality = report.get("quality_disclosures") or {}
+    if not isinstance(quality, dict):
+        quality = {}
+    blocking = _texts(quality.get("blocking_issues"), limit=100)
+    cautions = _texts(quality.get("cautions"), limit=100)
     is_partial = str(report.get("status") or "") == "partial" or bool(reasons)
-    if not is_partial:
+    if not (is_partial or blocking or cautions):
         return ""
-    labels = {
-        "figure_coverage": "Figure coverage is incomplete.",
-        "degraded_fallback": "The report writer fell back to a degraded summary.",
-        "approved_partial": "A partial report was explicitly approved.",
-        "analysis_quality": "Retained analysis-quality gaps limit this report.",
-    }
-    details = [labels.get(reason, reason.replace("_", " ").capitalize() + ".") for reason in reasons]
-    figureless = _texts(report.get("figureless_sections"), limit=100)
-    unreported = _texts(report.get("unreported_figures"), limit=100)
-    if figureless:
-        details.append("Figureless result sections: " + ", ".join(figureless) + ".")
-    if unreported:
-        details.append("Unreported figures: " + ", ".join(unreported) + ".")
-    if not details and report.get("current_step"):
-        details.append(str(report.get("current_step")))
-    items = "".join(f"<li>{html.escape(item)}</li>" for item in details)
-    return (
-        '<section class="report-completeness report-partial">'
-        "<h2>Partial report</h2>"
-        "<p>This document is available, but it is not a fully complete report.</p>"
-        f"<ul>{items}</ul></section>"
-    )
 
+    if blocking or str(quality.get("status") or "") == "incomplete":
+        tone, headline = "status-blocking", "Partial report — unresolved evidence gaps"
+    elif is_partial:
+        tone, headline = "status-partial", "Partial report"
+    else:
+        tone, headline = "status-qualified", "Report carries evidence qualifications"
 
-def render_quality_disclosures_html(value: Dict[str, Any] | None) -> str:
-    """Render the same disclosure record in standalone and Supervisor HTML."""
-    if not value:
-        return ""
-    quality = value.get("quality_disclosures", value)
-    if not isinstance(quality, dict) or not quality:
-        return ""
-    status = str(quality.get("status") or "unknown")
-    title = {
-        "complete": "Analysis quality checks complete",
-        "qualified": "Analysis completed with quality qualifications",
-        "incomplete": "Analysis report is partial",
-    }.get(status, "Analysis quality status unavailable")
-    issues = list(quality.get("blocking_issues") or [])
-    cautions = list(quality.get("cautions") or [])
-    rows = []
-    for result in quality.get("rounds") or []:
-        rows.append(
-            "<tr>"
-            f"<td>{html.escape(str(result.get('round_number', '')))}</td>"
-            f"<td>{html.escape(str(result.get('round_status', '')))}</td>"
-            f"<td>{html.escape(str(result.get('evidence_status', '')))}</td>"
-            f"<td>{html.escape(str(result.get('direction_coverage_eligible')))}</td>"
-            f"<td>{html.escape(str(result.get('bioinformatics_evidence_verified')))}</td>"
-            "</tr>"
-        )
-    details = ""
-    if issues or cautions:
-        items = "".join(
-            f"<li>{html.escape(str(item))}</li>" for item in issues + cautions
-        )
-        details = f"<ul>{items}</ul>"
-    rounds_html = ""
-    if rows:
-        rounds_html = (
-            "<table><thead><tr><th>Round</th><th>Status</th><th>Evidence</th>"
-            "<th>Coverage eligible</th><th>Evidence verified</th></tr></thead>"
-            f"<tbody>{''.join(rows)}</tbody></table>"
-        )
-    review_details = []
-    for review in quality.get("post_execution_reviews") or []:
-        audit = review.get("plan_audit") or {}
-        assessment = review.get("assessment") or {}
-        unmet = _texts(audit.get("unmet_titles"), limit=20)
-        remaining = _texts(assessment.get("remaining_gaps"), limit=20)
-        if unmet or remaining:
-            label = f"Round {review.get('round_number', 0)} post-execution review"
-            detail_parts = []
-            if unmet:
-                detail_parts.append("unmet plan steps: " + ", ".join(unmet))
-            if remaining:
-                detail_parts.append("remaining gaps: " + ", ".join(remaining))
-            review_details.append(
-                f"<li><strong>{html.escape(label)}:</strong> "
-                f"{html.escape('; '.join(detail_parts))}</li>"
-            )
-    review_html = (
-        "<h3>Post-execution review gaps</h3><ul>"
-        + "".join(review_details)
-        + "</ul>"
-        if review_details else ""
-    )
-    annotation = quality.get("annotation") or {}
-    confirmation = (annotation.get("confirmation") or {}).get("status", "unknown")
-    validation = (annotation.get("validation") or {}).get("status", "unknown")
-    counts = annotation.get("cell_counts") or {}
-    annotation_html = (
-        "<p><strong>Annotation confirmation:</strong> "
-        f"{html.escape(str(confirmation))}; "
-        "<strong>validation:</strong> "
-        f"{html.escape(str(validation))}; "
-        "<strong>cluster cell counts:</strong> "
-        f"{int(counts.get('known_clusters', 0) or 0)} known / "
-        f"{int(counts.get('unknown_clusters', 0) or 0)} unknown.</p>"
-    )
-    validation_summary = str((annotation.get("validation") or {}).get("summary") or "")
-    if validation_summary:
-        annotation_html += (
-            "<p><strong>Annotation validation summary:</strong> "
-            f"{html.escape(validation_summary)}</p>"
-        )
+    counts = []
+    if blocking:
+        counts.append(f"{len(blocking)} unresolved issue" + ("s" if len(blocking) != 1 else ""))
+    if cautions:
+        counts.append(f"{len(cautions)} caution" + ("s" if len(cautions) != 1 else ""))
+    detail = "; ".join(counts) if counts else "see the qualifications below"
     return (
-        f'<section class="quality-disclosures quality-{html.escape(status)}">'
-        f"<h2>{html.escape(title)}</h2>{details}{rounds_html}{review_html}"
-        f"{annotation_html}</section>"
+        f'<div class="report-status-line {tone}">'
+        f"<strong>{html.escape(headline)}.</strong> "
+        f"{html.escape(detail)} — read the conclusions in that light; the itemised "
+        "record is at the end of this report."
+        "</div>"
     )
 
 
@@ -663,18 +585,106 @@ def render_report_limitations_html(report: Dict[str, Any] | None) -> str:
         details.append("Unreported figures: " + ", ".join(unreported) + ".")
 
     quality = report.get("quality_disclosures") or {}
-    if isinstance(quality, dict):
-        details.extend(list(quality.get("blocking_issues") or []))
-        details.extend(list(quality.get("cautions") or []))
+    if not isinstance(quality, dict):
+        quality = {}
+    details.extend(list(quality.get("blocking_issues") or []))
+    details.extend(list(quality.get("cautions") or []))
     details = _texts(details, limit=200)
-    if not details:
+
+    # The prose above summarises; it does not name. A caution reads "Round 1
+    # post-execution review failed to resolve its supplementary gaps" without
+    # saying WHICH step went unmet, and says nothing at all about annotation
+    # confirmation or per-round evidence. Those three groups were rendered by the
+    # two banners this block replaced in 0.49.3; the machine-readable record kept
+    # them but the report stopped showing them, so an audit could no longer see
+    # which obligation was missed. They belong here, inside the one collapsed
+    # block, which is what "keeping every retained issue available" meant.
+    review_items = []
+    for review in quality.get("post_execution_reviews") or []:
+        if not isinstance(review, dict):
+            continue
+        audit = review.get("plan_audit") or {}
+        assessment = review.get("assessment") or {}
+        unmet = _texts(audit.get("unmet_titles"), limit=20)
+        remaining = _texts(assessment.get("remaining_gaps"), limit=20)
+        if not unmet and not remaining:
+            continue
+        parts = []
+        if unmet:
+            parts.append("unmet plan steps: " + ", ".join(unmet))
+        if remaining:
+            parts.append("remaining gaps: " + ", ".join(remaining))
+        label = f"Round {review.get('round_number', 0)} post-execution review"
+        review_items.append(
+            f"<li><strong>{html.escape(label)}:</strong> "
+            f"{html.escape('; '.join(parts))}</li>"
+        )
+
+    # A block with nothing to disclose stays absent: annotation state and the
+    # round table are context for a qualification, never a qualification on
+    # their own, so they must not make a clean report grow an empty section.
+    if not details and not review_items:
         return ""
 
-    items = "".join(f"<li>{html.escape(item)}</li>" for item in details)
+    body = ""
+    if details:
+        body += "<ul>" + "".join(
+            f"<li>{html.escape(item)}</li>" for item in details
+        ) + "</ul>"
+    if review_items:
+        body += (
+            "<h3>Post-execution review gaps</h3><ul>"
+            + "".join(review_items)
+            + "</ul>"
+        )
+
+    rows = []
+    for result in quality.get("rounds") or []:
+        if not isinstance(result, dict):
+            continue
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(result.get('round_number', '')))}</td>"
+            f"<td>{html.escape(str(result.get('round_status', '')))}</td>"
+            f"<td>{html.escape(str(result.get('evidence_status', '')))}</td>"
+            f"<td>{html.escape(str(result.get('direction_coverage_eligible')))}</td>"
+            f"<td>{html.escape(str(result.get('bioinformatics_evidence_verified')))}</td>"
+            "</tr>"
+        )
+    if rows:
+        body += (
+            "<table><thead><tr><th>Round</th><th>Status</th><th>Evidence</th>"
+            "<th>Coverage eligible</th><th>Evidence verified</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>"
+        )
+
+    annotation = quality.get("annotation") or {}
+    if isinstance(annotation, dict) and annotation:
+        confirmation = (annotation.get("confirmation") or {}).get("status", "unknown")
+        validation = (annotation.get("validation") or {}).get("status", "unknown")
+        counts = annotation.get("cell_counts") or {}
+        body += (
+            "<p><strong>Annotation confirmation:</strong> "
+            f"{html.escape(str(confirmation))}; "
+            "<strong>validation:</strong> "
+            f"{html.escape(str(validation))}; "
+            "<strong>cluster cell counts:</strong> "
+            f"{int(counts.get('known_clusters', 0) or 0)} known / "
+            f"{int(counts.get('unknown_clusters', 0) or 0)} unknown.</p>"
+        )
+        validation_summary = str(
+            (annotation.get("validation") or {}).get("summary") or ""
+        )
+        if validation_summary:
+            body += (
+                "<p><strong>Annotation validation summary:</strong> "
+                f"{html.escape(validation_summary)}</p>"
+            )
+
     return (
         '<details class="report-limitations-details">'
         "<summary>Detailed evidence qualifications</summary>"
         "<p>The PI summary above consolidates the principal limitations; "
         "the retained machine-derived details are listed here.</p>"
-        f"<ul>{items}</ul></details>"
+        f"{body}</details>"
     )

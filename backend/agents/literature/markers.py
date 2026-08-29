@@ -166,10 +166,30 @@ For each cluster, provide:
 5. Brief evidence/reasoning citing the literature
 
 IMPORTANT:
-- Be specific about cell types (e.g., "CD8+ cytotoxic T cells" not just "T cells")
-- If a cluster has ambiguous markers, list the top 2 candidates
+- Be as specific as the markers actually support, and no more. "CD8+ cytotoxic T cells" is
+  better than "T cells" ONLY when the distinguishing markers are present in this cluster's list;
+  in 3' single-cell data CD4/CD8 transcripts are often too sparse to make that call. Assign the
+  most specific label the evidence carries, then stop — an over-specific label is not a more
+  informative answer, it is a wrong one, and everything downstream inherits it
+- If a cluster has ambiguous markers, list the top 2 candidates and set confidence accordingly
 - Consider the tissue context ({tissue}) when making assignments
-- Use "Unknown" only if markers truly don't match any known cell type
+- Not every cluster is a cell type. Use these when they fit, rather than forcing a lineage label:
+    * "Doublet/multiplet (suspected)" — the marker list mixes the defining markers of two
+      unrelated lineages
+    * "Low-quality/dying (suspected)" — the markers are dominated by mitochondrial or ribosomal
+      genes with no lineage-specific signature
+    * "Ambient/background (suspected)" — the top markers are the highly expressed genes of
+      another, abundant population without that population's full signature
+    * "Mixed/unresolved" — several distinct signatures that sub-clustering would be needed to separate
+    * "Transitional/intermediate state" — markers of two related types along one lineage
+    * "Unknown" — a real, coherent population whose identity the markers do not establish
+  You are given ONLY each cluster's ranked marker genes — no mitochondrial fraction, no detected-
+  gene counts, no doublet scores, no per-cell values. Judge from the marker list alone. The three
+  "(suspected)" labels are therefore hypotheses the marker list is CONSISTENT with, not calls:
+  say so in `evidence`, name the per-cell QC that would confirm or refute it, and never state one
+  as established
+  Forcing one of these into a specific cell type propagates a population that does not exist into
+  every downstream comparison, and it cannot be detected later
 
 Return a JSON object with this EXACT structure:
 {{
@@ -282,12 +302,19 @@ Please return in JSON format:
     ) -> Dict[str, Any]:
         """Validate pathway enrichment with literature evidence."""
         self.refresh_runtime_config_if_needed()
-        topic = f"{pathway_name} pathway {' '.join(genes[:10])} disease mechanism"
+        topic = (
+            f"{pathway_name} pathway {' '.join(genes[:10])} "
+            f"{context[:120] + ' ' if context else ''}"
+            "function, regulation, and evidence for and against involvement"
+        )
 
         result = await self._do_research(topic, state)
 
         prompt = f"""
-Based on the literature review, validate the biological significance of the following pathway enrichment:
+Based on the literature review, ASSESS the following pathway enrichment. Assess means decide
+whether the literature supports, contradicts, or is silent on its relevance here — not confirm it.
+An enrichment result that the literature does not support, or that is driven by a handful of
+broadly expressed genes, is a legitimate and useful assessment:
 
 Pathway name: {pathway_name}
 Enriched genes: {', '.join(genes[:20])}
@@ -297,16 +324,19 @@ Literature information:
 {result['report'][:8000]}
 
 Please evaluate:
-1. Known role of this pathway in disease/physiology
-2. Relevance of enriched genes to the pathway
-3. Biological significance of this finding
+1. Known role of this pathway, in whatever context the literature actually establishes — do not
+   assume a disease context unless the research context above states one
+2. Relevance of the enriched genes to the pathway, and whether they are specific to it or broadly
+   expressed genes that drive many enrichment results
+3. What the literature supports, what it contradicts, and what it does not address here
 
 Reply in JSON format:
 {{
     "pathway": "{pathway_name}",
     "known_role": "Known role of the pathway",
     "gene_relevance": "Gene relevance assessment",
-    "biological_significance": "Biological significance",
+    "biological_significance": "What this supports here, at the claim level the evidence carries",
+    "contradicting_or_absent_evidence": "Literature that argues against this, or a statement that the literature does not address it",
     "confidence": "high/medium/low",
     "key_references": ["Key references"]
 }}

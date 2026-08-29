@@ -55,6 +55,56 @@ from .shared import (  # noqa: F401
 )
 
 
+def _search_continuation(evaluation, query, label, round_num):
+    """Decide whether to keep searching, and why we stopped if not.
+
+    Returns ``(stop_reason, next_query)``; ``stop_reason`` is None to continue.
+    "Stop searching" and "the evidence supports a conclusion" are two judgements
+    that used to share one boolean, so a broken evaluator and an
+    exhausted-but-thin search both came out as "sufficient".
+    """
+    if evaluation.get("evaluation_failed"):
+        logger.warning(
+            f"[Literature] {label} stopped after {round_num} rounds: "
+            "search evaluation unavailable; evidence left unassessed"
+        )
+        return "evaluation_failed", query
+    if evaluation.get("search_exhausted"):
+        logger.info(
+            f"[Literature] {label} search exhausted after {round_num} rounds "
+            f"(evidence: {evaluation.get('evidence_strength', 'unassessed')})"
+        )
+        return "search_exhausted", query
+    refined_query = str(evaluation.get("refined_query") or query).strip()
+    if _normalized_search_text(refined_query) == _normalized_search_text(query):
+        return "query_stagnation", query
+    return None, refined_query
+
+
+def _evaluation_meta(evaluation) -> dict:
+    """Project the search evaluation onto the metadata the report reads.
+
+    Without these, "we stopped because the evaluator broke" and "we stopped
+    because the search was exhausted and the evidence is strong" were the same
+    record downstream.
+    """
+    if not isinstance(evaluation, dict):
+        return {
+            "search_exhausted": False,
+            "evidence_strength": "unassessed",
+            "evaluation_failed": False,
+            "evaluation_reasoning": "",
+            "missing_aspects": [],
+        }
+    return {
+        "search_exhausted": bool(evaluation.get("search_exhausted")),
+        "evidence_strength": str(evaluation.get("evidence_strength") or "unassessed"),
+        "evaluation_failed": bool(evaluation.get("evaluation_failed")),
+        "evaluation_reasoning": str(evaluation.get("reasoning") or "")[:600],
+        "missing_aspects": list(evaluation.get("missing_aspects") or [])[:10],
+    }
+
+
 class PubMedMixin:
     """PubMed search execution, XML parsing, and batched query rounds."""
 
@@ -222,14 +272,30 @@ Articles found ({len(articles)} total, showing {len(sampled)} most recent with a
 {articles_summary}
 
 Evaluation criteria:
-- Are there articles directly relevant to the topic?
-- Are key aspects covered (mechanism, phenotype, therapeutic implications)?
-- Are there at least 5 highly relevant articles?
+- Are there articles directly relevant to the topic, as opposed to merely adjacent to it?
+- Are the aspects this specific topic turns on covered? Derive them from the topic itself
+  rather than from a fixed list; a descriptive, methodological, developmental or comparative
+  topic has no therapeutic angle to cover, and demanding one produces padding
+- For each CONTESTABLE claim, was contradicting, qualifying or non-replicating work looked
+  for as deliberately as supporting work? Weigh what you find by study design, directness and
+  how well the model applies here — not by how many papers sit on each side, and not by giving
+  the two equal space regardless of quality. A well-established descriptive fact needs no
+  manufactured counterpoint; searching for one only imports irrelevant literature
+- Do the retrieved studies differ in design or model, so the conclusion does not rest on a
+  single group or a single system?
 
-Respond in JSON format:
+Note on counts: the number of articles is not the criterion. A genuinely novel or narrow topic
+may have very few relevant papers, and reporting that honestly ("sparse literature; N directly
+relevant articles") is a correct and informative outcome. Do NOT keep broadening the query until
+some arbitrary number of hits accumulates — that yields tangentially related papers that will
+later be cited as if they supported the claim.
+
+Respond in JSON format. Note that the two judgements below are separate: a search can be
+exhausted while the evidence remains thin, and that combination is a useful, honest result.
 {{
-    "sufficient": true or false,
-    "reasoning": "why sufficient or not",
+    "search_exhausted": true or false,
+    "evidence_strength": "strong | moderate | sparse | contradictory | insufficient",
+    "reasoning": "why the search is or is not exhausted, and how strong the evidence is",
     "refined_query": "a NEW PubMed search query targeting missing aspects (MUST differ from all previous queries)",
     "missing_aspects": ["aspects not yet covered"]
 }}
@@ -237,12 +303,33 @@ Respond in JSON format:
 IMPORTANT:
 - The refined_query MUST be a valid PubMed search query using AND/OR operators
 - The refined_query MUST NOT duplicate any previous query listed above
-- If the articles are mostly irrelevant, try a simpler, broader query"""
+- If the articles are mostly irrelevant, the query may be wrong — try different
+  terminology or a different angle before broadening. If broadening is genuinely the
+  right move, keep the query on-topic; do not relax it until unrelated work matches.
+  If the literature is simply sparse, say so: set search_exhausted=true with
+  evidence_strength="sparse". Exhausting the search and finding little is an honest
+  result; manufacturing hits to fill it is not"""
 
         response, _ = await self._chat_with_fallback(prompt, temperature=0.3)
         result = self._safe_parse_json(response)
-        if not result or "sufficient" not in result:
-            return {"sufficient": True}
+        if not result or "search_exhausted" not in result:
+            # Stopping here is right -- an unreadable evaluator should not spin the
+            # loop -- but reporting it as "sufficient" turns a tooling failure into
+            # a claim about the evidence. Stop, and say why.
+            logger.warning(
+                "[Literature] Sufficiency evaluation unreadable; stopping the search "
+                "and recording the evaluation as unavailable"
+            )
+            return {
+                "search_exhausted": False,
+                "evidence_strength": "unassessed",
+                "evaluation_failed": True,
+                "reasoning": (
+                    "The search evaluation could not be read, so the search loop stopped "
+                    "early. This says nothing about whether the retrieved literature supports "
+                    "any conclusion; treat the evidence as unassessed."
+                ),
+            }
         return result
 
     async def _focused_rare_search(
@@ -386,6 +473,10 @@ IMPORTANT:
         seen_pmids: Set[str] = set()
         search_history: List[Dict[str, Any]] = []
         latest_triage: Dict[str, Any] = {}
+        # Separate from latest_triage, which is the annotation triage payload:
+        # only the PI-guided branch ever wrote that, so the plain PubMed branch
+        # produced metadata contradicting its own stop_reason.
+        latest_evaluation: Dict[str, Any] = {}
         plateau_streak = 0
         evaluation_count = 0
         stop_reason = "max_search_rounds"
@@ -535,8 +626,14 @@ IMPORTANT:
                         break
                     except Exception as e:
                         logger.warning(f"[Literature] PI evaluation failed in round {round_num}: {e}, stopping")
-                        evaluation = {"sufficient": True}
+                        evaluation = {
+                            "search_exhausted": False,
+                            "evidence_strength": "unassessed",
+                            "evaluation_failed": True,
+                            "reasoning": f"Search evaluation raised: {e}",
+                        }
                     latest_triage = evaluation
+                    latest_evaluation = evaluation
                     # 确定性语义终止: 全部簇已归桶 且 triage 非低置信
                     if evaluation.get("triage_complete") and not evaluation.get("triage_low_confidence"):
                         logger.info(f"[Literature] {label} semantic termination: all clusters triaged")
@@ -555,15 +652,14 @@ IMPORTANT:
                         stop_reason = "wall_clock_budget"
                         break
 
-                if evaluation.get("sufficient", True):
-                    stop_reason = "sufficient"
-                    logger.info(f"[Literature] {label} sufficient after {round_num} rounds")
+                latest_evaluation = evaluation
+                decision, next_query = _search_continuation(
+                    evaluation, query, label, round_num
+                )
+                if decision is not None:
+                    stop_reason = decision
                     break
-                refined_query = str(evaluation.get("refined_query") or query).strip()
-                if _normalized_search_text(refined_query) == _normalized_search_text(query):
-                    stop_reason = "query_stagnation"
-                    break
-                query = refined_query
+                query = next_query
 
             # Rate limiting for NCBI E-utilities (3 req/s without API key)
             await asyncio.sleep(0.4)
@@ -579,6 +675,7 @@ IMPORTANT:
                 "sufficiency_evaluations": evaluation_count,
                 "elapsed_seconds": round(time.monotonic() - search_started, 3),
                 "fallback": "llm_knowledge",
+                **_evaluation_meta(latest_evaluation),
             }
             cache_result(fallback)
             return fallback
@@ -648,6 +745,7 @@ IMPORTANT:
             "article_count": len(all_articles),
             "sufficiency_evaluations": evaluation_count,
             "elapsed_seconds": round(time.monotonic() - search_started, 3),
+            **_evaluation_meta(latest_evaluation),
         }
         cache_result(final)
         return final

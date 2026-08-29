@@ -76,6 +76,20 @@ class IntegrationMixin:
         raw_candidates = await self.pi_agent.generate_integration_direction_candidates(
             analysis_state, cumulative_rounds, integration_report, new_literature
         )
+        # An empty candidate list has two causes and only one of them is a
+        # scientific statement. Capture the tooling failure immediately: further
+        # down, an empty list is otherwise reported as "no sufficiently novel
+        # research direction was found".
+        candidate_failure = getattr(
+            self.pi_agent, "last_candidate_generation_error", None
+        )
+        if candidate_failure:
+            latest_round = analysis_state.get_latest_round()
+            if latest_round is not None:
+                notes = list(getattr(latest_round, "evidence_notes", []) or [])
+                if candidate_failure not in notes:
+                    notes.append(candidate_failure)
+                    latest_round.evidence_notes = notes
 
         scored_candidates = []
         literature_evidence = []
@@ -185,9 +199,19 @@ class IntegrationMixin:
         # the actual terminal phase before either branch returns.
         analysis_state.analysis_phase = AnalysisPhase.INTEGRATION
         if cap_reached or not scored_candidates:
-            reason = ("Reached the integration analysis limit; proceeding to the final report."
-                      if cap_reached else
-                      "No sufficiently novel research direction was found; proceeding to the final report.")
+            if cap_reached:
+                reason = "Reached the integration analysis limit; proceeding to the final report."
+            elif candidate_failure:
+                reason = (
+                    "Direction-candidate generation was unavailable, so no new direction could "
+                    "be proposed; proceeding to the final report. This is a tooling failure, "
+                    "not a finding that no novel direction remains."
+                )
+            else:
+                reason = (
+                    "No sufficiently novel research direction was found; proceeding to the "
+                    "final report."
+                )
             analysis_state.integration_gate_candidates = []
             analysis_state.integration_gate_literature_evidence = []
             html_url = f"/api/session/{session_id}/integration-report/html" if analysis_state.integration_report_html_path else None

@@ -138,6 +138,33 @@ Reply in JSON format as follows:
         focusing on broad data extraction rather than targeted investigation.
         """
         logger.info(f"[PI] Generating exploration-phase instructions for project: {state.name}")
+
+        additional_planning_block = """Beyond the baseline pipeline, plan these additional analyses:
+1. Decide which cluster comparisons are biologically meaningful for cross-cluster DEG
+   - Do NOT compare biologically unrelated populations merely because they are both present
+   - Focus on: same cell type across conditions, related subtypes within a lineage
+2. Decide which subtypes should be merged for additional condition-level comparisons
+   (e.g., merge data-supported subtypes that share a coherent parent identity)
+3. Keep all analyses simple and high-throughput"""
+        literature_scope = (
+            "Broad topics covering the cell types and pathways the data actually shows, in "
+            "the tissue and experimental context stated above. Do not assume a disease "
+            "context the design does not describe."
+        )
+        cluster_field_hint = '"Which clusters to compare and why (brief)"'
+        merge_field_hint = '"Which subtypes to merge for condition comparison (brief)"'
+        baseline_pipeline_block = """## Baseline Pipeline (MUST be included in bioinformatics_tasks)
+1. Quality Control (QC) and filtering
+2. Doublet removal assessment (if data quality suggests it is needed)
+3. Batch effect assessment on the uncorrected representation; decide whether a
+   correction/integration step is scientifically appropriate for the measured design
+4. Normalization, HVG selection, PCA, UMAP
+5. Clustering (leiden/louvain)
+6. Cell type annotation via annotate_clusters tool
+7. Assess condition-associated signals using methods and inferential strength that
+   you judge appropriate for the measured design; state material limitations
+   (merge closely related states into a shared parent population only when the observed markers support it)
+8. Cell-cell communication analysis (liana)"""
         sample_design_facts = sequencing_design_instruction(state)
         prompt = f"""
 ## Project Information
@@ -162,37 +189,23 @@ CRITICAL CONSTRAINTS:
 - Prioritize broad, efficient, high-information analyses (e.g., DEG + GO/KEGG) over targeted deep analyses.
 - Do NOT instruct agents to perform experiments or staining that are not in the available data.
 
-## Fixed Mandatory Pipeline (MUST be included in bioinformatics_tasks)
-1. Quality Control (QC) and filtering
-2. Doublet removal assessment (if data quality suggests it is needed)
-3. Batch effect assessment on the uncorrected representation; decide whether a
-   correction/integration step is scientifically appropriate for the measured design
-4. Normalization, HVG selection, PCA, UMAP
-5. Clustering (leiden/louvain)
-6. Cell type annotation via annotate_clusters tool
-7. Assess condition-associated signals using methods and inferential strength that
-   you judge appropriate for the measured design; state material limitations
-   (merge closely related states into a shared parent population only when the observed markers support it)
-8. Cell-cell communication analysis (liana)
+{baseline_pipeline_block}
 9. If bulk RNA-seq data is available:
    a. Analyze bulk expression using methods you judge appropriate for its measured design.
-   b. Assess cross-modal concordance and decide what inferential weight it supports.
+   b. Assess cross-modal concordance ONLY if another modality exists to compare against, and
+      decide what inferential weight it supports — noting whether the modalities come from the
+      same biological samples (a consistency check) or different ones (replication).
    c. Select and justify any comparison visualizations needed to communicate the
       cross-modal evidence.
-   d. Decide whether a cell-composition analysis is scientifically supported by
-      the available bulk and single-cell inputs; if so, select and justify the
-      method and limitations.
+   d. Decide whether a cell-composition analysis is scientifically supported. Deconvolution
+      needs a reference the available inputs can supply; without single-cell data from this
+      study or a justified external reference, it is not supported — say so rather than
+      planning it.
 
-Note: These tasks span both Stage 1 (steps 1–6: QC through cell type annotation) and Stage 2 (steps 7–9: DEG, enrichment, cell-cell communication, bulk integration). The bioinformatics agent will automatically split and schedule them across the appropriate stages — do NOT try to compress everything into a single stage.
+Note: These tasks span two stages — the baseline establishment steps above, then the condition-level, enrichment and integration steps. The bioinformatics agent will automatically split and schedule them across the appropriate stages — do NOT try to compress everything into a single stage.
 
 ## Your Additional Planning (UNBIASED exploration)
-Beyond the fixed pipeline, plan these additional analyses:
-1. Decide which cluster comparisons are biologically meaningful for cross-cluster DEG
-   - Do NOT compare biologically unrelated populations merely because they are both present
-   - Focus on: same cell type across conditions, related subtypes within a lineage
-2. Decide which subtypes should be merged for additional condition-level comparisons
-   (e.g., merge data-supported subtypes that share a coherent parent identity)
-3. Keep all analyses simple and high-throughput
+{additional_planning_block}
 
 IMPORTANT: You must assign tasks based ONLY on the data that is actually available.
 You MAY include a brief "recommended_future_experiments" list, but primary tasks must use only available data.
@@ -202,7 +215,7 @@ Please assign specific tasks for each direction (listed in execution order):
 1. Biochemistry analysis: Analyze available biochemistry data/indicators
 2. Pathology analysis: Analyze available histology images
 3. Bioinformatics analysis: The fixed pipeline above PLUS your additional unbiased exploration tasks
-4. Literature research: Broad topics covering expected cell types and pathways in this tissue/disease context
+4. Literature research: {literature_scope}
 
 Reply in JSON format:
 {{
@@ -211,8 +224,8 @@ Reply in JSON format:
     "pathology_tasks": ["task1", "task2", ...],
     "bioinformatics_tasks": ["task1", "task2", ...],
     "literature_topics": ["topic1", "topic2", ...],
-    "cluster_comparison_strategy": "Which clusters to compare and why (brief)",
-    "merge_strategy": "Which subtypes to merge for condition comparison (brief)",
+    "cluster_comparison_strategy": {cluster_field_hint},
+    "merge_strategy": {merge_field_hint},
     "recommended_future_experiments": ["experiment1", ...]
 }}
 """
@@ -229,7 +242,9 @@ Reply in JSON format:
             "pathology_tasks": ["Analyze tissue sections, assess overall morphological changes"],
             "bioinformatics_tasks": _build_default_bio_tasks(state, detailed=True),
             "biochemistry_tasks": ["Summarize existing biochemical indicators"],
-            "literature_topics": ["Cell types and pathways relevant to the tissue and disease context"]
+            "literature_topics": [
+                "Cell types and pathways relevant to the stated experimental context"
+            ]
         }
 
     async def innovation_instruction(
@@ -263,29 +278,55 @@ PI Direction Assessment: {state.exploration_report.pi_direction_assessment[:500]
 
         # Detect data types for conditional toolkit inclusion
         has_bulk_data = state.has_bulk_rnaseq()
-        has_scrna_data = state.has_scrnaseq()
+        scoring_entry = (
+            "score cells for biological or metabolic signatures using sc.tl.score_genes "
+            "or pyscenic.aucell"
+        )
+        correlation_unit = "computed within a cell population"
+        marker_viz = "dot plots, violin plots, feature plots for key genes across conditions"
+        task_target = "the target cell types"
+        modality_toolkit = """- **Trajectory & RNA Velocity**: Diffusion pseudotime (DPT), PAGA for lineage inference; scvelo or cellrank for directed cell fate mapping (only where spliced/unspliced layers exist; these answer different questions and are not interchangeable)
+- **Cell-cell communication**: liana / cellphonedb for ligand-receptor interactions; ligand-target analysis (via decoupler) to predict downstream target activation in receiver cells
+- **Cellular Stemness & Plasticity**: cytotrace2-py for CytoTRACE-like scoring to infer differentiation potential
+- **Tumor/Malignancy estimation**: infercnvpy to detect large-scale copy number variation (use only when oncology data is present)
+- **Subpopulation re-clustering**: re-cluster specific cell types at higher resolution to discover subtypes or functional states
+- **Compositional analysis**: compare cell type proportions between conditions with statistical testing (pertpy or sccoda)
+"""
 
         # Conditionally add bulk-scRNA integration as the FIRST and recommended item
-        if has_bulk_data and has_scrna_data:
+        if has_bulk_data:
             toolkit_intro = """
-- **Bulk-scRNA direction validation (RECOMMENDED — include at least ONE bulk validation task)**:
-  Use bulk RNA-seq data as an independent validation layer for this direction's new findings.
+- **Bulk-scRNA cross-assay check (include one when the direction makes a claim bulk can test)**:
+  Check whether the bulk data is CONCORDANT with this direction's findings. Before framing the
+  result, establish from the experimental design whether the bulk and single-cell libraries came
+  from the SAME biological samples or from different ones, and state which:
+    * different biological samples -> independent replication, and may be described as such
+    * the same samples -> a cross-assay consistency check ONLY. It shares the biological
+      replicates, the animals/donors, and usually the batch, so it cannot independently confirm
+      anything; agreement mostly rules out a single-assay technical artifact.
+  Never call the same-sample case "independent validation". If the provenance cannot be
+  established from the design, say so and use the weaker framing.
   Reuse the bulk variables already loaded in Round 1 (see the data context section for their exact
   names); do NOT re-run the bulk DEG pipeline from scratch.
-"""
-        elif has_bulk_data:
-            toolkit_intro = """
-- **Bulk direction validation (RECOMMENDED when bulk data exists)**:
-  Validate new findings on existing bulk data. Reuse the bulk variables already loaded in
-  Round 1 (see the data context section for their exact names); do NOT re-run the bulk DEG
-  pipeline from scratch.
 """
         else:
             toolkit_intro = ""
 
         # Append additional targeted-analysis methods (Round 2+ enrichments)
-        toolkit_intro += """- **Gene Expression Programs (Lightweight)**: For continuous cell states, prefer `sklearn.decomposition.NMF` on highly variable genes; for large datasets consider subsampling (e.g., ~3000 cells) to keep runtime tractable. Avoid full cNMF bootstraps unless explicitly requested.
-- **Biomarker Discovery (Conditional)**: When the target population has clear binary/multiclass metadata (e.g., `len(adata.obs['Condition'].unique()) >= 2`), use `sklearn.ensemble.RandomForestClassifier` to extract top feature genes (~20 by default).
+        toolkit_intro += """- **Gene Expression Programs**: For continuous cell states, matrix factorization (NMF, cNMF) or
+  another program-discovery method — choose it, its rank, and its input feature set from the data
+  and justify them; a rank picked without inspecting the reconstruction or stability is a guess.
+  Subsampling to keep runtime tractable is fine, but state the number used and check the programs
+  are recovered on a second subsample before interpreting them.
+- **Biomarker Discovery (Conditional)**: A supervised classifier can nominate candidate features,
+  but only where the design can support it. Before proposing one, check what the label actually
+  separates: with one biological replicate per condition, ANY classifier separates the conditions
+  perfectly by learning donor/batch identity, and the "biomarkers" it returns are that identity.
+  Require independent biological replicates per class, hold out data or cross-validate at the
+  BIOLOGICAL-UNIT level (never at the cell level, where cells of one sample leak across the
+  split), report the out-of-fold performance next to a label-permuted baseline, and treat
+  correlated-feature importance rankings as unstable. Any feature count you cut at is a reporting
+  choice, not a result — state it.
 """
 
         prompt = f"""
@@ -307,25 +348,27 @@ Design specific analyses to deeply investigate this direction.
 For each bioinformatics task, specify the CONCRETE analysis method and target:
 
 Available analysis toolkit (use as many as relevant):
-{toolkit_intro}- **Targeted DEG**: Specify which cell populations to compare, which contrasts, and threshold strategy
+{toolkit_intro}{modality_toolkit}- **Targeted differential expression**: specify which populations or sample groups to
+  compare, which contrasts, and the threshold strategy — fixed in advance, not after seeing
+  the result
 - **Pathway enrichment**: GO/KEGG for broad screening; GSEA/ssGSEA for quantitative pathway scoring; MSigDB hallmark gene sets
-- **Gene signature & Metabolic scoring**: Score cells for specific biological or metabolic signatures using sc.tl.score_genes or pyscenic.aucell; choose gene sets based on data-driven findings, not prior assumptions
-- **Trajectory & RNA Velocity**: Diffusion pseudotime (DPT), PAGA for lineage inference; scvelo or cellrank for directed cell fate mapping and driver gene identification (if spliced/unspliced data available)
+- **Gene signature & Metabolic scoring**: {scoring_entry}; choose gene sets based on data-driven findings, not prior assumptions
 - **Transcription factor & Gene Regulatory Networks (GRN)**: decoupler / pyscenic to infer TF activity; PyWGCNA or gene co-expression analysis to identify co-expressed gene modules and hub genes
-- **Cell-cell communication**: liana / cellphonedb for ligand-receptor interactions; ligand-target analysis (via decoupler) to predict downstream target gene activation in receiver cells
-- **Cellular Stemness & Plasticity**: cytotrace2-py for CytoTRACE-like scoring to infer differentiation potential and developmental states
-- **Tumor/Malignancy estimation**: infercnvpy to detect large-scale chromosomal copy number variations (use only when oncology data is present)
-- **Subpopulation re-clustering**: Re-cluster specific cell types at higher resolution to discover subtypes or functional states
-- **Correlation analysis**: Gene-gene correlation, module scoring, or regression analysis within cell populations
-- **Compositional analysis**: Compare cell type proportions between conditions with statistical testing (pertpy or sccoda)
+- **Correlation analysis**: gene-gene correlation, module scoring, or regression, {correlation_unit}
 - **Immune repertoire analysis**: scirpy for TCR/BCR clonotype expansion, diversity, and sharing analysis (use only when paired VDJ data is available)
-- **Marker gene visualization**: Dot plots, violin plots, feature plots for key genes across conditions
+- **Key-gene visualization**: {marker_viz}
 
 IMPORTANT:
-- Generate AT LEAST 4-6 bioinformatics tasks that form a LOGICAL, CASCADING analytical storyline.
-- Design tasks so Task N builds upon the findings of Task N-1 where possible, rather than as isolated probes.
+- Generate as many bioinformatics tasks as this direction actually needs — typically a handful.
+  Do not pad the list to reach a count; a direction that is answered by two well-chosen analyses
+  is answered.
+- Sequence tasks so a later one builds on an earlier one where that genuinely helps, but do NOT
+  build a chain that only holds together if every earlier step comes out positive. For any task
+  that depends on a prior result, state what should happen if that prior result is null or
+  ambiguous: which downstream tasks stop, and what gets reported instead. A storyline that
+  survives its own negative results is a plan; one that does not is an assumption.
 - For each bioinformatics task, you MUST specify three fields:
-  1. Task & Method: what to analyze, the concrete method/library to use, and the target cell types.
+  1. Task & Method: what to analyze, the concrete method/library to use, and {task_target}.
   2. Rationale: WHY this is biologically relevant to the chosen direction (state the underlying hypothesis).
   3. Expected Outcome: what specific patterns or values would confirm OR reject the hypothesis.
 - Include both hypothesis-confirming AND exploratory analyses.
@@ -356,7 +399,7 @@ IMPORTANT:
             "bioinformatics_tasks": [f"Perform targeted analysis on: {user_direction}"],
             "pathology_tasks": [],
             "biochemistry_tasks": [],
-            "literature_topics": [f"Literature review on: {user_direction}"]
+            "literature_topics": [f"Literature review on: {user_direction}"],
         }
 
     async def innovation_instruction_pi_directed(

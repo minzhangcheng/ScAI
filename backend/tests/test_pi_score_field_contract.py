@@ -46,7 +46,8 @@ def test_score_prompt_contains_spec_scoring_rules():
     block = SRC.split("def score_directions_with_evidence", 1)[1].split("async def", 1)[0]
     for phrase in [
         "complementary",
-        "high data reliability + high data novelty",
+        "high on data_reliability AND high on data_novelty",
+        "Novelty never substitutes for reliability",
         "reconcile",
         "negative_validation_confidence=medium",
     ]:

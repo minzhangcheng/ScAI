@@ -162,6 +162,9 @@ _HEAD_POST_CSS_BODY = """\
                 </ul>
             </div>
 
+            <!-- Always-visible report status -->
+            {report_status_line_html}
+
             <!-- Graphic Abstract -->
             {graphic_abstract_html}
 
@@ -211,6 +214,7 @@ def render_report_html(context: dict) -> str:
     """
     context = dict(context)
     context.setdefault("report_limitations_html", "")
+    context.setdefault("report_status_line_html", "")
     head = _HEAD_PRE_CSS.format(**context)
     body = _HEAD_POST_CSS_BODY.format(**context)
     return head + REPORT_CSS + body

@@ -15,6 +15,16 @@ import os
 import logging
 
 from .base import BaseAgent
+from .biochemistry_parts.prompts import (
+    file_extraction_prompt as _file_extraction_prompt,
+    indicator_analysis_prompt as _indicator_analysis_prompt,
+)
+from .biochemistry_parts.records import (
+    clean_optional_text as _clean_optional_text,
+    restore_measurement_identity as _restore_measurement_identity,
+    merge_marker_records as _merge_marker_records,
+    reconcile_provenance as _reconcile_provenance,
+)
 from ..models.schemas import (
     AgentType, AnalysisState, MessageRole, BiochemistryIndicator, DataFile
 )
@@ -134,11 +144,25 @@ class BiochemistryAgent(BaseAgent):
                                         f"Invalid value for {r.get('indicator')}: {r.get('value')}, skipping"
                                     )
                                     continue
+                                _gid, _snum, _glabel, _notes = _reconcile_provenance(
+                                    file_group_id=bio_file.group_id,
+                                    file_sample_number=bio_file.sample_number,
+                                    row_group_label=r.get("group"),
+                                    row_sample_value=r.get("sample"),
+                                    state=state,
+                                )
                                 await self.add_result(
                                     indicator=r.get("indicator", "Unknown"),
                                     value=value,
                                     unit=r.get("unit", ""),
                                     state=state,
+                                    reference_range=_clean_optional_text(
+                                        r.get("reference_range")
+                                    ),
+                                    group_id=_gid,
+                                    sample_number=_snum,
+                                    source_group_label=_glabel,
+                                    provenance_notes=_notes,
                                 )
                             except (ValueError, TypeError) as e:
                                 logger.warning(
@@ -157,49 +181,58 @@ class BiochemistryAgent(BaseAgent):
 
         logger.info(f"[BiochemistryAgent] Step 1: Analyzing {len(results)} indicators")
 
-        # Build results summary
+        # Build results summary.
+        #
+        # BiochemistryIndicator carries group_id, sample_number and reference_range;
+        # rendering only "indicator: value unit" threw all three away and then asked the
+        # model to compare treatment against control and to apply reference intervals.
+        # It could do neither, so it invented both. Pass what the record actually holds.
+        group_names = {g.id: g.name for g in (state.treatment_groups or [])}
         results_text = []
         for r in results:
-            results_text.append(f"- {r.indicator}: {r.value} {r.unit}")
+            parts = [f"- [{r.id}] {r.indicator}: {r.value} {r.unit}".rstrip()]
+            group = group_names.get(r.group_id) or r.group_id
+            if group:
+                parts.append(f"group={group}")
+            if r.sample_number is not None:
+                parts.append(f"sample={r.sample_number}")
+            if r.reference_range:
+                parts.append(f"reference_range={r.reference_range}")
+            if r.source_group_label and not r.group_id:
+                parts.append(f"UNDECLARED group label in file={r.source_group_label!r}")
+            for note in (r.provenance_notes or [])[:2]:
+                parts.append(f"note: {note}")
+            results_text.append(parts[0] + ("  [" + "; ".join(parts[1:]) + "]" if parts[1:] else ""))
 
-        prompt = f"""Analyze the following biochemistry indicators in the context of the research objective.
+        grouped = sorted({
+            group_names.get(r.group_id) or r.group_id
+            for r in results
+            if r.group_id
+        })
+        design_note = (
+            "Groups present in these measurements: " + ", ".join(grouped) + ".\n"
+            if grouped
+            else "No group labels are attached to these measurements, so between-group "
+                 "comparison is NOT possible — do not describe one.\n"
+        )
 
-## Biochemistry Results:
-{chr(10).join(results_text)}
-
-## Research Context / Analysis Objective:
-{instruction}
-
-**IMPORTANT**: You must determine which indicators are abnormal based on:
-1. The specific research context (species, tissue type, experimental model)
-2. Standard reference ranges for the relevant species/tissue
-3. The expected changes given the experimental conditions
-4. Relative changes between treatment and control groups (if applicable)
-
-Please analyze and provide:
-1. Which indicators are abnormal (high or low) and their significance
-2. Correlations between indicators
-3. Possible pathophysiological mechanisms
-4. Suggested supplementary experiments
-
-Reply in JSON format:
-{{
-    "abnormal_markers": [
-        {{"indicator": "name", "value": number, "status": "high/low/normal", "significance": "brief explanation"}},
-        ...
-    ],
-    "findings": ["finding 1", "finding 2", ...],
-    "mechanisms": ["possible mechanism 1", ...],
-    "suggested_experiments": ["experiment 1", ...]
-}}
-"""
+        prompt = _indicator_analysis_prompt(
+            results_block=chr(10).join(results_text),
+            instruction=instruction,
+            design_note=design_note,
+        )
 
         response = await self.chat(prompt, temperature=0.3)
         data = self._safe_parse_json(response, agent_label="BiochemistryAgent")
 
         return {
             "findings": data.get("findings", []),
-            "abnormal_markers": data.get("abnormal_markers", []),
+            # The model judges status and basis; it does not get to restate WHICH
+            # measurement it judged. Echoing a correct id next to another
+            # measurement's name, value or group was previously accepted verbatim.
+            "abnormal_markers": _restore_measurement_identity(
+                data.get("abnormal_markers", []), results, state
+            ),
             "mechanisms": data.get("mechanisms", []),
             "suggested_experiments": data.get("suggested_experiments", []),
         }
@@ -528,7 +561,13 @@ Please provide a comprehensive summary in JSON format:
 {{
     "findings": ["integrated finding 1", "integrated finding 2", ...],
     "abnormal_markers": [
-        {{"indicator": "name", "value": "value or description", "status": "high/low/normal/abnormal", "significance": "explanation"}},
+        {{"measurement_id": "<the id of the measurement from the per-indicator analysis above; omit only for a NEW observation this step is the first to see>",
+          "indicator": "name", "value": "value or description",
+          "status": "high/low/normal/not_classifiable",
+          "basis": "reference_range | control_group:<name> | none",
+          "source_step": "step1 | step2",
+          "source_evidence": "for a NEW observation only: which image or file it came from",
+          "significance": "explanation, or what is needed to classify it"}},
         ...
     ],
     "interpretation": "2-3 paragraph comprehensive interpretation covering: (1) organ/tissue function status, (2) consistency with other findings, (3) contribution to overall phenotype",
@@ -542,15 +581,30 @@ Please provide a comprehensive summary in JSON format:
 3. Identify any contradictions or gaps
 4. Prioritize experiment suggestions by importance
 5. Ensure conclusions are evidence-based and actionable
+5b. CARRY FORWARD each measurement by its `measurement_id`, with the status and
+   basis the per-indicator analysis established. This step integrates and
+   interprets; it does not re-adjudicate. A measurement recorded as
+   not_classifiable stays not_classifiable -- it was withheld because no
+   reference interval and no control group were available, and nothing in this
+   step supplies either. There is no literature input here, so a reference range
+   recalled from memory is not a basis: `published:` is not an allowed value.
+   Only an observation this step is genuinely the first to see (from an image)
+   may appear without a measurement_id, and it needs source_step="step2" plus
+   concrete source_evidence.
 6. IMPORTANT: Images analyzed here represent biochemistry experimental data (blots, plates, gels, etc.), NOT pathology slides. Do NOT label or categorize image observations as pathology findings — keep them in the biochemistry modality scope.
 """
 
         response = await self.chat(prompt, temperature=0.3)
         data = self._safe_parse_json(response, agent_label="BiochemistryAgent")
 
-        # Build the final result
+        # Build the final result. The per-indicator record belongs to step 1;
+        # step 3 integrates and interprets rather than re-adjudicating, and its
+        # output no longer replaces step 1's list wholesale.
         all_findings = data.get("findings", [])
-        all_markers = data.get("abnormal_markers", [])
+        all_markers, marker_provenance = _merge_marker_records(
+            (step1_result or {}).get("abnormal_markers", []),
+            data.get("abnormal_markers", []),
+        )
         all_experiments = data.get("suggested_experiments", [])
         interpretation = data.get("interpretation", "")
 
@@ -565,10 +619,29 @@ Please provide a comprehensive summary in JSON format:
             )
         ])
 
+        provenance_notes = []
+        for indicator in (state.biochemistry_indicators or []):
+            for note in (indicator.provenance_notes or []):
+                entry = f"{indicator.indicator}: {note}"
+                if entry not in provenance_notes:
+                    provenance_notes.append(entry)
+        for marker in all_markers:
+            for note in (marker.get("provenance_notes") or []):
+                entry = f"{marker.get('indicator', 'unknown')}: {note}"
+                if entry not in provenance_notes:
+                    provenance_notes.append(entry)
+        for note in marker_provenance:
+            if note not in provenance_notes:
+                provenance_notes.append(note)
+
         result = {
             "status": "completed",
             "findings": all_findings,
             "abnormal_markers": all_markers,
+            # Group/sample conflicts and withheld classifications are for the PI to
+            # weigh. They lived only on the indicator records, which the round
+            # synthesis never reads, so they were recorded and then lost.
+            "provenance_notes": provenance_notes[:40],
             "interpretation": interpretation,
             "suggested_experiments": all_experiments,
             "conclusions": data.get("conclusions", []),
@@ -637,7 +710,10 @@ Based on the research context and any available findings from other agents,
 please provide:
 1. What biochemistry experiments SHOULD be performed for this research
 2. Which specific indicators are most relevant and why
-3. Recommended experimental design (groups, sample sizes, time points)
+3. Recommended experimental design (groups, and which comparisons they enable). State the
+   quantities a sample-size calculation needs — expected effect size, variability, the
+   test to be used — rather than naming an n: with no data in hand there is nothing to
+   estimate variance from, and a number quoted here would be invented
 4. Priority ranking of suggested experiments
 
 Reply in JSON format:
@@ -755,30 +831,7 @@ Reply in JSON format:
         if len(content) > 5000:
             content = content[:5000] + "\n... (truncated)"
 
-        prompt = f"""Analyze this biochemistry data file and extract ALL numerical values.
-
-Filename: {filename}
-
-Content:
-{content}
-
-For EACH biochemistry indicator found, extract:
-1. Indicator name (standardize to common abbreviations like ALT, AST, TG, etc.)
-2. Numerical value
-3. Unit
-
-Reply ONLY in JSON format:
-{{
-    "results": [
-        {{"indicator": "ALT", "value": 45.2, "unit": "U/L"}},
-        {{"indicator": "AST", "value": 89.5, "unit": "U/L"}},
-        ...
-    ],
-    "notes": "Any additional observations"
-}}
-
-Extract EVERY biochemistry-related numerical value. Ignore metadata like dates or sample IDs.
-"""
+        prompt = _file_extraction_prompt(filename=filename, content=content)
 
         response = await self.chat(prompt, temperature=0.1)
         result = self._safe_parse_json(response, agent_label="BiochemistryAgent")
@@ -790,18 +843,31 @@ Extract EVERY biochemistry-related numerical value. Ignore metadata like dates o
         indicator: str,
         value: float,
         unit: str,
-        state: AnalysisState
+        state: AnalysisState,
+        reference_range: Optional[str] = None,
+        group_id: Optional[str] = None,
+        sample_number: Optional[int] = None,
+        source_group_label: Optional[str] = None,
+        provenance_notes: Optional[List[str]] = None,
     ) -> BiochemistryIndicator:
         """Add a single biochemistry indicator.
 
         Note: Interpretation is NOT done here with hardcoded reference ranges.
-        Instead, the LLM will interpret all results contextually in step 1.
+        Instead, the LLM will interpret all results contextually in step 1 --
+        which it can only do if the comparators travel with the value. The
+        reference interval, group and replicate are those comparators: without
+        them step 1 has nothing to classify against and falls back to guessing,
+        so they are accepted here rather than discarded at the door.
         """
         result = BiochemistryIndicator(
             indicator=indicator,
             value=value,
             unit=unit,
-            reference_range=None,
+            reference_range=reference_range or None,
+            group_id=group_id or None,
+            sample_number=sample_number,
+            source_group_label=source_group_label or None,
+            provenance_notes=list(provenance_notes or []),
             interpretation=None,
         )
 
@@ -882,7 +948,9 @@ Pathology findings:
 {json.dumps(pathology_findings, ensure_ascii=False)}
 
 Biochemistry results:
-{json.dumps([{"indicator": r.indicator, "value": r.value, "interpretation": r.interpretation}
+{json.dumps([{"indicator": r.indicator, "value": r.value, "unit": r.unit,
+              "reference_range": r.reference_range, "group_id": r.group_id,
+              "interpretation": r.interpretation}
              for r in state.biochemistry_indicators], ensure_ascii=False)}
 
 Please analyze the consistency between pathology and biochemistry findings:

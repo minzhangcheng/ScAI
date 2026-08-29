@@ -95,6 +95,12 @@ class DirectionSelectionRecord(BaseModel):
     selections: List[SelectionEntry] = Field(default_factory=list)
     pi_selected: List[Dict[str, str]] = Field(default_factory=list)
     supplementary_requests: List[str] = Field(default_factory=list)
+    # An empty pi_selected has two very different causes. Without these, a tooling
+    # failure and a deliberate "nothing here is worth a round" are the same record.
+    decision_outcome: Optional[
+        Literal["selected", "none_selected", "tooling_failure"]
+    ] = None
+    selection_rationale: str = ""
 
 class AnnotationClusterEntry(BaseModel):
     """One cluster's final annotation state at confirm time."""

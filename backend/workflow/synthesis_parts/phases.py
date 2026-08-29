@@ -2,6 +2,51 @@
 from __future__ import annotations
 
 
+_PATHOLOGY_IMAGE_PROJECTION_LIMIT = 20
+
+
+def _pathology_image_projection(detailed_results):
+    """Bounded per-image state for the PI prompt, without the tile prose.
+
+    Returns ``(projected, counts)``. The counts matter: truncating at a limit
+    without saying so hid every observation past the cap, and the PI had no way
+    to know the list it was reading was partial.
+    """
+    if not isinstance(detailed_results, list):
+        return [], {}
+    projected = []
+    for entry in detailed_results[:_PATHOLOGY_IMAGE_PROJECTION_LIMIT]:
+        if not isinstance(entry, dict):
+            continue
+        validation = entry.get("tile_validation") or {}
+        projected.append({
+            "image_id": entry.get("image_id"),
+            "image_type": entry.get("image_type"),
+            "status": entry.get("status"),
+            "severity_rubric_name": entry.get("severity_rubric_name"),
+            "severity_score": entry.get("severity_score"),
+            "severity_max": entry.get("severity_max"),
+            "severity_basis": str(entry.get("severity_basis") or "")[:300],
+            "tiles_analyzed": validation.get("valid_tiles"),
+            "tiles_expected": validation.get("expected_tiles"),
+            "tile_coverage_status": validation.get("status"),
+            "severity_observations": entry.get("severity_observations") or [],
+        })
+    total = len([e for e in detailed_results if isinstance(e, dict)])
+    counts = {
+        "total_images": total,
+        "projected_images": len(projected),
+        "omitted_images": max(0, total - len(projected)),
+    }
+    if counts["omitted_images"]:
+        counts["note"] = (
+            f"{counts['omitted_images']} further image(s) were analysed but are not "
+            "listed here; their findings are in the findings list and their full "
+            "per-image detail is retained on the round result."
+        )
+    return projected, counts
+
+
 def bind_facade(facade) -> None:
     globals().update(
         {name: value for name, value in vars(facade).items() if not name.startswith("__")}
@@ -119,7 +164,31 @@ async def synthesize_agent_results(self, state):
                 ensure_ascii=False,
             )
         else:
-            agent_results[agent_name] = json.dumps(findings, ensure_ascii=False)
+            # Observations recorded by a modality are for the PI to weigh; passing
+            # only `findings` recorded them and then threw them away one step
+            # before the agent that was supposed to read them.
+            payload = {"findings": findings}
+            if status:
+                payload["status"] = status
+            for key in (
+                "abnormal_markers",          # biochemistry: status + basis per measurement
+                "provenance_notes",          # biochemistry: group/sample conflicts
+                "severity_observations",     # pathology: how a grade fails to hang together
+            ):
+                value = result.get(key)
+                if value:
+                    payload[key] = value
+            # Pathology's detailed_results carries every tile's prose. Forwarding it
+            # whole re-sends the tile descriptions the findings already summarise and
+            # crowds the PI's context; the structured per-image state is what the PI
+            # actually weighs. The full detail stays on the result, unmodified.
+            images, image_counts = _pathology_image_projection(
+                result.get("detailed_results")
+            )
+            if images:
+                payload["images"] = images
+                payload["image_counts"] = image_counts
+            agent_results[agent_name] = json.dumps(payload, ensure_ascii=False, default=str)
 
     # Cross-modal audit (Gap 0/1/2 fix) — innovation rounds only, non-critical.
     cms = None

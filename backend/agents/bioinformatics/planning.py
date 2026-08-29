@@ -61,7 +61,12 @@ _COMPLETED_STEPS_BUDGET = 16_000
 _AFFECTED_STEPS_BUDGET = 28_000
 
 
-from .planning_support import render_pi_modifications, _normalize_plan_boundary
+from .planning_support import (
+    render_pi_modifications,
+    _normalize_plan_boundary,
+    REJECTED_PLAN_POLICY,
+    _planner_modality_line,
+)
 
 
 from .shared import (  # noqa: F401
@@ -448,7 +453,7 @@ Use these results to plan the downstream analysis steps."""
                 revision_context = f"""
 ## Previous Plan was REJECTED by PI
 
-The following plan was completely rejected. Generate a COMPLETELY NEW approach. Do NOT reuse any structure or methods from the rejected plan. The PI's feedback will be provided in the dialogue — use it to understand what to avoid. Rejecting the approach does NOT reject the biology: every entity, hypothesis, and named mechanism the rejected plan covered must still be covered by the replacement.
+{REJECTED_PLAN_POLICY}
 
 Rejected plan overview: {existing_plan.overview}
 Rejected plan steps (DO NOT COPY the structure):
@@ -539,8 +544,10 @@ You are REVISING the remaining steps based on new findings."""
             )
 
         research_context = self._research_context_block(state)
+        modality_line = _planner_modality_line(state)
 
         prompt = f"""You are planning a single-cell RNA-seq bioinformatics analysis. Generate a method-level analysis plan.
+{modality_line}
 
 ## Data Context
 {data_desc}{sample_design_facts}{bulk_profile_block}{loaded_objects_block}
@@ -561,7 +568,9 @@ Tasks:
 ## Instructions
 Generate a detailed, method-level analysis plan. For each step specify:
 - **title**: Short, descriptive name
-- **method**: The specific Python library/method to use (e.g., "scanpy.pp.filter_cells with min_genes=200")
+- **method**: The specific Python library/method to use, named concretely enough to run
+  (library.function plus the parameters that matter; choose values from the data rather
+  than copying a fixed example)
 - **input**: What data/result this step consumes
 - **expected_output**: What this step produces
 - **figure_requirements**: A JSON list of publication figure deliverables. Each
@@ -788,7 +797,16 @@ Return the plan as a JSON object:
 - You may insert NEW steps between completed steps and revised steps.
 - Every step ID and every depends_on entry MUST be a positive integer. Do not use labels such as "S2_Step_1".
 - Updated plan must maintain logical dependency order.
-- The feedback tells you how to analyse, not what to stop analysing. Every entity, gene, pathway, module, hypothesis, and named mechanism present in the current plan, the PI's tasks, or the research context MUST still appear in the revised plan unless the feedback explicitly says to drop it. Dropping one because the evidence for it is weak is not permitted — keep the step and state the limitation.
+- The feedback tells you how to analyse, not what to stop analysing. Everything the PI's tasks or the research context ask to be covered MUST still be covered by the revised plan unless the feedback says to drop it, and weak evidence for a question is not a reason to stop asking it — keep the step and state the limitation.
+- That obligation is to the QUESTIONS the PI set, not to the previous plan's inventory, on the same terms as a rejected plan:
+{REJECTED_PLAN_POLICY}
+- The one exception: when a COMPLETED step has already SETTLED the question, retire the step rather than running it again. Re-running an analysis whose answer is already known is not thoroughness — it consumes rounds and produces figures for something that is not there. "Weak evidence" is never this exception.
+  State which of these four the settled answer is, because they are not the same claim and only the first is a biological result:
+    * observed absence — the entity was measurable here and is not present. A negative biological finding.
+    * below detection — it may be present below what this assay, depth, or filtering can resolve. Report the detection limit, not absence.
+    * not measured — the required layer, covariate, modality, or annotation does not exist in this dataset. This says nothing whatever about the biology; it is a limitation of the input.
+    * not identifiable — the data exist but the design cannot separate this effect from a confound. Also not a biological result.
+  Never report the last three as a negative result, and never let one of them stand as the answer to a biological question.
 - Return every step with a populated input, expected_output, and rationale. Do not replace a concrete list with a category label: "curated gene sets for A, B, C" must not become "relevant gene modules".
 - Preserve or explicitly revise every step's figure_requirements. Result-bearing
   steps should normally retain at least one publication figure. Set

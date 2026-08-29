@@ -309,8 +309,15 @@ class BiochemistryIndicator(BaseModel):
     interpretation: Optional[str] = None
 
     # Group and sample
-    group_id: Optional[str] = None
+    group_id: Optional[str] = None       # TreatmentGroup.id ONLY, never a raw label
     sample_number: Optional[int] = None
+
+    # Provenance of the two fields above. A value read out of a file body is a
+    # parse, not a declaration: keeping the raw text and any disagreement with the
+    # upload-level metadata lets the PI see what was assumed instead of having a
+    # guess presented as fact.
+    source_group_label: Optional[str] = None   # group text as written in the file
+    provenance_notes: List[str] = Field(default_factory=list)
 
     timestamp: datetime = Field(default_factory=datetime.now)
 

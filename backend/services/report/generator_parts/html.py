@@ -446,6 +446,9 @@ def _write_html_report(
             "report_limitations_html": _safe_format_value(
                 bindings.render_report_limitations_html(report)
             ),
+            "report_status_line_html": _safe_format_value(
+                bindings.render_report_status_line_html(report)
+            ),
             "toc_title": "Table of Contents",
             "toc_items": _safe_format_value("\n".join(toc_items)),
             "graphic_abstract_html": _safe_format_value(ga_html),

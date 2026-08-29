@@ -102,7 +102,12 @@ class ResearchMixin:
         topic: str,
         search_history: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """LLM evaluates if search results are sufficient (for Gemini/OpenRouter modes)."""
+        """Evaluate whether to keep searching (Gemini/OpenRouter modes).
+
+        Kept on the same contract as the PubMed evaluator: "stop searching" and
+        "the evidence supports a conclusion" are separate judgements, and a reply
+        we cannot read is neither.
+        """
         history_summary = json.dumps(search_history, ensure_ascii=False, indent=2)
 
         prompt = f"""Evaluate whether the search results so far are sufficient for a comprehensive
@@ -115,27 +120,50 @@ Search history:
 
 Respond in JSON format:
 {{
-    "sufficient": true or false,
-    "reasoning": "why sufficient or not",
-    "refined_query": "suggested refined search query if not sufficient",
+    "search_exhausted": true or false,
+    "evidence_strength": "strong | moderate | sparse | contradictory | insufficient",
+    "reasoning": "why the search is or is not exhausted, and how strong the evidence is",
+    "refined_query": "suggested refined search query if the search is not exhausted",
     "missing_aspects": ["aspects not yet covered"]
 }}"""
 
         response = await self.chat_without_history(prompt, temperature=0.3)
         result = self._safe_parse_json(response)
-        if not result or "sufficient" not in result:
-            return {"sufficient": True}
+        if not result or "search_exhausted" not in result:
+            return {
+                "search_exhausted": False,
+                "evidence_strength": "unassessed",
+                "evaluation_failed": True,
+                "reasoning": (
+                    "The search evaluation could not be read. This says nothing about "
+                    "whether the retrieved literature supports any conclusion."
+                ),
+            }
         return result
 
     async def integration_literature_search(self, state, integration_report: str) -> str:
+        balanced_framing = (
+            "For each contestable claim below, deliberately search for credible contradicting, "
+            "qualifying, null, or non-replicating evidence as well as supporting work. Weight "
+            "and report what you find by methodological quality, directness, and how well the "
+            "model, tissue and species apply here — not by how many papers sit on each side, "
+            "and not by giving the two equal space regardless of quality. A well-established "
+            "descriptive fact needs no manufactured counterpoint. Do not assemble a one-sided "
+            "case, and state the conditions under which each line of evidence applies."
+        )
         topic = (
             f"Integrative synthesis for {state.name}: {state.initial_instruction}. "
-            f"Corroborating background literature for the cross-direction findings."
+            f"{balanced_framing}"
         )
+        # The brief, not the topic, is what a Deep Research provider receives when
+        # both are supplied, so the framing has to travel inside the brief itself.
         result = await self._do_research(
             topic=topic,
             state=state,
-            research_brief=integration_report[:2000],
+            research_brief=(
+                f"{balanced_framing}\n\n"
+                f"Findings to assess:\n{integration_report[:2000]}"
+            ),
         )
         if isinstance(result, dict):
             findings = result.get("findings") or []

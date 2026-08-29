@@ -164,14 +164,6 @@ def _summarize_status(detailed_results, all_findings) -> str:
     return "completed"
 
 
-def severity_label_to_score(label: str) -> int:
-    """Map textual severity tiers to the canonical 0-4 numeric scale.
-    normal=0, mild=1, moderate=2, marked=3, severe=4. Unknown -> 0."""
-    return {"normal": 0, "mild": 1, "moderate": 2, "marked": 3, "severe": 4}.get(
-        (label or "").strip().lower(), 0
-    )
-
-
 class _ImageSkipRequested(Exception):
     """Internal sentinel: user chose to skip the current pathology image at the
     LLM-failure HITL gate. Caught by process() to skip only this image."""
@@ -402,7 +394,7 @@ Based on the analysis results from various staining types, please provide a comp
 
 Please provide comprehensive analysis and reply in JSON format:
 {{
-    "summary": "Comprehensive pathological diagnosis summary",
+    "summary": "Summary of what the sections show, at the level the images support. Describe morphology and its distribution; offer a diagnosis only where the stains and fields shown actually establish one, and say what further work a diagnosis would need otherwise",
     "key_findings": ["key finding 1", ...],
     "grading": {{
         "<dimension_name>": {{
@@ -416,7 +408,7 @@ Please provide comprehensive analysis and reply in JSON format:
     }},
     "suggested_staining": ["suggested additional special staining"],
     "questions_for_bioinformatics": ["questions requiring bioinformatics assistance"],
-    "consistency_with_literature": "consistency assessment with literature"
+    "literature_comparison_needed": ["specific published comparisons that would test these observations — no literature was supplied to this step, so do NOT state whether the findings agree with it"]
 }}
 """
         

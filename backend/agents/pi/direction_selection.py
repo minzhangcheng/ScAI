@@ -26,6 +26,34 @@ from .shared import (  # noqa: F401
 )
 
 
+def _dict_items(value):
+    """Keep only the object-shaped entries of a selection list.
+
+    ``selected_directions`` being a list was checked; its ELEMENTS being objects
+    was not, so a reply like ``["something"]`` passed validation and then raised
+    on the first ``.get()`` several call frames away.
+    """
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _selection_is_readable(data) -> bool:
+    """Whether a selection response can be read.
+
+    ``["bad"]`` is NOT a readable empty selection. Filtering it down to [] turned
+    a malformed reply into the scientific statement "no direction is worth a
+    round", which is exactly the conflation this whole path exists to prevent.
+    An actually empty list is readable, and means none was selected.
+    """
+    if not isinstance(data, dict):
+        return False
+    selected = data.get("selected_directions")
+    if not isinstance(selected, list):
+        return False
+    return not selected or any(isinstance(item, dict) for item in selected)
+
+
 class DirectionSelectionMixin:
     """Guardrails, dependency validation, and final selection of research directions."""
 
@@ -228,10 +256,19 @@ class DirectionSelectionMixin:
             candidates = state.exploration_report.research_direction_candidates
 
         if not candidates:
+            # No candidate to choose from is not a reason to invent one. An
+            # innovation round needs a direction that came out of the data;
+            # manufacturing "Continue analysis based on Round 1 findings" sends the
+            # whole round chasing a placeholder.
             return {
-                "selected_directions": [{"direction": "Continue analysis based on Round 1 findings", "notes": ""}],
+                "selected_directions": [],
                 "rejected_directions": [],
-                "selection_rationale": "No candidates available; using default direction.",
+                "decision_outcome": "none_selected",
+                "selection_rationale": (
+                    "Exploration produced no research direction candidates, so there is "
+                    "nothing to investigate in an innovation round; proceeding to the "
+                    "final report on the Round 1 results."
+                ),
             }
 
         exploration_context = ""
@@ -260,11 +297,16 @@ Select directions that respect dependency ordering: dependent directions should 
 ## Candidates
 {json.dumps(candidates, ensure_ascii=False, indent=2)}
 
-Select the best direction(s) — usually 1 to 2 — that together provide the most comprehensive and impactful outcomes while respecting prerequisite dependencies.
+Select the direction(s) — usually 1 to 2 — that together provide the most informative outcomes while respecting prerequisite dependencies. If no candidate clears the reliability bar, it is a valid and useful answer to select none and say what would have to be measured or resolved first; do not promote a weak candidate merely to fill the slot.
 
 SELECTION CRITERIA:
-1. **Reliability** is the baseline: low-reliability directions should be avoided
-2. **Innovation + Novelty** together determine priority
+1. **Reliability** is not merely a gate, it is a weight. A more surprising finding needs MORE
+   supporting evidence, not less. In single-cell data the most surprising signals are
+   disproportionately artifacts — ambient RNA, doublets, batch, a cluster driven by a handful of
+   cells — so ranking on surprise alone systematically selects for artifacts.
+2. **Innovation + Novelty** raise priority only after reliability and artifact risk have been
+   accounted for. Discount any novelty claim by the candidate's artifact_risk and
+   data_sufficiency; a high-novelty, high-artifact-risk candidate ranks below a solid one.
 3. Selected directions should ideally be complementary (not redundant)
 4. Consider the dependency graph: if a direction has prerequisites, ensure its prerequisites are also selected or the direction is independently viable
 5. For each rejected direction, provide an explanation
@@ -293,33 +335,51 @@ Return JSON:
 }}
 """
 
-        response = await self.chat(prompt, temperature=0.3)
-        data = self._safe_parse_json(response, default={})
+        # An empty selection is a SCIENTIFIC answer ("nothing here clears the
+        # reliability bar") and must be told apart from a response we failed to
+        # read. Only the latter is a malfunction. Conflating them made the prompt's
+        # "it is valid to select none" unreachable: the PI returned [], recovery
+        # overwrote it, and a low-quality direction entered an innovation round.
+        data = {}
+        response_readable = False
+        for attempt in range(2):
+            response = await self.chat(prompt, temperature=0.3)
+            data = self._safe_parse_json(response, default={})
+            response_readable = _selection_is_readable(data)
+            if response_readable:
+                break
+            logger.warning(
+                "[PI] Direction-selection response unreadable (attempt %s/2)", attempt + 1
+            )
 
-        selected = data.get("selected_directions", [])
-        rejected = data.get("rejected_directions", [])
-        rationale = data.get("selection_rationale", "")
+        selected = _dict_items(data.get("selected_directions", [])) if response_readable else []
+        rejected = data.get("rejected_directions", []) if isinstance(data, dict) else []
+        rationale = data.get("selection_rationale", "") if isinstance(data, dict) else ""
 
-        if not selected or len(selected) < 1:
-            # Fallback: pick first 2 candidates
-            selected = [
-                {"direction": c.get("direction", ""), "notes": ""}
-                for c in candidates[:2]
-            ]
-            # Build rejected list from remaining candidates
-            selected_dirs_set = {d.get("direction", "") for d in selected}
-            rejected = [
-                {"direction": c.get("direction", ""), "reason_not_selected": "Not selected in fallback",
-                 "follow_up_value": "low", "dependency_note": ""}
-                for c in candidates
-                if c.get("direction", "") not in selected_dirs_set
-            ]
-            if not rationale:
-                rationale = "Fallback: selected first available candidates."
-
-        # Ensure at least 1 direction
-        if not selected:
-            selected = [{"direction": "Continue analysis based on Round 1 findings", "notes": ""}]
+        if not response_readable:
+            # Choosing a research direction is the PI's call. When the reply cannot
+            # be read even on retry, the honest outcome is to select none and say
+            # so -- the run finalizes on Round 1. Having the host pick "the two
+            # highest-priority candidates" would silently substitute a mechanical
+            # ranking for a scientific judgement, and the report could not tell the
+            # difference afterwards.
+            logger.error(
+                "[PI] Direction selection unreadable after retry; selecting no direction"
+            )
+            selected = []
+            rejected = []
+            rationale = (
+                "DIRECTION SELECTION UNAVAILABLE: the PI's selection response could not be "
+                "read after a retry, so no innovation direction was selected and the run "
+                "finalizes on the Round 1 results. This is a tooling failure, not a "
+                "scientific conclusion about the candidates; the scored candidates are "
+                "retained in the exploration report for review."
+            )
+        elif not selected and not rationale:
+            rationale = (
+                "No candidate cleared the reliability bar; no innovation direction was "
+                "selected."
+            )
 
         # Validate dependency graph if present
         dep_graph = state.exploration_report.direction_dependency_graph if state.exploration_report else {}
@@ -356,6 +416,10 @@ Return JSON:
             "selected_directions": selected,
             "rejected_directions": rejected,
             "selection_rationale": rationale,
+            "decision_outcome": (
+                "selected" if selected
+                else ("none_selected" if response_readable else "tooling_failure")
+            ),
         }
 
     async def select_integration_directions(
@@ -443,10 +507,39 @@ Return JSON:
     "selection_rationale": "Why these directions were chosen, or why none were selected"
 }}"""
 
-        response = await self.chat(prompt, temperature=0.3)
-        data = self._safe_parse_json(response, default={})
+        data = {}
+        response_readable = False
+        for attempt in range(2):
+            response = await self.chat(prompt, temperature=0.3)
+            data = self._safe_parse_json(response, default={})
+            response_readable = _selection_is_readable(data)
+            if response_readable:
+                break
+            logger.warning(
+                "[PI] Integration-selection response unreadable (attempt %s/2)", attempt + 1
+            )
 
-        selected = data.get("selected_directions", [])
+        if not response_readable:
+            # Both outcomes end the study, but they are not the same statement and
+            # the report must not conflate them: "nothing novel enough remains" is a
+            # scientific conclusion, "we could not read the reply" is a malfunction.
+            logger.error(
+                "[PI] Integration selection unreadable after retry; selecting no direction"
+            )
+            return {
+                "selected_directions": [],
+                "rejected_directions": [],
+                "decision_outcome": "tooling_failure",
+                "selection_rationale": (
+                    "INTEGRATION SELECTION UNAVAILABLE: the PI's selection response could not "
+                    "be read after a retry, so no further direction was started and the run "
+                    "proceeds to the final report. This is a tooling failure, not a finding "
+                    "that no novel direction remains; the scored candidates are retained for "
+                    "review."
+                ),
+            }
+
+        selected = _dict_items(data.get("selected_directions", []))
         rejected = data.get("rejected_directions", [])
         rationale = data.get("selection_rationale", "")
 
@@ -462,4 +555,5 @@ Return JSON:
             "selected_directions": selected,
             "rejected_directions": rejected,
             "selection_rationale": rationale,
+            "decision_outcome": "selected" if selected else "none_selected",
         }

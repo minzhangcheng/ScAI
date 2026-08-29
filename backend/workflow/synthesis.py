@@ -126,15 +126,54 @@ class SynthesisMixin:
     def _skipped_direction_evidence(self, raw_candidates, reason):
         return build_fallback_direction_evidence(raw_candidates, status="skipped", reason=reason)
 
+    def _note_candidate_generation_failure(self, report):
+        """Carry a direction-proposal tooling failure onto the report.
+
+        An empty candidate list has two very different causes -- the PI proposed
+        nothing, or its reply could not be read -- and the report must not present
+        the second as the first.
+        """
+        if report is None:
+            return report
+        notes = [getattr(self.pi_agent, "last_candidate_generation_error", None)]
+        warnings = list(getattr(report, "data_quality_warnings", []) or [])
+        changed = False
+        for note in notes:
+            if note and note not in warnings:
+                warnings.append(note)
+                changed = True
+        if changed:
+            report.data_quality_warnings = warnings
+        return report
+
     async def _generate_evidence_gated_exploration_report(self, graph_state, analysis_state, round_result):
         raw_candidates = await self.pi_agent.generate_raw_direction_candidates(analysis_state, round_result)
+        if not raw_candidates:
+            # No candidates to verify. The literature gate is skipped outright.
+            # score_directions_with_evidence is still the Report A summariser (it
+            # produces cluster_overview, quality warnings and the round narrative),
+            # so it is still called -- but with an empty candidate list, and every
+            # candidate-shaped field is cleared afterwards so a scoring step cannot
+            # introduce directions nobody proposed.
+            logger.info(
+                f"[{self.session_id}] No direction candidates; skipping literature "
+                "verification, and no candidate may survive direction scoring"
+            )
+            report = await self.pi_agent.score_directions_with_evidence(
+                analysis_state, round_result, [], []
+            )
+            report.research_direction_candidates = []
+            report.raw_direction_candidates = []
+            report.direction_literature_evidence = []
+            report.direction_dependency_graph = {}
+            return self._note_candidate_generation_failure(report)
         literature_result = (graph_state or {}).get("literature_result") or {}
         if literature_result.get("status") in {"skipped", "disabled"}:
             reason = "Direction-level literature verification was skipped because the Literature Agent was skipped or disabled earlier in the workflow."
             direction_evidence = self._skipped_direction_evidence(raw_candidates, reason)
             report = await self.pi_agent.score_directions_with_evidence(analysis_state, round_result, raw_candidates, direction_evidence)
             self.pi_agent._sanitize_direction_dependency_graph(report)
-            return report
+            return self._note_candidate_generation_failure(report)
 
         try:
             direction_evidence = await self.literature_agent.evaluate_direction_novelty_candidates(raw_candidates, state=analysis_state)
@@ -148,7 +187,7 @@ class SynthesisMixin:
             )
         report = await self.pi_agent.score_directions_with_evidence(analysis_state, round_result, raw_candidates, direction_evidence)
         self.pi_agent._sanitize_direction_dependency_graph(report)
-        return report
+        return self._note_candidate_generation_failure(report)
 
     async def _pi_synthesis(self, state: WorkflowState) -> WorkflowState:
         synthesis_phases.bind_facade(sys.modules[__name__])

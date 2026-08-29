@@ -17,9 +17,7 @@ from backend.services.report.generator import (
 )
 from backend.services.report.quality import (
     build_quality_disclosures,
-    render_quality_disclosures_html,
     render_report_limitations_html,
-    render_report_status_banner_html,
 )
 from backend.workflow.reporting_parts.final_report import (
     analysis_completion_message,
@@ -285,7 +283,7 @@ def test_quality_record_keeps_confirmation_validation_and_unknown_counts_separat
         "n_cells_known": False,
         "n_cells_source": "unknown",
     }
-    rendered = render_quality_disclosures_html(quality)
+    rendered = render_report_limitations_html({"quality_disclosures": quality})
     assert "One low-confidence cluster remains" in rendered
     assert "1 known / 1 unknown" in rendered
 
@@ -315,8 +313,10 @@ def test_unverified_round_and_unmet_post_review_make_report_quality_incomplete()
     quality = build_quality_disclosures(state)
     assert quality["status"] == "incomplete"
     assert any("unverified" in issue for issue in quality["blocking_issues"])
-    html = render_quality_disclosures_html(quality)
-    assert "Cell communication" in html
+    html = render_report_limitations_html({"quality_disclosures": quality})
+    assert "Cell communication" in html, (
+        "the report must name WHICH plan step went unmet, not just that one did"
+    )
     assert "Validate interaction" in html
     assert "max_steps_reached" in " ".join(quality["cautions"])
 
@@ -355,15 +355,15 @@ def test_integration_round_does_not_require_bioinformatics_verification():
         ("analysis_quality", {}, "quality gaps"),
     ],
 )
-def test_partial_banner_covers_every_machine_readable_reason(reason, extra, expected):
+def test_limitations_cover_every_machine_readable_reason(reason, extra, expected):
     report = {
         "status": "partial",
         "partial_reason": reason,
         "partial_reasons": [reason],
         **extra,
     }
-    html = render_report_status_banner_html(report)
-    assert "Partial report" in html
+    html = render_report_limitations_html(report)
+    assert "Detailed evidence qualifications" in html
     assert expected in html
 
 

@@ -36,6 +36,7 @@ from ...services.report.figure_discovery import (
 )
 from ...services.report.quality import (
     render_report_limitations_html,
+    render_report_status_line_html,
 )
 
 

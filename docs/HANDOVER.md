@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.49.5 · **Last updated**: 2026-08-29
+**Version**: 0.49.6 · **Last updated**: 2026-08-30
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,8 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.49.x — (2026-08-28 onward)**
+
+- `0.49.6` — Consolidates default agent prompts into one JSON source consumed by the backend and frontend, with runtime parity coverage. Improves evidence-preserving behavior across biochemistry, pathology, literature, Bioinformatics, PI direction/synthesis, and reporting: measurement identity and provenance travel through analysis, uncertain or absent support remains explicit, search outcomes retain evaluation metadata, modality observations and bounded per-image coverage reach PI synthesis, and report/figure disclosures retain limitations. Related agent and report components remain behind their existing facades, with focused regression coverage for prompt contracts, pathology severity, direction decisions, report regeneration, and report-quality disclosures. Focused affected evidence passed `128/128` nodes with `0` failures and `0` skips at `test-results/20260829T165227Z-1840502/evidence.json`; frontend, client, kernel, and backend-full profiles were not run. No application image build, registry push, deployment, or historical-session mutation was performed.
 
 - `0.49.5` — Fixes human-intervention state transitions and duplicate-signal handling across plan review, species input, and round continuation. Plan-review submissions now reject requests outside the active review wait state; plan-review and species-input signals retain the first accepted action and report conflicts for duplicates. Consumed species and continuation signals clear wait metadata and restore `RUNNING` before PI processing or workflow continuation, keeping persisted/API status aligned with execution. Regression coverage was added for first-signal-wins behavior, stale review requests, species resolution, plan-feedback processing, and continuation status transitions. No application image build, registry push, deployment, or historical-session mutation was performed.
 
