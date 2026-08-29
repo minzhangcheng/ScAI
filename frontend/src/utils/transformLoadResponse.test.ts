@@ -140,7 +140,7 @@ describe('transformLoadResponse', () => {
       publication_figures: [{
         id: 'f1', name: 'Fig 1', description: 'A figure',
         figure_type: 'umap', png_path: '/fig.png', pdf_path: '/fig.pdf',
-        review_status: 'approved', pi_feedback: 'good',
+        review_status: 'pending', review_unavailable: true, pi_feedback: 'unavailable',
         revision_count: 1, plan_step_id: 4, plan_id: 'plan-v2', purpose: 'result',
         created_at: '2026-01-01',
       }],
@@ -154,7 +154,8 @@ describe('transformLoadResponse', () => {
     const result = transformLoadResponse(data)
     expect(result.sessionUpdates.publicationFigures).toHaveLength(1)
     expect(result.sessionUpdates.publicationFigures![0].figureType).toBe('umap')
-    expect(result.sessionUpdates.publicationFigures![0].reviewStatus).toBe('approved')
+    expect(result.sessionUpdates.publicationFigures![0].reviewStatus).toBe('pending')
+    expect(result.sessionUpdates.publicationFigures![0].reviewUnavailable).toBe(true)
     expect(result.sessionUpdates.publicationFigures![0].planStepId).toBe(4)
     expect(result.sessionUpdates.publicationFigures![0].planId).toBe('plan-v2')
     expect(result.sessionUpdates.publicationFigures![0].purpose).toBe('result')

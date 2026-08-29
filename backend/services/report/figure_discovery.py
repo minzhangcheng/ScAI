@@ -315,6 +315,9 @@ def publication_figure_metadata(
             "diagnostic": bool(getattr(figure, "diagnostic", False)),
             "round": int(getattr(figure, "round_number", 0) or 0) or None,
             "review_status": str(getattr(status, "value", status) or ""),
+            "review_unavailable": bool(
+                getattr(figure, "review_unavailable", False)
+            ),
             "plan_step_id": getattr(figure, "plan_step_id", None),
             "plan_id": getattr(figure, "plan_id", None),
             "purpose": getattr(figure, "purpose", "result") or "result",
@@ -639,6 +642,9 @@ def resolve_state_figure_candidates(
             "interpretation": str(getattr(record, "interpretation", "") or ""),
             "is_publication": True,
             "review_status": str(getattr(status, "value", status) or ""),
+            "review_unavailable": bool(
+                getattr(record, "review_unavailable", False)
+            ),
             "round": int(getattr(record, "round_number", 0) or 0) or None,
             "purpose": str(getattr(record, "purpose", "result") or "result"),
             "render_sha256": getattr(record, "render_sha256", None),

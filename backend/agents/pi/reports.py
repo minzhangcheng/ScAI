@@ -77,7 +77,11 @@ class ReportsMixin:
         ]
         for i, fig in enumerate(renderable_figures):
             raw_status = getattr(fig.review_status, "value", fig.review_status)
-            status = str(raw_status or "reportable").replace("_", " ").title()
+            status = (
+                "Review Unavailable"
+                if getattr(fig, "review_unavailable", False)
+                else str(raw_status or "reportable").replace("_", " ").title()
+            )
             figures_info.append(
                 f"Figure {i+1}: {fig.name} (declared type: {fig.figure_type}) - "
                 f"{fig.description} [{status}]"

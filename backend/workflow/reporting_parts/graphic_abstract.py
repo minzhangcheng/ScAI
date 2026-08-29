@@ -265,6 +265,9 @@ class GraphicAbstractMixin:
                     "preview_sha256": getattr(fig, "preview_sha256", None),
                     "pdf_sha256": getattr(fig, "pdf_sha256", None),
                     "review_status": fig.review_status.value,
+                    "review_unavailable": bool(
+                        getattr(fig, "review_unavailable", False)
+                    ),
                     "revision_count": fig.revision_count,
                     "plan_step_id": getattr(fig, "plan_step_id", None),
                     "plan_id": getattr(fig, "plan_id", None),
@@ -312,6 +315,7 @@ class GraphicAbstractMixin:
                     "preview_sha256": preview_render_sha256(b64),
                     "pdf_sha256": pdf_file_sha256(wf["pdf_path"]),
                     "review_status": "pending",
+                    "review_unavailable": False,
                     "revision_count": 0,
                     "plan_step_id": wf.get("plan_step_id"),
                     "plan_id": wf.get("plan_id"),

@@ -50,6 +50,8 @@ export interface PublicationFigure {
   pdfPath: string
   pngBase64?: string
   reviewStatus: FigureReviewStatus
+  /** A visual verdict could not be obtained; this is not an approval. */
+  reviewUnavailable?: boolean
   piFeedback?: string
   revisionCount: number
   createdAt: string

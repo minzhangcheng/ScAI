@@ -146,6 +146,7 @@ function transformPublicationFigures(raw: (RawPublicationFigure & RawFigureBadge
     pngBase64: normalizeImageBase64(f.png_base64)
       ?? normalizeImageBase64(f.pngBase64),
     reviewStatus: (f.review_status || f.reviewStatus || 'pending') as FigureReviewStatus,
+    reviewUnavailable: f.review_unavailable ?? f.reviewUnavailable ?? false,
     piFeedback: f.pi_feedback || f.piFeedback,
     revisionCount: f.revision_count ?? f.revisionCount ?? 0,
     createdAt: f.created_at || f.createdAt || '',

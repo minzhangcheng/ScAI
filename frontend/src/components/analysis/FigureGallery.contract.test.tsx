@@ -44,6 +44,17 @@ describe('FigureGallery contract', () => {
     expect(screen.getByAltText('Figure 9')).toBeInTheDocument()
   })
 
+  it('labels an unavailable review instead of showing generic pending', () => {
+    render(<FigureGallery figures={[{
+      ...figure(1),
+      reviewStatus: 'pending',
+      reviewUnavailable: true,
+    }]} />)
+
+    expect(screen.getByText('Review unavailable')).toBeInTheDocument()
+    expect(screen.queryByText('Pending Review')).not.toBeInTheDocument()
+  })
+
   it('keeps the image download endpoint and filename', async () => {
     render(<FigureGallery figures={[figure(1)]} />)
     fireEvent.click(screen.getByRole('button', { name: 'JPG' }))

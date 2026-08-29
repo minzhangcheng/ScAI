@@ -139,6 +139,7 @@ export const zh = {
     figureGallery: '图片库',
     figureApproved: '已通过',
     figurePending: '待审核',
+    figureReviewUnavailable: '审查不可用',
     figureRevisionRequested: '需修改',
     graphicAbstract: '图形摘要',
     graphicAbstractTextMode: '图形摘要 (文字模式)',

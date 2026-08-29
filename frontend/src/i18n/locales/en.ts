@@ -139,6 +139,7 @@ export const en = {
     figureGallery: 'Figure Gallery',
     figureApproved: 'Approved',
     figurePending: 'Pending Review',
+    figureReviewUnavailable: 'Review unavailable',
     figureRevisionRequested: 'Revision Requested',
     graphicAbstract: 'Graphic Abstract',
     graphicAbstractTextMode: 'Graphic Abstract (Text Mode)',

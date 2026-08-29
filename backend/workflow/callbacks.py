@@ -11,6 +11,19 @@ from .helpers import wait_with_skip_time
 logger = logging.getLogger(__name__)
 
 
+def _unavailable_figure_review(reason: str) -> Dict[str, Any]:
+    """Return a bounded factual result when no visual verdict was obtained."""
+    feedback = str(reason or "Figure review unavailable").strip()[:500]
+    return {
+        "approved": False,
+        "quality_score": None,
+        "review_unavailable": True,
+        "feedback": feedback or "Figure review unavailable",
+        "suggestions": [],
+        "must_fix": [],
+    }
+
+
 def parse_plan_revision_signal(response_text: str) -> bool:
     text = response_text or ""
     if PLAN_REVISION_NEEDED_TAG in text:
@@ -47,6 +60,9 @@ def compact_figure_event_payload(
         "png_path": figure.png_path,
         "pdf_path": figure.pdf_path,
         "review_status": raw_status,
+        "review_unavailable": bool(
+            getattr(figure, "review_unavailable", False)
+        ),
         "pi_feedback": (
             pi_feedback if pi_feedback is not None
             else getattr(figure, "pi_feedback", None)
@@ -308,17 +324,14 @@ IMPORTANT: Respond in English only. Do not use any other language."""
             AgentType.PI,
         )
 
-        # 4.1: All models in the chain lack vision → skip image review
+        # 4.1: All models in the chain lack vision → no review verdict exists
         if not pi_vision and not bio_vision and not sup_vision:
-            logger.info(f"[{self.session_id}] All agents lack vision, auto-approving figure: {figure.name}")
-            review = {
-                "approved": True,
-                "quality_score": 7,
-                "feedback": "Auto-approved (no vision-capable model in pipeline)",
-                "suggestions": [],
-                "must_fix": [],
-            }
-            return review
+            logger.info(
+                f"[{self.session_id}] No vision-capable figure reviewer: {figure.name}"
+            )
+            return _unavailable_figure_review(
+                "Figure review unavailable: no vision-capable model in pipeline"
+            )
 
         # 4.3.2: PI has no vision
         if not pi_vision:
@@ -331,14 +344,9 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                 logger.info(f"[{self.session_id}] PI and bio lack vision, supervisor reviewing figure: {figure.name}")
                 review = await self._supervisor_figure_review(figure)
             else:
-                # No one can see the figure — auto-approve
-                review = {
-                    "approved": True,
-                    "quality_score": 7,
-                    "feedback": "Auto-approved (no vision-capable reviewer available)",
-                    "suggestions": [],
-                    "must_fix": [],
-                }
+                review = _unavailable_figure_review(
+                    "Figure review unavailable: no vision-capable reviewer"
+                )
 
             return review
 
@@ -352,13 +360,19 @@ IMPORTANT: Respond in English only. Do not use any other language."""
             )
         state = self._current_analysis_state
 
-        review = await self.pi_agent.review_figure(
-            state,
-            figure,
-            figure.png_base64
-        )
-
-        return review
+        try:
+            return await self.pi_agent.review_figure(
+                state,
+                figure,
+                figure.png_base64
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] PI figure review failed: %s", self.session_id, exc
+            )
+            return _unavailable_figure_review(
+                f"PI vision review failed: {str(exc)[:400]}"
+            )
 
     async def _figure_plan_binding_callback(
         self, state: AnalysisState, proposal: Dict[str, Any]
@@ -399,13 +413,9 @@ IMPORTANT: Respond in English only. Do not use any other language."""
             response_text = response.content if response and response.content else ""
         except Exception as e:
             logger.warning(f"[{self.session_id}] {label} figure review vision failed: {e}")
-            return {
-                "approved": True,
-                "quality_score": 7,
-                "feedback": f"{label} vision review failed, auto-approved",
-                "suggestions": [],
-                "must_fix": [],
-            }
+            return _unavailable_figure_review(
+                f"{label} vision review failed: {str(e)[:400]}"
+            )
 
         if hasattr(agent, '_safe_parse_json'):
             data = agent._safe_parse_json(response_text, default={})
@@ -414,7 +424,12 @@ IMPORTANT: Respond in English only. Do not use any other language."""
         else:
             data = {}
         if data and ("approved" in data or "quality_score" in data):
-            score = int(data.get("quality_score", 7))
+            try:
+                score = int(data.get("quality_score", 7))
+            except (TypeError, ValueError):
+                return _unavailable_figure_review(
+                    "Figure review response could not be parsed"
+                )
             return {
                 "approved": data.get("approved", score >= 7),
                 "quality_score": score,
@@ -423,13 +438,9 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                 "must_fix": data.get("must_fix", []),
                 "requires_reanalysis": data.get("requires_reanalysis", False),
             }
-        return {
-            "approved": True,
-            "quality_score": 7,
-            "feedback": "Could not parse review response, auto-approved",
-            "suggestions": [],
-            "must_fix": [],
-        }
+        return _unavailable_figure_review(
+            "Figure review response could not be parsed"
+        )
 
     async def _bio_self_figure_review(self, figure: PublicationFigure) -> Dict[str, Any]:
         """Bioinformatics agent self-reviews its own figure using vision."""
@@ -519,6 +530,9 @@ Approve if quality_score >= 7."""
             self.supervisor_agent, figure, prompt, compressed,
             temperature=0.2, label="Supervisor", max_tokens=REASONING_MODEL_MIN_TOKENS,  # reasoning headroom
         )
+
+        if review.get("review_unavailable") is True:
+            return review
 
         # --- Supervisor-as-sole-reviewer degradation logic ---
         if supervisor_is_sole_reviewer and not review.get("approved", False):

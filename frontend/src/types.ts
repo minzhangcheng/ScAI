@@ -257,6 +257,8 @@ export interface RawPublicationFigure {
   pngBase64?: string
   review_status?: string
   reviewStatus?: string
+  review_unavailable?: boolean
+  reviewUnavailable?: boolean
   pi_feedback?: string
   piFeedback?: string
   revision_count?: number

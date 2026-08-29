@@ -62,6 +62,9 @@ async def emit_figure_record(
                 bindings.FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS.value,
             },
             "quality_score": review.get("quality_score"),
+            "review_unavailable": bool(
+                getattr(figure, "review_unavailable", False)
+            ),
             "feedback": figure.pi_feedback or review.get("feedback", ""),
             "suggestions": review.get("suggestions", []),
             "must_fix": review.get("must_fix", []),
@@ -73,6 +76,9 @@ async def emit_figure_record(
                 "png_path": figure.png_path,
                 "pdf_path": figure.pdf_path,
                 "review_status": status,
+                "review_unavailable": bool(
+                    getattr(figure, "review_unavailable", False)
+                ),
                 "pi_feedback": figure.pi_feedback,
                 "revision_count": figure.revision_count,
                 "plan_step_id": getattr(figure, "plan_step_id", None),

@@ -137,9 +137,9 @@ export function FigureGallery(props: FigureGalleryProps) {
             {/* Modal Footer */}
             <div className="p-4 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className={`px-3 py-1 rounded-full text-sm font-medium border ${getStatusColor(selectedFigure.reviewStatus, selectedFigure.diagnostic)}`}>
-                  {getStatusIcon(selectedFigure.reviewStatus, selectedFigure.diagnostic)}
-                  <span className="ml-1">{getStatusLabel(selectedFigure.reviewStatus, selectedFigure.diagnostic, language, t)}</span>
+                <span className={`px-3 py-1 rounded-full text-sm font-medium border ${getStatusColor(selectedFigure.reviewStatus, selectedFigure.diagnostic, selectedFigure.reviewUnavailable)}`}>
+                  {getStatusIcon(selectedFigure.reviewStatus, selectedFigure.diagnostic, selectedFigure.reviewUnavailable)}
+                  <span className="ml-1">{getStatusLabel(selectedFigure.reviewStatus, selectedFigure.diagnostic, language, t, selectedFigure.reviewUnavailable)}</span>
                 </span>
                 {selectedFigure.piFeedback && (
                   <span className="text-sm text-slate-500 dark:text-slate-400 italic">

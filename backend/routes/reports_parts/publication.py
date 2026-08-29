@@ -531,6 +531,9 @@ async def get_publication_figures(
             "pdf_path": fig.pdf_path,
             "png_base64": fig.png_base64,
             "review_status": review_status,
+            "review_unavailable": bool(
+                getattr(fig, "review_unavailable", False)
+            ),
             "pi_feedback": fig.pi_feedback,
             "revision_count": fig.revision_count,
             "plan_step_id": fig.plan_step_id,

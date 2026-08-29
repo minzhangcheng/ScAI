@@ -1048,6 +1048,9 @@ class _PromptAgent(FiguresMixin):
     def _set_llm_context(self):
         return None
 
+    async def _budgeted_text_call(self, method, **kwargs):
+        return await method(**kwargs)
+
 
 @pytest.mark.asyncio
 async def test_figure_revision_prompt_has_shared_stable_prefix_and_unchanged_dynamic_contract():
