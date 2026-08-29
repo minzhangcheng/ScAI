@@ -272,6 +272,8 @@ export interface AgentTemperatures {
 export interface AgentServerConfig {
   llmBaseUrl: string
   apiKey: string
+  contextWindow?: number
+  effectiveContextWindow?: number
 }
 
 export interface AgentVisionSettings {

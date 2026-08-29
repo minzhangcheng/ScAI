@@ -235,6 +235,12 @@ export function transformAgentSettings(data: AgentSettingsResponse): StoreUpdate
       {
         llmBaseUrl: config?.llm_base_url ?? '',
         apiKey: config?.api_key ?? '',
+        ...(typeof config?.context_window === 'number'
+          ? { contextWindow: config.context_window }
+          : {}),
+        ...(typeof config?.effective_context_window === 'number'
+          ? { effectiveContextWindow: config.effective_context_window }
+          : {}),
       },
     ]),
   ) as Partial<Record<AgentType, AgentServerConfig>>

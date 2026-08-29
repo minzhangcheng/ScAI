@@ -115,6 +115,10 @@ export function usePromptsController() {
   const [editedTemperature, setEditedTemperature] = useState(temperatures[selectedAgent] ?? DEFAULT_TEMPERATURES[selectedAgent] ?? 0.5)
   const [editedLlmBaseUrl, setEditedLlmBaseUrl] = useState(agentServerConfigs[selectedAgent]?.llmBaseUrl || apiConfig.llmBaseUrl)
   const [editedApiKey, setEditedApiKey] = useState(agentServerConfigs[selectedAgent]?.apiKey || apiConfig.apiKey)
+  const [editedContextWindow, setEditedContextWindow] = useState<number | undefined>(
+    agentServerConfigs[selectedAgent]?.contextWindow,
+  )
+  const [contextWindowTouched, setContextWindowTouched] = useState(false)
   const [editedVisionEnabled, setEditedVisionEnabled] = useState(agentVisionSettings[selectedAgent] ?? DEFAULT_VISION_SETTINGS[selectedAgent] ?? true)
   const [showAgentApiKey, setShowAgentApiKey] = useState(false)
   const [showGoogleKey, setShowGoogleKey] = useState(false)
@@ -139,8 +143,14 @@ export function usePromptsController() {
     setEditedTemperature(temperatures[selectedAgent] ?? DEFAULT_TEMPERATURES[selectedAgent] ?? 0.5)
     setEditedLlmBaseUrl(agentServerConfigs[selectedAgent]?.llmBaseUrl || apiConfig.llmBaseUrl)
     setEditedApiKey(agentServerConfigs[selectedAgent]?.apiKey || apiConfig.apiKey)
+    if (!contextWindowTouched) {
+      setEditedContextWindow(agentServerConfigs[selectedAgent]?.contextWindow)
+    }
     setEditedVisionEnabled(agentVisionSettings[selectedAgent] ?? DEFAULT_VISION_SETTINGS[selectedAgent] ?? true)
-  }, [selectedAgent, prompts, models, temperatures, defaultPrompts, agentServerConfigs, apiConfig, agentVisionSettings])
+  }, [
+    selectedAgent, prompts, models, temperatures, defaultPrompts,
+    agentServerConfigs, apiConfig, agentVisionSettings, contextWindowTouched,
+  ])
 
   const agentConfig: {
     id: AgentType
@@ -231,6 +241,8 @@ export function usePromptsController() {
     setEditedTemperature(temperatures[agentId] ?? DEFAULT_TEMPERATURES[agentId] ?? 0.5)
     setEditedLlmBaseUrl(agentServerConfigs[agentId]?.llmBaseUrl || apiConfig.llmBaseUrl)
     setEditedApiKey(agentServerConfigs[agentId]?.apiKey || apiConfig.apiKey)
+    setEditedContextWindow(agentServerConfigs[agentId]?.contextWindow)
+    setContextWindowTouched(false)
     setServerExpanded(false)
     setSaved(false)
   }
@@ -257,6 +269,9 @@ export function usePromptsController() {
               temperature: editedTemperature,
               llm_base_url: serverConfig.llmBaseUrl,
               api_key: serverConfig.apiKey,
+              ...(contextWindowTouched
+                ? { context_window: editedContextWindow ?? null }
+                : {}),
               vision_enabled: editedVisionEnabled,
               literature_config: selectedAgent === 'literature'
                 ? buildLiteratureConfigPayload(useAppStore.getState())
@@ -269,9 +284,18 @@ export function usePromptsController() {
         setPrompt(selectedAgent, editedPrompt)
         setModel(selectedAgent, editedModel)
         setTemperature(selectedAgent, editedTemperature)
-        setAgentServerConfig(selectedAgent, serverConfig)
+        const storedContextWindow = contextWindowTouched
+          ? editedContextWindow
+          : agentServerConfigs[selectedAgent]?.contextWindow
+        setAgentServerConfig(selectedAgent, {
+          ...serverConfig,
+          ...(typeof storedContextWindow === 'number'
+            ? { contextWindow: storedContextWindow }
+            : {}),
+        })
         setAgentVisionSetting(selectedAgent, editedVisionEnabled)
       }
+      setContextWindowTouched(false)
       setSaved(true)
       // If this save was triggered from LLM modify flow, mark it as saved only for the failing agent
       if (useAppStore.getState().llmModifyPending) {
@@ -304,6 +328,8 @@ export function usePromptsController() {
     // Reset server config to global defaults
     setEditedLlmBaseUrl(apiConfig.llmBaseUrl)
     setEditedApiKey(apiConfig.apiKey)
+    setEditedContextWindow(undefined)
+    setContextWindowTouched(true)
     setAgentServerConfig(selectedAgent, { llmBaseUrl: '', apiKey: '' })
     // Reset vision setting to default
     setEditedVisionEnabled(DEFAULT_VISION_SETTINGS[selectedAgent])
@@ -328,10 +354,12 @@ export function usePromptsController() {
   const selectedStyles = colorStyles[selectedConfig.color] || colorStyles.violet
 
   return {
-    language, t, apiConfig, agentConfig, colorStyles, selectedAgent, handleSelectAgent, selectedConfig, Icon, selectedStyles,
+    language, t, apiConfig, agentConfig, agentServerConfigs, colorStyles, selectedAgent, handleSelectAgent, selectedConfig, Icon, selectedStyles,
     editedPrompt, setEditedPrompt, editedModel, setEditedModel,
     editedTemperature, setEditedTemperature, editedLlmBaseUrl, setEditedLlmBaseUrl,
     editedApiKey, setEditedApiKey, editedVisionEnabled, setEditedVisionEnabled,
+    editedContextWindow, setEditedContextWindow, contextWindowTouched,
+    setContextWindowTouched,
     showAgentApiKey, setShowAgentApiKey, showGoogleKey, setShowGoogleKey,
     showDeepResearchApiKey, setShowDeepResearchApiKey, serverExpanded, setServerExpanded,
     saving, saved, saveError, setSaved, handleSave, handleReset,

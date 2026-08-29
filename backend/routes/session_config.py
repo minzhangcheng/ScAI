@@ -15,7 +15,7 @@ from backend.utils.auth import require_session_ownership, require_session_read_o
 from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import validate_session_id
 from backend.utils.secret_redaction import mask_api_key
-from backend.utils.settings_provider import AgentSettingsProvider
+from backend.utils.settings_provider import AgentSettingsProvider, resolve_context_window
 
 router = APIRouter(prefix="/api", tags=["session-config"])
 
@@ -45,18 +45,32 @@ def _invalidate_active_agent_config(session_id: str, agent_name: str) -> None:
         agent.refresh_runtime_config_if_needed()
 
 
-def _masked_agent_server_configs(state) -> dict:
+def _masked_agent_server_configs(state, config: SystemConfig | None = None) -> dict:
     masked = {}
-    for agent, config in (state.agent_server_configs or {}).items():
-        value = dict(config) if config else {}
+    for agent, server_config in (state.agent_server_configs or {}).items():
+        value = dict(server_config) if server_config else {}
         if value.get("api_key"):
             value["api_key"] = mask_api_key(value["api_key"])
+        raw_window = value.get("context_window")
+        value["context_window"] = (
+            raw_window
+            if isinstance(raw_window, int)
+            and not isinstance(raw_window, bool)
+            and raw_window >= 8_192
+            else None
+        )
+        if config is not None:
+            value["effective_context_window"] = resolve_context_window(
+                state.agent_server_configs,
+                config,
+                agent,
+            )
         masked[agent] = value
     return masked
 
 
 def _agent_settings_payload(state, config: SystemConfig) -> dict:
-    server_configs = _masked_agent_server_configs(state)
+    server_configs = _masked_agent_server_configs(state, config)
     return {
         "prompts": {
             agent: state.custom_prompts.get(
@@ -77,7 +91,12 @@ def _agent_settings_payload(state, config: SystemConfig) -> dict:
             for agent in _AGENT_NAMES
         },
         "agent_server_configs": {
-            agent: server_configs.get(agent, {"llm_base_url": "", "api_key": ""})
+            agent: server_configs.get(agent, {
+                "llm_base_url": "",
+                "api_key": "",
+                "context_window": None,
+                "effective_context_window": config.context_windows.get(agent),
+            })
             for agent in _AGENT_NAMES
         },
         "vision_settings": {
@@ -302,10 +321,16 @@ async def update_agent_server_config(session_id: str, request: Request, body: Ag
         incoming_key = body.api_key
         if incoming_key and incoming_key == mask_api_key(existing.get("api_key", "")):
             incoming_key = existing.get("api_key", "")
-        state.agent_server_configs[body.agent] = {
+        new_config = {
             "llm_base_url": body.llm_base_url,
             "api_key": incoming_key,
         }
+        if "context_window" not in body.model_fields_set:
+            if "context_window" in existing:
+                new_config["context_window"] = existing["context_window"]
+        elif body.context_window is not None:
+            new_config["context_window"] = body.context_window
+        state.agent_server_configs[body.agent] = new_config
         await update_session_cache(session_id, state)
         await async_save_session(session_id, state)
     _invalidate_active_agent_config(session_id, body.agent)
@@ -319,7 +344,8 @@ async def get_agent_server_configs(session_id: str, request: Request):
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
-    return _masked_agent_server_configs(state)
+    config = await resolve_config_for_user(user_id) or SystemConfig()
+    return _masked_agent_server_configs(state, config)
 
 
 @router.get("/session/{session_id}/agent-settings")
@@ -351,10 +377,16 @@ async def update_agent_settings(
         state.custom_prompts[body.agent] = body.prompt
         state.custom_models[body.agent] = body.model
         state.custom_temperatures[body.agent] = body.temperature
-        state.agent_server_configs[body.agent] = {
+        new_server = {
             "llm_base_url": body.llm_base_url,
             "api_key": incoming_key,
         }
+        if "context_window" not in body.model_fields_set:
+            if "context_window" in existing_server:
+                new_server["context_window"] = existing_server["context_window"]
+        elif body.context_window is not None:
+            new_server["context_window"] = body.context_window
+        state.agent_server_configs[body.agent] = new_server
         state.agent_vision_settings[body.agent] = body.vision_enabled
 
         if body.agent == "literature" and body.literature_config is not None:

@@ -1,11 +1,54 @@
 import {
   AlertCircle, ChevronDown, ChevronRight, Cpu, Eye, EyeOff, Key, Search, Server,
+  Sliders,
 } from 'lucide-react'
 
 import { DEFAULT_MODELS } from '../../stores/appStore'
 import type { PromptsController } from './usePromptsController'
 
 interface ProviderProps { controller: PromptsController }
+
+function ContextWindowInput({ controller }: ProviderProps) {
+  const {
+    editedContextWindow, selectedAgent, setContextWindowTouched,
+    setEditedContextWindow, setSaved, t,
+  } = controller
+  return (
+    <div className="flex items-center gap-3">
+      <Sliders className="w-4 h-4 text-slate-400" />
+      <input
+        aria-label={t('agentContextWindow')}
+        type="number"
+        min={8192}
+        step={1024}
+        value={editedContextWindow ?? ''}
+        onChange={(event) => {
+          const raw = event.target.value.trim()
+          setEditedContextWindow(raw ? Number.parseInt(raw, 10) : undefined)
+          setContextWindowTouched(Boolean(raw))
+          setSaved(false)
+        }}
+        className="flex-1 px-3 py-1.5 border border-slate-300 dark:border-slate-600 rounded-lg text-sm font-mono focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+        placeholder={String(
+          controller.agentServerConfigs[selectedAgent]?.effectiveContextWindow
+          ?? 200000,
+        )}
+        title={t('agentContextWindowHint')}
+      />
+      <button
+        type="button"
+        onClick={() => {
+          setEditedContextWindow(undefined)
+          setContextWindowTouched(true)
+          setSaved(false)
+        }}
+        className="px-2 py-1.5 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 rounded"
+      >
+        {t('reset')}
+      </button>
+    </div>
+  )
+}
 
 function LiteratureResearchMode({ controller }: ProviderProps) {
   const {
@@ -335,6 +378,7 @@ function PubMedSettings({ controller }: ProviderProps) {
                           {showAgentApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                         </button>
                       </div>
+                      <ContextWindowInput controller={controller} />
                       <p className="text-xs text-slate-400">{t('agentServerHint')}</p>
                     </div>
                   )}
@@ -484,6 +528,7 @@ function StandardProvider({ controller }: ProviderProps) {
                   </button>
                 </div>
               </div>
+              <ContextWindowInput controller={controller} />
               <p className="text-xs text-slate-400">
                 {t('agentServerHint')}
               </p>

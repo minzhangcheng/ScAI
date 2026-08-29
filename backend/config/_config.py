@@ -362,6 +362,31 @@ class AgentTemperatures(BaseModel):
         data = self.model_dump()
         data.update({k: v for k, v in custom.items() if k in data})
         return AgentTemperatures(**data)
+
+
+MINIMUM_CONTEXT_WINDOW: int = 8_192
+DEFAULT_AGENT_CONTEXT_WINDOW: int = 200_000
+
+
+class AgentContextWindows(BaseModel):
+    """Configured context-window defaults for text dispatches by each agent."""
+
+    pi: int = Field(default=DEFAULT_AGENT_CONTEXT_WINDOW, ge=MINIMUM_CONTEXT_WINDOW)
+    pathology: int = Field(default=DEFAULT_AGENT_CONTEXT_WINDOW, ge=MINIMUM_CONTEXT_WINDOW)
+    bioinformatics: int = Field(default=DEFAULT_AGENT_CONTEXT_WINDOW, ge=MINIMUM_CONTEXT_WINDOW)
+    biochemistry: int = Field(default=DEFAULT_AGENT_CONTEXT_WINDOW, ge=MINIMUM_CONTEXT_WINDOW)
+    literature: int = Field(default=DEFAULT_AGENT_CONTEXT_WINDOW, ge=MINIMUM_CONTEXT_WINDOW)
+    painter: int = Field(default=DEFAULT_AGENT_CONTEXT_WINDOW, ge=MINIMUM_CONTEXT_WINDOW)
+    supervisor: int = Field(default=DEFAULT_AGENT_CONTEXT_WINDOW, ge=MINIMUM_CONTEXT_WINDOW)
+    technique: int = Field(default=DEFAULT_AGENT_CONTEXT_WINDOW, ge=MINIMUM_CONTEXT_WINDOW)
+
+    def get(self, agent: str, default: int = DEFAULT_AGENT_CONTEXT_WINDOW) -> int:
+        return getattr(self, agent, default)
+
+    def merge_custom(self, custom: Dict[str, int]) -> "AgentContextWindows":
+        data = self.model_dump()
+        data.update({key: value for key, value in custom.items() if key in data})
+        return AgentContextWindows(**data)
     
 # Literature agent defaults
 DEFAULT_LITERATURE_MODE = "pubmed_llm"
@@ -373,6 +398,7 @@ class SystemConfig(BaseModel):
     models: ModelConfig = Field(default_factory=ModelConfig)
     prompts: AgentPrompts = Field(default_factory=AgentPrompts)
     temperatures: AgentTemperatures = Field(default_factory=AgentTemperatures)
+    context_windows: AgentContextWindows = Field(default_factory=AgentContextWindows)
     
     # Image processing settings
     image_tile_size: int = 1024  # Size for pathology image tiles

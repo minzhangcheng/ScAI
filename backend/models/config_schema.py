@@ -91,6 +91,7 @@ class AgentOverride(BaseModel):
     custom_prompt: Optional[str] = None
     temperature: Optional[float] = None
     vision: Optional[bool] = None
+    context_window: Optional[int] = Field(default=None, ge=8_192)
 
 
 class ConfigV1(BaseModel):

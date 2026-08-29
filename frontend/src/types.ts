@@ -147,6 +147,8 @@ export interface AgentSettingsResponse {
   agent_server_configs: Partial<Record<AgentType, {
     llm_base_url?: string
     api_key?: string
+    context_window?: number | null
+    effective_context_window?: number
   }>>
   vision_settings: Record<AgentType, boolean>
   literature_config: NonNullable<SessionLoadResponse['literature_config']>

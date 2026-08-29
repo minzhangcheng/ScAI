@@ -33,6 +33,38 @@ _SECRET_FIELD_NAMES = {
     "proxy_url",
 }
 
+
+def resolve_context_window(
+    agent_server_configs: Optional[Dict[str, Any]],
+    config: SystemConfig,
+    agent_name: str,
+) -> int:
+    """Resolve a valid session override or fall back to the configured default."""
+
+    default = config.context_windows.get(agent_name)
+    raw = ((agent_server_configs or {}).get(agent_name) or {}).get(
+        "context_window"
+    )
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError, OverflowError):
+        logger.warning(
+            "Ignoring invalid legacy context window for agent %s: %r",
+            agent_name,
+            raw,
+        )
+        return default
+    if value < 8_192:
+        logger.warning(
+            "Ignoring legacy context window below minimum for agent %s: %r",
+            agent_name,
+            raw,
+        )
+        return default
+    return value
+
 # ``set_retry_callback`` predates the lifecycle gate.  Keep a one-argument
 # update from accidentally clearing an already-installed ``before_retry``.
 _RETRY_CALLBACK_UNSET = object()
@@ -205,6 +237,15 @@ class AgentSettingsProvider:
         if custom is not None:
             return custom
         return getattr(self._config.temperatures, agent_name, 0.5)
+
+    def get_context_window(self, agent_name: str) -> int:
+        """Resolve the freshest session override, then the configured default."""
+
+        return resolve_context_window(
+            self._get_state().agent_server_configs,
+            self._config,
+            agent_name,
+        )
 
     def get_system_prompt(self, agent_name: str) -> str:
         custom_prompts = self._get_state().custom_prompts or {}
@@ -501,6 +542,7 @@ class AgentSettingsProvider:
             "temperature": self.get_temperature(agent_name),
             "system_prompt": self.get_system_prompt(agent_name),
             "vision_enabled": self.get_vision_setting(agent_name),
+            "context_window": self.get_context_window(agent_name),
             "server": (state.agent_server_configs or {}).get(agent_name, {}),
             "resolved_api": {
                 "llm_base_url": self._live_api_config().llm_base_url,

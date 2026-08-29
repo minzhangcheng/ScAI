@@ -85,7 +85,13 @@ export function scrubAgentServerConfigs(
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue
     const config = candidate as Record<string, unknown>
     if (typeof config.llmBaseUrl !== 'string') continue
-    scrubbed[agent] = { llmBaseUrl: config.llmBaseUrl, apiKey: '' }
+    scrubbed[agent] = {
+      llmBaseUrl: config.llmBaseUrl,
+      apiKey: '',
+      ...(typeof config.contextWindow === 'number'
+        ? { contextWindow: config.contextWindow }
+        : {}),
+    }
   }
   return scrubbed
 }

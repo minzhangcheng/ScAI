@@ -28,7 +28,12 @@ describe('transformAgentSettings', () => {
       models: { ...DEFAULT_MODELS, pi: 'mimo-v2.5' },
       temperatures: { ...DEFAULT_TEMPERATURES, pi: 0.3 },
       agent_server_configs: {
-        pi: { llm_base_url: 'https://pi.example/v1', api_key: '********' },
+        pi: {
+          llm_base_url: 'https://pi.example/v1',
+          api_key: '********',
+          context_window: 128000,
+          effective_context_window: 128000,
+        },
       },
       vision_settings: { ...DEFAULT_VISION_SETTINGS, pi: false },
       literature_config: {
@@ -44,6 +49,8 @@ describe('transformAgentSettings', () => {
     expect(updates.agentServerConfigs?.pi).toEqual({
       llmBaseUrl: 'https://pi.example/v1',
       apiKey: '********',
+      contextWindow: 128000,
+      effectiveContextWindow: 128000,
     })
     expect(updates.agentVisionSettings?.pi).toBe(false)
   })
