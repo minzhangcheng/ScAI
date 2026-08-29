@@ -2,7 +2,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from backend.models.api_requests import AgentServerConfigRequest, LiteratureConfigRequest
+from backend.config import SystemConfig
+from backend.models.api_requests import (
+    AgentServerConfigRequest,
+    AgentSettingsUpdateRequest,
+    LiteratureConfigRequest,
+)
 from backend.models.schemas import AnalysisState
 from backend.routes import session_config
 from backend.state import sessions, workflows
@@ -119,3 +124,85 @@ async def test_agent_server_config_route_preserves_masked_preview(monkeypatch):
         sessions.pop(session_id, None)
 
     assert state.agent_server_configs["pi"]["api_key"] == "sk-123456789"
+
+
+@pytest.mark.asyncio
+async def test_agent_settings_route_updates_once_and_invalidates_before_next_call(monkeypatch):
+    session_id = "route-agent-settings-test"
+    state = _state(session_id)
+    state.agent_server_configs["pi"] = {
+        "llm_base_url": "https://old.example/v1",
+        "api_key": "sk-123456789",
+    }
+    sessions[session_id] = state
+    provider = MagicMock()
+    workflow = MagicMock()
+    workflow._settings_provider = provider
+    workflow.pi_agent = MagicMock()
+    workflow.pi_agent.refresh_runtime_config_if_needed = MagicMock()
+    workflows[session_id] = workflow
+    events = []
+    workflow.pi_agent.refresh_runtime_config_if_needed.side_effect = lambda: events.append("invalidate")
+
+    monkeypatch.setattr(session_config, "require_session_ownership", AsyncMock(return_value=state))
+    monkeypatch.setattr(
+        session_config, "resolve_config_for_user", AsyncMock(return_value=SystemConfig())
+    )
+    save_mock = AsyncMock(side_effect=lambda *_args, **_kwargs: events.append("save"))
+    cache_mock = AsyncMock(side_effect=lambda *_args, **_kwargs: events.append("cache"))
+    monkeypatch.setattr(session_config, "async_save_session", save_mock)
+    monkeypatch.setattr(session_config, "update_session_cache", cache_mock)
+
+    body = AgentSettingsUpdateRequest(
+        agent="pi",
+        prompt="Updated PI prompt",
+        model="mimo-v2.5",
+        temperature=0.3,
+        llm_base_url="https://new.example/v1",
+        api_key=mask_api_key("sk-123456789"),
+        vision_enabled=False,
+    )
+    try:
+        response = await session_config.update_agent_settings(session_id, _Request(), body)
+    finally:
+        workflows.pop(session_id, None)
+        sessions.pop(session_id, None)
+
+    assert state.custom_prompts["pi"] == "Updated PI prompt"
+    assert state.custom_models["pi"] == "mimo-v2.5"
+    assert state.custom_temperatures["pi"] == 0.3
+    assert state.agent_server_configs["pi"] == {
+        "llm_base_url": "https://new.example/v1",
+        "api_key": "sk-123456789",
+    }
+    assert state.agent_vision_settings["pi"] is False
+    assert response["models"]["pi"] == "mimo-v2.5"
+    assert response["agent_server_configs"]["pi"]["api_key"] == mask_api_key("sk-123456789")
+    cache_mock.assert_awaited_once_with(session_id, state)
+    save_mock.assert_awaited_once_with(session_id, state)
+    provider.clear_agent_client_cache.assert_called_once_with("pi")
+    workflow.pi_agent.refresh_runtime_config_if_needed.assert_called_once()
+    assert events == ["cache", "invalidate", "save"]
+
+
+@pytest.mark.asyncio
+async def test_get_agent_settings_returns_current_session_values(monkeypatch):
+    state = _state("route-agent-settings-read-test")
+    state.custom_models["pi"] = "mimo-v2.5"
+    state.agent_server_configs["pi"] = {
+        "llm_base_url": "https://pi.example/v1",
+        "api_key": "sk-123456789",
+    }
+    monkeypatch.setattr(
+        session_config, "require_session_read_ownership", AsyncMock(return_value=state)
+    )
+    monkeypatch.setattr(
+        session_config, "resolve_config_for_user", AsyncMock(return_value=SystemConfig())
+    )
+
+    response = await session_config.get_agent_settings(state.id, _Request())
+
+    assert response["models"]["pi"] == "mimo-v2.5"
+    assert response["models"]["supervisor"] == "gpt-5.4-mini"
+    assert response["vision_settings"]["literature"] is True
+    assert response["agent_server_configs"]["pi"]["api_key"] == mask_api_key("sk-123456789")

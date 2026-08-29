@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import type { SessionLoadResponse } from '../../../types'
+import type { AgentSettingsResponse, SessionLoadResponse } from '../../../types'
 import { useAppStore, type Session } from '../../../stores/appStore'
 import { restoreAgentErrors, transformRawMessage } from '../../../utils/messageTransform'
-import { transformLoadResponse } from '../../../utils/transformLoadResponse'
+import { transformAgentSettings, transformLoadResponse } from '../../../utils/transformLoadResponse'
 import { apiFetch, applyStoreUpdates } from '../client'
 import { loadRealtimeMessageHistory } from '../realtimeHistory'
 import type { ActiveSessionHistory, ActiveSessionLoad, SessionLoadingOwnership } from './types'
@@ -95,6 +95,12 @@ export function useSessionLoading(store: SessionLoadingStore) {
         ownsResponse,
       )
       if (!ownsResponse()) throw new DOMException('Session load was superseded', 'AbortError')
+      const agentSettings = await apiFetch<AgentSettingsResponse>(
+        `/session/${sessionId}/agent-settings`,
+        { signal: controller.signal },
+        ownsResponse,
+      )
+      if (!ownsResponse()) throw new DOMException('Session load was superseded', 'AbortError')
 
       const { sessionUpdates, storeUpdates } = transformLoadResponse(data)
       const session: Session = {
@@ -112,7 +118,7 @@ export function useSessionLoading(store: SessionLoadingStore) {
       }
 
       store.setCurrentSession(session)
-      applyStoreUpdates(storeUpdates)
+      applyStoreUpdates({ ...storeUpdates, ...transformAgentSettings(agentSettings) })
       if (data.agent_errors && Array.isArray(data.agent_errors)) restoreAgentErrors(data.agent_errors)
       if (data.messages && Array.isArray(data.messages)) {
         store.setMessages(data.messages.map(transformRawMessage))

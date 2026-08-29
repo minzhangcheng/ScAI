@@ -68,6 +68,18 @@ class AgentServerConfigRequest(BaseModel):
     api_key: str = ""
 
 
+class AgentSettingsUpdateRequest(BaseModel):
+    """Atomically update all editable settings for one agent."""
+    agent: VALID_AGENTS
+    prompt: str = Field(max_length=50000)
+    model: str
+    temperature: float = Field(ge=0.0, le=2.0)
+    llm_base_url: str = ""
+    api_key: str = ""
+    vision_enabled: bool
+    literature_config: Optional[LiteratureConfigRequest] = None
+
+
 class AgentConfigUpdateRequest(BaseModel):
     """Unified request for updating a single agent config field.
 

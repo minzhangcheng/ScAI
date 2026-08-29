@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { BookOpen, Code2, Eye, FlaskConical, Microscope, Palette, Users, Wrench } from 'lucide-react'
 
-import { apiFetch, usePrompts } from '../../hooks/useApi'
+import { apiFetch, applyStoreUpdates } from '../../hooks/useApi'
 import { getDefaultPrompts, useTranslation } from '../../i18n/translations'
 import {
   DEFAULT_MODELS, DEFAULT_TEMPERATURES, DEFAULT_VISION_SETTINGS, useAppStore,
   type AgentType,
 } from '../../stores/appStore'
 import { buildLiteratureConfigPayload, resolveDeepResearchServerConfig } from '../../utils/literatureConfig'
+import { transformAgentSettings } from '../../utils/transformLoadResponse'
+import type { AgentSettingsResponse } from '../../types'
 
 const colorStyles: Record<string, {
   bgSelected: string
@@ -105,7 +107,6 @@ export function usePromptsController() {
   })
   const llmModifyPending = useAppStore(s => s.llmModifyPending)
   const llmFailureInfo = useAppStore(s => s.llmFailureInfo)
-  const { savePrompt, saveModel, saveTemperature } = usePrompts()
   const { t } = useTranslation(language)
   const defaultPrompts = getDefaultPrompts(language)
   const [selectedAgent, setSelectedAgent] = useState<AgentType>('pi')
@@ -240,65 +241,35 @@ export function usePromptsController() {
     try {
       // Only persist per-agent server config if different from global defaults
       const isCustomServer = editedLlmBaseUrl !== apiConfig.llmBaseUrl || editedApiKey !== apiConfig.apiKey
-      if (isCustomServer) {
-        setAgentServerConfig(selectedAgent, { llmBaseUrl: editedLlmBaseUrl, apiKey: editedApiKey })
-      } else {
-        // Clear per-agent override (use global)
-        setAgentServerConfig(selectedAgent, { llmBaseUrl: '', apiKey: '' })
-      }
+      const serverConfig = isCustomServer
+        ? { llmBaseUrl: editedLlmBaseUrl, apiKey: editedApiKey }
+        : { llmBaseUrl: '', apiKey: '' }
 
       if (currentSession) {
-        await savePrompt(selectedAgent, editedPrompt)
-        await saveModel(selectedAgent, editedModel)
-        await saveTemperature(selectedAgent, editedTemperature)
-
-        // Save per-agent server config to backend
-        try {
-          await apiFetch(`/session/${currentSession.id}/agent-server-config`, {
+        const response = await apiFetch<AgentSettingsResponse>(
+          `/session/${currentSession.id}/agent-settings`,
+          {
             method: 'POST',
             body: JSON.stringify({
               agent: selectedAgent,
-              llm_base_url: editedLlmBaseUrl,
-              api_key: editedApiKey,
-            }),
-          })
-        } catch (e) {
-          console.error('Failed to save agent server config:', e)
-          throw e
-        }
-
-        // Save vision setting to backend
-        try {
-          await apiFetch(`/session/${currentSession.id}/vision-settings`, {
-            method: 'POST',
-            body: JSON.stringify({
-              agent: selectedAgent,
+              prompt: editedPrompt,
+              model: editedModel,
+              temperature: editedTemperature,
+              llm_base_url: serverConfig.llmBaseUrl,
+              api_key: serverConfig.apiKey,
               vision_enabled: editedVisionEnabled,
+              literature_config: selectedAgent === 'literature'
+                ? buildLiteratureConfigPayload(useAppStore.getState())
+                : undefined,
             }),
-          })
-        } catch (e) {
-          console.error('Failed to save vision setting:', e)
-          throw e
-        }
-        setAgentVisionSetting(selectedAgent, editedVisionEnabled)
-
-        // Also save literature config if on literature agent
-        if (selectedAgent === 'literature') {
-          try {
-            const literaturePayload = buildLiteratureConfigPayload(useAppStore.getState())
-            await apiFetch(`/session/${currentSession.id}/literature-config`, {
-              method: 'POST',
-              body: JSON.stringify(literaturePayload),
-            })
-          } catch (e) {
-            console.error('Failed to save literature config:', e)
-            throw e
-          }
-        }
+          },
+        )
+        applyStoreUpdates(transformAgentSettings(response))
       } else {
         setPrompt(selectedAgent, editedPrompt)
         setModel(selectedAgent, editedModel)
         setTemperature(selectedAgent, editedTemperature)
+        setAgentServerConfig(selectedAgent, serverConfig)
         setAgentVisionSetting(selectedAgent, editedVisionEnabled)
       }
       setSaved(true)

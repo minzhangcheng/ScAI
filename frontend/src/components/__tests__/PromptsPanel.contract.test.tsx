@@ -10,9 +10,10 @@ describe('PromptsPanel extraction contract', () => {
   })
 
   it('keeps save payloads, reset defaults, and timer cleanup in the controller', () => {
-    expect(controllerSource).toContain('/agent-server-config')
-    expect(controllerSource).toContain('/vision-settings')
-    expect(controllerSource).toContain('/literature-config')
+    expect(controllerSource).toContain('/agent-settings')
+    expect(controllerSource).not.toContain('/agent-server-config')
+    expect(controllerSource).not.toContain('/vision-settings')
+    expect(controllerSource).not.toContain('/literature-config')
     expect(controllerSource).toContain('clearTimeout(savedTimerRef.current)')
     expect(controllerSource).toContain("setLiteratureMode('pubmed_llm')")
   })

@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { transformLoadResponse, transformRoundResults, type RawFigureBadges } from './transformLoadResponse'
+import { transformAgentSettings, transformLoadResponse, transformRoundResults, type RawFigureBadges } from './transformLoadResponse'
 import { applyStoreUpdates } from '../hooks/useApi'
-import { useAppStore } from '../stores/appStore'
-import type { SessionLoadResponse, RawPublicationFigure } from '../types'
+import { DEFAULT_MODELS, DEFAULT_TEMPERATURES, DEFAULT_VISION_SETTINGS, useAppStore } from '../stores/appStore'
+import type { AgentSettingsResponse, SessionLoadResponse, RawPublicationFigure } from '../types'
+import { getDefaultPrompts } from '../i18n/translations'
 import { resultIdentityKey } from './roundKey'
 
 const MINIMAL_RESPONSE: SessionLoadResponse = {
@@ -19,6 +20,34 @@ const MINIMAL_RESPONSE: SessionLoadResponse = {
   publication_figures: [],
   publication_tables: [],
 }
+
+describe('transformAgentSettings', () => {
+  it('maps the current session settings into the Agents page store shape', () => {
+    const response: AgentSettingsResponse = {
+      prompts: getDefaultPrompts('en'),
+      models: { ...DEFAULT_MODELS, pi: 'mimo-v2.5' },
+      temperatures: { ...DEFAULT_TEMPERATURES, pi: 0.3 },
+      agent_server_configs: {
+        pi: { llm_base_url: 'https://pi.example/v1', api_key: '********' },
+      },
+      vision_settings: { ...DEFAULT_VISION_SETTINGS, pi: false },
+      literature_config: {
+        mode: 'pubmed_llm',
+        max_search_rounds: 20,
+      },
+    }
+
+    const updates = transformAgentSettings(response)
+
+    expect(updates.models?.pi).toBe('mimo-v2.5')
+    expect(updates.temperatures?.pi).toBe(0.3)
+    expect(updates.agentServerConfigs?.pi).toEqual({
+      llmBaseUrl: 'https://pi.example/v1',
+      apiKey: '********',
+    })
+    expect(updates.agentVisionSettings?.pi).toBe(false)
+  })
+})
 
 describe('transformLoadResponse', () => {
   it('transforms minimal response with present fields', () => {

@@ -2,8 +2,15 @@ import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useSession } from '../api/useSession'
-import { useAppStore, type Session } from '../../stores/appStore'
-import type { SessionLoadResponse } from '../../types'
+import {
+  DEFAULT_MODELS,
+  DEFAULT_TEMPERATURES,
+  DEFAULT_VISION_SETTINGS,
+  useAppStore,
+  type Session,
+} from '../../stores/appStore'
+import type { AgentSettingsResponse, SessionLoadResponse } from '../../types'
+import { getDefaultPrompts } from '../../i18n/translations'
 
 vi.mock('../../utils/authStorage', () => ({
   getToken: vi.fn(() => 'test-token'),
@@ -48,6 +55,17 @@ function loadResponse(id: string, marker: number): SessionLoadResponse {
       timestamp: '2026-08-03T00:00:00Z',
       resolved: false,
     }],
+  }
+}
+
+function agentSettingsResponse(): AgentSettingsResponse {
+  return {
+    prompts: getDefaultPrompts('en'),
+    models: { ...DEFAULT_MODELS },
+    temperatures: { ...DEFAULT_TEMPERATURES },
+    agent_server_configs: {},
+    vision_settings: { ...DEFAULT_VISION_SETTINGS },
+    literature_config: { mode: 'pubmed_llm', max_search_rounds: 20 },
   }
 }
 
@@ -143,6 +161,8 @@ describe('loadSession response ownership', () => {
 
     await act(async () => {
       pending[1].resolve(jsonResponse(loadResponse('B', 2)))
+      await vi.waitFor(() => expect(pending).toHaveLength(3))
+      pending[2].resolve(jsonResponse(agentSettingsResponse()))
       await currentLoad
     })
 
@@ -170,6 +190,8 @@ describe('loadSession response ownership', () => {
 
     await act(async () => {
       pending[1].resolve(jsonResponse(loadResponse('same', 3)))
+      await vi.waitFor(() => expect(pending).toHaveLength(3))
+      pending[2].resolve(jsonResponse(agentSettingsResponse()))
       await currentLoad
     })
     await act(async () => {
@@ -195,11 +217,13 @@ describe('loadSession response ownership', () => {
 
     await act(async () => {
       pending[0].resolve(jsonResponse({ ...loadResponse('history', 4), messages: undefined }))
-      await Promise.resolve()
-      await Promise.resolve()
+      await vi.waitFor(() => expect(pending).toHaveLength(2))
+      expect(pending[1].url).toBe('/api/session/history/agent-settings')
+      pending[1].resolve(jsonResponse(agentSettingsResponse()))
+      await vi.waitFor(() => expect(pending).toHaveLength(3))
     })
     expect(useAppStore.getState().currentSession?.id).toBe('history')
-    expect(pending[1].url).toContain('/api/session/history/messages')
+    expect(pending[2].url).toContain('/api/session/history/messages')
 
     act(() => useAppStore.getState().addMessage({
       id: 'live-arrival',
@@ -208,7 +232,7 @@ describe('loadSession response ownership', () => {
       timestamp: '2026-08-03T00:00:02Z',
     }))
     await act(async () => {
-      pending[1].resolve(jsonResponse({
+      pending[2].resolve(jsonResponse({
         messages: [{ id: 'paged', type: 'message', content: 'paged', timestamp: '2026-08-03T00:00:01Z' }],
         page_size: 1,
         has_more: false,

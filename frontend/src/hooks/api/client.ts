@@ -52,6 +52,34 @@ export function applyStoreUpdates(updates: StoreUpdates): void {
       setter(incoming)
     }
   }
+  if (updates.prompts) {
+    for (const [agent, prompt] of Object.entries(updates.prompts)) {
+      store.setPrompt(agent as keyof typeof updates.prompts, prompt)
+    }
+  }
+  if (updates.models) {
+    for (const [agent, model] of Object.entries(updates.models)) {
+      store.setModel(agent as keyof typeof updates.models, model)
+    }
+  }
+  if (updates.temperatures) {
+    for (const [agent, temperature] of Object.entries(updates.temperatures)) {
+      store.setTemperature(agent as keyof typeof updates.temperatures, temperature)
+    }
+  }
+  if (updates.agentServerConfigs) {
+    for (const [agent, config] of Object.entries(updates.agentServerConfigs)) {
+      if (!config) continue
+      store.setAgentServerConfig(agent as keyof typeof updates.agentServerConfigs, {
+        ...config,
+      })
+    }
+  }
+  if (updates.agentVisionSettings) {
+    for (const [agent, enabled] of Object.entries(updates.agentVisionSettings)) {
+      store.setAgentVisionSetting(agent as keyof typeof updates.agentVisionSettings, enabled)
+    }
+  }
   if (updates.stateVersion != null) store.setStateVersion(updates.stateVersion)
   if (updates.snapshotCount != null) store.setSnapshotCount(updates.snapshotCount)
   if (updates.roundWaitSeconds != null) store.setRoundWaitSeconds(updates.roundWaitSeconds)

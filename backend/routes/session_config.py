@@ -2,21 +2,27 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from backend.config import AgentTemperatures, PI_AGENT_NAME
+from backend.config import AgentTemperatures, PI_AGENT_NAME, SystemConfig
 from backend.models.api_requests import (
     PromptUpdateRequest, ModelUpdateRequest, TemperatureUpdateRequest,
     VisionSettingUpdateRequest, LiteratureConfigRequest, AgentServerConfigRequest,
+    AgentSettingsUpdateRequest,
 )
 from backend.models.schemas import APIResponse, DEFAULT_ROUND_WAIT_SECONDS
 from backend.services.session_store import async_save_session, ensure_session_loaded, update_session_cache
 from backend.state import get_session_lock, workflows
-from backend.utils.auth import require_session_ownership
+from backend.utils.auth import require_session_ownership, require_session_read_ownership
 from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import validate_session_id
 from backend.utils.secret_redaction import mask_api_key
 from backend.utils.settings_provider import AgentSettingsProvider
 
 router = APIRouter(prefix="/api", tags=["session-config"])
+
+_AGENT_NAMES = (
+    "pi", "pathology", "bioinformatics", "biochemistry",
+    "literature", "painter", "supervisor", "technique",
+)
 
 
 def _invalidate_active_agent_config(session_id: str, agent_name: str) -> None:
@@ -37,6 +43,51 @@ def _invalidate_active_agent_config(session_id: str, agent_name: str) -> None:
     agent = getattr(workflow, agent_attr, None)
     if agent is not None and hasattr(agent, "refresh_runtime_config_if_needed"):
         agent.refresh_runtime_config_if_needed()
+
+
+def _masked_agent_server_configs(state) -> dict:
+    masked = {}
+    for agent, config in (state.agent_server_configs or {}).items():
+        value = dict(config) if config else {}
+        if value.get("api_key"):
+            value["api_key"] = mask_api_key(value["api_key"])
+        masked[agent] = value
+    return masked
+
+
+def _agent_settings_payload(state, config: SystemConfig) -> dict:
+    server_configs = _masked_agent_server_configs(state)
+    return {
+        "prompts": {
+            agent: state.custom_prompts.get(
+                agent, getattr(config.prompts, f"{agent}_prompt", "")
+            )
+            for agent in _AGENT_NAMES
+        },
+        "models": {
+            agent: state.custom_models.get(
+                agent, getattr(config.models, f"{agent}_model", "")
+            )
+            for agent in _AGENT_NAMES
+        },
+        "temperatures": {
+            agent: state.custom_temperatures.get(
+                agent, getattr(config.temperatures, agent, 0.5)
+            )
+            for agent in _AGENT_NAMES
+        },
+        "agent_server_configs": {
+            agent: server_configs.get(agent, {"llm_base_url": "", "api_key": ""})
+            for agent in _AGENT_NAMES
+        },
+        "vision_settings": {
+            agent: state.agent_vision_settings.get(agent, True)
+            for agent in _AGENT_NAMES
+        },
+        "literature_config": AgentSettingsProvider.mask_literature_config(
+            state.literature_config
+        ),
+    }
 
 
 class MaxRoundsRequest(BaseModel):
@@ -67,7 +118,7 @@ async def get_prompts(session_id: str, request: Request):
     """Get current prompts"""
     user_id = getattr(request.state, "user_id", "")
     cfg = await resolve_config_for_user(user_id)
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    state = await require_session_read_ownership(session_id=session_id, user_id=user_id)
 
     prompts = {
         PI_AGENT_NAME: state.custom_prompts.get(PI_AGENT_NAME, cfg.prompts.pi_prompt if cfg else ""),
@@ -268,10 +319,54 @@ async def get_agent_server_configs(session_id: str, request: Request):
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
-    masked = {}
-    for agent, cfg in (state.agent_server_configs or {}).items():
-        c = dict(cfg) if cfg else {}
-        if c.get("api_key"):
-            c["api_key"] = mask_api_key(c["api_key"])
-        masked[agent] = c
-    return masked
+    return _masked_agent_server_configs(state)
+
+
+@router.get("/session/{session_id}/agent-settings")
+async def get_agent_settings(session_id: str, request: Request):
+    """Return the authoritative settings displayed by the Agents page."""
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    config = await resolve_config_for_user(user_id) or SystemConfig()
+    state = await require_session_read_ownership(session_id=session_id, user_id=user_id)
+    return _agent_settings_payload(state, config)
+
+
+@router.post("/session/{session_id}/agent-settings")
+async def update_agent_settings(
+    session_id: str,
+    request: Request,
+    body: AgentSettingsUpdateRequest,
+):
+    """Atomically persist every editable setting for one agent."""
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    async with get_session_lock(session_id):
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
+        existing_server = (state.agent_server_configs or {}).get(body.agent, {}) or {}
+        incoming_key = body.api_key
+        if incoming_key and incoming_key == mask_api_key(existing_server.get("api_key", "")):
+            incoming_key = existing_server.get("api_key", "")
+
+        state.custom_prompts[body.agent] = body.prompt
+        state.custom_models[body.agent] = body.model
+        state.custom_temperatures[body.agent] = body.temperature
+        state.agent_server_configs[body.agent] = {
+            "llm_base_url": body.llm_base_url,
+            "api_key": incoming_key,
+        }
+        state.agent_vision_settings[body.agent] = body.vision_enabled
+
+        if body.agent == "literature" and body.literature_config is not None:
+            literature = body.literature_config
+            state.literature_config = AgentSettingsProvider.resolve_literature_config_update(
+                state.literature_config or {},
+                literature.model_dump(),
+            )
+
+        await update_session_cache(session_id, state)
+        _invalidate_active_agent_config(session_id, body.agent)
+        await async_save_session(session_id, state)
+
+    config = await resolve_config_for_user(user_id) or SystemConfig()
+    return _agent_settings_payload(state, config)

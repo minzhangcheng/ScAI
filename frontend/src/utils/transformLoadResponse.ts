@@ -2,6 +2,7 @@ import { parseSnapshotFailure, type ParsedSnapshotFailure } from './snapshotV2'
 import { buildAnnotationDataFromState, type AnnotationData } from './annotationGate'
 import type {
   SessionLoadResponse,
+  AgentSettingsResponse,
   RawRoundResult,
   RawTreatmentGroup,
   RawDataFile,
@@ -15,6 +16,12 @@ import type {
   RoundResult,
   FigureReviewStatus,
   LlmFailureInfo,
+  AgentModels,
+  AgentPrompts,
+  AgentServerConfig,
+  AgentTemperatures,
+  AgentType,
+  AgentVisionSettings,
 } from '../stores/appStore'
 import type { SnapshotTransactionRecord } from '../types/snapshotV2'
 import { resultIdentityKey } from './roundKey'
@@ -209,11 +216,44 @@ export type StoreUpdates = {
   runtimeRestoreWarning?: string | null
   snapshotFailure?: ParsedSnapshotFailure | null
   snapshotTransaction?: SnapshotTransactionRecord | null
+  prompts?: AgentPrompts
+  models?: AgentModels
+  temperatures?: AgentTemperatures
+  agentServerConfigs?: Partial<Record<AgentType, AgentServerConfig>>
+  agentVisionSettings?: AgentVisionSettings
 } & LiteratureConfigStoreUpdates
 
 export interface TransformedLoadResponse {
   sessionUpdates: Partial<Session>
   storeUpdates: StoreUpdates
+}
+
+export function transformAgentSettings(data: AgentSettingsResponse): StoreUpdates {
+  const agentServerConfigs = Object.fromEntries(
+    Object.entries(data.agent_server_configs).map(([agent, config]) => [
+      agent,
+      {
+        llmBaseUrl: config?.llm_base_url ?? '',
+        apiKey: config?.api_key ?? '',
+      },
+    ]),
+  ) as Partial<Record<AgentType, AgentServerConfig>>
+  const literature = data.literature_config
+
+  return {
+    prompts: data.prompts,
+    models: data.models,
+    temperatures: data.temperatures,
+    agentServerConfigs,
+    agentVisionSettings: data.vision_settings,
+    ...opt('literatureMode', literature.mode),
+    ...opt('deepResearchModel', literature.deep_research_model),
+    ...opt('deepResearchLlmBaseUrl', literature.deep_research_llm_base_url),
+    ...opt('deepResearchApiKey', literature.deep_research_api_key),
+    ...opt('googleApiKey', literature.google_api_key),
+    ...opt('pubmedEmail', literature.pubmed_email),
+    ...opt('literatureMaxSearchRounds', literature.max_search_rounds),
+  }
 }
 
 export function transformLoadResponse(data: SessionLoadResponse): TransformedLoadResponse {

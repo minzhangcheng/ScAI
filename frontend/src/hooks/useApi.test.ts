@@ -44,6 +44,26 @@ describe('applyStoreUpdates', () => {
     expect(useAppStore.getState().deepResearchApiKey).toBe('********')
   })
 
+  it('hydrates the authoritative session agent settings', () => {
+    useAppStore.getState().setAgentServerConfig('pi', {
+      llmBaseUrl: 'https://old.example/v1',
+      apiKey: 'local-agent-key',
+    })
+
+    applyStoreUpdates({
+      models: { ...useAppStore.getState().models, pi: 'mimo-v2.5' },
+      agentServerConfigs: {
+        pi: { llmBaseUrl: 'https://new.example/v1', apiKey: '********' },
+      },
+    })
+
+    expect(useAppStore.getState().models.pi).toBe('mimo-v2.5')
+    expect(useAppStore.getState().agentServerConfigs.pi).toEqual({
+      llmBaseUrl: 'https://new.example/v1',
+      apiKey: '********',
+    })
+  })
+
   it('applies snapshot transaction hydration', () => {
     const transaction = {
       transaction_id: 'restore-job-reload',
