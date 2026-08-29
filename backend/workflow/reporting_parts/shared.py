@@ -31,20 +31,26 @@ from ...services.report.paths import resolve_report_output_dir
 from ...services.report.lineage import build_lineage_report_state
 
 
-def validate_complete_report_allowed(state: AnalysisState) -> tuple[bool, str]:
-    if state.allow_partial_report:
-        return True, ""
+def report_coverage_observation(state: AnalysisState) -> str:
+    """Return a direction-coverage fact for PI review, or an empty string.
+
+    Coverage metadata never decides whether report generation proceeds or
+    whether a report is scientifically acceptable.
+    """
     from ..direction_coverage import active_batch_incomplete
     if active_batch_incomplete(state):
-        return False, (
+        return (
             "The active research direction batch does not have complete or "
-            "coverage-eligible evidence for every direction; only a partial "
-            "report can be produced."
+            "coverage-eligible evidence for every direction. The PI must decide "
+            "how this affects the report and its limitations."
         )
     if len(state.user_chosen_directions) <= 1:
-        return True, ""
+        return ""
     coverage = direction_coverage_status(state, lineage_id=current_lineage_id(state))
     if coverage.complete:
-        return True, ""
+        return ""
     missing = ", ".join(sorted(coverage.missing_keys))
-    return False, f"Complete report blocked because selected directions are missing completed evidence: {missing}"
+    return (
+        "Selected directions are missing completed evidence: "
+        f"{missing}. The PI must decide how this affects the report and its limitations."
+    )

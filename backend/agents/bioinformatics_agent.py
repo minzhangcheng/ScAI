@@ -37,7 +37,6 @@ from ..services.statistical_gates import run_gates as run_statistical_gates
 from ..services.sample_design import (
     BULK_RNASEQ_MODALITY,
     SCRNA_MODALITY,
-    code_sample_design_violation,
     finding_evidence_errors,
     has_replicated_condition_design,
     infer_execution_modalities,
@@ -96,7 +95,7 @@ from .bioinformatics.executor_context import ExecutorBindings
 
 
 def _method_rule_text(rule_id: str) -> str:
-    """Governing rule for a refusal, or '' when the corpus is unavailable.
+    """Governing rule text, or '' when the corpus is unavailable.
 
     Retrieved guidance must never be able to break an analysis, so every lookup
     failure degrades to silence rather than raising.
@@ -122,10 +121,6 @@ def _gate_samples_per_group(state) -> Dict[str, int]:
         for group, count in counts.items():
             merged[group] = min(merged.get(group, count), count)
     return merged
-
-
-# Compatibility-visible gate ceiling owned by executor_report_gates at runtime.
-_unsatisfiable = {"cell-level-inference"}
 
 
 # Configure logger

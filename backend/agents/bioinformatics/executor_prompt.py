@@ -139,8 +139,8 @@ WORKFLOW GUIDELINES:
   * Only use `init_pos='spectral'` for n_obs <= 5000
 - **BATCH EFFECT CHECK**: When loading multiple samples/batches/conditions, assess batch effects BEFORE clustering:
   * After initial PCA/UMAP, visualize cells colored by batch/sample/condition to check for batch effects
-  * If samples separate by batch, document the structure on the uncorrected embedding and consult PI about its interpretation; do not run Harmony, BBKNN, scVI, ComBat, or another correction because the current replicate-count channel does not verify a full-rank condition-by-batch design.
-  * With one independent single-cell sample per condition, concatenate with labels and keep condition comparisons descriptive; batch correction cannot identify which difference is technical.
+  * If samples separate by batch, document the structure on the uncorrected embedding and consult PI. The PI decides whether correction is appropriate and how condition effects may be interpreted from the measured design.
+  * With one independent single-cell sample per condition, make the sample/condition confounding explicit to the PI before choosing a correction or inferential claim.
   * Do NOT skip this step when multiple samples exist — batch effects can dominate clustering results
 - For CELL TYPE ANNOTATION, use annotate_clusters (NOT consult_pi):
   * After clustering and sc.tl.rank_genes_groups(), collect ALL cluster top markers into a dict

@@ -181,7 +181,7 @@ def samples_per_group_by_modality(state: Any) -> Dict[str, Dict[str, int]]:
 
     Measured group-specific records are authoritative. Per-sample numbered
     uploads provide a count when profiling records are absent. Declarations are
-    display metadata only and never enter an inferential gate. An ungrouped
+    display metadata only and never determine scientific acceptance. An ungrouped
     matrix keeps the modality present but unresolved:
     its total column count is never divided among groups. Profiling must persist
     a group-specific record after verifying column-to-group membership.
@@ -266,7 +266,7 @@ def samples_per_group_by_modality(state: Any) -> Dict[str, Dict[str, int]]:
 def has_replicated_condition_design(state: Any, modality: str) -> bool:
     """Whether every treatment group has at least two verified independent units.
 
-    Declarations remain a compatibility fallback for display and legacy gates,
+    Declarations remain a compatibility fallback for legacy display consumers,
     but cannot by themselves enable inferential work. This is a necessary
     replication check, not proof that technical batch and condition are
     separable. Planning text must retain that distinction.
@@ -316,7 +316,7 @@ def has_replicated_condition_design(state: Any, modality: str) -> bool:
 
 
 def single_cell_design_instruction(state: Any) -> str:
-    """A deterministic planning constraint derived from the single-cell n."""
+    """Render measured single-cell design facts for PI consideration."""
     designs = samples_per_group_by_modality(state)
     counts = designs.get(SCRNA_MODALITY)
     if not counts:
@@ -324,41 +324,40 @@ def single_cell_design_instruction(state: Any) -> str:
             return ""
         return (
             "Single-cell independent-unit counts or group membership could not "
-            "be resolved. Do not plan condition-level inference or batch "
-            "correction until the sample design is verified."
+            "be resolved. The PI must decide which comparisons are supportable "
+            "and state any resulting limitations."
         )
     if len(getattr(state, "treatment_groups", None) or []) < 2:
         return (
-            "Only one treatment group is present. No between-condition inference "
-            "is planned; any technical batch correction still requires an "
-            "identified, non-biological batch variable."
+            "Only one treatment group is present. There is no between-condition "
+            "contrast in the recorded design; any technical batch variable must "
+            "be identified separately."
         )
     rendered = ", ".join(f"{group}={count}" for group, count in counts.items())
     if has_replicated_condition_design(state, SCRNA_MODALITY):
         return (
             f"Single-cell independent-unit counts are {rendered}. Sample-level "
-            "condition inference may be planned. Replicate counts alone do not "
-            "establish that condition and technical batch are separable, so do "
-            "not plan batch correction without a separately verified full-rank "
-            "condition-by-batch design."
+            "replication is recorded. Replicate counts alone do not establish "
+            "whether condition and technical batch are separable; the PI must "
+            "judge any correction or condition-level inference in that context."
         )
     bulk_clause = (
-        "Replicated bulk data is the condition-level inferential layer and "
-        "single-cell data may localize those results to cell types or states."
+        "Replicated bulk data is recorded separately and is available to the PI "
+        "when judging cross-modal support."
         if has_replicated_condition_design(state, BULK_RNASEQ_MODALITY)
         else
-        "No other modality's sample count can license single-cell condition inference."
+        "No separately replicated sequencing modality is recorded."
     )
     return (
         f"Single-cell independent-unit counts are {rendered}. The single-cell arm "
-        "does not have replicated conditions: concatenate without condition-confounded "
-        "batch correction; do not plan cell-level or inferential pseudobulk condition "
-        f"tests. Single-cell condition contrasts must be descriptive. {bulk_clause}"
+        "does not have replicated conditions, so sample and condition may be "
+        "confounded. The PI must decide the analytical approach, inferential "
+        f"strength, and required disclosure. {bulk_clause}"
     )
 
 
 def bulk_design_instruction(state: Any) -> str:
-    """A deterministic planning constraint derived from bulk replicate records."""
+    """Render measured bulk design facts for PI consideration."""
     designs = samples_per_group_by_modality(state)
     counts = designs.get(BULK_RNASEQ_MODALITY)
     if counts is None:
@@ -366,248 +365,26 @@ def bulk_design_instruction(state: Any) -> str:
     if not counts:
         return (
             "Bulk RNA-seq sample-to-group membership could not be resolved. "
-            "Do not plan condition-level DEG, enrichment from DEG, or inferential "
-            "cross-modal validation until group-specific replicate records are verified."
+            "The PI must decide which comparisons are supportable and state any "
+            "resulting limitations."
         )
     rendered = ", ".join(f"{group}={count}" for group, count in counts.items())
     if has_replicated_condition_design(state, BULK_RNASEQ_MODALITY):
         return (
             f"Bulk RNA-seq independent-unit counts are {rendered}; sample-level "
-            "condition inference may be planned."
+            "replication is recorded. The PI decides whether and how to use "
+            "condition-level inference."
         )
     return (
         f"Bulk RNA-seq independent-unit counts are {rendered}. The bulk arm does "
-        "not have replicated conditions, so condition comparisons must remain descriptive."
+        "not have replicated conditions; the PI must judge the analytical approach, "
+        "inferential strength, and required disclosure."
     )
 
 
 def sequencing_design_instruction(state: Any) -> str:
-    """Return all sequencing-modality planning constraints."""
+    """Return measured sequencing-design facts without making a plan decision."""
     return "\n".join(filter(None, (
         single_cell_design_instruction(state),
         bulk_design_instruction(state),
     )))
-
-
-_BATCH_CORRECTION_STEP = re.compile(
-    r"\b(?:harmony\w*|bbknn\w*|combat\w*|scanorama\w*|batch[-\s]corr\w*|"
-    r"scvi\w*[^.;]{0,80}\bbatch(?:_key)?\b)\b",
-    re.I,
-)
-_SCRNA_CONDITION_INFERENCE_STEP = re.compile(
-    r"(?:\b(?:sc[-\s]?rna|sn[-\s]?rna|single[-\s]?(?:cell|nucle\w+)|"
-    r"pseudobulk|cell[-\s]?type|per[-\s]?cell|cluster)\b[^.;]{0,120}"
-    r"\b(?:condition[-\s]?level|differential\s+expression|\bdegs?\b|"
-    r"differential\s+abundance|significan\w*|p[-\s]?value|fdr)\b|"
-    r"\b(?:condition[-\s]?level|differential\s+expression|\bdegs?\b)\b"
-    r"[^.;]{0,120}\b(?:cell[-\s]?type|per[-\s]?cell|cluster|pseudobulk)\b)",
-    re.I,
-)
-_BULK_CONDITION_INFERENCE_STEP = re.compile(
-    r"\b(?:bulk(?:[-\s]?rna(?:[-\s]?seq)?)?|pydeseq2?|deseq2?|edger|limma)\b"
-    r"[^.;]{0,160}\b(?:differential\s+expression|\bdegs?\b|significan\w*|"
-    r"p[-\s]?value|fdr|condition[-\s]?(?:effect|comparison))\b|"
-    r"\b(?:differential\s+expression|\bdegs?\b|condition[-\s]?(?:effect|comparison))\b"
-    r"[^.;]{0,160}\b(?:bulk(?:[-\s]?rna(?:[-\s]?seq)?)?|pydeseq2?|deseq2?|edger|limma)\b",
-    re.I,
-)
-
-_CLAUSE_SPLIT = re.compile(r"[.;\n]+")
-_EXPLICIT_NONINFERENCE = re.compile(
-    r"\b(?:descriptive|exploratory)\s+only\b|"
-    r"\b(?:do\s+not|don't|must\s+not|should\s+not|never|without|no)\b"
-    r"[^.;\n]{0,60}\b(?:inferen\w*|test\w*|p[-\s]?values?|fdr|"
-    r"significan\w*|differential\s+expression|\bdegs?\b)\b",
-    re.I,
-)
-_HARD_INFERENCE_TERM = re.compile(
-    r"\b(?:p[-\s]?values?|fdr|q[-\s]?values?|significan\w*|wilcoxon|"
-    r"t[-\s]?test|mann[-\s]?whitney|deseq2?|pydeseq2|edger|limma|"
-    r"differential\s+expression|\bdegs?\b)\b",
-    re.I,
-)
-_NEGATED_INFERENCE = re.compile(
-    r"\b(?:do\s+not|don't|must\s+not|should\s+not|never|avoid|without|"
-    r"exclude|skip|no)\b[^.;\n]{0,60}$",
-    re.I,
-)
-_NEGATED_BATCH = re.compile(
-    r"\b(?:do\s+not|don't|must\s+not|should\s+not|never|avoid|without|"
-    r"exclude|skip|no)\b[^.;\n]{0,50}$",
-    re.I,
-)
-_POSTPOSED_NEGATION = re.compile(
-    r"^[^.;\n]{0,60}\b(?:is|are|was|were|will|would|should|must|can|"
-    r"cannot|can't|may|might)\s+(?:not|never)\b|"
-    r"^[^.;\n]{0,60}\b(?:not|never)\s+(?:be\s+)?(?:used|run|applied|"
-    r"performed|included|reported|computed|generated)\b",
-    re.I,
-)
-_BATCH_ASSESSMENT = re.compile(
-    r"\b(?:assess|evaluate|inspect|check|determine|decide)\b[^.;\n]{0,80}"
-    r"\b(?:whether|need\s+for|necessity\s+of)?\s*batch[-\s]corr\w*\b",
-    re.I,
-)
-
-
-def _has_unnegated_batch_correction(text: str) -> bool:
-    """Whether plan prose positively proposes a batch-correction method."""
-    value = str(text or "")
-    for match in _BATCH_CORRECTION_STEP.finditer(value):
-        clause_start = max(
-            value.rfind(".", 0, match.start()),
-            value.rfind(";", 0, match.start()),
-            value.rfind("\n", 0, match.start()),
-        ) + 1
-        clause_end_candidates = [
-            pos for pos in (
-                value.find(".", match.end()),
-                value.find(";", match.end()),
-                value.find("\n", match.end()),
-            ) if pos >= 0
-        ]
-        clause_end = min(clause_end_candidates) if clause_end_candidates else len(value)
-        clause = value[clause_start:clause_end]
-        if _BATCH_ASSESSMENT.search(clause):
-            continue
-        prefix = value[max(0, match.start() - 60):match.start()]
-        suffix = value[match.end():match.end() + 80]
-        if (not _NEGATED_BATCH.search(prefix)
-                and not _POSTPOSED_NEGATION.search(suffix)):
-            return True
-    return False
-
-
-def _has_undisclaimed_inference(text: str, pattern: re.Pattern) -> bool:
-    """Find an inferential plan clause that is not explicitly prohibited."""
-    for clause in _CLAUSE_SPLIT.split(str(text or "")):
-        if not pattern.search(clause):
-            continue
-        hard_terms = list(_HARD_INFERENCE_TERM.finditer(clause))
-        if any(
-            not _NEGATED_INFERENCE.search(
-                clause[max(0, match.start() - 70):match.start()],
-            )
-            and not _POSTPOSED_NEGATION.search(
-                clause[match.end():match.end() + 80],
-            )
-            for match in hard_terms
-        ):
-            return True
-        if not hard_terms and not _EXPLICIT_NONINFERENCE.search(clause):
-            return True
-    return False
-
-
-def _call_name(node: ast.AST) -> str:
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        prefix = _call_name(node.value)
-        return f"{prefix}.{node.attr}" if prefix else node.attr
-    return ""
-
-
-def _code_calls_batch_correction(code: str) -> bool:
-    """Inspect executable calls, ignoring comments, strings, and negated prose."""
-    try:
-        tree = ast.parse(str(code or ""))
-    except SyntaxError:
-        return False
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        name = _call_name(node.func).casefold()
-        if any(token in name for token in (
-            "harmony", "bbknn", "combat", "scanorama",
-        )):
-            return True
-        if "scvi" in name and any(
-            str(keyword.arg or "").casefold() in {"batch", "batch_key"}
-            for keyword in node.keywords
-        ):
-            return True
-    return False
-
-
-def plan_sample_design_violations(plan: Any, state: Any) -> list[dict[str, Any]]:
-    """Return plan steps that contradict modality-specific replicate designs."""
-    if len(getattr(state, "treatment_groups", None) or []) < 2:
-        return []
-    scrna_replicated = has_replicated_condition_design(state, SCRNA_MODALITY)
-    bulk_replicated = has_replicated_condition_design(
-        state, BULK_RNASEQ_MODALITY,
-    )
-    has_scrna = state_has_modality(state, SCRNA_MODALITY)
-    has_bulk = state_has_modality(state, BULK_RNASEQ_MODALITY)
-
-    violations: list[dict[str, Any]] = []
-    for step in (getattr(plan, "steps", None) or []):
-        text = " ".join(str(getattr(step, field, "") or "") for field in (
-            "title", "method", "input", "expected_output", "rationale",
-        ))
-        if has_scrna and _has_unnegated_batch_correction(text):
-            violations.append({
-                "step_id": getattr(step, "id", None),
-                "suggestion": (
-                    "Remove single-cell batch correction: replicate counts do "
-                    "not verify a full-rank condition-by-batch design. Concatenate "
-                    "with explicit labels and assess the uncorrected embedding."
-                ),
-            })
-            continue
-        if (has_scrna and not scrna_replicated
-                and _has_undisclaimed_inference(
-                    text, _SCRNA_CONDITION_INFERENCE_STEP,
-                )):
-            remedy = (
-                "Use replicated bulk samples for condition-level inference."
-                if bulk_replicated else
-                "No other modality currently establishes condition-level inference."
-            )
-            violations.append({
-                "step_id": getattr(step, "id", None),
-                "suggestion": (
-                    "Replace inferential single-cell condition testing with "
-                    "descriptive effect sizes/ranks and cell-type localization. "
-                    + remedy
-                ),
-            })
-            continue
-        if (has_bulk and not bulk_replicated
-                and _has_undisclaimed_inference(
-                    text, _BULK_CONDITION_INFERENCE_STEP,
-                )):
-            violations.append({
-                "step_id": getattr(step, "id", None),
-                "suggestion": (
-                    "Remove inferential bulk condition testing until independent "
-                    "bulk samples are assigned to treatment groups. Keep the bulk "
-                    "comparison descriptive or repair the profiling records."
-                ),
-            })
-    return violations
-
-
-def code_sample_design_violation(code: str, state: Any) -> str:
-    """Reject correction calls without a verified full-rank batch design."""
-    if len(getattr(state, "treatment_groups", None) or []) < 2:
-        return ""
-    if not state_has_modality(state, SCRNA_MODALITY):
-        return ""
-    if not _code_calls_batch_correction(str(code or "")):
-        return ""
-    if has_replicated_condition_design(state, SCRNA_MODALITY):
-        return (
-            "Single-cell batch correction is blocked because replicate counts "
-            "alone do not verify that condition and technical batch form a "
-            "separable, full-rank design. Concatenate with explicit labels and "
-            "use the uncorrected representation unless a future structured "
-            "batch-design check establishes separability."
-        )
-    return (
-        "Single-cell batch correction is blocked because each condition has "
-        "fewer than two independent biological units. Sample/library effects "
-        "cannot be separated from condition; concatenate with explicit labels "
-        "and use the uncorrected representation for descriptive comparisons."
-    )

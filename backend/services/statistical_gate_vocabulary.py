@@ -1,4 +1,4 @@
-"""Pure text and method vocabulary used by statistical gate enforcement."""
+"""Pure text and method vocabulary used by statistical observations."""
 
 from __future__ import annotations
 
@@ -250,8 +250,8 @@ _DE = frozenset({"deseq2", "pydeseq2", "deseqstats", "edger", "limma", "voom",
 #: Matching is whole-token, so a package's code spelling and its prose spelling
 #: are separate entries and neither implies the other: "miloR::testNhoods" does
 #: not contain the token "milo". Deliberately absent: quasibinomial and glmmTMB,
-#: which fit one population at a time and so are the design this gate refuses
-#: rather than an escape from it; pertpy, whose composition entry points already
+#: which fit one population at a time and therefore do not establish a joint
+#: compositional model; pertpy, whose composition entry points already
 #: match through sccoda and milo while the bare name would also capture its
 #: perturbation and enrichment tools; and scipy.stats.betabinom, a univariate
 #: distribution that carries no joint model however it is spelled.
@@ -265,10 +265,9 @@ def infer_method_kind(method):
     Whole-token match over the declared `method`, first hit wins, "other" when
     nothing matches. `method` is free text the model writes -- register_score
     takes no enum -- so this classifies a self-report rather than verifying one.
-    That is why the tables stay narrow: at check_declared_testing_family and
-    check_ora_background a name this misses costs a missed check, but at
-    check_composition_claims the kind is an exemption, so a name it matches too
-    eagerly costs a refusal that should have stood.
+    That is why the tables stay narrow: a missed or over-eager match changes the
+    factual context shown to the PI even though it never accepts or rejects a
+    finding.
     """
     raw = str(method or "").lower()
     tok = _tokens(raw)

@@ -1,13 +1,14 @@
-"""Statistical gates run in code, not in the prompt.
+"""Statistical observations run in code, not only in the prompt.
 
 The prompt already asks for most of this. Over a 200-step loop prompted
 guidance drifts and nothing observes whether it was followed, which is how a
 negative conclusion came to rest on a five-gene panel and a q-value came to
 depend on which other sets shared its call.
 
-These gates read structured state -- registered scores, frozen plans, declared
+These checks read structured state -- registered scores, frozen plans, declared
 sample counts -- so they see what the analysis actually did rather than what its
-code text mentions. Each refusal carries the rule that explains it.
+code text mentions. Each observation carries the rule that explains it, and no
+observation decides acceptance.
 """
 import inspect
 from types import SimpleNamespace
@@ -67,7 +68,7 @@ def test_positive_claims_are_not_flagged(text):
     assert not asserts_absence(text)
 
 
-def test_underpowered_negative_claim_is_refused():
+def test_underpowered_negative_claim_is_observed():
     """The real failure: 'not significant' from a five-gene panel."""
     scores = [_score("panel_x", underpowered=True, effective_n=5)]
     findings = ["panel_x was not significant, arguing against this mechanism"]
@@ -99,7 +100,7 @@ def test_negative_claim_about_a_different_score_is_not_flagged():
 
 # ------------------------------------------------------------ testing family
 
-def test_enrichment_without_a_declared_family_is_refused():
+def test_enrichment_without_a_declared_family_is_observed():
     scores = [_score("enrich_a", method="gseapy.prerank", plan_id="p1")]
     plans = [_plan("p1", family=[])]
     out = check_declared_testing_family(scores, plans)
@@ -119,14 +120,14 @@ def test_non_enrichment_scores_need_no_family():
     assert check_declared_testing_family(scores, [_plan("p1")]) == []
 
 
-def test_enrichment_with_no_plan_at_all_is_refused():
+def test_enrichment_with_no_plan_at_all_is_observed():
     scores = [_score("enrich_a", method="gseapy.prerank", plan_id="")]
     assert len(check_declared_testing_family(scores, [])) == 1
 
 
 # -------------------------------------------------------- permutation at n
 
-def test_permutation_qvalue_below_viable_n_is_refused():
+def test_permutation_qvalue_below_viable_n_is_observed():
     """3 vs 3 admits only 10 label partitions; nothing below ~0.1 is reachable."""
     scores = [_score("enrich_a", method="gseapy.prerank")]
     findings = ["enrich_a reached FDR 0.045, supporting the mechanism"]
@@ -193,23 +194,24 @@ def test_adequate_replication_passes():
 
 # ----------------------------------------------------------- composition
 
-#: A per-cluster test of proportions, which is what the simplex gate refuses.
+#: A per-cluster test of proportions, which triggers the simplex observation.
 _SIMPLEX_CLAIM = "The proportion of cluster 3 rose from 12% to 31% (chi-square p = 0.001)."
 
 
-def test_composition_claim_without_a_joint_model_is_refused():
+def test_composition_claim_without_a_joint_model_is_observed():
     report = run_gates([_SIMPLEX_CLAIM], score_definitions=[], scoring_plans=[],
                        samples_per_group={"A": 3, "B": 3})
-    assert [f.gate for f in report.blocking] == ["simplex-ignored"]
+    assert report.passed
+    assert [f.gate for f in report.advisories] == ["simplex-ignored"]
 
 
-def test_a_registered_joint_model_downgrades_the_refusal_to_a_note():
+def test_a_registered_joint_model_keeps_the_observation_as_a_note():
     """run_gates held score_definitions and did not forward them, so the
     exemption this check declares was unreachable."""
     scores = [_score("composition", method="pertpy.tools.Sccoda")]
     report = run_gates([_SIMPLEX_CLAIM], score_definitions=scores,
                        scoring_plans=[], samples_per_group={"A": 3, "B": 3})
-    assert report.passed, "a registered joint model must not be refused"
+    assert report.passed
     assert [f.gate for f in report.advisories] == ["simplex-ignored"], (
         "the caveat must still travel: method is free text the model writes, so "
         "the exemption may not delete the finding"
@@ -221,7 +223,7 @@ def test_an_unrelated_score_does_not_open_the_composition_exemption():
     report = run_gates([_SIMPLEX_CLAIM], score_definitions=scores,
                        scoring_plans=[_plan("", family=["ranked_enrichment"])],
                        samples_per_group={"A": 3, "B": 3})
-    assert "simplex-ignored" in [f.gate for f in report.blocking]
+    assert "simplex-ignored" in [f.gate for f in report.advisories]
 
 
 def test_the_composition_family_covers_the_spellings_a_score_records():
@@ -232,8 +234,7 @@ def test_the_composition_family_covers_the_spellings_a_score_records():
         )
     for method in ("scipy.stats.betabinom", "statsmodels.glm(family=quasibinomial)"):
         assert score_kind(SimpleNamespace(method=method)) != "differential_abundance", (
-            f"{method} fits one population at a time -- it is the design the gate "
-            f"refuses, not an escape from it"
+            f"{method} fits one population at a time and is not a joint model"
         )
 
 
@@ -273,17 +274,17 @@ def test_run_gates_calls_families_in_frozen_order(monkeypatch):
     assert calls == names
 
 
-def test_run_gates_message_is_actionable():
+def test_statistical_observation_message_is_actionable_and_non_blocking():
     scores = [_score("panel_x", underpowered=True, plan_id="p1")]
     plans = [_plan("p1", family=[])]
     report = run_gates(["panel_x was not significant"],
                        score_definitions=scores, scoring_plans=plans,
                        samples_per_group={"A": 3, "B": 3})
-    assert not report.passed
+    assert report.passed
     text = report.message()
-    assert "[REJECTED]" in text
-    assert "method rule:" in text, "a refusal must carry the rule that explains it"
-    assert "call report_findings again" in text
+    assert "[PI REVIEW OBSERVATION]" in text
+    assert "method rule:" in text
+    assert "[REJECTED]" not in text
 
 
 def test_gate_finding_message_includes_rule_guidance():
@@ -301,36 +302,22 @@ def test_gate_finding_message_includes_rule_guidance():
 def test_gate_is_wired_into_report_findings():
     block = inspect.getsource(executor_report_gates.prepare_report_attempt)
     assert "run_statistical_gates" in block
-    assert "stats_gate_reject_count" in block
+    assert "PI review observation; non-blocking" in block
 
 
-def test_gate_is_bounded_and_records_its_escape():
-    """An unsatisfiable check must not trap the loop, but must not vanish either.
-
-    The ceiling is now per-violation rather than fixed. A defect the model can
-    repair -- an undeclared testing family, an unattributed panel -- is worth
-    asking about up to MAX_STATS_GATE_REJECTIONS times. A design defect it
-    cannot repair mid-run gets one attempt: every session measured has one
-    cell-resolved library per condition, so the only satisfiable response to a
-    cell-level-inference rejection is to reword the claim, and asking twice more
-    trains the phrasing rather than the analysis.
-    """
+def test_statistical_observations_never_reject_report_findings():
     src = inspect.getsource(executor_report_gates.prepare_report_attempt)
-    assert "max_stats_gate_rejections" in src
-    assert "_unsatisfiable" in src, "the per-violation ceiling is missing"
-    assert "cell-level-inference" in src
-    start = src.index("if context.stats_gate_reject_count < _cap:")
-    block = src[start:start + 3000]
-    assert "_escaped_notes.append" in block, (
-        "a force-released gate must record the escape in the report"
-    )
+    assert "stats_gate_reject_count" not in src
+    assert "max_stats_gate_rejections" not in src
+    assert "return None" not in src[src.index("_stats_report ="):]
+    assert 'severity="advise"' in src
 
 
 def test_advisories_reach_the_report_without_blocking():
     """A narrow check earns a note, not a rejection."""
     src = inspect.getsource(executor_report_gates.prepare_report_attempt)
-    assert "advisory_message()" in src
-    idx = src.index("advisory_message()")
+    assert "_stats_report.findings" in src
+    idx = src.index("_stats_report.findings")
     window = src[idx:idx + 400]
     assert "_escaped_notes.append" in window, (
         "advisories must be recorded in the report rather than only logged"
@@ -420,8 +407,8 @@ def test_declarations_without_profiling_fail_closed_as_unresolved():
     report = run_gates(["Treatment significantly increases Il6 (p = 0.003)."],
                        score_definitions=[], scoring_plans=[],
                        samples_per_group_by_modality=samples)
-    assert report.advisories == []
-    assert [f.gate for f in report.blocking] == ["sample-design-unresolved"]
+    assert [f.gate for f in report.advisories] == ["sample-design-unresolved"]
+    assert report.blocking == []
 
 
 def test_numbered_uploads_raise_a_count_left_at_the_schema_default():
@@ -465,17 +452,11 @@ def test_an_earlier_rounds_resample_count_still_bounds_a_later_p_value():
                        score_definitions=carried,
                        scoring_plans=state.scoring_plans,
                        samples_per_group={"A": 8, "B": 8})
-    assert [f.gate for f in report.blocking] == ["p-below-resampling-resolution"]
+    assert [f.gate for f in report.advisories] == ["p-below-resampling-resolution"]
 
 
-def test_an_earlier_rounds_joint_model_still_downgrades_the_simplex_refusal():
-    """The exemption travels with the evidence, or the gate refuses good work.
-
-    check_composition_claims runs unconditionally and reads score_definitions
-    for the stand-down. Dropping an earlier round's scCODA registration turns a
-    correctly modelled composition claim back into a hard block, and there is
-    no way to re-register it from the round that is being refused.
-    """
+def test_an_earlier_rounds_joint_model_still_informs_the_simplex_observation():
+    """Earlier registered evidence remains visible in the PI review context."""
     state = _live_state(
         score_definitions=[_registered("composition", "pertpy.tools.Sccoda", 2,
                                        plan_id="p2")],
@@ -492,15 +473,7 @@ def test_an_earlier_rounds_joint_model_still_downgrades_the_simplex_refusal():
     assert [f.gate for f in report.advisories] == ["simplex-ignored"]
 
 
-def test_an_earlier_rounds_defective_record_does_not_refuse_forever():
-    """The one thing a stale score may not do is block a round it has nothing
-    to do with.
-
-    An undeclared testing family and an unnamed ORA universe are refused
-    against the record itself, and register_score only replaces a score of the
-    same name, so a round working on something else can never clear them. Those
-    records, and only those, are left out.
-    """
+def test_an_earlier_rounds_defective_record_remains_available_to_pi_review():
     state = _live_state(
         score_definitions=[
             _registered("orphan_ora", "gseapy.enrich", 2),
@@ -510,7 +483,10 @@ def test_an_earlier_rounds_defective_record_does_not_refuse_forever():
         scoring_plans=[_frozen_plan("p3", "stale_gsea", "gseapy.prerank")],
         current_round=3,
     )
-    assert bio_mod._gate_score_definitions(state) == []
+    carried = bio_mod._gate_score_definitions(state)
+    assert [score.score_name for score in carried] == [
+        "orphan_ora", "stale_gsea",
+    ]
     report = run_gates(["a positive observation about cluster identity"],
                        score_definitions=bio_mod._gate_score_definitions(state),
                        scoring_plans=state.scoring_plans,
@@ -519,7 +495,6 @@ def test_an_earlier_rounds_defective_record_does_not_refuse_forever():
 
 
 def test_the_current_rounds_scores_are_never_withheld():
-    """A defective record registered this round must still be refused now."""
     state = _live_state(
         score_definitions=[_registered("fresh_ora", "gseapy.enrich", 3)],
         scoring_plans=[],
@@ -529,7 +504,7 @@ def test_the_current_rounds_scores_are_never_withheld():
     assert [s.score_name for s in carried] == ["fresh_ora"]
     report = run_gates(["a positive observation"], score_definitions=carried,
                        scoring_plans=[], samples_per_group={"A": 8, "B": 8})
-    assert "ora-universe-undeclared" in [f.gate for f in report.blocking]
+    assert "ora-universe-undeclared" in [f.gate for f in report.advisories]
 
 
 # ------------------------------------------- which number the floor applies to
@@ -634,7 +609,7 @@ def test_a_detected_singleton_reaches_the_analysis_unit_check():
     report = run_gates(["DKO significantly increases Mt1 (p = 0.004)."],
                        score_definitions=[], scoring_plans=[],
                        samples_per_group_by_modality=samples)
-    assert [f.gate for f in report.advisories] == ["unidentifiable-design"]
-    assert [f.gate for f in report.blocking] == [
-        "unreplicated-single-cell-inference"
+    assert [f.gate for f in report.advisories] == [
+        "unreplicated-single-cell-inference", "unidentifiable-design",
     ]
+    assert report.blocking == []

@@ -531,7 +531,7 @@ TOOLS = [
                     "gene_list_source": {
                         "type": "string",
                         "description": (
-                            "REQUIRED. Where the gene panel came from, in one of four "
+                            "Where the gene panel came from, preferably in one of four "
                             "machine-checkable forms. "
                             "(1) database:<resource>:<version>:<set_id> for a named set from a "
                             "versioned resource - the version must be a concrete release, not "
@@ -541,16 +541,18 @@ TOOLS = [
                             "(4) bespoke:<justification of at least 20 characters> when the "
                             "panel was assembled by hand - allowed, but say why no versioned "
                             "set fits, because hand-assembled panels are reported as such and "
-                            "weighed accordingly."
+                            "weighed accordingly. Missing or invalid provenance is recorded "
+                            "as a non-blocking PI review observation."
                         )
                     },
                     "plan_id": {
                         "type": "string",
                         "description": (
-                            "REQUIRED when a gene panel is used: the plan_id returned by "
+                            "When a gene panel is used, cite the plan_id returned by "
                             "register_analysis_plan before this score was computed. The panel "
                             "you register here is re-hashed against the frozen one; if it has "
-                            "changed, the difference is recorded on the score."
+                            "changed, the difference is recorded on the score. A missing or "
+                            "unknown plan is recorded for PI review and does not reject the call."
                         )
                     },
                     "n_genes_matched": {

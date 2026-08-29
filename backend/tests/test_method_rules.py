@@ -2,7 +2,7 @@
 
 The corpus is distilled from bioSkills (MIT) and translated for this stack; see
 THIRD_PARTY_NOTICES.md. These tests pin the parts that would silently rot: the
-attribution, the gate/guidance split that other code keys off, and the
+attribution, the advisory/guidance split that other code keys off, and the
 domain-neutrality that ScAI's general-purpose remit requires.
 """
 import re
@@ -11,14 +11,12 @@ import pytest
 
 from backend.services.method_rules import (
     ENFORCEMENT_ADVISORY,
-    ENFORCEMENT_GATE,
     ENFORCEMENT_GUIDANCE,
     ENFORCEMENT_VALUES,
     all_rules,
     attribution,
     corpus_meta,
     format_rule,
-    gates,
     get_rule,
     rule_text,
     search_rules,
@@ -49,18 +47,12 @@ def test_enforcement_values_are_known():
         assert rule["enforcement"] in ENFORCEMENT_VALUES
 
 
-def test_there_are_both_gates_and_guidance():
-    """A corpus of pure guidance would enforce nothing; pure gates, unusable."""
+def test_corpus_has_only_advisories_and_guidance():
+    """Scientific rules may inform the PI but may not refuse a call."""
     kinds = {r["enforcement"] for r in all_rules()}
-    assert ENFORCEMENT_GATE in kinds
+    assert ENFORCEMENT_ADVISORY in kinds
     assert ENFORCEMENT_GUIDANCE in kinds
-    assert kinds <= set(ENFORCEMENT_VALUES)
-
-
-def test_gates_subset_matches_enforcement_field():
-    assert {r["id"] for r in gates()} == {
-        r["id"] for r in all_rules() if r["enforcement"] == ENFORCEMENT_GATE
-    }
+    assert kinds == set(ENFORCEMENT_VALUES)
 
 
 def test_every_rule_cites_something():
@@ -93,8 +85,8 @@ def test_meta_records_that_rules_were_translated():
 
 def test_get_rule_by_id():
     """minimum-gene-set-size is guidance: in code it produces a caveat on the
-    score, not a refusal. The refusable consequence -- a negative conclusion
-    from such a panel -- is a separate rule."""
+    score. A negative conclusion from such a panel is a separate PI review
+    observation."""
     rule = get_rule("minimum-gene-set-size")
     assert rule and rule["enforcement"] == ENFORCEMENT_GUIDANCE
 

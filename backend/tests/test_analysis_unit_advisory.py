@@ -105,7 +105,7 @@ def test_measured_multimodal_session_is_not_refused():
     assert not any(f.gate == "unidentifiable-design" for f in report.findings)
 
 
-def test_single_cell_finding_at_n1_is_blocked_and_keeps_the_advisory():
+def test_single_cell_finding_at_n1_surfaces_both_observations():
     samples = bio_mod._gate_samples_per_group_by_modality(_multimodal_state())
     report = run_gates(
         [{"text": "condition effect is significant (p = 0.004)",
@@ -113,10 +113,10 @@ def test_single_cell_finding_at_n1_is_blocked_and_keeps_the_advisory():
         score_definitions=[], scoring_plans=[],
         samples_per_group_by_modality=samples,
     )
-    assert [f.gate for f in report.blocking] == [
-        "unreplicated-single-cell-inference"
+    assert report.blocking == []
+    assert [f.gate for f in report.advisories] == [
+        "unreplicated-single-cell-inference", "unidentifiable-design",
     ]
-    assert [f.gate for f in report.advisories] == ["unidentifiable-design"]
 
 
 def test_descriptive_prefix_cannot_disclaim_a_later_inferential_clause():
@@ -129,9 +129,10 @@ def test_descriptive_prefix_cannot_disclaim_a_later_inferential_clause():
         samples_per_group_by_modality=samples,
     )
 
-    assert [f.gate for f in report.blocking] == [
-        "unreplicated-single-cell-inference"
+    assert "unreplicated-single-cell-inference" in [
+        f.gate for f in report.advisories
     ]
+    assert report.blocking == []
 
 
 def test_single_structured_finding_object_still_reaches_the_gate():
@@ -142,9 +143,10 @@ def test_single_structured_finding_object_still_reaches_the_gate():
         score_definitions=[], scoring_plans=[],
         samples_per_group_by_modality=samples,
     )
-    assert [f.gate for f in report.blocking] == [
-        "unreplicated-single-cell-inference"
+    assert "unreplicated-single-cell-inference" in [
+        f.gate for f in report.advisories
     ]
+    assert report.blocking == []
 
 
 def test_finding_text_cannot_override_structured_single_cell_modality():
@@ -155,9 +157,10 @@ def test_finding_text_cannot_override_structured_single_cell_modality():
         score_definitions=[], scoring_plans=[],
         samples_per_group_by_modality=samples,
     )
-    assert [f.gate for f in report.blocking] == [
-        "unreplicated-single-cell-inference"
+    assert "unreplicated-single-cell-inference" in [
+        f.gate for f in report.advisories
     ]
+    assert report.blocking == []
 
 
 def test_multimodal_inferential_finding_must_name_its_source():
@@ -167,7 +170,8 @@ def test_multimodal_inferential_finding_must_name_its_source():
         score_definitions=[], scoring_plans=[],
         samples_per_group_by_modality=samples,
     )
-    assert [f.gate for f in report.blocking] == ["modality-unresolved"]
+    assert "modality-unresolved" in [f.gate for f in report.advisories]
+    assert report.blocking == []
 
 
 def test_descriptive_cross_modal_finding_does_not_borrow_one_modality_n():
@@ -195,9 +199,10 @@ def test_inferential_cross_modal_finding_cannot_hide_unreplicated_arm():
         score_definitions=[], scoring_plans=[],
         samples_per_group_by_modality=samples,
     )
-    assert [finding.gate for finding in report.blocking] == [
-        "cross-modal-inference-unreplicated"
+    assert "cross-modal-inference-unreplicated" in [
+        finding.gate for finding in report.advisories
     ]
+    assert report.blocking == []
 
 
 def test_known_modality_with_unresolved_counts_cannot_borrow_bulk_n():
@@ -210,7 +215,8 @@ def test_known_modality_with_unresolved_counts_cannot_borrow_bulk_n():
             "scRNA-seq": {},
         },
     )
-    assert [f.gate for f in report.blocking] == ["sample-design-unresolved"]
+    assert "sample-design-unresolved" in [f.gate for f in report.advisories]
+    assert report.blocking == []
 
 
 def test_partial_group_mapping_is_treated_as_unresolved():
@@ -223,7 +229,8 @@ def test_partial_group_mapping_is_treated_as_unresolved():
             "scRNA-seq": {"Con": 1, "DKO": 1},
         },
     )
-    assert [f.gate for f in report.blocking] == ["sample-design-unresolved"]
+    assert "sample-design-unresolved" in [f.gate for f in report.advisories]
+    assert report.blocking == []
 
 
 def test_descriptive_wording_still_produces_nothing():
@@ -250,24 +257,17 @@ def test_detail_names_the_counts_it_was_given():
 # -------------------------------------------------------- corpus agreement
 
 def test_corpus_marks_the_rule_advisory():
-    """enforcement=gate promises a refusal in code; this rule no longer is one.
-
-    test_rule_reachability's gate parametrizations select on this field, so the
-    corpus and the implementation cannot drift apart silently.
-    """
+    """The corpus cannot turn this observation into a host refusal."""
     rule = get_rule("one-sample-per-condition-is-unidentifiable")
     assert rule is not None
     assert rule["enforcement"] == ENFORCEMENT_ADVISORY
 
 
-def test_unsatisfiable_ceiling_no_longer_lists_the_rule():
-    """The 1-rejection ceiling exists for gates a retry cannot satisfy. This one
-    no longer reaches `blocking`, so listing it there is a dead branch."""
+def test_statistical_observations_have_no_rejection_ceiling():
+    """Scientific observations never consume retries or force-release."""
     src = inspect_source()
-    m = re.search(r"_unsatisfiable\s*=\s*\{[^}]*\}", src)
-    assert m, "could not locate the _unsatisfiable set"
-    assert "cell-level-inference" in m.group(0), "the other entry must remain"
-    assert "unidentifiable-design" not in m.group(0)
+    assert "_unsatisfiable" not in src
+    assert "stats_gate_reject_count" not in src
 
 
 def inspect_source():

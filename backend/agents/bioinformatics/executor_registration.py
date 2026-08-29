@@ -348,55 +348,50 @@ async def handle_register_score(context, tool_call) -> ToolAction:
     provenance, prov_error = parse_provenance(
         args.get("gene_list_source")
     )
-    gate_note = ""
+    review_notes = []
+
+    def record_review_observation(*, gate: str, rule_id: str, detail: str) -> None:
+        record = _evidence_gate_record(
+            gate=gate,
+            rule_id=rule_id,
+            detail=detail,
+            subject=str(args.get("score_name", "") or ""),
+            severity="advise",
+        )
+        record["round_number"] = state.current_round
+        key = (record["gate"], record["rule_id"], record["subject"], record["round_number"])
+        if not any(
+            (
+                existing.get("gate"),
+                existing.get("rule_id"),
+                existing.get("subject"),
+                existing.get("round_number"),
+            ) == key
+            for existing in context.evidence_gate_findings
+            if isinstance(existing, dict)
+        ):
+            context.evidence_gate_findings.append(record)
+
     if prov_error:
-        # Reject rather than record an unattributable panel: an
-        # unsourced gene list is indistinguishable downstream from
-        # a versioned one, which is how two runs of the same
-        # analysis ended up with different panels and no record.
-        if context.score_gate_reject_count < context.max_score_gate_rejections:
-            context.score_gate_reject_count += 1
-            logger.warning(
-                f"[Bioinformatics] register_score rejected: provenance "
-                f"({context.score_gate_reject_count}/{context.max_score_gate_rejections})"
-            )
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": (
-                    f"register_score rejected: {prov_error} "
-                    f"Re-call register_score with a valid gene_list_source. "
-                    + _method_rule_text("cite-the-resource-version")
-                ),
-            })
-            return ToolAction.CONTINUE
-        # Ceiling reached: record the score so the methodology
-        # section is not simply empty, but mark what is missing.
         logger.warning(
-            "[Bioinformatics] register_score provenance gate: max "
-            "rejections reached, recording score as unattributed"
+            "[Bioinformatics] register_score provenance unresolved; "
+            "recording a PI review observation"
         )
         provenance, _ = parse_provenance(
-            "bespoke:provenance not supplied after repeated requests; "
+            "bespoke:valid provenance was not supplied; "
             "this panel is unattributed and not reproducible"
         )
-        gate_note = (
-            "Recorded WITHOUT valid provenance after "
-            f"{context.max_score_gate_rejections} attempts; treat this panel "
-            "as unattributed."
+        review_notes.append(
+            "Recorded without valid provenance; the PI must decide how much "
+            "weight to give this unattributed panel."
         )
-        context.record_forced_score_gate(_evidence_gate_record(
+        record_review_observation(
             gate="register-score-provenance",
             rule_id="cite-the-resource-version",
             detail=str(prov_error),
-            subject=str(args.get("score_name", "") or ""),
-            severity="block",
-            rejection_count=context.score_gate_reject_count,
-            rejection_limit=context.max_score_gate_rejections,
-            forced_release=True,
-        ))
+        )
 
-    # A panel score must cite the plan that froze the panel.
+    # Link to a frozen panel when one exists; missing linkage remains visible.
     plan_id = str(args.get("plan_id", "") or "").strip()
     plan = next(
         (pl for pl in state.scoring_plans if pl.id == plan_id),
@@ -408,7 +403,7 @@ async def handle_register_score(context, tool_call) -> ToolAction:
     # excerpt, so sizing and hashing the panel from it mis-states
     # every panel above that cap: n_genes, match_rate, the
     # underpowered flag and the drift hash all come out wrong, and
-    # the power gate then fires -- or fails to fire -- on a number
+    # the power observation then fires -- or fails to fire -- on a number
     # that describes the excerpt. The frozen plan carries the full
     # canonicalised membership; use it when one is cited, and keep
     # the excerpt for what it is for, which is detecting drift
@@ -420,46 +415,26 @@ async def handle_register_score(context, tool_call) -> ToolAction:
                 pl.id for pl in state.scoring_plans[-5:]
             )
             detail = (
-                "this score uses a gene panel, so it must cite the "
-                "plan_id returned by register_analysis_plan. Call "
-                "register_analysis_plan FIRST with this panel, then "
-                "re-call register_score with the plan_id it returns."
+                "this score uses a gene panel, but no frozen plan_id was "
+                "supplied. The record cannot establish that the panel was "
+                "pre-specified before its result was visible."
                 if not plan_id else
                 f"no frozen plan with plan_id={plan_id!r}. "
                 f"Recent plan_ids: {known or 'none'}."
             )
-            if context.score_gate_reject_count < context.max_score_gate_rejections:
-                context.score_gate_reject_count += 1
-                logger.warning(
-                    f"[Bioinformatics] register_score rejected: plan "
-                    f"({context.score_gate_reject_count}/{context.max_score_gate_rejections})"
-                )
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": f"register_score rejected: {detail}",
-                })
-                return ToolAction.CONTINUE
             logger.warning(
-                "[Bioinformatics] register_score plan gate: max rejections "
-                "reached, recording score without a frozen plan"
+                "[Bioinformatics] register_score has no frozen plan; "
+                "recording a PI review observation"
             )
-            gate_note = (gate_note + " " if gate_note else "") + (
-                f"Recorded WITHOUT a frozen plan after "
-                f"{context.max_score_gate_rejections} attempts; the panel was not "
-                f"pre-specified, so it cannot be distinguished from one "
-                f"chosen after seeing the result."
+            review_notes.append(
+                "Recorded without a frozen plan; the panel was not pre-specified, "
+                "so the PI must decide how this affects interpretation."
             )
-            context.record_forced_score_gate(_evidence_gate_record(
+            record_review_observation(
                 gate="register-score-plan",
                 rule_id="prespecify-the-family-before-results",
                 detail=detail,
-                subject=str(args.get("score_name", "") or ""),
-                severity="block",
-                rejection_count=context.score_gate_reject_count,
-                rejection_limit=context.max_score_gate_rejections,
-                forced_release=True,
-            ))
+            )
             plan_id = ""
         else:
             drift = diff_panels(plan.panel_genes, gene_list)
@@ -522,10 +497,10 @@ async def handle_register_score(context, tool_call) -> ToolAction:
             "the nominal panel size. Report the number of panel genes "
             "actually present in the matrix for an accurate assessment."
         )
-    if gate_note:
-        # The escape must reach the report, not just the log.
+    if review_notes:
+        # The observations must reach the report, not just the log.
         score_def.plan_drift = dict(score_def.plan_drift or {})
-        score_def.plan_drift["gate_escape"] = gate_note.strip()
+        score_def.plan_drift["pi_review_observations"] = list(review_notes)
     drift_text = describe_drift(drift) if drift else ""
     if drift_text:
         result_lines.append(
@@ -535,8 +510,7 @@ async def handle_register_score(context, tool_call) -> ToolAction:
             f"why in the findings; if not, re-score the frozen panel. "
             + _method_rule_text("prespecify-the-family-before-results")
         )
-    if gate_note:
-        result_lines.append(gate_note.strip())
+    result_lines.extend(review_notes)
     caveat = power_caveat(power)
     if caveat:
         result_lines.append(caveat)

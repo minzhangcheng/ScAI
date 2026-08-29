@@ -1,9 +1,9 @@
 from backend.models.schemas import AnalysisPhase, AnalysisState, RoundResult
-from backend.workflow.reporting import validate_complete_report_allowed
+from backend.workflow.reporting import report_coverage_observation
 from backend.workflow.core import SingleCellAnalysisWorkflow
 
 
-def test_missing_direction_coverage_blocks_complete_report():
+def test_missing_direction_coverage_is_a_pi_review_observation():
     state = AnalysisState(
         id="s",
         user_id="u",
@@ -21,13 +21,13 @@ def test_missing_direction_coverage_blocks_complete_report():
         ],
     )
 
-    allowed, message = validate_complete_report_allowed(state)
+    message = report_coverage_observation(state)
 
-    assert allowed is False
     assert "b" in message.lower()
+    assert "PI must decide" in message
 
 
-def test_partial_report_requires_explicit_state_flag():
+def test_partial_flag_does_not_hide_direction_coverage_fact():
     state = AnalysisState(
         id="s",
         user_id="u",
@@ -37,13 +37,11 @@ def test_partial_report_requires_explicit_state_flag():
         round_results=[],
     )
 
-    allowed, message = validate_complete_report_allowed(state)
+    message = report_coverage_observation(state)
 
-    assert allowed is True
-    assert message == ""
+    assert message
+    assert "PI must decide" in message
 
 
-def test_after_final_report_routes_blocked_state_to_terminal():
-    workflow = SingleCellAnalysisWorkflow.__new__(SingleCellAnalysisWorkflow)
-    assert workflow._after_final_report({"report_blocked": True}) == "blocked"
-    assert workflow._after_final_report({"report_blocked": False}) == "continue"
+def test_reporting_has_no_host_direction_coverage_acceptance_router():
+    assert not hasattr(SingleCellAnalysisWorkflow, "_after_final_report")

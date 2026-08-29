@@ -138,8 +138,8 @@ class TestToolDispatchResilience:
                 "description": "test",
                 "parameters": {},
                 "gene_list": [],
-                # register_score rejects unattributable panels; this test is about
-                # dispatch resilience, so give it a valid provenance string.
+                # Keep this fixture attributed; provenance behavior is covered
+                # independently from dispatch resilience.
                 "gene_list_source": "derived:test",
             },
         )

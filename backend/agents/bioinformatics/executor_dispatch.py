@@ -40,14 +40,6 @@ class ToolRuntime:
     consecutive_errors: int
     total_errors: int
     figures_rendered: int
-    score_gate_reject_count: int
-    mechanism_gate_reject_count: int
-    stats_gate_reject_count: int
-    integration_reject_count: int
-    bulk_reject_count: int
-    evidence_citation_reject_count: int
-    deconv_reject_count: int
-    innovation_bulk_reject_count: int
     evidence_gate_degraded: bool
     evidence_gate_findings: list
     reported_evidence_ids: list
@@ -59,17 +51,8 @@ class ToolRuntime:
     has_substantive_work: bool = False
     has_figure_work: bool = False
     has_register_score: bool = False
-    record_forced_score_gate: Any = None
     save_checkpoint: Any = None
     supervisor_callback: Any = None
-    max_score_gate_rejections: int = 4
-    max_mechanism_rejections: int = 2
-    max_stats_gate_rejections: int = 3
-    max_integration_rejections: int = 2
-    max_bulk_rejections: int = 2
-    max_evidence_citation_refusals: int = 2
-    max_deconv_rejections: int = 2
-    max_innovation_bulk_rejections: int = 2
     max_consecutive_errors: int = 5
     max_total_errors: int = 50
 

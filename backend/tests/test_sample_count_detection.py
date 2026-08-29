@@ -77,12 +77,12 @@ def test_to_api_dict_serializes_detected_sample_counts_to_camelcase():
 
 import backend.agents.bioinformatics_agent as bio_mod
 from backend.models.schemas import DataFile, TreatmentGroup
+from backend.services import sample_design
 from backend.services.sample_design import (
     BULK_RNASEQ_MODALITY,
     SCRNA_MODALITY,
-    code_sample_design_violation,
     has_replicated_condition_design,
-    plan_sample_design_violations,
+    sequencing_design_instruction,
 )
 
 
@@ -279,68 +279,7 @@ def test_declarations_alone_do_not_enable_condition_inference():
     assert has_replicated_condition_design(state, SCRNA_MODALITY) is False
 
 
-def test_unreplicated_single_cell_plan_rejects_harmony_and_inferential_deg():
-    from backend.models.schemas import AnalysisPlan, PlanStep
-
-    state = _state_with(
-        records=[
-            _rec(group_id, name, "sequencing", "scRNA-seq", 1, 3)
-            for group_id, name in (("g1", "Con"), ("g2", "DKO"))
-        ],
-        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
-                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
-    )
-    plan = AnalysisPlan(phase="exploration", steps=[
-        PlanStep(id=1, title="Harmony correction", method="harmony_integrate batch=sample"),
-        PlanStep(id=2, title="Per-cell-type condition DEG",
-                 method="rank_genes_groups with condition p-values"),
-    ])
-
-    violations = plan_sample_design_violations(plan, state)
-    assert [item["step_id"] for item in violations] == [1, 2]
-
-
-def test_unreplicated_single_cell_plan_allows_descriptive_localization():
-    from backend.models.schemas import AnalysisPlan, PlanStep
-
-    state = _state_with(
-        records=[
-            _rec(group_id, name, "sequencing", "scRNA-seq", 1, 3)
-            for group_id, name in (("g1", "Con"), ("g2", "DKO"))
-        ],
-        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
-                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
-    )
-    plan = AnalysisPlan(phase="exploration", steps=[
-        PlanStep(
-            id=1,
-            title="Descriptive cell-type localization",
-            method="rank bulk-supported genes by descriptive scRNA effect size",
-        ),
-    ])
-
-    assert plan_sample_design_violations(plan, state) == []
-
-
-def test_unresolved_ungrouped_bulk_plan_rejects_inferential_deg():
-    from backend.models.schemas import AnalysisPlan, PlanStep
-
-    state = _state_with(
-        records=[_rec(None, "", "sequencing", "bulk RNA-seq", 6, None)],
-        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
-                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
-    )
-    plan = AnalysisPlan(phase="exploration", steps=[
-        PlanStep(id=1, title="Bulk differential expression",
-                 method="pydeseq2 condition DEG with adjusted p-values"),
-    ])
-
-    violations = plan_sample_design_violations(plan, state)
-    assert [item["step_id"] for item in violations] == [1]
-    assert "bulk samples" in violations[0]["suggestion"]
-
-
-def test_unreplicated_single_cell_runtime_blocks_harmony():
+def test_unreplicated_single_cell_design_is_a_pi_fact_not_a_host_decision():
     state = _state_with(
         records=[
             _rec(group_id, name, "sequencing", "scRNA-seq", 1, 3)
@@ -350,97 +289,17 @@ def test_unreplicated_single_cell_runtime_blocks_harmony():
                 TreatmentGroup(id="g2", name="DKO", sample_count=3)],
     )
 
-    error = code_sample_design_violation(
-        "sc.external.pp.harmony_integrate(adata, 'library_id')", state,
-    )
-    assert "cannot be separated from condition" in error
+    rendered = sequencing_design_instruction(state)
+    assert "Single-cell independent-unit counts are" in rendered
+    assert "Con=1" in rendered and "DKO=1" in rendered
+    assert "PI must decide" in rendered
+    assert "do not plan" not in rendered.lower()
+    assert "blocked" not in rendered.lower()
 
 
-def test_negated_harmony_plan_and_code_are_not_rejected():
-    from backend.models.schemas import AnalysisPlan, PlanStep
-
-    state = _state_with(
-        records=[
-            _rec(group_id, name, "sequencing", "scRNA-seq", 1, 3)
-            for group_id, name in (("g1", "Con"), ("g2", "DKO"))
-        ],
-        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
-                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
-    )
-    plan = AnalysisPlan(phase="exploration", steps=[
-        PlanStep(id=1, title="Uncorrected embedding",
-                 method="Do not use Harmony; assess the uncorrected embedding"),
-    ])
-
-    assert plan_sample_design_violations(plan, state) == []
-    assert code_sample_design_violation(
-        "# Harmony is intentionally not used\nsc.pp.neighbors(adata)", state,
-    ) == ""
-
-
-def test_postposed_batch_negation_and_assessment_are_not_rejected():
-    from backend.models.schemas import AnalysisPlan, PlanStep
-
-    state = _state_with(
-        records=[
-            _rec(group_id, name, "sequencing", "scRNA-seq", 1, 3)
-            for group_id, name in (("g1", "Con"), ("g2", "DKO"))
-        ],
-        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
-                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
-    )
-    plan = AnalysisPlan(phase="exploration", steps=[
-        PlanStep(id=1, title="Uncorrected embedding",
-                 method="Harmony integration will not be used"),
-        PlanStep(id=2, title="Batch assessment",
-                 method="Assess whether batch correction is required; retain the uncorrected embedding"),
-    ])
-
-    assert plan_sample_design_violations(plan, state) == []
-
-
-def test_replicates_alone_do_not_license_batch_correction():
-    from backend.models.schemas import AnalysisPlan, PlanStep
-
-    state = _state_with(
-        records=[
-            _rec(group_id, name, "sequencing", "scRNA-seq", 3, 3)
-            for group_id, name in (("g1", "Con"), ("g2", "DKO"))
-        ],
-        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
-                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
-    )
-    plan = AnalysisPlan(phase="exploration", steps=[
-        PlanStep(id=1, title="Harmony correction",
-                 method="sc.external.pp.harmony_integrate by library"),
-    ])
-
-    assert [v["step_id"] for v in plan_sample_design_violations(plan, state)] == [1]
-    assert "full-rank" in code_sample_design_violation(
-        "sc.external.pp.harmony_integrate(adata, 'library_id')", state,
-    )
-
-
-def test_inferential_statistics_are_not_excused_by_descriptive_wording():
-    from backend.models.schemas import AnalysisPlan, PlanStep
-
-    state = _state_with(
-        records=[
-            _rec(group_id, name, "sequencing", "scRNA-seq", 1, 3)
-            for group_id, name in (("g1", "Con"), ("g2", "DKO"))
-        ],
-        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
-                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
-    )
-    plan = AnalysisPlan(phase="exploration", steps=[
-        PlanStep(
-            id=1,
-            title="Single-cell condition differential expression",
-            method="Compute cell-level p-values and also report descriptive effect sizes",
-        ),
-    ])
-
-    assert [v["step_id"] for v in plan_sample_design_violations(plan, state)] == [1]
+def test_sample_design_service_exposes_facts_without_plan_or_code_vetoes():
+    assert not hasattr(sample_design, "plan_sample_design_violations")
+    assert not hasattr(sample_design, "code_sample_design_violation")
 
 
 def test_the_profiling_tool_set_is_two_tools_and_excludes_the_analysis_tools():

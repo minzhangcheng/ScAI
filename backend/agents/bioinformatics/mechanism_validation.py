@@ -48,58 +48,40 @@ def _overclaim_unnegated(text):
                 return True
     return False
 
-#: Grades a claim may carry, weakest first. Used to clamp rather than to refuse:
-#: the strength of a claim is bounded by the reproducibility of the instruments
-#: it rests on, and lowering it costs nothing, whereas refusing costs a rejection,
-#: a retry, and a step from a bounded analysis budget.
+#: Closed vocabulary required by ``DataDrivenMechanismProgram``.
 _STRENGTH_ORDER = ("weak", "moderate", "strong")
 
 #: Provenance kinds that another investigator cannot retrieve. A panel built for
 #: this analysis may be the best instrument available -- for a concept no public
 #: resource covers, it is the ONLY one -- so this is not a defect. It does mean
-#: a result resting entirely on such panels cannot also be the strongest grade
-#: on offer, because nobody outside this run can re-derive the instrument.
+#: a result resting entirely on such panels merits a visible PI review note.
 _UNREPRODUCIBLE_PROVENANCE_KINDS = ("bespoke",)
 
-_MAX_STRENGTH_ON_UNREPRODUCIBLE_SOURCES = "moderate"
+def _provenance_observation(supporting_scores, score_provenance):
+    """Return a source-reproducibility fact for PI review, when applicable.
 
-
-def _clamp_strength(declared, ceiling):
-    """The weaker of a declared grade and a ceiling."""
-    try:
-        return declared if _STRENGTH_ORDER.index(declared) <= _STRENGTH_ORDER.index(ceiling) \
-            else ceiling
-    except ValueError:
-        return ceiling
-
-
-def _provenance_ceiling(supporting_scores, score_provenance):
-    """Ceiling implied by the sources a program cites, and why.
-
-    Returns (ceiling, note) with ceiling None when nothing constrains the grade.
+    The host records this fact but does not change the producer's declared
+    grade. Scientific weight and acceptance belong to the PI.
     Only resolvable citations count: a score name that matches no registration
     says nothing about reproducibility either way, and guessing from it would
     penalise a program for a bookkeeping gap rather than for its evidence.
     """
     if not score_provenance:
-        return None, ""
+        return ""
     resolved = []
     for name in supporting_scores or ():
         entry = score_provenance.get(str(name).strip())
         if isinstance(entry, dict):
             resolved.append((str(name).strip(), str(entry.get("kind", "") or "").lower()))
     if not resolved:
-        return None, ""
+        return ""
     unreproducible = [n for n, kind in resolved if kind in _UNREPRODUCIBLE_PROVENANCE_KINDS]
     if len(unreproducible) != len(resolved):
-        return None, ""
-    return _MAX_STRENGTH_ON_UNREPRODUCIBLE_SOURCES, (
+        return ""
+    return (
         "Every supporting instrument was constructed for this analysis and cannot be "
-        "retrieved independently (" + ", ".join(sorted(unreproducible)[:6]) + "), so the "
-        "evidence grade is capped at "
-        f"'{_MAX_STRENGTH_ON_UNREPRODUCIBLE_SOURCES}'. Re-testing against a versioned "
-        "public resource, or against an independently constructed panel, is what would "
-        "raise it."
+        "retrieved independently (" + ", ".join(sorted(unreproducible)[:6]) + "). "
+        "The PI must decide how this affects the declared evidence grade and interpretation."
     )
 
 
@@ -112,12 +94,9 @@ def validate_mechanism_program_payload(payload, *, round_number=0, phase="", sta
     programs list is valid ONLY when no_program_reason is non-empty.
 
     `score_provenance` maps a registered score name to its provenance dict. When
-    supplied, a program whose every resolvable supporting score was constructed
-    for this analysis has its `evidence_strength` clamped and the reason appended
-    to `missing_evidence`. This stays a clamp on purpose: the platform records
-    provenance meticulously and then acts on none of it, which is how a claim
-    grounded in instruments nobody else can obtain came to read the same as one
-    grounded in versioned public resources.
+    every resolvable supporting score was constructed for this analysis, that
+    fact is appended to `missing_evidence` for PI review. The host never changes
+    `evidence_strength` or decides scientific acceptance from provenance.
     """
     from ...models.schemas import DataDrivenMechanismProgram
 
@@ -180,17 +159,11 @@ def validate_mechanism_program_payload(payload, *, round_number=0, phase="", sta
         if evidence_strength not in _STRENGTH_ORDER:
             evidence_strength = "weak"
         supporting_scores = [str(s) for s in _ensure_list(rp.get("supporting_scores"))]
-        ceiling, ceiling_note = _provenance_ceiling(supporting_scores, score_provenance)
-        if ceiling:
-            clamped = _clamp_strength(evidence_strength, ceiling)
-            if clamped != evidence_strength:
-                missing = missing + [ceiling_note]
-                logger.info(
-                    "mechanism program %r: evidence_strength %s -> %s "
-                    "(all supporting instruments are analysis-specific)",
-                    str(rp.get("label", ""))[:80], evidence_strength, clamped,
-                )
-            evidence_strength = clamped
+        provenance_note = _provenance_observation(
+            supporting_scores, score_provenance,
+        )
+        if provenance_note:
+            missing = missing + [provenance_note]
         specificity = rp.get("specificity")
         if specificity not in ("high", "medium", "low"):
             specificity = "low"

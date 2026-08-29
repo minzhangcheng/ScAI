@@ -116,47 +116,30 @@ def _build_exploration_instruction(
     has_bulk: bool, has_scrna: bool, scrna_replicated: bool = True,
     bulk_replicated: bool = True,
 ) -> str:
+    # Retain the replication keywords for caller compatibility. Measured
+    # counts are presented separately as facts; they must not let the host
+    # rewrite the PI-approved scientific plan.
+    del scrna_replicated, bulk_replicated
     condition_analysis = (
         "Execute the PI-approved bulk objectives; PI owns the supported claim "
         "level and Bioinformatics owns the method and implementation details"
         if not has_scrna else
-        "Perform sample-level pseudobulk condition DEG for supported cell type groups"
-        if scrna_replicated else
-        "For single-cell condition comparisons, report descriptive effect sizes/ranks only; "
-        "do not report cell-level or inferential pseudobulk p/FDR"
+        "Execute the condition analyses and claim level selected in the PI-approved plan; "
+        "consult the PI if the measured design facts make a planned method ambiguous"
     )
     enrichment_analysis = (
         "Perform only the downstream analyses selected in the approved PI plan"
-        if not has_scrna else
-        "Run GO/KEGG pathway enrichment on supported replicated DEG results"
-        if scrna_replicated else
-        "Use replicated bulk DEG for inferential enrichment when bulk exists; treat "
-        "single-cell pathway localization as exploratory"
-        if bulk_replicated else
-        "Keep pathway comparisons exploratory because neither sequencing arm has "
-        "verified condition replication"
     )
     result_figure_analysis = (
         "Register result figures and tables that the approved bulk analysis produces"
         if not has_scrna else
-        "For each supported single-cell pseudobulk DEG and enrichment result, "
-        "generate the corresponding result figure"
-        if scrna_replicated else
-        "Generate inferential DEG/enrichment figures only for a replicated bulk "
-        "arm; single-cell figures must show descriptive localization or effect sizes"
-        if bulk_replicated else
-        "Generate descriptive result figures only; do not create volcano or "
-        "significance-ranked enrichment figures for unreplicated contrasts"
+        "Generate the result figures requested by the PI-approved plan"
     )
     analysis_scope = (
         "Use the host input profile as facts, not as a method selector"
         if not has_scrna else
-        "Keep analyses simple and high-throughput (sample-level DEG + GO/KEGG)"
-        if scrna_replicated else
-        "Keep inference in replicated bulk DEG + GO/KEGG and use single-cell "
-        "data only for descriptive localization"
-        if bulk_replicated else
-        "Keep all condition comparisons descriptive and exploratory"
+        "Treat measured sample-design metadata as facts for PI review, not as a "
+        "host-selected method or claim level"
     )
     instr = f"""
 ## EXPLORATION PHASE INSTRUCTIONS
@@ -230,14 +213,14 @@ def _build_stage2_instruction(
     """Stage 2 downstream-analysis instruction (DEG/GO/cellchat/trajectory),
     plus method-neutral bulk ownership guidance when bulk data is present. Pure
     function so it is unit-testable."""
+    del scrna_replicated, bulk_replicated
     condition_step = (
         "Execute the PI-approved bulk objectives using methods selected and "
         "justified by Bioinformatics"
         if not has_scrna else
-        "Sample-level pseudobulk condition differential expression per supported cell type"
-        if scrna_replicated else
-        "Descriptive single-cell condition effect sizes/ranks per supported cell type; "
-        "no cell-level or inferential pseudobulk p/FDR"
+        "Execute the condition analyses, including differential expression when "
+        "selected in the PI-approved plan, at the claim level chosen by the PI; "
+        "consult the PI if measured design facts require a scientific choice"
     )
     instr = f"""
 ## STAGE 2 - DOWNSTREAM ANALYSIS (builds on Stage 1 results)
@@ -278,18 +261,7 @@ def build_phase_instruction(planning_stage: str, analysis_phase: str,
     pi_synthesis).
     """
     if planning_stage == "stage1":
-        if not has_scrna or scrna_replicated:
-            return _STAGE1_INSTRUCTION
-        return _STAGE1_INSTRUCTION + """
-
-## DESIGN OVERRIDE — UNREPLICATED SINGLE-CELL CONDITIONS
-Each single-cell condition has fewer than two independent biological units.
-Assess the uncorrected sample/condition structure, but do NOT use Harmony,
-BBKNN, ComBat, scVI batch correction, or another integration method to remove
-sample/library differences that are confounded with condition. Concatenation
-with explicit sample and condition labels is allowed. This override takes
-precedence over any generic request for batch correction.
-"""
+        return _STAGE1_INSTRUCTION
     if planning_stage == "stage2":
         return _build_stage2_instruction(
             has_bulk, has_scrna, scrna_replicated=scrna_replicated,

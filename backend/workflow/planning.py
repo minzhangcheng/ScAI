@@ -4,7 +4,6 @@ from .planning_parts import dialogue as planning_dialogue
 from .planning_parts import pi as planning_pi
 from .planning_parts import review as planning_review
 from .planning_parts import shared as _shared
-from ..services.sample_design import plan_sample_design_violations
 globals().update(
     {name: value for name, value in vars(_shared).items() if not name.startswith("__")}
 )

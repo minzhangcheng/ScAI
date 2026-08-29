@@ -70,7 +70,7 @@ from .shared import (  # noqa: F401
     direction_coverage_status,
     resolve_report_output_dir,
     build_lineage_report_state,
-    validate_complete_report_allowed,
+    report_coverage_observation,
 )
 
 
@@ -360,9 +360,6 @@ class GraphicAbstractMixin:
         """Dispatcher: try image mode first when Painter is available; on failure (or when
         Painter is disabled) fall back to text-mode ASCII diagram drawn by the Bio agent.
         """
-        if state.get("report_blocked"):
-            return state
-
         analysis_state = state["analysis_state"]
 
         if not analysis_state.analysis_log and not analysis_state.code_history:

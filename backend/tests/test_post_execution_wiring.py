@@ -760,7 +760,7 @@ def test_merge_discards_unreviewed_automatic_supplementary_figures():
     assert result["figures"] == ["reviewed-main-figure"]
 
 
-def test_supplementary_n1_inference_is_discarded_before_merge():
+def test_supplementary_n1_inference_is_retained_for_pi_review():
     from backend.agents.bioinformatics.supplementary import (
         _validated_supplementary_findings,
     )
@@ -791,11 +791,14 @@ def test_supplementary_n1_inference_is_discarded_before_merge():
         [execution], state,
     )
 
-    assert records == []
+    assert len(records) == 1
+    assert records[0]["text"].startswith("Gene X is significantly increased")
+    assert records[0]["evidence_status"] == "unverified"
+    assert any("PI review observation" in warning for warning in warnings)
     assert any("fewer than two independent" in warning for warning in warnings)
 
 
-def test_supplementary_batch_correction_uses_the_same_design_guard():
+def test_supplementary_batch_correction_is_not_host_vetoed():
     from backend.agents.bioinformatics.supplementary import SupplementaryMixin
     from backend.models.schemas import AnalysisState, SampleCountRecord, TreatmentGroup
 
@@ -819,7 +822,7 @@ def test_supplementary_batch_correction_uses_the_same_design_guard():
     error = _Agent()._supplementary_code_is_safe(
         "sc.external.pp.harmony_integrate(adata, 'sample')", "adata",
     )
-    assert error and "cannot be separated from condition" in error
+    assert error is None
 
 
 @pytest.mark.asyncio

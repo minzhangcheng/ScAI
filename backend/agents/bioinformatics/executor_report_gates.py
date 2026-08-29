@@ -1,4 +1,4 @@
-"""Statistical and evidence-gate input construction."""
+"""Statistical and evidence observations for PI-owned result review."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -27,20 +27,13 @@ class ReportAttempt:
     requested_evidence_ids: set[str] = field(default_factory=set)
 
 
-def gate_score_definitions(state, *, run_gates) -> List[Any]:
-    """Keep current/pre-tracking scores and older evidence-valid records."""
-    carried: List[Any] = []
-    for score in (state.score_definitions or []):
-        if getattr(score, "round_number", 0) in (0, state.current_round):
-            carried.append(score)
-            continue
-        if run_gates(
-            None,
-            score_definitions=[score],
-            scoring_plans=state.scoring_plans,
-        ).passed:
-            carried.append(score)
-    return carried
+def gate_score_definitions(state, *, run_gates=None) -> List[Any]:
+    """Return registered score evidence from every round for PI review.
+
+    ``run_gates`` remains an ignored keyword for facade compatibility. Host
+    checks must not decide which scientific evidence the PI is allowed to see.
+    """
+    return list(state.score_definitions or [])
 
 
 def gate_samples_per_group_by_modality(state) -> Dict[str, Dict[str, int]]:
@@ -79,26 +72,15 @@ async def prepare_report_attempt(context, tool_call) -> ReportAttempt | None:
     step_count = context.step_count
     agent_reasoning = context.agent_reasoning
     args = tool_call.arguments
-    if state.analysis_phase == AnalysisPhase.EXPLORATION and not context.annotation_completed:
+    annotation_missing = (
+        state.analysis_phase == AnalysisPhase.EXPLORATION
+        and not context.annotation_completed
+    )
+    if annotation_missing:
         logger.warning(
-            f"[Bioinformatics] report_findings rejected: annotate_clusters not yet called"
+            "[Bioinformatics] report_findings submitted before annotate_clusters; "
+            "recording a non-blocking observation for PI review"
         )
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": (
-                "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
-                "cell type annotation via annotate_clusters. "
-                "You MUST first run sc.tl.rank_genes_groups(), then call annotate_clusters, "
-                "before reporting findings."
-            )
-        })
-        analysis_log.append(AnalysisStep(
-            step_number=step_count, step_type="report_findings",
-            agent_reasoning=agent_reasoning,
-            findings=[], findings_summary="REJECTED: annotate_clusters not completed",
-        ))
-        return None
     has_scrna_data = state.has_scrnaseq()
     has_bulk_data = state.has_bulk_rnaseq()
     finding_records = self._normalize_report_finding_records(args)
@@ -162,6 +144,22 @@ async def prepare_report_attempt(context, tool_call) -> ReportAttempt | None:
     _attempt_gate_findings: List[Dict[str, Any]] = list(
         context.evidence_gate_findings
     )
+    if annotation_missing:
+        detail = (
+            "Cell-type annotation via annotate_clusters was not completed before "
+            "findings were submitted. The PI must decide whether the result is "
+            "acceptable, needs repair, or should be limited."
+        )
+        _escaped_notes.append(
+            "[PI review observation; non-blocking] " + detail
+        )
+        _attempt_gate_findings.append(_evidence_gate_record(
+            gate="annotation-completion-observation",
+            rule_id="scai-native/annotation-completion-observation",
+            detail=detail,
+            subject="cell-type-annotation",
+            severity="advise",
+        ))
     from ...services.figure_contract import (
         audit_figure_contract,
         format_missing_figure_feedback,
@@ -208,9 +206,15 @@ async def prepare_report_attempt(context, tool_call) -> ReportAttempt | None:
         scoring_plans=state.scoring_plans,
         samples_per_group_by_modality=_gate_samples_per_group_by_modality(state),
     )
-    _stats_advice = _stats_report.advisory_message()
-    if _stats_advice:
-        _escaped_notes.append(_stats_advice)
+    if _stats_report.findings:
+        logger.warning(
+            "[Bioinformatics] statistical observations recorded for PI review; "
+            "report_findings remains non-blocking"
+        )
+        _escaped_notes.append(
+            "[PI review observation; non-blocking] Statistical checks: "
+            + "; ".join(finding.detail for finding in _stats_report.findings)
+        )
         _attempt_gate_findings.extend(
             _evidence_gate_record(
                 gate=finding.gate,
@@ -219,49 +223,7 @@ async def prepare_report_attempt(context, tool_call) -> ReportAttempt | None:
                 subject=finding.subject,
                 severity="advise",
             )
-            for finding in _stats_report.advisories
-        )
-    _unsatisfiable = {"cell-level-inference"}
-    _cap = (1 if all(f.gate in _unsatisfiable
-                     for f in _stats_report.blocking)
-            else context.max_stats_gate_rejections)
-    if not _stats_report.passed:
-        if context.stats_gate_reject_count < _cap:
-            context.stats_gate_reject_count += 1
-            logger.warning(
-                f"[Bioinformatics] report_findings rejected: "
-                f"statistical validity "
-                f"({context.stats_gate_reject_count}/{_cap})"
-            )
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": _stats_report.message(),
-            })
-            return None
-        logger.warning(
-            "[Bioinformatics] statistical gate: max rejections "
-            "reached, allowing report_findings"
-        )
-        _escaped_notes.append(
-            "Statistical validity checks did not pass after "
-            + str(_cap)
-            + " attempt(s) and were force-released: "
-            + "; ".join(f.detail for f in _stats_report.blocking)
-        )
-        _attempt_gate_degraded = True
-        _attempt_gate_findings.extend(
-            _evidence_gate_record(
-                gate=finding.gate,
-                rule_id=finding.rule_id,
-                detail=finding.detail,
-                subject=finding.subject,
-                severity="block",
-                rejection_count=_cap,
-                rejection_limit=_cap,
-                forced_release=True,
-            )
-            for finding in _stats_report.blocking
+            for finding in _stats_report.findings
         )
     return ReportAttempt(
         evidence_executions=evidence_executions,
@@ -275,69 +237,32 @@ async def prepare_report_attempt(context, tool_call) -> ReportAttempt | None:
     )
 
 
-async def check_mandatory_report_gates(context, tool_call, attempt) -> bool:
-    self = context.agent
+async def attach_report_observations(context, attempt) -> None:
     state = context.state
-    messages = context.messages
-    analysis_log = context.analysis_log
-    step_count = context.step_count
-    agent_reasoning = context.agent_reasoning
-    lowered_codes = attempt.lowered_codes
-    has_scrna_data = attempt.has_scrna_data
     has_bulk_data = attempt.has_bulk_data
-    scrna_has_replicates = has_replicated_condition_design(
-        state, SCRNA_MODALITY,
-    )
-    bulk_has_replicates = has_replicated_condition_design(
-        state, BULK_RNASEQ_MODALITY,
-    )
     _escaped_notes = attempt.escaped_notes
-    _attempt_gate_degraded = attempt.gate_degraded
     _attempt_gate_findings = attempt.gate_findings
     if (state.analysis_phase == AnalysisPhase.EXPLORATION
             and context.planning_stage != "stage1"
             and not context.mechanism_programs_registered):
-        if context.mechanism_gate_reject_count < context.max_mechanism_rejections:
-            context.mechanism_gate_reject_count += 1
-            logger.warning(
-                f"[Bioinformatics] report_findings rejected: "
-                f"register_mechanism_programs not called "
-                f"({context.mechanism_gate_reject_count}/{context.max_mechanism_rejections})"
-            )
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": (
-                    "[REJECTED] Before reporting findings you must call "
-                    "register_mechanism_programs. After completing downstream "
-                    "analysis, identify up to 8 data-driven mechanism programs that "
-                    "are genuinely supported by observed genes, pathways, scores, "
-                    "enrichment terms, or cross-validated patterns (do NOT invent "
-                    "weak programs to reach a count). "
-                    + MECHANISM_EVIDENCE_POLICY
-                    + " If none are "
-                    "supportable, call register_mechanism_programs with an empty "
-                    "programs list and explain why in no_program_reason."
-                ),
-            })
-            analysis_log.append(AnalysisStep(
-                step_number=step_count, step_type="report_findings",
-                agent_reasoning=agent_reasoning,
-                findings=[], findings_summary="REJECTED: register_mechanism_programs not called",
-            ))
-            return False
-        else:
-            _escaped_notes.append(build_gate_skip_note("data-driven mechanism program capture"))
-            _attempt_gate_degraded = True
-            _attempt_gate_findings.append(_evidence_gate_record(
-                gate="mechanism-program-capture",
-                rule_id="scai-native/mechanism-program-capture",
-                detail="register_mechanism_programs was not completed before reporting findings.",
-                severity="block",
-                rejection_count=context.max_mechanism_rejections,
-                rejection_limit=context.max_mechanism_rejections,
-                forced_release=True,
-            ))
+        detail = (
+            "register_mechanism_programs was not completed before reporting "
+            "findings. The PI must decide whether mechanism-program capture is "
+            "needed before accepting the result."
+        )
+        logger.warning(
+            "[Bioinformatics] mechanism-program capture missing; recording a "
+            "non-blocking observation for PI review"
+        )
+        _escaped_notes.append(
+            "[PI review observation; non-blocking] " + detail
+        )
+        _attempt_gate_findings.append(_evidence_gate_record(
+            gate="mechanism-program-capture-observation",
+            rule_id="scai-native/mechanism-program-capture-observation",
+            detail=detail,
+            severity="advise",
+        ))
     if has_bulk_data and context.planning_stage != "stage1":
         eligible_ids = {item.id for item in attempt.evidence_executions}
         current_decisions = [
@@ -348,7 +273,6 @@ async def check_mandatory_report_gates(context, tool_call, attempt) -> bool:
                     for profile in state.bulk_input_profiles)
         ]
         if not current_decisions:
-            _attempt_gate_degraded = True
             _attempt_gate_findings.append(_evidence_gate_record(
                 gate="bulk-method-decision",
                 rule_id="scai-native/bulk-method-decision",
@@ -359,12 +283,10 @@ async def check_mandatory_report_gates(context, tool_call, attempt) -> bool:
                 ),
                 severity="advise",
             ))
-    attempt.gate_degraded = _attempt_gate_degraded
     attempt.gate_findings = _attempt_gate_findings
-    return True
 
 
-async def check_report_evidence(context, tool_call, attempt) -> bool:
+async def record_report_evidence_candidates(context, tool_call, attempt) -> None:
     args = tool_call.arguments
     evidence_executions = attempt.evidence_executions
     requested_evidence_ids = {
@@ -399,4 +321,3 @@ async def check_report_evidence(context, tool_call, attempt) -> bool:
         record["evidence_status"] = "unverified"
         record["semantic_status"] = "unverified"
         attempt.requested_evidence_ids.update(record_ids)
-    return True

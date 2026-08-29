@@ -53,33 +53,46 @@ def test_stage2_builder_scrna_only_has_no_bulk_section():
     assert "Bulk RNA-seq DEG" not in txt
 
 
-def test_unreplicated_mixed_stage2_keeps_scrna_descriptive_without_bulk_selection():
-    txt = _build_stage2_instruction(
+def test_measured_replication_does_not_override_pi_stage2_plan():
+    unreplicated = _build_stage2_instruction(
         has_bulk=True, has_scrna=True, scrna_replicated=False,
     )
-    lowered = txt.lower()
-    assert "descriptive single-cell condition effect sizes" in lowered
-    assert "bulk scientific ownership" in lowered
+    replicated = _build_stage2_instruction(
+        has_bulk=True, has_scrna=True, scrna_replicated=True,
+    )
+    assert unreplicated == replicated
+    lowered = unreplicated.lower()
+    assert "pi-approved plan" in lowered
+    assert "claim level chosen by the pi" in lowered
     assert "pydeseq2" not in lowered
-    assert "replicated bulk inference" not in lowered
 
 
-def test_unreplicated_exploration_does_not_mandate_single_cell_deg_figures():
-    txt = _build_exploration_instruction(
+def test_measured_replication_does_not_override_pi_exploration_plan():
+    unreplicated = _build_exploration_instruction(
         has_bulk=True, has_scrna=True,
         scrna_replicated=False, bulk_replicated=True,
     )
-    assert "For EACH cell type group's DEG results" not in txt
-    assert "single-cell figures must show descriptive localization" in txt
+    replicated = _build_exploration_instruction(
+        has_bulk=True, has_scrna=True,
+        scrna_replicated=True, bulk_replicated=True,
+    )
+    assert unreplicated == replicated
+    assert "PI-approved plan" in unreplicated
+    assert "single-cell figures must show descriptive localization" not in unreplicated
 
 
-def test_unreplicated_stage1_forbids_condition_confounded_correction():
-    txt = build_phase_instruction(
+def test_measured_replication_does_not_install_a_stage1_design_override():
+    unreplicated = build_phase_instruction(
         planning_stage="stage1", analysis_phase="exploration",
         has_bulk=True, has_scrna=True, direction="", scrna_replicated=False,
     )
-    assert "UNREPLICATED SINGLE-CELL CONDITIONS" in txt
-    assert "do NOT use Harmony" in txt
+    replicated = build_phase_instruction(
+        planning_stage="stage1", analysis_phase="exploration",
+        has_bulk=True, has_scrna=True, direction="", scrna_replicated=True,
+    )
+    assert unreplicated == replicated
+    assert "DESIGN OVERRIDE" not in unreplicated
+    assert "do NOT use Harmony" not in unreplicated
 
 
 def test_bulk_replication_flag_does_not_select_a_stage2_bulk_method():
@@ -95,12 +108,12 @@ def test_bulk_replication_flag_does_not_select_a_stage2_bulk_method():
     assert "method and implementation details" in unresolved
 
 
-def test_replicated_scrna_does_not_select_an_unresolved_bulk_method():
+def test_replicated_scrna_does_not_select_a_scientific_method():
     txt = _build_stage2_instruction(
         has_bulk=True, has_scrna=True,
         scrna_replicated=True, bulk_replicated=False,
     ).lower()
-    assert "sample-level pseudobulk" in txt
+    assert "pi-approved plan" in txt
     assert "bulk scientific ownership" in txt
     assert "pydeseq2" not in txt
     assert "bulk deg significance" not in txt

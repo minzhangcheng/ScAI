@@ -1,8 +1,7 @@
-"""register_score must reject unattributable panels and record real panel size.
+"""register_score records provenance limitations and real panel size.
 
-The schema change alone is advisory -- a model can omit or invent a field. These
-tests pin the handler-side enforcement and the report rendering, which are the
-parts a model cannot talk its way around.
+Missing provenance remains visible to PI review but cannot reject registration
+or decide scientific acceptance.
 """
 import inspect
 
@@ -36,27 +35,17 @@ def test_schema_exposes_matched_gene_count():
     assert "n_genes_matched" in schema["properties"]
 
 
-def test_handler_rejects_invalid_provenance_and_returns_a_tool_message():
-    """A rejection must still emit a role=tool message for the tool_call_id.
-
-    Otherwise the call is orphaned and the next request fails -- the same
-    invariant test_unknown_tool_dispatch pins for unknown tools.
-    """
+def test_handler_records_invalid_provenance_without_rejecting_registration():
     block = inspect.getsource(executor_registration.handle_register_score)
 
     assert "parse_provenance" in block, "handler does not validate provenance"
     assert "prov_error" in block
-    # The rejection path emits a tool message then skips registration.
-    assert '"role": "tool"' in block
-    assert "ToolAction.CONTINUE" in block
-    # has_register_score must not be set before validation succeeds, or a
-    # rejected call would satisfy the "did you register a score" gate.
-    reject_idx = block.index("prov_error")
-    flag_idx = block.index("context.has_register_score = True")
-    assert flag_idx > reject_idx, (
-        "has_register_score is set before provenance validation, so a rejected "
-        "score would still satisfy the registration gate"
-    )
+    before_registration = block[:block.index("context.has_register_score = True")]
+    assert "return ToolAction.CONTINUE" not in before_registration
+    assert "register_score rejected" not in block
+    assert "register-score-provenance" in block
+    assert 'severity="advise"' in block
+    assert "PI must decide" in block
 
 
 def test_handler_records_power_assessment():

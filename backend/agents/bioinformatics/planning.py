@@ -474,11 +474,11 @@ You are REVISING the remaining steps based on new findings."""
             state.build_experimental_design_summary(),
             max_chars=8_000,
         )
-        sample_design_constraint = sequencing_design_instruction(state)
-        if sample_design_constraint:
-            sample_design_constraint = (
-                "\n\n## Replication and Design Constraint\n"
-                + sample_design_constraint
+        sample_design_facts = sequencing_design_instruction(state)
+        if sample_design_facts:
+            sample_design_facts = (
+                "\n\n## Measured Sequencing-Design Facts\n"
+                + sample_design_facts
             )
         bulk_profile_block = ""
         if state.bulk_input_profiles:
@@ -543,7 +543,7 @@ You are REVISING the remaining steps based on new findings."""
         prompt = f"""You are planning a single-cell RNA-seq bioinformatics analysis. Generate a method-level analysis plan.
 
 ## Data Context
-{data_desc}{sample_design_constraint}{bulk_profile_block}{loaded_objects_block}
+{data_desc}{sample_design_facts}{bulk_profile_block}{loaded_objects_block}
 {research_context}
 
 ## PI's Analysis Goals

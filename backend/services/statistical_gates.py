@@ -1,19 +1,10 @@
-# Statistical-validity checks applied before findings are accepted.
-"""Gates that a model cannot talk its way past.
+# Statistical-validity observations supplied to the PI before acceptance.
+"""Structured statistical observations that never decide whether findings pass.
 
-The prompt already asks for most of this. Prompted guidance is not enough: over
-a 200-step loop it drifts, and nothing observes whether it was followed. These
-checks run against structured state -- registered scores, frozen plans -- rather
-than by grepping the agent's code text, so they see what actually happened.
-
-Each gate cites a rule id from services/method_rules, so a refusal arrives with
-its mechanism and its literature attached instead of as a bare "no". That is the
-whole design: the gate stops the claim, the rule explains why, and the model
-gets enough to fix it rather than to retry blindly.
-
-Every check here is structural. Nothing inspects biology, and nothing may: the
-gates ask how many genes matched, whether a family was declared, how many
-samples a condition had -- never which genes or which condition.
+The checks use registered scores, frozen plans, and measured sample facts so the
+PI receives concrete limitations instead of relying on prompt memory. They do
+not reject, retry, force-release, or downgrade a result. Scientific acceptance
+and the response to each observation belong to the PI agent.
 """
 from __future__ import annotations
 
@@ -82,21 +73,19 @@ PANEL_REDUNDANCY_CONTAINMENT = 0.5
 
 @dataclass
 class GateFinding:
-    """One failed check, with the rule that explains it."""
+    """One statistical observation, with the rule that explains it."""
 
     gate: str
     rule_id: str
     detail: str
     subject: str = ""
-    #: Further rules bearing on the same refusal. A violation usually has one
+    #: Further rules bearing on the same observation. A finding usually has one
     #: governing rule and several that explain the surrounding practice; naming
     #: them here keeps the primary message short while still surfacing the rest.
     also_see: tuple = ()
-    #: "block" refuses the call; "advise" surfaces a note the model cannot
-    #: suppress but does not stop it. A check whose coverage is too narrow to
-    #: justify spending a rejection -- and a retry, and a step from a 200-step
-    #: budget -- belongs on the advisory channel rather than being deleted.
-    severity: str = "block"
+    #: Retained for serialized compatibility. Statistical checks are advisory;
+    #: callers must not use this field to reject or downgrade a result.
+    severity: str = "advise"
 
     def message(self) -> str:
         head = f"[{self.gate}]"
@@ -111,41 +100,33 @@ class GateFinding:
 
 @dataclass
 class GateReport:
-    """Outcome of running the checks over a set of findings."""
+    """Statistical observations over a set of findings."""
 
     findings: list[GateFinding] = field(default_factory=list)
 
     @property
     def blocking(self) -> list:
-        return [f for f in self.findings if f.severity == "block"]
+        """Compatibility view: statistical observations never block."""
+        return []
 
     @property
     def advisories(self) -> list:
-        return [f for f in self.findings if f.severity != "block"]
+        return list(self.findings)
 
     @property
     def passed(self) -> bool:
-        """True when nothing BLOCKS. Advisories travel with an accepted call."""
-        return not self.blocking
+        """Compatibility view: acceptance is not decided by this report."""
+        return True
 
     def message(self) -> str:
-        if self.passed:
-            return ""
-        lines = ["[REJECTED] Statistical validity checks failed."]
-        lines.extend(f.message() for f in self.blocking)
-        lines.append(
-            "Fix these and call report_findings again. If a check is wrong for "
-            "this analysis, say so explicitly in the finding text rather than "
-            "restating the claim unchanged."
-        )
-        return "\n\n".join(lines)
+        return self.advisory_message()
 
     def advisory_message(self) -> str:
         """Notes attached to an accepted call, or '' when there are none."""
         if not self.advisories:
             return ""
         return "\n\n".join(
-            ["[ADVISORY] These do not block the call but belong in the report."]
+            ["[PI REVIEW OBSERVATION] These do not block the call."]
             + [f.message() for f in self.advisories]
         )
 
@@ -227,16 +208,11 @@ _MEASURED_QUANTITY = re.compile(
 
 # ============================================================ COMPOSITION
 def check_composition_claims(findings, *, score_definitions=()):
-    """A composition claim must not rest on a per-population test of proportions.
+    """Surface when a composition claim rests on separate proportion tests.
 
-    A registered joint model downgrades the refusal to a note; it does not
-    delete it. `method` is free text the model writes itself -- register_score
-    declares it as a bare string with no enum -- so honouring it as a stand-down
-    would hand the model an off-switch for a blocking gate, and the exemption is
-    payload-wide, so one scCODA score would also cover a claim about a
-    population that model never touched. Downgrading keeps both halves honest:
-    an analysis that did the work is not made to argue with the gate, and the
-    simplex caveat still rides along to the report either way.
+    A registered joint model is included in the observation because `method`
+    is free text supplied by the model and is not authoritative. The PI decides
+    whether the method and resulting claim are acceptable.
     """
     modelled = any(score_kind(s) == "differential_abundance"
                    for s in score_definitions or ())
@@ -271,7 +247,7 @@ def check_composition_claims(findings, *, score_definitions=()):
                     "size.")
                 remedy = (
                     " A joint compositional model is registered for this "
-                    "analysis, so this is a note rather than a refusal: say that "
+                    "analysis; say that "
                     "the claim is that model's output, not a per-population test "
                     "computed beside it."
                     if modelled else
@@ -280,7 +256,7 @@ def check_composition_claims(findings, *, score_definitions=()):
                 return [GateFinding(
                     gate="simplex-ignored",
                     rule_id="composition-lives-on-a-simplex",
-                    severity="advise" if modelled else "block",
+                    severity="advise",
                     detail=shape + remedy)]
     return []
 
@@ -305,8 +281,8 @@ _CONDITION_CONTRAST = re.compile(
 def _carries_cell_level_inference(clause):
     """``_has_inference`` plus a feature count, minus bare abundance wording.
 
-    "Significant" next to a proportion is a composition claim, which the
-    simplex gate owns; this one is about the unit of analysis.
+    "Significant" next to a proportion is a composition claim; this check is
+    about the unit of analysis instead.
     """
     return (_has_p(clause) or bool(_NAMED_TEST.search(clause))
             or bool(_ALT_INFERENCE.search(clause))
@@ -326,7 +302,7 @@ def _within_group_pattern(samples_per_group):
     """Wording that places the contrast INSIDE one condition.
 
     A statistic computed within a single group is not a between-condition claim,
-    so this gate is the wrong one for it whatever its n was.
+    so this observation is not relevant whatever its n was.
     """
     labels = [re.escape(str(g)) for g in (samples_per_group or ()) if str(g).strip()]
     alt = '|'.join(labels + [r'(?:the\s+)?(?:\w+\s+)?condition', r'(?:each|either|one)\s+\w+',
@@ -549,15 +525,12 @@ def check_underpowered_negative_claims(findings, score_definitions):
 
 
 def check_permutation_at_small_n(findings, score_definitions, samples_per_group):
-    """Permutation q-values below the viable sample size must not carry a claim.
+    """Surface permutation q-values below the viable sample resolution.
 
-    Scoped to small n on purpose. The rule it cites is unconditional -- a
-    gene-permutation null is anti-conservative at every sample size -- but the
-    unconditional half is guidance, because refusing every preranked q-value
-    would refuse the standard analysis. What is refusable is the case where the
-    null is not merely optimistic but arithmetically incapable of the quoted
-    value: at 3 versus 3 there are 10 distinct label partitions, so nothing
-    below about 0.1 is reachable.
+    Scoped to small n on purpose. A gene-permutation null is
+    anti-conservative at every sample size, while at 3 versus 3 there are only
+    10 distinct label partitions and nothing below about 0.1 is reachable.
+    The PI decides how that limitation affects the claim.
     """
     if not samples_per_group:
         return []
@@ -647,10 +620,9 @@ def _resamples_for(text, declared):
     A text that names registered scores is held to those; one that names none
     cannot be attributed, and the *most permissive* count is used. The direction
     is deliberate. Holding an unattributable finding to the coarsest score that
-    happens to be registered refuses a correct number -- a cheap 100-draw probe
-    beside a 10,000-draw run would bound the run's own p-values -- and the only
-    rewording that satisfies the gate overstates the uncertainty by the ratio of
-    the two counts. Observation (1) already covers the sloppy case advisorily.
+    happens to be registered would attach the wrong observation -- a cheap
+    100-draw probe beside a 10,000-draw run would bound the run's own p-values.
+    Observation (1) already covers the unattributed case.
     """
     named = [n for name, n in declared.items()
              if name and n and _names_score(text, name)]
@@ -659,22 +631,11 @@ def _resamples_for(text, declared):
 
 
 def check_resampling_resolution(findings, score_definitions):
-    """A resampling p-value quoted below the resolution its draws can attain.
+    """Surface p-values below the resolution their resamples can attain.
 
-    Three separate observations, deliberately at different severities.
-
-    The refusable one is narrow by construction: it fires only when the model
-    itself declared how many resamples it drew AND then quoted a value at or
-    under the floor those draws imply, as an equality rather than a bound. That
-    is a self-contradiction in the model's own record, not a judgement about the
-    analysis -- and the fix is a rewording it can perform without recomputing
-    anything.
-
-    The other two only advise. Absence of a declared count is left advisory
-    because the method kind is inferred by matching tokens in a free-text field,
-    and a mis-tokenised method must not cost a rejection. A shared value across
-    findings is advisory because a coincidence, however unlikely, is not an
-    error.
+    The checks distinguish a declared numerical contradiction, an undeclared
+    resample count, and repeated floor values. All three are observations; the
+    PI decides whether they require rewording, recomputation, or a limitation.
     """
     texts = _texts(findings)
     if not texts:
@@ -709,7 +670,7 @@ def check_resampling_resolution(findings, score_definitions):
     # shape of a finding reports a resampling result and an analytic one side by
     # side ("... pydeseq2 ... adjusted p = 1e-8. GSEA on the same contrast ...").
     # A model-fit p-value has no resolution floor, and holding one to the
-    # enrichment's floor refuses a correct number.
+    # enrichment's floor would attach an incorrect observation.
     if counts:
         hit = None
         for text in texts:
@@ -729,8 +690,8 @@ def check_resampling_resolution(findings, score_definitions):
                         # A conventional cutoff restated is a threshold, not an
                         # estimate -- the same carve-out observation (3) makes.
                         # gseapy's default of 1000 draws puts the floor within
-                        # rounding distance of 0.001, so without this the gate
-                        # refuses the most standard sentence in the method.
+                        # rounding distance of 0.001, so without this the check
+                        # flags the most standard sentence in the method.
                         continue
                     hit = (value, resamples, floor)
                     break
@@ -781,13 +742,11 @@ def check_resampling_resolution(findings, score_definitions):
 def check_panel_redundancy(score_definitions, scoring_plans):
     """Panels tested together whose membership is largely the same panel.
 
-    Advisory, never blocking, and the distinction matters. Overlap is not an
+    Advisory and never blocking. Overlap is not an
     error: a broad set and a focused component of it are both legitimate tests,
     and partitions of one parent set are subsets of each other by construction.
-    Refusing here would be the platform overruling a design decision it is not
-    entitled to make. What the platform IS entitled to do is refuse to let the
-    overlap go unstated, because that is what turns one observation into an
-    apparent agreement between two.
+    The overlap is surfaced so the PI can decide whether the report would turn
+    one observation into apparent agreement between two.
 
     Containment rather than Jaccard: a small panel wholly inside a large one is
     entirely redundant with it, yet scores low on Jaccard precisely because the
@@ -891,7 +850,7 @@ def run_gates(
     samples_per_group_by_modality=None,
     cluster_labels=(),
 ):
-    """Run every statistical gate over a report_findings payload.
+    """Collect every statistical observation for a report_findings payload.
 
     cluster_labels is accepted and deliberately ignored. Measured: feeding
     annotation vocabulary to the composition check takes it from 21 TP / 0 FP
@@ -900,7 +859,7 @@ def run_gates(
     so callers need not know that. Those counts were measured while the
     composition check was still being called without score_definitions, so they
     describe its inputs rather than the operating point that ships now: a
-    registered joint model downgrades that check to an advisory.
+    registered joint model changes the context included in that observation.
     """
     report = GateReport()
     report.findings.extend(

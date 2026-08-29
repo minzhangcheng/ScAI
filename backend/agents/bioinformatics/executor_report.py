@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from .executor_dispatch import ToolAction
 from .executor_report_gates import (
-    check_mandatory_report_gates,
-    check_report_evidence,
+    attach_report_observations,
     prepare_report_attempt,
+    record_report_evidence_candidates,
 )
 
 
@@ -35,10 +35,8 @@ async def handle_report_findings(context, tool_call) -> ToolAction:
     attempt = await prepare_report_attempt(context, tool_call)
     if attempt is None:
         return ToolAction.CONTINUE
-    if not await check_mandatory_report_gates(context, tool_call, attempt):
-        return ToolAction.CONTINUE
-    if not await check_report_evidence(context, tool_call, attempt):
-        return ToolAction.CONTINUE
+    await attach_report_observations(context, attempt)
+    await record_report_evidence_candidates(context, tool_call, attempt)
     self = context.agent
     state = context.state
     messages = context.messages

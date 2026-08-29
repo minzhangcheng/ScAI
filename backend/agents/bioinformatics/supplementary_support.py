@@ -108,16 +108,10 @@ def _validated_supplementary_findings(
             )
         else:
             report = None
-        if report is not None and not report.passed:
+        if report is not None and report.findings:
             warnings.append(
-                f"Discarded supplementary finding {index}: "
-                + "; ".join(finding.detail for finding in report.blocking)
-            )
-            continue
-        if report is not None and report.advisories:
-            warnings.append(
-                f"Supplementary finding {index} advisory: "
-                + "; ".join(finding.detail for finding in report.advisories)
+                f"Supplementary finding {index} PI review observation: "
+                + "; ".join(finding.detail for finding in report.findings)
             )
         if not candidate_ids:
             warnings.append(

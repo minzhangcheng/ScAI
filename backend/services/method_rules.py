@@ -1,14 +1,9 @@
 # Loading and querying the methodological rule corpus.
 """Access to backend/data/method_rules.yaml.
 
-The corpus is the "retrieved guidance" half of ScAI's methodology layer. The
-other half -- the gates -- lives in code and cannot be argued with; these rules
-supply the reasoning behind a gate when it fires, and answer method questions
-the model asks on its own.
-
-Rules are keyed by id so a gate can cite exactly the rule it is enforcing, which
-means a refusal arrives with its justification and its literature attached
-rather than as a bare "no".
+The corpus supplies non-blocking statistical observations and on-demand method
+guidance to the PI. Rules are keyed by id so each observation carries its
+mechanism and literature without host code deciding whether a result passes.
 """
 from __future__ import annotations
 
@@ -22,14 +17,11 @@ logger = logging.getLogger(__name__)
 
 _RULES_PATH = Path(__file__).resolve().parent.parent / "data" / "method_rules.yaml"
 
-ENFORCEMENT_GATE = "gate"
-#: Emitted in code as a note the model cannot suppress, but the call proceeds.
-#: For checks whose coverage is too narrow to justify a rejection plus a retry
-#: plus a step from the analysis budget.
+#: Emitted in code as a non-blocking observation for PI review.
 ENFORCEMENT_ADVISORY = "advisory"
 ENFORCEMENT_GUIDANCE = "guidance"
 
-ENFORCEMENT_VALUES = (ENFORCEMENT_GATE, ENFORCEMENT_ADVISORY, ENFORCEMENT_GUIDANCE)
+ENFORCEMENT_VALUES = (ENFORCEMENT_ADVISORY, ENFORCEMENT_GUIDANCE)
 
 
 @lru_cache(maxsize=1)
@@ -61,15 +53,11 @@ def get_rule(rule_id: str) -> Optional[dict]:
     return next((r for r in all_rules() if r.get("id") == rule_id), None)
 
 
-def gates() -> list[dict]:
-    return [r for r in all_rules() if r.get("enforcement") == ENFORCEMENT_GATE]
-
-
 def format_rule(rule: dict, *, include_python: bool = True) -> str:
     """Render one rule for injection into a tool result.
 
-    Kept compact on purpose: this text is appended to a rejection the model has
-    to act on, and a wall of prose there competes with the instruction itself.
+    Kept compact on purpose: this text is appended to an observation the PI
+    must assess, and a wall of prose would compete with the observation itself.
     """
     if not rule:
         return ""

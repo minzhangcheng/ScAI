@@ -8,22 +8,6 @@ def bind_facade(facade) -> None:
     )
 
 
-def enforce_sample_design_review(plan, analysis_state, review):
-    """Replace an LLM approval with deterministic sample-design revision."""
-    violations = plan_sample_design_violations(plan, analysis_state)
-    if not violations:
-        return review
-    return {
-        "decision": "revise",
-        "feedback": (
-            "The plan contradicts the measured modality-specific replicate design. "
-            "Unreplicated single-cell conditions cannot support inferential condition "
-            "testing, and replicate counts alone do not verify a separable "
-            "condition-by-batch design for correction."
-        ),
-        "modifications": violations,
-    }
-
 async def prepare_planning_dialogue(self, state):
     analysis_state = state["analysis_state"]
 
@@ -248,39 +232,21 @@ async def run_planning_dialogue_rounds(self, ctx, state):
                 )
                 if action == LlmFailureAction.RETRY:
                     continue  # retry same PI review call
-                unavailable_review_violations = plan_sample_design_violations(
-                    plan, analysis_state,
-                )
-                if unavailable_review_violations:
-                    review = {
-                        "decision": "revise",
-                        "feedback": (
-                            "PI review was unavailable, but the deterministic "
-                            "sample-design check rejected this plan."
-                        ),
-                        "modifications": unavailable_review_violations,
-                    }
-                    break
-                # SKIP — plan exists but unreviewed; auto-accept it
+                # A plan cannot be accepted when the PI review did not complete.
                 await self._send_message(
                     "error",
-                    "Planning dialogue: PI review skipped due to LLM failure, auto-accepting plan.",
+                    "Planning dialogue: PI review did not complete; the plan was not approved.",
                     AgentType.PI,
                 )
-                plan.status = "pi_reviewing"
-                analysis_state.current_plan = plan
-                plan_json = plan.model_dump(mode="json")
-                analysis_state.plan_dialogue_history = dialogue_history + [{
-                    "round": round_num,
-                    "plan": plan_json,
-                    "pi_decision": "approved",
-                    "pi_feedback": "PI review skipped due to LLM failure — auto-accepted",
-                    "pi_modifications": [],
-                }]
+                state["failed_node"] = "planning_dialogue"
                 state["planning_result"] = {
-                    "plan": plan_json,
-                    "dialogue": analysis_state.plan_dialogue_history,
+                    "error": str(e),
+                    "findings": [],
+                    "status": "failed",
                 }
+                state["should_continue"] = False
+                analysis_state.status = TaskStatus.FAILED
+                await self._send_state_sync(analysis_state, "planning_aborted")
                 return state
             except Exception as e:
                 pi_review_attempt += 1
@@ -318,8 +284,6 @@ async def run_planning_dialogue_rounds(self, ctx, state):
                 analysis_state.status = TaskStatus.FAILED
                 await self._send_state_sync(analysis_state, "planning_aborted")
                 return state
-
-        review = enforce_sample_design_review(plan, analysis_state, review)
 
         # --- Process PI review decision ---
         dialogue_history.append({
@@ -414,17 +378,6 @@ async def finalize_planning_dialogue(self, ctx, state):
                 current_plan=seed_plan,
             )
             populate_plan_scope(final_plan, analysis_state)
-            final_design_violations = plan_sample_design_violations(
-                final_plan, analysis_state,
-            )
-            if final_design_violations:
-                raise ValueError(
-                    "Final plan violates the measured sequencing sample design: "
-                    + "; ".join(
-                        str(item.get("suggestion") or "")
-                        for item in final_design_violations
-                    )
-                )
             analysis_state.current_plan = final_plan
             analysis_state.plan_dialogue_history = dialogue_history
             state["plan_approved"] = True

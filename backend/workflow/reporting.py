@@ -53,7 +53,7 @@ from .reporting_parts.shared import (  # noqa: F401
     direction_coverage_status,
     resolve_report_output_dir,
     build_lineage_report_state,
-    validate_complete_report_allowed,
+    report_coverage_observation,
 )
 from .reporting_parts import (  # noqa: F401
     FinalReportMixin,

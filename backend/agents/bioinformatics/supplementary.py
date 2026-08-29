@@ -21,7 +21,6 @@ from pathlib import Path
 
 from backend.services.report.artifacts import artifact_stems
 from backend.services.report.figure_discovery import discover_figures_in_workspace
-from backend.services.sample_design import code_sample_design_violation
 
 from .shared import (
     AnalysisStep,
@@ -158,11 +157,6 @@ class SupplementaryMixin:
 
     def _supplementary_code_is_safe(self, code: str, main_var: str) -> Optional[str]:
         """Return a reason string if a supplementary cell is statically unsafe, else None."""
-        design_error = code_sample_design_violation(
-            code, getattr(self, "_current_analysis_state", None),
-        )
-        if design_error:
-            return design_error
         unsafe = code_is_statically_unsafe(code, main_var, self._SUPPLEMENTARY_DENYLIST)
         if unsafe:
             return unsafe

@@ -1,10 +1,8 @@
 """Every rule must actually be able to reach the model.
 
-The corpus header promises two things: that a `gate` is refused in code, and
-that `guidance` is retrieved on demand. An independent review found neither was
-fully true -- two gates had no implementation at all, and seven guidance rules
-were unreachable because the only runtime path was a gate citing a rule id, and
-no gate cites a guidance rule.
+The corpus supports non-blocking observations and guidance retrieved on demand.
+Scientific rules are deliberately unable to refuse a call; acceptance belongs
+to the PI.
 
 A rule the model never sees is worse than no rule: it makes the corpus look
 larger than the system's real behaviour, and the gap is invisible from inside.
@@ -20,8 +18,7 @@ import backend.agents.bioinformatics_agent as bio_mod
 from backend.agents.bioinformatics import executor_collaboration
 from backend.services import statistical_gates
 from backend.services.method_rules import (
-    ENFORCEMENT_ADVISORY, ENFORCEMENT_GATE, ENFORCEMENT_GUIDANCE,
-    ENFORCEMENT_VALUES, all_rules, gates,
+    ENFORCEMENT_ADVISORY, ENFORCEMENT_VALUES, all_rules,
 )
 
 _REPO = Path(__file__).resolve().parent.parent.parent
@@ -41,69 +38,13 @@ def _production_sources() -> str:
 _SOURCES = _production_sources()
 
 
-#: Symbols that only appear where a call is actually refused. A rule id
-#: interpolated into a message string reaches none of them.
-_REFUSAL_SYMBOLS = ("GateFinding(", "rejected:", "_reject_count")
-
-
-def _citation_windows(rule_id: str) -> list[str]:
-    """Source around each place a rule id appears, one window per occurrence."""
-    windows = []
-    for path in _BACKEND.rglob("*.py"):
-        if "tests" in path.parts or "__pycache__" in path.parts:
-            continue
-        text = path.read_text(encoding="utf-8")
-        start = 0
-        while True:
-            idx = text.find(rule_id, start)
-            if idx == -1:
-                break
-            windows.append(text[max(0, idx - 700):idx + 700])
-            start = idx + 1
-    return windows
-
-
-@pytest.mark.parametrize("rule", [r for r in all_rules() if r["enforcement"] == ENFORCEMENT_GATE],
-                         ids=lambda r: r["id"])
-def test_every_gate_is_cited_by_production_code(rule):
-    """A gate that no code enforces is a false claim about the system."""
-    assert rule["id"] in _SOURCES, (
-        f"rule {rule['id']!r} is declared enforcement=gate but no non-test "
-        f"backend file references it. Either implement the check, or reclassify "
-        f"it as guidance -- the corpus header promises gates are refused in code."
-    )
-
-
-@pytest.mark.parametrize("rule", [r for r in all_rules() if r["enforcement"] == ENFORCEMENT_GATE],
-                         ids=lambda r: r["id"])
-def test_every_gate_reaches_the_model_through_a_refusal(rule):
-    """enforcement=gate must mean the call is REFUSED, not annotated.
-
-    Mentioning the id is not enforcing it. Two rules were interpolated into
-    advisory notes -- one onto a plan-drift message, one onto a power caveat --
-    and the weaker assertion passed them both. A rule that only advises belongs
-    on the advisory or guidance channel, where the corpus now says so.
-    """
-    windows = _citation_windows(rule["id"])
-    assert windows, f"{rule['id']} is not referenced in production code at all"
-    assert any(any(sym in w for sym in _REFUSAL_SYMBOLS) for w in windows), (
-        f"{rule['id']} is declared enforcement=gate, but every place it appears "
-        f"is a message string rather than a refusal. Reclassify it as advisory "
-        f"or guidance, or implement a check that rejects."
-    )
-
-
 @pytest.mark.parametrize(
     "rule", [r for r in all_rules() if r["enforcement"] == ENFORCEMENT_ADVISORY],
     ids=lambda r: r["id"])
 def test_advisory_rules_are_emitted_without_blocking(rule):
     """An advisory must reach the model, and must not refuse the call."""
-    from backend.services import statistical_gates
-
-    src = inspect.getsource(statistical_gates)
-    assert rule["id"] in src, f"{rule['id']} is advisory but no check emits it"
-    assert 'severity="advise"' in src, (
-        "an advisory rule requires at least one check emitting severity='advise'"
+    assert rule["id"] in _SOURCES, (
+        f"{rule['id']} is advisory but no production path emits or records it"
     )
 
 
@@ -145,23 +86,22 @@ def test_method_question_alone_is_a_valid_call():
     assert "method_question and not function_path" in source
 
 
-def test_gates_cite_only_existing_rules():
-    """A gate citing a missing id would emit an empty explanation."""
+def test_observations_cite_only_existing_rules():
+    """An observation citing a missing id would emit an empty explanation."""
     from backend.services.method_rules import get_rule
 
     src = inspect.getsource(statistical_gates)
     cited = set(re.findall(r'rule_id="([a-z0-9-]+)"', src))
     cited |= set(re.findall(r'also_see=\("([a-z0-9-]+)"', src))
-    assert cited, "no rule ids found in the gate module"
+    assert cited, "no rule ids found in the observation module"
     for rule_id in cited:
-        assert get_rule(rule_id) is not None, f"gate cites unknown rule {rule_id!r}"
+        assert get_rule(rule_id) is not None, (
+            f"observation cites unknown rule {rule_id!r}"
+        )
 
 
-def test_gate_count_matches_the_corpus():
-    """Sanity: the helper and the enforcement field cannot disagree."""
-    assert {r["id"] for r in gates()} == {
-        r["id"] for r in all_rules() if r["enforcement"] == ENFORCEMENT_GATE
-    }
+def test_corpus_has_no_hard_gate_enforcement_value():
+    assert "gate" not in {r["enforcement"] for r in all_rules()}
 
 
 # ---------------------------------------------- the specific review findings
@@ -187,7 +127,7 @@ def test_no_declared_panel_is_not_flagged_as_underpowered():
     assert not power["supports_negative_claim"]
 
 
-def test_zero_match_negative_claim_is_refused():
+def test_zero_match_negative_claim_is_flagged_for_pi_review():
     from types import SimpleNamespace
 
     from backend.services.gene_set_provenance import assess_panel_power
@@ -198,6 +138,7 @@ def test_zero_match_negative_claim_is_refused():
     out = check_underpowered_negative_claims(
         ["panel_zero was not significant, arguing against this mechanism"], [score])
     assert len(out) == 1
+    assert out[0].severity == "advise"
 
 
 def test_zero_match_caveat_names_the_likely_cause():
@@ -209,14 +150,14 @@ def test_zero_match_caveat_names_the_likely_cause():
     assert "organism" in text or "naming" in text
 
 
-def test_cell_level_inference_is_enforced():
-    """biological-replicate-is-the-unit was a gate with no implementation."""
+def test_cell_level_inference_observation_is_emitted():
     from backend.services.statistical_gates import check_cell_level_inference
 
     out = check_cell_level_inference(
         ["a per-cell test shows the condition effect is significant"], {"A": 3, "B": 3})
     assert len(out) == 1
     assert out[0].rule_id == "biological-replicate-is-the-unit"
+    assert out[0].severity == "advise"
 
 
 def test_pseudobulk_wording_is_not_flagged_as_cell_level():
@@ -286,7 +227,7 @@ def test_ora_universe_rule_exists_and_gives_a_working_route():
 
     rule = get_rule("ora-universe-must-be-the-measured-genes")
     assert rule is not None
-    assert rule["enforcement"] == ENFORCEMENT_GATE
+    assert rule["enforcement"] == ENFORCEMENT_ADVISORY
     python = rule["python"]
     assert "get_library" in python, "the rule must name the controllable route"
     assert "background=" in python

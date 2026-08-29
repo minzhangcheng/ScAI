@@ -94,24 +94,6 @@ async def _user_review_gate(self, state: WorkflowState) -> WorkflowState:
         await self._send_state_sync(analysis_state, "planning_aborted")
         return state
 
-    review_design_violations = plan_sample_design_violations(plan, analysis_state)
-    if review_design_violations:
-        state["plan_approved"] = False
-        state["user_plan_feedback"] = (
-            "Deterministic sample-design validation requires revision: "
-            + "; ".join(
-                str(item.get("suggestion") or "")
-                for item in review_design_violations
-            )
-        )
-        await self._send_message(
-            "status",
-            "Plan review was returned for revision because it conflicts with "
-            "the measured modality-specific replicate counts.",
-            AgentType.PI,
-        )
-        return state
-
     # Wipe any action/event left behind by a previous gate invocation in the
     # same workflow (e.g. stage1's approve still sitting in the slot when
     # stage2's gate is entered). Without this, the `prev_action` capture

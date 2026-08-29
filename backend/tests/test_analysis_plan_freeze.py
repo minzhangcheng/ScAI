@@ -157,7 +157,7 @@ def test_every_tool_is_named_in_the_system_prompt():
     assert not missing, f"tools absent from the agent module text: {missing}"
 
 
-def test_register_score_requires_plan_id_for_panel_scores():
+def test_register_score_records_missing_plan_id_for_pi_review():
     import re
 
     block = inspect.getsource(executor_registration.handle_register_score)
@@ -167,7 +167,9 @@ def test_register_score_requires_plan_id_for_panel_scores():
     joined = re.sub(r'"\s*\n\s*(?:f?)"', "", block)
     joined = re.sub(r"\s+", " ", joined)
     assert "plan_id" in block
-    assert "must cite the plan_id" in joined
+    assert "Recorded without a frozen plan" in joined
+    assert "register-score-plan" in block
+    assert "return ToolAction.CONTINUE" not in block[:block.index("context.has_register_score = True")]
     assert "diff_panels" in block
 
 

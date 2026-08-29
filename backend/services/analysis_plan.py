@@ -12,12 +12,13 @@ the desired answer, with nothing in the record showing that other panels were
 tried. That is the garden of forking paths, and no amount of downstream
 statistics repairs it.
 
-What this module enforces
--------------------------
+What this module records
+------------------------
 A plan freezes ``(score_name, method, panel)`` and returns a ``plan_id``.
-``register_score`` must cite one, and the handler re-hashes the panel it was
+When ``register_score`` cites one, the handler re-hashes the panel it was
 actually given: if it differs from the frozen one, the score is recorded with an
-explicit, itemised diff rather than silently accepted.
+explicit, itemised diff. Missing plan linkage is also recorded for PI review;
+host code does not reject or accept the scientific result.
 
 What it does NOT prove
 ----------------------

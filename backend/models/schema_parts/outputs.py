@@ -360,7 +360,8 @@ class WebSocketMessage(BaseModel):
         "exploration_failed",
         # Modality warning (e.g. imaging data uploaded but its agent is disabled)
         "modality_warning",
-        # Final report blocked (e.g. insufficient direction coverage) — awaits user
+        # Legacy report-blocked event retained for stored-session compatibility;
+        # current reporting records coverage for PI review and does not emit it.
         "report_blocked",
         # Integration (cross-direction) round: gate for direction selection, and
         # terminal completion when the PI selects no further directions / cap hit

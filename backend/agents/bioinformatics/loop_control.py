@@ -221,30 +221,6 @@ class LoopControlMixin:
             llm_server=base_url,
         )
 
-    @staticmethod
-    def _check_gate_keyword(lowered_codes, keywords, reject_count, max_rejections, gate_label):
-        """Returns (new_reject_count, should_reject, escaped).
-        escaped is True ONLY when the gate is force-released after hitting
-        max_rejections (the mandatory analysis was NOT actually performed).
-        """
-        code_mentions = any(any(kw in lc for kw in keywords) for lc in lowered_codes)
-        if code_mentions:
-            return reject_count, False, False
-
-        if reject_count >= max_rejections:
-            logger.warning(
-                f"[Bioinformatics] {gate_label}: max rejections reached, "
-                "allowing report_findings"
-            )
-            return reject_count, False, True
-
-        new_count = reject_count + 1
-        logger.warning(
-            f"[Bioinformatics] report_findings rejected: {gate_label} "
-            f"(rejection {new_count}/{max_rejections})"
-        )
-        return new_count, True, False
-
     def _validate_code(self, code: str) -> Tuple[bool, str]:
         """
         Validate code for security before execution.

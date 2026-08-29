@@ -45,32 +45,6 @@ def build_execution_tool_result(code_execution, result) -> str:
     return content
 
 
-def reject_sample_design_code(context, tool_call, code, description, step_type) -> bool:
-    """Record and reject code incompatible with the measured sample design."""
-    design_error = code_sample_design_violation(code, context.state)
-    if not design_error:
-        return False
-    logger.warning(
-        "[Bioinformatics] Blocked code incompatible with sample design: %s",
-        design_error,
-    )
-    context.messages.append({
-        "role": "tool",
-        "tool_call_id": tool_call.id,
-        "content": f"Execution blocked: {design_error}",
-    })
-    context.analysis_log.append(AnalysisStep(
-        step_number=context.step_count,
-        step_type="execute_code",
-        agent_reasoning=context.agent_reasoning,
-        code=code,
-        code_error=design_error,
-        code_description=description,
-        code_step_type=step_type,
-    ))
-    return True
-
-
 def execution_plan_binding(
     state, args,
 ) -> tuple[str, list[int], str, str | None]:
@@ -267,8 +241,6 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
     ) = (
         execution_input_binding(state, args)
     )
-    if reject_sample_design_code(context, tool_call, code, description, step_type):
-        return ToolAction.CONTINUE
     is_safe, security_error = self._validate_code(code)
     if not is_safe:
         error_msg = f"Code validation failed: {security_error}"

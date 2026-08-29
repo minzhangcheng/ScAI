@@ -159,15 +159,10 @@ class GraphMixin:
             }
         )
 
-        # Final report flow: summary -> graphic abstract -> detailed report -> END
-        self.graph.add_conditional_edges(
-            "generate_final_report",
-            self._after_final_report,
-            {
-                "continue": "generate_graphic_abstract",
-                "blocked": END,
-            },
-        )
+        # Final report flow: summary -> graphic abstract -> detailed report -> END.
+        # Scientific coverage observations are reviewed by the PI and never
+        # terminate this host-controlled path.
+        self.graph.add_edge("generate_final_report", "generate_graphic_abstract")
         self.graph.add_edge("generate_graphic_abstract", "generate_detailed_report")
         self.graph.add_edge("generate_detailed_report", END)
 

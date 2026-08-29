@@ -17,11 +17,7 @@ from ..agents.bioinformatics.stage1_baseline_figures import (
     ensure_stage1_baseline_figures,
 )
 from ..services.figure_contract import audit_figure_contract
-from ..services.sample_design import (
-    BULK_RNASEQ_MODALITY,
-    SCRNA_MODALITY,
-    has_replicated_condition_design,
-)
+from ..services.sample_design import sequencing_design_instruction
 from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, MAX_EXECUTION_REVISION_ATTEMPTS, prepend_species, safe_pi_brief, STAGE1_KEYWORDS, WorkflowSupersededError
 from ..utils.blob_store import BLOB_REF_PREFIX
 from .retry import with_retry

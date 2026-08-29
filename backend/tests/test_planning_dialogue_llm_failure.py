@@ -209,9 +209,8 @@ class TestPlanningDialoguePIReviewFailure:
     """Test PI review UpstreamExhaustedError handling in _planning_dialogue."""
 
     @pytest.mark.asyncio
-    async def test_pi_review_upstream_exhausted_skip_auto_accepts_plan(self):
-        """When PI review fails with UpstreamExhaustedError and user SKIPs,
-        the plan is auto-accepted and forwarded to user_review_gate."""
+    async def test_pi_review_upstream_exhausted_skip_does_not_approve_plan(self):
+        """A plan without a completed PI review cannot be auto-approved."""
         wf = _make_workflow()
         wf._wait_for_llm_intervention = AsyncMock(return_value=LlmFailureAction.SKIP)
 
@@ -236,14 +235,15 @@ class TestPlanningDialoguePIReviewFailure:
 
         result = await wf._planning_dialogue(state)
 
-        assert plan.status == "pi_reviewing"
-        assert analysis_state.current_plan == plan
-        assert result["planning_result"]["plan"] == plan.model_dump(mode="json")
-        dialogue = result["planning_result"]["dialogue"]
-        assert len(dialogue) == 1
-        assert dialogue[0]["pi_decision"] == "approved"
-        assert "LLM failure" in dialogue[0]["pi_feedback"]
-        assert "auto-accepted" in dialogue[0]["pi_feedback"]
+        assert plan.status == "draft"
+        assert analysis_state.current_plan is None
+        assert result["failed_node"] == "planning_dialogue"
+        assert result["planning_result"]["status"] == "failed"
+        assert result["should_continue"] is False
+        assert analysis_state.status == TaskStatus.FAILED
+        wf._send_state_sync.assert_awaited_once_with(
+            analysis_state, "planning_aborted"
+        )
 
     @pytest.mark.asyncio
     async def test_pi_review_upstream_exhausted_retry_then_succeed(self):

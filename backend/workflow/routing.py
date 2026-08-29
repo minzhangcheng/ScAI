@@ -145,9 +145,8 @@ class RoutingMixin:
             return "continue"
 
         # The batch was attempted but still lacks coverage-eligible evidence.
-        # Stop at the partial-report gate instead of launching directionless
-        # rounds forever. The user can approve a partial report or retry with
-        # explicit new guidance/data.
+        # Stop launching directionless rounds and proceed to PI-owned report
+        # generation, where the gap is recorded as an observation.
         if active_batch_incomplete(analysis_state):
             logger.info(
                 f"[{self.session_id}] Stopping: active direction batch exhausted "

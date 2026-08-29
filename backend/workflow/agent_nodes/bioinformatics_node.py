@@ -167,21 +167,13 @@ async def prepare_bioinformatics_instruction(self, state, analysis_state):
         from backend.services.bulk_input_profile import ensure_bulk_input_profiles
 
         ensure_bulk_input_profiles(analysis_state)
-    scrna_replicated = has_replicated_condition_design(
-        analysis_state, SCRNA_MODALITY,
-    )
-    bulk_replicated = has_replicated_condition_design(
-        analysis_state, BULK_RNASEQ_MODALITY,
-    )
-
     phase_instruction = build_phase_instruction(
         planning_stage=planning_stage,
         analysis_phase=analysis_state.analysis_phase.value,
         has_bulk=has_bulk, has_scrna=has_scrna,
         direction=analysis_state.current_round_direction or "",
-        scrna_replicated=scrna_replicated,
-        bulk_replicated=bulk_replicated,
     )
+    design_facts = sequencing_design_instruction(analysis_state)
 
     # Build merge strategy context from PI instructions
     merge_context = ""
@@ -218,6 +210,9 @@ async def prepare_bioinformatics_instruction(self, state, analysis_state):
 
 Research context: {analysis_state.initial_instruction}
 {phase_instruction}
+
+Measured sequencing-design facts for PI-owned scientific judgment:
+{design_facts or "No additional measured sequencing-design facts."}
 
 PI's analysis goals for this round:
 {goals_text}
@@ -472,8 +467,6 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
     )
 
     effective_status = result.get("status", "completed")
-    if not figure_contract.passed and effective_status == "completed":
-        effective_status = "partial"
 
     final_result = {
         "findings": all_findings,

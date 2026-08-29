@@ -47,7 +47,6 @@ class ExecutorLoopContext:
     mechanism_programs: list
     checkpoint_manager: Any
     save_checkpoint: Any
-    record_forced_score_gate: Any
     review_callback: Any
     supervisor_callback: Any
     planning_stage: str
@@ -59,14 +58,6 @@ class ExecutorLoopContext:
     annotation_retry_required: bool = False
     annotation_retry_attempts: int = 0
     mechanism_programs_registered: bool = False
-    mechanism_gate_reject_count: int = 0
-    stats_gate_reject_count: int = 0
-    score_gate_reject_count: int = 0
-    integration_reject_count: int = 0
-    bulk_reject_count: int = 0
-    evidence_citation_reject_count: int = 0
-    deconv_reject_count: int = 0
-    innovation_bulk_reject_count: int = 0
     evidence_gate_degraded: bool = False
     evidence_gate_findings: list = None
     reported_evidence_ids: list = None

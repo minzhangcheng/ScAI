@@ -272,14 +272,6 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
     consecutive_errors = context.consecutive_errors
     total_errors = context.total_errors
     figures_rendered = context.figures_rendered
-    score_gate_reject_count = context.score_gate_reject_count
-    mechanism_gate_reject_count = context.mechanism_gate_reject_count
-    stats_gate_reject_count = context.stats_gate_reject_count
-    integration_reject_count = context.integration_reject_count
-    bulk_reject_count = context.bulk_reject_count
-    evidence_citation_reject_count = context.evidence_citation_reject_count
-    deconv_reject_count = context.deconv_reject_count
-    innovation_bulk_reject_count = context.innovation_bulk_reject_count
     evidence_gate_degraded = context.evidence_gate_degraded
     evidence_gate_findings = context.evidence_gate_findings
     reported_evidence_ids = context.reported_evidence_ids
@@ -288,7 +280,6 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
     completed = context.completed
     _plan_revision_needed = context.plan_revision_needed
     _plan_revision_context = context.plan_revision_context
-    _record_forced_score_gate = context.record_forced_score_gate
     _save_executor_checkpoint = context.save_checkpoint
     _supervisor_callback = context.supervisor_callback
     # Track what kind of work this iteration contains for step budget decisions
@@ -335,14 +326,6 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
         consecutive_errors=consecutive_errors,
         total_errors=total_errors,
         figures_rendered=figures_rendered,
-        score_gate_reject_count=score_gate_reject_count,
-        mechanism_gate_reject_count=mechanism_gate_reject_count,
-        stats_gate_reject_count=stats_gate_reject_count,
-        integration_reject_count=integration_reject_count,
-        bulk_reject_count=bulk_reject_count,
-        evidence_citation_reject_count=evidence_citation_reject_count,
-        deconv_reject_count=deconv_reject_count,
-        innovation_bulk_reject_count=innovation_bulk_reject_count,
         evidence_gate_degraded=evidence_gate_degraded,
         evidence_gate_findings=evidence_gate_findings,
         reported_evidence_ids=reported_evidence_ids,
@@ -351,7 +334,6 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
         completed=completed,
         plan_revision_needed=_plan_revision_needed,
         plan_revision_context=_plan_revision_context,
-        record_forced_score_gate=_record_forced_score_gate,
         save_checkpoint=_save_executor_checkpoint,
         supervisor_callback=_supervisor_callback,
     )
@@ -431,20 +413,12 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
     has_figure_work = has_figure_work or tool_runtime.has_figure_work
     figures_rendered = tool_runtime.figures_rendered
     has_register_score = has_register_score or tool_runtime.has_register_score
-    score_gate_reject_count = tool_runtime.score_gate_reject_count
     mechanism_programs_registered = tool_runtime.mechanism_programs_registered
     annotation_completed = tool_runtime.annotation_completed
     annotation_retry_required = tool_runtime.annotation_retry_required
     annotation_retry_attempts = tool_runtime.annotation_retry_attempts
     consecutive_errors = tool_runtime.consecutive_errors
     total_errors = tool_runtime.total_errors
-    mechanism_gate_reject_count = tool_runtime.mechanism_gate_reject_count
-    stats_gate_reject_count = tool_runtime.stats_gate_reject_count
-    integration_reject_count = tool_runtime.integration_reject_count
-    bulk_reject_count = tool_runtime.bulk_reject_count
-    evidence_citation_reject_count = tool_runtime.evidence_citation_reject_count
-    deconv_reject_count = tool_runtime.deconv_reject_count
-    innovation_bulk_reject_count = tool_runtime.innovation_bulk_reject_count
     evidence_gate_degraded = (
         context.evidence_gate_degraded
         or evidence_gate_degraded
@@ -467,14 +441,6 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
     context.consecutive_errors = consecutive_errors
     context.total_errors = total_errors
     context.figures_rendered = figures_rendered
-    context.score_gate_reject_count = score_gate_reject_count
-    context.mechanism_gate_reject_count = mechanism_gate_reject_count
-    context.stats_gate_reject_count = stats_gate_reject_count
-    context.integration_reject_count = integration_reject_count
-    context.bulk_reject_count = bulk_reject_count
-    context.evidence_citation_reject_count = evidence_citation_reject_count
-    context.deconv_reject_count = deconv_reject_count
-    context.innovation_bulk_reject_count = innovation_bulk_reject_count
     context.evidence_gate_degraded = evidence_gate_degraded
     context.evidence_gate_findings = evidence_gate_findings
     context.reported_evidence_ids = reported_evidence_ids
@@ -868,8 +834,8 @@ async def prepare_loop_context(
                 )
 
     annotation_completed = False
-    # Restore annotation_completed from analysis_log to avoid Gate 0
-    # falsely rejecting report_findings after resume. Failed annotation
+    # Restore annotation_completed from analysis_log so the PI observation is
+    # accurate after resume. Failed annotation
     # attempts also write an annotate_clusters step (with summary prefixed
     # "[ANNOTATION FAILED]"), so exclude those.
     if analysis_log and any(
@@ -885,42 +851,6 @@ async def prepare_loop_context(
         for s in analysis_log
     ))
     evidence_gate_findings: List[Dict[str, Any]] = []
-    loop_context = None
-
-    def _record_forced_score_gate(record: Dict[str, Any]) -> None:
-        """Persist register_score ceiling escapes before report_findings."""
-        enriched = {**record, "round_number": state.current_round}
-        key = (
-            enriched.get("gate"),
-            enriched.get("rule_id"),
-            enriched.get("subject"),
-            enriched.get("round_number"),
-        )
-        if not any(
-            (
-                existing.get("gate"),
-                existing.get("rule_id"),
-                existing.get("subject"),
-                existing.get("round_number"),
-            ) == key
-            for existing in evidence_gate_findings
-            if isinstance(existing, dict)
-        ):
-            evidence_gate_findings.append(enriched)
-        loop_context.evidence_gate_degraded = True
-        state.evidence_gate_degraded = True
-        if not any(
-            (
-                existing.get("gate"),
-                existing.get("rule_id"),
-                existing.get("subject"),
-                existing.get("round_number"),
-            ) == key
-            for existing in state.evidence_gate_findings
-            if isinstance(existing, dict)
-        ):
-            state.evidence_gate_findings.append(dict(enriched))
-
     loop_context = executor_context.ExecutorLoopContext(
         agent=self,
         analysis_state=state,
@@ -931,7 +861,6 @@ async def prepare_loop_context(
         mechanism_programs=mechanism_programs,
         checkpoint_manager=checkpoint_mgr,
         save_checkpoint=_save_executor_checkpoint,
-        record_forced_score_gate=_record_forced_score_gate,
         review_callback=review_callback,
         supervisor_callback=_supervisor_callback,
         planning_stage=planning_stage,

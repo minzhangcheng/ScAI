@@ -1,21 +1,11 @@
-"""No gate may trap the analysis loop.
+"""Scientific observations may not trap or decide the analysis loop.
 
-Every report_findings gate in this agent carries a ceiling and an escape hatch,
-on the principle that a check the agent cannot satisfy must not stall the run.
-The register_score gates added alongside them initially did not, which mattered
-most for the plan_id requirement: unlike a provenance error, it cannot be fixed
-from inside register_score at all -- it needs a prior register_analysis_plan
-call. A model that misses that connection would retry forever, and because a
-rejected call never sets has_register_score, each attempt also burns a step
-instead of being refunded.
-
-These tests pin the ceiling, the escape, and the fact that an escape is
-recorded rather than silently blessed.
+Missing score provenance or a frozen panel remains recorded, but registration
+proceeds and the PI decides how the limitation affects acceptance. Structural
+tool payload errors retain their normal correction path.
 """
 import inspect
 import re
-
-import pytest
 
 import backend.agents.bioinformatics_agent as bio_mod
 from backend.agents.bioinformatics import (
@@ -53,53 +43,50 @@ def _joined(block: str) -> str:
     return re.sub(r"\s+", " ", joined)
 
 
-def test_score_gate_has_a_ceiling():
+def test_register_score_has_no_scientific_rejection_ceiling():
     src = _loop_source()
-    assert "max_score_gate_rejections" in src
-    assert "score_gate_reject_count" in src
+    assert "max_score_gate_rejections" not in src
+    assert "score_gate_reject_count" not in src
 
 
-def test_every_score_gate_rejection_is_counted():
-    """An uncounted `continue` is an unbounded loop by another name."""
+def test_register_score_does_not_reject_missing_scientific_metadata():
     block = _register_score_block()
-    # Each rejection path must sit inside a counter comparison.
-    assert block.count(
-        "score_gate_reject_count < context.max_score_gate_rejections"
-    ) >= 2, (
-        "both the provenance and the plan rejection paths must be bounded"
-    )
+    before_registration = block[:block.index("context.has_register_score = True")]
+    assert "return ToolAction.CONTINUE" not in before_registration
+    assert "register_score rejected" not in block
 
 
-def test_score_gate_escape_records_what_was_not_established():
-    """Force-releasing a gate silently would be worse than not having it."""
+def test_score_limitations_are_recorded_for_pi_review():
     block = _register_score_block()
-    assert "gate_note" in block
-    assert "gate_escape" in block, "the escape must be recorded on the score"
+    assert "review_notes" in block
+    assert "pi_review_observations" in block
+    assert 'severity="advise"' in block
     text = _joined(block)
     assert "unattributed" in text
     assert "not pre-specified" in text
+    assert "PI must decide" in text
 
 
-def test_score_is_still_registered_after_the_ceiling():
-    """Blocking registration forever would leave the methodology section empty."""
+def test_score_is_registered_without_host_scientific_acceptance():
     block = _register_score_block()
-    text = _joined(block)
-    escape_idx = text.index("max rejections reached, recording score as unattributed")
-    tail = text[escape_idx:]
-    assert "has_register_score = True" in tail or "score_def = ScoreDefinition(" in tail
+    assert "context.has_register_score = True" in block
+    assert "score_def = ScoreDefinition(" in block
 
 
-@pytest.mark.parametrize("ceiling", [
-    "max_mechanism_rejections",
-    "max_stats_gate_rejections",
-    "max_integration_rejections",
-    "max_deconv_rejections",
-    "max_score_gate_rejections",
-])
-def test_all_gate_ceilings_are_defined(ceiling):
-    """Keep the set of bounded gates visible in one place."""
+def test_scientific_rejection_counters_are_retired():
     src = _loop_source()
-    assert re.search(rf"{ceiling}:\s*int\s*=\s*\d+", src), f"{ceiling} has no numeric ceiling"
+    retired = (
+        "max_score_gate_rejections",
+        "score_gate_reject_count",
+        "max_mechanism_rejections",
+        "max_stats_gate_rejections",
+        "max_integration_rejections",
+        "max_bulk_rejections",
+        "max_evidence_citation_refusals",
+        "max_deconv_rejections",
+        "max_innovation_bulk_rejections",
+    )
+    assert not [name for name in retired if name in src]
 
 
 def test_no_unbounded_rejection_added_to_register_analysis_plan():
@@ -179,7 +166,7 @@ def test_an_exhausted_allowance_charges_a_normal_step():
 
 
 def _bulk_method_gate() -> str:
-    return inspect.getsource(executor_report_gates.check_mandatory_report_gates)
+    return inspect.getsource(executor_report_gates.attach_report_observations)
 
 
 def test_bulk_method_decision_gap_is_advisory_and_non_blocking():
@@ -214,7 +201,9 @@ def test_bulk_gate_does_not_infer_execution_from_code_keywords():
 # ---------------------------------------------------------------------------
 
 def _evidence_citation_gate() -> str:
-    return inspect.getsource(executor_report_gates.check_report_evidence)
+    return inspect.getsource(
+        executor_report_gates.record_report_evidence_candidates
+    )
 
 
 def test_evidence_candidates_do_not_count_or_trigger_refusals():
@@ -230,6 +219,7 @@ def test_evidence_candidates_remain_explicitly_unverified():
     assert 'record["semantic_status"] = "unverified"' in block
 
 
-def test_evidence_candidate_normalization_always_returns_to_the_workflow():
+def test_evidence_candidate_normalization_has_no_acceptance_boolean():
     block = _evidence_citation_gate()
-    assert block.rstrip().endswith("return True")
+    assert "return True" not in block
+    assert "return False" not in block

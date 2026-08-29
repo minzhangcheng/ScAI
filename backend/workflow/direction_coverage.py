@@ -187,7 +187,7 @@ def attempted_innovation_direction_keys(
     Attempted coverage is deliberately broader than completed coverage. Once a
     direction produced a terminal round result (including partial/failed), the
     workflow must not launch unbounded directionless rounds trying to make the
-    same batch complete. Reporting can still require explicit partial approval.
+    same batch complete. Reporting records the gap for PI review and proceeds.
     """
     target_lineage = lineage_id or current_lineage_id(state)
     attempted: Set[str] = set()

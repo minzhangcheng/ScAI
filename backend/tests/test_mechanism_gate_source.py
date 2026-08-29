@@ -3,12 +3,10 @@ from backend.agents.bioinformatics_agent import BioinformaticsAgent
 from backend.agents.bioinformatics import executor_report_gates
 
 
-def test_gate_rejects_when_not_registered():
-    src = inspect.getsource(executor_report_gates.check_mandatory_report_gates)
+def test_missing_registration_is_a_non_blocking_pi_observation():
+    src = inspect.getsource(executor_report_gates.attach_report_observations)
     assert "not context.mechanism_programs_registered" in src
-    # gate scoped to stage-2 downstream exploration
     assert 'context.planning_stage != "stage1"' in src
-    # bounded release
-    assert "mechanism_gate_reject_count" in src
-    assert "max_mechanism_rejections" in src
-    assert 'build_gate_skip_note("data-driven mechanism program capture")' in src
+    assert "mechanism_gate_reject_count" not in src
+    assert 'severity="advise"' in src
+    assert "PI review observation; non-blocking" in src

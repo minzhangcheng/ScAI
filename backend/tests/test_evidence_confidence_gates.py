@@ -9,9 +9,9 @@ without any single step being wrong:
   their agreement were corroboration;
 * a mechanism graded `strong` on instruments that existed only inside that run.
 
-None of these is detectable from a single number. All three are detectable from
-structure the platform already records, which is why they are checks and not
-prompt text.
+None of these is detectable from a single number. The platform records the
+structure as PI review observations; it does not change a scientific grade or
+decide acceptance itself.
 """
 from types import SimpleNamespace
 
@@ -96,7 +96,7 @@ def test_redundancy_travels_as_an_advisory_through_run_gates():
 
 # --------------------------------------------------- resampling resolution
 
-def test_a_p_value_at_the_floor_is_refused_as_an_estimate():
+def test_a_p_value_at_the_floor_is_recorded_for_pi_review():
     """500 resamples put the floor at 1/501; a value there is a bound.
 
     Quoted rounded, as it always is in prose: 1/501 reads "0.002".
@@ -106,18 +106,18 @@ def test_a_p_value_at_the_floor_is_refused_as_an_estimate():
         ["The GSEA result for ranked_panel was strongly enriched, FDR = 0.002."],
         [score],
     )
-    blocking = [f for f in out if f.severity == "block"]
-    assert len(blocking) == 1
-    assert blocking[0].rule_id == "resampling-p-has-a-resolution-floor"
-    assert "0.002" in blocking[0].detail
+    assert len(out) == 1
+    assert out[0].severity == "advise"
+    assert out[0].rule_id == "resampling-p-has-a-resolution-floor"
+    assert "0.002" in out[0].detail
 
 
-def test_the_next_attainable_value_up_is_not_refused():
+def test_the_next_attainable_value_up_has_no_resolution_observation():
     """The rounding tolerance must not reach a genuinely larger p-value."""
     score = _score("ranked_panel", n_resamples=500)
     out = check_resampling_resolution(
         ["The GSEA result for ranked_panel gave FDR = 0.004."], [score])
-    assert [f for f in out if f.severity == "block"] == []
+    assert out == []
 
 
 def test_the_same_value_reported_as_a_bound_is_accepted():
@@ -125,7 +125,7 @@ def test_the_same_value_reported_as_a_bound_is_accepted():
     score = _score("ranked_panel", n_resamples=500)
     out = check_resampling_resolution(
         ["The GSEA result for ranked_panel reached FDR < 0.002."], [score])
-    assert [f for f in out if f.severity == "block"] == []
+    assert out == []
 
 
 def test_an_analytic_p_value_is_not_subject_to_a_resampling_floor():
@@ -135,7 +135,7 @@ def test_an_analytic_p_value_is_not_subject_to_a_resampling_floor():
         ["The differential expression test gave padj = 2.2e-43 for this feature."],
         [score],
     )
-    assert [f for f in out if f.severity == "block"] == []
+    assert out == []
 
 
 def test_an_undeclared_resample_count_advises_but_does_not_block():
@@ -193,7 +193,7 @@ def _program(strength, scores):
     }
 
 
-def test_a_grade_is_capped_by_instruments_nobody_else_can_obtain():
+def test_analysis_specific_instruments_are_observed_without_changing_grade():
     from backend.agents.bioinformatics.mechanism_validation import (
         validate_mechanism_program_payload,
     )
@@ -203,7 +203,7 @@ def test_a_grade_is_capped_by_instruments_nobody_else_can_obtain():
         score_provenance={"hand_built": {"kind": "bespoke"}},
     )
     assert err is None
-    assert progs[0].evidence_strength == "moderate"
+    assert progs[0].evidence_strength == "strong"
     assert any("cannot be retrieved independently" in m
                for m in progs[0].missing_evidence)
 
@@ -221,8 +221,7 @@ def test_a_versioned_source_leaves_the_grade_alone():
     assert progs[0].evidence_strength == "strong"
 
 
-def test_one_reproducible_source_among_several_is_enough():
-    """The cap applies only when EVERY resolvable source is analysis-specific."""
+def test_one_reproducible_source_avoids_the_analysis_specific_observation():
     from backend.agents.bioinformatics.mechanism_validation import (
         validate_mechanism_program_payload,
     )
@@ -233,6 +232,8 @@ def test_one_reproducible_source_among_several_is_enough():
                           "from_a_database": {"kind": "database"}},
     )
     assert progs[0].evidence_strength == "strong"
+    assert not any("cannot be retrieved independently" in item
+                   for item in progs[0].missing_evidence)
 
 
 def test_an_unresolvable_citation_does_not_lower_the_grade():
@@ -248,7 +249,7 @@ def test_an_unresolvable_citation_does_not_lower_the_grade():
     assert progs[0].evidence_strength == "strong"
 
 
-def test_the_clamp_is_off_when_no_provenance_map_is_supplied():
+def test_no_provenance_map_leaves_the_grade_alone():
     """Existing callers must keep their behaviour exactly."""
     from backend.agents.bioinformatics.mechanism_validation import (
         validate_mechanism_program_payload,
@@ -258,7 +259,7 @@ def test_the_clamp_is_off_when_no_provenance_map_is_supplied():
     assert progs[0].evidence_strength == "strong"
 
 
-def test_the_clamp_never_raises_a_grade():
+def test_a_weak_declared_grade_is_left_alone():
     from backend.agents.bioinformatics.mechanism_validation import (
         validate_mechanism_program_payload,
     )

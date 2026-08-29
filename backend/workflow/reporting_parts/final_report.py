@@ -52,7 +52,7 @@ from .shared import (  # noqa: F401
     direction_coverage_status,
     resolve_report_output_dir,
     build_lineage_report_state,
-    validate_complete_report_allowed,
+    report_coverage_observation,
 )
 
 
@@ -93,45 +93,27 @@ def analysis_completion_message(report: Optional[Dict[str, Any]]) -> str:
 class FinalReportMixin:
     """Final report and detailed report generation nodes."""
 
-    def _after_final_report(self, state: WorkflowState) -> str:
-        return "blocked" if state.get("report_blocked") else "continue"
-
     async def _generate_final_report(self, state: WorkflowState) -> WorkflowState:
         """Generate final analysis report including integrated report with figures"""
         analysis_state = state["analysis_state"]
 
-        # Validate direction coverage before proceeding
-        allowed, reason = validate_complete_report_allowed(analysis_state)
-        if not allowed and not getattr(analysis_state, "allow_partial_report", False):
-            # The report gate has no countdown/auto-skip of its own (unlike the
-            # per-round wait gate in _wait_for_user_input). In any auto-advancing
-            # mode (no-wait or countdown, i.e. round_wait_seconds >= 0) no user is
-            # guaranteed to be present to approve a partial report, so blocking
-            # here strands the run at a silent dead-end that produces no report.
-            # Fall through and emit a partial report instead; only manual mode
-            # (round_wait_seconds == -1) keeps the block-and-wait behavior.
-            if getattr(analysis_state, "round_wait_seconds", -1) >= 0:
-                logger.warning(
-                    f"[{self.session_id}] Direction coverage incomplete but "
-                    f"round_wait_seconds >= 0 (auto-advancing mode); producing a "
-                    f"partial report instead of blocking. Reason: {reason}"
-                )
-                analysis_state.allow_partial_report = True
-            else:
-                logger.warning(
-                    f"[{self.session_id}] Direction coverage incomplete; blocking "
-                    f"report and waiting for user to approve a partial report. "
-                    f"Reason: {reason}"
-                )
-                self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
-                await self._send_message("report_blocked", {"reason": reason, "partial_allowed": True}, AgentType.PI)
-                await self._send_state_sync(analysis_state, "report_blocked")
-                return {
-                    **state,
-                    "analysis_state": analysis_state,
-                    "should_continue": False,
-                    "report_blocked": True,
-                }
+        coverage_observation = report_coverage_observation(analysis_state)
+        if coverage_observation:
+            logger.warning(
+                "[%s] Direction coverage observation recorded for PI review: %s",
+                self.session_id,
+                coverage_observation,
+            )
+            if analysis_state.round_results:
+                note = "PI review observation: " + coverage_observation
+                evidence_notes = analysis_state.round_results[-1].evidence_notes
+                if note not in evidence_notes:
+                    evidence_notes.append(note)
+            await self._send_message(
+                "status",
+                "PI is reviewing incomplete direction coverage; report generation will proceed.",
+                AgentType.PI,
+            )
 
         if not analysis_state.analysis_log and not analysis_state.code_history:
             # current_round may be >0 even when no work happened (initialize_round
@@ -238,9 +220,6 @@ class FinalReportMixin:
 
     async def _generate_detailed_report(self, state: WorkflowState) -> WorkflowState:
         """Generate detailed report with figures and tables"""
-        if state.get("report_blocked"):
-            return state
-
         analysis_state = state["analysis_state"]
 
         if not analysis_state.analysis_log and not analysis_state.code_history:

@@ -96,21 +96,13 @@ class SynthesisMixin:
         must NOT advance EXPLORATION -> INNOVATION; the user retains the option
         to retry stage 1 in the next round.
 
-        'partial' is a disclosure of degraded evidence, not a claim of
-        incomplete execution: it is what the executor returns when
-        report_findings WAS accepted but a bounded gate force-released
-        (evidence_gate_degraded), and what workflow.agents substitutes when the
-        required-figure contract is unmet. Both are non-blocking by design --
-        the executor demoted the figure contract to an observation on purpose,
-        and decide_bioinfo_post_execution / workflow.agents already spell the
-        clean set as ("completed", "partial"). Refusing it here made this the
-        only consumer on the pipeline that reads it as failure, and the refusal
-        is unrecoverable: the gates that force-release are the ones a retry
-        cannot satisfy (a one-sample-per-condition design does not gain a
-        replicate by rerunning stage 1), so the user got an
-        exploration_failed dialog blaming their upload with no way out of it.
-        Measured on session 3d675631: 10 findings, 22 saved figures, an
-        accepted report_findings call, reported to the user as bad data.
+        'partial' is a disclosure of degraded or operationally incomplete
+        evidence, not a host scientific verdict. Statistical and figure checks
+        are PI review observations and do not set this status. Operational paths
+        such as a supervisor force-stop may still return partial. Measured on
+        session 3d675631, treating a scientifically limited result as a host
+        failure produced an unrecoverable exploration_failed dialog despite 10
+        findings and 22 saved figures; that scientific veto must not return.
 
         The degradation still reaches the report — evidence_gate_degraded,
         evidence_verified and evidence_notes ride on the round result and are

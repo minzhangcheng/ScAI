@@ -234,15 +234,10 @@ async def test_process_preserves_execution_evidence_metadata():
 
 
 @pytest.mark.asyncio
-async def test_register_score_ceiling_force_releases_inside_real_tool_loop(
+async def test_register_score_limitations_remain_advisory_inside_real_tool_loop(
     monkeypatch, tmp_path,
 ):
-    """Repeated invalid provenance/plan calls terminate with a degraded audit.
-
-    This drives the real autonomous dispatcher.  A source-only assertion cannot
-    prove that the counter survives turns, that the fifth call is registered,
-    or that the result and durable session both carry the forced-release record.
-    """
+    """Repeated invalid metadata is recorded without degrading acceptance."""
     from backend.tests.split_facade import setattr_facade
     from backend.utils.llm_client import LLMToolResponse, ToolCall
 
@@ -405,16 +400,17 @@ async def test_register_score_ceiling_force_releases_inside_real_tool_loop(
     )
 
     assert fake_client.chat_with_tools.await_count == 5
-    assert result["status"] == "partial"
-    assert result["evidence_gate_degraded"] is True
+    assert result["status"] == "completed"
+    assert result["evidence_gate_degraded"] is False
     assert result["evidence_verified"] is False
-    assert state.evidence_gate_degraded is True
+    assert state.evidence_gate_degraded is False
     assert len(state.score_definitions) == 1
-    assert "gate_escape" in state.score_definitions[0].plan_drift
+    assert "pi_review_observations" in state.score_definitions[0].plan_drift
     gates = {item["gate"] for item in result["evidence_gate_findings"]}
     assert gates == {"register-score-provenance", "register-score-plan"}
     for item in result["evidence_gate_findings"]:
-        assert item["forced_release"] is True
-        assert item["rejection_count"] == 4
-        assert item["rejection_limit"] == 4
+        assert item["severity"] == "advise"
+        assert item["forced_release"] is False
+        assert item["rejection_count"] == 0
+        assert item["rejection_limit"] == 0
         assert item["round_number"] == 2
