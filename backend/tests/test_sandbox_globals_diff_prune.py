@@ -102,6 +102,28 @@ def test_rebound_loom_handle_is_not_promoted_to_required_runtime():
     assert sb.runtime_dependency_tracker.required_outputs == {"path"}
 
 
+def test_function_local_h5py_handle_is_not_promoted_to_required_runtime():
+    sb = _bare_sandbox()
+    live = {"f", "h5py", "source_path"}
+    sb._record_globals_diff(before=set(), after=live)
+
+    code = (
+        "import h5py\n"
+        "def read_h5(path):\n"
+        "    with h5py.File(path, 'r') as f:\n"
+        "        return tuple(f.keys())\n"
+        "result = read_h5(source_path)"
+    )
+    after = live | {"read_h5", "result"}
+    sb._record_globals_diff(
+        before=live,
+        after=after,
+        loaded=sb._loaded_global_names_from_code(code),
+    )
+
+    assert sb.runtime_dependency_tracker.required_outputs == {"source_path"}
+
+
 def test_legacy_unobserved_declarations_are_pruned_but_created_dependencies_fail_closed():
     sb = _bare_sandbox()
     sb.runtime_dependency_tracker = RuntimeDependencyTracker.from_state_dict(

@@ -515,6 +515,45 @@ print("__SCAI_RUNTIME_METRICS__:" + _scai_json.dumps({
                         alias.asname or alias.name.split(".", 1)[0]
                         for alias in statement.names
                     )
+                elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    # Defaults, decorators, and annotations are evaluated while
+                    # defining the function. Its body runs in a separate local
+                    # scope: parameters and same-cell bindings must not be
+                    # mistaken for reads of an older kernel global.
+                    for decorator in statement.decorator_list:
+                        _loads(decorator, bound)
+                    for default in (
+                        list(statement.args.defaults)
+                        + [value for value in statement.args.kw_defaults if value]
+                    ):
+                        _loads(default, bound)
+                    for argument in (
+                        list(statement.args.posonlyargs)
+                        + list(statement.args.args)
+                        + list(statement.args.kwonlyargs)
+                    ):
+                        _loads(argument.annotation, bound)
+                    if statement.args.vararg:
+                        _loads(statement.args.vararg.annotation, bound)
+                    if statement.args.kwarg:
+                        _loads(statement.args.kwarg.annotation, bound)
+                    _loads(statement.returns, bound)
+                    function_bound = set(bound)
+                    function_bound.add(statement.name)
+                    function_bound.update(
+                        argument.arg
+                        for argument in (
+                            list(statement.args.posonlyargs)
+                            + list(statement.args.args)
+                            + list(statement.args.kwonlyargs)
+                        )
+                    )
+                    if statement.args.vararg:
+                        function_bound.add(statement.args.vararg.arg)
+                    if statement.args.kwarg:
+                        function_bound.add(statement.args.kwarg.arg)
+                    _block(statement.body, function_bound)
+                    bound.add(statement.name)
                 elif isinstance(statement, ast.If):
                     _loads(statement.test, bound)
                     _block(statement.body, bound)

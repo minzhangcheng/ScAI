@@ -128,7 +128,9 @@ export async function loadRealtimeMessageHistory(
       )
       if (!ownsSession(sessionId, options)) break
       const pageMessages = page.messages || []
-      const pageOverlaps = pageMessages.some(message => overlapIds.has(message.id))
+      const pageOverlaps = pageMessages.some(
+        message => message.id !== undefined && overlapIds.has(message.id),
+      )
       added += mergeRealtimeMessages(pageMessages)
       pages += 1
       initial = false
