@@ -66,7 +66,8 @@ class ClientsMixin:
                 f"trying fallback model: {self.fallback_model}"
             )
             try:
-                resp = await self.fallback_llm_client.chat(
+                resp = await self._budgeted_text_call(
+                    self.fallback_llm_client.chat,
                     model=self.fallback_model,
                     messages=[{"role": "system", "content": self.system_prompt}, {"role": "user", "content": prompt}],
                     temperature=temperature,
@@ -207,7 +208,8 @@ class ClientsMixin:
         try:
             for _attempt in range(_max_conn_retries + 1):
                 try:
-                    response = await dr_client.chat(
+                    response = await self._budgeted_text_call(
+                        dr_client.chat,
                         model=request_model,
                         messages=[
                             {"role": "system", "content": request_system_prompt},

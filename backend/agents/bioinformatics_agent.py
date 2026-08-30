@@ -32,6 +32,15 @@ from ..utils.checkpoint import CheckpointManager
 import json as _json
 from backend.services.marker_priors import MarkerDB, summarize_database_priors
 from ..utils.formatting import format_revision_history, truncate_for_llm
+from ..utils.context_budget import (
+    ContextBudget,
+    FRAMING_RESERVE_TOKENS,
+    compact_messages,
+    estimate_tokens,
+    message_text,
+    resolve_ceiling,
+    summarize_dropped_messages,
+)
 from ..utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ..services.statistical_gates import run_gates as run_statistical_gates
 from ..services.sample_design import (
@@ -600,122 +609,60 @@ class BioinformaticsAgent(
 
     # ---- Context compaction (volume-based) ----
 
-    COMPACT_THRESHOLD_TOKENS = 150_000
-    COMPACT_TARGET_TOKENS = 105_000
+    _EXECUTOR_COMPLETION_RESERVE = 32_768
+    _COMPACT_THRESHOLD_FACTOR = 0.90
+    _COMPACT_TARGET_RATIO = 0.70
     RECENT_PROTECT = 6
     _CHARS_PER_TOKEN = 3.5
     _COMPACT_TRUNCATE_BUDGETS = [64 * 1024, 32 * 1024, 16 * 1024]
 
+    @property
+    def COMPACT_THRESHOLD_TOKENS(self) -> int:
+        return resolve_ceiling(
+            self._resolve_context_window(),
+            completion_reserve=self._EXECUTOR_COMPLETION_RESERVE,
+            budget_factor=self._COMPACT_THRESHOLD_FACTOR,
+        )
+
+    @property
+    def COMPACT_TARGET_TOKENS(self) -> int:
+        return int(self.COMPACT_THRESHOLD_TOKENS * self._COMPACT_TARGET_RATIO)
+
+    @staticmethod
+    def _context_anchor_count(messages: List[Dict[str, Any]]) -> int:
+        if len(messages) <= 1:
+            return min(1, len(messages))
+        content = messages[1].get("content", "")
+        if isinstance(content, str):
+            dynamic = content.startswith(_DYNAMIC_CONTEXT_PREFIX)
+        elif isinstance(content, list):
+            dynamic = any(
+                part.get("text", "").startswith(_DYNAMIC_CONTEXT_PREFIX)
+                for part in content
+                if isinstance(part, dict)
+            )
+        else:
+            dynamic = False
+        return 2 if dynamic else 1
+
     @staticmethod
     def _estimate_context_tokens(messages: List[Dict[str, Any]]) -> int:
-        total_chars = 0
-        for m in messages:
-            content = m.get("content")
-            if isinstance(content, str):
-                total_chars += len(content)
-            elif isinstance(content, list):
-                total_chars += len(json.dumps(content))
-            for tc in m.get("tool_calls") or []:
-                if isinstance(tc, dict):
-                    args = tc.get("function", {}).get("arguments", "")
-                    if isinstance(args, str):
-                        total_chars += len(args)
-            total_chars += len(m.get("name", "") or "")
-            total_chars += len(m.get("tool_call_id", "") or "")
-        return int(total_chars / BioinformaticsAgent._CHARS_PER_TOKEN)
+        return estimate_tokens(messages)
 
     @staticmethod
     def _compact_context(messages: List[Dict[str, Any]], target_tokens: int) -> Tuple[List[Dict[str, Any]], bool]:
-        estimated = BioinformaticsAgent._estimate_context_tokens(messages)
-        if estimated <= target_tokens:
+        if estimate_tokens(messages) <= target_tokens:
             return messages, False
-
-        cls = BioinformaticsAgent
-        budget_list = cls._COMPACT_TRUNCATE_BUDGETS
-        RECENT_PROTECT = cls.RECENT_PROTECT
-
-        result = [dict(m) for m in messages]
-
-        # --- Phase 1: truncate large tool/user content (never assistant tool_calls.arguments) ---
-        anchor_count = 2
-        if len(result) > 1:
-            c1 = result[1].get("content", "")
-            is_dynamic = False
-            if isinstance(c1, str):
-                is_dynamic = c1.startswith(_DYNAMIC_CONTEXT_PREFIX)
-            elif isinstance(c1, list):
-                is_dynamic = any(
-                    p.get("text", "").startswith(_DYNAMIC_CONTEXT_PREFIX)
-                    for p in c1 if isinstance(p, dict)
-                )
-            if not is_dynamic:
-                anchor_count = 1
-
-        protect_end = max(anchor_count, len(result) - RECENT_PROTECT)
-
-        for budget in budget_list:
-            if cls._estimate_context_tokens(result) <= target_tokens:
-                break
-            candidates = []
-            for idx in range(anchor_count, protect_end):
-                m = result[idx]
-                role = m.get("role", "")
-                content = m.get("content")
-                if role not in ("tool", "user"):
-                    continue
-                if not isinstance(content, str) or len(content) <= budget:
-                    continue
-                candidates.append((idx, len(content)))
-            candidates.sort(key=lambda x: -x[1])
-            for idx, _ in candidates:
-                if cls._estimate_context_tokens(result) <= target_tokens:
-                    break
-                old_content = result[idx]["content"]
-                new_content = truncate_for_llm(old_content, max_chars=budget)
-                if len(new_content) < len(old_content):
-                    result[idx] = {**result[idx], "content": new_content}
-
-        # --- Phase 2: drop oldest mid-section with summary ---
-        if cls._estimate_context_tokens(result) > target_tokens:
-            system_msg = result[0]
-            dynamic_msg = result[1] if anchor_count >= 2 else None
-            tail_start = max(anchor_count, len(result) - RECENT_PROTECT)
-
-            # Walk backward from tail boundary to avoid orphaning tool_result
-            cut = tail_start
-            while cut > anchor_count and result[cut].get("role") == "tool":
-                cut -= 1
-
-            if cut > anchor_count:
-                dropped = result[anchor_count:cut]
-                summary = BioinformaticsAgent._summarize_dropped_messages(dropped)
-                summary_msg = {
-                    "role": "user",
-                    "content": f"[Previous analysis summary (compacted)]\n{summary}"
-                }
-                if dynamic_msg:
-                    result = [system_msg, dynamic_msg, summary_msg] + result[cut:]
-                else:
-                    result = [system_msg, summary_msg] + result[cut:]
-
-        # --- Phase 3: fallback — truncate protected window if still over ---
-        if cls._estimate_context_tokens(result) > target_tokens:
-            fallback_start = max(0, len(result) - RECENT_PROTECT)
-            for idx in range(fallback_start, len(result)):
-                m = result[idx]
-                role = m.get("role", "")
-                content = m.get("content")
-                if role not in ("tool", "user"):
-                    continue
-                if not isinstance(content, str) or len(content) <= 16 * 1024:
-                    continue
-                new_content = truncate_for_llm(content, max_chars=16 * 1024)
-                if len(new_content) < len(content):
-                    result[idx] = {**result[idx], "content": new_content}
-                if cls._estimate_context_tokens(result) <= target_tokens:
-                    break
-
-        return result, cls._estimate_context_tokens(result) < estimated
+        result, report = compact_messages(
+            messages,
+            ContextBudget(
+                context_window=target_tokens + 1 + FRAMING_RESERVE_TOKENS,
+                completion_reserve=1,
+            ),
+            anchor_count=BioinformaticsAgent._context_anchor_count(messages),
+            summarize=BioinformaticsAgent._summarize_dropped_messages,
+        )
+        return result, bool(report.actions)
 
     @staticmethod
     def _summarize_dropped_messages(dropped: List[Dict[str, Any]]) -> str:
@@ -724,59 +671,26 @@ class BioinformaticsAgent(
         Pure local extraction — no LLM call. Keeps output under ~500 tokens.
         Handles non-string content (e.g. multimodal list, None) gracefully.
         """
-        tool_counts: Dict[str, int] = {}
-        error_count = 0
         code_snippets: List[str] = []
 
         for msg in dropped:
-            role = msg.get("role", "")
-            content = msg.get("content")
-
-            if isinstance(content, str):
-                text = content
-            elif isinstance(content, list):
-                # Multimodal content — extract text parts
-                text = " ".join(
-                    p.get("text", "") for p in content
-                    if isinstance(p, dict) and p.get("type") == "text"
-                )
-            else:
-                text = ""
-
-            # Count tool calls from assistant messages
-            if role == "assistant":
-                tool_calls = msg.get("tool_calls")
-                if tool_calls and isinstance(tool_calls, list):
-                    for tc in tool_calls:
-                        if isinstance(tc, dict):
-                            name = tc.get("function", {}).get("name", "unknown")
-                        else:
-                            func = getattr(tc, "function", None)
-                            name = getattr(func, "name", "unknown") if func else "unknown"
-                        tool_counts[name] = tool_counts.get(name, 0) + 1
-
-            # Count errors in tool results
-            if role == "tool" and text and "error" in text[:300].lower():
-                error_count += 1
-
-            # Collect code execution descriptions from assistant reasoning
-            if role == "assistant" and text and "execute_code" in text[:500]:
+            text = message_text(msg)
+            if msg.get("role") == "assistant" and text and "execute_code" in text[:500]:
                 # Extract first line of reasoning as a brief description
                 first_line = text.strip().split("\n")[0][:120]
                 if first_line:
                     code_snippets.append(first_line)
 
-        parts = []
-        if tool_counts:
-            parts.append("Tools used: " + ", ".join(f"{k} x{v}" for k, v in tool_counts.items()))
-        if error_count:
-            parts.append(f"Errors encountered: {error_count}")
-        if code_snippets:
-            # Show last few code descriptions
-            recent = code_snippets[-3:]
-            parts.append("Recent steps: " + "; ".join(recent))
-
-        return "\n".join(parts) if parts else "Previous analysis steps completed."
+        return summarize_dropped_messages(
+            dropped,
+            extra_sections=(
+                (lambda _messages: [
+                    "Recent steps: " + "; ".join(code_snippets[-3:])
+                ])
+                if code_snippets
+                else None
+            ),
+        )
 
 
 

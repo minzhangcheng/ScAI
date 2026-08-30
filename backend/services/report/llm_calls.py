@@ -90,10 +90,35 @@ REPORT_TOOLS = [
 class LLMCallsMixin:
     """Provides LLM call methods for report generation."""
 
+    async def _budgeted_text_call(
+        self,
+        agent_name: str,
+        method,
+        *,
+        messages: List[Dict[str, Any]],
+        max_tokens: Optional[int] = None,
+        **kwargs,
+    ):
+        callback = getattr(self, "context_budget_callback", None)
+        if callback is None:
+            return await method(messages=messages, max_tokens=max_tokens, **kwargs)
+        dispatch = await callback(agent_name, messages, max_tokens=max_tokens)
+        response = await method(
+            messages=dispatch.messages,
+            max_tokens=dispatch.max_tokens,
+            **kwargs,
+        )
+        acknowledge = getattr(self, "context_budget_ack_callback", None)
+        if acknowledge is not None:
+            await acknowledge(agent_name, dispatch)
+        return response
+
     async def _pi_chat(self, prompt: str, temperature: float = 0.3, max_tokens: int = 32768) -> str:
         """Chat with PI Agent"""
         self._set_llm_context("report_pi")
-        response = await self.llm_client.chat(
+        response = await self._budgeted_text_call(
+            "pi",
+            self.llm_client.chat,
             model=self.pi_model,
             messages=[
                 {"role": "system", "content": "You are a senior biomedical research PI writing a scientific report. You MUST respond exclusively in English."},
@@ -157,7 +182,9 @@ class LLMCallsMixin:
     ):
         """Chat with Bioinformatics Agent using tools"""
         self._set_llm_context("report_bio")
-        return await self.llm_client.chat_with_tools(
+        return await self._budgeted_text_call(
+            "bioinformatics",
+            self.llm_client.chat_with_tools,
             model=self.bio_model,
             messages=messages,
             tools=REPORT_TOOLS,

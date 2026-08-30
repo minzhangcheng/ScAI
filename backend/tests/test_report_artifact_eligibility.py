@@ -71,6 +71,23 @@ def test_only_current_approved_artifacts_are_reportable():
     ]
 
 
+def test_technically_valid_unavailable_review_is_reportable_but_not_approved():
+    unavailable = _figure(
+        "unavailable",
+        FigureReviewStatus.PENDING,
+        review_unavailable=True,
+    )
+    blocked = _figure(
+        "blocked-unavailable",
+        FigureReviewStatus.PENDING,
+        review_unavailable=True,
+        layout_violations=[{"kind": "text_over_text", "severity": "block"}],
+    )
+
+    assert is_report_eligible(unavailable) is True
+    assert is_report_eligible(blocked) is False
+
+
 def test_valid_preview_digest_survives_malformed_render_digest():
     payload = valid_image_bytes("JPEG")
     figure = _figure(

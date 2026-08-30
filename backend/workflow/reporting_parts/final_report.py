@@ -308,6 +308,12 @@ class FinalReportMixin:
                         vision_settings=self._vision_settings,
                         supervisor_model=supervisor_model,
                         target_lineage_id=target_lineage_id,
+                        context_budget_callback=(
+                            self._settings_provider.budget_text_dispatch
+                        ),
+                        context_budget_ack_callback=(
+                            self._settings_provider.acknowledge_text_dispatch
+                        ),
                     )
                     report = await generator.generate_report(
                         report_state,

@@ -56,6 +56,8 @@ async def build_chat_sections_async(
     progress_callback: Optional[Callable] = None,
     max_chat_entries: int = 20,
     model: Optional[str] = None,
+    context_budget_callback: Optional[Callable] = None,
+    context_budget_ack_callback: Optional[Callable] = None,
 ) -> List[Dict[str, Any]]:
     """Process chat messages and return a list of report section dicts.
 
@@ -88,10 +90,25 @@ async def build_chat_sections_async(
                 + '\n\nRespond with JSON: [{"index": 1, "title": "..."}, ...]'
             )
 
-            response = await llm_client.chat(
-                model,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            title_messages = [{"role": "user", "content": prompt}]
+            if context_budget_callback is None:
+                response = await llm_client.chat(model, messages=title_messages)
+            else:
+                dispatch = await context_budget_callback(
+                    "supervisor",
+                    title_messages,
+                )
+                response = await llm_client.chat(
+                    model,
+                    messages=dispatch.messages,
+                    **(
+                        {"max_tokens": dispatch.max_tokens}
+                        if dispatch.max_tokens is not None
+                        else {}
+                    ),
+                )
+                if context_budget_ack_callback is not None:
+                    await context_budget_ack_callback("supervisor", dispatch)
 
             content = getattr(response, "content", "")
 

@@ -70,7 +70,7 @@ async def test_transient_vision_failure_does_not_disable_next_call():
     await agent.review_figure(state, figure, "aW1hZ2U=")
 
     assert agent.has_vision is True
-    assert agent.chat.await_count == 1
+    assert agent.chat.await_count == 0
 
     # A structured Responses image-shape rejection is a protocol fallback,
     # not a permanent model-capability decision.  It must leave the next
@@ -114,4 +114,4 @@ async def test_true_vision_mismatch_disables_once():
 
     assert agent.has_vision is False
     assert agent.llm_client.chat_with_vision.await_count == 1
-    assert agent.chat.await_count == 2
+    assert agent.chat.await_count == 0

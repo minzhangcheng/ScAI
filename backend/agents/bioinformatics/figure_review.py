@@ -28,6 +28,54 @@ def record_unresolved(attempt: FigureAttemptState, items) -> None:
             figure.pi_feedback = f"{existing}\n\n{note}" if existing else note
 
 
+async def _accept_unavailable_review(
+    attempt: FigureAttemptState, review: dict
+) -> str:
+    """Finalize a valid render while recording that no review occurred."""
+    figure = attempt.figure
+    feedback = str(
+        review.get("feedback") or "Figure review was unavailable"
+    ).strip()[:500]
+    observation = {
+        "round": attempt.revision_count + 1,
+        "candidate_id": f"{figure.id}:review:{attempt.revision_count + 1}",
+        "feedback": feedback,
+        "suggestions": [],
+        "must_fix": [],
+        "quality_score": None,
+        "review_unavailable": True,
+    }
+    if not any(
+        entry.get("review_unavailable") is True
+        for entry in attempt.revision_history
+    ):
+        attempt.revision_history.append(observation)
+    figure.review_status = FigureReviewStatus.PENDING
+    figure.review_unavailable = True
+    figure.pi_feedback = f"[REVIEW UNAVAILABLE] {feedback}"
+    figure.revision_history = list(attempt.revision_history)
+    # Reviewer opinions did not exist, so there are no reviewer must-fix items.
+    # Renderer measurements remain on layout_violations and independently
+    # control report eligibility.
+    figure.unresolved_must_fix = []
+    attempt.agent._upsert_publication_figure(attempt.state, figure)
+    publish_error = await finalize_render(attempt)
+    if publish_error:
+        return publish_error
+    await attempt.agent._emit_figure_record(
+        "figure_review", figure, review=review
+    )
+    await attempt.agent._notify(
+        "status",
+        f"Figure {attempt.request.figure_name} was saved; visual review is unavailable",
+    )
+    return (
+        f"Figure {attempt.request.figure_name} was saved. "
+        f"Visual review was unavailable: {feedback}"
+        + (f"\n{attempt.staleness_note}" if attempt.staleness_note else "")
+    )
+
+
 async def _accept_approved(
     attempt: FigureAttemptState, review: dict, quality_score, blocking
 ) -> str:
@@ -219,6 +267,8 @@ async def run_review_loop(attempt: FigureAttemptState) -> str:
         review = await guard_attempt_await(
             attempt, attempt.request.review_callback(figure)
         )
+        if review.get("review_unavailable") is True:
+            return await _accept_unavailable_review(attempt, review)
         quality_score = review.get("quality_score", 5)
         blocking = deps.get("blocking_violations")(figure.layout_violations)
         if not blocking and (

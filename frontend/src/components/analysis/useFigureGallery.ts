@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { useTranslation } from '../../i18n/translations'
 import { useAppStore, type PublicationFigure } from '../../stores/appStore'
 import { fetchAndDownload } from '../../utils/download'
+import { reportBranchQuery } from '../../utils/reportBranch'
 
 const API_BASE = '/api'
 
@@ -26,12 +27,13 @@ export function useFigureGallery({ figures, curatedCount }: FigureGalleryProps) 
   const previewCount = Math.max(PREVIEW_COUNT, curatedCount ?? 0)
   const visibleFigures = showAll ? figures : figures.slice(0, previewCount)
   const hiddenCount = figures.length - visibleFigures.length
+  const branchQuery = reportBranchQuery(currentSession?.restoreBranchId)
 
   const downloadPDF = async (figure: PublicationFigure) => {
     if (!currentSession) return
     try {
       await fetchAndDownload(
-        `${API_BASE}/session/${currentSession.id}/figure/${figure.id}/pdf`,
+        `${API_BASE}/session/${currentSession.id}/figure/${figure.id}/pdf${branchQuery}`,
         `${figure.name}.pdf`
       )
     } catch (e) {
@@ -43,7 +45,7 @@ export function useFigureGallery({ figures, curatedCount }: FigureGalleryProps) 
     if (!currentSession) return
     try {
       await fetchAndDownload(
-        `${API_BASE}/session/${currentSession.id}/figure/${figure.id}/png`,
+        `${API_BASE}/session/${currentSession.id}/figure/${figure.id}/png${branchQuery}`,
         `${figure.name}.jpg`
       )
     } catch (e) {
@@ -52,7 +54,7 @@ export function useFigureGallery({ figures, curatedCount }: FigureGalleryProps) 
   }
 
   return {
-    collapsed, currentSession, downloadJPG, downloadPDF, figures, hiddenCount, language,
+    branchQuery, collapsed, currentSession, downloadJPG, downloadPDF, figures, hiddenCount, language,
     selectedFigure, setCollapsed, setSelectedFigure, setShowAll, showAll, t, visibleFigures,
   }
 }

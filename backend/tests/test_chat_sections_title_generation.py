@@ -1,6 +1,7 @@
 """C1 — verify chat_sections passes (model, messages=...) and reads LLMResponse.content."""
 import pytest
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, List, Dict
 
 
@@ -71,3 +72,43 @@ async def test_falls_back_to_truncated_content_when_no_model(tmp_path):
         model=None,
     )
     assert sections[0]["title"] == "Q1"
+
+
+@pytest.mark.asyncio
+async def test_title_generation_uses_context_budget_callbacks(tmp_path):
+    from backend.services.report.chat_sections import build_chat_sections_async
+
+    messages = [
+        {"role": "user", "content": "Original question"},
+        {"role": "assistant", "content": "Original answer"},
+    ]
+    client = _FakeLLMClient(content='[{"index": 1, "title": "Budgeted title"}]')
+    dispatch = SimpleNamespace(
+        messages=[{"role": "user", "content": "Compacted title prompt"}],
+        max_tokens=123,
+    )
+    budget_calls = []
+    acknowledgements = []
+
+    async def budget(agent_name, request_messages):
+        budget_calls.append((agent_name, request_messages))
+        return dispatch
+
+    async def acknowledge(agent_name, acknowledged_dispatch):
+        acknowledgements.append((agent_name, acknowledged_dispatch))
+
+    sections = await build_chat_sections_async(
+        messages,
+        figures_dir=str(tmp_path),
+        tables_dir=str(tmp_path),
+        llm_client=client,
+        model="title-model",
+        context_budget_callback=budget,
+        context_budget_ack_callback=acknowledge,
+    )
+
+    assert budget_calls[0][0] == "supervisor"
+    assert client.calls[0]["messages"] == dispatch.messages
+    assert client.calls[0]["kwargs"]["max_tokens"] == 123
+    assert acknowledgements == [("supervisor", dispatch)]
+    assert sections[0]["title"] == "Budgeted title"

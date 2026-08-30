@@ -8,7 +8,10 @@ import { useAppStore } from '../../stores/appStore'
 import { getToken } from '../../utils/authStorage'
 import { fetchAndDownload } from '../../utils/download'
 import { devLog } from '../../utils/logger'
+import { reportBranchQuery } from '../../utils/reportBranch'
 import { useTranslation } from '../../i18n/translations'
+
+export { reportBranchQuery } from '../../utils/reportBranch'
 
 type ReportDownloadEndpoint = 'download-all-figures' | 'download-all-tables' | 'download-full'
 
@@ -149,10 +152,6 @@ export function partialReportNotice(
   return language === 'zh'
     ? '报告已生成，但被标记为部分报告。'
     : 'The report was generated but is marked as partial.'
-}
-
-export function reportBranchQuery(branchId?: string): string {
-  return branchId ? `?branch_id=${encodeURIComponent(branchId)}` : ''
 }
 
 export function useReportController() {

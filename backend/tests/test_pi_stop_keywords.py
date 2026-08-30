@@ -1,6 +1,7 @@
 """C3 — STOP_KEYWORDS is a single source of truth, both PI paths see same set."""
 import pytest
 
+from backend.agents.pi.interaction import _contains_stop_command
 from backend.tests.split_facade import split_source
 
 
@@ -31,3 +32,47 @@ def test_both_paths_recognize_overlap_keywords(keyword):
     """Both keyword sets, after consolidation, must recognize these."""
     from backend.constants import STOP_KEYWORDS
     assert keyword in STOP_KEYWORDS
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Continue the endothelial analysis.",
+        "Compare reporter-positive and reporter-negative cells.",
+        "Use the endpoint measurements.",
+    ],
+)
+def test_stop_words_do_not_match_inside_domain_terms(text):
+    assert _contains_stop_command(text) is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Do not stop the current analysis.",
+        "I do not want the current analysis to stop.",
+        "Don't finish yet.",
+        "No report now.",
+        "不要停止当前分析。",
+        "我不希望当前分析流程在完成质控之前停止。",
+        "请勿结束。",
+        "别报告结果。",
+    ],
+)
+def test_clause_local_negation_suppresses_stop_commands(text):
+    assert _contains_stop_command(text) is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Stop now.",
+        "Please finish the analysis.",
+        "停止并生成报告。",
+        "Do not stop the current step, but finish the analysis now.",
+        "Do not stop the current step but finish the analysis now.",
+        "不要停止当前步骤，但是现在结束分析。",
+    ],
+)
+def test_explicit_or_later_affirmative_stop_command_wins(text):
+    assert _contains_stop_command(text) is True

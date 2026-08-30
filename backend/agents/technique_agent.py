@@ -249,7 +249,8 @@ except ImportError as e:
             user_msg += f"\n\nSpecific question: {question}"
 
         try:
-            response = await self.llm_client.chat(
+            response = await self._budgeted_text_call(
+                self.llm_client.chat,
                 model=self.model,
                 messages=[
                     {"role": "system", "content": self.system_prompt},
@@ -339,7 +340,8 @@ except ImportError as e:
 
         await self._notify("status", "Summarizing error analysis and correct API usage...")
         try:
-            response = await self.llm_client.chat(
+            response = await self._budgeted_text_call(
+                self.llm_client.chat,
                 model=self.model,
                 messages=[
                     {"role": "system", "content": self.system_prompt},

@@ -349,12 +349,18 @@ async def _execute_chat_agent_inner(
                 f"QUESTION: {question}\n\nCONTEXT: {context}\n\n"
                 f"Please provide clear, actionable guidance."
             )
+            dispatch = await provider.budget_text_dispatch(
+                PI_AGENT_NAME,
+                [{"role": "user", "content": prompt}],
+                max_tokens=2048,
+            )
             resp = await llm_client.chat(
                 model=pi_model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=dispatch.messages,
                 temperature=provider.get_temperature(PI_AGENT_NAME),
-                max_tokens=2048
+                max_tokens=dispatch.max_tokens,
             )
+            await provider.acknowledge_text_dispatch(PI_AGENT_NAME, dispatch)
             answer = resp.content or "Proceed with standard bioinformatics practices."
             await _send_agent_msg("pi_response", answer, AgentType.PI)
             return answer

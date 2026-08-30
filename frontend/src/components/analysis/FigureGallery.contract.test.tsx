@@ -44,6 +44,17 @@ describe('FigureGallery contract', () => {
     expect(screen.getByAltText('Figure 9')).toBeInTheDocument()
   })
 
+  it('labels an unavailable review instead of showing generic pending', () => {
+    render(<FigureGallery figures={[{
+      ...figure(1),
+      reviewStatus: 'pending',
+      reviewUnavailable: true,
+    }]} />)
+
+    expect(screen.getByText('Review unavailable')).toBeInTheDocument()
+    expect(screen.queryByText('Pending Review')).not.toBeInTheDocument()
+  })
+
   it('keeps the image download endpoint and filename', async () => {
     render(<FigureGallery figures={[figure(1)]} />)
     fireEvent.click(screen.getByRole('button', { name: 'JPG' }))
@@ -66,6 +77,24 @@ describe('FigureGallery contract', () => {
     expect(previews[previews.length - 1]).toHaveAttribute(
       'src',
       '/api/session/session-gallery/figure/figure-1/png',
+    )
+  })
+
+  it('scopes restored previews and downloads to the active branch', async () => {
+    useAppStore.setState({
+      currentSession: { ...session, restoreBranchId: 'restore/a b' },
+    })
+    const persisted = { ...figure(1), pngBase64: '[image]' }
+    render(<FigureGallery figures={[persisted]} />)
+
+    expect(screen.getByAltText('Figure 1')).toHaveAttribute(
+      'src',
+      '/api/session/session-gallery/figure/figure-1/png?branch_id=restore%2Fa%20b',
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'JPG' }))
+    expect(fetchAndDownload).toHaveBeenCalledWith(
+      '/api/session/session-gallery/figure/figure-1/png?branch_id=restore%2Fa%20b',
+      'Figure 1.jpg',
     )
   })
 })

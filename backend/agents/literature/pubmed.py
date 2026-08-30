@@ -891,7 +891,8 @@ Note: If you are not certain about specific citation information, please clearly
                     f"[Literature] Quick search using fallback model: {self.fallback_model} "
                     f"but fallback_llm_client is None, using default client -> {client.base_url}"
                 )
-            resp = await client.chat(
+            resp = await self._budgeted_text_call(
+                client.chat,
                 model=self.fallback_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,

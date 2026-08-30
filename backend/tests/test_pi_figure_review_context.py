@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -18,14 +19,18 @@ async def test_figure_review_receives_the_linked_plan_deliverable():
     provider.get_model.return_value = "test-model"
     provider.get_system_prompt.return_value = ""
     provider.get_temperature.return_value = 0.2
-    provider.get_vision_setting.return_value = False
+    provider.get_vision_setting.return_value = True
+    vision = AsyncMock(return_value=SimpleNamespace(content=(
+        '{"approved":true,"quality_score":8,"feedback":"ok",'
+        '"strengths":[],"issues":[],"suggestions":[],"must_fix":[]}'
+    )))
+    provider.get_llm_client.return_value = SimpleNamespace(
+        chat_with_vision=vision,
+        set_context=lambda *_args: None,
+    )
     agent = PIAgent(settings_provider=provider)
     agent.set_session("review-plan-context")
     agent._set_llm_context = lambda: None
-    agent.chat = AsyncMock(return_value=(
-        '{"approved":true,"quality_score":8,"feedback":"ok",'
-        '"strengths":[],"issues":[],"suggestions":[],"must_fix":[]}'
-    ))
 
     state = AnalysisState(user_id="u", name="Project", initial_instruction="Analyze data")
     state.current_plan = AnalysisPlan(
@@ -53,7 +58,7 @@ async def test_figure_review_receives_the_linked_plan_deliverable():
     result = await agent.review_figure(state, figure, "base64")
 
     assert result["approved"] is True
-    prompt = agent.chat.await_args.args[0]
+    prompt = vision.await_args.kwargs["text_prompt"]
     assert "Linked plan: plan-current" in prompt
     assert "Linked step 7: Differential expression summary" in prompt
     assert "volcano x1: Effect size versus adjusted significance" in prompt

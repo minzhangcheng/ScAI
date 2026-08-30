@@ -9,6 +9,7 @@ export function useWebSocket() {
   const { currentSession, addMessage, updateSession, setWsConnected, addAgentError, setStateVersion } = useAppStore()
   const wsRef = useRef<WebSocket | null>(null)
   const connectionAttemptRef = useRef(0)
+  const stateSyncEpochRef = useRef(0)
   const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const reconnectCountRef = useRef<number>(0)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -20,7 +21,7 @@ export function useWebSocket() {
 
   const refs: ConnectionRefs = {
     wsRef, connectionAttemptRef, connectTimeoutRef, reconnectCountRef,
-    reconnectTimerRef, restoreCommitRefreshesRef,
+    reconnectTimerRef, restoreCommitRefreshesRef, stateSyncEpochRef,
   }
 
   const connect = useCallback(() => {

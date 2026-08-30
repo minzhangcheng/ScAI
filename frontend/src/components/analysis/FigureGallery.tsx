@@ -11,7 +11,7 @@ export function FigureGallery(props: FigureGalleryProps) {
   const { figures } = props
   if (figures.length === 0) return null
   const {
-    collapsed, currentSession, downloadJPG, downloadPDF, hiddenCount, language,
+    branchQuery, collapsed, currentSession, downloadJPG, downloadPDF, hiddenCount, language,
     selectedFigure, setCollapsed, setSelectedFigure, setShowAll, showAll, t, visibleFigures,
   } = controller
   const selectedBase64 = normalizeImageBase64(selectedFigure?.pngBase64)
@@ -44,6 +44,7 @@ export function FigureGallery(props: FigureGalleryProps) {
 
         {visibleFigures.map(figure => (
           <FigureCard
+            branchQuery={branchQuery}
             key={figure.id}
             currentSessionId={currentSession?.id}
             downloadJPG={downloadJPG}
@@ -113,7 +114,7 @@ export function FigureGallery(props: FigureGalleryProps) {
                 />
               ) : currentSession?.id ? (
                 <img
-                  src={`${API_BASE}/session/${currentSession.id}/figure/${selectedFigure.id}/png`}
+                  src={`${API_BASE}/session/${currentSession.id}/figure/${selectedFigure.id}/png${branchQuery}`}
                   alt={selectedFigure.name}
                   className="max-w-full h-auto mx-auto"
                   onError={(e) => {
@@ -136,9 +137,9 @@ export function FigureGallery(props: FigureGalleryProps) {
             {/* Modal Footer */}
             <div className="p-4 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className={`px-3 py-1 rounded-full text-sm font-medium border ${getStatusColor(selectedFigure.reviewStatus, selectedFigure.diagnostic)}`}>
-                  {getStatusIcon(selectedFigure.reviewStatus, selectedFigure.diagnostic)}
-                  <span className="ml-1">{getStatusLabel(selectedFigure.reviewStatus, selectedFigure.diagnostic, language, t)}</span>
+                <span className={`px-3 py-1 rounded-full text-sm font-medium border ${getStatusColor(selectedFigure.reviewStatus, selectedFigure.diagnostic, selectedFigure.reviewUnavailable)}`}>
+                  {getStatusIcon(selectedFigure.reviewStatus, selectedFigure.diagnostic, selectedFigure.reviewUnavailable)}
+                  <span className="ml-1">{getStatusLabel(selectedFigure.reviewStatus, selectedFigure.diagnostic, language, t, selectedFigure.reviewUnavailable)}</span>
                 </span>
                 {selectedFigure.piFeedback && (
                   <span className="text-sm text-slate-500 dark:text-slate-400 italic">

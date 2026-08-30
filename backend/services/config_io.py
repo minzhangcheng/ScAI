@@ -33,6 +33,8 @@ def build_agent_server_configs(config: ConfigV1) -> Dict[str, Dict[str, Any]]:
             "model": default_llm.model if ov.model is None else ov.model,
             "temperature": float(ov.temperature if ov.temperature is not None else 0.7),
         }
+        if ov.context_window is not None:
+            result[name]["context_window"] = int(ov.context_window)
     return result
 
 
@@ -232,6 +234,8 @@ def export_session_to_config(state: AnalysisState) -> Dict[str, Any]:
                 override["llm_base_url"] = cfg.get("llm_base_url") or cfg.get("base_url", "")
             if "api_key" in cfg:
                 override["api_key"] = cfg["api_key"]
+            if "context_window" in cfg and cfg["context_window"] is not None:
+                override["context_window"] = int(cfg["context_window"])
         if agent_name in state.custom_prompts:
             override["custom_prompt"] = state.custom_prompts[agent_name]
         if agent_name in state.custom_temperatures:

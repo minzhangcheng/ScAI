@@ -96,6 +96,96 @@ class BaseAgent(ABC):
             self.session_id,
             self.agent_type.value,
         )
+
+    def _agent_label(self) -> str:
+        agent_type = getattr(self, "agent_type", None)
+        label = getattr(agent_type, "value", agent_type)
+        return str(label) if label is not None else "unknown"
+
+    def _resolve_context_window(self) -> int:
+        try:
+            value = self._provider.get_context_window(self._agent_label())
+        except Exception:
+            value = None
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 8_192:
+            return value
+        # Context budgeting is observational and must not make a dispatch fail
+        # when a legacy/test provider does not implement the new setting yet.
+        from ..config import DEFAULT_AGENT_CONTEXT_WINDOW
+        return DEFAULT_AGENT_CONTEXT_WINDOW
+
+    async def _apply_context_budget(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        max_tokens: Optional[int] = None,
+        budget_factor: float = 1.0,
+        anchor_count: int = 1,
+        summarize=None,
+        declare: bool = True,
+    ):
+        """Prepare one non-blocking text dispatch through the shared budget."""
+
+        return await self._provider.budget_text_dispatch(
+            self._agent_label(),
+            messages,
+            max_tokens=max_tokens,
+            budget_factor=budget_factor,
+            anchor_count=anchor_count,
+            summarize=summarize,
+            declare=declare,
+        )
+
+    async def _acknowledge_context_budget(self, dispatch) -> None:
+        await self._provider.acknowledge_text_dispatch(
+            self._agent_label(),
+            dispatch,
+        )
+
+    async def _budgeted_text_call(
+        self,
+        method,
+        *,
+        messages: List[Dict[str, Any]],
+        max_tokens: Optional[int] = None,
+        anchor_count: int = 1,
+        summarize=None,
+        declare: bool = True,
+        **kwargs,
+    ):
+        """Budget exactly once, dispatch, then acknowledge PI visibility."""
+
+        try:
+            dispatch = await self._apply_context_budget(
+                messages,
+                max_tokens=max_tokens,
+                anchor_count=anchor_count,
+                summarize=summarize,
+                declare=declare,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] Context budgeting unavailable; sending best-effort request: %s",
+                self._agent_label(),
+                exc,
+            )
+            kwargs["messages"] = messages
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            return await method(**kwargs)
+        kwargs["messages"] = dispatch.messages
+        if max_tokens is not None or dispatch.max_tokens is not None:
+            kwargs["max_tokens"] = dispatch.max_tokens
+        response = await method(**kwargs)
+        try:
+            await self._acknowledge_context_budget(dispatch)
+        except Exception as exc:
+            logger.warning(
+                "[%s] Context-budget observation acknowledgement failed: %s",
+                self._agent_label(),
+                exc,
+            )
+        return response
     
     def set_session(self, session_id: str):
         """Update session ID for logging"""
@@ -190,15 +280,20 @@ class BaseAgent(ABC):
         try:
             self._set_llm_context(client)
             messages = self.get_messages_for_llm(message)
+            dispatch = await self._apply_context_budget(messages)
 
             # Use provided temperature or fall back to config default
             actual_temp = temperature if temperature is not None else self.config.temperature
 
-            response = await client.chat(
-                model=self.model,
-                messages=messages,
-                temperature=actual_temp
-            )
+            kwargs = {
+                "model": self.model,
+                "messages": dispatch.messages,
+                "temperature": actual_temp,
+            }
+            if dispatch.max_tokens is not None:
+                kwargs["max_tokens"] = dispatch.max_tokens
+            response = await client.chat(**kwargs)
+            await self._acknowledge_context_budget(dispatch)
 
             # Handle empty response - return empty string instead of None
             content = response.content if response and response.content else ""
@@ -238,20 +333,24 @@ class BaseAgent(ABC):
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": message}
             ]
+            dispatch = await self._apply_context_budget(messages)
 
             actual_temp = temperature if temperature is not None else self.config.temperature
 
             kwargs: dict = {
                 "model": self.model,
-                "messages": messages,
+                "messages": dispatch.messages,
                 "temperature": actual_temp,
             }
             if timeout is not None:
                 kwargs["timeout"] = timeout
             if max_retries is not None:
                 kwargs["max_retries"] = max_retries
+            if dispatch.max_tokens is not None:
+                kwargs["max_tokens"] = dispatch.max_tokens
 
             response = await client.chat(**kwargs)
+            await self._acknowledge_context_budget(dispatch)
 
             content = response.content if response and response.content else ""
             if not content:
@@ -287,18 +386,23 @@ class BaseAgent(ABC):
         try:
             self._set_llm_context(client)
             messages = self.get_messages_for_llm(message)
+            dispatch = await self._apply_context_budget(messages)
 
             # Use provided temperature or fall back to config default
             actual_temp = temperature if temperature is not None else self.config.temperature
 
             full_response = ""
-            async for chunk in client.chat_stream(
-                model=self.model,
-                messages=messages,
-                temperature=actual_temp
-            ):
+            kwargs = {
+                "model": self.model,
+                "messages": dispatch.messages,
+                "temperature": actual_temp,
+            }
+            if dispatch.max_tokens is not None:
+                kwargs["max_tokens"] = dispatch.max_tokens
+            async for chunk in client.chat_stream(**kwargs):
                 full_response += chunk
                 yield chunk
+            await self._acknowledge_context_budget(dispatch)
 
             # Add to history
             self.add_to_history("user", message)

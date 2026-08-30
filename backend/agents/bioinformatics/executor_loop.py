@@ -158,13 +158,16 @@ async def start_turn(context) -> TurnStart:
             f"after {context.empty_response_count} empty response(s)"
         )
     try:
-        response = await context.agent.llm_client.chat_with_tools(
-            model=context.agent.model,
+        response = await context.agent._budgeted_text_call(
+            context.agent.llm_client.chat_with_tools,
             messages=context.messages,
+            max_tokens=32768,
+            anchor_count=context.agent._context_anchor_count(context.messages),
+            summarize=context.agent._summarize_dropped_messages,
+            model=context.agent.model,
             tools=TOOLS,
             tool_choice=effective_tool_choice,
             temperature=context.agent.config.temperature,
-            max_tokens=32768
         )
     except UpstreamExhaustedError:
         logger.error(f"[Bioinformatics] Upstream exhausted, propagating to @with_retry")

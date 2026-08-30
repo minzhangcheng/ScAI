@@ -7,7 +7,10 @@ import { normalizeImageBase64 } from '../../utils/image'
 
 const API_BASE = '/api'
 
-export function getStatusIcon(status: FigureReviewStatus, diagnostic?: boolean) {
+export function getStatusIcon(status: FigureReviewStatus, diagnostic?: boolean, reviewUnavailable?: boolean) {
+    if (reviewUnavailable && status === 'pending') {
+      return <AlertTriangle className="w-4 h-4 text-slate-500" />
+    }
     if (diagnostic && status === 'pending') {
       return <FileImage className="w-4 h-4 text-sky-600" />
     }
@@ -23,7 +26,10 @@ export function getStatusIcon(status: FigureReviewStatus, diagnostic?: boolean) 
     }
   }
 
-export function getStatusLabel(status: FigureReviewStatus, diagnostic: boolean | undefined, language: string, t: (key: any) => string) {
+export function getStatusLabel(status: FigureReviewStatus, diagnostic: boolean | undefined, language: string, t: (key: any) => string, reviewUnavailable?: boolean) {
+    if (reviewUnavailable && status === 'pending') {
+      return t('figureReviewUnavailable')
+    }
     if (diagnostic && status === 'pending') {
       return language === 'zh' ? '平台图' : 'Platform figure'
     }
@@ -39,7 +45,10 @@ export function getStatusLabel(status: FigureReviewStatus, diagnostic: boolean |
     }
   }
 
-export function getStatusColor(status: FigureReviewStatus, diagnostic?: boolean) {
+export function getStatusColor(status: FigureReviewStatus, diagnostic?: boolean, reviewUnavailable?: boolean) {
+    if (reviewUnavailable && status === 'pending') {
+      return 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+    }
     if (diagnostic && status === 'pending') {
       return 'bg-sky-100 dark:bg-sky-900/60 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-800'
     }
@@ -56,6 +65,7 @@ export function getStatusColor(status: FigureReviewStatus, diagnostic?: boolean)
   }
 
 interface FigureCardProps {
+  branchQuery?: string
   currentSessionId?: string
   downloadJPG: (figure: PublicationFigure) => Promise<void>
   downloadPDF: (figure: PublicationFigure) => Promise<void>
@@ -66,7 +76,7 @@ interface FigureCardProps {
 }
 
 export function FigureCard({
-  currentSessionId, downloadJPG, downloadPDF, figure, language, onSelect, t,
+  branchQuery = '', currentSessionId, downloadJPG, downloadPDF, figure, language, onSelect, t,
 }: FigureCardProps) {
   const pngBase64 = normalizeImageBase64(figure.pngBase64)
   return (
@@ -88,7 +98,7 @@ export function FigureCard({
               ) : currentSessionId ? (
                 <img
                   key={`api-${figure.id}-${figure.reviewStatus}-${figure.revisionCount}`}
-                  src={`${API_BASE}/session/${currentSessionId}/figure/${figure.id}/png`}
+                  src={`${API_BASE}/session/${currentSessionId}/figure/${figure.id}/png${branchQuery}`}
                   alt={figure.name}
                   className="w-full h-full object-contain"
                   onError={(e) => {
@@ -113,10 +123,10 @@ export function FigureCard({
               </div>
 
               {/* Status Badge */}
-              <div className={`absolute top-2 right-2 px-2 py-1 rounded-full text-xs font-medium border ${getStatusColor(figure.reviewStatus, figure.diagnostic)}`}>
+              <div className={`absolute top-2 right-2 px-2 py-1 rounded-full text-xs font-medium border ${getStatusColor(figure.reviewStatus, figure.diagnostic, figure.reviewUnavailable)}`}>
                 <span className="flex items-center gap-1">
-                  {getStatusIcon(figure.reviewStatus, figure.diagnostic)}
-                  {getStatusLabel(figure.reviewStatus, figure.diagnostic, language, t)}
+                  {getStatusIcon(figure.reviewStatus, figure.diagnostic, figure.reviewUnavailable)}
+                  {getStatusLabel(figure.reviewStatus, figure.diagnostic, language, t, figure.reviewUnavailable)}
                 </span>
               </div>
 

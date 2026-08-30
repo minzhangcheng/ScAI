@@ -65,6 +65,10 @@ from .routes.reports import router as reports_router
 from .routes.admin import router as admin_router
 from .routes.user_config import router as user_config_router
 from .middleware.auth import AuthMiddleware
+from .middleware.upload_size import (
+    MULTIPART_ENVELOPE_ALLOWANCE,
+    UploadSizeLimitMiddleware,
+)
 from .utils.auth import (
     WS_AUTH_FAILED_CODE,
     get_db,
@@ -383,6 +387,11 @@ app.include_router(user_config_router)
 
 # CORS
 app.add_middleware(AuthMiddleware)
+app.add_middleware(
+    UploadSizeLimitMiddleware,
+    max_body_bytes=MAX_UPLOAD_SIZE + MULTIPART_ENVELOPE_ALLOWANCE,
+    advertised_bytes=MAX_UPLOAD_SIZE,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

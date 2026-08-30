@@ -657,7 +657,8 @@ async def prepare_report_generation(
         else:
             for attempt in range(2):  # Single retry on connection error
                 try:
-                    response = await client.chat(
+                    response = await self._budgeted_text_call(
+                        client.chat,
                         model=report_model,
                         messages=[
                             {"role": "system", "content": self._get_report_system_prompt(language)},
@@ -812,6 +813,10 @@ async def parse_and_place_report(
                 llm_client=client,
                 progress_callback=progress_callback,
                 model=report_model,
+                context_budget_callback=self._provider.budget_text_dispatch,
+                context_budget_ack_callback=(
+                    self._provider.acknowledge_text_dispatch
+                ),
             )
             sections.extend(chat_sections)
         except Exception as e:

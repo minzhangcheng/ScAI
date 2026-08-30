@@ -21,6 +21,7 @@ function canaryConfigs() {
       {
         llmBaseUrl: `https://${agent}.example.test/v1`,
         apiKey: `agent-secret-${agent}`,
+        contextWindow: 128000,
       },
     ]),
   )
@@ -63,6 +64,7 @@ function expectEndpointHints(value: Record<string, any>) {
     expect(value[agent]).toEqual({
       llmBaseUrl: `https://${agent}.example.test/v1`,
       apiKey: '',
+      contextWindow: 128000,
     })
   }
 }

@@ -1050,6 +1050,9 @@ class _PromptAgent(FiguresMixin):
     def _set_llm_context(self):
         return None
 
+    async def _budgeted_text_call(self, method, **kwargs):
+        return await method(**kwargs)
+
 
 class _PayloadRejectLLM(_PromptLLM):
     async def chat_with_vision(self, **kwargs):

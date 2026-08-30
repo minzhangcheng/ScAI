@@ -55,8 +55,12 @@ describe('realtime history pagination', () => {
     useAppStore.setState({ currentSession: session('history'), messages: [] })
   })
 
-  it('merges the complete stream in chronological batches of twenty', async () => {
-    const { loadRealtimeMessageHistory, REALTIME_MESSAGE_PAGE_SIZE } = await import('../api/realtimeHistory')
+  it('merges the complete initial stream in chronological batches of one hundred', async () => {
+    const {
+      INITIAL_REALTIME_MESSAGE_PAGE_SIZE,
+      loadRealtimeMessageHistory,
+      REALTIME_MESSAGE_PAGE_SIZE,
+    } = await import('../api/realtimeHistory')
     const urls: string[] = []
     vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => {
       const url = String(input)
@@ -69,8 +73,9 @@ describe('realtime history pagination', () => {
     await loadRealtimeMessageHistory('history', { ownsResponse: () => true })
 
     expect(REALTIME_MESSAGE_PAGE_SIZE).toBe(20)
+    expect(INITIAL_REALTIME_MESSAGE_PAGE_SIZE).toBe(100)
     expect(urls).toHaveLength(3)
-    expect(urls.every(url => url.includes('limit=20'))).toBe(true)
+    expect(urls.every(url => url.includes('limit=100'))).toBe(true)
     expect(useAppStore.getState().messages.map(item => item.id)).toEqual(
       Array.from({ length: 45 }, (_, index) => `m-${index.toString().padStart(2, '0')}`),
     )
@@ -109,6 +114,59 @@ describe('realtime history pagination', () => {
     ])
 
     expect(useAppStore.getState().messages.map(item => item.id)).toEqual(['a', 'b', 'z'])
+  })
+
+  it('sorts an existing unsorted stream once and preserves a live duplicate', async () => {
+    const { mergeRealtimeMessages } = await import('../api/realtimeHistory')
+    useAppStore.setState({
+      currentSession: session('history'),
+      messages: [
+        { ...message(3), content: 'live three' },
+        { ...message(1), content: 'live one' },
+      ],
+    })
+
+    const added = mergeRealtimeMessages([
+      { ...rawMessage(2), content: 'history two' },
+      { ...rawMessage(3), content: 'history replacement' },
+    ])
+
+    expect(added).toBe(1)
+    expect(useAppStore.getState().messages.map(item => item.id)).toEqual([
+      'm-01', 'm-02', 'm-03',
+    ])
+    expect(useAppStore.getState().messages[2].content).toBe('live three')
+  })
+
+  it('yields before the initial page and between continuation pages', async () => {
+    const { loadRealtimeMessageHistory } = await import('../api/realtimeHistory')
+    const events: string[] = []
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: TimerHandler) => {
+      events.push('yield')
+      if (typeof handler === 'function') handler()
+      return 1
+    }) as typeof setTimeout)
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => {
+        events.push('fetch')
+        return Promise.resolve(jsonResponse(page(25, 45, 'm-25')))
+      })
+      .mockImplementationOnce(() => {
+        events.push('fetch')
+        return Promise.resolve(jsonResponse(page(5, 25, null)))
+      })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await loadRealtimeMessageHistory('history', {
+      ownsResponse: () => true,
+    })
+
+    const fetchIndexes = events.flatMap((event, index) => (
+      event === 'fetch' ? [index] : []
+    ))
+    expect(fetchIndexes).toHaveLength(2)
+    expect(events.slice(0, fetchIndexes[0])).toContain('yield')
+    expect(events.slice(fetchIndexes[0] + 1, fetchIndexes[1])).toContain('yield')
   })
 
   it('exposes an initial-page failure to a retryable owner callback', async () => {

@@ -694,7 +694,8 @@ Return only the Python code:{note}"""
                         "**Current Figure:** (Image not available for this request. "
                         "Revise code based on PI feedback text only.)\n\n",
                     )
-                    response = await self.llm_client.chat(
+                    response = await self._budgeted_text_call(
+                        self.llm_client.chat,
                         model=self.model,
                         messages=[{"role": "user", "content": prompt}],
                         temperature=revision_temp,
@@ -703,7 +704,8 @@ Return only the Python code:{note}"""
                 else:
                     raise
         else:
-            response = await self.llm_client.chat(
+            response = await self._budgeted_text_call(
+                self.llm_client.chat,
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=revision_temp,

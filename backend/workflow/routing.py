@@ -192,6 +192,12 @@ class RoutingMixin:
             )
             return "hold"
 
+        if intent == "terminal":
+            logger.info(
+                f"[{self.session_id}] restore_entry intent=terminal → hold (END)"
+            )
+            return "hold"
+
         if intent in ("normal", "explicit_start"):
             logger.info(
                 f"[{self.session_id}] restore_entry intent={intent} → "

@@ -15,6 +15,23 @@ logger = logging.getLogger(__name__)
 from .enums import AgentType, MessageRole
 
 
+class ContextBudgetObservation(BaseModel):
+    """Bounded technical context-compaction fact awaiting PI visibility."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    agent: str
+    measured_tokens: int = Field(ge=0)
+    final_tokens: int = Field(ge=0)
+    ceiling: int = Field(ge=1)
+    requested_completion_reserve: int = Field(ge=0)
+    effective_completion_reserve: int = Field(ge=0)
+    actions: List[str] = Field(default_factory=list, max_length=8)
+    fits: bool
+    occurrence_count: int = Field(default=1, ge=1)
+    created_at: datetime = Field(default_factory=datetime.now)
+    pi_delivered_at: Optional[datetime] = None
+
+
 class AgentError(BaseModel):
     """Structured agent error record for tracking analysis failures"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))

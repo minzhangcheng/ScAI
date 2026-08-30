@@ -77,6 +77,47 @@ class SupervisorAgent(
 ):
     """Lightweight analysis supervisor using a cheap vision-capable LLM."""
 
+    def _resolve_context_window(self) -> int:
+        return self._provider.get_context_window("supervisor")
+
+    async def _budgeted_text_call(
+        self,
+        method,
+        *,
+        messages: List[Dict[str, Any]],
+        max_tokens: Optional[int] = None,
+        **kwargs,
+    ):
+        try:
+            dispatch = await self._provider.budget_text_dispatch(
+                "supervisor",
+                messages,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[supervisor] Context budgeting unavailable; sending best-effort request: %s",
+                exc,
+            )
+            kwargs["messages"] = messages
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            return await method(**kwargs)
+        kwargs["messages"] = dispatch.messages
+        if max_tokens is not None or dispatch.max_tokens is not None:
+            kwargs["max_tokens"] = dispatch.max_tokens
+        response = await method(**kwargs)
+        try:
+            await self._provider.acknowledge_text_dispatch(
+                "supervisor", dispatch
+            )
+        except Exception as exc:
+            logger.warning(
+                "[supervisor] Context-budget observation acknowledgement failed: %s",
+                exc,
+            )
+        return response
+
     def __init__(
         self,
         settings_provider: 'AgentSettingsProvider',
@@ -169,8 +210,6 @@ class SupervisorAgent(
     # ------------------------------------------------------------------
     # Report generation helpers
     # ------------------------------------------------------------------
-
-
 
 
 

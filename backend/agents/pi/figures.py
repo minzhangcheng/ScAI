@@ -34,6 +34,22 @@ from .shared import (  # noqa: F401
 class FiguresMixin:
     """Publication-figure review, graphic abstracts, and text diagrams."""
 
+    @staticmethod
+    def _unavailable_publication_figure_review(reason: str) -> Dict[str, Any]:
+        """Describe absence of a visual verdict without inventing a score."""
+        feedback = str(reason or "Figure review unavailable").strip()[:500]
+        return {
+            "approved": False,
+            "quality_score": None,
+            "review_unavailable": True,
+            "feedback": feedback or "Figure review unavailable",
+            "strengths": [],
+            "issues": [],
+            "suggestions": [],
+            "must_fix": [],
+            "requires_reanalysis": False,
+        }
+
     def _build_revision_history_text(self, figure: PublicationFigure) -> str:
         """Build a text summary of all revision history for the PI review prompt."""
         if figure.revision_history:
@@ -227,25 +243,27 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
                     self.has_vision = False
                 else:
                     logger.warning(f"[PI] Vision API transient failure; retaining vision: {e}")
-                response_text = await self.chat(
-                    f"{prompt}\n\n[Note: Unable to view image directly. Please provide general guidance based on figure type and description.]",
-                    temperature=0.3
+                return self._unavailable_publication_figure_review(
+                    f"PI vision review failed: {str(e)[:400]}"
                 )
         else:
-            # User explicitly marked model as no-vision — skip vision call
-            self._set_llm_context()
-            response_text = await self.chat(
-                f"{prompt}\n\n[Note: Vision not available for this model. Please provide general guidance based on figure type and description.]",
-                temperature=0.3
+            return self._unavailable_publication_figure_review(
+                "Figure review unavailable: PI model has no vision capability"
             )
 
         # Use base class safe JSON parser
         data = self._safe_parse_json(response_text, default={})
 
         if data and "approved" in data:
+            try:
+                quality_score = int(data.get("quality_score", 5))
+            except (TypeError, ValueError):
+                return self._unavailable_publication_figure_review(
+                    "Figure review response could not be parsed"
+                )
             result = {
                 "approved": bool(data.get("approved", False)),
-                "quality_score": int(data.get("quality_score", 5)),
+                "quality_score": quality_score,
                 "feedback": data.get("feedback", ""),
                 "strengths": data.get("strengths", []),
                 "issues": data.get("issues", []),
@@ -256,17 +274,9 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
             logger.info(f"[PI] Figure review result: approved={result['approved']}, score={result['quality_score']}, requires_reanalysis={result['requires_reanalysis']}")
             return result
 
-        # Fallback
-        return {
-            "approved": False,
-            "quality_score": 5,
-            "feedback": "Unable to parse review response. Please regenerate the figure.",
-            "strengths": [],
-            "issues": [],
-            "suggestions": ["Ensure figure meets publication standards"],
-            "must_fix": [],
-            "requires_reanalysis": False
-        }
+        return self._unavailable_publication_figure_review(
+            "Figure review response could not be parsed"
+        )
 
     def _build_ga_revision_history_text(self, revision_history: List[Dict[str, Any]]) -> str:
         return build_ga_revision_history_text(revision_history)
@@ -954,7 +964,8 @@ Example: ["umap_cell_types", "cell_type_proportions", "volcano_<celltype>_<condi
 
         try:
             self._set_llm_context()
-            response = await self.llm_client.chat(
+            response = await self._budgeted_text_call(
+                self.llm_client.chat,
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,

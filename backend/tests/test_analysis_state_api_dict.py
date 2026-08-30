@@ -25,6 +25,7 @@ from backend.models.schemas import (
     RoundResult,
     WebSocketMessage,
     PublicationFigure,
+    PublicationTable,
     FigureReviewStatus,
 )
 from backend.tests.figure_image_helpers import valid_image_bytes
@@ -248,6 +249,28 @@ class TestAnalysisStateApiDictRoundTrip:
 
         assert api["publication_figures"] == []
         assert api["messages"] == []
+
+    def test_publication_tables_are_filtered_to_the_active_lineage(self):
+        state = AnalysisState(
+            user_id="test",
+            restore_branch_id="restore/a",
+            publication_tables=[
+                PublicationTable(
+                    id="main-table", name="main", description="main",
+                    csv_path="/tmp/main.csv", lineage_id="main",
+                ),
+                PublicationTable(
+                    id="branch-table", name="branch", description="branch",
+                    csv_path="/tmp/branch.csv", lineage_id="restore/a",
+                ),
+            ],
+        )
+
+        api = state.to_api_dict()
+
+        assert [table["id"] for table in api["publication_tables"]] == [
+            "branch-table"
+        ]
 
     def test_runtime_warning_is_serialized(self):
         """to_api_dict() must include runtime_restore_warning when set, default to None."""

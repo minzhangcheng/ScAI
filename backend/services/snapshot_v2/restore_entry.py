@@ -40,6 +40,7 @@ class RestoreEntryPlan(BaseModel):
     target_node: str | None = None
     workflow_state: dict[str, Any] = Field(default_factory=dict)
     preserve_round_on_initialize: bool = False
+    terminal_status: Literal["completed", "stopped", "failed"] | None = None
 
 
 def build_restore_entry_plan(
@@ -68,9 +69,18 @@ def build_restore_entry_plan(
 
     # Resume kind from dispatcher activation
     if resume_kind == "terminal":
+        terminal_payload = dict(
+            getattr(analysis_state, "restore_resume_workflow_state", None) or {}
+        )
+        terminal_status = terminal_payload.get("terminal_status")
+        if terminal_status not in {"completed", "stopped", "failed"}:
+            current = getattr(analysis_state, "status", None)
+            terminal_status = getattr(current, "value", current)
+        if terminal_status not in {"completed", "stopped", "failed"}:
+            terminal_status = "completed"
         return RestoreEntryPlan(
             intent="terminal",
-            target_node="generate_final_report",
+            terminal_status=terminal_status,
         )
 
     if resume_kind == "semantic_gate":

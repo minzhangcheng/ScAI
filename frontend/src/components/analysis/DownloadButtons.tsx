@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 
 import { API_BASE } from '../../constants/api'
+import { reportBranchQuery } from '../../utils/reportBranch'
 
 interface DownloadButtonsProps {
   figures: PublicationFigure[]
@@ -26,6 +27,7 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
   const [downloading, setDownloading] = useState<string | null>(null)
   const [downloadComplete, setDownloadComplete] = useState<string | null>(null)
   const [downloadError, setDownloadError] = useSelfClearingError()
+  const branchQuery = reportBranchQuery(currentSession?.restoreBranchId)
 
   if (figures.length === 0 && tables.length === 0) {
     return null
@@ -59,7 +61,7 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
     if (!currentSession) return
     return downloadType(
       'figures',
-      `${API_BASE}/session/${currentSession.id}/report/download-all-figures`,
+      `${API_BASE}/session/${currentSession.id}/report/download-all-figures${branchQuery}`,
       `figures_${currentSession.id}.zip`,
       { method: 'POST' },
     )
@@ -69,7 +71,7 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
     if (!currentSession) return
     return downloadType(
       'tables',
-      `${API_BASE}/session/${currentSession.id}/report/download-all-tables`,
+      `${API_BASE}/session/${currentSession.id}/report/download-all-tables${branchQuery}`,
       `tables_${currentSession.id}.zip`,
       { method: 'POST' },
     )
@@ -84,7 +86,7 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
       if (figures.length > 0) {
         downloads.push(
           fetchAndDownload(
-            `${API_BASE}/session/${currentSession.id}/report/download-all-figures`,
+            `${API_BASE}/session/${currentSession.id}/report/download-all-figures${branchQuery}`,
             `figures_${currentSession.id}.zip`,
             { method: 'POST' },
           ),
@@ -94,7 +96,7 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
       // when there are no publication tables. Ignore 404 (no tables directory).
       downloads.push(
         fetchAndDownload(
-          `${API_BASE}/session/${currentSession.id}/report/download-all-tables`,
+          `${API_BASE}/session/${currentSession.id}/report/download-all-tables${branchQuery}`,
           `tables_${currentSession.id}.zip`,
           { method: 'POST' },
         ).catch((e) => {

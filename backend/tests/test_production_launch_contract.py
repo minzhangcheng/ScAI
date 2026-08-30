@@ -40,7 +40,15 @@ def test_docker_runtime_has_no_node_toolchain_and_uses_port_3000():
     assert runtime.startswith("FROM python:3.11-slim")
     assert "nodejs" not in runtime
     assert "curl build-essential pkg-config gosu" in runtime
-    assert "COPY --from=frontend-build" in runtime
+    user_creation = runtime.index("RUN useradd -m -u 10001 scai")
+    source_copy = runtime.index("COPY --chown=scai:scai . .")
+    frontend_copy = runtime.index(
+        "COPY --from=frontend-build --chown=scai:scai"
+    )
+    assert user_creation < source_copy < frontend_copy
+    assert "mkdir -p /app" in runtime
+    assert "chown scai:scai /app" in runtime
+    assert "chown -R scai:scai /app" not in runtime
     assert "127.0.0.1:3000/api/health" in runtime
     assert "EXPOSE 3000" in runtime
 

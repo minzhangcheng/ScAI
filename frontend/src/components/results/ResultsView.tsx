@@ -4,6 +4,7 @@ import {
 } from 'lucide-react'
 
 import { resultIdentityKey } from '../../utils/roundKey'
+import { reportBranchQuery } from '../../utils/reportBranch'
 import { DownloadButtons, FigureGallery, GraphicAbstract, IntegratedReport } from '../analysis'
 import type { ResultsController } from './useResultsController'
 
@@ -340,7 +341,7 @@ export function ResultsView({ controller }: ResultsViewProps) {
 
           {currentSession.status === 'completed' && (
             <a
-              href={`/api/session/${currentSession.id}/report/html`}
+              href={`/api/session/${currentSession.id}/report/html${reportBranchQuery(currentSession.restoreBranchId)}`}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-2 px-4 py-2 bg-accent-50 dark:bg-accent-900/40 text-accent-700 dark:text-accent-300 rounded-xl font-medium hover:bg-accent-100 dark:hover:bg-accent-900/60 transition-colors"
@@ -376,6 +377,7 @@ export function ResultsView({ controller }: ResultsViewProps) {
             <GraphicAbstract
               graphicAbstract={graphicAbstract}
               sessionId={currentSession?.id}
+              branchId={currentSession?.restoreBranchId}
             />
           )}
 

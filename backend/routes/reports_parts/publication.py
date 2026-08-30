@@ -11,7 +11,7 @@ import asyncio
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from datetime import datetime
 from fastapi import Depends, HTTPException, Request
@@ -52,6 +52,7 @@ from backend.services.report.artifacts import (
     resolve_verified_legacy_artifact,
 )
 from backend.services.report.figure_discovery import ensure_legacy_artifact_inventory
+from backend.services.report.paths import resolve_report_target_lineage
 
 logger = logging.getLogger(__name__)
 
@@ -495,14 +496,22 @@ async def get_graphic_abstract(session_id: str, request: Request):
     }
 
 @router.get("/{session_id}/publication-figures")
-async def get_publication_figures(session_id: str, request: Request):
+async def get_publication_figures(
+    session_id: str,
+    request: Request,
+    branch_id: Optional[str] = None,
+):
     """Get all publication figures for a session"""
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     figures = []
     approved = 0
-    target_lineage = getattr(state, "restore_branch_id", None) or "main"
+    target_lineage = resolve_report_target_lineage(
+        branch_id
+        if branch_id is not None
+        else getattr(state, "restore_branch_id", None)
+    )
     for fig in gallery_artifacts(state.publication_figures):
         if not getattr(fig, "is_current", True) or getattr(fig, "invalidated_at", None):
             continue
@@ -522,6 +531,9 @@ async def get_publication_figures(session_id: str, request: Request):
             "pdf_path": fig.pdf_path,
             "png_base64": fig.png_base64,
             "review_status": review_status,
+            "review_unavailable": bool(
+                getattr(fig, "review_unavailable", False)
+            ),
             "pi_feedback": fig.pi_feedback,
             "revision_count": fig.revision_count,
             "plan_step_id": fig.plan_step_id,
@@ -548,11 +560,20 @@ async def get_publication_figures(session_id: str, request: Request):
     }
 
 @router.get("/{session_id}/publication-tables")
-async def get_publication_tables(session_id: str, request: Request):
+async def get_publication_tables(
+    session_id: str,
+    request: Request,
+    branch_id: Optional[str] = None,
+):
     """Get all publication tables for a session"""
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
+    target_lineage = resolve_report_target_lineage(
+        branch_id
+        if branch_id is not None
+        else getattr(state, "restore_branch_id", None)
+    )
     tables = [
         {
             "id": tbl.id,
@@ -566,6 +587,7 @@ async def get_publication_tables(session_id: str, request: Request):
             "created_at": tbl.created_at.isoformat()
         }
         for tbl in state.publication_tables
+        if (getattr(tbl, "lineage_id", None) or "main") == target_lineage
     ]
 
     return {
@@ -575,11 +597,20 @@ async def get_publication_tables(session_id: str, request: Request):
     }
 
 @router.get("/{session_id}/figure/{figure_id}/pdf")
-async def download_publication_figure_pdf(session_id: str, figure_id: str, state: AnalysisState = Depends(require_session_ownership)):
+async def download_publication_figure_pdf(
+    session_id: str,
+    figure_id: str,
+    state: AnalysisState = Depends(require_session_ownership),
+    branch_id: Optional[str] = None,
+):
     """Download a specific publication figure as PDF"""
     workspace = get_session_workspace(session_id)
     await _ensure_frozen_artifact_inventory(session_id, state, workspace)
-    target_lineage = getattr(state, "restore_branch_id", None) or "main"
+    target_lineage = resolve_report_target_lineage(
+        branch_id
+        if branch_id is not None
+        else getattr(state, "restore_branch_id", None)
+    )
     payload, pdf_path, fig_name = await _prepare_generation_bound_download(
         session_id,
         state,
@@ -596,11 +627,20 @@ async def download_publication_figure_pdf(session_id: str, figure_id: str, state
     )
 
 @router.get("/{session_id}/figure/{figure_id}/png")
-async def download_publication_figure_png(session_id: str, figure_id: str, state: AnalysisState = Depends(require_session_ownership)):
+async def download_publication_figure_png(
+    session_id: str,
+    figure_id: str,
+    state: AnalysisState = Depends(require_session_ownership),
+    branch_id: Optional[str] = None,
+):
     """Download a specific publication figure as PNG/JPG"""
     workspace = get_session_workspace(session_id)
     await _ensure_frozen_artifact_inventory(session_id, state, workspace)
-    target_lineage = getattr(state, "restore_branch_id", None) or "main"
+    target_lineage = resolve_report_target_lineage(
+        branch_id
+        if branch_id is not None
+        else getattr(state, "restore_branch_id", None)
+    )
     payload, img_path, fig_name = await _prepare_generation_bound_download(
         session_id,
         state,

@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.49.8 · **Last updated**: 2026-08-30
+**Version**: 0.50.1 · **Last updated**: 2026-08-30
 
 ## 1. Runtime Architecture
 
@@ -335,6 +335,34 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.50.x — (2026-08-30 onward)**
+
+- `0.50.1` — Merges the behavior-level `feat/migrate-ver-0.47.4` work into the
+  current mainline without restoring the archived scientific gate or control-plane
+  system. Manual input now stops when any attachment upload fails, same-generation
+  WebSocket reloads cannot overwrite newer state, and multipart limits are enforced
+  before parsing. Snapshot V2 preserves terminal failure truth and clears stale
+  capture-failure state only from newly successful snapshots; stop actions use
+  boundary- and negation-aware parsing. Restored-session report and artifact URLs
+  retain branch identity, realtime history paging and merging are streamlined, and
+  provider prompt-cache telemetry is reported without turning missing data into
+  zero. Per-agent context-window settings feed one shared best-effort prompt budget
+  whose overflow remains a PI-visible technical observation rather than a workflow
+  veto. Unavailable figure review is recorded truthfully without withholding an
+  otherwise technically valid artifact, and the runtime image assigns application
+  ownership during Docker copy instead of recursively repairing it at startup.
+  Post-merge version consistency passed `8/8` nodes at
+  `test-results/20260830T002136Z-2955770/evidence.json`. Backend-full collected
+  `6194` nodes and recorded `6099 passed / 1 failed / 94 skipped` at
+  `test-results/20260830T002226Z-2960363/evidence.json`; the sole failure,
+  `test_real_agents_complete_the_review_and_merge_back`, reproduces unchanged on
+  the clean pre-merge `0.49.8` main commit at
+  `test-results/20260830T002949Z-2985078/evidence.json`, so the failed-node delta
+  is zero. The isolated frontend run passed `178/178` suites and `392/392` tests
+  at `test-results/20260830T003040Z-9018d5d02c76-frontend/evidence.json` against
+  the exact frontend tree merged into this release. Client, kernel, image build,
+  registry push, deployment, and historical-session mutation were not performed.
 
 **0.49.x — (2026-08-28 onward)**
 

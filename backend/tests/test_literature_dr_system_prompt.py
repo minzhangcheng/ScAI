@@ -4,6 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import MagicMock, AsyncMock
 from backend.agents.literature_agent import LiteratureAgent
 
@@ -16,6 +17,14 @@ def _make_agent():
     provider.get_literature_config.return_value = {}
     provider.get_config_revision.return_value = 0
     provider.clear_agent_client_cache = MagicMock()
+    provider.budget_text_dispatch = AsyncMock(side_effect=(
+        lambda _agent, messages, max_tokens=None, **_kwargs: SimpleNamespace(
+            messages=messages,
+            max_tokens=max_tokens,
+            pi_observation_ids=(),
+        )
+    ))
+    provider.acknowledge_text_dispatch = AsyncMock()
     client = MagicMock()
     client.set_context = MagicMock()
     resp = MagicMock()

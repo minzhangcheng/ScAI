@@ -10,6 +10,7 @@ export type ConnectionRefs = {
   reconnectCountRef: MutableRefObject<number>
   reconnectTimerRef: MutableRefObject<ReturnType<typeof setTimeout> | null>
   restoreCommitRefreshesRef: MutableRefObject<RestoreCommitRefreshes>
+  stateSyncEpochRef: MutableRefObject<number>
 }
 
 export type ConnectionContext = ConnectionRefs & {
@@ -25,5 +26,6 @@ export type MessageHandlerContext = {
   isCurrentAttempt: () => boolean
   ownsSocketSession: () => boolean
   restoreCommitRefreshesRef: MutableRefObject<RestoreCommitRefreshes>
+  stateSyncEpochRef: MutableRefObject<number>
   addMessage: (message: Message) => void
 }

@@ -1,5 +1,4 @@
 import { useAppStore, Message, Session, AgentType, RoundResult } from '../../../stores/appStore'
-import { transformRawMessage } from '../../../utils/messageTransform'
 import { transformRoundResults } from '../../../utils/transformLoadResponse'
 import { devLog } from '../../../utils/logger'
 import { resultIdentityKey } from '../../../utils/roundKey'
@@ -16,10 +15,31 @@ const SNAPSHOT_REMINDER_INTERVAL = 5
 const MAX_RESTORE_COMMIT_REFRESH_KEYS = 64
 
 function handleStateSync(data: any, context: MessageHandlerContext): void {
-  const { attempt, isCurrentAttempt, restoreCommitRefreshesRef } = context
+  const {
+    attempt, isCurrentAttempt, restoreCommitRefreshesRef, stateSyncEpochRef,
+  } = context
   // Normalise: some backend paths nest fields under `content`
   // while others place them at the top level of the message.
   const syncContent = data.content ?? data
+  const restoreInfo = syncContent.change_type === 'snapshot_transaction'
+    ? syncContent.snapshot_transaction
+    : null
+  const restoreSessionId = useAppStore.getState().currentSession?.id
+  const restoreRefreshKey = (
+    restoreSessionId && restoreInfo?.transaction_id
+      ? `${restoreSessionId}:${attempt}:${restoreInfo.transaction_id}`
+      : null
+  )
+  const repeatedRestoreCommit = Boolean(
+    restoreInfo?.status === 'committed'
+    && restoreInfo.session_id === restoreSessionId
+    && restoreRefreshKey
+    && restoreCommitRefreshesRef.current.keys.has(restoreRefreshKey)
+  )
+  // A replayed commit is the same causal sync that already owns the in-flight
+  // reload. Advancing the epoch while deduplicating its replacement would
+  // invalidate the only authoritative response.
+  if (!repeatedRestoreCommit) stateSyncEpochRef.current += 1
   const currentVersion = useAppStore.getState().stateVersion
 
   const terminalChat = syncContent.chat_message
@@ -40,15 +60,17 @@ function handleStateSync(data: any, context: MessageHandlerContext): void {
     console.warn('WebSocket: Received outdated state sync, current:', currentVersion, 'received:', syncContent.version, '. Reloading session state.')
     const sessionId = useAppStore.getState().currentSession?.id
     if (sessionId) {
+      const reloadEpoch = stateSyncEpochRef.current
       const ownsReload = () => (
         isCurrentAttempt()
         && useAppStore.getState().currentSession?.id === sessionId
+        && stateSyncEpochRef.current === reloadEpoch
       )
-      void reloadSessionState(
-        sessionId,
-        'WebSocket: Failed to reload session state:',
-        ownsReload,
-      )
+      void reloadSessionState(sessionId, ownsReload).catch(reloadErr => {
+        if (ownsReload()) {
+          console.error('WebSocket: Failed to reload session state:', reloadErr)
+        }
+      })
     }
   } else {
     // Update state version and session status. Producers that omit
@@ -152,23 +174,29 @@ function handleStateSync(data: any, context: MessageHandlerContext): void {
             const expired = refreshes.order.shift()
             if (expired) refreshes.keys.delete(expired)
           }
+          const restoreReloadEpoch = stateSyncEpochRef.current
           const ownsRestoreReload = () => (
             isCurrentAttempt()
             && useAppStore.getState().currentSession?.id === activeSessionId
+            && stateSyncEpochRef.current === restoreReloadEpoch
           )
-          void reloadSessionState(
-            activeSessionId,
-            'WebSocket: Failed to reload session state after restore commit:',
-            ownsRestoreReload,
-          ).then(applied => {
-            if (
-              !applied
-              && restoreCommitRefreshesRef.current.keys.has(refreshKey)
-            ) {
+          const releaseRefresh = () => {
+            if (restoreCommitRefreshesRef.current.keys.has(refreshKey)) {
               const retained = restoreCommitRefreshesRef.current
               retained.keys.delete(refreshKey)
               retained.order = retained.order.filter(key => key !== refreshKey)
             }
+          }
+          void reloadSessionState(activeSessionId, ownsRestoreReload).then(applied => {
+            if (!applied) releaseRefresh()
+          }).catch(reloadErr => {
+            if (ownsRestoreReload()) {
+              console.error(
+                'WebSocket: Failed to reload session state after restore commit:',
+                reloadErr,
+              )
+            }
+            releaseRefresh()
           })
         }
       }
@@ -268,9 +296,8 @@ export function handleWebSocketMessage(
     // Handle message_history - batch restore messages (e.g. reconnect to completed session)
     if (data.type === 'message_history') {
       if (data.content?.messages && Array.isArray(data.content.messages)) {
-        const serverMessages = data.content.messages.map(transformRawMessage)
-        mergeRealtimeMessages(serverMessages)
-        devLog(`WebSocket: Merged ${serverMessages.length} legacy history messages`)
+        mergeRealtimeMessages(data.content.messages)
+        devLog(`WebSocket: Merged ${data.content.messages.length} legacy history messages`)
       }
       return  // Don't add message_history itself to the message stream
     }

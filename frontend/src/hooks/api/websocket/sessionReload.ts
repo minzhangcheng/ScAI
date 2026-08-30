@@ -4,27 +4,47 @@ import { apiFetch, applyStoreUpdates } from '../client'
 
 export function reloadSessionState(
   sessionId: string,
-  errorLabel: string,
   ownsResponse: () => boolean,
-): Promise<boolean> {
+): Promise<any | null> {
+  const sessionAtRequest = useAppStore.getState().currentSession
+  if (sessionAtRequest?.id !== sessionId) return Promise.resolve(null)
+  const versionAtRequest = useAppStore.getState().stateVersion
+  let responseWasOwned = false
+  const ownsRequest = () => {
+    const owns = (
+      ownsResponse()
+      && useAppStore.getState().currentSession === sessionAtRequest
+    )
+    if (owns) responseWasOwned = true
+    return owns
+  }
   return apiFetch<any>(
     `/session/${sessionId}/load`,
     undefined,
-    ownsResponse,
+    ownsRequest,
   )
     .then(reloadData => {
-      if (!reloadData || typeof reloadData !== 'object') return false
+      if (!reloadData || typeof reloadData !== 'object') return null
       if (
-        !ownsResponse()
+        !ownsRequest()
         || useAppStore.getState().currentSession?.id !== sessionId
-      ) return false
+      ) return null
+      const currentVersion = useAppStore.getState().stateVersion
+      const responseVersion = typeof reloadData.state_version === 'number'
+        ? reloadData.state_version
+        : null
+      const storeAdvancedDuringRequest = currentVersion > versionAtRequest
+      if (
+        storeAdvancedDuringRequest
+        && (responseVersion === null || responseVersion < currentVersion)
+      ) return null
       const { sessionUpdates, storeUpdates } = transformLoadResponse(reloadData)
       useAppStore.getState().updateSession(sessionUpdates)
       applyStoreUpdates(storeUpdates)
-      return true
+      return reloadData
     })
     .catch(reloadErr => {
-      if (ownsResponse()) console.error(errorLabel, reloadErr)
-      return false
+      if (!ownsRequest() && !responseWasOwned) return null
+      throw reloadErr
     })
 }

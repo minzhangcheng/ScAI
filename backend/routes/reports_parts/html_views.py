@@ -58,13 +58,25 @@ from .core import _create_report_archive, _enforce_archive_retention, _load_repo
 
 
 @router.get("/{session_id}/exploration-report/html")
-async def get_exploration_report_html(session_id: str, request: Request):
+async def get_exploration_report_html(
+    session_id: str,
+    request: Request,
+    branch_id: Optional[str] = None,
+):
     """Serve the exploration report HTML file"""
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    html_path = state.exploration_report_html_path
+    target_lineage = resolve_report_target_lineage(
+        branch_id if branch_id is not None else state.restore_branch_id
+    )
+    active_lineage = state.restore_branch_id or "main"
+    html_path = (
+        state.exploration_report_html_path
+        if target_lineage == active_lineage
+        else None
+    )
     if not html_path or not Path(html_path).exists():
         raise HTTPException(status_code=404, detail="Exploration report HTML not found")
 
@@ -75,13 +87,25 @@ async def get_exploration_report_html(session_id: str, request: Request):
     return FileResponse(html_path, media_type="text/html", filename="exploration_report.html")
 
 @router.get("/{session_id}/annotation-report/html")
-async def get_annotation_report_html(session_id: str, request: Request):
+async def get_annotation_report_html(
+    session_id: str,
+    request: Request,
+    branch_id: Optional[str] = None,
+):
     """Serve the annotation context report HTML file"""
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    html_path = state.annotation_report_html_path
+    target_lineage = resolve_report_target_lineage(
+        branch_id if branch_id is not None else state.restore_branch_id
+    )
+    active_lineage = state.restore_branch_id or "main"
+    html_path = (
+        state.annotation_report_html_path
+        if target_lineage == active_lineage
+        else None
+    )
     if not html_path or not Path(html_path).exists():
         raise HTTPException(status_code=404, detail="Annotation report not found")
 
@@ -92,13 +116,25 @@ async def get_annotation_report_html(session_id: str, request: Request):
     return FileResponse(html_path, media_type="text/html", filename="annotation_context_report.html")
 
 @router.get("/{session_id}/integration-report/html")
-async def get_integration_report_html(session_id: str, request: Request):
+async def get_integration_report_html(
+    session_id: str,
+    request: Request,
+    branch_id: Optional[str] = None,
+):
     """Serve the integration report HTML file"""
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    html_path = state.integration_report_html_path
+    target_lineage = resolve_report_target_lineage(
+        branch_id if branch_id is not None else state.restore_branch_id
+    )
+    active_lineage = state.restore_branch_id or "main"
+    html_path = (
+        state.integration_report_html_path
+        if target_lineage == active_lineage
+        else None
+    )
     if not html_path or not Path(html_path).exists():
         raise HTTPException(status_code=404, detail="Integration report HTML not found")
 

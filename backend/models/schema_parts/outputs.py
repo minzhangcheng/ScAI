@@ -134,6 +134,10 @@ class PublicationFigure(BaseModel):
     pdf_sha256: Optional[str] = None
     interpretation: Optional[str] = None  # Scientific interpretation of the figure
     review_status: FigureReviewStatus = FigureReviewStatus.PENDING
+    # True means no visual review verdict was obtained. Keep PENDING so older
+    # readers do not mistake this for approval; this flag distinguishes the
+    # terminal observation from a review that is still in progress.
+    review_unavailable: bool = False
     pi_feedback: Optional[str] = None
     revision_history: List[Dict[str, Any]] = Field(default_factory=list)  # Accumulated feedback from all revision rounds
     revision_count: int = 0

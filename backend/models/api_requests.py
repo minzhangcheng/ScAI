@@ -66,6 +66,7 @@ class AgentServerConfigRequest(BaseModel):
     agent: Literal["pi", "pathology", "bioinformatics", "biochemistry", "literature", "painter", "supervisor", "technique"]
     llm_base_url: str = ""
     api_key: str = ""
+    context_window: Optional[int] = Field(default=None, ge=8_192)
 
 
 class AgentSettingsUpdateRequest(BaseModel):
@@ -76,6 +77,7 @@ class AgentSettingsUpdateRequest(BaseModel):
     temperature: float = Field(ge=0.0, le=2.0)
     llm_base_url: str = ""
     api_key: str = ""
+    context_window: Optional[int] = Field(default=None, ge=8_192)
     vision_enabled: bool
     literature_config: Optional[LiteratureConfigRequest] = None
 

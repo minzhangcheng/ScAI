@@ -49,7 +49,7 @@ from .schema_parts.enums import (  # noqa: F401
     FigureReviewStatus,
 )
 from .schema_parts.analysis import (  # noqa: F401
-    ScoringPlan,
+    ScoringPlan, ContextBudgetObservation,
     AgentError,
     AgentMessage,
     CodeExecution, BulkInputProfile, MethodDecision,
@@ -277,7 +277,7 @@ class AnalysisState(BaseModel):
 
     # Agent messages history
     messages: List[AgentMessage] = Field(default_factory=list)
-
+    context_budget_observations: List[ContextBudgetObservation] = Field(default_factory=list, max_length=20)
     # Realtime messages for WebSocket (persisted for session restoration)
     realtime_messages: List["WebSocketMessage"] = Field(default_factory=list)
     # Code execution history (for reproducibility)
@@ -748,7 +748,7 @@ class AnalysisState(BaseModel):
                     lineage_id=(self.restore_branch_id or "main"),
                 )
             elif field_name == "publication_tables":
-                result[api_key] = self._serialize_publication_tables(val)
+                result[api_key] = self._serialize_publication_tables(val, lineage_id=(self.restore_branch_id or "main"))
             elif field_name == "graphic_abstract":
                 result[api_key] = self._serialize_graphic_abstract(val)
             elif field_name == "plan_dialogue_history":
@@ -902,7 +902,7 @@ class AnalysisState(BaseModel):
             {"id": f["id"], "name": f["name"], "description": f["description"],
              "figure_type": f["figure_type"], "png_path": f["png_path"],
              "pdf_path": f["pdf_path"], "png_base64": f["png_base64"],
-             "review_status": f["review_status"],
+             "review_status": f["review_status"], "review_unavailable": bool(f.get("review_unavailable", False)),
              "pi_feedback": f["pi_feedback"], "revision_count": f["revision_count"],
              "round": f.get("round_number") or None,
              "plan_step_id": f.get("plan_step_id"),
@@ -926,14 +926,14 @@ class AnalysisState(BaseModel):
         ]
 
     @staticmethod
-    def _serialize_publication_tables(tables):
+    def _serialize_publication_tables(tables, *, lineage_id: str = "main"):
         return [
             {"id": t["id"], "name": t["name"], "description": t["description"],
              "csv_path": t["csv_path"], "columns": t["columns"],
              "preview_data": t["preview_data"],
              "review_status": t["review_status"],
              "pi_feedback": t["pi_feedback"], "created_at": t["created_at"]}
-            for t in tables
+            for t in tables if (t.get("lineage_id") or "main") == (lineage_id or "main")
         ]
 
     @staticmethod

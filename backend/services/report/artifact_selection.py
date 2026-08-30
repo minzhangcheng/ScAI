@@ -18,6 +18,9 @@ def compact_figure_event_payload(figure: Any, *, review_status: str | None=None,
         "png_path": getattr(figure, "png_path", ""),
         "pdf_path": getattr(figure, "pdf_path", ""),
         "review_status": raw_status,
+        "review_unavailable": bool(
+            getattr(figure, "review_unavailable", False)
+        ),
         "pi_feedback": (
             pi_feedback if pi_feedback is not None
             else getattr(figure, "pi_feedback", None)
@@ -91,6 +94,11 @@ def is_report_eligible(artifact: Any, *, bindings) -> bool:
     # figure most likely to crash the lint is the one most likely to need it.
     if is_diagnostic(artifact):
         return layout_was_measured(artifact)
+    if (
+        _status_value(artifact) == "pending"
+        and bool(_artifact_value(artifact, "review_unavailable", False))
+    ):
+        return True
     return _status_value(artifact) in REPORTABLE_REVIEW_STATUSES
 
 def logical_figure_key(artifact: Any, *, bindings) -> tuple[str, str]:

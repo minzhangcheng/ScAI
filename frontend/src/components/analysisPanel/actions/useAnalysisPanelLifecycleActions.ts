@@ -131,6 +131,7 @@ export function useAnalysisPanelLifecycleActions(options: LifecycleActionOptions
   const handleDialogSend = useCallback(async (message: string, files: UploadedFileWithAgent[]) => {
     if (!options.currentSession || blockForwardResume()) return
     const uploadedData: Array<{ type: string; filename: string; id?: string }> = []
+    const rejected: Array<{ name: string; reason: string }> = []
     for (const { file, targetAgent, groupId, sampleNumber, dataType } of files) {
       try {
         const formData = new FormData()
@@ -161,7 +162,23 @@ export function useAnalysisPanelLifecycleActions(options: LifecycleActionOptions
         }
       } catch (error) {
         console.error(`Failed to upload ${file.name}:`, error)
+        rejected.push({
+          name: file.name,
+          reason: error instanceof Error ? error.message : String(error),
+        })
       }
+    }
+    if (rejected.length > 0) {
+      const detail = rejected.map(item => `- ${item.name}: ${item.reason}`).join('\n')
+      options.addMessage({
+        id: generateId(),
+        type: 'error',
+        content: options.language === 'zh'
+          ? `以下文件上传失败，消息尚未发送，分析未继续：\n${detail}\n请移除或替换这些文件后重试。`
+          : `These files failed to upload, so nothing was sent and the analysis did not continue:\n${detail}\nRemove or replace them and try again.`,
+        timestamp: new Date().toISOString(),
+      })
+      return
     }
     try {
       await apiFetch(`/session/${options.currentSession.id}/human-input`, {

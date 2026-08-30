@@ -18,18 +18,19 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+RUN useradd -m -u 10001 scai \
+    && mkdir -p /app \
+    && chown scai:scai /app
+
 WORKDIR /app
 
-COPY . .
-COPY --from=frontend-build /build/frontend/dist /app/frontend/dist
+COPY --chown=scai:scai . .
+COPY --from=frontend-build --chown=scai:scai \
+    /build/frontend/dist /app/frontend/dist
 
 ENV SCAI_FRONTEND_DIST=/app/frontend/dist
 
-# Create non-root user; chown everything so the entrypoint (running as root)
-# can chown /dep and /data, then drop privileges via gosu.
-RUN useradd -m -u 10001 scai \
-    && chown -R scai:scai /app \
-    && chmod +x docker-entrypoint.sh
+RUN chmod +x docker-entrypoint.sh
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \
   CMD curl -f http://127.0.0.1:3000/api/health || exit 1
