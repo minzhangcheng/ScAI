@@ -101,6 +101,44 @@ async def test_publication_figures_expose_review_unavailable(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_publication_figures_expose_pi_degraded_acceptance(tmp_path):
+    png_path = tmp_path / "degraded.png"
+    png_payload = write_valid_image(png_path, min_bytes=2200)
+    state = AnalysisState(
+        id="session-figures",
+        name="Figures",
+        user_id="user-1",
+        publication_figures=[PublicationFigure(
+            name="degraded",
+            description="Best PI-reviewed exhausted candidate",
+            figure_type="other",
+            png_path=str(png_path),
+            pdf_path="/tmp/degraded.pdf",
+            render_sha256=hashlib.sha256(png_payload).hexdigest(),
+            review_status=FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS,
+            pi_degraded_acceptance=True,
+            pi_degraded_acceptance_reason="PI retained the best exhausted candidate.",
+        )],
+    )
+    request = SimpleNamespace(state=SimpleNamespace(user_id="user-1"))
+
+    async def fake_owner(**_kwargs):
+        return state
+
+    with patch_facade(
+        "backend.routes.reports",
+        "require_session_ownership",
+        side_effect=fake_owner,
+    ):
+        response = await get_publication_figures("session-figures", request)
+
+    assert response["figures"][0]["pi_degraded_acceptance"] is True
+    assert "best exhausted candidate" in response["figures"][0][
+        "pi_degraded_acceptance_reason"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_publication_figures_exposes_all_current_completed_renders(tmp_path):
     old_path = tmp_path / "old.jpg"
     head_path = tmp_path / "head.jpg"

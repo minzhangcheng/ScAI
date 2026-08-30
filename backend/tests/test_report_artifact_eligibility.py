@@ -88,6 +88,28 @@ def test_technically_valid_unavailable_review_is_reportable_but_not_approved():
     assert is_report_eligible(blocked) is False
 
 
+def test_only_explicit_pi_degraded_acceptance_waives_unresolved_observations():
+    observations = {
+        "layout_violations": [{"kind": "text_over_text", "severity": "block"}],
+        "unresolved_must_fix": ["Increase the legend spacing"],
+    }
+    ordinary = _figure(
+        "ordinary-reserved",
+        FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS,
+        **observations,
+    )
+    degraded = _figure(
+        "pi-degraded",
+        FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS,
+        pi_degraded_acceptance=True,
+        pi_degraded_acceptance_reason="PI selected the best exhausted candidate.",
+        **observations,
+    )
+
+    assert is_report_eligible(ordinary) is False
+    assert is_report_eligible(degraded) is True
+
+
 def test_valid_preview_digest_survives_malformed_render_digest():
     payload = valid_image_bytes("JPEG")
     figure = _figure(

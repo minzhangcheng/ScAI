@@ -903,6 +903,8 @@ class AnalysisState(BaseModel):
              "figure_type": f["figure_type"], "png_path": f["png_path"],
              "pdf_path": f["pdf_path"], "png_base64": f["png_base64"],
              "review_status": f["review_status"], "review_unavailable": bool(f.get("review_unavailable", False)),
+             "pi_degraded_acceptance": bool(f.get("pi_degraded_acceptance", False)),
+             "pi_degraded_acceptance_reason": f.get("pi_degraded_acceptance_reason"),
              "pi_feedback": f["pi_feedback"], "revision_count": f["revision_count"],
              "round": f.get("round_number") or None,
              "plan_step_id": f.get("plan_step_id"),

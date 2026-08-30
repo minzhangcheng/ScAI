@@ -358,12 +358,18 @@ def test_registered_metadata_retains_plan_provenance(tmp_path):
     registered.plan_step_id = 6
     registered.plan_id = "plan-v2"
     registered.purpose = "result"
+    registered.pi_degraded_acceptance = True
+    registered.pi_degraded_acceptance_reason = "PI retained the best candidate."
 
     metadata = publication_figure_metadata([registered])["planned_panel"]
 
     assert metadata["plan_step_id"] == 6
     assert metadata["plan_id"] == "plan-v2"
     assert metadata["purpose"] == "result"
+    assert metadata["pi_degraded_acceptance"] is True
+    assert metadata["pi_degraded_acceptance_reason"] == (
+        "PI retained the best candidate."
+    )
 
 
 def test_annotation_diagnostic_exception_is_context_only(tmp_path):

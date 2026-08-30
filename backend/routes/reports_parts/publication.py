@@ -534,6 +534,12 @@ async def get_publication_figures(
             "review_unavailable": bool(
                 getattr(fig, "review_unavailable", False)
             ),
+            "pi_degraded_acceptance": bool(
+                getattr(fig, "pi_degraded_acceptance", False)
+            ),
+            "pi_degraded_acceptance_reason": getattr(
+                fig, "pi_degraded_acceptance_reason", None
+            ),
             "pi_feedback": fig.pi_feedback,
             "revision_count": fig.revision_count,
             "plan_step_id": fig.plan_step_id,

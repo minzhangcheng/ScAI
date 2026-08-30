@@ -63,6 +63,16 @@ async def test_integrated_report_uses_only_renderable_report_eligible_figure_met
         name="Report eligibility",
         initial_instruction="Analyze the supplied data.",
     )
+    degraded = _figure(
+        "pi_degraded_panel", FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS,
+        png_path=_render(tmp_path / "pi_degraded_panel.jpg"),
+        layout_violations=[{"kind": "text_over_text", "severity": "block"}],
+    )
+    degraded.unresolved_must_fix = ["Increase legend spacing"]
+    degraded.pi_degraded_acceptance = True
+    degraded.pi_degraded_acceptance_reason = (
+        "PI retained the highest-scoring exhausted candidate."
+    )
     state.publication_figures = [
         _figure(
             "kept_barplot", FigureReviewStatus.APPROVED,
@@ -85,6 +95,7 @@ async def test_integrated_report_uses_only_renderable_report_eligible_figure_met
             png_path=_render(tmp_path / "covered_panel.jpg"),
             layout_violations=[{"kind": "text_over_text", "severity": "block"}],
         ),
+        degraded,
         # Review approval alone is not enough: this restored record has neither
         # a live file nor a recoverable record preview.
         _figure(
@@ -102,6 +113,8 @@ async def test_integrated_report_uses_only_renderable_report_eligible_figure_met
     assert "pending_panel" not in harness.prompt
     assert "rejected_panel" not in harness.prompt
     assert "covered_panel" not in harness.prompt
+    assert "pi_degraded_panel" in harness.prompt
+    assert "highest-scoring exhausted candidate" in harness.prompt
     assert "approved_ghost" not in harness.prompt
     assert "declared type: barplot" in harness.prompt
     assert "bar-plot metadata" in harness.prompt

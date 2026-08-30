@@ -9,7 +9,13 @@ from .figure_preflight import FigureAttemptState
 from .shared import FigureReviewStatus, TECHNICAL_ERROR_TYPES, UpstreamExhaustedError
 
 
-def take_snapshot(attempt: FigureAttemptState, score) -> dict | None:
+def take_snapshot(
+    attempt: FigureAttemptState,
+    score,
+    *,
+    review: dict | None = None,
+    must_fix: list[str] | None = None,
+) -> dict | None:
     try:
         jpg_bytes = attempt.jpg_path.read_bytes() if attempt.jpg_path.exists() else None
         pdf_bytes = attempt.pdf_path.read_bytes() if attempt.pdf_path.exists() else None
@@ -29,6 +35,8 @@ def take_snapshot(attempt: FigureAttemptState, score) -> dict | None:
         "pdf": pdf_bytes,
         "b64": attempt.figure.png_base64,
         "violations": list(attempt.figure.layout_violations or []),
+        "review": dict(review or {}),
+        "must_fix": list(must_fix or []),
     }
 
 

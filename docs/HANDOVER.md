@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.50.1 · **Last updated**: 2026-08-30
+**Version**: 0.50.2 · **Last updated**: 2026-08-30
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,16 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.50.x — (2026-08-30 onward)**
+
+- `0.50.2` — Closes the publication-figure review loop when the bounded redraw
+  budget is exhausted: every PI-reviewed candidate remains available for
+  selection, the highest-scoring candidate is retained with explicit
+  `accepted_with_reservations` status, and unresolved PI/renderer observations
+  remain visible in the result, API, realtime events, and report context.
+  Vision payload normalization and its protocol fallback continue to protect
+  multi-image PI review from malformed base64 handoff. Focused revision,
+  report, API, and vision-dispatch checks passed; no image build, deployment, or
+  historical-session mutation was performed.
 
 - `0.50.1` — Merges the behavior-level `feat/migrate-ver-0.47.4` work into the
   current mainline without restoring the archived scientific gate or control-plane

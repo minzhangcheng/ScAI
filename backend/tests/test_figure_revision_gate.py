@@ -463,28 +463,35 @@ async def test_preview_message_failure_trace_abandons_attempt(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_stalled_score_does_not_accept_unresolved_must_fix(tmp_path):
-    """A clean renderer cannot override unresolved PI must-fix items."""
+async def test_exhausted_revision_accepts_pi_scored_best_with_reservations(tmp_path):
+    """Exhaustion retains PI observations while closing the bounded loop."""
     agent, state, result = await _run(
         tmp_path, [CLEAN], [_review(score=6), _review(score=6)],
     )
     figure = state.publication_figures[0]
-    assert figure.review_status == FigureReviewStatus.REVISION_REQUESTED
+    assert figure.review_status == FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
+    assert figure.pi_degraded_acceptance is True
+    assert figure.unresolved_must_fix
+    assert "fix the legend" in (figure.pi_degraded_acceptance_reason or "")
     assert "bounded revision budget is exhausted" in result
     assert agent.sandbox.executions == 3  # initial + two redraw attempts
-    assert state.figure_revision_tasks[0].status == "exhausted_excluded"
+    assert state.figure_revision_tasks[0].status == "resolved"
+
+    from backend.services.report.artifacts import is_report_eligible
+
+    assert is_report_eligible(figure) is True
 
 
 @pytest.mark.asyncio
 async def test_stalled_score_cannot_ship_a_measured_collision(tmp_path):
-    """A stalled score is a judgement call; covered text is not. The loop must
-    keep revising instead of stamping accepted_with_reservations."""
+    """Measured defects stay disclosed on a PI-degraded exhausted candidate."""
     agent, state, _ = await _run(
         tmp_path, [BLOCKING],
         [_review(score=6), _review(score=6), _review(score=6), _review(score=6)],
     )
     figure = state.publication_figures[0]
-    assert figure.review_status == FigureReviewStatus.REVISION_REQUESTED
+    assert figure.review_status == FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
+    assert figure.pi_degraded_acceptance is True
     assert agent.sandbox.executions == 3  # initial + 2 revisions, budget spent
     assert figure.unresolved_must_fix, "unfixed defects must be recorded"
 
@@ -564,26 +571,27 @@ async def test_a_worse_revision_is_rolled_back(tmp_path):
         tmp_path, [CLEAN], [_review(score=6), _review(score=5)],
     )
     figure = state.publication_figures[0]
-    assert figure.review_status == FigureReviewStatus.REVISION_REQUESTED
+    assert figure.review_status == FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
+    assert figure.pi_degraded_acceptance is True
     assert "restored" in result
     # the first render's bytes are back on disk
     assert (tmp_path / "figures" / "f.jpg").read_bytes().endswith(b"\x01" * 100)
 
 
 @pytest.mark.asyncio
-async def test_a_held_back_figure_records_why_on_itself(tmp_path):
-    """The figure is dropped from every report while its review status still
-    reads "accepted with reservations" and the UI shows it as reviewed, so the
-    reason has to travel with the figure or it exists nowhere."""
+async def test_pi_degraded_acceptance_keeps_layout_observations_visible(tmp_path):
+    """The selected candidate remains reportable without hiding measured facts."""
     _, state, _ = await _run(
         tmp_path, [BLOCKING], [_review(approved=True, score=9)] * 4,
     )
     figure = state.publication_figures[0]
     from backend.services.report.artifacts import is_report_eligible
 
-    assert is_report_eligible(figure) is False
-    assert "[Layout gate]" in (figure.pi_feedback or "")
-    assert "held back" in figure.pi_feedback
+    assert is_report_eligible(figure) is True
+    assert figure.layout_violations
+    assert figure.unresolved_must_fix
+    assert "[DEGRADED ACCEPTANCE]" in (figure.pi_feedback or "")
+    assert figure.pi_degraded_acceptance_reason
 
 
 @pytest.mark.asyncio
@@ -641,8 +649,7 @@ async def test_a_malformed_lint_verdict_is_recorded_as_unverified(tmp_path):
 @pytest.mark.asyncio
 async def test_a_revision_with_no_verdict_does_not_clear_a_known_collision(tmp_path):
     """An unmeasured render must not read as a fixed one. Clearing the previous
-    measurement would re-open both the stall shortcut and report eligibility --
-    the exact path this change exists to close."""
+    measurement would hide the observation from the PI-degraded result."""
     agent, state, _ = await _run(
         tmp_path,
         [BLOCKING, {"violations": None}, {"violations": None}, {"violations": None}],
@@ -650,7 +657,8 @@ async def test_a_revision_with_no_verdict_does_not_clear_a_known_collision(tmp_p
     )
     figure = state.publication_figures[0]
     assert figure.layout_violations == BLOCKING
-    assert figure.review_status == FigureReviewStatus.REVISION_REQUESTED
+    assert figure.review_status == FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
+    assert figure.pi_degraded_acceptance is True
 
 
 @pytest.mark.asyncio

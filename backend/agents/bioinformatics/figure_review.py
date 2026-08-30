@@ -191,17 +191,27 @@ async def _finish_exhausted_review(attempt: FigureAttemptState) -> str:
     restored_best = False
     best_score = (attempt.best_snapshot or {}).get("score")
     current_score = attempt.last_review.get("quality_score")
+    if not isinstance(current_score, (int, float)):
+        current_score = 5
+    selected_review = attempt.last_review
+    selected_must_fix = attempt.last_must_fix
     if (
         isinstance(best_score, (int, float))
         and isinstance(current_score, (int, float))
         and best_score > current_score
     ):
         restored_best = restore_snapshot(attempt, attempt.best_snapshot)
-    figure.review_status = FigureReviewStatus.REVISION_REQUESTED
+        if restored_best:
+            selected_review = dict(
+                attempt.best_snapshot.get("review") or attempt.last_review
+            )
+            selected_must_fix = list(
+                attempt.best_snapshot.get("must_fix") or []
+            )
     remaining_blocking = deps.get("blocking_violations")(figure.layout_violations)
     record_unresolved(
         attempt,
-        deps.get("normalize_text_list")(attempt.last_must_fix, limit=20)
+        deps.get("normalize_text_list")(selected_must_fix, limit=20)
         + deps.get("_violation_must_fix_items")(remaining_blocking),
     )
     task = upsert_figure_revision_task(
@@ -209,35 +219,88 @@ async def _finish_exhausted_review(attempt: FigureAttemptState) -> str:
         figure,
         reason=attempt.terminal_revision_reason,
         must_fix=figure.unresolved_must_fix,
-        suggestions=attempt.last_review.get("suggestions", []),
+        suggestions=selected_review.get("suggestions", []),
     )
     if attempt.terminal_revision_reason == "attempts_exhausted":
-        task.status = "exhausted_excluded"
+        selected_score = (
+            best_score if restored_best else current_score
+        )
+        unresolved_summary = "; ".join(figure.unresolved_must_fix[:5])[:1000]
+        reason = (
+            "The bounded revision budget was exhausted. The candidate with the "
+            f"highest available PI quality score ({selected_score}/10) was retained; "
+            "all unresolved PI and renderer observations remain disclosed."
+            + (
+                f" Unresolved observations: {unresolved_summary}"
+                if unresolved_summary
+                else ""
+            )
+        )
+        figure.review_status = FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
+        figure.pi_degraded_acceptance = True
+        figure.pi_degraded_acceptance_reason = reason
+        selected_feedback = str(selected_review.get("feedback") or "").strip()
+        figure.pi_feedback = (
+            f"[DEGRADED ACCEPTANCE] {reason}"
+            + (
+                f"\n\nPI feedback for the retained candidate: {selected_feedback}"
+                if selected_feedback
+                else ""
+            )
+        )
+        # The exhausted task remains as audit evidence, but it no longer asks a
+        # later round to redraw a candidate the PI has accepted with reservations.
+        task.status = "resolved"
+    else:
+        figure.review_status = FigureReviewStatus.REVISION_REQUESTED
     publish_error = await finalize_render(attempt)
     if publish_error:
         return publish_error
-    await attempt.agent._emit_figure_record(
-        "figure_revision", figure, review=attempt.last_review
+    event_type = (
+        "figure_approved"
+        if figure.pi_degraded_acceptance
+        else "figure_revision"
     )
-    deps.get("logger").warning(
-        "[Bioinformatics] Figure %s not fully approved after %s revisions",
-        attempt.request.figure_name,
-        attempt.revision_count,
+    await attempt.agent._emit_figure_record(
+        event_type, figure, review=selected_review
     )
     layout_note = (
         f"\nUnresolved layout defects: {deps.get('summarize_violations')(remaining_blocking)}."
         if remaining_blocking
         else ""
     )
-    exhausted = task.status == "exhausted_excluded"
-    disposition = (
-        "the bounded revision budget is exhausted"
-        if exhausted
-        else "a durable redraw task remains pending"
+    if figure.pi_degraded_acceptance:
+        deps.get("logger").warning(
+            "[Bioinformatics] Figure %s accepted with reservations after the "
+            "bounded revision budget was exhausted (selected PI score=%s)",
+            attempt.request.figure_name,
+            selected_score,
+        )
+        await attempt.agent._notify(
+            "status",
+            f"Figure {attempt.request.figure_name} accepted with reservations "
+            "after PI candidate review",
+        )
+        return (
+            f"Figure {attempt.request.figure_name} saved after "
+            f"{attempt.revision_count} revision attempts. Status: accepted with "
+            "reservations; the bounded revision budget is exhausted.\n"
+            f"{figure.pi_feedback}{layout_note}"
+            + (
+                "\nThe highest-scoring prior PI-reviewed render was restored."
+                if restored_best else ""
+            )
+            + (f"\n{attempt.staleness_note}" if attempt.staleness_note else "")
+        )
+    deps.get("logger").warning(
+        "[Bioinformatics] Figure %s not fully approved after %s revisions",
+        attempt.request.figure_name,
+        attempt.revision_count,
     )
     return (
         f"Figure {attempt.request.figure_name} saved after {attempt.revision_count} "
-        f"revision attempts. Status: excluded from reports; {disposition}.\n"
+        "revision attempts. Status: excluded from reports; a durable redraw task "
+        "remains pending.\n"
         f"Last feedback: {figure.pi_feedback}{layout_note}"
         + (
             "\nThe highest-scoring prior render was restored before exclusion."
@@ -271,14 +334,6 @@ async def run_review_loop(attempt: FigureAttemptState) -> str:
             return await _accept_unavailable_review(attempt, review)
         quality_score = review.get("quality_score", 5)
         blocking = deps.get("blocking_violations")(figure.layout_violations)
-        if not blocking and (
-            attempt.best_snapshot is None
-            or quality_score > attempt.best_snapshot.get("score", -1)
-        ):
-            snapshot = take_snapshot(attempt, quality_score)
-            if snapshot is not None:
-                attempt.best_snapshot = snapshot
-
         must_fix = deps.get("normalize_text_list")(
             review.get("must_fix"), limit=20
         )
@@ -318,6 +373,21 @@ async def run_review_loop(attempt: FigureAttemptState) -> str:
             return await _accept_reanalysis(
                 attempt, review, feedback, must_fix, blocking
             )
+        # Every plot-level candidate has now been reviewed by the PI. Preserve
+        # the highest PI-scored render even when it still carries observations;
+        # those observations remain attached if the bounded budget is exhausted.
+        if (
+            attempt.best_snapshot is None
+            or quality_score > attempt.best_snapshot.get("score", -1)
+        ):
+            snapshot = take_snapshot(
+                attempt,
+                quality_score,
+                review=review,
+                must_fix=must_fix,
+            )
+            if snapshot is not None:
+                attempt.best_snapshot = snapshot
 
         attempt.revision_history.append(
             {

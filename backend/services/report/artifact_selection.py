@@ -21,6 +21,12 @@ def compact_figure_event_payload(figure: Any, *, review_status: str | None=None,
         "review_unavailable": bool(
             getattr(figure, "review_unavailable", False)
         ),
+        "pi_degraded_acceptance": bool(
+            getattr(figure, "pi_degraded_acceptance", False)
+        ),
+        "pi_degraded_acceptance_reason": getattr(
+            figure, "pi_degraded_acceptance_reason", None
+        ),
         "pi_feedback": (
             pi_feedback if pi_feedback is not None
             else getattr(figure, "pi_feedback", None)
@@ -74,9 +80,18 @@ def is_report_eligible(artifact: Any, *, bindings) -> bool:
             return False
     if is_figure and not has_frozen_publication_pair(artifact):
         return False
-    if has_blocking_layout_defects(artifact):
+    status = _status_value(artifact)
+    pi_degraded_acceptance = (
+        is_figure
+        and status == "accepted_with_reservations"
+        and bool(_artifact_value(artifact, "pi_degraded_acceptance", False))
+    )
+    if has_blocking_layout_defects(artifact) and not pi_degraded_acceptance:
         return False
-    if list(_artifact_value(artifact, "unresolved_must_fix", None) or []):
+    if (
+        list(_artifact_value(artifact, "unresolved_must_fix", None) or [])
+        and not pi_degraded_acceptance
+    ):
         return False
     # A platform-rendered diagnostic has no reviewer by construction, so a review
     # status it could never earn must not be what withholds it. Quality control is
@@ -95,11 +110,11 @@ def is_report_eligible(artifact: Any, *, bindings) -> bool:
     if is_diagnostic(artifact):
         return layout_was_measured(artifact)
     if (
-        _status_value(artifact) == "pending"
+        status == "pending"
         and bool(_artifact_value(artifact, "review_unavailable", False))
     ):
         return True
-    return _status_value(artifact) in REPORTABLE_REVIEW_STATUSES
+    return status in REPORTABLE_REVIEW_STATUSES
 
 def logical_figure_key(artifact: Any, *, bindings) -> tuple[str, str]:
     """Return the explicit revision-family key for one artifact.

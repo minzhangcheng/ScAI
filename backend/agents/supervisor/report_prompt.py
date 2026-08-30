@@ -107,6 +107,11 @@ def _build_report_prompt(
         description = str(metadata.get("description") or "").strip()
         if description:
             line += f" — authoritative description: {description[:600]}"
+        degraded_reason = str(
+            metadata.get("pi_degraded_acceptance_reason") or ""
+        ).strip()
+        if degraded_reason:
+            line += f" — PI accepted with reservations: {degraded_reason[:600]}"
         figure_lines.append(line)
     figure_list = "\n".join(figure_lines) or "None"
 

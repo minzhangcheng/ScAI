@@ -453,6 +453,12 @@ class AnalysisLogMixin:
                 "filename": os.path.basename(fig.png_path) if fig.png_path else "",
                 "review_status": fig.review_status.value if hasattr(fig.review_status, 'value') else str(fig.review_status),
                 "review_unavailable": bool(getattr(fig, "review_unavailable", False)),
+                "pi_degraded_acceptance": bool(
+                    getattr(fig, "pi_degraded_acceptance", False)
+                ),
+                "pi_degraded_acceptance_reason": getattr(
+                    fig, "pi_degraded_acceptance_reason", None
+                ),
             })
 
         # 4. Scan workspace for CSV tables

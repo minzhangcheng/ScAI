@@ -149,6 +149,12 @@ class PublicationFigure(BaseModel):
     # loop gave up. Recorded so the report can say so instead of presenting the
     # figure as reviewed and fine.
     unresolved_must_fix: List[str] = Field(default_factory=list)
+    # The bounded redraw budget was exhausted and the PI-reviewed candidate with
+    # the highest PI quality score was retained with explicit reservations.
+    # Measured defects and must-fix observations remain recorded; this flag only
+    # carries the PI disposition that makes that specific candidate reportable.
+    pi_degraded_acceptance: bool = False
+    pi_degraded_acceptance_reason: Optional[str] = None
     # Rendered by the platform rather than by the analysis agent, and therefore
     # never offered to the figure-review loop. Read by ``is_report_eligible``,
     # which must not withhold such a figure for lacking a sign-off that nobody was

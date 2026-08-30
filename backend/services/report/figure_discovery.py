@@ -318,6 +318,12 @@ def publication_figure_metadata(
             "review_unavailable": bool(
                 getattr(figure, "review_unavailable", False)
             ),
+            "pi_degraded_acceptance": bool(
+                getattr(figure, "pi_degraded_acceptance", False)
+            ),
+            "pi_degraded_acceptance_reason": getattr(
+                figure, "pi_degraded_acceptance_reason", None
+            ),
             "plan_step_id": getattr(figure, "plan_step_id", None),
             "plan_id": getattr(figure, "plan_id", None),
             "purpose": getattr(figure, "purpose", "result") or "result",

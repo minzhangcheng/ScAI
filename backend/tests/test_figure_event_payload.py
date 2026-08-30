@@ -17,6 +17,8 @@ def test_compact_figure_event_payload_keeps_provenance_without_preview():
         png_base64="do-not-send-this-large-preview",
         review_status="pending",
         review_unavailable=True,
+        pi_degraded_acceptance=True,
+        pi_degraded_acceptance_reason="PI retained the best exhausted candidate.",
         pi_feedback=None,
         revision_count=2,
         plan_step_id=7,
@@ -37,6 +39,8 @@ def test_compact_figure_event_payload_keeps_provenance_without_preview():
     assert payload["id"] == "fig-1"
     assert payload["review_status"] == "revision_requested"
     assert payload["review_unavailable"] is True
+    assert payload["pi_degraded_acceptance"] is True
+    assert "best exhausted candidate" in payload["pi_degraded_acceptance_reason"]
     assert payload["plan_step_id"] == 7
     assert payload["plan_id"] == "plan-v3"
     assert payload["purpose"] == "result"

@@ -65,6 +65,12 @@ async def emit_figure_record(
             "review_unavailable": bool(
                 getattr(figure, "review_unavailable", False)
             ),
+            "pi_degraded_acceptance": bool(
+                getattr(figure, "pi_degraded_acceptance", False)
+            ),
+            "pi_degraded_acceptance_reason": getattr(
+                figure, "pi_degraded_acceptance_reason", None
+            ),
             "feedback": figure.pi_feedback or review.get("feedback", ""),
             "suggestions": review.get("suggestions", []),
             "must_fix": review.get("must_fix", []),
@@ -78,6 +84,12 @@ async def emit_figure_record(
                 "review_status": status,
                 "review_unavailable": bool(
                     getattr(figure, "review_unavailable", False)
+                ),
+                "pi_degraded_acceptance": bool(
+                    getattr(figure, "pi_degraded_acceptance", False)
+                ),
+                "pi_degraded_acceptance_reason": getattr(
+                    figure, "pi_degraded_acceptance_reason", None
                 ),
                 "pi_feedback": figure.pi_feedback,
                 "revision_count": figure.revision_count,

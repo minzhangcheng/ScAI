@@ -63,6 +63,12 @@ def compact_figure_event_payload(
         "review_unavailable": bool(
             getattr(figure, "review_unavailable", False)
         ),
+        "pi_degraded_acceptance": bool(
+            getattr(figure, "pi_degraded_acceptance", False)
+        ),
+        "pi_degraded_acceptance_reason": getattr(
+            figure, "pi_degraded_acceptance_reason", None
+        ),
         "pi_feedback": (
             pi_feedback if pi_feedback is not None
             else getattr(figure, "pi_feedback", None)

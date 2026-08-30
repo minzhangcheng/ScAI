@@ -82,9 +82,16 @@ class ReportsMixin:
                 if getattr(fig, "review_unavailable", False)
                 else str(raw_status or "reportable").replace("_", " ").title()
             )
+            degraded_reason = str(
+                getattr(fig, "pi_degraded_acceptance_reason", None) or ""
+            ).strip()
             figures_info.append(
                 f"Figure {i+1}: {fig.name} (declared type: {fig.figure_type}) - "
                 f"{fig.description} [{status}]"
+                + (
+                    f" PI reservation: {degraded_reason}"
+                    if degraded_reason else ""
+                )
             )
 
         # Collect tables
