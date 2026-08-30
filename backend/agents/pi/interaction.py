@@ -49,18 +49,19 @@ def _contains_stop_command(value: str) -> bool:
             else re.finditer(rf"(?<![\w]){re.escape(token)}(?![\w])", text)
         )
         for match in matches:
-            prefix = text[max(0, match.start() - 80):match.start()]
-            clause_prefix = re.split(r"[.!?。！？,，;；]", prefix)[-1]
+            prefix = text[:match.start()]
+            clause_prefix = re.split(
+                r"[.!?。！？,，;；]|\b(?:but|however)\b|(?:但是|不过|然而|但)",
+                prefix,
+            )[-1]
             if is_cjk:
                 negated = bool(re.search(
-                    r"(?:(?:请\s*)?勿|不要|别|无需|暂不|先不|不必|不用|不可|不)\s*"
-                    r"[^，。！？；,;]{0,12}$",
+                    r"(?:(?:请\s*)?勿|不要|别|无需|暂不|先不|不必|不用|不可|不)",
                     clause_prefix,
                 ))
             else:
                 negated = bool(re.search(
-                    r"(?:\bdo\s+not|\bdon['’]?t|\bdont|\bnever|\bnot|\bno)\b"
-                    r"(?:\s+[\w'-]+){0,3}\s*$",
+                    r"(?:\bdo\s+not|\bdon['’]?t|\bdont|\bnever|\bnot|\bno)\b",
                     clause_prefix,
                 ))
             if not negated:

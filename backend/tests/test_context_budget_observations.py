@@ -128,3 +128,45 @@ async def test_observation_persistence_failure_does_not_block_dispatch(monkeypat
     assert dispatch.messages
     assert dispatch.report.fits is False
     assert state.context_budget_observations
+
+
+@pytest.mark.asyncio
+async def test_budget_plumbing_failure_returns_the_original_dispatch(monkeypatch):
+    state = AnalysisState(user_id="user-1")
+    provider = AgentSettingsProvider(state, SystemConfig(), global_client=None)
+    messages = [{"role": "user", "content": "Continue analysis"}]
+    monkeypatch.setattr(
+        provider,
+        "_budget_text_dispatch",
+        AsyncMock(side_effect=RuntimeError("budget unavailable")),
+    )
+
+    dispatch = await provider.budget_text_dispatch(
+        "pi",
+        messages,
+        max_tokens=2048,
+    )
+
+    assert dispatch.messages == messages
+    assert dispatch.max_tokens == 2048
+    assert dispatch.report is None
+    assert dispatch.pi_observation_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_observation_acknowledgement_failure_is_non_blocking(monkeypatch):
+    state = AnalysisState(user_id="user-1")
+    observation = append_observation(state, _observation())
+    provider = AgentSettingsProvider(state, SystemConfig(), global_client=None)
+    dispatch = await provider.budget_text_dispatch(
+        "pi",
+        [{"role": "user", "content": "Review"}],
+    )
+    monkeypatch.setattr(
+        "backend.utils.context_budget.mark_observations_delivered",
+        AsyncMock(side_effect=RuntimeError("ack unavailable")),
+    )
+
+    await provider.acknowledge_text_dispatch("pi", dispatch)
+
+    assert observation.pi_delivered_at is None

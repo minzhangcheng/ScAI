@@ -268,7 +268,42 @@ class AgentSettingsProvider:
         summarize=None,
         declare: bool = True,
     ) -> BudgetedTextDispatch:
-        """Budget one text dispatch and record non-blocking technical facts."""
+        """Budget one text dispatch without making observation plumbing a gate."""
+
+        try:
+            return await self._budget_text_dispatch(
+                agent_name,
+                messages,
+                max_tokens=max_tokens,
+                budget_factor=budget_factor,
+                anchor_count=anchor_count,
+                summarize=summarize,
+                declare=declare,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Context budgeting unavailable for %s; sending the original request: %s",
+                agent_name,
+                exc,
+            )
+            return BudgetedTextDispatch(
+                messages=[dict(message) for message in messages],
+                report=None,
+                max_tokens=max_tokens,
+            )
+
+    async def _budget_text_dispatch(
+        self,
+        agent_name: str,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        max_tokens: Optional[int] = None,
+        budget_factor: float = 1.0,
+        anchor_count: int = 1,
+        summarize=None,
+        declare: bool = True,
+    ) -> BudgetedTextDispatch:
+        """Apply the shared budget and record non-blocking technical facts."""
 
         from backend.utils.context_budget import (
             CompactionAction,
@@ -359,11 +394,18 @@ class AgentSettingsProvider:
             return
         from backend.utils.context_budget import mark_observations_delivered
 
-        await mark_observations_delivered(
-            self._get_state(),
-            dispatch.pi_observation_ids,
-            session_id=self._session_id,
-        )
+        try:
+            await mark_observations_delivered(
+                self._get_state(),
+                dispatch.pi_observation_ids,
+                session_id=self._session_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Context-budget observation acknowledgement failed for %s: %s",
+                agent_name,
+                exc,
+            )
 
     def get_system_prompt(self, agent_name: str) -> str:
         custom_prompts = self._get_state().custom_prompts or {}

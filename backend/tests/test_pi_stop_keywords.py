@@ -50,9 +50,11 @@ def test_stop_words_do_not_match_inside_domain_terms(text):
     "text",
     [
         "Do not stop the current analysis.",
+        "I do not want the current analysis to stop.",
         "Don't finish yet.",
         "No report now.",
         "不要停止当前分析。",
+        "我不希望当前分析流程在完成质控之前停止。",
         "请勿结束。",
         "别报告结果。",
     ],
@@ -68,6 +70,7 @@ def test_clause_local_negation_suppresses_stop_commands(text):
         "Please finish the analysis.",
         "停止并生成报告。",
         "Do not stop the current step, but finish the analysis now.",
+        "Do not stop the current step but finish the analysis now.",
         "不要停止当前步骤，但是现在结束分析。",
     ],
 )

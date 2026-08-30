@@ -122,7 +122,6 @@ export function connectWebSocket(ctx: ConnectionContext): void {
         devLog('WebSocket: Reconnect detected, reloading session state...')
         const data = await reloadSessionState(
           loadingSessionId,
-          'WebSocket: Failed to reload session state after reconnect:',
           ownsReconnectStateLoad,
         )
 
@@ -154,7 +153,10 @@ export function connectWebSocket(ctx: ConnectionContext): void {
         if (
           e instanceof ApiError &&
           (e.code === 'SESSION_NOT_FOUND' || e.code === 'SESSION_GONE') &&
-          useAppStore.getState().currentSession?.id === loadingSessionId
+          (
+            useAppStore.getState().currentSession?.id === loadingSessionId
+            || useAppStore.getState().currentSession == null
+          )
         ) {
           console.warn(`WebSocket: ${e.code}, closing stale connection`)
           ws.close()
@@ -166,6 +168,7 @@ export function connectWebSocket(ctx: ConnectionContext): void {
           )
         }
         console.error('WebSocket: Failed to restore session state/history:', e)
+        return
       }
     }
 

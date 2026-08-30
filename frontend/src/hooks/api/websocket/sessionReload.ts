@@ -4,16 +4,20 @@ import { apiFetch, applyStoreUpdates } from '../client'
 
 export function reloadSessionState(
   sessionId: string,
-  errorLabel: string,
   ownsResponse: () => boolean,
 ): Promise<any | null> {
   const sessionAtRequest = useAppStore.getState().currentSession
   if (sessionAtRequest?.id !== sessionId) return Promise.resolve(null)
   const versionAtRequest = useAppStore.getState().stateVersion
-  const ownsRequest = () => (
-    ownsResponse()
-    && useAppStore.getState().currentSession === sessionAtRequest
-  )
+  let responseWasOwned = false
+  const ownsRequest = () => {
+    const owns = (
+      ownsResponse()
+      && useAppStore.getState().currentSession === sessionAtRequest
+    )
+    if (owns) responseWasOwned = true
+    return owns
+  }
   return apiFetch<any>(
     `/session/${sessionId}/load`,
     undefined,
@@ -40,7 +44,7 @@ export function reloadSessionState(
       return reloadData
     })
     .catch(reloadErr => {
-      if (ownsRequest()) console.error(errorLabel, reloadErr)
-      return null
+      if (!ownsRequest() && !responseWasOwned) return null
+      throw reloadErr
     })
 }
