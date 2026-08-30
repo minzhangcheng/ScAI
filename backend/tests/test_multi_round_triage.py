@@ -7,6 +7,8 @@ class _Lit(LiteratureAgent):
     def __init__(self, evaluations, first_articles=1):
         self._evals = list(evaluations); self._eval_i = 0
         self.synth_calls = 0; self.focused_called = []
+        self.synthesis_evaluation = None
+        self.quick_calls = 0; self.reports = []
         self.max_search_rounds = 40
         self._first = first_articles
 
@@ -19,8 +21,9 @@ class _Lit(LiteratureAgent):
             return []
         self._pubmed_search = _search
 
-        async def _synth(topic, articles):
+        async def _synth(topic, articles, evaluation=None):
             self.synth_calls += 1
+            self.synthesis_evaluation = evaluation
             return "REPORT"
         self._synthesize_pubmed_results = _synth
 
@@ -29,6 +32,7 @@ class _Lit(LiteratureAgent):
         self._finalize_result = _final
 
         async def _quick(topic, state):
+            self.quick_calls += 1
             return {"report": "QUICK", "references": []}
         self._quick_search = _quick
 
@@ -97,7 +101,7 @@ async def test_focused_articles_prioritized_for_synthesis_when_main_pool_large()
 
             self._pubmed_search = _search
 
-            async def _synth(topic, articles):
+            async def _synth(topic, articles, evaluation=None):
                 self.synth_first_pmids = [a["pmid"] for a in articles[:20]]
                 return "REPORT"
 
@@ -148,10 +152,37 @@ async def test_focused_articles_prioritized_for_synthesis_when_main_pool_large()
 
 
 @pytest.mark.asyncio
-async def test_no_articles_returns_quick_search_without_focused():
+async def test_no_articles_returns_nonblocking_empty_result_without_fallback():
     lit = _Lit([{"sufficient": True}], first_articles=0)
     res = await lit._multi_round_pubmed("t", state=None, pubmed_max_results=50,
         initial_query="q1", evaluate_fn=lit._eval_fn, organism="mouse", tissue="liver")
-    assert res["report"] == "QUICK"           # 早返回保留
-    assert lit.focused_called == []           # 无文章不触发 focused
+    assert "No PubMed articles were found" in res["report"]
+    assert res["search_meta"]["stop_reason"] == "no_pubmed_results"
+    assert res["search_meta"]["fallback"] == "none"
+    assert res["search_meta"]["search_exhausted"] is True
+    assert res.get("report_id") is None
+    assert lit.quick_calls == 0
+    assert lit.focused_called == []
     assert lit.synth_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_search_evaluation_is_advisory_context_for_synthesis():
+    evaluation = {
+        "search_exhausted": True,
+        "evidence_strength": "insufficient",
+        "reasoning": "The retrieved paper is adjacent rather than directly relevant.",
+    }
+    lit = _Lit([evaluation])
+
+    await lit._multi_round_pubmed(
+        "target topic",
+        state=None,
+        pubmed_max_results=50,
+        initial_query="target query",
+        evaluate_fn=lit._eval_fn,
+        organism="mouse",
+        tissue="liver",
+    )
+
+    assert lit.synthesis_evaluation == evaluation

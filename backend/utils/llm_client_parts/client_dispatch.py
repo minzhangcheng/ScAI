@@ -411,6 +411,12 @@ class ClientDispatchMixin:
                         return result
                     except Exception as e:
                         last_error = e
+                        # Parameter adaptation belongs to the logical request,
+                        # not protocol discovery.  Let chat_with_tools retry the
+                        # same probe with tool_choice="auto" before considering
+                        # a different wire protocol.
+                        if is_tool_choice_error(e):
+                            raise
                         if is_transient_probe_error(e):
                             await asyncio.sleep(PROBE_RETRY_DELAYS[attempt])
                             continue

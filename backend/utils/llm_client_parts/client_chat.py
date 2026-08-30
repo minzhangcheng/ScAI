@@ -649,26 +649,55 @@ class ClientChatMixin:
             LLMToolResponse with potential tool calls
         """
         enforced = _inject_english_enforcement(messages)
-        return await self._dispatch_non_streaming(
-            model=model,
-            interaction_type="chat_with_tools",
-            log_messages=enforced,
-            make_anthropic_adapter_call=lambda adapter, skip_temperature: adapter.complete_with_tools(
-                model=model, messages=enforced, tools=tools, tool_choice=tool_choice,
-                temperature=temperature, max_tokens=max_tokens, skip_temperature=skip_temperature),
-            make_responses_adapter_call=lambda adapter, skip_temperature: adapter.complete_with_tools(
-                model=model, messages=enforced, tools=tools, tool_choice=tool_choice,
-                temperature=temperature, max_tokens=max_tokens, skip_temperature=skip_temperature),
-            make_inline_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_tools_inline(
-                model, enforced, tools, tool_choice, temperature, max_tokens,
-                non_retryable_predicate=non_retryable_predicate,
-                max_retries_override=max_retries_override),
-            make_probe_fallback_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_tools_inline(
-                model, enforced, tools, tool_choice, temperature, max_tokens, max_retries=0,
-                non_retryable_predicate=non_retryable_predicate,
-                max_retries_override=max_retries_override),
-            tools=tools,
-            tool_choice=tool_choice,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        model_key = _extract_model_name(model)
+        effective_tool_choice = tool_choice
+        if (
+            effective_tool_choice not in (None, "auto", "none")
+            and model_key in self._toolchoice_unsupported_models
+        ):
+            effective_tool_choice = "auto"
+
+        async def _dispatch(choice):
+            return await self._dispatch_non_streaming(
+                model=model,
+                interaction_type="chat_with_tools",
+                log_messages=enforced,
+                make_anthropic_adapter_call=lambda adapter, skip_temperature: adapter.complete_with_tools(
+                    model=model, messages=enforced, tools=tools, tool_choice=choice,
+                    temperature=temperature, max_tokens=max_tokens, skip_temperature=skip_temperature),
+                make_responses_adapter_call=lambda adapter, skip_temperature: adapter.complete_with_tools(
+                    model=model, messages=enforced, tools=tools, tool_choice=choice,
+                    temperature=temperature, max_tokens=max_tokens, skip_temperature=skip_temperature),
+                make_inline_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_tools_inline(
+                    model, enforced, tools, choice, temperature, max_tokens,
+                    non_retryable_predicate=non_retryable_predicate,
+                    max_retries_override=max_retries_override),
+                make_probe_fallback_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_tools_inline(
+                    model, enforced, tools, choice, temperature, max_tokens, max_retries=0,
+                    non_retryable_predicate=non_retryable_predicate,
+                    max_retries_override=max_retries_override),
+                tools=tools,
+                tool_choice=choice,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
+        try:
+            return await _dispatch(effective_tool_choice)
+        except Exception as error:
+            tool_choice_error = (
+                error if is_tool_choice_error(error) else getattr(error, "__cause__", None)
+            )
+            if (
+                effective_tool_choice in (None, "auto", "none")
+                or not is_tool_choice_error(tool_choice_error)
+            ):
+                raise
+            logger.warning(
+                f"[{self.agent_name}] adapter tool_choice rejected by {model_key}; "
+                "caching as unsupported and retrying with 'auto'"
+            )
+            self._ensure_cache_locks()
+            async with self._toolchoice_cache_lock:
+                self._toolchoice_unsupported_models.add(model_key)
+            return await _dispatch("auto")

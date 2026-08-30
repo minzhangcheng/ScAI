@@ -601,6 +601,11 @@ IMPORTANT:
                 f"{len(new_articles)} new articles, {len(all_articles)} total"
             )
 
+            if round_num == 1 and not all_articles:
+                stop_reason = "no_pubmed_results"
+                logger.info(f"[Literature] {label} stop: no PubMed results")
+                break
+
             # Evaluate if more searching needed
             if stop_reason == "article_budget":
                 logger.info(f"[Literature] {label} stop: article budget")
@@ -665,20 +670,38 @@ IMPORTANT:
             await asyncio.sleep(0.4)
 
         if not all_articles:
-            logger.warning(f"[Literature] No PubMed articles found ({label}), falling back to quick search")
-            fallback = await self._quick_search(topic, state)
-            fallback["search_meta"] = {
+            report_text = (
+                "No PubMed articles were found for the executed queries on this topic. "
+                "This records evidence scarcity for this search and does not establish "
+                "that relevant literature does not exist."
+            )
+            report = LiteratureReport(topic=topic, report=report_text, references=[])
+            self.reports.append(report)
+            if state is not None:
+                state.literature_reports.append(report)
+            result = {
+                "status": "completed",
+                "report": report_text,
+                "references": [],
+                "findings": [report_text],
+                "search_rounds": len(search_history),
+            }
+            result["search_meta"] = {
                 "stop_reason": stop_reason,
                 "cache_hit": False,
                 "rounds": len(search_history),
                 "article_count": 0,
                 "sufficiency_evaluations": evaluation_count,
                 "elapsed_seconds": round(time.monotonic() - search_started, 3),
-                "fallback": "llm_knowledge",
-                **_evaluation_meta(latest_evaluation),
+                "fallback": "none",
+                **_evaluation_meta({
+                    "search_exhausted": True,
+                    "evidence_strength": "unassessed",
+                    "reasoning": report_text,
+                }),
             }
-            cache_result(fallback)
-            return fallback
+            cache_result(result)
+            return result
 
         # --- Focused search: run after main loop, before synthesis ---
         focused_evidence: Dict[str, Any] = {}
@@ -728,7 +751,11 @@ IMPORTANT:
             drop_empty=True,
         )[:max_articles_per_topic]
 
-        report_text = await self._synthesize_pubmed_results(topic, synthesis_articles)
+        report_text = await self._synthesize_pubmed_results(
+            topic,
+            synthesis_articles,
+            evaluation=latest_evaluation or None,
+        )
 
         references = [
             {"title": a["title"], "url": f"https://pubmed.ncbi.nlm.nih.gov/{a['pmid']}/"}
@@ -962,7 +989,8 @@ Note: If you are not certain about specific citation information, please clearly
     async def _synthesize_pubmed_results(
         self,
         topic: str,
-        articles: List[Dict[str, str]]
+        articles: List[Dict[str, str]],
+        evaluation: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Synthesize PubMed articles into a comprehensive literature review."""
         # Build article text with abstracts (limit to first 20 articles)
@@ -974,11 +1002,31 @@ Note: If you are not certain about specific citation information, please clearly
             for a in articles[:20]
         )
 
+        evaluation_context = ""
+        if isinstance(evaluation, dict):
+            assessment = {
+                "search_exhausted": bool(evaluation.get("search_exhausted")),
+                "evidence_strength": str(
+                    evaluation.get("evidence_strength") or "unassessed"
+                ),
+                "reasoning": str(evaluation.get("reasoning") or "")[:2000],
+            }
+            evaluation_context = f"""
+Advisory assessment from the Literature Agent's search review:
+{json.dumps(assessment, ensure_ascii=False)}
+
+Use this assessment as context for scientific judgment, not as a host acceptance
+decision. Keep the retrieved articles visible, but distinguish direct evidence
+from adjacent or background work. If no retrieved paper is directly relevant,
+state that plainly and do not cite adjacent papers as support for the target claim.
+"""
+
         prompt = f"""Based on the following PubMed articles, write a comprehensive literature review
 on the topic: {topic}
 
 Articles ({len(articles)} total):
 {articles_text}
+{evaluation_context}
 
 Please include:
 1. Overview of the research field and key findings

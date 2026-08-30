@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.50.2 · **Last updated**: 2026-08-30
+**Version**: 0.50.3 · **Last updated**: 2026-08-30
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,17 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.50.x — (2026-08-30 onward)**
+
+- `0.50.3` — Repairs forced Supervisor tool calls when a provider rejects a
+  specific `tool_choice`: the same protocol now retries with `auto`, including
+  the initial protocol probe, instead of being misclassified as a protocol
+  failure. Literature search keeps degradation narrow, never appends unrelated
+  `Search PubMed` text, and reports an honest non-blocking no-hit result without
+  invoking knowledge fallback or downstream mechanism extraction for nonexistent
+  references. Existing search-relevance assessment is passed to synthesis as
+  advisory context so the Literature Agent can distinguish direct from adjacent
+  evidence. Focused regression checks passed; no image build, deployment, or
+  historical-session mutation was performed.
 
 - `0.50.2` — Closes the publication-figure review loop when the bounded redraw
   budget is exhausted: every PI-reviewed candidate remains available for

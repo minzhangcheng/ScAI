@@ -379,20 +379,24 @@ Return ONLY the PubMed query string, nothing else."""
         Degradation strategy:
         1. Original LLM-generated query
         2. Strip field tags and MeSH qualifiers, keep core terms
-        3. Simple keyword search from topic + species + tissue
 
         Returns (final_query, articles) tuple.
         """
         attempt = 0
-        max_attempts = 3
+        max_attempts = 2
+        last_error: Optional[Exception] = None
+        last_search_failed = False
         while attempt < max_attempts:
             try:
                 articles = await self._pubmed_search(query, max_results=max_results)
+                last_search_failed = False
                 if articles:
                     if attempt > 0:
                         logger.info(f"[Literature] Query succeeded after {attempt} degradation(s): {query[:80]}")
                     return query, articles
             except Exception as e:
+                last_error = e
+                last_search_failed = True
                 logger.warning(f"[Literature] PubMed search error (attempt {attempt + 1}): {e}")
 
             # Degrade the query
@@ -407,22 +411,8 @@ Return ONLY the PubMed query string, nothing else."""
                     await asyncio.sleep(0.4)
                     attempt += 1
                     continue
-                # Strategy 1 had no effect — skip to Strategy 2 immediately
-                attempt = 1
-
-            # Strategy 2: Fall back to simple keyword search from topic
-            topic_words = topic.split()[:5]
-            query = " ".join(topic_words) if topic_words else topic
-            logger.info(f"[Literature] Degrading query (simple keywords): {query[:80]}")
-            await asyncio.sleep(0.4)
-            # Final search attempt with simplified query, then exit
-            try:
-                articles = await self._pubmed_search(query, max_results=max_results)
-                if articles:
-                    logger.info(f"[Literature] Query succeeded with simple keywords: {query[:80]}")
-                    return query, articles
-            except Exception as e:
-                logger.warning(f"[Literature] PubMed search error (simple keywords): {e}")
             break
 
+        if last_search_failed and last_error is not None:
+            raise last_error
         return query, []

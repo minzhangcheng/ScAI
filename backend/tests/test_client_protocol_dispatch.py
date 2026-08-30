@@ -279,6 +279,49 @@ async def test_tools_responses_not_implemented_500_falls_back_to_chat():
 
 
 @pytest.mark.asyncio
+async def test_responses_forced_tool_choice_retries_once_with_auto():
+    c = _client("https://x/v1")
+    error = BadRequestError(
+        message="Thinking mode does not support this tool_choice",
+        response=MagicMock(status_code=400),
+        body={"error": {"message": "Thinking mode does not support this tool_choice"}},
+    )
+    responses = MagicMock()
+    responses.complete_with_tools = AsyncMock(side_effect=[
+        error,
+        LLMToolResponse("ok", [], "thinking-model", {}, None),
+    ])
+    c._responses_adapter = responses
+    inline_message = MagicMock(content="wrong protocol", tool_calls=None)
+    inline_message.model_dump.return_value = {
+        "content": "wrong protocol",
+        "tool_calls": None,
+    }
+    inline_response = MagicMock(
+        choices=[MagicMock(message=inline_message)],
+        model="thinking-model",
+        usage=None,
+    )
+    c.client.chat.completions.create = AsyncMock(return_value=inline_response)
+    forced = {"type": "function", "function": {"name": "submit_result"}}
+
+    result = await c.chat_with_tools(
+        model="thinking-model",
+        messages=[{"role": "user", "content": "submit"}],
+        tools=[{"type": "function", "function": {"name": "submit_result"}}],
+        tool_choice=forced,
+    )
+
+    assert result.content == "ok"
+    assert responses.complete_with_tools.await_count == 2
+    assert responses.complete_with_tools.call_args_list[0].kwargs["tool_choice"] == forced
+    assert responses.complete_with_tools.call_args_list[1].kwargs["tool_choice"] == "auto"
+    c.client.chat.completions.create.assert_not_awaited()
+    assert llm_mod._PROBE_CACHE[("https://x/v1", "thinking-model")] == "responses"
+    assert "thinking-model" in c._toolchoice_unsupported_models
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_not_implemented_500_falls_back_to_chat():
     c = _client("https://api.n1n.ai/v1")
 

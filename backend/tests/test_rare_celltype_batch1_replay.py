@@ -32,7 +32,7 @@ class _Replay(LiteratureAgent):
         self._validate_and_degrade_query = _vd
         async def _s(q, max_results=20): return []
         self._pubmed_search = _s
-        async def _syn(t, arts): self.synth_calls += 1; return "REVIEW"
+        async def _syn(t, arts, evaluation=None): self.synth_calls += 1; return "REVIEW"
         self._synthesize_pubmed_results = _syn
         async def _fin(t, r, refs, st, n): return {"report": r, "references": refs}
         self._finalize_result = _fin

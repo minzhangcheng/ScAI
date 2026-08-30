@@ -26,6 +26,7 @@ class _EmptyPubMedAgent(PubMedMixin):
 
     def __init__(self):
         self.search_calls = 0
+        self.reports = []
 
     async def _generate_pubmed_query(self, *_args):
         return "  exact empty query  "
@@ -43,15 +44,15 @@ class _EmptyPubMedAgent(PubMedMixin):
 
 @pytest.mark.asyncio
 async def test_pubmed_each_budget_stops_and_exact_empty_result_is_cached():
-    state = SimpleNamespace(literature_search_cache={})
+    state = SimpleNamespace(literature_search_cache={}, literature_reports=[])
     agent = _EmptyPubMedAgent()
 
     first = await agent._multi_round_pubmed("  Empty Topic  ", state)
 
-    assert first["search_meta"]["stop_reason"] == "marginal_yield_plateau"
-    assert first["search_meta"]["fallback"] == "llm_knowledge"
-    assert first["search_meta"]["rounds"] == agent.plateau_rounds
-    assert agent.search_calls == agent.plateau_rounds
+    assert first["search_meta"]["stop_reason"] == "no_pubmed_results"
+    assert first["search_meta"]["fallback"] == "none"
+    assert first["search_meta"]["rounds"] == 1
+    assert agent.search_calls == 1
 
     calls = agent.search_calls
     second = await agent._multi_round_pubmed("empty topic", state)
@@ -131,7 +132,9 @@ async def test_focused_pubmed_obeys_remaining_deadline_and_final_article_cap():
         async def _judge_focused_relevance(self, *_args):
             return {"status": "strong"}
 
-        async def _synthesize_pubmed_results(self, _topic, articles):
+        async def _synthesize_pubmed_results(
+            self, _topic, articles, evaluation=None
+        ):
             return f"synthesized {len(articles)}"
 
         async def _finalize_result(self, _topic, report, references, _state, _rounds):
