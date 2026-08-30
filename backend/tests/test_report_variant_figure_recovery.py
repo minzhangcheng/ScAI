@@ -13,6 +13,7 @@ from backend.models.schemas import (
     PublicationFigure,
     RoundResult,
 )
+from backend.models.schema_parts.session import DetailedReportSegment
 from backend.services.report.variants_parts import detailed, exploration
 from backend.tests.figure_image_helpers import valid_image_bytes, write_valid_image
 
@@ -180,3 +181,65 @@ def test_detailed_variant_omits_empty_gallery_shell(monkeypatch, tmp_path):
 
     assert "Generated Figures" not in html
     assert 'class="figure-gallery"' not in html
+
+
+def test_detailed_report_discloses_unverified_technical_evidence(monkeypatch, tmp_path):
+    state = AnalysisState(
+        id="evidence-disclosure",
+        name="Evidence disclosure",
+        user_id="u",
+        current_round=2,
+        round_results=[RoundResult(
+            round_number=2,
+            bioinformatics_evidence_verified=False,
+            evidence_execution_ids=[],
+            evidence_notes=["Bioinformatics evidence reconciliation was unavailable."],
+        )],
+        plan_evidence_reconciliations=[{
+            "round_number": 2,
+            "status": "unverified",
+            "overall_reason": "Supervisor reconciliation timed out.",
+            "links": [
+                {"plan_step_id": 1, "status": "unverified"},
+                {"plan_step_id": 2, "status": "unverified"},
+            ],
+        }],
+    )
+    reports = tmp_path / "reports"
+    monkeypatch.setattr(
+        "backend.config.get_session_workspace", lambda _session_id: tmp_path / "missing"
+    )
+    monkeypatch.setattr(
+        "backend.config.get_session_reports", lambda _session_id: reports
+    )
+
+    segment_html = detailed.generate_detailed_report_segment_html(
+        state,
+        "innovation_round_2",
+        "Innovation round 2",
+        round_result=state.round_results[0],
+    )
+
+    assert "Technical Evidence Observations" in segment_html
+    assert "not verified" in segment_html
+    assert "2 unverified plan steps" in segment_html
+    assert "do not block this report" in segment_html
+
+    state.detailed_report_segments = [DetailedReportSegment(
+        phase="innovation_round_2",
+        title="Stored innovation round 2",
+        round_number=2,
+        content_html=(
+            '<div class="report-segment"><p class="segment-timestamp">old</p>'
+            '<div class="segment-section"><h3>PI Synthesis</h3>'
+            '<p>Strong conclusion.</p></div></div>'
+        ),
+    )]
+    report_path = detailed.generate_combined_detailed_report_html(state)
+    combined = Path(report_path).read_text(encoding="utf-8")
+
+    assert "Strong conclusion." in combined
+    assert "Technical Evidence Observations" in combined
+    assert combined.index("Technical Evidence Observations") < combined.index(
+        "Strong conclusion."
+    )

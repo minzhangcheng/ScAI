@@ -67,6 +67,7 @@ from .shared import (  # noqa: F401
     _inject_english_enforcement,
     detect_image_mime,
     _detect_image_mime_type,
+    normalize_image_input,
     UpstreamExhaustedError,
     EmptyResponseError,
     LLMResponse,
@@ -366,28 +367,29 @@ class ClientStreamVisionMixin:
         Returns:
             LLMResponse object
         """
-        log_msgs = [{"role": "user", "content": f"[{len(images)} images] + {text_prompt[:500]}"}]
+        normalized_images = [normalize_image_input(image)[0] for image in images]
+        log_msgs = [{"role": "user", "content": f"[{len(normalized_images)} images] + {text_prompt[:500]}"}]
         probe_timeout = request_timeout or DEFAULT_REQUEST_TIMEOUT
         return await self._dispatch_non_streaming(
             model=model,
             interaction_type="vision",
             log_messages=log_msgs,
             make_anthropic_adapter_call=lambda adapter, skip_temperature: adapter.complete_vision(
-                model=model, text_prompt=text_prompt, images=images,
+                model=model, text_prompt=text_prompt, images=normalized_images,
                 temperature=temperature, max_tokens=max_tokens,
                 timeout=request_timeout, skip_temperature=skip_temperature,
                 system_prompt=system_prompt),
             make_responses_adapter_call=lambda adapter, skip_temperature: adapter.complete_vision(
-                model=model, text_prompt=text_prompt, images=images,
+                model=model, text_prompt=text_prompt, images=normalized_images,
                 temperature=temperature, max_tokens=max_tokens,
                 timeout=request_timeout, skip_temperature=skip_temperature,
                 system_prompt=system_prompt),
             make_inline_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_vision_inline(
-                model, text_prompt, images, temperature, max_tokens, request_timeout,
+                model, text_prompt, normalized_images, temperature, max_tokens, request_timeout,
                 non_retryable_predicate=non_retryable_predicate,
                 system_prompt=system_prompt),
             make_probe_fallback_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_vision_inline(
-                model, text_prompt, images, temperature, max_tokens, probe_timeout, max_retries=0,
+                model, text_prompt, normalized_images, temperature, max_tokens, probe_timeout, max_retries=0,
                 non_retryable_predicate=non_retryable_predicate,
                 system_prompt=system_prompt),
             temperature=temperature,

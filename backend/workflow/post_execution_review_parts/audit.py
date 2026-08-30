@@ -70,6 +70,24 @@ class PlanAudit:
             "unavailable_families": sorted(self.unavailable_families),
             "eligible_figures": sorted(self.eligible_figures),
             "evidence_mode": self.evidence_mode,
+            "step_observations": [
+                {
+                    "plan_step_id": step.step_id,
+                    "title": step.title,
+                    "technical_linkage": (
+                        "unverified"
+                        if not step.verifiable
+                        else {
+                            STATUS_COMPLETED: "evidenced",
+                            STATUS_PENDING: "not_evidenced",
+                            STATUS_SKIPPED: "technically_unavailable",
+                        }.get(step.status, "unverified")
+                    ),
+                    "verifiable": step.verifiable,
+                    "reason": step.reason[:2000],
+                }
+                for step in self.steps
+            ],
         }
 
 
@@ -550,52 +568,60 @@ def should_run_post_execution_review(
     is_last_direction_of_batch: bool,
     has_runtime: bool = True,
 ) -> Tuple[bool, str]:
-    """Decide whether the bounded supplementary pass is warranted.
+    """Decide whether to show post-execution observations to the PI.
 
-    Returns (run, reason). Deliberately NOT gated on the PI's opinion: across
-    real runs `synthesize_round` returned `should_stop=False` in 39 of 40 calls
-    and never proposed zero follow-ups, so "does the PI think anything is open?"
-    fires every round and cannot terminate anything. Only hard structural
-    signals qualify:
-
-      1. the executor errored or stopped short of its own completion path;
-      2. the agent admitted in writing that something did not run;
-      3. the plan audit found a non-conditional step with no execution evidence;
-      4. this is the last direction of the active batch, so analysis may stop
-         after it — the round whose follow-up proposals are otherwise the most
-         likely to be discarded.
-
-    Signal 4 used to claim the round was TERMINAL. It cannot: whether another
-    analysis round follows depends on `integration_synthesis` incrementing
-    `integration_cycle` and the PI then choosing new directions, both of which
-    happen after this decision. "Last direction of the batch" is the strongest
-    decidable form, and it fires once per batch rather than once per session.
+    The boolean requests a PI review; it never authorizes supplementary work.
+    The PI alone decides whether any observed gap warrants another calculation.
+    A missing runtime limits what can be executed but does not hide observations
+    from the PI.
     """
-    if not has_runtime:
-        return (False, "No live analysis runtime available for a supplementary pass.")
-
+    reasons: List[str] = []
     status = str(result_status or "").strip().lower()
     if status in ("error", "timeout", "max_steps_reached", "completed_with_fallback"):
-        return (True, f"Execution ended as '{status}' rather than a clean completion.")
+        reasons.append(f"Execution ended as '{status}' rather than a clean completion.")
 
     if admissions:
-        return (True, f"Agent recorded {len(admissions)} explicit not-run/failure admission(s).")
+        reasons.append(
+            f"Agent recorded {len(admissions)} explicit not-run/failure admission(s)."
+        )
 
     unmet = audit.unmet
     if unmet:
         families = sorted({f for s in unmet for f in s.missing_families})
         figures = sorted({kind for s in unmet for kind in s.missing_figure_kinds})
         absent = families + [f"figure:{kind}" for kind in figures]
-        return (True,
-                f"{len(unmet)} approved step(s) show no eligible execution/artifact "
-                f"evidence ({', '.join(absent[:6])}).")
+        reasons.append(
+            f"{len(unmet)} approved step(s) show no eligible execution/artifact "
+            f"evidence ({', '.join(absent[:6])})."
+        )
+
+    if audit.unverifiable:
+        reasons.append(
+            f"Evidence reconciliation left {len(audit.unverifiable)} approved "
+            "step(s) technically unverifiable."
+        )
+
+    # A technically clean linkage record still does not establish scientific
+    # sufficiency. The PI owns the plan-completion decision, so any audited plan
+    # receives a review rather than a Host-written completion verdict.
+    if audit.steps and not reasons:
+        reasons.append(
+            f"Technical linkage observations are available for {len(audit.steps)} "
+            "approved step(s); PI review determines plan completion."
+        )
+
+    if not reasons:
+        return (False, "No post-execution plan observations were available for PI review.")
 
     if is_last_direction_of_batch:
-        return (True,
-                "Last direction of the active batch: analysis may stop after this "
-                "round, so its follow-up work would be discarded.")
+        reasons.append("This is the last direction of the active batch.")
+    if not has_runtime:
+        reasons.append(
+            "No live analysis runtime is available; PI advice can be recorded but "
+            "supplementary execution is unavailable."
+        )
 
-    return (False, "Plan fully evidenced, no failure admissions, and another direction remains.")
+    return (True, " ".join(reasons))
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +645,8 @@ def _clean_list(
     Slicing first would let a model's empty strings silently consume the task
     budget, which is the one number in this feature that has to mean what it says.
     """
+    if limit <= 0:
+        return []
     bounded_diagnostic = None
     if diagnostic:
         from backend.utils.error_parsing import bounded_diagnostic
@@ -643,22 +671,50 @@ def _clean_list(
     return out
 
 
-def sanitize_review_plan(plan: Any, max_tasks: int) -> Dict[str, Any]:
+def sanitize_review_plan(
+    plan: Any,
+    max_tasks: int,
+    valid_step_ids: Optional[Set[int]] = None,
+) -> Dict[str, Any]:
     """Bound the PI's review output. The task cap is the cost ceiling: an LLM PI
     asked what else could be done answers with 1-15 items every single time, so
     the number of tasks admitted is a hard constant here, not the PI's choice."""
     if not isinstance(plan, dict):
         return {"gaps": [], "supplementary_tasks": [], "out_of_scope": [],
-                "verdict": "no_action", "rationale": "Review returned no structured plan."}
+                "step_decisions": [], "verdict": "no_action",
+                "rationale": "Review returned no structured plan."}
     cap = max(0, int(max_tasks))
     tasks = _clean_list(plan.get("supplementary_tasks"), cap, _MAX_TASK_LEN)
     verdict = str(plan.get("verdict", "") or "").strip().lower()
     if verdict not in ("supplement", "no_action"):
-        verdict = "supplement" if tasks else "no_action"
+        # Supplementary execution requires an explicit PI authorization. Keep
+        # any proposed tasks visible in the stored review, but never infer the
+        # authorization from their presence.
+        verdict = "no_action"
+    allowed_ids = set(valid_step_ids or set())
+    step_decisions: List[Dict[str, Any]] = []
+    for value in plan.get("step_decisions") or []:
+        if not isinstance(value, dict):
+            continue
+        try:
+            step_id = int(value.get("plan_step_id"))
+        except (TypeError, ValueError):
+            continue
+        if valid_step_ids is not None and step_id not in allowed_ids:
+            continue
+        status = str(value.get("status") or "").strip().lower()
+        if status not in {STATUS_COMPLETED, STATUS_PENDING, STATUS_SKIPPED}:
+            continue
+        step_decisions.append({
+            "plan_step_id": step_id,
+            "status": status,
+            "reason": str(value.get("reason") or "")[:_MAX_GAP_LEN],
+        })
     return {
         "gaps": _clean_list(plan.get("gaps"), _MAX_LIST, _MAX_GAP_LEN),
         "supplementary_tasks": tasks,
         "out_of_scope": _clean_list(plan.get("out_of_scope"), _MAX_LIST, _MAX_GAP_LEN),
+        "step_decisions": step_decisions,
         "verdict": verdict,
         "rationale": str(plan.get("rationale", "") or "")[:2000],
     }

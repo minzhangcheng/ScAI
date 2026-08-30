@@ -1,12 +1,11 @@
-"""Post-execution plan audit and the gated supplementary analysis pass.
+"""Post-execution observations and the PI-directed supplementary analysis pass.
 
 Two features live here, deliberately independent of each other:
 
-* the plan audit runs unconditionally after every bioinformatics execution and is
-  the only writer of `PlanStep.status` / `executed_at`. It answers "what did this
-  round actually run", which nothing could answer before;
-* the supplementary pass is gated, bounded, and off by one config flag. It uses
-  the audit as its trigger signal, asks the PI for at most N repair tasks, runs
+* the plan audit runs unconditionally after every bioinformatics execution and
+  records technical linkage observations without deciding plan completion;
+* the supplementary pass is PI-directed, bounded, and off by one config flag. It
+  shows the observations to the PI, asks for at most N repair tasks, runs
   them through a restricted executor, and merges the result back into the SAME
   round result.
 
@@ -18,12 +17,12 @@ produces exactly one RoundResult for one direction — `max_rounds`, the directi
 queue and the integration bookkeeping stay untouched.
 """
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..models.schemas import AgentType
 from ..services.figure_contract import visual_plan_inheritance_for_plan
 from .post_execution_review import (
-    apply_audit_to_plan,
     audit_plan_execution,
     collect_failure_admissions,
     collect_structured_evidence_gaps,
@@ -231,10 +230,10 @@ class PostExecutionReviewMixin:
         result: Dict[str, Any],
         reconciliation: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Audit the approved plan against this round's evidence and record it.
+        """Observe the approved plan against this round's evidence.
 
-        Writes `PlanStep.status` / `executed_at` on `analysis_state.current_plan`.
-        Never raises: an audit failure must not fail the round it describes.
+        Never writes PI-owned plan completion state and never raises: an audit
+        failure must not fail the round it describes.
         Returns the audit summary (empty dict when there was no plan to audit).
         """
         evidence_gaps = self._collect_round_evidence_gaps(result)
@@ -271,12 +270,11 @@ class PostExecutionReviewMixin:
                 ) or None,
                 semantic_reconciliation=reconciliation,
             )
-            updated = apply_audit_to_plan(plan, audit)
             summary = audit.summary()
             logger.info(
                 f"[{self.session_id}] Plan audit: {summary['n_completed']}/{summary['n_steps']} "
                 f"evidenced, {summary['n_skipped']} skipped, {summary['n_unmet']} unmet, "
-                f"{summary['n_unverifiable']} unverifiable ({updated} step statuses written)"
+                f"{summary['n_unverifiable']} unverifiable (observation only)"
             )
             if summary["n_unmet"]:
                 logger.warning(
@@ -355,6 +353,9 @@ class PostExecutionReviewMixin:
         def _decline(status: str, reason: str, **extra) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             meta = empty_review_meta(status, reason, attempt_id)
             meta["plan_audit"] = audit_summary
+            meta["round_number"] = int(
+                getattr(analysis_state, "current_round", 0) or 0
+            )
             meta.update(extra)
             self._store_review(analysis_state, meta)
             return meta, empty_merge
@@ -373,43 +374,18 @@ class PostExecutionReviewMixin:
             from .post_execution_review import PlanAudit
             audit = PlanAudit()
 
-        # The restricted supplementary executor can add calculations, but it
-        # cannot create a registered, reviewed PublicationFigure.  Sending a
-        # figure-only gap through it wastes a pass and, worse, invites an inline
-        # notebook image to be described as if the contract were repaired.  Keep
-        # mixed method/figure gaps eligible for computational repair; the final
-        # contract below will then return the remaining visual deliverable to the
-        # main executor.
-        unmet = list(audit.unmet)
-        figure_only_gap = bool(unmet) and all(
-            step.missing_figure_kinds and not step.missing_families
-            for step in unmet
-        )
-        if figure_only_gap and not admissions:
-            kinds = sorted({
-                kind for step in unmet for kind in step.missing_figure_kinds
-            })
-            reason = (
-                "Required publication figure gap deferred to the main "
-                "bioinformatics figure/review pipeline"
-                + (f" ({', '.join(kinds)})" if kinds else "")
-                + "."
-            )
-            logger.info(f"[{self.session_id}] Post-execution review skipped: {reason}")
-            return _decline("skipped", reason)
-
-        run, reason = should_run_post_execution_review(
+        review_pi, reason = should_run_post_execution_review(
             audit, admissions, result_status, is_terminal, has_runtime=has_runtime
         )
-        if not run:
+        if not review_pi:
             logger.info(f"[{self.session_id}] Post-execution review skipped: {reason}")
             return _decline("skipped", reason)
 
-        logger.info(f"[{self.session_id}] Post-execution review triggered: {reason}")
+        logger.info(f"[{self.session_id}] PI post-execution review requested: {reason}")
         max_iterations, step_timeout, total_timeout, max_tasks = \
             self._post_execution_review_limits()
-        if max_tasks == 0:
-            return _decline("skipped", "Supplementary task budget is zero by configuration.")
+        if not has_runtime:
+            max_tasks = 0
 
         # 3) PI reviews the completed result set and triages what is worth doing.
         await self._send_message("status", "PI is reviewing execution completeness...", AgentType.PI)
@@ -434,7 +410,24 @@ class PostExecutionReviewMixin:
             logger.warning(f"[{self.session_id}] post-execution review planning failed: {e}")
             return _decline("failed", f"Review planning failed: {e}")
 
-        review_plan = sanitize_review_plan(raw_plan, max_tasks)
+        review_plan = sanitize_review_plan(
+            raw_plan,
+            max_tasks,
+            valid_step_ids={step.step_id for step in audit.steps},
+        )
+        decisions = {
+            item["plan_step_id"]: item
+            for item in review_plan.get("step_decisions") or []
+        }
+        now = datetime.now()
+        for step in getattr(plan, "steps", None) or []:
+            decision = decisions.get(int(getattr(step, "id", 0) or 0))
+            if decision is None:
+                continue
+            step.status = decision["status"]
+            if step.status == "completed" and getattr(step, "executed_at", None) is None:
+                step.executed_at = now
+
         if review_plan["verdict"] == "no_action" or not review_plan["supplementary_tasks"]:
             logger.info(f"[{self.session_id}] PI declined supplementary analysis")
             return _decline(

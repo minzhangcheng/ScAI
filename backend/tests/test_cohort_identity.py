@@ -105,7 +105,7 @@ def test_cohort_transition_invalidates_prior_current_artifacts():
     ) is None
 
 
-def test_current_cohort_report_excludes_legacy_unverified_findings():
+def test_current_cohort_report_retains_legacy_findings_as_pi_observations():
     from backend.services.report.lineage import build_lineage_report_state
 
     digest = "d" * 64
@@ -131,15 +131,57 @@ def test_current_cohort_report_excludes_legacy_unverified_findings():
     report_state = build_lineage_report_state(state, "main")
 
     result = report_state.round_results[0]
-    assert result.bioinformatics_findings == []
+    assert result.bioinformatics_findings == [
+        "Legacy claim without a semantic receipt."
+    ]
     assert result.bioinformatics_evidence_verified is False
     assert any(
-        "no current Supervisor-confirmed finding records" in note
+        "retained as unverified observations for PI review" in note
         for note in result.evidence_notes
     )
     assert state.round_results[0].bioinformatics_findings == [
         "Legacy claim without a semantic receipt."
     ]
+
+
+def test_current_cohort_report_retains_structured_unverified_findings():
+    from backend.services.report.lineage import build_lineage_report_state
+
+    digest = "f" * 64
+    record = {
+        "id": "unverified-current-finding",
+        "text": "Current finding with unavailable semantic reconciliation.",
+        "lineage_id": "main",
+        "cohort_generation": 1,
+        "cohort_digest": digest,
+        "evidence_status": "unverified",
+        "semantic_status": "unverified",
+        "evidence_execution_ids": [],
+    }
+    state = AnalysisState(
+        id="cohort-report-unverified",
+        user_id="user",
+        sandbox_state={
+            "cohort_identity_v1": {
+                **_probe(digest),
+                "cohort_generation": 1,
+                "lineage_id": "main",
+                "round_number": 1,
+            }
+        },
+        round_results=[RoundResult(
+            round_number=1,
+            lineage_id="main",
+            bioinformatics_findings=[record["text"]],
+            bioinformatics_finding_records=[record],
+        )],
+    )
+
+    result = build_lineage_report_state(state, "main").round_results[0]
+
+    assert result.bioinformatics_findings == [record["text"]]
+    assert result.bioinformatics_finding_records[0]["evidence_status"] == "unverified"
+    assert result.bioinformatics_evidence_verified is False
 
 
 def test_report_requires_current_cohort_generation_even_for_same_digest():

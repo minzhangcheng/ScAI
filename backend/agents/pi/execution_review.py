@@ -54,7 +54,7 @@ class ExecutionReviewMixin:
         the names verbatim, and one that does not exist costs an iteration from
         a budget measured in single digits.
 
-        Returns the raw dict for `sanitize_review_plan` (gaps,
+        Returns the raw dict for `sanitize_review_plan` (gaps, step_decisions,
         supplementary_tasks, out_of_scope, verdict, rationale); {} on failure,
         which the caller treats as "no action".
         """
@@ -96,7 +96,11 @@ Research direction this round: {direction or "N/A"}
 Execution ended as: {result_status or "unknown"}
 Why this review was triggered: {trigger_reason or "N/A"}
 
-## Plan-versus-evidence audit (machine-checked against executed code, not the agent's prose)
+## Plan-versus-evidence observations
+Execution and artifact identities below are Host-validated technical facts. Semantic
+linkage from Supervisor is advisory. You, the PI, decide whether each plan step is
+completed, pending, or scientifically skipped; the Host will only validate step IDs and
+status syntax.
 {audit_block}
 
 ## Findings this round reported
@@ -156,6 +160,9 @@ do not reword an out-of-scope wish into something that merely looks runnable.
 Reply with STRICT JSON only:
 {{
   "gaps": ["<what is unfinished or unsupported in this round>"],
+  "step_decisions": [
+    {{"plan_step_id": 1, "status": "completed" | "pending" | "skipped", "reason": "<PI rationale>"}}
+  ],
   "supplementary_tasks": ["<one executable analysis instruction>"],
   "out_of_scope": ["<follow-up needing new data or new experiments — one-line reason>"],
   "verdict": "supplement" | "no_action",
@@ -289,12 +296,7 @@ Reply with STRICT JSON only:
 
     @classmethod
     def _format_execution_audit(cls, plan_audit: Dict[str, Any], admissions: List[str]) -> str:
-        """Render `PlanAudit.summary()` plus the agent's own admissions.
-
-        Only counts and the identifiers that failed the audit are shown. The PI is
-        triaging machine-checked facts, so replaying the whole approved plan here
-        would only invite it to re-litigate steps the audit already cleared.
-        """
+        """Render `PlanAudit.summary()` plus the agent's own admissions."""
         audit = plan_audit or {}
         lines = [
             f"- Approved steps: {audit.get('n_steps', 0)} "
@@ -303,6 +305,22 @@ Reply with STRICT JSON only:
             f"no execution evidence {audit.get('n_unmet', 0)}, "
             f"not machine-checkable {audit.get('n_unverifiable', 0)})"
         ]
+        observations = audit.get("step_observations") or []
+        if observations:
+            lines.append("- Per-step technical observations (use these plan_step_id values):")
+            for item in observations:
+                if not isinstance(item, dict):
+                    continue
+                lines.append(
+                    "  - plan_step_id={step_id}; linkage={linkage}; "
+                    "verifiable={verifiable}; title={title}; reason={reason}".format(
+                        step_id=item.get("plan_step_id", "?"),
+                        linkage=str(item.get("technical_linkage") or "unverified")[:40],
+                        verifiable=bool(item.get("verifiable", False)),
+                        title=str(item.get("title") or "")[:_MAX_PROMPT_ITEM_LEN],
+                        reason=str(item.get("reason") or "")[:_MAX_PROMPT_ITEM_LEN],
+                    )
+                )
         unmet = cls._format_review_items(audit.get("unmet_titles"))
         if unmet:
             lines.append("- Approved steps with NO execution evidence:")

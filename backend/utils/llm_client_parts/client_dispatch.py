@@ -91,6 +91,7 @@ from .shared import (  # noqa: F401
     is_endpoint_absent,
     is_responses_only_model,
     is_responses_vision_shape_error,
+    is_vision_request_shape_error,
     _is_protocol_adaptation_signal,
     _RESPONSES_INPUT_PARAMETER_RE,
     is_responses_input_shape_error,
@@ -320,6 +321,12 @@ class ClientDispatchMixin:
                                f"switching to chat")
                 return "chat"
         if protocol == "chat":
+            if modality == VISION_MODALITY and is_vision_request_shape_error(error):
+                logger.warning(
+                    f"[{self.agent_name}] Chat vision shape rejected at "
+                    f"{self.base_url}; switching this vision request to Responses"
+                )
+                return "responses"
             if is_responses_only_model(error):
                 logger.warning(f"[{self.agent_name}] model {model} is responses-only; "
                                f"switching to responses")

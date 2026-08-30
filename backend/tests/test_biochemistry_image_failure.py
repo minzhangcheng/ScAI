@@ -7,7 +7,7 @@ import pytest
 
 from backend.agents.biochemistry_agent import BiochemistryAgent
 from backend.models.schemas import AgentType, AnalysisState, DataFile
-from backend.utils.llm_client import UpstreamExhaustedError
+from backend.utils.llm_client import BadRequestError, UpstreamExhaustedError
 
 
 def _agent(llm_client=None):
@@ -116,3 +116,37 @@ async def test_upstream_exhaustion_propagates(tmp_path):
     with pytest.raises(UpstreamExhaustedError):
         await agent._analyze_single_image(record, "instruction")
     assert record.extracted_data["error"]
+
+
+@pytest.mark.asyncio
+async def test_deterministic_vision_shape_failure_is_recorded_without_hitl(tmp_path):
+    from PIL import Image
+
+    image_path = tmp_path / "biochem-shape.png"
+    Image.new("RGB", (8, 8), "white").save(image_path)
+    record = DataFile(
+        filename=image_path.name,
+        file_path=str(image_path),
+        section="biochemistry",
+        data_type="image",
+    )
+    provider_error = BadRequestError(
+        message="Error code: 400 - invalid image url",
+        response=MagicMock(status_code=400),
+        body={"error": {
+            "message": "Invalid image_url payload",
+            "param": "messages[0].content[1].image_url",
+            "code": 1214,
+        }},
+    )
+    wrapped = UpstreamExhaustedError(
+        "protocols exhausted", agent_name="biochemistry", model="m"
+    )
+    wrapped.__cause__ = provider_error
+    client = MagicMock()
+    client.chat_with_vision = AsyncMock(side_effect=wrapped)
+    agent = _agent(client)
+
+    assert await agent._analyze_single_image(record, "instruction") is None
+    assert client.chat_with_vision.await_count == 1
+    assert "protocols exhausted" in record.extracted_data["error"]

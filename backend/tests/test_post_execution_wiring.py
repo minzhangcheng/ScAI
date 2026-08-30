@@ -1,8 +1,8 @@
 """Post-execution review orchestration.
 
-Covers the three contracts the round depends on: the plan audit is the writer of
-`PlanStep.status`, the supplementary pass is paid for at most once per execution,
-and neither can fail the round it reviews.
+Covers the three contracts the round depends on: the audit supplies observations
+to the PI without deciding completion, the supplementary pass is paid for at most
+once per execution, and neither can fail the round it reviews.
 """
 import base64
 import hashlib
@@ -139,10 +139,10 @@ def _result_figure(
 
 
 # ---------------------------------------------------------------------------
-# Feature A — the audit writes plan step status
+# Feature A — the audit records observations without writing plan status
 # ---------------------------------------------------------------------------
 
-def test_audit_writes_step_status_and_stamps_only_completed():
+def test_audit_does_not_write_pi_owned_step_status():
     plan = _plan([
         PlanStep(id=1, title="Cell communication", method="Run liana rank_aggregate"),
         PlanStep(id=2, title="Pathway activity", method="Run decoupler run_ulm"),
@@ -187,7 +187,7 @@ def test_audit_writes_step_status_and_stamps_only_completed():
     assert summary["n_completed"] == 1
     assert summary["n_unmet"] == 1
     by_id = {s.id: s for s in plan.steps}
-    assert by_id[1].status == "completed" and by_id[1].executed_at is not None
+    assert by_id[1].status == "pending" and by_id[1].executed_at is None
     assert by_id[2].status == "pending" and by_id[2].executed_at is None
 
 
@@ -227,7 +227,7 @@ def test_audit_wiring_passes_current_publication_figures():
     assert summary["n_figure_steps"] == 1
     assert summary["n_figure_unmet"] == 0
     assert summary["eligible_figures"] == ["annotated_umap"]
-    assert plan.steps[0].status == "completed"
+    assert plan.steps[0].status == "pending"
 
 
 def test_audit_is_noop_without_a_plan():
@@ -347,16 +347,15 @@ def _healthy_round(evidence_verified):
     return state, result
 
 
-def test_evidence_gate_fires_when_binding_failed():
-    """The completeness gate withholds direction-coverage eligibility from a round
-    whose findings are not bound to successful executions. It could not fire at all
-    while the key was being dropped from the node's result dict."""
+def test_evidence_binding_failure_is_observational_for_round_completion():
+    """Technical evidence weakness is retained for PI review, not used by Host
+    code to decide scientific round completion or direction coverage."""
     from backend.workflow.synthesis import derive_round_completion_status
 
     result = derive_round_completion_status(*_healthy_round(False))
 
-    assert result.round_status == "partial"
-    assert result.direction_coverage_eligible is False
+    assert result.round_status == "completed"
+    assert result.direction_coverage_eligible is True
 
 
 def test_evidence_gate_does_not_fire_when_binding_succeeded():
@@ -533,6 +532,11 @@ class _PI:
     def __init__(self, plan=None, assessment=None, raise_on_review=False):
         self._plan = plan if plan is not None else {
             "gaps": ["decoupler never ran"],
+            "step_decisions": [{
+                "plan_step_id": 1,
+                "status": "pending",
+                "reason": "The PI considers this step unfinished.",
+            }],
             "supplementary_tasks": ["Run decoupler run_ulm on the existing object"],
             "out_of_scope": ["Measure protein by western blot"],
             "verdict": "supplement",
@@ -608,7 +612,7 @@ async def test_disabled_by_config_skips_without_touching_agents():
 
 
 @pytest.mark.asyncio
-async def test_fully_evidenced_round_does_not_run_the_pass():
+async def test_fully_evidenced_round_is_still_reviewed_by_pi_without_supplement():
     plan = _plan([PlanStep(id=1, title="Communication", method="Run liana rank_aggregate")])
     # Another direction is still queued, so this is not the batch's last one either.
     state = _state(plan, code_history=[_execution("li.mt.rank_aggregate(adata)")],
@@ -617,15 +621,27 @@ async def test_fully_evidenced_round_does_not_run_the_pass():
                    publication_figures=[_result_figure(
                        plan, 1, name="communication_result"
                    )])
-    pi, bio = _PI(), _Bio()
+    pi, bio = _PI(plan={
+        "gaps": [],
+        "step_decisions": [{
+            "plan_step_id": 1,
+            "status": "completed",
+            "reason": "The PI accepts this planned step as completed.",
+        }],
+        "supplementary_tasks": [],
+        "verdict": "no_action",
+        "rationale": "No supplementary analysis is warranted.",
+    }), _Bio()
     harness = _Harness(pi=pi, bio=bio)
 
     audit_summary = harness._audit_round_plan_execution(state, {})
     meta, merge = await harness._run_post_execution_review(
         state, _unmet_result(), audit_summary, "full")
 
-    assert meta["review_status"] == "skipped"
-    assert pi.review_calls == 0 and bio.calls == 0 and merge == {}
+    assert meta["review_status"] == "no_action"
+    assert pi.review_calls == 1 and bio.calls == 0 and merge == {}
+    assert plan.steps[0].status == "completed"
+    assert plan.steps[0].executed_at is not None
 
 
 @pytest.mark.asyncio
@@ -826,7 +842,7 @@ def test_supplementary_batch_correction_is_not_host_vetoed():
 
 
 @pytest.mark.asyncio
-async def test_figure_only_gap_is_deferred_to_main_publication_pipeline():
+async def test_figure_only_gap_is_shown_to_pi_but_not_supplemented():
     plan = _plan([PlanStep(
         id=1,
         title="Show pathway activity",
@@ -840,7 +856,17 @@ async def test_figure_only_gap_is_deferred_to_main_publication_pipeline():
         exec_id="score-summary-exec",
     )
     state = _state(plan, code_history=[receipt], publication_figures=[])
-    pi, bio = _PI(), _Bio()
+    pi, bio = _PI(plan={
+        "gaps": ["The reviewed heatmap is missing."],
+        "step_decisions": [{
+            "plan_step_id": 1,
+            "status": "pending",
+            "reason": "The planned figure is not yet available.",
+        }],
+        "supplementary_tasks": [],
+        "verdict": "no_action",
+        "rationale": "The main figure pipeline owns this deliverable.",
+    }), _Bio()
     harness = _Harness(pi=pi, bio=bio)
 
     audit_summary = harness._audit_round_plan_execution(
@@ -857,10 +883,10 @@ async def test_figure_only_gap_is_deferred_to_main_publication_pipeline():
         state, _unmet_result(), audit_summary, "full"
     )
 
-    assert meta["review_status"] == "skipped"
-    assert "main bioinformatics figure/review pipeline" in meta["review_reason"]
+    assert meta["review_status"] == "no_action"
     assert merge == {}
-    assert pi.review_calls == 0 and bio.calls == 0
+    assert pi.review_calls == 1 and bio.calls == 0
+    assert plan.steps[0].status == "pending"
 
 
 @pytest.mark.asyncio
@@ -919,7 +945,28 @@ async def test_pi_declining_costs_nothing_further():
 
 
 @pytest.mark.asyncio
-async def test_zero_task_budget_keeps_the_audit_and_skips_the_pass():
+async def test_tasks_without_explicit_pi_supplement_verdict_never_execute():
+    plan = _plan([PlanStep(id=1, title="Pathway activity", method="Run decoupler run_ulm")])
+    state = _state(plan)
+    pi = _PI(plan={
+        "gaps": ["Potential gap"],
+        "supplementary_tasks": ["Run another analysis"],
+        "verdict": "maybe",
+    })
+    bio = _Bio()
+    harness = _Harness(pi=pi, bio=bio)
+
+    audit_summary = harness._audit_round_plan_execution(state, {})
+    meta, merge = await harness._run_post_execution_review(
+        state, _unmet_result(), audit_summary, "full"
+    )
+
+    assert meta["review_status"] == "no_action"
+    assert bio.calls == 0 and merge == {}
+
+
+@pytest.mark.asyncio
+async def test_zero_task_budget_still_reports_observations_to_pi():
     plan = _plan([PlanStep(id=1, title="Pathway activity", method="Run decoupler run_ulm")])
     setup = _receipt(
         plan,
@@ -947,9 +994,9 @@ async def test_zero_task_budget_keeps_the_audit_and_skips_the_pass():
     meta, _ = await harness._run_post_execution_review(
         state, _unmet_result(), audit_summary, "full")
 
-    assert meta["review_status"] == "skipped"
+    assert meta["review_status"] == "no_action"
     assert meta["plan_audit"]["n_unmet"] == 1, "the audit still runs and is recorded"
-    assert pi.review_calls == 0 and bio.calls == 0
+    assert pi.review_calls == 1 and bio.calls == 0
 
 
 @pytest.mark.asyncio
@@ -981,7 +1028,7 @@ async def test_executor_failure_cannot_fail_the_round():
 
 
 @pytest.mark.asyncio
-async def test_no_runtime_means_no_pass():
+async def test_no_runtime_still_reports_observations_but_runs_no_tasks():
     plan = _plan([PlanStep(id=1, title="Pathway activity", method="Run decoupler run_ulm")])
     state = _state(plan)
     harness = _Harness(pi=_PI(), bio=None)
@@ -990,7 +1037,8 @@ async def test_no_runtime_means_no_pass():
     meta, merge = await harness._run_post_execution_review(
         state, _unmet_result(), audit_summary, "full")
 
-    assert meta["review_status"] == "skipped" and merge == {}
+    assert meta["review_status"] == "no_action" and merge == {}
+    assert harness.pi_agent.review_calls == 1
 
 
 @pytest.mark.asyncio
@@ -1014,5 +1062,5 @@ async def test_last_direction_triggers_on_an_otherwise_clean_round():
     meta, _ = await harness._run_post_execution_review(
         state, _unmet_result(), audit_summary, "full")
 
-    assert "Last direction" in meta["review_reason"]
+    assert "last direction" in meta["review_reason"].lower()
     assert pi.review_calls == 1

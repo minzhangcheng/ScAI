@@ -24,9 +24,11 @@ from ..llm_logger import get_llm_logger, LLMInteraction
 # importers and tests keep resolving them from this module.
 from ..llm_client_parts.media import (  # noqa: F401
     ENGLISH_ENFORCEMENT,
+    VisionPayloadError,
     _inject_english_enforcement,
     detect_image_mime,
     _detect_image_mime_type,
+    normalize_image_input,
 )
 from ..llm_client_parts.errors import (  # noqa: F401
     UpstreamExhaustedError,
@@ -61,6 +63,7 @@ from ..llm_client_parts.error_signals import (  # noqa: F401
     is_endpoint_absent,
     is_responses_only_model,
     is_responses_vision_shape_error,
+    is_vision_request_shape_error,
     is_vision_capability_mismatch,
     is_max_tokens_field_error,
     max_tokens_field_from_error,

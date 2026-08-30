@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.49.7 · **Last updated**: 2026-08-30
+**Version**: 0.49.8 · **Last updated**: 2026-08-30
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,21 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.49.x — (2026-08-28 onward)**
+
+- `0.49.8` — Repairs evidence-preserving analysis and reporting behavior. Vision
+  requests now normalize raw Base64/data-URI inputs and deterministic payload or
+  protocol rejections are recorded as non-blocking observations instead of
+  repeatedly escalating to HITL. Bioinformatics execution receipts retain the
+  explicit execution purpose and current plan-step IDs, while unknown IDs are
+  ignored as observations. Post-execution audits expose every approved step to
+  the PI, keep semantic completion and supplementary execution PI-directed, and
+  require an explicit supplementary verdict. Current-cohort findings remain in
+  detailed reports as unverified observations, with evidence and review limits
+  disclosed as cautions rather than scientific report blockers. Focused backend
+  coverage passed `254/254` nodes with `0` failures and `0` skips at
+  `test-results/20260830T001113Z-2921177/evidence.json`; frontend, client,
+  kernel, backend-full, image build, deployment, and historical-session
+  mutation were not performed.
 
 - `0.49.7` — Makes the Agents page session-authoritative and runtime-safe when changing LLM settings. Session loading now hydrates prompts, models, temperatures, per-agent servers, vision settings, and literature configuration from the selected session instead of stale browser state. Saving one agent uses a single atomic request, publishes the updated runtime configuration and invalidates its client before disk persistence, then saves the complete editable configuration once; masked credentials remain preserved server-side. The save button now returns as soon as that request finishes while the success indicator is shown independently. Focused backend coverage passed `5/5` nodes at `test-results/20260829T172444Z-1931020/evidence.json`; isolated frontend coverage passed `370/370` tests at `test-results/20260829T172515Z-cd94ed3ef557-frontend/evidence.json`. No application image build, registry push, deployment, or historical-session mutation was performed.
 

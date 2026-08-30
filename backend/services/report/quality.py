@@ -131,20 +131,28 @@ def _round_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Lis
                     f"{label} has unsupported evidence status {evidence!r}."
                 )
             elif evidence in {"failed", "empty"}:
-                blocking.append(f"{label} has {evidence} evidence status.")
+                cautions.append(f"{label} has {evidence} evidence status.")
         if current_evidence_schema and phase != "integration":
             if coverage is False:
-                blocking.append(f"{label} is not eligible for direction coverage.")
+                cautions.append(f"{label} is not eligible for direction coverage.")
+            elif coverage is None:
+                cautions.append(
+                    f"{label} has no verifiable direction-coverage verdict."
+                )
             elif coverage is not True:
                 blocking.append(
-                    f"{label} has no verifiable direction-coverage verdict."
+                    f"{label} has malformed direction-coverage value {coverage!r}."
                 )
         if current_evidence_schema and phase != "integration":
             if verified is False:
-                blocking.append(f"{label} bioinformatics evidence is unverified.")
+                cautions.append(f"{label} bioinformatics evidence is unverified.")
+            elif verified is None:
+                cautions.append(
+                    f"{label} has no verifiable bioinformatics evidence verdict."
+                )
             elif verified is not True:
                 blocking.append(
-                    f"{label} has no verifiable bioinformatics evidence verdict."
+                    f"{label} has malformed bioinformatics evidence value {verified!r}."
                 )
         elif legacy_evidence_schema:
             cautions.append(
@@ -318,11 +326,11 @@ def _review_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Li
         # remaining gaps must not stay partial merely because the pre-pass audit
         # correctly recorded what triggered the repair.
         if final_gap_status == "unresolved":
-            blocking.append(f"{label} retained unresolved supplementary gaps.")
+            cautions.append(f"{label} retained unresolved supplementary gaps.")
         elif final_gap_status == "failed":
-            blocking.append(f"{label} failed to resolve its supplementary gaps.")
+            cautions.append(f"{label} failed to resolve its supplementary gaps.")
         elif final_gap_status == "unverifiable":
-            blocking.append(f"{label} has no verifiable final gap assessment.")
+            cautions.append(f"{label} has no verifiable final gap assessment.")
         if final_gap_status == "not_assessed":
             cautions.append(f"{label} was skipped and has no final gap assessment.")
         if review_status in (_REVIEW_FAILURE_STATUSES | _REVIEW_PARTIAL_STATUSES):

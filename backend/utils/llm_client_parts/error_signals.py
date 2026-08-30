@@ -24,6 +24,7 @@ from ..llm_logger import get_llm_logger, LLMInteraction
 logger = logging.getLogger(__name__)
 
 from .errors import UpstreamExhaustedError
+from .media import VisionPayloadError
 from .model_traits import _WEB_SEARCH_TOOL_NAMES, _is_deep_research_model
 
 
@@ -166,6 +167,32 @@ def is_responses_vision_shape_error(error: Exception) -> bool:
     400 errors whose structured message names ``image_url``/``image url`` and
     one of the known schema markers; unrelated 400s must not be rerouted.
     """
+    return is_vision_request_shape_error(error)
+
+
+def is_vision_request_shape_error(error: Exception) -> bool:
+    """Recognize a local payload failure or structured image-shape rejection.
+
+    Cause chains are inspected because protocol probing may wrap the provider's
+    400 in ``UpstreamExhaustedError``. Only structured HTTP 400 image fields and
+    the provider's explicit 1214 code qualify; unrelated bad requests remain
+    ordinary upstream failures.
+    """
+    current: Optional[BaseException] = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, VisionPayloadError):
+            return True
+        if _one_vision_request_shape_error(current):
+            return True
+        current = getattr(current, "__cause__", None) or getattr(
+            current, "__context__", None
+        )
+    return False
+
+
+def _one_vision_request_shape_error(error: BaseException) -> bool:
     response = getattr(error, "response", None)
     status_code = getattr(response, "status_code", None)
     # This is deliberately a protocol signal, not a prose heuristic.  A
@@ -189,7 +216,9 @@ def is_responses_vision_shape_error(error: Exception) -> bool:
     )
     if "image_url" not in message and "image url" not in message:
         return False
-    return any(marker in message for marker in _VISION_SHAPE_MARKERS)
+    return str(err.get("code") or "").strip() == "1214" or any(
+        marker in message for marker in _VISION_SHAPE_MARKERS
+    )
 
 
 def is_vision_capability_mismatch(error: Exception) -> bool:
@@ -272,7 +301,7 @@ def _is_protocol_adaptation_signal(error: Exception) -> bool:
     return (is_responses_endpoint_absent(error)
             or is_responses_chat_only_model(error)
             or is_responses_only_model(error)
-            or is_responses_vision_shape_error(error)
+            or is_vision_request_shape_error(error)
             or is_max_tokens_field_error(error)
             or is_temperature_error(error)
             or is_tool_choice_error(error))

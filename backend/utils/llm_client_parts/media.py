@@ -24,6 +24,16 @@ from ..llm_logger import get_llm_logger, LLMInteraction
 logger = logging.getLogger(__name__)
 
 
+class VisionPayloadError(ValueError):
+    """The local image value cannot be serialized into a vision request."""
+
+
+_DATA_IMAGE_RE = re.compile(
+    r"^data:(image/[a-z0-9.+-]+);base64,(.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
 # English enforcement instruction injected into every LLM call
 ENGLISH_ENFORCEMENT = (
     "CRITICAL INSTRUCTION: You MUST respond exclusively in English. "
@@ -76,3 +86,30 @@ def _detect_image_mime_type(img_b64: str) -> str:
     except Exception as e:
         logger.debug(f"Image MIME type detection failed, defaulting to image/png: {e}")
     return "image/png"
+
+
+def normalize_image_input(value: str) -> Tuple[str, str]:
+    """Return ``(raw_base64, mime_type)`` for raw base64 or a data URI.
+
+    Report helpers intentionally produce data URIs while the LLM adapters expect
+    raw base64. Normalizing at this boundary prevents a second ``data:`` prefix
+    and keeps every protocol adapter on the same byte payload.
+    """
+    text = str(value or "").strip()
+    declared_mime = ""
+    match = _DATA_IMAGE_RE.match(text)
+    if match:
+        declared_mime = match.group(1).lower()
+        text = match.group(2)
+    raw = "".join(text.split())
+    if not raw:
+        raise VisionPayloadError("vision image payload is empty")
+    try:
+        decoded = base64.b64decode(raw, validate=True)
+    except Exception as exc:
+        raise VisionPayloadError("vision image payload is not valid base64") from exc
+    if not decoded:
+        raise VisionPayloadError("vision image payload decoded to no bytes")
+    detected_mime = detect_image_mime(decoded[:12])
+    mime = detected_mime or declared_mime or "image/png"
+    return raw, mime

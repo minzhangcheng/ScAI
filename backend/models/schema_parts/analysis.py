@@ -58,8 +58,8 @@ class CodeExecution(BaseModel):
     plan_id: Optional[str] = None
     plan_step_ids: List[int] = Field(default_factory=list)
     execution_purpose: Literal[
-        "planned", "supplementary", "repair",
-    ] = "supplementary"
+        "planned", "supplementary", "repair", "unspecified",
+    ] = "unspecified"
     plan_binding_status: Literal[
         "candidate", "confirmed", "supplementary", "unverified",
         "bound", "legacy_unverifiable",

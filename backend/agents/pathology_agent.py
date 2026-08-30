@@ -19,7 +19,11 @@ from ..utils.formatting import safe_parse_json_array
 from ..utils.image_utils import (
     process_pathology_image, create_overview_image, load_image
 )
-from ..utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
+from ..utils.llm_client import (
+    OpenAICompatibleClient,
+    UpstreamExhaustedError,
+    is_vision_request_shape_error,
+)
 from ..utils.settings_provider import AgentSettingsProvider
 
 logger = logging.getLogger(__name__)
@@ -326,6 +330,18 @@ class PathologyAgent(BaseAgent):
             try:
                 return await call_factory()
             except UpstreamExhaustedError as e:
+                if is_vision_request_shape_error(e):
+                    # A deterministic image-payload/protocol rejection will not
+                    # improve when a user presses Retry. Preserve it as a
+                    # per-image technical failure for downstream PI/report
+                    # disclosure without parking the workflow at HITL.
+                    logger.warning(
+                        "[PathologyAgent] Vision request rejected at '%s' for %s; "
+                        "recording a technical image failure without HITL",
+                        step_label,
+                        image_label,
+                    )
+                    raise
                 if self.llm_intervention_callback is None:
                     # No HITL wired — let process() handle as a per-image failure.
                     raise

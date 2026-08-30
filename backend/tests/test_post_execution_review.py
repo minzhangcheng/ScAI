@@ -32,6 +32,7 @@ from backend.workflow.post_execution_review import (
     step_is_conditional,
     unavailable_method_families,
 )
+from backend.workflow.post_execution_review_parts.reconciliation import _apply_links
 
 
 _ARTIFACT_ROOT: Path | None = None
@@ -179,6 +180,10 @@ def test_supervisor_confirmation_completes_only_its_semantic_plan_step():
     assert audit.evidence_mode == "supervisor_semantic"
     assert [step.status for step in audit.steps] == ["completed", "pending"]
     assert "receipt-1" in audit.steps[0].reason
+    observations = audit.summary()["step_observations"]
+    assert observations[0]["plan_step_id"] == 1
+    assert observations[0]["technical_linkage"] == "evidenced"
+    assert observations[1]["technical_linkage"] == "unverified"
 
 
 @pytest.mark.parametrize(
@@ -237,6 +242,58 @@ def test_semantic_reconciliation_cannot_cross_cohort_generations():
 
     assert audit.steps[0].status == "pending"
     assert audit.steps[0].verifiable is False
+
+
+def test_unverified_reconciliation_is_advisory_not_degraded():
+    state = type("State", (), {"analysis_log": []})()
+    finding = {
+        "id": "finding-1",
+        "text": "A retained scientific observation.",
+        "candidate_evidence_execution_ids": [],
+    }
+    result = {
+        "finding_records": [finding],
+        "evidence_gate_degraded": False,
+        "evidence_gate_findings": [],
+    }
+
+    _apply_links(
+        state,
+        result,
+        {
+            "executions": [],
+            "figures": [],
+            "tables": [],
+            "finding_records": [finding],
+        },
+        [{
+            "plan_step_id": 1,
+            "status": "unverified",
+            "execution_ids": [],
+            "finding_ids": ["finding-1"],
+            "figure_ids": [],
+            "table_ids": [],
+            "reason": "Supervisor reconciliation was unavailable.",
+        }],
+        "plan-1",
+    )
+
+    assert result["evidence_verified"] is False
+    assert result["evidence_gate_degraded"] is False
+    assert result["evidence_gate_findings"] == [{
+        "gate": "supervisor-plan-evidence",
+        "rule_id": "scai-native/supervisor-plan-evidence",
+        "detail": (
+            "One or more findings could not be semantically reconciled "
+            "to current execution evidence. They remain retained as "
+            "unverified observations for PI and report disclosure."
+        ),
+        "subject": "plan-1",
+        "severity": "advise",
+        "rejection_count": 0,
+        "rejection_limit": 0,
+        "forced_release": False,
+    }]
 
 
 def test_attempt_id_is_stable_under_evidence_reordering():
@@ -445,6 +502,10 @@ def test_audit_summary_counts_agree():
     assert summary["unmet_families"] == []
     assert summary["executed_families"] == ["enrichment", "marker_de"]
     assert summary["unavailable_families"] == ["composition_model"]
+    assert all(
+        item["technical_linkage"] == "unverified"
+        for item in summary["step_observations"]
+    )
 
 
 def test_structured_keyword_family_is_diagnostic_not_plan_credit():
@@ -588,20 +649,20 @@ def test_review_fires_on_hard_structural_signals():
     assert run is True and "last direction" in reason.lower()
 
 
-def test_review_declines_when_clean_and_a_later_round_remains():
+def test_clean_audit_is_still_shown_to_pi_for_completion_decision():
     run, reason = should_run_post_execution_review(_clean_audit(), [], "completed", False)
-    assert run is False
-    assert reason
+    assert run is True
+    assert "pi review" in reason.lower()
 
 
-def test_review_never_fires_without_a_runtime():
+def test_review_without_runtime_remains_observational():
     for audit, admissions, status, terminal in (
         (_clean_audit(), [], "completed", False),
         (_unmet_audit(), ["could not be run"], "error", True),
     ):
         run, reason = should_run_post_execution_review(
             audit, admissions, status, terminal, has_runtime=False)
-        assert run is False
+        assert run is True
         assert "runtime" in reason.lower()
 
 
@@ -644,15 +705,77 @@ def test_sanitize_review_plan_blanks_do_not_consume_the_cap():
     assert out["supplementary_tasks"] == ["only real task"]
 
 
-def test_sanitize_review_plan_coerces_verdict_and_survives_non_dict():
+def test_sanitize_review_plan_zero_budget_admits_no_task():
+    out = sanitize_review_plan(
+        {"supplementary_tasks": ["must not run"], "verdict": "supplement"}, 0
+    )
+    assert out["supplementary_tasks"] == []
+
+
+def test_sanitize_review_plan_keeps_only_current_step_decisions():
+    out = sanitize_review_plan({
+        "step_decisions": [
+            {"plan_step_id": 1, "status": "completed", "reason": "PI accepted"},
+            {"plan_step_id": 9, "status": "completed", "reason": "foreign"},
+            {"plan_step_id": 2, "status": "invalid", "reason": "bad syntax"},
+        ],
+    }, 0, valid_step_ids={1, 2})
+
+    assert out["step_decisions"] == [{
+        "plan_step_id": 1,
+        "status": "completed",
+        "reason": "PI accepted",
+    }]
+
+
+def test_sanitize_review_plan_keeps_all_current_step_decisions():
+    decisions = [
+        {"plan_step_id": step_id, "status": "completed", "reason": "PI accepted"}
+        for step_id in range(1, 22)
+    ]
+
+    out = sanitize_review_plan(
+        {"step_decisions": decisions, "verdict": "no_action"},
+        0,
+        valid_step_ids=set(range(1, 22)),
+    )
+
+    assert [item["plan_step_id"] for item in out["step_decisions"]] == list(
+        range(1, 22)
+    )
+
+
+def test_sanitize_review_plan_requires_explicit_supplement_verdict():
     assert sanitize_review_plan({"supplementary_tasks": ["do it"], "verdict": "maybe"},
-                                5)["verdict"] == "supplement"
+                                5)["verdict"] == "no_action"
     assert sanitize_review_plan({"supplementary_tasks": []}, 5)["verdict"] == "no_action"
 
     for bad in (None, "not a plan", [1, 2]):
         out = sanitize_review_plan(bad, 5)
         assert out["verdict"] == "no_action"
         assert out["supplementary_tasks"] == [] and out["gaps"] == []
+
+
+def test_pi_execution_audit_formats_every_plan_step():
+    from backend.agents.pi.execution_review import ExecutionReviewMixin
+
+    observations = [
+        {
+            "plan_step_id": step_id,
+            "technical_linkage": "unverified",
+            "verifiable": False,
+            "title": f"Step {step_id}",
+            "reason": "Reconciliation unavailable",
+        }
+        for step_id in range(1, 22)
+    ]
+
+    rendered = ExecutionReviewMixin._format_execution_audit(
+        {"n_steps": 21, "n_unverifiable": 21, "step_observations": observations},
+        [],
+    )
+
+    assert "plan_step_id=21" in rendered
 
 
 def test_sanitize_review_result_bounds_lists_and_survives_non_dict():

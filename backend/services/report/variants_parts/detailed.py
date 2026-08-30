@@ -27,6 +27,129 @@ from .figure_records import resolved_record_figure_candidates
 logger = __import__('logging').getLogger(__name__)
 
 
+def _record_value(record: Any, key: str, default: Any = None) -> Any:
+    if isinstance(record, dict):
+        return record.get(key, default)
+    return getattr(record, key, default)
+
+
+def _matching_round_record(records, round_number: int):
+    for record in reversed(list(records or [])):
+        if int(_record_value(record, "round_number", 0) or 0) == round_number:
+            return record
+    return None
+
+
+def _technical_evidence_observations_html(
+    state: "AnalysisState",
+    round_result: Any,
+) -> str:
+    """Render non-blocking technical evidence facts for one completed round."""
+    round_number = int(_record_value(round_result, "round_number", 0) or 0)
+    verified = _record_value(
+        round_result, "bioinformatics_evidence_verified", None
+    )
+    verification_label = {
+        True: "verified",
+        False: "not verified",
+        None: "not recorded",
+    }[verified]
+    execution_ids = list(
+        _record_value(round_result, "evidence_execution_ids", []) or []
+    )
+    notes = [
+        str(value).strip()
+        for value in (_record_value(round_result, "evidence_notes", []) or [])
+        if str(value).strip()
+    ]
+
+    reconciliation = _matching_round_record(
+        getattr(state, "plan_evidence_reconciliations", []), round_number
+    )
+    links = list(_record_value(reconciliation, "links", []) or [])
+    link_counts = {
+        status: sum(
+            1
+            for link in links
+            if str(_record_value(link, "status", "")).lower() == status
+        )
+        for status in ("evidenced", "partial", "unverified")
+    }
+
+    parts = [
+        '<div class="segment-section evidence-observations">',
+        '<h3>Technical Evidence Observations</h3>',
+        (
+            '<p>These are technical execution and linkage observations for PI '
+            'review. They do not accept or reject the scientific conclusions '
+            'and do not block this report.</p>'
+        ),
+        '<ul>',
+        (
+            '<li><strong>Bioinformatics evidence verification:</strong> '
+            f'{html_module.escape(verification_label)}</li>'
+        ),
+        (
+            '<li><strong>Confirmed execution receipts:</strong> '
+            f'{len(execution_ids)}</li>'
+        ),
+    ]
+    if reconciliation is not None:
+        status = str(_record_value(reconciliation, "status", "not recorded"))
+        parts.append(
+            '<li><strong>Plan/evidence reconciliation:</strong> '
+            f'{html_module.escape(status)}; '
+            f'{link_counts["evidenced"]} evidenced, '
+            f'{link_counts["partial"]} partial, '
+            f'{link_counts["unverified"]} unverified plan steps</li>'
+        )
+        reason = str(_record_value(reconciliation, "overall_reason", "") or "").strip()
+        if reason:
+            parts.append(
+                '<li><strong>Reconciliation note:</strong> '
+                f'{html_module.escape(reason)}</li>'
+            )
+    elif verified is False:
+        parts.append(
+            '<li><strong>Plan/evidence reconciliation:</strong> no retained '
+            'round-level reconciliation record</li>'
+        )
+    for note in notes[:20]:
+        parts.append(
+            '<li><strong>Evidence note:</strong> '
+            f'{html_module.escape(note)}</li>'
+        )
+    parts.extend(['</ul>', '</div>'])
+    return "\n".join(parts)
+
+
+def _completed_round_result(state: "AnalysisState", round_number: int):
+    return _matching_round_record(getattr(state, "round_results", []), round_number)
+
+
+def _with_historical_evidence_observations(
+    state: "AnalysisState",
+    segment: Any,
+) -> str:
+    """Add current evidence disclosure when combining older stored segments."""
+    content = str(_record_value(segment, "content_html", "") or "")
+    if not content or 'class="segment-section evidence-observations"' in content:
+        return content
+    phase = str(_record_value(segment, "phase", "") or "")
+    if phase == "pre_annotation":
+        return content
+    round_number = int(_record_value(segment, "round_number", 0) or 0)
+    round_result = _completed_round_result(state, round_number)
+    if round_result is None:
+        return content
+    observation = _technical_evidence_observations_html(state, round_result)
+    timestamp_end = content.find("</p>")
+    if timestamp_end >= 0:
+        insert_at = timestamp_end + len("</p>")
+        return content[:insert_at] + "\n" + observation + content[insert_at:]
+    return observation + "\n" + content
+
+
 def generate_detailed_report_segment_html(
     state: "AnalysisState",
     phase: str,
@@ -61,6 +184,9 @@ def generate_detailed_report_segment_html(
     except Exception as e:
         logger.debug(f"Experimental design section failed: {e}")
         pass
+
+    if round_result is not None:
+        parts.append(_technical_evidence_observations_html(state, round_result))
 
     # --- Section: Agent Findings (from graph_state if available) ---
     if graph_state:
@@ -253,7 +379,9 @@ def generate_combined_detailed_report_html(state: "AnalysisState") -> str:
     reports_dir.mkdir(parents=True, exist_ok=True)
 
     segments_html = "\n<hr class='segment-divider'>\n".join(
-        seg.content_html for seg in state.detailed_report_segments if seg.content_html
+        content
+        for seg in state.detailed_report_segments
+        if (content := _with_historical_evidence_observations(state, seg))
     )
     # A figure can be visible at several workflow gates. Keep its first segment
     # occurrence so the combined report does not repeat the same image gallery.

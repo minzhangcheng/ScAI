@@ -4,6 +4,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 import backend.utils.llm_client as llm_mod
 from backend.utils.llm_client import OpenAICompatibleClient, LLMResponse, LLMToolResponse, NotFoundError, BadRequestError, InternalServerError, RateLimitError
+from backend.utils.llm_client_parts.media import normalize_image_input
 
 
 _OPEN_CLIENTS = []
@@ -194,6 +195,46 @@ async def test_vision_shape_400_reroutes_only_vision():
     c.client.chat.completions.create.assert_awaited_once()
     assert llm_mod._PROBE_CACHE[("https://x/v1", "vision-model", "vision")] == "chat"
     assert llm_mod._PROBE_CACHE.get(("https://x/v1", "vision-model")) is None
+
+
+def test_vision_data_uri_is_normalized_without_double_prefix():
+    raw, mime = normalize_image_input("data:image/jpeg;base64,aW1hZ2U=")
+
+    assert raw == "aW1hZ2U="
+    assert not raw.startswith("data:")
+    assert mime in {"image/jpeg", "image/png"}
+
+
+@pytest.mark.asyncio
+async def test_chat_vision_code_1214_reroutes_once_to_responses():
+    c = _client("https://x/v1/chat/completions")
+    shape_error = BadRequestError(
+        message="Error code: 400 - invalid image url",
+        response=MagicMock(status_code=400),
+        body={"error": {
+            "message": "Invalid image_url payload",
+            "param": "messages[0].content[1].image_url",
+            "code": 1214,
+        }},
+    )
+    c.client.chat.completions.create = AsyncMock(side_effect=shape_error)
+    responses = MagicMock()
+    responses.complete_vision = AsyncMock(
+        return_value=LLMResponse("RESPONSES_VISION", "m", {}, None)
+    )
+    c._responses_adapter = responses
+
+    result = await c.chat_with_vision(
+        model="vision-model",
+        text_prompt="describe",
+        images=["data:image/png;base64,aW1hZ2U="],
+        max_tokens=10,
+    )
+
+    assert result.content == "RESPONSES_VISION"
+    c.client.chat.completions.create.assert_awaited_once()
+    responses.complete_vision.assert_awaited_once()
+    assert responses.complete_vision.call_args.kwargs["images"] == ["aW1hZ2U="]
 
 
 def test_unrelated_400_is_not_vision_shape_mismatch():

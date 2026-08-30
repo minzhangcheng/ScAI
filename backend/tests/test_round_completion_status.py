@@ -61,7 +61,7 @@ def test_agent_error_with_findings_marks_partial_not_complete():
     assert completed_innovation_direction_keys(state) == set()
 
 
-def test_unverified_execution_evidence_marks_round_partial():
+def test_unverified_execution_evidence_does_not_set_scientific_round_status():
     result = _round()
     derive_round_completion_status(
         {
@@ -75,8 +75,8 @@ def test_unverified_execution_evidence_marks_round_partial():
         result,
     )
 
-    assert result.round_status == "partial"
-    assert result.direction_coverage_eligible is False
+    assert result.round_status == "completed"
+    assert result.direction_coverage_eligible is True
 
 
 def test_completed_results_with_findings_mark_substantive():

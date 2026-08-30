@@ -12,7 +12,7 @@ import backend.agents.pathology_agent as mod
 from backend.agents.pathology_agent import PathologyAgent, _ImageSkipRequested
 from backend.constants import LlmFailureAction
 from backend.models.schemas import AgentType
-from backend.utils.llm_client import UpstreamExhaustedError
+from backend.utils.llm_client import BadRequestError, UpstreamExhaustedError
 from backend.workflow.helpers import WorkflowTerminatedError
 from backend.tests.split_facade import setattr_facade
 
@@ -95,6 +95,36 @@ async def test_no_callback_propagates_error():
 
     with pytest.raises(UpstreamExhaustedError):
         await agent._call_llm_with_hitl(call_factory, "img.tif", "overview")
+
+
+@pytest.mark.asyncio
+async def test_deterministic_vision_shape_failure_does_not_open_hitl():
+    agent = _bare_agent()
+    callback_calls = 0
+    provider_error = BadRequestError(
+        message="Error code: 400 - invalid image url",
+        response=MagicMock(status_code=400),
+        body={"error": {
+            "message": "Invalid image_url payload",
+            "param": "messages[0].content[1].image_url",
+            "code": 1214,
+        }},
+    )
+    wrapped = _make_error()
+    wrapped.__cause__ = provider_error
+
+    async def call_factory():
+        raise wrapped
+
+    async def cb(error, image_label):
+        nonlocal callback_calls
+        callback_calls += 1
+        return LlmFailureAction.RETRY
+
+    agent.llm_intervention_callback = cb
+    with pytest.raises(UpstreamExhaustedError):
+        await agent._call_llm_with_hitl(call_factory, "img.tif", "overview")
+    assert callback_calls == 0
 
 
 @pytest.mark.asyncio

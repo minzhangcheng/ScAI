@@ -64,12 +64,15 @@ TOOLS = [
                     },
                     "execution_purpose": {
                         "type": "string",
-                        "enum": ["planned", "supplementary", "repair"],
+                        "enum": [
+                            "planned", "supplementary", "repair", "unspecified"
+                        ],
                         "description": (
                             "Producer intent only: planned for approved work, repair for a "
-                            "correction, or supplementary for out-of-plan exploration."
+                            "correction, supplementary for out-of-plan exploration, or "
+                            "unspecified when the producer does not nominate an intent."
                         ),
-                        "default": "supplementary",
+                        "default": "unspecified",
                     },
                     "input_profile_ids": {
                         "type": "array",

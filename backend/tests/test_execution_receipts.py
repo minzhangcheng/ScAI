@@ -61,6 +61,32 @@ def test_supplementary_execution_is_explicitly_non_plan_evidence():
     ) == ("supplementary", [], "supplementary", None)
 
 
+def test_omitted_purpose_preserves_valid_plan_candidates_without_inventing_intent():
+    state = _state_with_plan()
+
+    purpose, step_ids, status, warning = execution_plan_binding(
+        state,
+        {"plan_step_ids": [1, 2]},
+    )
+
+    assert purpose == "unspecified"
+    assert step_ids == [1, 2]
+    assert status == "candidate"
+    assert "omitted" in warning
+    assert "PI review" in warning
+
+
+def test_omitted_purpose_without_plan_candidates_stays_unverified():
+    state = _state_with_plan()
+
+    purpose, step_ids, status, warning = execution_plan_binding(state, {})
+
+    assert purpose == "unspecified"
+    assert step_ids == []
+    assert status == "unverified"
+    assert "omitted" in warning
+
+
 def test_current_derived_record_rejects_foreign_plan_and_generation():
     state = _state_with_plan()
     state.current_round = 2

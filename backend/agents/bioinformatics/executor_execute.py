@@ -54,14 +54,14 @@ def execution_plan_binding(
     reconciliation.  Invalid or missing IDs are recorded as unverified instead
     of spending another autonomous-agent turn on a schema repair.
     """
-    purpose = str(args.get("execution_purpose") or "").strip().lower()
+    raw_purpose = str(args.get("execution_purpose") or "").strip().lower()
+    purpose = raw_purpose or "unspecified"
     warnings: list[str] = []
-    if purpose not in {"planned", "supplementary", "repair"}:
-        if purpose:
-            warnings.append(
-                "execution_purpose was not recognized and was treated as supplementary"
-            )
-        purpose = "supplementary"
+    if purpose not in {"planned", "supplementary", "repair", "unspecified"}:
+        warnings.append(
+            "execution_purpose was not recognized and was recorded as unspecified"
+        )
+        purpose = "unspecified"
     raw_ids = args.get("plan_step_ids")
     if raw_ids is None:
         raw_ids = []
@@ -104,13 +104,22 @@ def execution_plan_binding(
                 "planned work had no valid current-plan step nomination; "
                 "Supervisor reconciliation will determine any semantic link"
             )
-    else:
+    elif purpose == "supplementary":
         status = "supplementary"
         if step_ids:
             warnings.append(
                 "supplementary execution cannot claim plan credit; nominated "
                 "step IDs remain audit context only"
             )
+    else:
+        status = "candidate" if has_plan and step_ids else "unverified"
+        warnings.append(
+            "execution_purpose was omitted; valid current-plan step nominations "
+            "were preserved as candidates for PI review"
+            if status == "candidate"
+            else "execution_purpose was omitted and no valid current-plan step "
+                 "nomination was available"
+        )
     return purpose, step_ids, status, "; ".join(dict.fromkeys(warnings)) or None
 
 

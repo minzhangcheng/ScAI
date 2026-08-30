@@ -416,7 +416,7 @@ def _apply_links(
             "detail": (
                 "One or more findings could not be semantically reconciled "
                 "to current execution evidence. They remain retained as "
-                "unverified and are excluded from the report evidence view."
+                "unverified observations for PI and report disclosure."
             ),
             "subject": plan_id,
             "severity": "advise",
@@ -425,7 +425,17 @@ def _apply_links(
             "forced_release": False,
         })
     result["evidence_gate_findings"] = gates
-    result["evidence_gate_degraded"] = bool(gates)
+    # Advisory reconciliation observations stay visible to the PI without
+    # changing workflow status. Preserve only an already-recorded operational
+    # degradation (for example a Supervisor force-stop) or a forced release.
+    result["evidence_gate_degraded"] = bool(
+        result.get("evidence_gate_degraded")
+        or any(
+            item.get("forced_release")
+            for item in gates
+            if isinstance(item, dict)
+        )
+    )
 
 
 def _sync_analysis_log(analysis_state, finding_records: list[dict]) -> None:

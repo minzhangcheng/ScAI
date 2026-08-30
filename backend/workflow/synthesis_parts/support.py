@@ -310,21 +310,6 @@ def derive_round_completion_status(state: Dict[str, Any], result: RoundResult) -
     has_optional_failed = any(status in FAILED_AGENT_STATUSES for status in optional_statuses)
     has_optional_partial = any(status in PARTIAL_AGENT_STATUSES for status in optional_statuses)
 
-    # New bioinformatics runs must bind findings to successful current-run
-    # execution IDs. A deliberately degraded mandatory gate or an invalid
-    # evidence reference may still yield a partial narrative, but it must not
-    # satisfy direction coverage or be reported as validated evidence.
-    bioinformatics_result = state.get("bioinformatics_result")
-    if (
-        isinstance(bioinformatics_result, dict)
-        and bioinformatics_result.get("findings")
-        and bioinformatics_result.get("evidence_verified") is False
-    ):
-        result.round_status = "partial"
-        result.evidence_status = "substantive" if has_evidence else "failed"
-        result.direction_coverage_eligible = False
-        return result
-
     if has_core_failed:
         result.round_status = "partial" if has_evidence else "failed"
         result.evidence_status = "substantive" if has_evidence else "failed"

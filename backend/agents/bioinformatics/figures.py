@@ -43,7 +43,10 @@ from ...utils.formatting import (
     truncate_for_llm,
 )
 from ...utils.error_parsing import compact_traceback
-from ...utils.llm_client import is_vision_capability_mismatch
+from ...utils.llm_client import (
+    is_vision_capability_mismatch,
+    is_vision_request_shape_error,
+)
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ...services.figure_layout import (
     blocking_violations,
@@ -672,17 +675,23 @@ Return only the Python code:{note}"""
                 )
             except Exception as vision_err:
                 _is_vision_unsupported = is_vision_capability_mismatch(vision_err)
-                if _is_vision_unsupported:
-                    # Model does not support vision input — disable for this session and fall back
-                    logger.warning(
-                        f"[Bioinformatics] Model {self.model} does not support vision "
-                        f"({vision_err}), disabling vision for this session"
+                _is_payload_error = is_vision_request_shape_error(vision_err)
+                if _is_vision_unsupported or _is_payload_error:
+                    fallback_reason = (
+                        "model vision capability mismatch"
+                        if _is_vision_unsupported
+                        else "vision request payload/protocol rejection"
                     )
-                    self.has_vision = False
+                    logger.warning(
+                        f"[Bioinformatics] Falling back to text-only figure revision "
+                        f"after {fallback_reason}: {vision_err}"
+                    )
+                    if _is_vision_unsupported:
+                        self.has_vision = False
                     prompt = prompt.replace(
                         "**Current Figure:** An image of the current figure is attached. "
                         "Review it carefully to understand what needs to be changed.\n\n",
-                        "**Current Figure:** (Image not available — model does not support vision. "
+                        "**Current Figure:** (Image not available for this request. "
                         "Revise code based on PI feedback text only.)\n\n",
                     )
                     response = await self.llm_client.chat(

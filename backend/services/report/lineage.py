@@ -610,7 +610,7 @@ def build_lineage_report_state(
                 if isinstance(item, dict)
             ]
             if records:
-                verified_records = []
+                retained_records = []
                 for record in records:
                     cited = {
                         str(value) for value in (
@@ -623,45 +623,64 @@ def build_lineage_report_state(
                         == active_cohort_digest
                         and int(record.get("cohort_generation", 0) or 0)
                         == active_cohort_generation
-                        and record.get("evidence_status") == "verified"
-                        and record.get("semantic_status") == "evidenced"
-                        and bool(cited)
-                        and cited <= current_execution_ids
                     ):
-                        verified_records.append(record)
-                excluded_count = len(records) - len(verified_records)
-                round_result.bioinformatics_finding_records = verified_records
+                        retained = dict(record)
+                        valid_cited = sorted(cited & current_execution_ids)
+                        retained["evidence_execution_ids"] = valid_cited
+                        if not valid_cited or cited != set(valid_cited):
+                            retained["evidence_status"] = "unverified"
+                            retained["semantic_status"] = "unverified"
+                        retained_records.append(retained)
+                excluded_count = len(records) - len(retained_records)
+                round_result.bioinformatics_finding_records = retained_records
                 round_result.bioinformatics_findings = [
                     str(record.get("text") or "")
-                    for record in verified_records
+                    for record in retained_records
                     if str(record.get("text") or "").strip()
                 ]
                 round_result.evidence_execution_ids = sorted({
                     str(value)
-                    for record in verified_records
+                    for record in retained_records
+                    if record.get("evidence_status") == "verified"
+                    and record.get("semantic_status") == "evidenced"
                     for value in (record.get("evidence_execution_ids") or [])
                     if str(value)
                 })
                 round_result.bioinformatics_evidence_verified = bool(
-                    verified_records
-                ) and excluded_count == 0
+                    retained_records
+                ) and all(
+                    record.get("evidence_status") == "verified"
+                    and record.get("semantic_status") == "evidenced"
+                    and bool(record.get("evidence_execution_ids"))
+                    for record in retained_records
+                )
                 if excluded_count:
                     round_result.evidence_notes = list(
                         round_result.evidence_notes
                     ) + [
-                        f"{excluded_count} bioinformatics finding(s) were retained "
-                        "only in source-session audit history because current "
-                        "cohort identity or Supervisor semantic evidence was missing."
+                        f"{excluded_count} bioinformatics finding(s) belonged to a "
+                        "different lineage or cohort and remain only in source-session "
+                        "audit history."
+                    ]
+                unverified_count = sum(
+                    1 for record in retained_records
+                    if record.get("evidence_status") != "verified"
+                    or record.get("semantic_status") != "evidenced"
+                )
+                if unverified_count:
+                    round_result.evidence_notes = list(
+                        round_result.evidence_notes
+                    ) + [
+                        f"{unverified_count} current-cohort bioinformatics finding(s) "
+                        "are retained as unverified observations for PI review."
                     ]
             else:
                 if round_result.bioinformatics_findings:
-                    round_result.bioinformatics_findings = []
                     round_result.bioinformatics_evidence_verified = False
                     round_result.evidence_execution_ids = []
                     round_result.evidence_notes = list(round_result.evidence_notes) + [
-                        "Bioinformatics findings have no current Supervisor-confirmed "
-                        "finding records and are retained only in the source-session "
-                        "audit history."
+                        "Bioinformatics findings have no current structured finding "
+                        "records and are retained as unverified observations for PI review."
                     ]
         sandbox_state = dict(report_state.sandbox_state or {})
         sandbox_state["report_evidence_execution_ids"] = sorted(

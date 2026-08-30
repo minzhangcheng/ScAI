@@ -28,7 +28,11 @@ from .biochemistry_parts.records import (
 from ..models.schemas import (
     AgentType, AnalysisState, MessageRole, BiochemistryIndicator, DataFile
 )
-from ..utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
+from ..utils.llm_client import (
+    OpenAICompatibleClient,
+    UpstreamExhaustedError,
+    is_vision_request_shape_error,
+)
 from ..utils.settings_provider import AgentSettingsProvider
 
 logger = logging.getLogger(__name__)
@@ -466,6 +470,11 @@ insufficient for interpretation. Then provide the full analysis below that line.
                     f"[BiochemistryAgent] Vision analysis failed for "
                     f"{bio_file.filename} (attempt {attempt + 1}): {e}"
                 )
+                if is_vision_request_shape_error(e):
+                    # Retrying the same deterministic payload/protocol rejection
+                    # cannot recover. Record it as missing image evidence without
+                    # escalating the workflow to an LLM-failure HITL gate.
+                    break
 
         # All attempts failed
         bio_file.extracted_data = {
@@ -475,7 +484,10 @@ insufficient for interpretation. Then provide the full analysis below that line.
         logger.error(
             f"[BiochemistryAgent] All vision attempts failed for {bio_file.filename}"
         )
-        if isinstance(last_error, UpstreamExhaustedError):
+        if (
+            isinstance(last_error, UpstreamExhaustedError)
+            and not is_vision_request_shape_error(last_error)
+        ):
             raise last_error
         return None
 

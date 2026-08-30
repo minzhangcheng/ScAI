@@ -14,6 +14,7 @@ import ast
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -29,6 +30,7 @@ from backend.services.report.artifacts import (
     publication_pdf_is_valid,
 )
 from backend.tests.figure_image_helpers import valid_image_bytes, valid_pdf_bytes
+from backend.utils.llm_client import BadRequestError
 
 BLOCKING = [{
     "kind": "text_over_text", "severity": "block", "text": "Con FXR/bile",
@@ -1047,6 +1049,43 @@ class _PromptAgent(FiguresMixin):
 
     def _set_llm_context(self):
         return None
+
+
+class _PayloadRejectLLM(_PromptLLM):
+    async def chat_with_vision(self, **kwargs):
+        self.calls.append(("vision", kwargs))
+        raise BadRequestError(
+            message="Error code: 400 - invalid image url",
+            response=MagicMock(status_code=400),
+            body={"error": {
+                "message": "Invalid image_url payload",
+                "param": "messages[0].content[1].image_url",
+                "code": 1214,
+            }},
+        )
+
+
+@pytest.mark.asyncio
+async def test_figure_revision_payload_rejection_falls_back_without_disabling_vision():
+    agent = _PromptAgent()
+    agent.llm_client = _PayloadRejectLLM()
+
+    revised = await agent._revise_figure_code(
+        "plot()",
+        "Fix the title",
+        [],
+        [],
+        "heatmap",
+        state=SimpleNamespace(treatment_groups=[]),
+        image_base64="aW1hZ2U=",
+    )
+
+    assert revised == "revised plain code"
+    assert agent.has_vision is True
+    assert [kind for kind, _kwargs in agent.llm_client.calls] == ["vision", "chat"]
+    assert "Image not available for this request" in (
+        agent.llm_client.calls[-1][1]["messages"][0]["content"]
+    )
 
 
 @pytest.mark.asyncio

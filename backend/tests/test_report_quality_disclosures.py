@@ -39,7 +39,7 @@ def _round(**overrides):
     return RoundResult(**values)
 
 
-def test_legacy_round_defaults_are_cautions_but_current_empty_evidence_blocks():
+def test_legacy_and_current_evidence_limits_are_nonblocking_cautions():
     legacy = AnalysisState(
         user_id="u",
         round_results=[RoundResult(round_number=1, pi_summary="Historical report")],
@@ -59,8 +59,9 @@ def test_legacy_round_defaults_are_cautions_but_current_empty_evidence_blocks():
     assert legacy_quality["status"] == "qualified"
     assert legacy_quality["blocking_issues"] == []
     assert any("predates" in item for item in legacy_quality["cautions"])
-    assert current_quality["status"] == "incomplete"
-    assert any("empty evidence" in item for item in current_quality["blocking_issues"])
+    assert current_quality["status"] == "qualified"
+    assert current_quality["blocking_issues"] == []
+    assert any("empty evidence" in item for item in current_quality["cautions"])
 
     future = AnalysisState(
         user_id="u",
@@ -171,7 +172,8 @@ def test_failure_unverifiable_and_remaining_gaps_override_resolved_review(
 
     quality = build_quality_disclosures(state)
 
-    assert quality["status"] == "incomplete"
+    assert quality["status"] == "qualified"
+    assert quality["blocking_issues"] == []
     assert quality["post_execution_reviews"][0]["final_gap_status"] == expected_gap_status
 
 
@@ -223,7 +225,8 @@ def test_declined_review_cannot_hide_explicit_unverifiable_result(
 
     quality = build_quality_disclosures(state)
 
-    assert quality["status"] == "incomplete"
+    assert quality["status"] == "qualified"
+    assert quality["blocking_issues"] == []
     assert quality["post_execution_reviews"][0]["final_gap_status"] == "unverifiable"
 
 
@@ -288,7 +291,7 @@ def test_quality_record_keeps_confirmation_validation_and_unknown_counts_separat
     assert "1 known / 1 unknown" in rendered
 
 
-def test_unverified_round_and_unmet_post_review_make_report_quality_incomplete():
+def test_unverified_round_and_unmet_post_review_remain_nonblocking_observations():
     state = AnalysisState(
         user_id="u",
         round_results=[_round(
@@ -311,8 +314,9 @@ def test_unverified_round_and_unmet_post_review_make_report_quality_incomplete()
     )
 
     quality = build_quality_disclosures(state)
-    assert quality["status"] == "incomplete"
-    assert any("unverified" in issue for issue in quality["blocking_issues"])
+    assert quality["status"] == "qualified"
+    assert quality["blocking_issues"] == []
+    assert any("unverified" in issue for issue in quality["cautions"])
     html = render_report_limitations_html({"quality_disclosures": quality})
     assert "Cell communication" in html, (
         "the report must name WHICH plan step went unmet, not just that one did"
@@ -322,10 +326,10 @@ def test_unverified_round_and_unmet_post_review_make_report_quality_incomplete()
 
     neutral = SimpleNamespace(allow_partial_report=False)
     assert report_completion_fields(neutral, quality_disclosures=quality) == (
-        "partial",
-        "Complete with unresolved analysis-quality gaps",
+        "completed",
+        "Complete",
     )
-    assert report_partial_reason(neutral, quality_disclosures=quality) == "analysis_quality"
+    assert report_partial_reason(neutral, quality_disclosures=quality) is None
 
 
 def test_integration_round_does_not_require_bioinformatics_verification():

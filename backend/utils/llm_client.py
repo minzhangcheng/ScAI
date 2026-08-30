@@ -119,6 +119,7 @@ from .llm_client_parts.shared import (  # noqa: F401
     is_endpoint_absent,
     is_responses_only_model,
     is_responses_vision_shape_error,
+    is_vision_request_shape_error,
     is_vision_capability_mismatch,
     is_max_tokens_field_error,
     max_tokens_field_from_error,
