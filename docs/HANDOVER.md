@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.50.4 · **Last updated**: 2026-08-30
+**Version**: 0.50.4.1 · **Last updated**: 2026-08-31
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,11 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.50.x — (2026-08-30 onward)**
+
+- `0.50.4.1` — Corrects retry status notifications for upstream 5xx errors to
+  report the effective retry budget instead of the caller's default budget.
+  Focused retry-classification checks passed; no image build, deployment, or
+  historical-session mutation was performed.
 
 - `0.50.4` — Prevents function-local variables, including closed h5py and
   loompy handles, from being promoted to required cross-cell runtime outputs.

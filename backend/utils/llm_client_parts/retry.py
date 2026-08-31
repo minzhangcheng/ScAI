@@ -281,7 +281,7 @@ async def retry_with_backoff(
                     f"[{agent_name}] Request failed (attempt {attempt + 1}/{current_max + 1}): {error_label}: {str(e)[:100]}. "
                     f"Retrying in {delay:.1f}s..."
                 )
-                await _notify_retry(attempt, delay, error_label)
+                await _notify_retry(attempt, delay, error_label, current_max)
                 await asyncio.sleep(delay)
                 attempt += 1
                 await _await_before_retry()

@@ -8,6 +8,7 @@ from backend.utils.llm_client import (
     InternalServerError,
     UpstreamExhaustedError,
     MAX_RETRIES,
+    MAX_RETRIES_UPSTREAM_5XX,
 )
 
 
@@ -82,6 +83,36 @@ async def test_5xx_budget_does_not_stick_to_deterministic_failure(monkeypatch):
         )
 
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_5xx_retry_notice_uses_expanded_budget(monkeypatch):
+    notices = []
+    calls = 0
+
+    async def record(*args):
+        notices.append(args)
+
+    async def request():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _err(InternalServerError, "temporary upstream failure", 524)
+        return "ok"
+
+    monkeypatch.setattr("backend.utils.llm_client_parts.retry.asyncio.sleep", AsyncMock())
+
+    assert await retry_with_backoff(
+        request,
+        max_retries=1,
+        retry_delay_base=0,
+        agent_name="bioinformatics",
+        on_retry=record,
+    ) == "ok"
+
+    assert notices == [
+        (0, MAX_RETRIES_UPSTREAM_5XX, 0, "InternalServerError(5xx)", "bioinformatics")
+    ]
 
 @pytest.mark.asyncio
 async def test_tool_choice_400_not_retried_propagates():
