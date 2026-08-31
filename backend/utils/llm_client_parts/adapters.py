@@ -23,8 +23,8 @@ from ..llm_logger import get_llm_logger, LLMInteraction
 
 logger = logging.getLogger(__name__)
 
-from .error_signals import _inject_web_search_if_needed, _is_unknown_web_search_tool_error, _is_unsupported_background_error, _swap_web_search_tool_name
-from .errors import StreamInterruptedError
+from .error_signals import _inject_web_search_if_needed, _is_unknown_web_search_tool_error, _is_unsupported_background_error, _swap_web_search_tool_name, is_stream_unsupported_error
+from .errors import StreamInterruptedError, StreamNotStartedError
 from .google import _DR_BACKGROUND_MAX_POLL_ERRORS, _DR_BACKGROUND_MAX_WAIT, _DR_BACKGROUND_POLL_INTERVAL, _DR_BACKGROUND_TERMINAL_FAILED
 from .media import _detect_image_mime_type, _inject_english_enforcement
 from .model_traits import _WEB_SEARCH_TOOL_NAMES, _get_effective_temperature, _is_deep_research_model
@@ -106,7 +106,9 @@ async def _start_stream(stream, consumer, *, timeout, label) -> _StartedStream:
         )
     except StopAsyncIteration as error:
         await _close_stream(stream)
-        raise RuntimeError(f"{label} ended before its first event") from error
+        raise StreamNotStartedError(
+            f"{label} ended before its first event"
+        ) from error
     except BaseException:
         await _close_stream(stream)
         raise
@@ -118,6 +120,35 @@ async def _start_stream(stream, consumer, *, timeout, label) -> _StartedStream:
         idle_timeout=idle_timeout,
         label=label,
     )
+
+
+async def stream_with_fallback(stream_call, non_stream_call, *, on_unsupported,
+                               label, agent_name="unknown"):
+    """Run ``stream_call``, replaying as ``non_stream_call`` only where replay is safe.
+
+    Exactly two provider behaviours are recoverable, because in both the stream
+    yielded nothing: a deterministic 400 rejecting streaming (permanent, so
+    ``on_unsupported`` records it), and a stream that closes cleanly before its
+    first event (possibly transient, so it is deliberately NOT cached). Every
+    other failure propagates -- once events have been consumed, replaying could
+    duplicate generation or tool execution.
+    """
+    try:
+        return await stream_call()
+    except StreamNotStartedError:
+        logger.warning(
+            "[%s] %s ended before its first event; falling back once to "
+            "non-streaming", agent_name, label,
+        )
+    except Exception as error:
+        if not is_stream_unsupported_error(error):
+            raise
+        on_unsupported()
+        logger.warning(
+            "[%s] %s is unsupported; falling back to non-streaming: %s: %s",
+            agent_name, label, type(error).__name__, str(error)[:200],
+        )
+    return await non_stream_call()
 
 class _AnthropicAdapter:
     """Adapter for the Anthropic Messages API. anthropic SDK is imported lazily
@@ -288,7 +319,8 @@ class _AnthropicAdapter:
 
     async def complete_vision(self, model, text_prompt, images, temperature,
                               max_tokens, timeout=None, skip_temperature=False,
-                              system_prompt=None) -> LLMResponse:
+                              system_prompt=None, stream=False,
+                              defer_stream=False) -> LLMResponse:
         content = [{"type": "text", "text": text_prompt}]
         for img_b64 in images:
             mime = _detect_image_mime_type(img_b64)
@@ -302,7 +334,17 @@ class _AnthropicAdapter:
         params = self._build_params(model, messages, temperature, max_tokens, skip_temperature=skip_temperature)
         if timeout is not None:
             params["timeout"] = timeout
+        if stream:
+            params["stream"] = True
         resp = await self.client.messages.create(**params)
+        if stream:
+            started = await _start_stream(
+                resp,
+                lambda value: self._complete_stream_response(value, model),
+                timeout=timeout,
+                label="Anthropic vision stream",
+            )
+            return started if defer_stream else await started.finish()
         dump = resp.model_dump()
         text, _tc, _think, usage = _parse_anthropic_dump(dump)
         return LLMResponse(content=text, model=getattr(resp, "model", model),

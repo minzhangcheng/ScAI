@@ -62,3 +62,15 @@ class EmptyResponseError(RuntimeError):
 
 class StreamInterruptedError(RuntimeError):
     """A stream failed after its first event, so replay is unsafe."""
+
+
+class StreamNotStartedError(RuntimeError):
+    """A stream ended cleanly before yielding its first event."""
+
+
+class ReasoningOnlyStreamError(RuntimeError):
+    """A completed Chat stream contained private reasoning but no public text."""
+
+    def __init__(self, message: str, usage=None):
+        super().__init__(message)
+        self.usage = usage or {}

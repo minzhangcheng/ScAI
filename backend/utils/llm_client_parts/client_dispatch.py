@@ -232,7 +232,13 @@ class ClientDispatchMixin:
             usage.get("completion_tokens", usage.get("output_tokens"))
             if isinstance(usage, dict) else None
         )
-        terminal_failure = status in {"failed", "incomplete", "cancelled"}
+        terminal_failure = (
+            status in {"failed", "cancelled"}
+            or (
+                status == "incomplete"
+                and (not content or bool(tool_calls))
+            )
+        )
         no_public_output = (
             status is not None
             and not content

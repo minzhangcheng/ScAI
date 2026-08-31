@@ -44,8 +44,9 @@ _PROBE_CACHE: Dict[Tuple[Any, ...], str] = {}
 # protocol cache: (base_url, model, "vision"). Transient failures never enter it.
 _NO_RESPONSES_VISION_STREAM: set = set()
 
-# Deterministic text/tool-stream rejections, keyed by
-# (base_url, model, modality, wire_protocol).
+# Deterministic stream rejections for every (modality, protocol) pair except
+# Responses vision, which predates this set and keeps its own cache above.
+# Keyed by (base_url, model, modality, wire_protocol).
 _NO_TEXT_STREAM: set = set()
 
 # Chat Completions endpoints that stream successfully but reject

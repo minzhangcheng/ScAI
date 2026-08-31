@@ -87,6 +87,7 @@ from .shared import (  # noqa: F401
     _swap_web_search_tool_name,
     _is_unsupported_background_error,
     is_stream_unsupported_error,
+    is_stream_options_unsupported_error,
     is_temperature_error,
     is_tool_choice_error,
     is_responses_endpoint_absent,
@@ -115,6 +116,8 @@ from .shared import (  # noqa: F401
     _NO_BACKGROUND_ENDPOINT,
     _NO_RESPONSES_ENDPOINT,
     _NO_RESPONSES_VISION_STREAM,
+    _NO_TEXT_STREAM,
+    _NO_CHAT_STREAM_OPTIONS,
     _PROBE_CACHE,
     _PROBE_LOCKS,
     _url_path_suffix_protocol,
@@ -138,6 +141,9 @@ from .shared import (  # noqa: F401
     _anthropic_restore_thinking,
     _parse_responses_dump,
     _ANTHROPIC_DEFAULT_MAX_TOKENS,
+    ReasoningOnlyStreamError,
+    _start_stream,
+    stream_with_fallback,
     _AnthropicAdapter,
     _ResponsesAdapter,
     _DR_BACKGROUND_POLL_INTERVAL,
@@ -274,6 +280,7 @@ class ClientStreamVisionMixin:
         max_retries: Optional[int] = None,
         non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
         system_prompt: Optional[str] = None,
+        stream: bool = False,
     ) -> LLMResponse:
         messages = _inject_english_enforcement(
             ([{"role": "system", "content": system_prompt}]
@@ -300,9 +307,33 @@ class ClientStreamVisionMixin:
 
         model_key = _extract_model_name(model)
         base_params = {"model": model, "messages": messages}
-        _make_request, _make_request_no_temp = self._build_request_pair(
-            base_params, model, temperature, max_tokens
-        )
+        stream_options_key = (self.base_url, model)
+        if stream:
+            base_params["stream"] = True
+            if stream_options_key not in _NO_CHAT_STREAM_OPTIONS:
+                base_params["stream_options"] = {"include_usage": True}
+
+        def _build_vision_requests():
+            make_request, make_request_no_temp = self._build_request_pair(
+                base_params, model, temperature, max_tokens
+            )
+            if not stream:
+                return make_request, make_request_no_temp
+
+            def start(factory):
+                async def call():
+                    raw_stream = await factory()
+                    return await _start_stream(
+                        raw_stream,
+                        lambda value: self._complete_chat_stream(value, model),
+                        timeout=request_timeout,
+                        label="Chat Completions vision stream",
+                    )
+                return call
+
+            return start(make_request), start(make_request_no_temp)
+
+        _make_request, _make_request_no_temp = _build_vision_requests()
         retry_kwargs = self._build_retry_kwargs(
             model, request_timeout=request_timeout, max_retries_override=max_retries,
             non_retryable_predicate=non_retryable_predicate,
@@ -310,9 +341,52 @@ class ClientStreamVisionMixin:
 
         try:
             logger.info(f"[{self.agent_name}] Sending vision request to {model} with {len(images)} images")
-            response = await self._call_with_temp_fallback(
-                _make_request, _make_request_no_temp, model_key, retry_kwargs
-            )
+            try:
+                response = await self._call_with_temp_fallback(
+                    _make_request, _make_request_no_temp, model_key, retry_kwargs
+                )
+            except Exception as error:
+                if not (
+                    stream
+                    and "stream_options" in base_params
+                    and is_stream_options_unsupported_error(error)
+                ):
+                    raise
+                logger.warning(
+                    f"[{self.agent_name}] Vision stream usage options rejected at "
+                    f"{self.base_url}; retrying the stream without stream_options"
+                )
+                _NO_CHAT_STREAM_OPTIONS.add(stream_options_key)
+                base_params.pop("stream_options", None)
+                _make_request, _make_request_no_temp = _build_vision_requests()
+                response = await self._call_with_temp_fallback(
+                    _make_request, _make_request_no_temp, model_key, retry_kwargs
+                )
+
+            if stream:
+                try:
+                    result = await response.finish()
+                except ReasoningOnlyStreamError as error:
+                    # The non-streaming extractor surfaces a reasoning-only
+                    # vision reply as the placeholder rather than raising, and
+                    # a corrective retry would re-upload every image. Match it.
+                    logger.warning(
+                        f"[{self.agent_name}] Vision stream returned private "
+                        "reasoning without a public answer"
+                    )
+                    result = LLMResponse(
+                        content=EMPTY_CONTENT_PLACEHOLDER,
+                        model=model,
+                        usage=error.usage,
+                        raw_response=None,
+                    )
+                await self._emit_log_response(
+                    interaction=interaction,
+                    response_content=result.content,
+                    usage=result.usage,
+                    duration_ms=(time.time() - start_time) * 1000,
+                )
+                return result
 
             content = ""
             if response and response.choices and len(response.choices) > 0:
@@ -368,8 +442,10 @@ class ClientStreamVisionMixin:
             images: List of base64 encoded images
             temperature: Sampling temperature
             max_tokens: Maximum tokens
-            prefer_stream: Try Responses streaming first; fall back to the
-                existing non-streaming request only if streaming is unsupported
+            prefer_stream: Stream first on whichever protocol is routed to
+                (Responses, Chat Completions or Anthropic), falling back to the
+                non-streaming request when the endpoint rejects streaming or
+                the stream ends before its first event
 
         Returns:
             LLMResponse object
@@ -378,11 +454,78 @@ class ClientStreamVisionMixin:
         log_msgs = [{"role": "user", "content": f"[{len(normalized_images)} images] + {text_prompt[:500]}"}]
         probe_timeout = request_timeout or DEFAULT_REQUEST_TIMEOUT
         stream_cache_key = _probe_key(self.base_url, model, VISION_MODALITY)
+        stream_preferred = prefer_stream and not _is_deep_research_model(model)
         responses_stream_enabled = (
-            prefer_stream
-            and not _is_deep_research_model(model)
+            stream_preferred
             and stream_cache_key not in _NO_RESPONSES_VISION_STREAM
         )
+        # Chat Completions and Anthropic vision share the generic stream cache;
+        # only Responses vision predates it and keeps its own set.
+        stream_enabled = {
+            protocol: (
+                stream_preferred
+                and (self.base_url, model, VISION_MODALITY, protocol)
+                not in _NO_TEXT_STREAM
+            )
+            for protocol in ("chat", "anthropic")
+        }
+
+        async def _vision_stream_first(protocol, stream_call, non_stream_call):
+            if not stream_enabled[protocol]:
+                return await non_stream_call()
+
+            def _disable():
+                stream_enabled[protocol] = False
+                _NO_TEXT_STREAM.add(
+                    (self.base_url, model, VISION_MODALITY, protocol)
+                )
+
+            return await stream_with_fallback(
+                stream_call, non_stream_call, on_unsupported=_disable,
+                label=f"{protocol} vision streaming", agent_name=self.agent_name,
+            )
+
+        async def _anthropic_vision_call(adapter, skip_temperature):
+            kwargs = {
+                "model": model,
+                "text_prompt": text_prompt,
+                "images": normalized_images,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "timeout": request_timeout,
+                "skip_temperature": skip_temperature,
+                "system_prompt": system_prompt,
+            }
+            return await _vision_stream_first(
+                "anthropic",
+                lambda: adapter.complete_vision(
+                    **kwargs, stream=True, defer_stream=True
+                ),
+                lambda: adapter.complete_vision(**kwargs),
+            )
+
+        async def _chat_vision_call(timeout, retries, *,
+                                    max_retries_override=None,
+                                    non_retryable_predicate=None):
+            kwargs = {
+                "model": model,
+                "text_prompt": text_prompt,
+                "images": normalized_images,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "request_timeout": timeout,
+                "max_retries": (
+                    max_retries_override if max_retries_override is not None
+                    else retries
+                ),
+                "non_retryable_predicate": non_retryable_predicate,
+                "system_prompt": system_prompt,
+            }
+            return await _vision_stream_first(
+                "chat",
+                lambda: self._chat_with_vision_inline(**kwargs, stream=True),
+                lambda: self._chat_with_vision_inline(**kwargs, stream=False),
+            )
 
         async def _responses_vision_call(adapter, skip_temperature):
             nonlocal responses_stream_enabled
@@ -396,41 +539,38 @@ class ClientStreamVisionMixin:
                 "skip_temperature": skip_temperature,
                 "system_prompt": system_prompt,
             }
-            if responses_stream_enabled:
-                try:
-                    return await adapter.complete_vision(
-                        **kwargs, stream=True, defer_stream=True
-                    )
-                except Exception as e:
-                    if not is_stream_unsupported_error(e):
-                        raise
-                    responses_stream_enabled = False
-                    _NO_RESPONSES_VISION_STREAM.add(stream_cache_key)
-                    logger.warning(
-                        f"[{self.agent_name}] Responses vision streaming is "
-                        f"unsupported; falling back to non-streaming: "
-                        f"{type(e).__name__}: {str(e)[:200]}"
-                    )
-            return await adapter.complete_vision(**kwargs)
+            if not responses_stream_enabled:
+                return await adapter.complete_vision(**kwargs)
+
+            def _disable():
+                nonlocal responses_stream_enabled
+                responses_stream_enabled = False
+                _NO_RESPONSES_VISION_STREAM.add(stream_cache_key)
+
+            return await stream_with_fallback(
+                lambda: adapter.complete_vision(
+                    **kwargs, stream=True, defer_stream=True
+                ),
+                lambda: adapter.complete_vision(**kwargs),
+                on_unsupported=_disable,
+                label="Responses vision streaming",
+                agent_name=self.agent_name,
+            )
 
         return await self._dispatch_non_streaming(
             model=model,
             interaction_type="vision",
             log_messages=log_msgs,
-            make_anthropic_adapter_call=lambda adapter, skip_temperature: adapter.complete_vision(
-                model=model, text_prompt=text_prompt, images=normalized_images,
-                temperature=temperature, max_tokens=max_tokens,
-                timeout=request_timeout, skip_temperature=skip_temperature,
-                system_prompt=system_prompt),
+            make_anthropic_adapter_call=_anthropic_vision_call,
             make_responses_adapter_call=_responses_vision_call,
-            make_inline_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_vision_inline(
-                model, text_prompt, normalized_images, temperature, max_tokens, request_timeout,
-                non_retryable_predicate=non_retryable_predicate,
-                system_prompt=system_prompt),
-            make_probe_fallback_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_vision_inline(
-                model, text_prompt, normalized_images, temperature, max_tokens, probe_timeout, max_retries=0,
-                non_retryable_predicate=non_retryable_predicate,
-                system_prompt=system_prompt),
+            make_inline_call=lambda max_retries_override=None, non_retryable_predicate=None: _chat_vision_call(
+                request_timeout, None,
+                max_retries_override=max_retries_override,
+                non_retryable_predicate=non_retryable_predicate),
+            make_probe_fallback_call=lambda max_retries_override=None, non_retryable_predicate=None: _chat_vision_call(
+                probe_timeout, 0,
+                max_retries_override=max_retries_override,
+                non_retryable_predicate=non_retryable_predicate),
             temperature=temperature,
             max_tokens=max_tokens,
             request_timeout=request_timeout,

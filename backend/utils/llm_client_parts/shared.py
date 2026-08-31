@@ -35,6 +35,8 @@ from ..llm_client_parts.errors import (  # noqa: F401
     ToolProtocolError,
     EmptyResponseError,
     StreamInterruptedError,
+    StreamNotStartedError,
+    ReasoningOnlyStreamError,
 )
 from ..llm_client_parts.responses import (  # noqa: F401
     LLMResponse,
@@ -129,6 +131,7 @@ from ..llm_client_parts.adapters import (  # noqa: F401
     _ANTHROPIC_DEFAULT_MAX_TOKENS,
     _StartedStream,
     _start_stream,
+    stream_with_fallback,
     _AnthropicAdapter,
     _ResponsesAdapter,
 )

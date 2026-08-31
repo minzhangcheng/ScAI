@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.51.3 · **Last updated**: 2026-08-31
+**Version**: 0.51.4 · **Last updated**: 2026-09-01
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,22 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.51.x — (2026-08-31 onward)**
+
+- `0.51.4` — Completes stream-first compatibility for long LLM calls. Vision
+  requests now aggregate streams over Chat Completions and Anthropic as well as
+  Responses, including Chat usage-option adaptation and per-protocol capability
+  caching. A shared fallback distinguishes a deterministic HTTP 400 rejection
+  from a stream that closes before its first event: the former disables that
+  endpoint/model/modality/protocol stream path, while the latter retries once
+  non-streaming without caching a transient empty stream. Any failure after the
+  first event remains non-replayable. Chat streams surface refusal deltas as the
+  public answer and retry a text-only reasoning response once with an explicit
+  answer-channel instruction; vision preserves its existing empty-content
+  placeholder instead of re-uploading every image. Responses marked incomplete
+  retain usable public text and terminal metadata, while missing public output
+  and incomplete tool calls still enter the upstream-failure path. Focused
+  adapter, protocol-dispatch, and version-consistency regressions passed; no
+  image build, deployment, push, or historical-session mutation was performed.
 
 - `0.51.3` — Makes routine agent, chat, and report LLM calls prefer aggregated
   streaming so long generations produce upstream traffic instead of remaining

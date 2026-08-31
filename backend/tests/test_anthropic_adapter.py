@@ -379,6 +379,46 @@ async def test_anthropic_midstream_eof_is_closed_and_not_accepted():
     stream.close.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_anthropic_adapter_streaming_vision_aggregates_text():
+    async def _stream():
+        yield MagicMock(
+            type="message_start",
+            message=MagicMock(model="claude-x", usage=MagicMock(
+                input_tokens=9,
+                cache_creation_input_tokens=None,
+                cache_read_input_tokens=None,
+            )),
+        )
+        yield MagicMock(type="content_block_delta",
+                        delta=MagicMock(type="text_delta", text="Red"))
+        yield MagicMock(type="message_delta", usage=MagicMock(output_tokens=1))
+        yield MagicMock(type="message_stop")
+
+    client = MagicMock()
+    client.messages = MagicMock()
+    client.messages.create = AsyncMock(return_value=_stream())
+    adapter = _AnthropicAdapter.__new__(_AnthropicAdapter)
+    adapter.client = client
+    adapter.agent_name = "pathology"
+
+    result = await adapter.complete_vision(
+        model="claude-x",
+        text_prompt="describe",
+        images=["aW1hZ2U="],
+        temperature=0.3,
+        max_tokens=1000,
+        system_prompt="PATHOLOGY ROLE",
+        stream=True,
+    )
+
+    assert result.content == "Red"
+    assert result.usage["prompt_tokens"] == 9
+    # The provider reported no cache fields, so none is invented.
+    assert "cached_tokens" not in result.usage
+    assert client.messages.create.call_args.kwargs["stream"] is True
+
+
 from backend.utils.llm_client import _tool_calls_to_raw_assistant
 
 

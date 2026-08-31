@@ -140,8 +140,11 @@ from .shared import (  # noqa: F401
     _parse_responses_dump,
     _ANTHROPIC_DEFAULT_MAX_TOKENS,
     StreamInterruptedError,
+    StreamNotStartedError,
+    ReasoningOnlyStreamError,
     _StartedStream,
     _start_stream,
+    stream_with_fallback,
     _AnthropicAdapter,
     _ResponsesAdapter,
     _DR_BACKGROUND_POLL_INTERVAL,
@@ -164,10 +167,12 @@ class ClientChatMixin:
         self, started: _StartedStream, model: str
     ) -> LLMResponse:
         text_parts = []
+        refusal_parts = []
         usage = {}
         last_chunk = None
         model_name = model
         finished = False
+        has_private_reasoning = False
         async for chunk in started.events():
             last_chunk = chunk
             model_name = getattr(chunk, "model", model_name)
@@ -180,16 +185,40 @@ class ClientChatMixin:
             if getattr(choice, "finish_reason", None) is not None:
                 finished = True
             delta = getattr(choice, "delta", None)
+            if delta is not None:
+                has_private_reasoning = has_private_reasoning or any(
+                    bool(getattr(delta, key, None))
+                    for key in (
+                        "reasoning", "reasoning_content", "reasoning_details",
+                        "thinking", "thought",
+                    )
+                )
             content = getattr(delta, "content", None)
             if isinstance(content, str) and content:
                 text_parts.append(content)
+            refusal = getattr(delta, "refusal", None)
+            if isinstance(refusal, str) and refusal:
+                refusal_parts.append(refusal)
         if not finished:
             raise StreamInterruptedError(
                 "Chat Completions text stream ended after the first event "
                 "without finish_reason"
             )
         text = "".join(text_parts)
+        if not text and refusal_parts:
+            # A refusal is the provider's public answer channel, not an empty
+            # response. Mirrors _extract_content_from_message on the
+            # non-streaming path so both wire shapes surface the same string.
+            refusal = "".join(refusal_parts)
+            logger.warning(f"[{self.agent_name}] Request was refused: {refusal}")
+            text = f"[Refusal]: {refusal}"
         if not text:
+            if has_private_reasoning:
+                raise ReasoningOnlyStreamError(
+                    "Chat Completions text stream returned private reasoning "
+                    "without public text",
+                    usage=usage,
+                )
             raise RuntimeError("Chat Completions text stream ended without text output")
         return LLMResponse(
             content=text,
@@ -288,7 +317,50 @@ class ClientChatMixin:
                 )
 
             if stream:
-                result = await response.finish()
+                try:
+                    result = await response.finish()
+                except ReasoningOnlyStreamError as error:
+                    if _reasoning_only_retried:
+                        raise UpstreamExhaustedError(
+                            "LLM returned private reasoning without a public answer "
+                            "after a corrective retry",
+                            agent_name=self.agent_name,
+                            model=model,
+                            llm_server=self.base_url,
+                        ) from error
+                    logger.warning(
+                        f"[{self.agent_name}] Provider returned private reasoning "
+                        "without a public answer; retrying once with an explicit "
+                        "answer-channel request"
+                    )
+                    await self._emit_log_response(
+                        interaction=interaction,
+                        response_content="",
+                        usage=error.usage,
+                        duration_ms=(time.time() - start_time) * 1000,
+                    )
+                    corrective_messages = list(messages) + [{
+                        "role": "user",
+                        "content": (
+                            "Return the final answer in the public response content field. "
+                            "Do not return only private reasoning or thinking metadata."
+                        ),
+                    }]
+                    return await self._chat_inline(
+                        model,
+                        corrective_messages,
+                        temperature,
+                        max_tokens,
+                        stream,
+                        timeout,
+                        max_retries,
+                        _truncation_retried=_truncation_retried,
+                        _reasoning_only_retried=True,
+                        _empty_retry_count=_empty_retry_count,
+                        _allow_empty_retry=_allow_empty_retry,
+                        non_retryable_predicate=non_retryable_predicate,
+                        max_retries_override=max_retries_override,
+                    )
                 await self._emit_log_response(
                     interaction=interaction,
                     response_content=result.content,
@@ -490,7 +562,8 @@ class ClientChatMixin:
             timeout: Per-request timeout in seconds (overrides client default)
             tools: Optional Responses API tools for non-streaming Responses calls
             prefer_stream: Aggregate a streaming text response first; use the
-                existing non-streaming path only if streaming is unsupported
+                existing non-streaming path if streaming is unsupported or
+                ends before its first event
 
         Returns:
             LLMResponse object
@@ -513,22 +586,19 @@ class ClientChatMixin:
         }
 
         async def _stream_first(protocol, stream_call, non_stream_call):
-            if stream_enabled[protocol]:
-                try:
-                    return await stream_call()
-                except Exception as e:
-                    if not is_stream_unsupported_error(e):
-                        raise
-                    stream_enabled[protocol] = False
-                    _NO_TEXT_STREAM.add(
-                        (self.base_url, model, TEXT_MODALITY, protocol)
-                    )
-                    logger.warning(
-                        f"[{self.agent_name}] {protocol} text streaming is "
-                        f"unsupported; falling back to non-streaming: "
-                        f"{type(e).__name__}: {str(e)[:200]}"
-                    )
-            return await non_stream_call()
+            if not stream_enabled[protocol]:
+                return await non_stream_call()
+
+            def _disable():
+                stream_enabled[protocol] = False
+                _NO_TEXT_STREAM.add(
+                    (self.base_url, model, TEXT_MODALITY, protocol)
+                )
+
+            return await stream_with_fallback(
+                stream_call, non_stream_call, on_unsupported=_disable,
+                label=f"{protocol} text streaming", agent_name=self.agent_name,
+            )
 
         async def _anthropic_call(adapter, skip_temperature):
             kwargs = {
@@ -862,22 +932,23 @@ class ClientChatMixin:
                 "max_tokens": max_tokens,
                 "skip_temperature": skip_temperature,
             }
-            if tool_stream_enabled:
-                try:
-                    return await adapter.complete_with_tools(
-                        **kwargs, stream=True, defer_stream=True
-                    )
-                except Exception as error:
-                    if not is_stream_unsupported_error(error):
-                        raise
-                    tool_stream_enabled = False
-                    _NO_TEXT_STREAM.add(tool_stream_key)
-                    logger.warning(
-                        f"[{self.agent_name}] Responses tool streaming is "
-                        f"unsupported; falling back to non-streaming: "
-                        f"{type(error).__name__}: {str(error)[:200]}"
-                    )
-            return await adapter.complete_with_tools(**kwargs)
+            if not tool_stream_enabled:
+                return await adapter.complete_with_tools(**kwargs)
+
+            def _disable():
+                nonlocal tool_stream_enabled
+                tool_stream_enabled = False
+                _NO_TEXT_STREAM.add(tool_stream_key)
+
+            return await stream_with_fallback(
+                lambda: adapter.complete_with_tools(
+                    **kwargs, stream=True, defer_stream=True
+                ),
+                lambda: adapter.complete_with_tools(**kwargs),
+                on_unsupported=_disable,
+                label="Responses tool streaming",
+                agent_name=self.agent_name,
+            )
 
         async def _dispatch(choice):
             return await self._dispatch_non_streaming(
