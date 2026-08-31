@@ -168,6 +168,7 @@ async def start_turn(context) -> TurnStart:
             tools=TOOLS,
             tool_choice=effective_tool_choice,
             temperature=context.agent.config.temperature,
+            prefer_stream=True,
         )
     except UpstreamExhaustedError:
         logger.error(f"[Bioinformatics] Upstream exhausted, propagating to @with_retry")

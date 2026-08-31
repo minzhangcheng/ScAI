@@ -1,6 +1,7 @@
 import asyncio
 import pytest
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 import backend.utils.llm_client as llm_mod
 from backend.utils.llm_client import OpenAICompatibleClient, LLMResponse, LLMToolResponse, NotFoundError, BadRequestError, InternalServerError, RateLimitError
@@ -13,6 +14,9 @@ _OPEN_CLIENTS = []
 @pytest.fixture(autouse=True)
 def _clear(monkeypatch):
     llm_mod._NO_RESPONSES_ENDPOINT.clear()
+    llm_mod._NO_RESPONSES_VISION_STREAM.clear()
+    llm_mod._NO_TEXT_STREAM.clear()
+    llm_mod._NO_CHAT_STREAM_OPTIONS.clear()
     llm_mod._PROBE_CACHE.clear()
     monkeypatch.setattr(llm_mod.asyncio, "sleep", AsyncMock())
     # These protocol unit tests exercise dispatch, not the production JSONL
@@ -60,6 +64,510 @@ async def test_responses_success_caches_responses():
     r = await c.chat(model="gpt-4o", messages=[{"role": "user", "content": "hi"}])
     assert r.content == "R"
     assert llm_mod._PROBE_CACHE[("https://x/v1", "gpt-4o")] == "responses"
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_completions_prefers_stream_and_aggregates_text():
+    c = _client("https://x/v1/chat/completions")
+
+    async def chunks():
+        yield SimpleNamespace(
+            model="chat-model",
+            usage=None,
+            choices=[SimpleNamespace(
+                delta=SimpleNamespace(content="Hel"), finish_reason=None
+            )],
+        )
+        yield SimpleNamespace(
+            model="chat-model",
+            usage=None,
+            choices=[SimpleNamespace(
+                delta=SimpleNamespace(content="lo"), finish_reason="stop"
+            )],
+        )
+        yield SimpleNamespace(
+            model="chat-model",
+            usage=SimpleNamespace(
+                prompt_tokens=3,
+                completion_tokens=2,
+                total_tokens=5,
+                prompt_tokens_details=None,
+            ),
+            choices=[],
+        )
+
+    c.client.chat.completions.create = AsyncMock(return_value=chunks())
+    result = await c.chat(
+        model="chat-model",
+        messages=[{"role": "user", "content": "hi"}],
+        prefer_stream=True,
+    )
+
+    assert result.content == "Hello"
+    assert result.usage == {
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "total_tokens": 5,
+    }
+    request = c.client.chat.completions.create.call_args.kwargs
+    assert request["stream"] is True
+    assert request["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_stream_5xx_retries_stream_instead_of_falling_back():
+    client = _client("https://x/v1/chat/completions")
+
+    async def chunks():
+        yield SimpleNamespace(
+            model="chat-model",
+            usage=None,
+            choices=[SimpleNamespace(
+                delta=SimpleNamespace(content="recovered"), finish_reason="stop"
+            )],
+        )
+
+    client.client.chat.completions.create = AsyncMock(side_effect=[
+        InternalServerError(
+            message="temporary upstream error",
+            response=MagicMock(status_code=500),
+            body={"error": {"message": "temporary upstream error"}},
+        ),
+        chunks(),
+    ])
+
+    result = await client.chat(
+        model="chat-model",
+        messages=[{"role": "user", "content": "hi"}],
+        prefer_stream=True,
+    )
+
+    assert result.content == "recovered"
+    assert [
+        call.kwargs["stream"]
+        for call in client.client.chat.completions.create.await_args_list
+    ] == [True, True]
+    llm_mod.asyncio.sleep.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_midstream_eof_is_not_replayed_nonstreaming():
+    async def chunks():
+        yield SimpleNamespace(
+            model="chat-model",
+            usage=None,
+            choices=[SimpleNamespace(
+                delta=SimpleNamespace(content="partial"), finish_reason=None
+            )],
+        )
+
+    client = _client("https://x/v1/chat/completions")
+    client.client.chat.completions.create = AsyncMock(return_value=chunks())
+
+    with pytest.raises(llm_mod.StreamInterruptedError, match="finish_reason"):
+        await client.chat(
+            model="chat-model",
+            messages=[{"role": "user", "content": "hi"}],
+            prefer_stream=True,
+        )
+
+    client.client.chat.completions.create.assert_awaited_once()
+    assert client.client.chat.completions.create.call_args.kwargs["stream"] is True
+
+
+@pytest.mark.asyncio
+async def test_plain_text_stream_unsupported_is_cached_and_falls_back():
+    base_url = "https://x/v1"
+    model = "gpt-4o"
+    llm_mod._PROBE_CACHE[(base_url, model)] = "responses"
+    stream_flags = []
+
+    async def complete(**kwargs):
+        stream_flags.append(kwargs.get("stream", False))
+        if kwargs.get("stream"):
+            raise BadRequestError(
+                message="Error code: 400 - stream is not supported",
+                response=MagicMock(status_code=400),
+                body={"error": {
+                    "message": "stream is not supported",
+                    "param": "stream",
+                }},
+            )
+        return LLMResponse("fallback", model, {}, None)
+
+    first = _client(base_url)
+    first._responses_adapter = MagicMock()
+    first._responses_adapter.complete = AsyncMock(side_effect=complete)
+    assert (await first.chat(
+        model=model,
+        messages=[{"role": "user", "content": "hi"}],
+        prefer_stream=True,
+    )).content == "fallback"
+
+    second = _client(base_url)
+    second._responses_adapter = MagicMock()
+    second._responses_adapter.complete = AsyncMock(side_effect=complete)
+    assert (await second.chat(
+        model=model,
+        messages=[{"role": "user", "content": "again"}],
+        prefer_stream=True,
+    )).content == "fallback"
+
+    assert stream_flags == [True, False, False]
+    assert (base_url, model, "text", "responses") in llm_mod._NO_TEXT_STREAM
+
+
+@pytest.mark.asyncio
+async def test_deep_research_keeps_nonstreaming_background_lifecycle():
+    client = _client("https://x/v1/responses")
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(
+        return_value=LLMResponse("research", "o3-deep-research", {}, None)
+    )
+    client._responses_adapter = adapter
+
+    result = await client.chat(
+        model="o3-deep-research",
+        messages=[{"role": "user", "content": "research"}],
+        prefer_stream=True,
+    )
+
+    assert result.content == "research"
+    assert adapter.complete.call_args.kwargs.get("stream", False) is False
+
+
+@pytest.mark.asyncio
+async def test_plain_text_stream_transient_failure_retries_stream_only():
+    base_url = "https://x/v1"
+    model = "gpt-4o"
+    llm_mod._PROBE_CACHE[(base_url, model)] = "responses"
+    stream_flags = []
+
+    async def complete(**kwargs):
+        stream_flags.append(kwargs.get("stream", False))
+        if len(stream_flags) <= 2:
+            raise InternalServerError(
+                message="temporary upstream error",
+                response=MagicMock(status_code=500),
+                body={"error": {"message": "temporary upstream error"}},
+            )
+        return LLMResponse("recovered", model, {}, None)
+
+    client = _client(base_url)
+    client._responses_adapter = MagicMock()
+    client._responses_adapter.complete = AsyncMock(side_effect=complete)
+
+    result = await client.chat(
+        model=model,
+        messages=[{"role": "user", "content": "hi"}],
+        prefer_stream=True,
+    )
+
+    assert result.content == "recovered"
+    assert stream_flags == [True, True, True]
+    assert (base_url, model, "text", "responses") not in llm_mod._NO_TEXT_STREAM
+    assert llm_mod.asyncio.sleep.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_responses_stream_remainder_is_consumed_after_retry_boundary(monkeypatch):
+    import backend.utils.llm_client_parts.client_params as params_mod
+
+    retry_returned = asyncio.Event()
+
+    async def tracing_retry(func, **_kwargs):
+        result = await func()
+        assert isinstance(result, llm_mod._StartedStream)
+        retry_returned.set()
+        return result
+
+    monkeypatch.setattr(params_mod, "retry_with_backoff", tracing_retry)
+
+    release = asyncio.Event()
+    completed = MagicMock()
+    completed.model = "gpt-x"
+    completed.model_dump.return_value = {
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "content": [{"type": "output_text", "text": "Hello"}],
+        }],
+        "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+    }
+
+    class BlockingStream:
+        def __init__(self):
+            self.index = 0
+            self.close = AsyncMock()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            self.index += 1
+            if self.index == 1:
+                return SimpleNamespace(type="response.output_text.delta", delta="Hel")
+            if self.index == 2:
+                await release.wait()
+                return SimpleNamespace(type="response.completed", response=completed)
+            raise StopAsyncIteration
+
+    stream = BlockingStream()
+    client = _client("https://x/v1/responses")
+    client.client.responses.create = AsyncMock(return_value=stream)
+
+    task = asyncio.create_task(client.chat(
+        model="gpt-x",
+        messages=[{"role": "user", "content": "hi"}],
+        prefer_stream=True,
+    ))
+    await asyncio.wait_for(retry_returned.wait(), timeout=1)
+
+    # The retry layer has already returned while the logical response is still
+    # streaming. A total request deadline therefore cannot cancel this phase.
+    assert task.done() is False
+    assert client.client.responses.create.await_count == 1
+
+    release.set()
+    result = await task
+    assert result.content == "Hello"
+    stream.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_responses_midstream_failure_is_closed_and_not_replayed():
+    error = InternalServerError(
+        message="connection lost",
+        response=MagicMock(status_code=500),
+        body={"error": {"message": "connection lost"}},
+    )
+
+    class FailingStream:
+        def __init__(self):
+            self.index = 0
+            self.close = AsyncMock()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            self.index += 1
+            if self.index == 1:
+                return SimpleNamespace(type="response.output_text.delta", delta="partial")
+            raise error
+
+    stream = FailingStream()
+    # Leave protocol uncached so this also proves the probe loop does not replay
+    # a stream that already emitted an event or switch it to another protocol.
+    client = _client("https://x/v1")
+    client.client.responses.create = AsyncMock(return_value=stream)
+    client.client.chat.completions.create = AsyncMock()
+
+    with pytest.raises(llm_mod.StreamInterruptedError, match="after the first event"):
+        await client.chat(
+            model="gpt-x",
+            messages=[{"role": "user", "content": "hi"}],
+            prefer_stream=True,
+        )
+
+    client.client.responses.create.assert_awaited_once()
+    client.client.chat.completions.create.assert_not_awaited()
+    stream.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_responses_stream_idle_timeout_closes_without_replay():
+    never = asyncio.Event()
+
+    class IdleStream:
+        def __init__(self):
+            self.index = 0
+            self.close = AsyncMock()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            self.index += 1
+            if self.index == 1:
+                return SimpleNamespace(type="response.output_text.delta", delta="partial")
+            await never.wait()
+
+    stream = IdleStream()
+    client = _client("https://x/v1/responses")
+    client.client.responses.create = AsyncMock(return_value=stream)
+
+    with pytest.raises(llm_mod.StreamInterruptedError, match="TimeoutError"):
+        await client.chat(
+            model="gpt-x",
+            messages=[{"role": "user", "content": "hi"}],
+            timeout=0.01,
+            prefer_stream=True,
+        )
+
+    client.client.responses.create.assert_awaited_once()
+    stream.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_responses_stream_closes_and_releases_request_lease():
+    entered_remainder = asyncio.Event()
+    never = asyncio.Event()
+
+    class BlockingStream:
+        def __init__(self):
+            self.index = 0
+            self.close = AsyncMock()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            self.index += 1
+            if self.index == 1:
+                return SimpleNamespace(type="response.output_text.delta", delta="partial")
+            entered_remainder.set()
+            await never.wait()
+
+    stream = BlockingStream()
+    client = _client("https://x/v1/responses")
+    client.client.responses.create = AsyncMock(return_value=stream)
+
+    task = asyncio.create_task(client.chat(
+        model="gpt-x",
+        messages=[{"role": "user", "content": "hi"}],
+        prefer_stream=True,
+    ))
+    await asyncio.wait_for(entered_remainder.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    stream.close.assert_awaited_once()
+    assert client._active_requests == 0
+    assert client._requests_idle.is_set()
+
+
+@pytest.mark.asyncio
+async def test_responses_incomplete_reasoning_only_stream_enters_upstream_failure():
+    incomplete = MagicMock()
+    incomplete.model = "gpt-x"
+    incomplete.model_dump.return_value = {
+        "status": "incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"},
+        "error": None,
+        "output": [{"type": "reasoning"}],
+        "usage": {
+            "input_tokens": 5,
+            "output_tokens": 32768,
+            "total_tokens": 32773,
+        },
+    }
+
+    async def events():
+        yield SimpleNamespace(type="response.incomplete", response=incomplete)
+
+    client = _client("https://x/v1")
+    client.client.responses.create = AsyncMock(return_value=events())
+    client.client.chat.completions.create = AsyncMock()
+
+    with pytest.raises(llm_mod.UpstreamExhaustedError) as excinfo:
+        await client.chat(
+            model="gpt-x",
+            messages=[{"role": "user", "content": "answer"}],
+            max_tokens=32768,
+            prefer_stream=True,
+        )
+
+    assert "status=incomplete" in str(excinfo.value)
+    assert "max_output_tokens" in str(excinfo.value)
+    assert excinfo.value.failure_kind == "incomplete_response"
+    client.client.responses.create.assert_awaited_once()
+    client.client.chat.completions.create.assert_not_awaited()
+
+
+def test_stream_unsupported_classifier_does_not_cache_other_bad_parameters():
+    error = BadRequestError(
+        message="Streaming request has unsupported parameter temperature",
+        response=MagicMock(status_code=400),
+        body={"error": {
+            "message": "Unsupported parameter for streaming request",
+            "param": "temperature",
+        }},
+    )
+
+    assert llm_mod.is_stream_unsupported_error(error) is False
+
+
+def test_stream_unsupported_classifier_rejects_temperature_without_param_field():
+    error = BadRequestError(
+        message="Unsupported parameter: temperature is not supported with streaming",
+        response=MagicMock(status_code=400),
+        body={"error": {
+            "message": "Unsupported parameter: temperature is not supported with streaming",
+        }},
+    )
+
+    assert llm_mod.is_stream_unsupported_error(error) is False
+
+    direct_stream_error = BadRequestError(
+        message="Unsupported parameter: stream",
+        response=MagicMock(status_code=400),
+        body={"error": {"message": "Unsupported parameter: stream"}},
+    )
+    assert llm_mod.is_stream_unsupported_error(direct_stream_error) is True
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_options_rejection_retries_stream_without_usage_option_and_caches():
+    base_url = "https://x/v1/chat/completions"
+    model = "chat-model"
+    error = BadRequestError(
+        message="Unsupported parameter: stream_options",
+        response=MagicMock(status_code=400),
+        body={"error": {
+            "message": "Unsupported parameter: stream_options",
+            "param": "stream_options",
+        }},
+    )
+
+    async def chunks(text):
+        yield SimpleNamespace(
+            model=model,
+            usage=None,
+            choices=[SimpleNamespace(
+                delta=SimpleNamespace(content=text), finish_reason="stop"
+            )],
+        )
+
+    client = _client(base_url)
+    client.client.chat.completions.create = AsyncMock(side_effect=[
+        error,
+        chunks("first"),
+        chunks("second"),
+    ])
+
+    first = await client.chat(
+        model=model,
+        messages=[{"role": "user", "content": "hi"}],
+        prefer_stream=True,
+    )
+    second = await client.chat(
+        model=model,
+        messages=[{"role": "user", "content": "again"}],
+        prefer_stream=True,
+    )
+
+    assert first.content == "first"
+    assert second.content == "second"
+    assert first.usage == {}
+    calls = client.client.chat.completions.create.await_args_list
+    assert calls[0].kwargs["stream_options"] == {"include_usage": True}
+    assert "stream_options" not in calls[1].kwargs
+    assert "stream_options" not in calls[2].kwargs
+    assert all(call.kwargs["stream"] is True for call in calls)
+    assert (base_url, model) in llm_mod._NO_CHAT_STREAM_OPTIONS
+    assert (base_url, model, "text", "chat") not in llm_mod._NO_TEXT_STREAM
 
 
 @pytest.mark.asyncio
@@ -149,6 +657,95 @@ async def test_vision_responses_not_implemented_500_falls_back_to_chat():
     assert llm_mod._PROBE_CACHE.get((
         "https://api.n1n.ai/v1", "gemini-3.1-pro-preview"
     )) is None
+
+
+@pytest.mark.asyncio
+async def test_vision_stream_transient_failure_retries_stream_only():
+    c = _client("https://x/v1")
+    model = "gemini-3.1-pro-preview"
+    llm_mod._PROBE_CACHE[("https://x/v1", model, "vision")] = "responses"
+    stream_flags = []
+
+    async def complete_vision(**kwargs):
+        stream_flags.append(kwargs.get("stream", False))
+        if len(stream_flags) <= 2:
+            raise InternalServerError(
+                message="temporary upstream error",
+                response=MagicMock(status_code=500),
+                body={"error": {"message": "temporary upstream error"}},
+            )
+        return LLMResponse('{"ok": true}', model, {}, None)
+
+    responses = MagicMock()
+    responses.complete_vision = AsyncMock(side_effect=complete_vision)
+    c._responses_adapter = responses
+
+    result = await c.chat_with_vision(
+        model=model,
+        text_prompt="describe",
+        images=["aW1hZ2U="],
+        prefer_stream=True,
+    )
+
+    assert result.content == '{"ok": true}'
+    assert stream_flags == [True, True, True]
+    assert ("https://x/v1", model, "vision") not in llm_mod._NO_RESPONSES_VISION_STREAM
+    assert llm_mod.asyncio.sleep.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_vision_stream_unsupported_is_cached_per_endpoint_and_model():
+    base_url = "https://x/v1"
+    model = "gemini-3.1-pro-preview"
+    calls = []
+
+    async def complete_vision(**kwargs):
+        calls.append((kwargs["model"], kwargs.get("stream", False)))
+        if kwargs["model"] == model and kwargs.get("stream"):
+            raise BadRequestError(
+                message="Error code: 400 - stream is not supported",
+                response=MagicMock(status_code=400),
+                body={"error": {
+                    "message": "stream is not supported",
+                    "param": "stream",
+                }},
+            )
+        return LLMResponse('{"ok": true}', kwargs["model"], {}, None)
+
+    first = _client(base_url)
+    first._responses_adapter = MagicMock()
+    first._responses_adapter.complete_vision = AsyncMock(side_effect=complete_vision)
+    await first.chat_with_vision(
+        model=model,
+        text_prompt="describe",
+        images=["aW1hZ2U="],
+        prefer_stream=True,
+    )
+
+    second = _client(base_url)
+    second._responses_adapter = MagicMock()
+    second._responses_adapter.complete_vision = AsyncMock(side_effect=complete_vision)
+    await second.chat_with_vision(
+        model=model,
+        text_prompt="describe again",
+        images=["aW1hZ2U="],
+        prefer_stream=True,
+    )
+    await second.chat_with_vision(
+        model="other-model",
+        text_prompt="describe other model",
+        images=["aW1hZ2U="],
+        prefer_stream=True,
+    )
+
+    assert calls == [
+        (model, True),
+        (model, False),
+        (model, False),
+        ("other-model", True),
+    ]
+    assert (base_url, model, "vision") in llm_mod._NO_RESPONSES_VISION_STREAM
+    assert (base_url, "other-model", "vision") not in llm_mod._NO_RESPONSES_VISION_STREAM
 
 
 @pytest.mark.asyncio
@@ -540,6 +1137,102 @@ async def test_tools_responses_route():
                                 tools=[{"type": "function", "function": {"name": "f"}}])
     assert isinstance(r, LLMToolResponse)
     assert llm_mod._PROBE_CACHE[("https://x/v1", "gpt-4o")] == "responses"
+
+
+@pytest.mark.asyncio
+async def test_tools_responses_stream_aggregates_one_complete_tool_call():
+    completed = MagicMock()
+    completed.model = "gpt-x"
+    completed.model_dump.return_value = {
+        "status": "completed",
+        "output": [{
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "execute_code",
+            "arguments": '{"code":"print(1)"}',
+        }],
+        "usage": {"input_tokens": 4, "output_tokens": 3, "total_tokens": 7},
+    }
+
+    async def events():
+        yield SimpleNamespace(
+            type="response.function_call_arguments.delta", delta='{"code":"print'
+        )
+        yield SimpleNamespace(
+            type="response.function_call_arguments.delta", delta='(1)"}'
+        )
+        yield SimpleNamespace(type="response.completed", response=completed)
+
+    client = _client("https://x/v1/responses")
+    client.client.responses.create = AsyncMock(return_value=events())
+
+    result = await client.chat_with_tools(
+        model="gpt-x",
+        messages=[{"role": "user", "content": "run code"}],
+        tools=[{"type": "function", "function": {"name": "execute_code"}}],
+        prefer_stream=True,
+    )
+
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].id == "call_1"
+    assert result.tool_calls[0].name == "execute_code"
+    assert result.tool_calls[0].arguments == {"code": "print(1)"}
+    assert result.raw_assistant_message["tool_calls"][0]["id"] == "call_1"
+    assert client.client.responses.create.await_count == 1
+    assert client.client.responses.create.call_args.kwargs["stream"] is True
+
+
+@pytest.mark.asyncio
+async def test_tools_stream_unsupported_falls_back_once_and_is_cached():
+    base_url = "https://x/v1"
+    model = "gpt-x"
+    stream_flags = []
+
+    async def complete_with_tools(**kwargs):
+        stream_flags.append(kwargs.get("stream", False))
+        if kwargs.get("stream"):
+            raise BadRequestError(
+                message="stream is not supported",
+                response=MagicMock(status_code=400),
+                body={"error": {
+                    "message": "stream is not supported",
+                    "param": "stream",
+                }},
+            )
+        return LLMToolResponse(
+            content=None,
+            tool_calls=[],
+            model=model,
+            usage={},
+            raw_response=None,
+        )
+
+    first = _client(base_url)
+    first._responses_adapter = MagicMock()
+    first._responses_adapter.complete_with_tools = AsyncMock(
+        side_effect=complete_with_tools
+    )
+    await first.chat_with_tools(
+        model=model,
+        messages=[{"role": "user", "content": "run"}],
+        tools=[{"type": "function", "function": {"name": "f"}}],
+        prefer_stream=True,
+    )
+
+    second = _client(base_url)
+    second._responses_adapter = MagicMock()
+    second._responses_adapter.complete_with_tools = AsyncMock(
+        side_effect=complete_with_tools
+    )
+    await second.chat_with_tools(
+        model=model,
+        messages=[{"role": "user", "content": "run again"}],
+        tools=[{"type": "function", "function": {"name": "f"}}],
+        prefer_stream=True,
+    )
+
+    assert stream_flags == [True, False, False]
+    assert (base_url, model, "tools", "responses") in llm_mod._NO_TEXT_STREAM
 
 
 @pytest.mark.asyncio

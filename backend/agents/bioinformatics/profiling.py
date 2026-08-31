@@ -107,6 +107,7 @@ class ProfilingMixin:
                     "tool_choice": "auto",
                     "temperature": self.config.temperature,
                     "max_tokens": 8192,
+                    "prefer_stream": True,
                 }
                 if callable(getattr(self, "_budgeted_text_call", None)):
                     response = await self._budgeted_text_call(

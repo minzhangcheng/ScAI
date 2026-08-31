@@ -159,6 +159,7 @@ async def test_invalid_tile_batch_retries_then_uses_only_validated_entries(monke
     agent = _bare_agent()
     image = _patch_image_setup(monkeypatch, agent)
     prompts = []
+    stream_preferences = []
     responses = [
         {"overall_structure": "Preserved", "severity": "normal"},
         {
@@ -178,6 +179,7 @@ async def test_invalid_tile_batch_retries_then_uses_only_validated_entries(monke
     class FakeClient:
         async def chat_with_vision(self, **kwargs):
             prompts.append(kwargs["text_prompt"])
+            stream_preferences.append(kwargs.get("prefer_stream"))
             return SimpleNamespace(content=json.dumps(responses.pop(0)))
 
     agent._provider.get_llm_client.return_value = FakeClient()
@@ -194,6 +196,7 @@ async def test_invalid_tile_batch_retries_then_uses_only_validated_entries(monke
     result = await agent._analyze_image(image, "Analyze")
 
     assert len(prompts) == 3  # overview + invalid batch + corrected retry
+    assert stream_preferences == [True, True, True]
     assert "previous response failed validation" in prompts[-1]
     assert [entry["tile_index"] for entry in result["tile_findings"]] == [0, 1]
     assert result["tile_validation"]["status"] == "completed"

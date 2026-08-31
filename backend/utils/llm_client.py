@@ -112,6 +112,9 @@ from .llm_client_parts.shared import (  # noqa: F401
     _is_unknown_web_search_tool_error,
     _swap_web_search_tool_name,
     _is_unsupported_background_error,
+    is_stream_unsupported_error,
+    is_stream_options_unsupported_error,
+    is_responses_stream_unsupported_error,
     is_temperature_error,
     is_tool_choice_error,
     is_responses_endpoint_absent,
@@ -144,12 +147,16 @@ from .llm_client_parts.shared import (  # noqa: F401
     retry_with_backoff,
     _NO_BACKGROUND_ENDPOINT,
     _NO_RESPONSES_ENDPOINT,
+    _NO_RESPONSES_VISION_STREAM,
+    _NO_TEXT_STREAM,
+    _NO_CHAT_STREAM_OPTIONS,
     _PROBE_CACHE,
     _PROBE_LOCKS,
     _url_path_suffix_protocol,
     _DEFAULT_PROTOCOL_ORDER,
     PROBE_RETRY_DELAYS,
     TEXT_MODALITY,
+    TOOLS_MODALITY,
     VISION_MODALITY,
     _probe_key,
     _keyword_protocol_hints,
@@ -168,6 +175,9 @@ from .llm_client_parts.shared import (  # noqa: F401
     _anthropic_restore_thinking,
     _parse_responses_dump,
     _ANTHROPIC_DEFAULT_MAX_TOKENS,
+    StreamInterruptedError,
+    _StartedStream,
+    _start_stream,
     _AnthropicAdapter,
     _ResponsesAdapter,
     _DR_BACKGROUND_POLL_INTERVAL,
@@ -362,6 +372,7 @@ class OpenAICompatibleClient(
         timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        prefer_stream: bool = False,
     ) -> LLMResponse:
         self._begin_request()
         try:
@@ -375,6 +386,7 @@ class OpenAICompatibleClient(
                 timeout=timeout,
                 max_retries=max_retries,
                 tools=tools,
+                prefer_stream=prefer_stream,
             )
         finally:
             self._end_request()
@@ -387,6 +399,7 @@ class OpenAICompatibleClient(
         tool_choice: Union[str, Dict[str, Any]] = "auto",
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
+        prefer_stream: bool = False,
     ) -> LLMToolResponse:
         self._begin_request()
         try:
@@ -398,6 +411,7 @@ class OpenAICompatibleClient(
                 tool_choice=tool_choice,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                prefer_stream=prefer_stream,
             )
         finally:
             self._end_request()
@@ -432,6 +446,7 @@ class OpenAICompatibleClient(
         max_tokens: Optional[int] = None,
         request_timeout: Optional[float] = None,
         system_prompt: Optional[str] = None,
+        prefer_stream: bool = False,
     ) -> LLMResponse:
         self._begin_request()
         try:
@@ -444,6 +459,7 @@ class OpenAICompatibleClient(
                 max_tokens=max_tokens,
                 request_timeout=request_timeout,
                 system_prompt=system_prompt,
+                prefer_stream=prefer_stream,
             )
         finally:
             self._end_request()

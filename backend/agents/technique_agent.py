@@ -258,6 +258,7 @@ except ImportError as e:
                 ],
                 temperature=self.config.temperature,
                 max_tokens=REASONING_MODEL_MIN_TOKENS,  # reasoning models need headroom or content comes back empty
+                prefer_stream=True,
             )
             summary = response.content if response.content else raw_doc[:2000]
             await self._notify("result", summary)
@@ -349,6 +350,7 @@ except ImportError as e:
                 ],
                 temperature=self.config.temperature,
                 max_tokens=REASONING_MODEL_MIN_TOKENS,  # reasoning models need headroom or content comes back empty
+                prefer_stream=True,
             )
             summary = response.content if response.content else combined[:1500]
             await self._notify("result", summary)

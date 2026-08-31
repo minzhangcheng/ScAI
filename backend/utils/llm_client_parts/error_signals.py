@@ -75,6 +75,92 @@ def _is_unsupported_background_error(error: Exception) -> bool:
         "not supported", "unexpected", "not allowed", "invalid parameter",
     ))
 
+
+def is_stream_unsupported_error(error: Exception) -> bool:
+    """True only for a deterministic HTTP 400 rejection of streaming."""
+    response = getattr(error, "response", None)
+    if not isinstance(error, BadRequestError) and getattr(response, "status_code", None) != 400:
+        return False
+    s = str(error).lower()
+    body = getattr(error, "body", None)
+    param = ""
+    if isinstance(body, dict):
+        detail = body.get("error") or body
+        if isinstance(detail, dict):
+            param = str(detail.get("param", "")).lower().strip()
+            s = " ".join((
+                s,
+                str(detail.get("message", "")).lower(),
+                str(detail.get("code", "")).lower(),
+                param,
+            ))
+    rejection_markers = (
+        "unknown parameter",
+        "unsupported parameter",
+        "unrecognized parameter",
+        "unexpected parameter",
+        "not supported",
+        "unsupported",
+        "not allowed",
+        "not enabled",
+        "must be false",
+        "disabled",
+    )
+    if param:
+        normalized_param = param.strip("`'\"")
+        if (
+            normalized_param not in {"stream", "streaming", "stream_options"}
+            and not normalized_param.startswith("stream_options.")
+        ):
+            return False
+        return any(marker in s for marker in rejection_markers)
+    if "stream" not in s:
+        return False
+    parameter_match = re.search(
+        r"(?:unknown|unsupported|unrecognized|unexpected)\s+"
+        r"(?:request\s+)?parameter\s*[:=]?\s*[`'\"]?"
+        r"([a-z_][a-z0-9_.-]*)",
+        s,
+    )
+    if parameter_match:
+        mentioned_param = parameter_match.group(1)
+        return (
+            mentioned_param in {"stream", "streaming", "stream_options"}
+            or mentioned_param.startswith("stream_options.")
+        )
+    return bool(
+        re.search(
+            r"\bstream(?:ing)?\b[^.\n]{0,40}"
+            r"(?:not supported|unsupported|not allowed|not enabled|must be false|disabled)",
+            s,
+        )
+        or re.search(r"(?:does not|doesn't) support[^.\n]{0,30}\bstream(?:ing)?\b", s)
+    )
+
+
+def is_stream_options_unsupported_error(error: Exception) -> bool:
+    """True only when a 400 specifically rejects ``stream_options``.
+
+    Such an endpoint may still support streaming, so callers should retry the
+    stream once without usage options instead of disabling streaming entirely.
+    """
+    if not is_stream_unsupported_error(error):
+        return False
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        detail = body.get("error") or body
+        if isinstance(detail, dict):
+            param = str(detail.get("param", "")).lower().strip("`'\" ")
+            if param:
+                return param == "stream_options" or param.startswith(
+                    "stream_options."
+                )
+    return "stream_options" in str(error).lower()
+
+
+# Compatibility name retained for the first Responses-vision consumer.
+is_responses_stream_unsupported_error = is_stream_unsupported_error
+
 def is_temperature_error(error: Exception) -> bool:
     """Check if a BadRequestError is related to the temperature parameter."""
     if not isinstance(error, BadRequestError):
@@ -302,6 +388,7 @@ def _is_protocol_adaptation_signal(error: Exception) -> bool:
             or is_responses_chat_only_model(error)
             or is_responses_only_model(error)
             or is_vision_request_shape_error(error)
+            or is_stream_unsupported_error(error)
             or is_max_tokens_field_error(error)
             or is_temperature_error(error)
             or is_tool_choice_error(error))

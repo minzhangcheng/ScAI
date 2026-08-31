@@ -503,6 +503,209 @@ async def test_responses_adapter_stream_yields_text_deltas():
     assert "".join(chunks) == "Hello"
 
 
+@pytest.mark.asyncio
+async def test_responses_adapter_streaming_text_returns_completed_response():
+    completed = MagicMock()
+    completed.model = "gpt-x"
+    completed.model_dump.return_value = {
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Hello"}],
+        }],
+        "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+    }
+
+    async def _fake_stream():
+        yield SimpleNamespace(type="response.output_text.delta", delta="Hel")
+        yield SimpleNamespace(type="response.output_text.delta", delta="lo")
+        yield SimpleNamespace(type="response.completed", response=completed)
+
+    client = MagicMock()
+    client.responses = MagicMock()
+    client.responses.create = AsyncMock(return_value=_fake_stream())
+    adapter = _ResponsesAdapter(client, agent_name="t")
+
+    result = await adapter.complete(
+        model="gpt-x",
+        messages=[{"role": "user", "content": "hi"}],
+        temperature=0.5,
+        max_tokens=None,
+        stream=True,
+    )
+
+    assert result.content == "Hello"
+    assert result.usage == {
+        "prompt_tokens": 4,
+        "completion_tokens": 2,
+        "total_tokens": 6,
+    }
+    assert client.responses.create.call_args.kwargs["stream"] is True
+
+
+@pytest.mark.asyncio
+async def test_responses_adapter_streaming_vision_returns_completed_response():
+    completed = MagicMock()
+    completed.model = "gemini-3.1-pro-preview"
+    completed.model_dump.return_value = {
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": '{"ok": true}'}],
+        }],
+        "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+    }
+
+    async def _fake_stream():
+        yield SimpleNamespace(type="response.output_text.delta", delta='{"ok":')
+        yield SimpleNamespace(type="response.output_text.delta", delta=" true}")
+        yield SimpleNamespace(type="response.completed", response=completed)
+
+    client = MagicMock()
+    client.responses = MagicMock()
+    client.responses.create = AsyncMock(return_value=_fake_stream())
+    adapter = _ResponsesAdapter(client, agent_name="pathology")
+
+    result = await adapter.complete_vision(
+        model="gemini-3.1-pro-preview",
+        text_prompt="describe",
+        images=["aW1hZ2U="],
+        temperature=0.3,
+        max_tokens=None,
+        system_prompt="PATHOLOGY ROLE",
+        stream=True,
+    )
+
+    assert result.content == '{"ok": true}'
+    assert result.usage == {
+        "prompt_tokens": 5,
+        "completion_tokens": 3,
+        "total_tokens": 8,
+    }
+    assert result.raw_response is completed
+    kwargs = client.responses.create.call_args.kwargs
+    assert kwargs["stream"] is True
+    assert kwargs["input"][0]["content"][1]["type"] == "input_image"
+
+
+@pytest.mark.asyncio
+async def test_responses_adapter_streaming_tools_uses_terminal_response_and_closes():
+    completed = MagicMock()
+    completed.model = "gpt-x"
+    completed.model_dump.return_value = {
+        "status": "completed",
+        "output": [{
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "execute_code",
+            "arguments": '{"code":"print(1)"}',
+        }],
+        "usage": {"input_tokens": 7, "output_tokens": 4, "total_tokens": 11},
+    }
+
+    class ClosableStream:
+        def __init__(self):
+            self.events = iter([
+                SimpleNamespace(
+                    type="response.function_call_arguments.delta",
+                    delta='{"code":"print',
+                ),
+                SimpleNamespace(
+                    type="response.function_call_arguments.delta",
+                    delta='(1)"}',
+                ),
+                SimpleNamespace(type="response.completed", response=completed),
+            ])
+            self.close = AsyncMock()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self.events)
+            except StopIteration as error:
+                raise StopAsyncIteration from error
+
+    stream = ClosableStream()
+    client = MagicMock()
+    client.responses = MagicMock()
+    client.responses.create = AsyncMock(return_value=stream)
+    adapter = _ResponsesAdapter(client, agent_name="bioinformatics")
+
+    result = await adapter.complete_with_tools(
+        model="gpt-x",
+        messages=[{"role": "user", "content": "run code"}],
+        tools=[{"type": "function", "function": {"name": "execute_code"}}],
+        tool_choice="auto",
+        temperature=0.2,
+        max_tokens=100,
+        stream=True,
+    )
+
+    assert result.status == "completed"
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].id == "call_1"
+    assert result.tool_calls[0].name == "execute_code"
+    assert result.tool_calls[0].arguments == {"code": "print(1)"}
+    assert result.raw_assistant_message["tool_calls"][0]["id"] == "call_1"
+    assert result.usage["completion_tokens"] == 4
+    stream.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_responses_adapter_incomplete_stream_preserves_terminal_metadata():
+    incomplete = MagicMock()
+    incomplete.model = "gpt-x"
+    incomplete.model_dump.return_value = {
+        "status": "incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"},
+        "error": None,
+        "output": [{"type": "reasoning"}],
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 32768,
+            "total_tokens": 32778,
+        },
+    }
+
+    async def events():
+        yield SimpleNamespace(type="response.incomplete", response=incomplete)
+
+    client = MagicMock()
+    client.responses = MagicMock()
+    client.responses.create = AsyncMock(return_value=events())
+    adapter = _ResponsesAdapter(client, agent_name="bioinformatics")
+
+    result = await adapter.complete(
+        model="gpt-x",
+        messages=[{"role": "user", "content": "answer"}],
+        temperature=0.2,
+        max_tokens=32768,
+        stream=True,
+    )
+
+    assert result.content == ""
+    assert result.status == "incomplete"
+    assert result.incomplete_details == {"reason": "max_output_tokens"}
+    assert result.usage["completion_tokens"] == 32768
+
+
+def test_parse_responses_dump_preserves_public_refusal_text():
+    text, tools, citations, usage = _parse_responses_dump({
+        "output": [{
+            "type": "message",
+            "content": [{"type": "refusal", "refusal": "I cannot help with that."}],
+        }],
+        "usage": {},
+    })
+
+    assert text == "I cannot help with that."
+    assert tools == []
+    assert citations is None
+    assert usage["completion_tokens"] == 0
+
+
 def test_messages_to_input_prevents_unknown_parameter_input_tool_calls_regression():
     messages = [
         {"role": "system", "content": "You are a professional bioinformatics analyst."},

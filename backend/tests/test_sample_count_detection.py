@@ -371,6 +371,7 @@ async def test_profile_data_registers_what_the_model_reports():
             self.llm_client = self
             self.config = type("C", (), {"temperature": 0.2})()
             self.sent_messages = []
+            self.stream_preferences = []
             self._responses = [
                 _FakeResponse([ToolCall(id="c1", name="execute_code", arguments={
                     "code": "import scanpy as sc\nadata = sc.read_loom('Con.loom')",
@@ -392,6 +393,7 @@ async def test_profile_data_registers_what_the_model_reports():
             # verified, not just exercised: a wrong key or a missing json.dumps
             # would otherwise fail nothing here.
             self.sent_messages.append(list(kwargs["messages"]))
+            self.stream_preferences.append(kwargs.get("prefer_stream"))
             return self._responses.pop(0)
 
         def _validate_code(self, code):
@@ -412,6 +414,7 @@ async def test_profile_data_registers_what_the_model_reports():
     record = result["records"][0]
     assert (record.group_id, record.detected_count, record.declared_count) == ("g1", 1, 3)
     assert record.conflicts is True
+    assert agent.stream_preferences == [True, True]
 
     # Correction 2's fallback (raw_assistant_message is None on the fake): the
     # second call must have been handed the hand-built assistant entry from the

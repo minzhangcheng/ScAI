@@ -228,6 +228,7 @@ async def _generate_figures_in_chat(
                     messages=dispatch.messages,
                     temperature=0.1,
                     max_tokens=dispatch.max_tokens,
+                    prefer_stream=True,
                 )
                 await provider.acknowledge_text_dispatch(
                     "bioinformatics",

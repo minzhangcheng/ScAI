@@ -137,7 +137,8 @@ async def chat_with_pi(
                 text_prompt=full_prompt,
                 images=image_b64_list,
                 temperature=pi_temp,
-                max_tokens=32768
+                max_tokens=32768,
+                prefer_stream=True,
             )
         else:
             from backend.utils.settings_provider import AgentSettingsProvider
@@ -163,6 +164,7 @@ async def chat_with_pi(
                 messages=dispatch.messages,
                 temperature=pi_temp,
                 max_tokens=dispatch.max_tokens,
+                prefer_stream=True,
             )
             await provider.acknowledge_text_dispatch(PI_AGENT_NAME, dispatch)
 

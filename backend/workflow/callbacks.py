@@ -414,6 +414,7 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                 text_prompt=prompt,
                 images=[image_b64],
                 temperature=temperature,
+                prefer_stream=True,
                 **vision_kwargs,
             )
             response_text = response.content if response and response.content else ""

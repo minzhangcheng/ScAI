@@ -125,7 +125,8 @@ class LLMCallsMixin:
                 {"role": "user", "content": prompt},
             ],
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            prefer_stream=True,
         )
         return response.content if response else ""
 
@@ -163,6 +164,7 @@ class LLMCallsMixin:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     request_timeout=request_timeout,
+                    prefer_stream=True,
                 )
                 return response.content if response and response.content else ""
             except Exception as e:
@@ -189,5 +191,6 @@ class LLMCallsMixin:
             messages=messages,
             tools=REPORT_TOOLS,
             temperature=temperature,
-            max_tokens=32768
+            max_tokens=32768,
+            prefer_stream=True,
         )

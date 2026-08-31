@@ -68,6 +68,7 @@ from .shared import (  # noqa: F401
     _detect_image_mime_type,
     UpstreamExhaustedError,
     EmptyResponseError,
+    StreamInterruptedError,
     LLMResponse,
     ToolCall,
     _tool_calls_to_raw_assistant,
@@ -137,6 +138,7 @@ from .shared import (  # noqa: F401
     _anthropic_restore_thinking,
     _parse_responses_dump,
     _ANTHROPIC_DEFAULT_MAX_TOKENS,
+    _StartedStream,
     _AnthropicAdapter,
     _ResponsesAdapter,
     _DR_BACKGROUND_POLL_INTERVAL,
@@ -210,12 +212,56 @@ class ClientDispatchMixin:
             result = await self._call_with_temp_fallback(
                 make_coro, make_coro_no_temp, model_key, retry_kwargs
             )
+            # Stream creation plus the first event ran inside retry_with_backoff.
+            # Consume the remaining events here so the per-attempt deadline does
+            # not become a total generation deadline.
+            if isinstance(result, _StartedStream):
+                result = await result.finish()
         except Exception as e:
             await self._emit_log_response(
                 interaction=interaction, error=str(e),
                 duration_ms=(time.time() - start_time) * 1000,
             )
             raise
+
+        status = getattr(result, "status", None)
+        content = getattr(result, "content", None)
+        tool_calls = getattr(result, "tool_calls", None) or []
+        usage = getattr(result, "usage", None) or {}
+        completion_tokens = (
+            usage.get("completion_tokens", usage.get("output_tokens"))
+            if isinstance(usage, dict) else None
+        )
+        terminal_failure = status in {"failed", "incomplete", "cancelled"}
+        no_public_output = (
+            status is not None
+            and not content
+            and not tool_calls
+            and completion_tokens is not None
+            and completion_tokens > 0
+        )
+        if terminal_failure or no_public_output:
+            details = getattr(result, "incomplete_details", None)
+            upstream_error = getattr(result, "error", None)
+            reason = (
+                f"status={status}, completion_tokens={completion_tokens}, "
+                f"incomplete_details={details}, error={upstream_error}"
+            )
+            error = UpstreamExhaustedError(
+                "LLM returned no complete public answer (" + reason + ")",
+                agent_name=self.agent_name,
+                model=model,
+                llm_server=self.base_url,
+                failure_kind="incomplete_response",
+            )
+            await self._emit_log_response(
+                interaction=interaction,
+                response_content=content,
+                usage=usage,
+                error=str(error),
+                duration_ms=(time.time() - start_time) * 1000,
+            )
+            raise error
 
         if self._llm_response_empty_no_output(result):
             if not _allow_empty_retry:
@@ -411,6 +457,17 @@ class ClientDispatchMixin:
                         return result
                     except Exception as e:
                         last_error = e
+                        # The provider already emitted an event. Replaying via
+                        # this or another protocol could duplicate generation or
+                        # tool execution, so leave protocol discovery immediately.
+                        if (
+                            isinstance(e, StreamInterruptedError)
+                            or (
+                                isinstance(e, UpstreamExhaustedError)
+                                and e.failure_kind == "incomplete_response"
+                            )
+                        ):
+                            raise
                         # Parameter adaptation belongs to the logical request,
                         # not protocol discovery.  Let chat_with_tools retry the
                         # same probe with tool_choice="auto" before considering

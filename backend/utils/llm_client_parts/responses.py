@@ -32,6 +32,9 @@ class LLMResponse:
     usage: Dict[str, int]
     raw_response: Any
     citations: Optional[List[Dict[str, str]]] = None  # Responses API url_citation; None for chat/anthropic
+    status: Optional[str] = None
+    incomplete_details: Any = None
+    error: Any = None
 
 @dataclass
 class ToolCall:
@@ -67,6 +70,9 @@ class LLMToolResponse:
     usage: Dict[str, int]
     raw_response: Any
     raw_assistant_message: Optional[Dict[str, Any]] = None
+    status: Optional[str] = None
+    incomplete_details: Any = None
+    error: Any = None
 
     @property
     def has_tool_calls(self) -> bool:

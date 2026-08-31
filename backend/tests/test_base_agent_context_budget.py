@@ -58,6 +58,7 @@ async def test_small_context_sends_the_reduced_completion_maximum():
 
     assert await _agent(state, client).chat("review") == "answer"
     assert client.calls[0]["max_tokens"] == 7_679
+    assert client.calls[0]["prefer_stream"] is True
 
 
 @pytest.mark.asyncio

@@ -85,6 +85,8 @@ from .shared import (  # noqa: F401
     _is_unknown_web_search_tool_error,
     _swap_web_search_tool_name,
     _is_unsupported_background_error,
+    is_stream_unsupported_error,
+    is_stream_options_unsupported_error,
     is_temperature_error,
     is_tool_choice_error,
     is_responses_endpoint_absent,
@@ -112,11 +114,15 @@ from .shared import (  # noqa: F401
     retry_with_backoff,
     _NO_BACKGROUND_ENDPOINT,
     _NO_RESPONSES_ENDPOINT,
+    _NO_TEXT_STREAM,
+    _NO_CHAT_STREAM_OPTIONS,
     _PROBE_CACHE,
     _PROBE_LOCKS,
     _url_path_suffix_protocol,
     _DEFAULT_PROTOCOL_ORDER,
     PROBE_RETRY_DELAYS,
+    TEXT_MODALITY,
+    TOOLS_MODALITY,
     _keyword_protocol_hints,
     _route_protocol_order,
     _route_protocol,
@@ -133,6 +139,9 @@ from .shared import (  # noqa: F401
     _anthropic_restore_thinking,
     _parse_responses_dump,
     _ANTHROPIC_DEFAULT_MAX_TOKENS,
+    StreamInterruptedError,
+    _StartedStream,
+    _start_stream,
     _AnthropicAdapter,
     _ResponsesAdapter,
     _DR_BACKGROUND_POLL_INTERVAL,
@@ -150,6 +159,44 @@ from .shared import (  # noqa: F401
 
 class ClientChatMixin:
     """Plain chat and tool-calling chat entry points."""
+
+    async def _complete_chat_stream(
+        self, started: _StartedStream, model: str
+    ) -> LLMResponse:
+        text_parts = []
+        usage = {}
+        last_chunk = None
+        model_name = model
+        finished = False
+        async for chunk in started.events():
+            last_chunk = chunk
+            model_name = getattr(chunk, "model", model_name)
+            if getattr(chunk, "usage", None) is not None:
+                usage = self._extract_usage(chunk)
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            choice = choices[0]
+            if getattr(choice, "finish_reason", None) is not None:
+                finished = True
+            delta = getattr(choice, "delta", None)
+            content = getattr(delta, "content", None)
+            if isinstance(content, str) and content:
+                text_parts.append(content)
+        if not finished:
+            raise StreamInterruptedError(
+                "Chat Completions text stream ended after the first event "
+                "without finish_reason"
+            )
+        text = "".join(text_parts)
+        if not text:
+            raise RuntimeError("Chat Completions text stream ended without text output")
+        return LLMResponse(
+            content=text,
+            model=model_name,
+            usage=usage,
+            raw_response=last_chunk,
+        )
 
     async def _chat_inline(
         self,
@@ -184,9 +231,32 @@ class ClientChatMixin:
 
         model_key = _extract_model_name(model)
         base_params = {"model": model, "messages": messages, "stream": stream}
-        _make_request, _make_request_no_temp = self._build_request_pair(
-            base_params, model, temperature, max_tokens, request_timeout=timeout
-        )
+        stream_options_key = (self.base_url, model)
+        if stream and stream_options_key not in _NO_CHAT_STREAM_OPTIONS:
+            base_params["stream_options"] = {"include_usage": True}
+
+        def _build_chat_requests():
+            make_request, make_request_no_temp = self._build_request_pair(
+                base_params, model, temperature, max_tokens,
+                request_timeout=timeout,
+            )
+            if not stream:
+                return make_request, make_request_no_temp
+
+            def start(factory):
+                async def call():
+                    raw_stream = await factory()
+                    return await _start_stream(
+                        raw_stream,
+                        lambda value: self._complete_chat_stream(value, model),
+                        timeout=timeout,
+                        label="Chat Completions text stream",
+                    )
+                return call
+
+            return start(make_request), start(make_request_no_temp)
+
+        _make_request, _make_request_no_temp = _build_chat_requests()
         effective_max_retries = max_retries_override if max_retries_override is not None else max_retries
         retry_kwargs = self._build_retry_kwargs(
             model, request_timeout=timeout, max_retries_override=effective_max_retries,
@@ -195,9 +265,37 @@ class ClientChatMixin:
 
         try:
             logger.info(f"[{self.agent_name}] Sending chat request to {model}")
-            response = await self._call_with_temp_fallback(
-                _make_request, _make_request_no_temp, model_key, retry_kwargs
-            )
+            try:
+                response = await self._call_with_temp_fallback(
+                    _make_request, _make_request_no_temp, model_key, retry_kwargs
+                )
+            except Exception as error:
+                if not (
+                    stream
+                    and "stream_options" in base_params
+                    and is_stream_options_unsupported_error(error)
+                ):
+                    raise
+                logger.warning(
+                    f"[{self.agent_name}] Chat stream usage options rejected at "
+                    f"{self.base_url}; retrying the stream without stream_options"
+                )
+                _NO_CHAT_STREAM_OPTIONS.add(stream_options_key)
+                base_params.pop("stream_options", None)
+                _make_request, _make_request_no_temp = _build_chat_requests()
+                response = await self._call_with_temp_fallback(
+                    _make_request, _make_request_no_temp, model_key, retry_kwargs
+                )
+
+            if stream:
+                result = await response.finish()
+                await self._emit_log_response(
+                    interaction=interaction,
+                    response_content=result.content,
+                    usage=result.usage,
+                    duration_ms=(time.time() - start_time) * 1000,
+                )
+                return result
 
             # Extract only the provider's answer channel; reasoning/thinking
             # fields are private scratch space and are never answer content.
@@ -377,6 +475,7 @@ class ClientChatMixin:
         timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        prefer_stream: bool = False,
     ) -> LLMResponse:
         """
         Send chat request to OpenAI-compatible API with automatic retry on timeout
@@ -390,6 +489,8 @@ class ClientChatMixin:
             stream: Unsupported; use chat_stream() for streaming responses
             timeout: Per-request timeout in seconds (overrides client default)
             tools: Optional Responses API tools for non-streaming Responses calls
+            prefer_stream: Aggregate a streaming text response first; use the
+                existing non-streaming path only if streaming is unsupported
 
         Returns:
             LLMResponse object
@@ -399,26 +500,107 @@ class ClientChatMixin:
 
         enforced = _inject_english_enforcement(messages)
         probe_timeout = timeout or DEFAULT_REQUEST_TIMEOUT
+        stream_preferred = (
+            prefer_stream and not tools and not _is_deep_research_model(model)
+        )
+        stream_enabled = {
+            protocol: (
+                stream_preferred
+                and (self.base_url, model, TEXT_MODALITY, protocol)
+                not in _NO_TEXT_STREAM
+            )
+            for protocol in ("responses", "chat", "anthropic")
+        }
+
+        async def _stream_first(protocol, stream_call, non_stream_call):
+            if stream_enabled[protocol]:
+                try:
+                    return await stream_call()
+                except Exception as e:
+                    if not is_stream_unsupported_error(e):
+                        raise
+                    stream_enabled[protocol] = False
+                    _NO_TEXT_STREAM.add(
+                        (self.base_url, model, TEXT_MODALITY, protocol)
+                    )
+                    logger.warning(
+                        f"[{self.agent_name}] {protocol} text streaming is "
+                        f"unsupported; falling back to non-streaming: "
+                        f"{type(e).__name__}: {str(e)[:200]}"
+                    )
+            return await non_stream_call()
+
+        async def _anthropic_call(adapter, skip_temperature):
+            kwargs = {
+                "model": model,
+                "messages": enforced,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "timeout": timeout,
+                "skip_temperature": skip_temperature,
+            }
+            return await _stream_first(
+                "anthropic",
+                lambda: adapter.complete(
+                    **kwargs, stream=True, defer_stream=True
+                ),
+                lambda: adapter.complete(**kwargs),
+            )
+
+        async def _responses_call(adapter, skip_temperature):
+            kwargs = {
+                "model": model,
+                "messages": enforced,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "timeout": timeout,
+                "skip_temperature": skip_temperature,
+                "tools": tools,
+            }
+            return await _stream_first(
+                "responses",
+                lambda: adapter.complete(
+                    **kwargs, stream=True, defer_stream=True
+                ),
+                lambda: adapter.complete(**kwargs),
+            )
+
+        async def _chat_call(request_timeout, request_retries, *,
+                             allow_empty_retry=True,
+                             max_retries_override=None,
+                             non_retryable_predicate=None):
+            kwargs = {
+                "model": model,
+                "messages": enforced,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "timeout": request_timeout,
+                "max_retries": request_retries,
+                "_allow_empty_retry": allow_empty_retry,
+                "non_retryable_predicate": non_retryable_predicate,
+                "max_retries_override": max_retries_override,
+            }
+            return await _stream_first(
+                "chat",
+                lambda: self._chat_inline(**kwargs, stream=True),
+                lambda: self._chat_inline(**kwargs, stream=False),
+            )
+
         return await self._dispatch_non_streaming(
             model=model,
             interaction_type="chat",
             log_messages=enforced,
-            make_anthropic_adapter_call=lambda adapter, skip_temperature: adapter.complete(
-                model=model, messages=enforced, temperature=temperature,
-                max_tokens=max_tokens, timeout=timeout, skip_temperature=skip_temperature),
-            make_responses_adapter_call=lambda adapter, skip_temperature: adapter.complete(
-                model=model, messages=enforced, temperature=temperature,
-                max_tokens=max_tokens, timeout=timeout, skip_temperature=skip_temperature,
-                tools=tools),
-            make_inline_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_inline(
-                model, enforced, temperature, max_tokens, False, timeout, max_retries,
-                non_retryable_predicate=non_retryable_predicate,
-                max_retries_override=max_retries_override),
-            make_probe_fallback_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_inline(
-                model, enforced, temperature, max_tokens, False, probe_timeout, max_retries=0,
-                _allow_empty_retry=False,
-                non_retryable_predicate=non_retryable_predicate,
-                max_retries_override=max_retries_override),
+            make_anthropic_adapter_call=_anthropic_call,
+            make_responses_adapter_call=_responses_call,
+            make_inline_call=lambda max_retries_override=None, non_retryable_predicate=None: _chat_call(
+                timeout, max_retries,
+                max_retries_override=max_retries_override,
+                non_retryable_predicate=non_retryable_predicate),
+            make_probe_fallback_call=lambda max_retries_override=None, non_retryable_predicate=None: _chat_call(
+                probe_timeout, 0,
+                allow_empty_retry=False,
+                max_retries_override=max_retries_override,
+                non_retryable_predicate=non_retryable_predicate),
             temperature=temperature,
             max_tokens=max_tokens,
             request_timeout=timeout,
@@ -631,7 +813,8 @@ class ClientChatMixin:
         tools: List[Dict[str, Any]],
         tool_choice: Union[str, Dict[str, Any]] = "auto",
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        prefer_stream: bool = False,
     ) -> LLMToolResponse:
         """
         Send chat request with function/tool calling support and automatic retry on timeout.
@@ -644,6 +827,8 @@ class ClientChatMixin:
             tool_choice: "auto", "none", "required", or specific tool
             temperature: Sampling temperature
             max_tokens: Maximum tokens to generate
+            prefer_stream: Try Responses tool streaming first; fall back only
+                when the endpoint deterministically rejects streaming
 
         Returns:
             LLMToolResponse with potential tool calls
@@ -657,6 +842,43 @@ class ClientChatMixin:
         ):
             effective_tool_choice = "auto"
 
+        tool_stream_key = (
+            self.base_url, model, TOOLS_MODALITY, "responses"
+        )
+        tool_stream_enabled = (
+            prefer_stream
+            and not _is_deep_research_model(model)
+            and tool_stream_key not in _NO_TEXT_STREAM
+        )
+
+        async def _responses_tools_call(adapter, skip_temperature, choice):
+            nonlocal tool_stream_enabled
+            kwargs = {
+                "model": model,
+                "messages": enforced,
+                "tools": tools,
+                "tool_choice": choice,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "skip_temperature": skip_temperature,
+            }
+            if tool_stream_enabled:
+                try:
+                    return await adapter.complete_with_tools(
+                        **kwargs, stream=True, defer_stream=True
+                    )
+                except Exception as error:
+                    if not is_stream_unsupported_error(error):
+                        raise
+                    tool_stream_enabled = False
+                    _NO_TEXT_STREAM.add(tool_stream_key)
+                    logger.warning(
+                        f"[{self.agent_name}] Responses tool streaming is "
+                        f"unsupported; falling back to non-streaming: "
+                        f"{type(error).__name__}: {str(error)[:200]}"
+                    )
+            return await adapter.complete_with_tools(**kwargs)
+
         async def _dispatch(choice):
             return await self._dispatch_non_streaming(
                 model=model,
@@ -665,9 +887,8 @@ class ClientChatMixin:
                 make_anthropic_adapter_call=lambda adapter, skip_temperature: adapter.complete_with_tools(
                     model=model, messages=enforced, tools=tools, tool_choice=choice,
                     temperature=temperature, max_tokens=max_tokens, skip_temperature=skip_temperature),
-                make_responses_adapter_call=lambda adapter, skip_temperature: adapter.complete_with_tools(
-                    model=model, messages=enforced, tools=tools, tool_choice=choice,
-                    temperature=temperature, max_tokens=max_tokens, skip_temperature=skip_temperature),
+                make_responses_adapter_call=lambda adapter, skip_temperature: _responses_tools_call(
+                    adapter, skip_temperature, choice),
                 make_inline_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_tools_inline(
                     model, enforced, tools, choice, temperature, max_tokens,
                     non_retryable_predicate=non_retryable_predicate,

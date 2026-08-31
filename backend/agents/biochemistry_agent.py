@@ -432,6 +432,7 @@ insufficient for interpretation. Then provide the full analysis below that line.
                     temperature=0.2,
                     max_tokens=32768,
                     system_prompt=self.system_prompt,
+                    prefer_stream=True,
                 )
 
                 content = response.content if response else ""

@@ -672,6 +672,7 @@ async def prepare_report_generation(
                         temperature=0.3,
                         max_tokens=32768,
                         timeout=900.0,  # 15 min — large narratives need long generation time
+                        prefer_stream=True,
                     )
                     report_content = response.content or ""
                     break

@@ -40,9 +40,22 @@ _NO_RESPONSES_ENDPOINT: set = set()
 # 这样一次图像协议降级不会把文本请求永久钉在 Chat Completions。
 _PROBE_CACHE: Dict[Tuple[Any, ...], str] = {}
 
+# Deterministic Responses vision-stream rejections, keyed like the vision
+# protocol cache: (base_url, model, "vision"). Transient failures never enter it.
+_NO_RESPONSES_VISION_STREAM: set = set()
+
+# Deterministic text/tool-stream rejections, keyed by
+# (base_url, model, modality, wire_protocol).
+_NO_TEXT_STREAM: set = set()
+
+# Chat Completions endpoints that stream successfully but reject
+# stream_options={"include_usage": True}, keyed by (base_url, model).
+_NO_CHAT_STREAM_OPTIONS: set = set()
+
 _PROBE_LOCKS: Dict[Tuple[Any, ...], asyncio.Lock] = {}
 
 TEXT_MODALITY = "text"
+TOOLS_MODALITY = "tools"
 VISION_MODALITY = "vision"
 
 
@@ -407,6 +420,10 @@ def _parse_responses_dump(dump: Dict[str, Any]):
                     continue
                 if block.get("type") in ("output_text", "text") and isinstance(block.get("text"), str):
                     text_parts.append(block["text"])
+                elif block.get("type") == "refusal" and isinstance(block.get("refusal"), str):
+                    # A refusal is still the provider's public answer channel;
+                    # do not misclassify it as a reasoning-only empty response.
+                    text_parts.append(block["refusal"])
                 for ann in block.get("annotations", []) or []:
                     if isinstance(ann, dict) and ann.get("type") == "url_citation":
                         uri = ann.get("url", "")

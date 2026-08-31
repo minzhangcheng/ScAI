@@ -79,6 +79,7 @@ async def test_failed_or_unparseable_vision_review_has_no_synthetic_score(mode):
     assert review["quality_score"] is None
     assert review["suggestions"] == []
     assert review["must_fix"] == []
+    assert chat.await_args.kwargs["prefer_stream"] is True
 
 
 @pytest.mark.asyncio

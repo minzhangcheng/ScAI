@@ -86,6 +86,7 @@ from .shared import (  # noqa: F401
     _is_unknown_web_search_tool_error,
     _swap_web_search_tool_name,
     _is_unsupported_background_error,
+    is_stream_unsupported_error,
     is_temperature_error,
     is_tool_choice_error,
     is_responses_endpoint_absent,
@@ -113,11 +114,14 @@ from .shared import (  # noqa: F401
     retry_with_backoff,
     _NO_BACKGROUND_ENDPOINT,
     _NO_RESPONSES_ENDPOINT,
+    _NO_RESPONSES_VISION_STREAM,
     _PROBE_CACHE,
     _PROBE_LOCKS,
     _url_path_suffix_protocol,
     _DEFAULT_PROTOCOL_ORDER,
     PROBE_RETRY_DELAYS,
+    VISION_MODALITY,
+    _probe_key,
     _keyword_protocol_hints,
     _route_protocol_order,
     _route_protocol,
@@ -352,6 +356,7 @@ class ClientStreamVisionMixin:
         max_tokens: Optional[int] = None,
         request_timeout: Optional[float] = None,
         system_prompt: Optional[str] = None,
+        prefer_stream: bool = False,
     ) -> LLMResponse:
         """
         Send chat request with images to OpenAI-compatible API with automatic retry on timeout.
@@ -363,6 +368,8 @@ class ClientStreamVisionMixin:
             images: List of base64 encoded images
             temperature: Sampling temperature
             max_tokens: Maximum tokens
+            prefer_stream: Try Responses streaming first; fall back to the
+                existing non-streaming request only if streaming is unsupported
 
         Returns:
             LLMResponse object
@@ -370,6 +377,42 @@ class ClientStreamVisionMixin:
         normalized_images = [normalize_image_input(image)[0] for image in images]
         log_msgs = [{"role": "user", "content": f"[{len(normalized_images)} images] + {text_prompt[:500]}"}]
         probe_timeout = request_timeout or DEFAULT_REQUEST_TIMEOUT
+        stream_cache_key = _probe_key(self.base_url, model, VISION_MODALITY)
+        responses_stream_enabled = (
+            prefer_stream
+            and not _is_deep_research_model(model)
+            and stream_cache_key not in _NO_RESPONSES_VISION_STREAM
+        )
+
+        async def _responses_vision_call(adapter, skip_temperature):
+            nonlocal responses_stream_enabled
+            kwargs = {
+                "model": model,
+                "text_prompt": text_prompt,
+                "images": normalized_images,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "timeout": request_timeout,
+                "skip_temperature": skip_temperature,
+                "system_prompt": system_prompt,
+            }
+            if responses_stream_enabled:
+                try:
+                    return await adapter.complete_vision(
+                        **kwargs, stream=True, defer_stream=True
+                    )
+                except Exception as e:
+                    if not is_stream_unsupported_error(e):
+                        raise
+                    responses_stream_enabled = False
+                    _NO_RESPONSES_VISION_STREAM.add(stream_cache_key)
+                    logger.warning(
+                        f"[{self.agent_name}] Responses vision streaming is "
+                        f"unsupported; falling back to non-streaming: "
+                        f"{type(e).__name__}: {str(e)[:200]}"
+                    )
+            return await adapter.complete_vision(**kwargs)
+
         return await self._dispatch_non_streaming(
             model=model,
             interaction_type="vision",
@@ -379,11 +422,7 @@ class ClientStreamVisionMixin:
                 temperature=temperature, max_tokens=max_tokens,
                 timeout=request_timeout, skip_temperature=skip_temperature,
                 system_prompt=system_prompt),
-            make_responses_adapter_call=lambda adapter, skip_temperature: adapter.complete_vision(
-                model=model, text_prompt=text_prompt, images=normalized_images,
-                temperature=temperature, max_tokens=max_tokens,
-                timeout=request_timeout, skip_temperature=skip_temperature,
-                system_prompt=system_prompt),
+            make_responses_adapter_call=_responses_vision_call,
             make_inline_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_vision_inline(
                 model, text_prompt, normalized_images, temperature, max_tokens, request_timeout,
                 non_retryable_predicate=non_retryable_predicate,

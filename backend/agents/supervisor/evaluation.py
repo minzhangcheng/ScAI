@@ -178,6 +178,7 @@ class EvaluationMixin:
                     temperature=self.temperature,
                     max_tokens=REASONING_MODEL_MIN_TOKENS,  # reasoning models need headroom or content comes back empty
                     system_prompt=effective_prompt,
+                    prefer_stream=True,
                 )
                 vision_observation = response.content if response else ""
                 structured_context = (
@@ -338,6 +339,7 @@ class EvaluationMixin:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=self.temperature,
                 max_tokens=1200,
+                prefer_stream=True,
             )
             content = str(getattr(response, "content", "") or "").strip()
             return f"[Package Support] {content}" if content else None

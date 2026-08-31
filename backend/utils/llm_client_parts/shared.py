@@ -34,6 +34,7 @@ from ..llm_client_parts.errors import (  # noqa: F401
     UpstreamExhaustedError,
     ToolProtocolError,
     EmptyResponseError,
+    StreamInterruptedError,
 )
 from ..llm_client_parts.responses import (  # noqa: F401
     LLMResponse,
@@ -56,6 +57,9 @@ from ..llm_client_parts.error_signals import (  # noqa: F401
     _is_unknown_web_search_tool_error,
     _swap_web_search_tool_name,
     _is_unsupported_background_error,
+    is_stream_unsupported_error,
+    is_stream_options_unsupported_error,
+    is_responses_stream_unsupported_error,
     is_temperature_error,
     is_tool_choice_error,
     is_responses_endpoint_absent,
@@ -93,12 +97,16 @@ from ..llm_client_parts.retry import (  # noqa: F401
 from ..llm_client_parts.protocol import (  # noqa: F401
     _NO_BACKGROUND_ENDPOINT,
     _NO_RESPONSES_ENDPOINT,
+    _NO_RESPONSES_VISION_STREAM,
+    _NO_TEXT_STREAM,
+    _NO_CHAT_STREAM_OPTIONS,
     _PROBE_CACHE,
     _PROBE_LOCKS,
     _url_path_suffix_protocol,
     _DEFAULT_PROTOCOL_ORDER,
     PROBE_RETRY_DELAYS,
     TEXT_MODALITY,
+    TOOLS_MODALITY,
     VISION_MODALITY,
     _probe_key,
     _keyword_protocol_hints,
@@ -119,6 +127,8 @@ from ..llm_client_parts.protocol import (  # noqa: F401
 )
 from ..llm_client_parts.adapters import (  # noqa: F401
     _ANTHROPIC_DEFAULT_MAX_TOKENS,
+    _StartedStream,
+    _start_stream,
     _AnthropicAdapter,
     _ResponsesAdapter,
 )

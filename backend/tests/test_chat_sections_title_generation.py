@@ -49,6 +49,7 @@ async def test_titles_generated_via_correct_chat_signature(tmp_path):
     assert call["model"] == "google/gemini-3.1-flash-lite-preview"
     assert isinstance(call["messages"], list)
     assert call["messages"][0]["role"] == "user"
+    assert call["kwargs"]["prefer_stream"] is True
 
     # 2) titles extracted from LLMResponse.content (not dict.get)
     assert sections[0]["title"] == "Pathway enrichment cluster 3"
@@ -110,5 +111,6 @@ async def test_title_generation_uses_context_budget_callbacks(tmp_path):
     assert budget_calls[0][0] == "supervisor"
     assert client.calls[0]["messages"] == dispatch.messages
     assert client.calls[0]["kwargs"]["max_tokens"] == 123
+    assert client.calls[0]["kwargs"]["prefer_stream"] is True
     assert acknowledgements == [("supervisor", dispatch)]
     assert sections[0]["title"] == "Budgeted title"

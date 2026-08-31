@@ -230,6 +230,7 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
                     images=[image_base64],
                     temperature=0.3,
                     system_prompt=self.system_prompt,
+                    prefer_stream=True,
                 )
                 response_text = response.content if response and response.content else ""
             except Exception as e:
@@ -366,6 +367,7 @@ Objective: {state.initial_instruction[:500] if state.initial_instruction else 'B
                 images=[image_base64],
                 temperature=0.3,
                 system_prompt=self.system_prompt,
+                prefer_stream=True,
             )
             response_text = response.content if response and response.content else ""
         except Exception as e:
@@ -474,6 +476,7 @@ Consider:
                 images=candidates,
                 temperature=0.2,
                 system_prompt=self.system_prompt,
+                prefer_stream=True,
             )
             response_text = response.content if response and response.content else ""
         except Exception as e:
@@ -861,6 +864,7 @@ an earlier version may win.
                 images=images,
                 temperature=0.1,
                 system_prompt=self.system_prompt,
+                prefer_stream=True,
             )
             text = (response.content or "") if response else ""
         except Exception as e:
@@ -969,7 +973,8 @@ Example: ["umap_cell_types", "cell_type_proportions", "volcano_<celltype>_<condi
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                max_tokens=REASONING_MODEL_MIN_TOKENS  # reasoning models need headroom or content comes back empty
+                max_tokens=REASONING_MODEL_MIN_TOKENS,  # reasoning models need headroom or content comes back empty
+                prefer_stream=True,
             )
             text = (response.content or "").strip()
             parsed = safe_parse_json_array(text)

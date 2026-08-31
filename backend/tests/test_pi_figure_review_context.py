@@ -58,6 +58,7 @@ async def test_figure_review_receives_the_linked_plan_deliverable():
     result = await agent.review_figure(state, figure, "base64")
 
     assert result["approved"] is True
+    assert vision.await_args.kwargs["prefer_stream"] is True
     prompt = vision.await_args.kwargs["text_prompt"]
     assert "Linked plan: plan-current" in prompt
     assert "Linked step 7: Differential expression summary" in prompt

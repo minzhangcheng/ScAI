@@ -226,5 +226,6 @@ async def test_vision_observation_is_revalidated_by_structured_tool_call():
 
     assert result["severity"] == "critical"
     assert client.vision_calls[0]["system_prompt"]
+    assert client.vision_calls[0]["prefer_stream"] is True
     structured_prompt = client.calls[0]["messages"][1]["content"]
     assert "The plot is blank." in structured_prompt

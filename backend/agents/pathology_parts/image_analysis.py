@@ -151,6 +151,7 @@ If no abnormality is visible in a tile, use the explicit finding "No abnormality
                     temperature=0.3,
                     request_timeout=to,
                     system_prompt=agent.system_prompt,
+                    prefer_stream=True,
                 ),
                 image_label=image_info.filename,
                 step_label=f"tile batch {batch_idx + 1}/{num_batches}",
@@ -317,6 +318,7 @@ Please reply in JSON format:
                 temperature=0.3,
                 request_timeout=600.0,  # 10 min for single overview image
                 system_prompt=agent.system_prompt,
+                prefer_stream=True,
             ),
             image_label=image_info.filename,
             step_label="overview analysis",

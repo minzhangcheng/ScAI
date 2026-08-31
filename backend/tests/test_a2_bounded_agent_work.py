@@ -106,6 +106,7 @@ async def test_biochemistry_sha_cache_requires_matching_terminal_usable_record(t
     nonterminal.extracted_data["terminal"] = False
     assert await agent._analyze_single_image(nonterminal, "review") == "EXTRACTION_STATUS: usable\nfresh"
     assert client.chat_with_vision.await_count == 2
+    assert all(call.kwargs["prefer_stream"] is True for call in client.chat_with_vision.await_args_list)
 
 
 @pytest.mark.asyncio

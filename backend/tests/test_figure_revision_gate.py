@@ -1152,6 +1152,7 @@ async def test_figure_revision_prompt_has_shared_stable_prefix_and_unchanged_dyn
 
     calls = agent.llm_client.calls
     assert [kind for kind, _ in calls] == ["chat", "vision"]
+    assert calls[1][1]["prefer_stream"] is True
     plain_prompt = calls[0][1]["messages"][0]["content"]
     vision_prompt = calls[1][1]["text_prompt"]
     original_marker = "**Original Code:**"

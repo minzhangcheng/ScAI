@@ -95,6 +95,7 @@ Respond in JSON:
             ],
             temperature=0.1,  # Strict review
             max_tokens=REASONING_MODEL_MIN_TOKENS,  # reasoning models need headroom or content comes back empty
+            prefer_stream=True,
         )
         response_text = response.content if response and response.content else ""
         if not response_text.strip():

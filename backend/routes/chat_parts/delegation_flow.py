@@ -167,6 +167,7 @@ async def _execute_delegation_success(
         messages=dispatch.messages,
         temperature=pi_temp,
         max_tokens=dispatch.max_tokens,
+        prefer_stream=True,
     )
     await delegation_provider.acknowledge_text_dispatch(PI_AGENT_NAME, dispatch)
     final_content = pi_response.content or "Analysis completed but synthesis failed."

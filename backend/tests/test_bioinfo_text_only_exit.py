@@ -201,6 +201,8 @@ class TestAutonomousLoopTextOnlyEscalation:
         second_call_kwargs = fake_client.chat_with_tools.call_args_list[1].kwargs
         assert first_call_kwargs.get("tool_choice") == "auto"
         assert second_call_kwargs.get("tool_choice") == "required"
+        assert first_call_kwargs.get("prefer_stream") is True
+        assert second_call_kwargs.get("prefer_stream") is True
 
 
 class TestAutonomousLoopBudgetExhaustion:

@@ -289,6 +289,7 @@ class BaseAgent(ABC):
                 "model": self.model,
                 "messages": dispatch.messages,
                 "temperature": actual_temp,
+                "prefer_stream": True,
             }
             if dispatch.max_tokens is not None:
                 kwargs["max_tokens"] = dispatch.max_tokens
@@ -341,6 +342,7 @@ class BaseAgent(ABC):
                 "model": self.model,
                 "messages": dispatch.messages,
                 "temperature": actual_temp,
+                "prefer_stream": True,
             }
             if timeout is not None:
                 kwargs["timeout"] = timeout

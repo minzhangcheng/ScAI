@@ -359,6 +359,7 @@ async def _execute_chat_agent_inner(
                 messages=dispatch.messages,
                 temperature=provider.get_temperature(PI_AGENT_NAME),
                 max_tokens=dispatch.max_tokens,
+                prefer_stream=True,
             )
             await provider.acknowledge_text_dispatch(PI_AGENT_NAME, dispatch)
             answer = resp.content or "Proceed with standard bioinformatics practices."

@@ -92,7 +92,11 @@ async def build_chat_sections_async(
 
             title_messages = [{"role": "user", "content": prompt}]
             if context_budget_callback is None:
-                response = await llm_client.chat(model, messages=title_messages)
+                response = await llm_client.chat(
+                    model,
+                    messages=title_messages,
+                    prefer_stream=True,
+                )
             else:
                 dispatch = await context_budget_callback(
                     "supervisor",
@@ -106,6 +110,7 @@ async def build_chat_sections_async(
                         if dispatch.max_tokens is not None
                         else {}
                     ),
+                    prefer_stream=True,
                 )
                 if context_budget_ack_callback is not None:
                     await context_budget_ack_callback("supervisor", dispatch)

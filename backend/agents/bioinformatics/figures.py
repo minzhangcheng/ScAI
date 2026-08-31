@@ -672,6 +672,7 @@ Return only the Python code:{note}"""
                     temperature=revision_temp,
                     max_tokens=32768,
                     system_prompt=self.system_prompt,
+                    prefer_stream=True,
                 )
             except Exception as vision_err:
                 _is_vision_unsupported = is_vision_capability_mismatch(vision_err)
@@ -699,7 +700,8 @@ Return only the Python code:{note}"""
                         model=self.model,
                         messages=[{"role": "user", "content": prompt}],
                         temperature=revision_temp,
-                        max_tokens=32768
+                        max_tokens=32768,
+                        prefer_stream=True,
                     )
                 else:
                     raise
@@ -709,7 +711,8 @@ Return only the Python code:{note}"""
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=revision_temp,
-                max_tokens=32768
+                max_tokens=32768,
+                prefer_stream=True,
             )
 
         response_text = response.content if response and response.content else None

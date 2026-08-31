@@ -97,6 +97,7 @@ def test_restore_thinking_roundtrip():
 
 
 import pytest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from backend.utils.llm_client import _AnthropicAdapter, LLMToolResponse
 
@@ -165,6 +166,217 @@ async def test_anthropic_adapter_complete_vision_passes_timeout():
     assert kwargs["timeout"] == 42.0
     assert "PATHOLOGY ROLE" in kwargs["system"]
     assert "respond exclusively in English" in kwargs["system"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_adapter_streaming_text_aggregates_usage():
+    async def _stream():
+        yield MagicMock(
+            type="message_start",
+            message=MagicMock(
+                model="claude-x",
+                usage=MagicMock(
+                    input_tokens=3,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=2,
+                ),
+            ),
+        )
+        yield MagicMock(
+            type="content_block_delta",
+            delta=MagicMock(type="text_delta", text="Hel"),
+        )
+        yield MagicMock(
+            type="content_block_delta",
+            delta=MagicMock(type="text_delta", text="lo"),
+        )
+        yield MagicMock(type="message_delta", usage=MagicMock(output_tokens=2))
+        yield MagicMock(type="message_stop")
+
+    client = MagicMock()
+    client.messages = MagicMock()
+    client.messages.create = AsyncMock(return_value=_stream())
+    adapter = _AnthropicAdapter.__new__(_AnthropicAdapter)
+    adapter.client = client
+    adapter.agent_name = "t"
+
+    result = await adapter.complete(
+        model="claude-x",
+        messages=[{"role": "user", "content": "hi"}],
+        temperature=0.5,
+        max_tokens=1000,
+        stream=True,
+    )
+
+    assert result.content == "Hello"
+    assert result.usage == {
+        "prompt_tokens": 5,
+        "completion_tokens": 2,
+        "total_tokens": 7,
+        "cached_tokens": 2,
+    }
+    assert client.messages.create.call_args.kwargs["stream"] is True
+
+
+@pytest.mark.asyncio
+async def test_anthropic_streaming_usage_preserves_missing_cache_telemetry():
+    async def _stream():
+        yield SimpleNamespace(
+            type="message_start",
+            message=SimpleNamespace(
+                model="claude-x",
+                usage=SimpleNamespace(input_tokens=3),
+            ),
+        )
+        yield SimpleNamespace(
+            type="content_block_delta",
+            delta=SimpleNamespace(type="text_delta", text="Hello"),
+        )
+        yield SimpleNamespace(
+            type="message_delta",
+            usage=SimpleNamespace(output_tokens=2),
+        )
+        yield SimpleNamespace(type="message_stop")
+
+    client = MagicMock()
+    client.messages = MagicMock()
+    client.messages.create = AsyncMock(return_value=_stream())
+    adapter = _AnthropicAdapter.__new__(_AnthropicAdapter)
+    adapter.client = client
+    adapter.agent_name = "t"
+
+    result = await adapter.complete(
+        model="claude-x",
+        messages=[{"role": "user", "content": "hi"}],
+        temperature=0.5,
+        max_tokens=1000,
+        stream=True,
+    )
+
+    assert result.usage == {
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "total_tokens": 5,
+    }
+
+
+@pytest.mark.asyncio
+async def test_anthropic_streaming_reasoning_only_max_tokens_is_incomplete():
+    async def _stream():
+        yield SimpleNamespace(
+            type="message_start",
+            message=SimpleNamespace(
+                model="claude-x",
+                usage=SimpleNamespace(input_tokens=3),
+            ),
+        )
+        yield SimpleNamespace(
+            type="content_block_delta",
+            delta=SimpleNamespace(type="thinking_delta", thinking="reasoning"),
+        )
+        yield SimpleNamespace(
+            type="message_delta",
+            delta=SimpleNamespace(stop_reason="max_tokens"),
+            usage=SimpleNamespace(output_tokens=8),
+        )
+        yield SimpleNamespace(type="message_stop")
+
+    client = MagicMock()
+    client.messages = MagicMock()
+    client.messages.create = AsyncMock(return_value=_stream())
+    adapter = _AnthropicAdapter.__new__(_AnthropicAdapter)
+    adapter.client = client
+    adapter.agent_name = "t"
+
+    result = await adapter.complete(
+        model="claude-x",
+        messages=[{"role": "user", "content": "hi"}],
+        temperature=0.5,
+        max_tokens=8,
+        stream=True,
+    )
+
+    assert result.content == ""
+    assert result.status == "incomplete"
+    assert result.incomplete_details == {"reason": "max_tokens"}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_nonstream_reasoning_only_max_tokens_is_incomplete():
+    dump = {
+        "content": [{"type": "thinking", "thinking": "reasoning"}],
+        "stop_reason": "max_tokens",
+        "usage": {"input_tokens": 3, "output_tokens": 8},
+    }
+    client = _fake_anthropic(dump)
+    adapter = _AnthropicAdapter.__new__(_AnthropicAdapter)
+    adapter.client = client
+    adapter.agent_name = "t"
+
+    result = await adapter.complete(
+        model="claude-x",
+        messages=[{"role": "user", "content": "hi"}],
+        temperature=0.5,
+        max_tokens=8,
+    )
+
+    assert result.content == ""
+    assert result.status == "incomplete"
+    assert result.incomplete_details == {"reason": "max_tokens"}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_midstream_eof_is_closed_and_not_accepted():
+    from backend.utils.llm_client import StreamInterruptedError
+
+    class ClosableStream:
+        def __init__(self):
+            self.events = iter([
+                MagicMock(
+                    type="message_start",
+                    message=MagicMock(
+                        model="claude-x",
+                        usage=MagicMock(
+                            input_tokens=1,
+                            cache_creation_input_tokens=0,
+                            cache_read_input_tokens=0,
+                        ),
+                    ),
+                ),
+                MagicMock(
+                    type="content_block_delta",
+                    delta=MagicMock(type="text_delta", text="partial"),
+                ),
+            ])
+            self.close = AsyncMock()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self.events)
+            except StopIteration as error:
+                raise StopAsyncIteration from error
+
+    stream = ClosableStream()
+    client = MagicMock()
+    client.messages = MagicMock()
+    client.messages.create = AsyncMock(return_value=stream)
+    adapter = _AnthropicAdapter.__new__(_AnthropicAdapter)
+    adapter.client = client
+    adapter.agent_name = "t"
+
+    with pytest.raises(StreamInterruptedError, match="message_stop"):
+        await adapter.complete(
+            model="claude-x",
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.5,
+            max_tokens=1000,
+            stream=True,
+        )
+
+    stream.close.assert_awaited_once()
 
 
 from backend.utils.llm_client import _tool_calls_to_raw_assistant

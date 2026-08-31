@@ -58,3 +58,7 @@ class EmptyResponseError(RuntimeError):
     as a wrong-protocol signal (switch protocol), whereas this must be classified
     transient so the probe retries the SAME protocol. Probe exhaustion then
     surfaces as UpstreamExhaustedError from _probe_in_order."""
+
+
+class StreamInterruptedError(RuntimeError):
+    """A stream failed after its first event, so replay is unsafe."""

@@ -71,6 +71,7 @@ class ClientsMixin:
                     model=self.fallback_model,
                     messages=[{"role": "system", "content": self.system_prompt}, {"role": "user", "content": prompt}],
                     temperature=temperature,
+                    prefer_stream=True,
                 )
                 if not resp.content:
                     logger.warning("[Literature] Fallback model returned empty content")

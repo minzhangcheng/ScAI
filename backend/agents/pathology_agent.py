@@ -491,6 +491,7 @@ Please reply in structured format.
                     images=tiles,
                     temperature=0.3,
                     system_prompt=self.system_prompt,
+                    prefer_stream=True,
                 ),
                 image_label=image_info.id,
                 step_label="targeted",

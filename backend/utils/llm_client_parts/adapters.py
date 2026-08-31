@@ -24,14 +24,100 @@ from ..llm_logger import get_llm_logger, LLMInteraction
 logger = logging.getLogger(__name__)
 
 from .error_signals import _inject_web_search_if_needed, _is_unknown_web_search_tool_error, _is_unsupported_background_error, _swap_web_search_tool_name
+from .errors import StreamInterruptedError
 from .google import _DR_BACKGROUND_MAX_POLL_ERRORS, _DR_BACKGROUND_MAX_WAIT, _DR_BACKGROUND_POLL_INTERVAL, _DR_BACKGROUND_TERMINAL_FAILED
 from .media import _detect_image_mime_type, _inject_english_enforcement
 from .model_traits import _WEB_SEARCH_TOOL_NAMES, _get_effective_temperature, _is_deep_research_model
 from .protocol import _NO_BACKGROUND_ENDPOINT, _anthropic_messages_translate, _anthropic_restore_thinking, _anthropic_translate_tool_choice, _anthropic_translate_tools, _parse_anthropic_dump, _parse_responses_dump, _responses_messages_to_input, _responses_translate_tool_choice, _responses_translate_tools
 from .responses import LLMResponse, LLMToolResponse, _tool_calls_to_raw_assistant
+from .retry import DEFAULT_REQUEST_TIMEOUT
 
 
 _ANTHROPIC_DEFAULT_MAX_TOKENS = 4096
+
+
+async def _close_stream(stream) -> None:
+    """Close an SDK stream without masking the request's primary outcome."""
+    closer = getattr(stream, "close", None)
+    if not callable(closer):
+        closer = getattr(stream, "aclose", None)
+    if not callable(closer):
+        return
+    try:
+        result = closer()
+        if inspect.isawaitable(result):
+            await result
+    except asyncio.CancelledError:
+        raise
+    except Exception as close_error:  # cleanup must not replace the primary error
+        logger.warning("Failed to close LLM stream: %s", close_error)
+
+
+@dataclass
+class _StartedStream:
+    """A stream whose first event was received inside the retry boundary."""
+
+    stream: Any
+    iterator: Any
+    first_event: Any
+    consumer: Callable[["_StartedStream"], Awaitable[Any]]
+    idle_timeout: float
+    label: str
+    _closed: bool = False
+
+    async def events(self):
+        yield self.first_event
+        while True:
+            try:
+                event = await asyncio.wait_for(
+                    self.iterator.__anext__(), timeout=self.idle_timeout
+                )
+            except StopAsyncIteration:
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                raise StreamInterruptedError(
+                    f"{self.label} interrupted after the first event: "
+                    f"{type(error).__name__}: {error}"
+                ) from error
+            yield event
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await _close_stream(self.stream)
+
+    async def finish(self):
+        try:
+            return await self.consumer(self)
+        finally:
+            await self.close()
+
+
+async def _start_stream(stream, consumer, *, timeout, label) -> _StartedStream:
+    """Receive the first event before returning control to the retry layer."""
+    idle_timeout = timeout if timeout is not None else DEFAULT_REQUEST_TIMEOUT
+    iterator = stream.__aiter__()
+    try:
+        first_event = await asyncio.wait_for(
+            iterator.__anext__(), timeout=idle_timeout
+        )
+    except StopAsyncIteration as error:
+        await _close_stream(stream)
+        raise RuntimeError(f"{label} ended before its first event") from error
+    except BaseException:
+        await _close_stream(stream)
+        raise
+    return _StartedStream(
+        stream=stream,
+        iterator=iterator,
+        first_event=first_event,
+        consumer=consumer,
+        idle_timeout=idle_timeout,
+        label=label,
+    )
 
 class _AnthropicAdapter:
     """Adapter for the Anthropic Messages API. anthropic SDK is imported lazily
@@ -78,15 +164,120 @@ class _AnthropicAdapter:
             raw_assistant["reasoning_details"] = thinking
         return LLMToolResponse(content=text or None, tool_calls=tool_calls,
                                model=getattr(resp, "model", model), usage=usage,
-                               raw_response=resp, raw_assistant_message=raw_assistant)
+                               raw_response=resp, raw_assistant_message=raw_assistant,
+                               **self._terminal_metadata(dump.get("stop_reason")))
 
-    async def complete(self, model, messages, temperature, max_tokens, timeout=None, skip_temperature=False) -> LLMResponse:
+    @staticmethod
+    def _terminal_metadata(stop_reason: Any) -> Dict[str, Any]:
+        if stop_reason == "max_tokens":
+            return {
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_tokens"},
+            }
+        return {"status": "completed"}
+
+    async def _complete_stream_response(
+        self, started: _StartedStream, model: str
+    ) -> LLMResponse:
+        text_parts = []
+        raw_message = None
+        usage_data = {}
+        has_cache_telemetry = False
+        model_name = model
+        message_stopped = False
+        stop_reason = None
+        async for event in started.events():
+            event_type = getattr(event, "type", "")
+            if event_type == "message_start":
+                raw_message = getattr(event, "message", None)
+                model_name = getattr(raw_message, "model", model_name)
+                usage_obj = getattr(raw_message, "usage", None)
+                if usage_obj is not None:
+                    usage_data["input_tokens"] = (
+                        getattr(usage_obj, "input_tokens", 0) or 0
+                    )
+                    cache_creation = getattr(
+                        usage_obj, "cache_creation_input_tokens", None
+                    )
+                    cache_read = getattr(
+                        usage_obj, "cache_read_input_tokens", None
+                    )
+                    has_cache_telemetry = (
+                        cache_creation is not None or cache_read is not None
+                    )
+                    if cache_creation is not None:
+                        usage_data["cache_creation_input_tokens"] = cache_creation or 0
+                    if cache_read is not None:
+                        usage_data["cache_read_input_tokens"] = cache_read or 0
+            elif event_type == "content_block_delta":
+                delta = getattr(event, "delta", None)
+                if delta is not None and getattr(delta, "type", "") == "text_delta":
+                    text = getattr(delta, "text", "")
+                    if text:
+                        text_parts.append(text)
+            elif event_type == "message_delta":
+                delta = getattr(event, "delta", None)
+                event_stop_reason = getattr(delta, "stop_reason", None)
+                if isinstance(event_stop_reason, str):
+                    stop_reason = event_stop_reason
+                usage_obj = getattr(event, "usage", None)
+                if usage_obj is not None:
+                    usage_data["output_tokens"] = (
+                        getattr(usage_obj, "output_tokens", 0) or 0
+                    )
+            elif event_type == "message_stop":
+                message_stopped = True
+                break
+        if not message_stopped:
+            raise StreamInterruptedError(
+                "Anthropic text stream ended after the first event without message_stop"
+            )
+        prompt_tokens = sum(
+            usage_data.get(key, 0)
+            for key in (
+                "input_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+            )
+        )
+        completion_tokens = usage_data.get("output_tokens", 0)
+        usage = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+        if has_cache_telemetry:
+            usage["cached_tokens"] = usage_data.get("cache_read_input_tokens", 0)
+        return LLMResponse(
+            content="".join(text_parts),
+            model=model_name,
+            usage=usage,
+            raw_response=raw_message,
+            **self._terminal_metadata(stop_reason),
+        )
+
+    async def complete(self, model, messages, temperature, max_tokens, timeout=None,
+                       skip_temperature=False, stream=False,
+                       defer_stream=False) -> LLMResponse:
         params = self._build_params(model, messages, temperature, max_tokens, skip_temperature=skip_temperature)
+        if stream:
+            params["stream"] = True
+        if timeout is not None:
+            params["timeout"] = timeout
         resp = await self.client.messages.create(**params)
+        if stream:
+            started = await _start_stream(
+                resp,
+                lambda value: self._complete_stream_response(value, model),
+                timeout=timeout,
+                label="Anthropic text stream",
+            )
+            return started if defer_stream else await started.finish()
         dump = resp.model_dump()
         text, _tc, _think, usage = _parse_anthropic_dump(dump)
         return LLMResponse(content=text, model=getattr(resp, "model", model),
-                           usage=usage, raw_response=resp)
+                           usage=usage, raw_response=resp,
+                           **self._terminal_metadata(dump.get("stop_reason")))
 
     async def complete_with_tools(self, model, messages, tools, tool_choice,
                                   temperature, max_tokens, skip_temperature=False) -> LLMToolResponse:
@@ -115,19 +306,23 @@ class _AnthropicAdapter:
         dump = resp.model_dump()
         text, _tc, _think, usage = _parse_anthropic_dump(dump)
         return LLMResponse(content=text, model=getattr(resp, "model", model),
-                           usage=usage, raw_response=resp)
+                           usage=usage, raw_response=resp,
+                           **self._terminal_metadata(dump.get("stop_reason")))
 
     async def stream(self, model, messages, temperature, max_tokens, timeout=None, skip_temperature=False):
         params = self._build_params(model, messages, temperature, max_tokens, skip_temperature=skip_temperature)
         params["stream"] = True
         stream = await self.client.messages.create(**params)
-        async for event in stream:
-            if getattr(event, "type", "") == "content_block_delta":
-                delta = getattr(event, "delta", None)
-                if delta is not None and getattr(delta, "type", "") == "text_delta":
-                    text = getattr(delta, "text", "")
-                    if text:
-                        yield text
+        try:
+            async for event in stream:
+                if getattr(event, "type", "") == "content_block_delta":
+                    delta = getattr(event, "delta", None)
+                    if delta is not None and getattr(delta, "type", "") == "text_delta":
+                        text = getattr(delta, "text", "")
+                        if text:
+                            yield text
+        finally:
+            await _close_stream(stream)
 
 class _ResponsesAdapter:
     """Adapter for the OpenAI Responses API (sync form). Holds an AsyncOpenAI
@@ -269,7 +464,110 @@ class _ResponsesAdapter:
             f"{_DR_BACKGROUND_MAX_WAIT}s"
         )
 
-    async def complete(self, model, messages, temperature, max_tokens, timeout=None, skip_temperature=False, tools=None) -> LLMResponse:
+    @staticmethod
+    def _response_metadata(resp, dump, fallback_status=None) -> Dict[str, Any]:
+        status = dump.get("status") if isinstance(dump, dict) else None
+        if status is None:
+            raw_status = getattr(resp, "status", None)
+            if isinstance(raw_status, str):
+                status = raw_status
+        incomplete_details = (
+            dump.get("incomplete_details") if isinstance(dump, dict) else None
+        )
+        upstream_error = dump.get("error") if isinstance(dump, dict) else None
+        return {
+            "status": status or fallback_status,
+            "incomplete_details": incomplete_details,
+            "error": upstream_error,
+        }
+
+    async def _complete_stream_response(
+        self, started: _StartedStream, model: str, *, with_tools: bool = False
+    ):
+        text_parts = []
+        completed_response = None
+        terminal_event_type = None
+        terminal_event_error = None
+        async for event in started.events():
+            event_type = getattr(event, "type", "")
+            if event_type == "response.output_text.delta":
+                delta = getattr(event, "delta", None)
+                if delta:
+                    text_parts.append(delta)
+            elif event_type in {
+                "response.completed",
+                "response.failed",
+                "response.incomplete",
+            }:
+                completed_response = getattr(event, "response", None)
+                terminal_event_type = event_type
+                terminal_event_error = getattr(event, "error", None)
+                break
+
+        if completed_response is None and terminal_event_type is None:
+            raise StreamInterruptedError(
+                "Responses stream ended after the first event without a terminal response"
+            )
+        if completed_response is None:
+            status = terminal_event_type.removeprefix("response.")
+            metadata = {
+                "status": status,
+                "incomplete_details": None,
+                "error": terminal_event_error,
+            }
+            if with_tools:
+                return LLMToolResponse(
+                    content=None,
+                    tool_calls=[],
+                    model=model,
+                    usage={},
+                    raw_response=None,
+                    raw_assistant_message=_tool_calls_to_raw_assistant("", []),
+                    **metadata,
+                )
+            return LLMResponse(
+                content="".join(text_parts),
+                model=model,
+                usage={},
+                raw_response=None,
+                **metadata,
+            )
+        dump = completed_response.model_dump()
+        final_text, tool_calls, citations, usage = _parse_responses_dump(dump)
+        text = final_text or "".join(text_parts)
+        metadata = self._response_metadata(
+            completed_response,
+            dump,
+            fallback_status=(
+                terminal_event_type.removeprefix("response.")
+                if terminal_event_type else None
+            ),
+        )
+        if metadata["error"] is None and terminal_event_type == "response.failed":
+            metadata["error"] = terminal_event_error
+        if with_tools:
+            raw_assistant = _tool_calls_to_raw_assistant(text, tool_calls)
+            return LLMToolResponse(
+                content=text or None,
+                tool_calls=tool_calls,
+                model=getattr(completed_response, "model", model),
+                usage=usage,
+                raw_response=completed_response,
+                raw_assistant_message=raw_assistant,
+                **metadata,
+            )
+        return LLMResponse(
+            content=text,
+            model=getattr(completed_response, "model", model),
+            usage=usage,
+            raw_response=completed_response,
+            citations=citations,
+            **metadata,
+        )
+
+    async def complete(self, model, messages, temperature, max_tokens, timeout=None,
+                       skip_temperature=False, tools=None, stream=False,
+                       defer_stream=False) -> LLMResponse:
         params = self._build_params(
             model,
             messages,
@@ -279,30 +577,54 @@ class _ResponsesAdapter:
             timeout=timeout,
             skip_temperature=skip_temperature,
             background_ok=True,
+            stream=stream,
         )
         resp = await self._create_responses_with_fallback(params)
+        if stream:
+            started = await _start_stream(
+                resp,
+                lambda value: self._complete_stream_response(value, model),
+                timeout=timeout,
+                label="Responses text stream",
+            )
+            return started if defer_stream else await started.finish()
         resp = await self._await_completion(resp)
         dump = resp.model_dump()
         text, _tools, citations, usage = _parse_responses_dump(dump)
         return LLMResponse(content=text, model=getattr(resp, "model", model),
-                           usage=usage, raw_response=resp, citations=citations)
+                           usage=usage, raw_response=resp, citations=citations,
+                           **self._response_metadata(resp, dump))
 
     async def complete_with_tools(self, model, messages, tools, tool_choice,
-                                  temperature, max_tokens, skip_temperature=False) -> LLMToolResponse:
+                                  temperature, max_tokens, skip_temperature=False,
+                                  stream=False, defer_stream=False) -> LLMToolResponse:
         params = self._build_params(model, messages, temperature, max_tokens,
-                                    tools=tools, tool_choice=tool_choice, skip_temperature=skip_temperature)
+                                    tools=tools, tool_choice=tool_choice,
+                                    skip_temperature=skip_temperature, stream=stream)
         resp = await self._create_responses_with_fallback(params)
+        if stream:
+            started = await _start_stream(
+                resp,
+                lambda value: self._complete_stream_response(
+                    value, model, with_tools=True
+                ),
+                timeout=None,
+                label="Responses tool stream",
+            )
+            return started if defer_stream else await started.finish()
         resp = await self._await_completion(resp)
         dump = resp.model_dump()
         text, tool_calls, _citations, usage = _parse_responses_dump(dump)
         raw_assistant = _tool_calls_to_raw_assistant(text, tool_calls)
         return LLMToolResponse(content=text or None, tool_calls=tool_calls,
                                model=getattr(resp, "model", model), usage=usage,
-                               raw_response=resp, raw_assistant_message=raw_assistant)
+                               raw_response=resp, raw_assistant_message=raw_assistant,
+                               **self._response_metadata(resp, dump))
 
     async def complete_vision(self, model, text_prompt, images, temperature,
                               max_tokens, timeout=None, skip_temperature=False,
-                              system_prompt=None) -> LLMResponse:
+                              system_prompt=None, stream=False,
+                              defer_stream=False) -> LLMResponse:
         content = [{"type": "input_text", "text": text_prompt}]
         for img_b64 in images:
             mime = _detect_image_mime_type(img_b64)
@@ -312,13 +634,26 @@ class _ResponsesAdapter:
              if system_prompt else [])
             + [{"role": "user", "content": content}]
         )
-        params = self._build_params(model, messages, temperature, max_tokens, timeout=timeout, skip_temperature=skip_temperature)
+        params = self._build_params(
+            model, messages, temperature, max_tokens, stream=stream,
+            timeout=timeout, skip_temperature=skip_temperature,
+        )
         resp = await self._create_responses_with_fallback(params)
+        if stream:
+            started = await _start_stream(
+                resp,
+                lambda value: self._complete_stream_response(value, model),
+                timeout=timeout,
+                label="Responses vision stream",
+            )
+            return started if defer_stream else await started.finish()
+
         resp = await self._await_completion(resp)
         dump = resp.model_dump()
         text, _tools, citations, usage = _parse_responses_dump(dump)
         return LLMResponse(content=text, model=getattr(resp, "model", model),
-                           usage=usage, raw_response=resp, citations=citations)
+                           usage=usage, raw_response=resp, citations=citations,
+                           **self._response_metadata(resp, dump))
 
     async def stream(self, model, messages, temperature, max_tokens, timeout=None, skip_temperature=False):
         """Yield text deltas from a streaming Responses call. Connection
@@ -326,8 +661,11 @@ class _ResponsesAdapter:
         params = self._build_params(model, messages, temperature, max_tokens,
                                     stream=True, timeout=timeout, skip_temperature=skip_temperature)
         stream = await self._create_responses_with_fallback(params)
-        async for event in stream:
-            if getattr(event, "type", "") == "response.output_text.delta":
-                delta = getattr(event, "delta", None)
-                if delta:
-                    yield delta
+        try:
+            async for event in stream:
+                if getattr(event, "type", "") == "response.output_text.delta":
+                    delta = getattr(event, "delta", None)
+                    if delta:
+                        yield delta
+        finally:
+            await _close_stream(stream)

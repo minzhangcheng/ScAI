@@ -923,6 +923,7 @@ Note: If you are not certain about specific citation information, please clearly
                 model=self.fallback_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
+                prefer_stream=True,
             )
             response = resp.content or ""
         else:

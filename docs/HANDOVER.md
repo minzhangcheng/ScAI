@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.51.2 · **Last updated**: 2026-08-31
+**Version**: 0.51.3 · **Last updated**: 2026-08-31
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,23 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.51.x — (2026-08-31 onward)**
+
+- `0.51.3` — Makes routine agent, chat, and report LLM calls prefer aggregated
+  streaming so long generations produce upstream traffic instead of remaining
+  idle behind a gateway. Text aggregation supports Responses, Chat Completions,
+  and Anthropic; Responses tool calls and vision calls use the same stream-first
+  path, while deep-research models retain their background polling lifecycle.
+  A deterministic HTTP 400 stream rejection is cached per endpoint, model,
+  modality, and protocol before falling back to the established non-streaming
+  request; Chat Completions retries `stream_options` rejection without disabling
+  the stream. Only stream creation and the first event are inside the retry
+  boundary. Once output begins, idle or transport interruption closes the stream
+  and fails without replaying another request or protocol, preventing duplicate
+  generation and tool execution. Terminal failed/incomplete metadata now reaches
+  the shared upstream-failure path, public refusal text remains answer content,
+  and provider usage is retained where supplied. Focused adapter, protocol,
+  caller-contract, and version-consistency regressions passed; no image build,
+  deployment, push, or historical-session mutation was performed.
 
 - `0.51.2` — Corrects the opt-in method-decision guidance pilot after review.
   Planning retrieval now uses focused decision context, card-specific metadata
