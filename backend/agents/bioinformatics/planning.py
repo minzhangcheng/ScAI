@@ -197,6 +197,40 @@ class PlanGenerationFailure(RuntimeError):
 class PlanningMixin:
     """Analysis-plan generation, incremental revision, and checkpoint discovery."""
 
+    def _method_decision_guidance_block(self, *query_parts: Any) -> str:
+        """Return optional, bounded planning context without selecting a method."""
+        try:
+            if self._provider.get_method_decision_guidance_enabled() is not True:
+                return ""
+        except Exception as exc:
+            logger.warning(
+                "[Bioinformatics] method decision guidance switch unavailable: %s",
+                exc,
+            )
+            return ""
+
+        try:
+            from ...services.method_decision_cards import guidance_for_query
+
+            query = "\n".join(str(part) for part in query_parts if part)
+            guidance = guidance_for_query(query)
+        except Exception as exc:
+            logger.warning(
+                "[Bioinformatics] method decision guidance unavailable: %s", exc
+            )
+            return ""
+        if not guidance:
+            return ""
+        return f"""
+
+## Non-binding Method Decision Guidance
+The following cards compare unranked approaches. Use observed facts to choose
+and justify an executable method and its material parameters. Do not treat a
+card as a required method or threshold. Put unresolved material alternatives
+in key_decision_points for PI review.
+
+{guidance}"""
+
     @staticmethod
     def _prepare_plan_data(
         plan_data: dict,
@@ -545,13 +579,24 @@ You are REVISING the remaining steps based on new findings."""
 
         research_context = self._research_context_block(state)
         modality_line = _planner_modality_line(state)
+        decision_guidance = self._method_decision_guidance_block(
+            bounded_overview,
+            tasks_text,
+            planning_stage,
+            modality_line,
+            data_desc,
+            sample_design_facts,
+            bulk_profile_block,
+            previous_context,
+            revision_context,
+        )
 
         prompt = f"""You are planning a single-cell RNA-seq bioinformatics analysis. Generate a method-level analysis plan.
 {modality_line}
 
 ## Data Context
 {data_desc}{sample_design_facts}{bulk_profile_block}{loaded_objects_block}
-{research_context}
+{research_context}{decision_guidance}
 
 ## PI's Analysis Goals
 Overview: {bounded_overview}
@@ -773,6 +818,23 @@ Return the plan as a JSON object:
 
         research_context = self._research_context_block(state)
         stage_guidance = _stage_guidance_text(current_plan.stage or "full")
+        revision_data_desc = truncate_for_llm(
+            state.build_experimental_design_summary(),
+            max_chars=8_000,
+        )
+        revision_sample_facts = sequencing_design_instruction(state)
+        decision_guidance = self._method_decision_guidance_block(
+            overview,
+            tasks_text,
+            current_plan.stage,
+            _planner_modality_line(state),
+            revision_data_desc,
+            revision_sample_facts,
+            research_context,
+            bounded_feedback,
+            completed_text,
+            affected_text,
+        )
 
         prompt = f"""Revise an analysis plan based on PI feedback. Only modify affected steps — completed steps are locked.
 {research_context}
@@ -785,7 +847,7 @@ Return the plan as a JSON object:
 
 ## Steps To Revise
 {affected_text}
-{stage_guidance}
+{stage_guidance}{decision_guidance}
 
 ## Evidence Policy
 {MECHANISM_EVIDENCE_POLICY}

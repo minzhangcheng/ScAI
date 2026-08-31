@@ -37,6 +37,14 @@ _ENABLE_SNAPSHOT_V2 = os.environ.get("SCAI_ENABLE_SNAPSHOT_V2", "").lower() in (
 )
 SNAPSHOT_V2_ENABLED = _ENABLE_SNAPSHOT_V2
 
+_ENABLE_METHOD_DECISION_GUIDANCE = os.environ.get(
+    "SCAI_ENABLE_METHOD_DECISION_GUIDANCE", ""
+).lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
 
 #: Retained for lower-level callers that explicitly inject a quota. Production
 #: Snapshot V2 storage is unbounded and reports a zero quota/warning ratio.
@@ -428,6 +436,15 @@ class SystemConfig(BaseModel):
     enable_reproducibility: bool = Field(
         default=_ENABLE_REPRODUCIBILITY,
         description="Enable reproducibility bundle generation (checksums, environment snapshot, commands, decisions)",
+    )
+
+    enable_method_decision_guidance: bool = Field(
+        default=_ENABLE_METHOD_DECISION_GUIDANCE,
+        description=(
+            "Enable the experimental, non-binding method decision card pilot. "
+            "Disabled by default; set SCAI_ENABLE_METHOD_DECISION_GUIDANCE=true "
+            "before backend startup to opt in."
+        ),
     )
 
     enable_annotation_validation_round: bool = Field(

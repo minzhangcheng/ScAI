@@ -8,10 +8,11 @@ mechanism and literature without host code deciding whether a result passes.
 from __future__ import annotations
 
 import logging
-import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
+
+from .method_guidance_search import search_by_token_overlap
 
 logger = logging.getLogger(__name__)
 
@@ -87,19 +88,13 @@ def search_rules(query: str, limit: int = 5) -> list[dict]:
     anything needing an index, and a wrong match here is cheap because the model
     reads the rule before applying it.
     """
-    tokens = {t for t in re.split(r"[^a-z0-9]+", str(query).lower()) if len(t) > 2}
-    if not tokens:
-        return []
-    scored: list[tuple[int, dict]] = []
-    for rule in all_rules():
-        haystack = " ".join(str(rule.get(field, "")) for field in
-                            ("id", "title", "rule", "why", "applies_when", "python")).lower()
-        hay_tokens = {t for t in re.split(r"[^a-z0-9]+", haystack) if len(t) > 2}
-        overlap = len(tokens & hay_tokens)
-        if overlap:
-            scored.append((overlap, rule))
-    scored.sort(key=lambda pair: (-pair[0], pair[1].get("id", "")))
-    return [rule for _, rule in scored[:limit]]
+    fields = ("id", "title", "rule", "why", "applies_when", "python")
+    return search_by_token_overlap(
+        all_rules(),
+        query,
+        field_weights={field: 1.0 for field in fields},
+        limit=limit,
+    )
 
 
 def attribution() -> str:
