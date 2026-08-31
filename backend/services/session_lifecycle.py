@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, TypeVar
 
 from backend.config import REPORTS_DIR, SESSION_DIR, STATE_DIR, UPLOAD_DIR, WORKSPACE_DIR
+from backend.constants import VERSION
 from backend.utils.files import (
     atomic_write_bytes,
     legacy_session_state_paths,
@@ -457,6 +458,7 @@ def _register_new_generation_locked(state) -> int:
             f"session id collision with persisted data: {state.id}"
         )
     generation = 1
+    state.scai_version = VERSION
     state.lifecycle_generation = generation
     _write_record({
         "session_id": state.id,

@@ -6,6 +6,7 @@ import weakref
 
 import pytest
 
+from backend.constants import VERSION
 from backend.models.schemas import AnalysisState
 from backend.services import session_lifecycle, session_store
 from backend.services.session_lifecycle import (
@@ -216,7 +217,9 @@ async def test_disk_session_still_loads_after_process_cache_restart(monkeypatch,
     _configure_roots(monkeypatch, tmp_path)
     monkeypatch.setattr("backend.config.is_snapshot_v2_enabled", lambda: False)
     state = AnalysisState(id="restart-load", user_id="owner")
+    assert state.scai_version is None
     register_new_generation(state)
+    assert state.scai_version == VERSION
     session_store.save_session_to_disk(state.id, state)
     sessions.pop(state.id, None)
 
@@ -225,6 +228,7 @@ async def test_disk_session_still_loads_after_process_cache_restart(monkeypatch,
     assert loaded is not None
     assert loaded.id == state.id
     assert loaded.lifecycle_generation == state.lifecycle_generation
+    assert loaded.scai_version == VERSION
 
 
 @pytest.mark.asyncio

@@ -56,6 +56,24 @@ def test_appendix_resolves_literature_deep_research_label():
     assert appendix["agent_models"]["literature"] == "Google Deep Research"
 
 
+def test_appendix_reports_persisted_session_scai_version():
+    state = AnalysisState(
+        id="versioned-session",
+        name="t",
+        initial_instruction="x",
+        user_id="u1",
+        scai_version="0.49.9",
+    )
+    sup = _make_supervisor(state)
+
+    appendix = sup._build_appendix(state, stats={})
+    html = sup._build_appendix_html_section({"appendix": appendix})
+
+    assert appendix["scai_version"] == "0.49.9"
+    assert "ScAI Version (Session Created With)" in html
+    assert "0.49.9" in html
+
+
 def test_appendix_includes_literature_report_link_when_reports_exist():
     state = AnalysisState(id="s2", name="t", initial_instruction="x", user_id="u1")
     state.literature_reports = [

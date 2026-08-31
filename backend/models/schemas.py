@@ -132,6 +132,7 @@ class AnalysisState(BaseModel):
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     lifecycle_generation: int = 0
+    scai_version: Optional[str] = None
     name: str = "Untitled Analysis"
     user_id: str = Field(..., min_length=1)  # Owner user ID (required, non-empty)
     created_at: datetime = Field(default_factory=datetime.now)

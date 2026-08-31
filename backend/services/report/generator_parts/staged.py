@@ -368,6 +368,7 @@ async def _assemble_report(
         "project_name": report_state.name,
         "project_description": report_state.initial_instruction,
         "created_at": report_state.created_at.isoformat() if hasattr(report_state.created_at, 'isoformat') else str(report_state.created_at),
+        "scai_version": report_state.scai_version,
         "agent_models": bindings.build_agent_models_appendix(report_state),
         "agent_temperatures": {k: v for k, v in report_state.custom_temperatures.items()} if report_state.custom_temperatures else {},
         "treatment_groups": [

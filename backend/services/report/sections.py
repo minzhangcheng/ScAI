@@ -210,7 +210,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                     <tbody>
                         <tr><td>Python</td><td><code>{esc(str(info.get('python_version', 'N/A'))[:120])}</code></td></tr>
                         <tr><td>Platform</td><td>{esc(info.get('platform', 'N/A'))}</td></tr>
-                        <tr><td>ScAI Version</td><td>{esc(info.get('scai_version', 'N/A'))}</td></tr>
+                        <tr><td>ScAI Version (Report Runtime)</td><td>{esc(info.get('scai_version', 'N/A'))}</td></tr>
                         <tr><td>CPU Cores</td><td>{info.get('cpu_count', 'N/A')}</td></tr>
                         <tr><td>Memory</td><td>{info.get('memory_gb', 'N/A')} GB</td></tr>
                     </tbody>
@@ -328,6 +328,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             <tbody>
                 <tr><td><strong>{lbl_name}</strong></td><td>{esc(state.name)}</td></tr>
                 <tr><td><strong>{lbl_desc}</strong></td><td>{esc(state.initial_instruction[:500]) if state.initial_instruction else '-'}</td></tr>
+                <tr><td><strong>ScAI Version (Session Created With)</strong></td><td>{esc(state.scai_version or 'Unknown (legacy session)')}</td></tr>
                 <tr><td><strong>{lbl_created}</strong></td><td>{esc(created_str)}</td></tr>
                 <tr><td><strong>{lbl_report_time}</strong></td><td>{esc(report_time)}</td></tr>
             </tbody>
