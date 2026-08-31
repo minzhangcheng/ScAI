@@ -127,6 +127,7 @@ async def _generate(args: argparse.Namespace) -> None:
         search_cards,
     )
     from backend.utils.llm_client import OpenAICompatibleClient
+    from backend.utils.formatting import safe_parse_json
 
     model = config.models.bioinformatics_model
     temperature = config.temperatures.bioinformatics
@@ -184,18 +185,48 @@ async def _generate(args: argparse.Namespace) -> None:
             for condition in order:
                 label = labels[condition]
                 started = time.perf_counter()
-                response = await client.chat(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompts[condition]},
-                    ],
-                    temperature=temperature,
-                    max_tokens=args.max_tokens,
-                    timeout=args.timeout,
-                    max_retries=2,
-                )
+                request_prompt = prompts[condition]
+                attempts = []
+                response = None
+                parsed = None
+                for attempt_number in (1, 2):
+                    response = await client.chat(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": request_prompt},
+                        ],
+                        temperature=temperature,
+                        max_tokens=args.max_tokens,
+                        timeout=args.timeout,
+                        max_retries=2,
+                    )
+                    parsed = safe_parse_json(response.content, default=None)
+                    parseable = bool(
+                        isinstance(parsed, dict)
+                        and isinstance(parsed.get("steps"), list)
+                        and parsed["steps"]
+                    )
+                    attempts.append({
+                        "attempt": attempt_number,
+                        "content": response.content,
+                        "content_sha256": _sha256(response.content),
+                        "prompt_sha256": _sha256(request_prompt),
+                        "usage": response.usage,
+                        "parseable_plan": parseable,
+                    })
+                    if parseable:
+                        break
+                    request_prompt = (
+                        prompts[condition]
+                        + "\n\nIMPORTANT: Return valid JSON only. The top-level "
+                        "object must contain a non-empty steps array. Numeric IDs "
+                        "and depends_on entries must be numbers. Do not include "
+                        "analysis, commentary, or Markdown outside the JSON object. "
+                        f"[retry:b2-{case_id}-{label.lower()}]"
+                    )
                 latency_ms = round((time.perf_counter() - started) * 1000)
+                assert response is not None
                 outputs[label] = {
                     "content": response.content,
                     "content_sha256": _sha256(response.content),
@@ -203,6 +234,15 @@ async def _generate(args: argparse.Namespace) -> None:
                     "usage": response.usage,
                     "latency_ms": latency_ms,
                     "prompt_sha256": _sha256(prompts[condition]),
+                    "attempts": attempts,
+                    "parseable_plan": bool(
+                        isinstance(parsed, dict)
+                        and isinstance(parsed.get("steps"), list)
+                        and parsed["steps"]
+                    ),
+                    "step_count": len(parsed.get("steps", []))
+                    if isinstance(parsed, dict)
+                    else 0,
                 }
                 print(
                     f"{case_id} {label}: complete in {latency_ms / 1000:.1f}s",
