@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import time
@@ -35,7 +36,7 @@ ORDER_SEED = "method-guidance-b2-2026-08-31"
 GUIDANCE_HEADER = """
 
 ## Non-binding Method Decision Guidance
-The following cards compare unranked approaches. Use observed facts to choose
+The retrieved guidance compares unranked approaches. Use observed facts to choose
 and justify an executable method and its material parameters. Do not treat a
 card as a required method or threshold. Put unresolved material alternatives
 in key_decision_points for PI review.
@@ -84,6 +85,56 @@ def _insert_guidance(prompt: str, block: str) -> str:
     return prompt + block
 
 
+def _prompt_section(prompt: str, heading: str) -> str:
+    match = re.search(
+        rf"(?ms)^{re.escape(heading)}\s*\n(.*?)(?=^## |\Z)",
+        prompt,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _focused_planning_query(prompt: str, build_query) -> str:
+    """Recover the narrow production retrieval fields from a recorded prompt."""
+    goals = _prompt_section(prompt, "## PI's Analysis Goals") or _prompt_section(
+        prompt, "## PI's Analysis Goals (still binding on this revision)"
+    )
+    feedback = _prompt_section(prompt, "## PI's Feedback")
+    affected_steps = _prompt_section(prompt, "## Steps To Revise")
+    modality = ""
+    if "\n## Data Context" in prompt:
+        preamble = prompt.split("\n## Data Context", 1)[0].splitlines()[1:]
+        modality = "\n".join(line for line in preamble if line.strip()).strip()
+    return build_query(
+        tasks=goals,
+        modality=modality,
+        feedback=feedback,
+        affected_steps=affected_steps,
+    )
+
+
+def _build_guided_prompt(
+    case_id: str,
+    baseline_prompt: str,
+    retrieval_query: str,
+    hits: list[dict],
+    guidance: str,
+) -> str:
+    """Fail if a frozen on/off pair would not contain a guidance contrast."""
+    if not retrieval_query.strip():
+        raise ValueError(f"{case_id}: empty retrieval query")
+    if not hits:
+        raise ValueError(f"{case_id}: retrieval returned no decision cards")
+    if not guidance.strip():
+        raise ValueError(f"{case_id}: retrieval returned empty guidance")
+    guided_prompt = _insert_guidance(
+        baseline_prompt,
+        GUIDANCE_HEADER.format(guidance=guidance),
+    )
+    if guided_prompt == baseline_prompt:
+        raise ValueError(f"{case_id}: guided prompt is identical to baseline")
+    return guided_prompt
+
+
 def _condition_order(case_id: str) -> list[str]:
     digest = hashlib.sha256(f"{ORDER_SEED}:{case_id}".encode()).digest()
     return ["off", "on"] if digest[0] % 2 == 0 else ["on", "off"]
@@ -123,6 +174,7 @@ async def _generate(args: argparse.Namespace) -> None:
     config = _load_config(args.database, args.secret_file, output_dir)
 
     from backend.services.method_decision_cards import (
+        build_planning_guidance_query,
         guidance_for_query,
         search_cards,
     )
@@ -155,6 +207,10 @@ async def _generate(args: argparse.Namespace) -> None:
             "current system prompt plus exact persisted Bioinformatics planning "
             "request; guided condition inserts the current card block"
         ),
+        "retrieval_query": (
+            "focused modality, PI goals, PI feedback, and affected-step sections "
+            "using the production query builder"
+        ),
     }
     _write_json(output_dir / "run.json", run_meta)
 
@@ -171,12 +227,18 @@ async def _generate(args: argparse.Namespace) -> None:
             if row.get("agent") != "bioinformatics" or row.get("interaction_type") != "chat":
                 raise ValueError(f"{case_id} is not a Bioinformatics chat call")
             baseline_prompt = _planning_prompt(row)
-            hits = search_cards(baseline_prompt)
-            guidance = guidance_for_query(baseline_prompt)
-            guided_prompt = _insert_guidance(
+            retrieval_query = _focused_planning_query(
+                baseline_prompt, build_planning_guidance_query
+            )
+            hits = search_cards(retrieval_query)
+            guidance = guidance_for_query(retrieval_query)
+            guided_prompt = _build_guided_prompt(
+                case_id,
                 baseline_prompt,
-                GUIDANCE_HEADER.format(guidance=guidance),
-            ) if guidance else baseline_prompt
+                retrieval_query,
+                hits,
+                guidance,
+            )
             prompts = {"off": baseline_prompt, "on": guided_prompt}
             order = _condition_order(case_id)
             labels = {condition: label for condition, label in zip(order, ("A", "B"))}

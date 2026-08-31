@@ -35,6 +35,7 @@ import json as _json
 from backend.services import ora_kernel
 from backend.services.marker_priors import MarkerDB, summarize_database_priors
 from ...services.sample_design import sequencing_design_instruction
+from ...services.method_decision_cards import build_planning_guidance_query
 
 from ...utils.formatting import (
     as_list,
@@ -224,7 +225,7 @@ class PlanningMixin:
         return f"""
 
 ## Non-binding Method Decision Guidance
-The following cards compare unranked approaches. Use observed facts to choose
+The retrieved guidance compares unranked approaches. Use observed facts to choose
 and justify an executable method and its material parameters. Do not treat a
 card as a required method or threshold. Put unresolved material alternatives
 in key_decision_points for PI review.
@@ -579,17 +580,13 @@ You are REVISING the remaining steps based on new findings."""
 
         research_context = self._research_context_block(state)
         modality_line = _planner_modality_line(state)
-        decision_guidance = self._method_decision_guidance_block(
-            bounded_overview,
-            tasks_text,
-            planning_stage,
-            modality_line,
-            data_desc,
-            sample_design_facts,
-            bulk_profile_block,
-            previous_context,
-            revision_context,
+        decision_query = build_planning_guidance_query(
+            overview=bounded_overview,
+            tasks=tasks_text,
+            stage=planning_stage,
+            modality=modality_line,
         )
+        decision_guidance = self._method_decision_guidance_block(decision_query)
 
         prompt = f"""You are planning a single-cell RNA-seq bioinformatics analysis. Generate a method-level analysis plan.
 {modality_line}
@@ -818,23 +815,22 @@ Return the plan as a JSON object:
 
         research_context = self._research_context_block(state)
         stage_guidance = _stage_guidance_text(current_plan.stage or "full")
-        revision_data_desc = truncate_for_llm(
-            state.build_experimental_design_summary(),
-            max_chars=8_000,
+        affected_query = truncate_for_llm(
+            "\n".join(
+                f"{step.title}: {step.method}; {step.rationale}"
+                for step in affected_steps
+            ),
+            max_chars=4_000,
         )
-        revision_sample_facts = sequencing_design_instruction(state)
-        decision_guidance = self._method_decision_guidance_block(
-            overview,
-            tasks_text,
-            current_plan.stage,
-            _planner_modality_line(state),
-            revision_data_desc,
-            revision_sample_facts,
-            research_context,
-            bounded_feedback,
-            completed_text,
-            affected_text,
+        decision_query = build_planning_guidance_query(
+            overview=truncate_for_llm(str(overview), max_chars=4_000),
+            tasks=tasks_text,
+            stage=current_plan.stage or "full",
+            modality=_planner_modality_line(state),
+            feedback=truncate_for_llm(str(pi_feedback), max_chars=4_000),
+            affected_steps=affected_query,
         )
+        decision_guidance = self._method_decision_guidance_block(decision_query)
 
         prompt = f"""Revise an analysis plan based on PI feedback. Only modify affected steps — completed steps are locked.
 {research_context}

@@ -1,4 +1,6 @@
 """Switch-controlled Bioinformatics prompt and method-lookup integration."""
+from pathlib import Path
+import runpy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -8,6 +10,7 @@ import backend.agents.bioinformatics_agent as bio_mod
 from backend.agents.bioinformatics import executor_collaboration
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
 from backend.models.schemas import AnalysisPlan, AnalysisState, PlanStep
+from backend.services.method_decision_cards import build_planning_guidance_query
 
 
 PLAN_JSON = (
@@ -65,6 +68,70 @@ async def test_switch_on_injects_bounded_initial_planning_cards():
     assert prompt.count("[decision card:") <= 3
     assert "unresolved material alternatives" in prompt
     assert "key_decision_points" in prompt
+
+
+@pytest.mark.asyncio
+async def test_initial_planning_retrieval_uses_only_focused_decision_context():
+    agent = _agent(True)
+    agent._method_decision_guidance_block = MagicMock(return_value="")
+
+    await agent.generate_analysis_plan(
+        state=_state(),
+        pi_tasks=["Compare reference mapping with marker-based annotation"],
+        overview="Choose an annotation strategy",
+        phase="exploration",
+    )
+
+    agent._method_decision_guidance_block.assert_called_once()
+    (query,) = agent._method_decision_guidance_block.call_args.args
+    assert "Choose an annotation strategy" in query
+    assert "Compare reference mapping with marker-based annotation" in query
+    assert "Data Context" not in query
+    assert "Previous Stage Results" not in query
+
+
+def test_b2_evaluator_uses_focused_planning_sections():
+    evaluator = runpy.run_path(
+        str(Path(__file__).resolve().parents[2] / "scripts" / "evaluate-method-guidance-pilot.py"),
+        run_name="method_guidance_evaluator_test",
+    )
+    prompt = """Plan an analysis.
+This run has BOTH single-cell and bulk data.
+
+## Data Context
+IRRELEVANT_DATA_CONTEXT
+
+## PI's Analysis Goals
+Overview: choose an annotation strategy
+Tasks:
+- compare reference mapping with marker evidence
+
+## Previous Stage Results
+IRRELEVANT_COMPLETED_CONTEXT
+"""
+
+    query = evaluator["_focused_planning_query"](
+        prompt, build_planning_guidance_query
+    )
+
+    assert "choose an annotation strategy" in query
+    assert "compare reference mapping with marker evidence" in query
+    assert "single-cell and bulk" in query
+    assert "IRRELEVANT_DATA_CONTEXT" not in query
+    assert "IRRELEVANT_COMPLETED_CONTEXT" not in query
+
+    build_guided_prompt = evaluator["_build_guided_prompt"]
+    with pytest.raises(ValueError, match="empty retrieval query"):
+        build_guided_prompt("case-test", prompt, "", [{}], "guidance")
+    with pytest.raises(ValueError, match="no decision cards"):
+        build_guided_prompt("case-test", prompt, query, [], "guidance")
+    with pytest.raises(ValueError, match="empty guidance"):
+        build_guided_prompt("case-test", prompt, query, [{}], "")
+
+    guided_prompt = build_guided_prompt(
+        "case-test", prompt, query, [{}], "complete guidance"
+    )
+    assert guided_prompt != prompt
 
 
 @pytest.mark.asyncio

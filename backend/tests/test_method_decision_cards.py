@@ -8,6 +8,7 @@ from backend.services.method_decision_cards import (
     MAX_GUIDANCE_CARDS,
     MAX_GUIDANCE_CHARS,
     all_cards,
+    build_planning_guidance_query,
     format_card,
     get_card,
     guidance_for_query,
@@ -98,14 +99,57 @@ def test_card_search_finds_the_named_decision_surface(query, expected_id):
     assert get_card(expected_id) in search_cards(query)
 
 
-def test_rendering_is_bounded_to_three_cards_and_six_thousand_characters():
-    text = guidance_for_query(
-        "batch integration differential expression clustering annotation "
-        "trajectory velocity enrichment activity composition abundance"
+def test_card_search_does_not_rank_on_verbose_rendering_fields(monkeypatch):
+    monkeypatch.setattr(
+        cards_mod,
+        "all_cards",
+        lambda: [
+            {
+                "id": "unrelated-card",
+                "title": "Unrelated card",
+                "aliases": [],
+                "applies_when": "unrelated question",
+                "facts_to_consider": ["body-only-retrieval-token"],
+            }
+        ],
     )
-    assert text.count("[decision card:") <= MAX_GUIDANCE_CARDS
+
+    assert search_cards("body-only-retrieval-token") == []
+
+
+def test_card_search_ignores_generic_method_prose():
+    assert search_cards(
+        "and the for with between from data method choice"
+    ) == []
+
+
+def test_rendering_respects_card_and_character_caps_without_partial_cards():
+    text = guidance_for_query(
+        "Harmony PCA scVI batch correction reference mapping marker annotation"
+    )
+    assert text.count("[decision card:") == MAX_GUIDANCE_CARDS
     assert len(text) <= MAX_GUIDANCE_CHARS
     assert "Unranked approaches:" in text
+    assert "...[truncated]" not in text
+    for rendered_card in text.split("\n\n"):
+        assert rendered_card.startswith("[decision card:")
+        assert "Selection considerations:" in rendered_card
+        assert "Citations:" in rendered_card
+
+
+def test_planning_guidance_query_contains_only_explicit_decision_context():
+    query = build_planning_guidance_query(
+        overview="choose annotation strategy",
+        tasks="compare reference mapping with marker evidence",
+        stage="full",
+        modality="single-cell and bulk",
+    )
+
+    assert "choose annotation strategy" in query
+    assert "compare reference mapping with marker evidence" in query
+    assert "full" in query
+    assert "single-cell and bulk" in query
+    assert "Data Context" not in query
 
 
 def test_no_match_returns_no_optional_guidance():

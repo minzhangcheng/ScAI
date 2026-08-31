@@ -38,14 +38,18 @@ def search_by_token_overlap(
     field_weights: Mapping[str, float],
     limit: int,
     id_field: str = "id",
+    ignored_tokens: Iterable[str] = (),
 ) -> list[dict]:
     """Rank records by weighted query-token overlap with deterministic ties.
 
     A token occurring in several fields receives the largest applicable field
     weight, not the sum. Equal field weights therefore reproduce the previous
-    method-rule union-of-fields overlap exactly.
+    method-rule union-of-fields overlap exactly. Scores can only grow as a
+    query gains distinct matching tokens, so callers should pass focused
+    queries and may exclude corpus-specific generic tokens.
     """
-    query_tokens = tokenize(query)
+    ignored = {str(token).lower() for token in ignored_tokens}
+    query_tokens = tokenize(query) - ignored
     if not query_tokens or limit <= 0:
         return []
 

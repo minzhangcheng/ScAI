@@ -205,6 +205,16 @@ def test_global_system_config_discards_legacy_deployment_runtime_budgets():
         assert key not in opened
 
 
+def test_global_system_config_discards_process_scoped_method_guidance_switch():
+    payload = {
+        "api": {"api_key": "", "llm_base_url": "https://example.test/v1"},
+        "enable_method_decision_guidance": True,
+    }
+
+    assert "enable_method_decision_guidance" not in seal_system_config_payload(payload)
+    assert "enable_method_decision_guidance" not in open_system_config_payload(payload)
+
+
 def test_portable_export_state_omits_credentials(tmp_path):
     from backend.routes.export_import import _add_portable_state_json
 

@@ -13,7 +13,9 @@ logger = logging.getLogger(__name__)
 _CARDS_PATH = (
     Path(__file__).resolve().parent.parent / "data" / "method_decision_cards.yaml"
 )
-MAX_GUIDANCE_CARDS = 3
+# Rendered cards are 2.6-3.3k characters; the 6k prompt budget can hold at
+# most two complete cards and may hold only one for larger combinations.
+MAX_GUIDANCE_CARDS = 2
 MAX_GUIDANCE_CHARS = 6_000
 
 _CARD_FIELDS = (
@@ -63,12 +65,18 @@ _SEARCH_WEIGHTS = {
     "title": 4.0,
     "aliases": 3.0,
     "applies_when": 2.0,
-    "facts_to_consider": 1.0,
-    "candidate_approaches": 2.0,
-    "selection_considerations": 1.0,
-    "parameters_to_justify": 1.0,
-    "diagnostics": 1.0,
 }
+_SEARCH_STOPWORDS = frozenset({
+    "and",
+    "the",
+    "for",
+    "with",
+    "between",
+    "from",
+    "data",
+    "method",
+    "choice",
+})
 
 
 def _has_forbidden_field(value) -> bool:
@@ -155,6 +163,30 @@ def search_cards(query: str, limit: int = MAX_GUIDANCE_CARDS) -> list[dict]:
         query,
         field_weights=_SEARCH_WEIGHTS,
         limit=min(max(int(limit), 0), MAX_GUIDANCE_CARDS),
+        ignored_tokens=_SEARCH_STOPWORDS,
+    )
+
+
+def build_planning_guidance_query(
+    *,
+    overview: str = "",
+    tasks: str = "",
+    stage: str = "",
+    modality: str = "",
+    feedback: str = "",
+    affected_steps: str = "",
+) -> str:
+    """Build a focused retrieval query from method-decision context only."""
+    fields = (
+        ("Overview", overview),
+        ("Tasks", tasks),
+        ("Stage", stage),
+        ("Modality", modality),
+        ("PI feedback", feedback),
+        ("Affected steps", affected_steps),
+    )
+    return "\n".join(
+        f"{label}: {str(value).strip()}" for label, value in fields if value
     )
 
 
@@ -212,7 +244,19 @@ def guidance_for_query(
     except Exception as exc:
         logger.warning("method decision card retrieval failed: %s", exc)
         return ""
-    text = "\n\n".join(item for item in rendered if item)
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 15].rstrip() + "\n...[truncated]"
+    selected: list[str] = []
+    used_chars = 0
+    for index, item in enumerate(rendered):
+        if not item:
+            continue
+        added_chars = len(item) + (2 if selected else 0)
+        if used_chars + added_chars > max_chars:
+            logger.debug(
+                "omitting %d method decision card(s) that exceed the %d-character budget",
+                len(rendered) - index,
+                max_chars,
+            )
+            break
+        selected.append(item)
+        used_chars += added_chars
+    return "\n\n".join(selected)

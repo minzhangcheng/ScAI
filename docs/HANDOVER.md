@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.51.1 · **Last updated**: 2026-08-31
+**Version**: 0.51.2 · **Last updated**: 2026-08-31
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,19 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.51.x — (2026-08-31 onward)**
+
+- `0.51.2` — Corrects the opt-in method-decision guidance pilot after review.
+  Planning retrieval now uses focused decision context, card-specific metadata
+  and stopwords instead of large general context blocks or verbose card bodies.
+  The 6,000-character prompt budget emits at most two complete cards and never
+  truncates a card mid-section. The process-scoped pilot switch is excluded
+  from both persisted configuration writes and restores, so stale database
+  values cannot override the deployment environment. The frozen B2 evaluator
+  rebuilds the production retrieval query and fails loudly when an on/off pair
+  lacks a real guidance contrast; the original B2 card-effectiveness conclusion
+  is superseded pending a retrieval-aligned rerun, while its default-off pilot
+  decision remains valid. Focused method-guidance regressions passed; no B2
+  rerun, image build, deployment, or historical-session mutation was performed.
 
 - `0.51.1` — Adds method-only `lookup_documentation` support and an opt-in,
   default-off method-decision guidance pilot for Bioinformatics planning,
