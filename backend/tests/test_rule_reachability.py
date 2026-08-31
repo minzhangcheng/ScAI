@@ -11,6 +11,8 @@ These tests close it.
 import inspect
 import re
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -82,8 +84,50 @@ def test_method_question_is_exposed_on_a_tool():
 
 def test_method_question_alone_is_a_valid_call():
     """Asking a method question must not require inventing a function path."""
-    source = inspect.getsource(executor_collaboration.handle_lookup_documentation)
-    assert "method_question and not function_path" in source
+    schema = next(t["function"]["parameters"] for t in bio_mod.TOOLS
+                  if t["function"]["name"] == "lookup_documentation")
+    assert "function_path" not in schema.get("required", [])
+
+
+@pytest.mark.asyncio
+async def test_method_question_only_does_not_call_technique_agent():
+    executor_collaboration.bind_facade(bio_mod)
+    technique_agent = SimpleNamespace(lookup_docs=AsyncMock())
+    context = SimpleNamespace(
+        agent=SimpleNamespace(technique_agent=technique_agent),
+        messages=[],
+        analysis_log=[],
+        step_count=1,
+        agent_reasoning="compare methods",
+    )
+    call = SimpleNamespace(
+        id="method-only",
+        arguments={"method_question": "multiple testing family q-value"},
+    )
+
+    await executor_collaboration.handle_lookup_documentation(context, call)
+
+    assert "[method rule:" in context.messages[-1]["content"]
+    technique_agent.lookup_docs.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lookup_documentation_rejects_empty_target_without_technique_call():
+    executor_collaboration.bind_facade(bio_mod)
+    technique_agent = SimpleNamespace(lookup_docs=AsyncMock())
+    context = SimpleNamespace(
+        agent=SimpleNamespace(technique_agent=technique_agent),
+        messages=[],
+        analysis_log=[],
+        step_count=1,
+        agent_reasoning="lookup docs",
+    )
+    call = SimpleNamespace(id="empty-lookup", arguments={})
+
+    await executor_collaboration.handle_lookup_documentation(context, call)
+
+    assert "requires at least one" in context.messages[-1]["content"]
+    technique_agent.lookup_docs.assert_not_awaited()
 
 
 def test_observations_cite_only_existing_rules():

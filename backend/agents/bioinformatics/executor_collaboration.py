@@ -440,10 +440,27 @@ async def handle_validate_species(context, tool_call) -> ToolAction:
 
 
 async def handle_lookup_documentation(context, tool_call) -> ToolAction:
-    args = tool_call.arguments
-    function_path = args.get("function_path", "")
-    question = args.get("question", "")
-    method_question = args.get("method_question", "")
+    args = tool_call.arguments or {}
+    function_path = str(args.get("function_path") or "").strip()
+    question = str(args.get("question") or "").strip()
+    method_question = str(args.get("method_question") or "").strip()
+    if not function_path and not method_question:
+        context.messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": (
+                "lookup_documentation requires at least one of function_path "
+                "or method_question."
+            ),
+        })
+        context.analysis_log.append(AnalysisStep(
+            step_number=context.step_count,
+            step_type="lookup_documentation",
+            agent_reasoning=context.agent_reasoning,
+            code_description="Documentation lookup missing target",
+        ))
+        return ToolAction.CONTINUE
+
     method_answer = ""
     if method_question:
         try:

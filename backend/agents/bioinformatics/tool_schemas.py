@@ -591,7 +591,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "lookup_documentation",
-            "description": "Look up API documentation for an installed Python function/class. Returns a concise summary with signature, key parameters, and usage example. Use when unsure about correct API usage before writing code.",
+            "description": (
+                "Look up API documentation for an installed Python function/class "
+                "and/or local methodological guidance. Provide at least one of "
+                "function_path or method_question."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -615,8 +619,7 @@ TOOLS = [
                         "type": "string",
                         "description": "Optional: specific question about the API (e.g., 'what parameters control batch correction?')"
                     }
-                },
-                "required": ["function_path"]
+                }
             }
         }
     },
