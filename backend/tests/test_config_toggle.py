@@ -63,6 +63,40 @@ class TestReproducibilityToggleEnvVarE2E:
         assert result.stdout.strip() == "True"
 
 
+class TestMethodDecisionGuidanceToggle:
+    """The experimental method-card pilot is process-scoped and default-off."""
+
+    def test_explicit_values_and_provider(self):
+        from backend.config._config import SystemConfig
+        from backend.models.schemas import AnalysisState
+        from backend.utils.settings_provider import AgentSettingsProvider
+
+        enabled = SystemConfig(enable_method_decision_guidance=True)
+        disabled = SystemConfig(enable_method_decision_guidance=False)
+        assert enabled.enable_method_decision_guidance is True
+        assert disabled.enable_method_decision_guidance is False
+        provider = AgentSettingsProvider(
+            AnalysisState(user_id="toggle-test"), enabled, global_client=None
+        )
+        assert provider.get_method_decision_guidance_enabled() is True
+
+    def test_default_is_false(self):
+        from backend.config._config import default_config
+
+        assert default_config.enable_method_decision_guidance is False
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [("true", True), ("yes", True), ("1", True), ("false", False), ("0", False), ("", False)],
+    )
+    def test_environment_value(self, monkeypatch, value, expected):
+        import backend.config._config as _cfg
+
+        monkeypatch.setenv("SCAI_ENABLE_METHOD_DECISION_GUIDANCE", value)
+        importlib.reload(_cfg)
+        assert _cfg.default_config.enable_method_decision_guidance is expected
+
+
 class TestGeneratorReproducibilityToggle:
     """Verify the conditional branch in generator.py works correctly."""
 

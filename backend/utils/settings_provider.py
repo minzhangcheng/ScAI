@@ -416,6 +416,10 @@ class AgentSettingsProvider:
     def get_vision_setting(self, agent_name: str) -> bool:
         return (self._get_state().agent_vision_settings or {}).get(agent_name, True)
 
+    def get_method_decision_guidance_enabled(self) -> bool:
+        """Return the process-scoped experimental guidance switch."""
+        return bool(self._config.enable_method_decision_guidance)
+
     def _live_api_config(self) -> APIConfig:
         return self._config.api
 

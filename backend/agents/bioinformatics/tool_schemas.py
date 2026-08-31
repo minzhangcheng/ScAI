@@ -591,7 +591,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "lookup_documentation",
-            "description": "Look up API documentation for an installed Python function/class. Returns a concise summary with signature, key parameters, and usage example. Use when unsure about correct API usage before writing code.",
+            "description": (
+                "Look up API documentation for an installed Python function/class "
+                "and/or local methodological guidance. Method questions always "
+                "search statistical caveats and, when the experimental pilot is "
+                "enabled, separately labelled method decision cards. Provide at "
+                "least one of function_path or method_question."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -605,18 +611,17 @@ TOOLS = [
                             "A methodological question rather than an API one -- how to "
                             "choose a test, what a statistic assumes, whether a claim is "
                             "supportable by a given design. Searches the project's rule "
-                            "corpus, which carries the reasoning and the primary "
-                            "literature. Ask here BEFORE choosing a statistical approach; "
-                            "the corpus records where the usual shortcuts fail. May be "
-                            "given with or instead of function_path."
+                            "corpus and, when enabled, an independently labelled set of "
+                            "non-binding decision comparisons. Ask here BEFORE choosing "
+                            "a statistical approach. May be given with or instead of "
+                            "function_path."
                         )
                     },
                     "question": {
                         "type": "string",
                         "description": "Optional: specific question about the API (e.g., 'what parameters control batch correction?')"
                     }
-                },
-                "required": ["function_path"]
+                }
             }
         }
     },

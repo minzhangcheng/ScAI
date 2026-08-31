@@ -21,8 +21,10 @@ You are conducting {modality} analysis. You have access to tools:
 12. lookup_documentation - Look up API docs for an installed Python function, OR
     ask a methodological question via method_question (which test is defensible,
     what a statistic assumes, whether a claim is supportable by this design).
-    The method corpus records where the usual shortcuts fail in THIS stack --
-    consult it before choosing a statistical approach, not after being refused.
+    Method questions return statistical caveats and, when the experimental pilot
+    is enabled, a separately labelled comparison of unranked approaches. Consult
+    this guidance before choosing a statistical approach, not after being refused.
+    function_path and method_question may be used separately or together.
    Returns concise summary (signature, key params, example).
    Use when unsure about API usage, especially for: decoupler, gseapy, scvelo, cellrank.
    Example: lookup_documentation(function_path="decoupler.get_collectri")

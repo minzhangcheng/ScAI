@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.50.5 · **Last updated**: 2026-08-31
+**Version**: 0.51.1 · **Last updated**: 2026-08-31
 
 ## 1. Runtime Architecture
 
@@ -335,6 +335,18 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.51.x — (2026-08-31 onward)**
+
+- `0.51.1` — Adds method-only `lookup_documentation` support and an opt-in,
+  default-off method-decision guidance pilot for Bioinformatics planning,
+  revision, and documentation lookup. Seven domain-neutral cards use bounded,
+  fail-open lexical retrieval and remain advisory to Bioinformatics and PI;
+  Host code does not select methods or gate workflow progression. Frozen
+  evaluation and blind-scoring tools record the Batch B2 result as
+  `revise_cards`, so the switch remains disabled by default. Focused guidance,
+  configuration, reachability, and version checks passed; no image build,
+  deployment, or historical-session mutation was performed.
 
 **0.50.x — (2026-08-30 onward)**
 

@@ -1,0 +1,495 @@
+meta:
+  corpus: scai-method-decision-guidance
+  version: 1
+  source_provenance: scai-native/method-decision-guidance
+  description: >-
+    Non-binding, domain-neutral comparisons for post-count analysis planning.
+    Approaches are unranked and scientific choices remain with Bioinformatics
+    and the PI.
+
+cards:
+  - id: latent-representation-and-batch-integration
+    title: Decide whether integration is needed and choose a representation
+    enforcement: guidance
+    applies_when: Multiple samples or technical groups may affect a shared low-dimensional representation.
+    aliases:
+      - batch correction
+      - data integration
+      - PCA Harmony scVI
+      - latent representation
+    facts_to_consider:
+      - sample and batch identities, including whether batch is confounded with the biological contrast
+      - intended use of the representation for visualization, clustering, mapping, or inference
+      - evidence that technical variation dominates relevant biological structure
+      - dataset scale, sparsity, covariates, and available count representation
+    candidate_approaches:
+      - name: unintegrated normalized expression with PCA
+        answers: Represents dominant variation without explicitly removing a declared batch effect.
+        consider_when:
+          - Batch effects are not evident or cannot be separated from the biological contrast.
+        limitations:
+          - Technical structure may remain and should be inspected by sample and covariate.
+        python_stack:
+          - scanpy.pp.pca
+      - name: linear embedding correction
+        answers: Adjusts a low-dimensional representation to improve mixing across declared batches.
+        consider_when:
+          - A separable batch variable affects a shared cell-state structure.
+        limitations:
+          - Mixing is not proof of biological validity and correction can attenuate real group structure.
+        python_stack:
+          - harmonypy
+          - scanpy.external.pp.harmony_integrate
+      - name: count-aware learned latent model
+        answers: Learns a probabilistic latent representation while modeling declared technical covariates.
+        consider_when:
+          - Counts, sufficient scale, and a defensible covariate model are available.
+        limitations:
+          - Model assumptions, training diagnostics, stochastic variation, and resource cost require review.
+        python_stack:
+          - scvi-tools
+    selection_considerations:
+      - First justify whether correction is needed; method comparison follows that decision.
+      - Preserve an uncorrected representation for diagnostics and biological interpretation.
+      - Do not use batch mixing alone as an optimization target when groups are partially or fully confounded.
+    parameters_to_justify:
+      - features and preprocessing used to construct the representation
+      - batch and biological covariates supplied to the model
+      - latent dimensionality and training or convergence settings
+    diagnostics:
+      - representation colored by sample, batch, group, and known covariates
+      - preservation of expected local structure and sample contributions
+      - sensitivity of downstream clustering or mapping to the representation choice
+    expected_outputs:
+      - representation choice, observed reason for correction or non-correction, diagnostics, and limitations
+    related_rule_ids:
+      - one-sample-per-condition-is-unidentifiable
+      - biological-replicate-is-the-unit
+    citations:
+      - citation: https://doi.org/10.1038/s41592-019-0619-0
+        supports: Harmony performs iterative correction in a low-dimensional embedding.
+      - citation: https://doi.org/10.1038/s41592-018-0229-2
+        supports: scVI is a probabilistic latent model for single-cell count data and declared batch effects.
+    source_provenance: scai-native/method-decision-guidance
+
+  - id: differential-expression-method-choice
+    title: Choose the inferential unit and differential-expression approach
+    enforcement: guidance
+    applies_when: Comparing expression between groups or describing markers within an annotated population.
+    aliases:
+      - differential expression
+      - marker testing
+      - pseudobulk
+      - sample-level inference
+      - repeated measures
+    facts_to_consider:
+      - independent biological sample identities and group allocation
+      - paired, blocked, or repeated-measure structure
+      - raw-count availability and the representation to be tested
+      - cells contributed by each sample and population
+      - intended inferential or descriptive claim level
+    candidate_approaches:
+      - name: sample-level pseudobulk count model
+        answers: Estimates group-level expression differences with biological samples as units.
+        consider_when:
+          - Raw counts and replicated sample identities are available within the population.
+        limitations:
+          - Aggregation changes the estimand and must preserve pairing, covariates, and sample structure.
+        python_stack:
+          - pydeseq2
+          - statsmodels
+      - name: repeated-measure or hierarchical model
+        answers: Estimates group effects while representing within-sample dependence explicitly.
+        consider_when:
+          - The model and replication support the required random or correlated effects.
+        limitations:
+          - Complex models do not create information when the design lacks independent replication.
+        python_stack:
+          - statsmodels
+      - name: cell-level marker ranking
+        answers: Describes features distinguishing cells or clusters in the observed dataset.
+        consider_when:
+          - The requested output is marker description rather than sample-level inference.
+        limitations:
+          - Cells do not replace independent biological samples; p-values must not be presented as sample-level evidence.
+        python_stack:
+          - scanpy.tl.rank_genes_groups
+    selection_considerations:
+      - Match the independent unit, estimand, and uncertainty to the intended claim.
+      - Separate exploratory marker description from replicated group-level inference.
+      - Verify the input scale before selecting a count or transformed-expression model.
+    parameters_to_justify:
+      - design formula, contrast, and handling of paired or repeated observations
+      - aggregation unit, filtering, normalization, and tested representation
+      - effect-size definition and multiple-testing family
+    diagnostics:
+      - per-sample cell and count contributions by population and group
+      - effect-size uncertainty, model fit, and influential samples
+      - agreement of direction across independent samples
+    expected_outputs:
+      - method, inferential unit, representation, design, contrast, effect size, uncertainty, and caveats
+    related_rule_ids:
+      - biological-replicate-is-the-unit
+      - one-sample-per-condition-is-unidentifiable
+      - post-clustering-inference-is-invalid
+      - testing-family-must-be-declared
+    citations:
+      - citation: https://doi.org/10.1038/s41467-021-21038-1
+        supports: Cells from one individual are dependent subsamples, and hierarchical or sample-level approaches address pseudoreplication.
+      - citation: https://doi.org/10.1038/s41467-021-25960-2
+        supports: Pseudobulk approaches can improve false-discovery behavior in multi-sample single-cell differential expression.
+    source_provenance: scai-native/method-decision-guidance
+
+  - id: clustering-resolution-and-stability
+    title: Select clustering scale using stability and analytical purpose
+    enforcement: guidance
+    applies_when: A graph-based partition or subclustering resolution must be chosen for downstream analysis.
+    aliases:
+      - Leiden clustering
+      - clustering resolution
+      - cluster stability
+      - subclustering
+    facts_to_consider:
+      - intended downstream use of the partition and the granularity the assay can support
+      - neighborhood graph construction and representation choice
+      - cells and independent samples represented in candidate clusters
+      - marker coherence, separation, and sensitivity to seeds or subsampling
+    candidate_approaches:
+      - name: coarse partition for broad populations
+        answers: Produces a lower-granularity summary suitable for robust broad annotation or composition.
+        consider_when:
+          - The downstream question concerns broad populations and finer splits are unstable or unsupported.
+        limitations:
+          - Distinct states may be merged and require targeted follow-up rather than a universal finer resolution.
+        python_stack:
+          - scanpy.tl.leiden
+      - name: resolution sweep with robustness comparison
+        answers: Shows how candidate partitions change across graph scale, seeds, or data perturbations.
+        consider_when:
+          - The choice materially changes annotation, abundance, or downstream contrasts.
+        limitations:
+          - Stability alone does not establish biological meaning or a unique optimum.
+        python_stack:
+          - scanpy.tl.leiden
+          - sklearn.metrics.adjusted_rand_score
+      - name: targeted subclustering
+        answers: Resolves heterogeneity inside a justified parent population using a rebuilt local representation.
+        consider_when:
+          - A parent population has sufficient cells, samples, and coherent evidence for finer analysis.
+        limitations:
+          - Reusing a global graph or selecting a subset after inspecting an outcome can distort interpretation.
+        python_stack:
+          - scanpy.pp.neighbors
+          - scanpy.tl.leiden
+    selection_considerations:
+      - No host-selected scalar resolution is universally correct; relate granularity to purpose and robustness.
+      - Inspect sample representation and marker coherence before treating a partition as a biological entity.
+    parameters_to_justify:
+      - representation, neighborhood size, distance metric, and graph construction
+      - resolution grid, random seeds, and perturbation or subsampling scheme
+      - minimum evidence used to retain, merge, or revisit a candidate cluster
+    diagnostics:
+      - partition correspondence across resolutions and seeds
+      - cluster sizes and per-sample contributions
+      - marker coherence and local graph connectivity
+    expected_outputs:
+      - compared partitions, robustness evidence, purpose-based selection rationale, and unresolved alternatives
+    related_rule_ids:
+      - cluster-resolution-must-be-swept
+      - post-clustering-inference-is-invalid
+    citations:
+      - citation: https://doi.org/10.1038/s41598-019-41695-z
+        supports: Leiden optimizes graph partitions while guaranteeing connected communities under its stated objective.
+      - citation: https://doi.org/10.1038/srep02930
+        supports: Community structure can occur at multiple scales, motivating explicit scale comparison.
+    source_provenance: scai-native/method-decision-guidance
+
+  - id: cell-annotation-strategy
+    title: Choose reference, automated, marker-based, or hybrid annotation
+    enforcement: guidance
+    applies_when: Cell or cluster identities must be assigned and uncertainty retained.
+    aliases:
+      - cell type annotation
+      - reference mapping
+      - label transfer
+      - automated annotation
+      - marker based annotation
+    facts_to_consider:
+      - compatibility of candidate references with assay, population coverage, and annotation granularity
+      - availability and provenance of marker evidence
+      - expected novel, transitional, perturbed, or out-of-reference states
+      - whether labels are needed per cell, per cluster, or hierarchically
+    candidate_approaches:
+      - name: matched reference mapping or label transfer
+        answers: Assigns query cells relative to labels represented in a compatible annotated reference.
+        consider_when:
+          - A well-matched, versioned reference covers the expected populations and label hierarchy.
+        limitations:
+          - Reference labels and omissions are inherited; forced mapping can conceal out-of-reference states.
+        python_stack:
+          - scvi-tools
+          - ingest-compatible reference mapping
+      - name: automated expression classifier
+        answers: Predicts labels from a trained reference or classifier at cell level.
+        consider_when:
+          - Training provenance, feature compatibility, and rejection or uncertainty behavior are available.
+        limitations:
+          - Accuracy depends on reference complexity, class balance, and label depth.
+        python_stack:
+          - sklearn
+      - name: marker-based cluster annotation
+        answers: Interprets cluster identities from positive, negative, and ambiguous marker evidence.
+        consider_when:
+          - Reference compatibility is weak or interpretable evidence and novel states are central.
+        limitations:
+          - Marker dropout, shared programs, and circular marker selection require explicit uncertainty.
+        python_stack:
+          - scanpy.tl.rank_genes_groups
+      - name: hybrid annotation with adjudication
+        answers: Combines reference predictions with marker and cluster evidence, retaining disagreements for review.
+        consider_when:
+          - Multiple evidence sources are available and their conflicts can be surfaced rather than silently averaged.
+        limitations:
+          - A hybrid is useful only when provenance and disagreement remain visible.
+        python_stack:
+          - scanpy
+          - sklearn
+    selection_considerations:
+      - Match the label ontology and granularity to the reference and downstream question.
+      - Preserve unknown, ambiguous, and out-of-reference outcomes instead of forcing complete labels.
+      - Keep prediction confidence separate from biological certainty.
+    parameters_to_justify:
+      - reference identity, version, label hierarchy, and feature intersection
+      - prediction or rejection rule and aggregation from cells to clusters
+      - marker evidence, conflicting labels, and ambiguity policy
+    diagnostics:
+      - confidence or distance distributions and unassigned fraction
+      - marker support and contradictions by proposed label
+      - agreement across methods, clusters, and independent samples
+    expected_outputs:
+      - assigned and unresolved labels, provenance, confidence evidence, marker support, and ambiguity notes
+    related_rule_ids:
+      - post-clustering-inference-is-invalid
+      - cite-the-resource-version
+    citations:
+      - citation: https://doi.org/10.1186/s13059-019-1795-z
+        supports: Automated annotation performance varies with dataset complexity, feature choice, and cross-dataset transfer.
+      - citation: https://doi.org/10.1038/s41587-021-01001-7
+        supports: Reference mapping can transfer latent structure and annotations while evaluating query-to-reference relationships.
+    source_provenance: scai-native/method-decision-guidance
+
+  - id: trajectory-connectivity-and-velocity
+    title: Distinguish connectivity, pseudotime ordering, and kinetic direction
+    enforcement: guidance
+    applies_when: A plan proposes lineage topology, cell ordering, roots, transitions, or RNA velocity.
+    aliases:
+      - trajectory inference
+      - PAGA DPT pseudotime
+      - RNA velocity
+      - lineage direction
+      - connectivity graph
+    facts_to_consider:
+      - whether the population plausibly samples a connected process rather than unrelated states
+      - evidence for roots, endpoints, branches, and topology
+      - availability and quality of spliced and unspliced layers for kinetic models
+      - representation, graph, sampling density, and potential confounding
+    candidate_approaches:
+      - name: graph connectivity abstraction
+        answers: Summarizes support for connectivity among partitions in a neighborhood graph.
+        consider_when:
+          - The question concerns coarse topology or whether proposed populations are connected.
+        limitations:
+          - Connectivity does not by itself identify temporal direction or a biological root.
+        python_stack:
+          - scanpy.tl.paga
+      - name: root-conditioned pseudotime ordering
+        answers: Orders cells by graph distance or diffusion structure relative to a supplied root.
+        consider_when:
+          - A connected manifold and independently justified root are available.
+        limitations:
+          - The ordering inherits the root and graph assumptions and is not kinetic directionality.
+        python_stack:
+          - scanpy.tl.dpt
+      - name: RNA velocity model
+        answers: Estimates local transcriptional change direction from spliced and unspliced measurements under kinetic assumptions.
+        consider_when:
+          - Required layers, preprocessing, gene-wise fit, and model diagnostics are adequate.
+        limitations:
+          - Kinetic violations, sparse layers, and preprocessing choices can make directions unreliable.
+        python_stack:
+          - scvelo
+    selection_considerations:
+      - Choose the method family from the question; PAGA, DPT, and velocity are not technical fallbacks for one another.
+      - Root and direction claims need evidence independent of an attractive embedding.
+      - Report disconnected or non-identifiable structure rather than forcing one trajectory.
+    parameters_to_justify:
+      - cells, features, representation, graph, and topology constraints
+      - root or endpoint evidence and branch assumptions
+      - velocity mode, layer provenance, filtering, moments, and fit diagnostics
+    diagnostics:
+      - topology and ordering stability across reasonable representations or subsamples
+      - root sensitivity and consistency with measured covariates
+      - velocity gene fits, phase portraits, and agreement of local directions with the sampled manifold
+    expected_outputs:
+      - question-specific topology, ordering, or kinetic result with assumptions, diagnostics, and non-equivalence stated
+    related_rule_ids:
+      - trajectory-direction-needs-external-evidence
+      - one-sample-per-condition-is-unidentifiable
+    citations:
+      - citation: https://doi.org/10.1186/s13059-019-1663-x
+        supports: PAGA estimates topology-preserving connectivity among data partitions.
+      - citation: https://doi.org/10.1038/s41587-020-0591-3
+        supports: Dynamical RNA velocity estimates transcriptional change from spliced and unspliced measurements under kinetic modeling assumptions.
+    source_provenance: scai-native/method-decision-guidance
+
+  - id: gene-set-and-regulatory-activity-method-choice
+    title: Match enrichment, module, pathway, or regulator activity to its input
+    enforcement: guidance
+    applies_when: A plan summarizes genes into sets, pathways, signatures, or regulator activities.
+    aliases:
+      - over representation analysis
+      - ranked enrichment GSEA
+      - module scoring
+      - pathway activity
+      - transcription factor activity
+      - regulon
+    facts_to_consider:
+      - input type, including selected genes, ranked statistics, expression values, or model coefficients
+      - tested universe or background and the multiple-testing family
+      - directionality, sign, and sample or cell-level replication
+      - gene-set or regulon source, version, organism mapping, and bespoke edits
+    candidate_approaches:
+      - name: over-representation analysis
+        answers: Tests whether a selected list contains more members of a set than expected relative to a declared universe.
+        consider_when:
+          - A defensible selection rule and measured background universe are available.
+        limitations:
+          - Results depend on the selection threshold, universe, mapping, and overlapping sets.
+        python_stack:
+          - scipy.stats
+          - gseapy.enrichr
+      - name: ranked-list enrichment
+        answers: Tests coordinated set placement across a pre-ranked feature statistic without a hard selected-list cutoff.
+        consider_when:
+          - A signed, comparable ranking statistic and valid permutation or null strategy are available.
+        limitations:
+          - Ranking ties, gene-set size, permutation unit, and correlated features affect calibration.
+        python_stack:
+          - gseapy.prerank
+      - name: per-cell or per-sample module score
+        answers: Summarizes relative expression of a declared feature set in each observation.
+        consider_when:
+          - Descriptive state scoring is the target and matched controls or normalization are justified.
+        limitations:
+          - A score is not automatically pathway activity, causal evidence, or an independent sample-level test.
+        python_stack:
+          - scanpy.tl.score_genes
+      - name: footprint-based pathway or regulator activity
+        answers: Infers latent activity from signed target relationships and observed expression statistics.
+        consider_when:
+          - A versioned, compatible network with direction and confidence is available.
+        limitations:
+          - Activity reflects the supplied network and model; regulon coverage and context mismatch remain visible limitations.
+        python_stack:
+          - decoupler
+    selection_considerations:
+      - These approaches answer different questions and are not interchangeable fallbacks.
+      - Match the null model and independent unit to the input statistic and intended claim.
+      - Preserve set, universe, network, mapping, and version provenance.
+    parameters_to_justify:
+      - input statistic, direction, selection rule, and tested universe
+      - gene-set size bounds, permutation unit, and multiple-testing family
+      - control-feature strategy or regulator-network confidence and minimum target coverage
+    diagnostics:
+      - set sizes after identifier mapping and overlap among tested sets
+      - sensitivity to background, ranking statistic, and control selection
+      - target coverage and concordance across independent samples
+    expected_outputs:
+      - method family, exact input, universe or controls, resource version, effect direction, uncertainty, and limitations
+    related_rule_ids:
+      - testing-family-must-be-declared
+      - gene-permutation-is-anticonservative
+      - minimum-gene-set-size
+      - cite-the-resource-version
+    citations:
+      - citation: https://doi.org/10.1073/pnas.0506580102
+        supports: GSEA evaluates coordinated placement of gene-set members in a ranked expression profile.
+      - citation: https://doi.org/10.1093/bioadv/vbac016
+        supports: Decoupler compares activity inference methods that use prior knowledge networks and molecular readouts.
+    source_provenance: scai-native/method-decision-guidance
+
+  - id: composition-abundance-and-expression-choice
+    title: Separate composition, abundance, and within-population expression
+    enforcement: guidance
+    applies_when: A plan compares population proportions, local abundance, absolute counts, or expression within a population.
+    aliases:
+      - cell composition
+      - differential abundance
+      - cell proportion
+      - neighborhood abundance
+      - within cell type expression
+    facts_to_consider:
+      - independent sample identities, group allocation, pairing, and covariates
+      - sampling denominator, captured cells, tissue or input amount, and whether absolute abundance was measured
+      - population definition, annotation uncertainty, and cells contributed per sample
+      - whether the question targets relative composition, local state abundance, or expression conditional on population
+    candidate_approaches:
+      - name: descriptive per-sample composition
+        answers: Summarizes each population as a fraction of captured cells within each sample.
+        consider_when:
+          - The aim is transparent description or replication is insufficient for group inference.
+        limitations:
+          - Fractions are relative to the sampled denominator and one population can change when another changes.
+        python_stack:
+          - pandas
+      - name: compositional sample-level model
+        answers: Estimates covariate-associated changes in relative population composition across replicated samples.
+        consider_when:
+          - Independent samples and a defensible compositional model or reference are available.
+        limitations:
+          - Effects are relative and depend on reference or log-ratio assumptions.
+        python_stack:
+          - statsmodels
+          - scipy
+      - name: graph-neighborhood differential abundance
+        answers: Tests whether local regions of a cell-state graph change in representation across replicated samples.
+        consider_when:
+          - Cluster boundaries are too coarse for the abundance question and sample replication is available.
+        limitations:
+          - Neighborhood overlap, graph construction, and sample-level design affect interpretation.
+          - No validated specialized implementation is installed in the current stack; do not replace it with an ad hoc cell-level test.
+        python_stack:
+          - not currently available in the installed stack
+      - name: within-population expression model
+        answers: Estimates expression differences conditional on a defined population rather than changes in its frequency.
+        consider_when:
+          - The scientific question is transcriptional change within the population and the DE design is identifiable.
+        limitations:
+          - Conditioning on an uncertain or outcome-dependent annotation can change the target population.
+        python_stack:
+          - pydeseq2
+          - statsmodels
+    selection_considerations:
+      - State the denominator and whether abundance is relative or absolutely measured.
+      - Do not use cell-level counts as independent sample replicates.
+      - Composition and within-population expression are distinct estimands and may both be relevant.
+    parameters_to_justify:
+      - sample-level design, pairing, covariates, and population denominator
+      - population or neighborhood definition and minimum sample contribution
+      - reference category, log-ratio, graph, or aggregation choices
+    diagnostics:
+      - captured cells and population counts per independent sample
+      - sensitivity to annotation, denominator, reference, or graph construction
+      - uncertainty and direction across independent samples
+    expected_outputs:
+      - estimand, denominator, independent unit, model, effect measure, uncertainty, and relationship to expression analyses
+    related_rule_ids:
+      - composition-lives-on-a-simplex
+      - biological-replicate-is-the-unit
+      - one-sample-per-condition-is-unidentifiable
+    citations:
+      - citation: https://doi.org/10.1038/s41467-021-27150-6
+        supports: scCODA models relative cell-type compositions jointly and interprets effects relative to a reference.
+      - citation: https://doi.org/10.1038/s41587-021-01033-z
+        supports: Milo tests differential abundance in graph neighborhoods using replicated sample designs.
+    source_provenance: scai-native/method-decision-guidance

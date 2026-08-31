@@ -41,6 +41,14 @@ def method_guidance(method_question: str, *, format_rule, search_rules) -> str:
     )
 
 
+def _method_decision_guidance_enabled(agent) -> bool:
+    """Read the optional switch only through the agent settings provider."""
+    try:
+        return agent._provider.get_method_decision_guidance_enabled() is True
+    except Exception:
+        return False
+
+
 async def handle_consult_pi(context, tool_call) -> ToolAction:
     context.has_substantive_work = True
     args = tool_call.arguments
@@ -440,18 +448,53 @@ async def handle_validate_species(context, tool_call) -> ToolAction:
 
 
 async def handle_lookup_documentation(context, tool_call) -> ToolAction:
-    args = tool_call.arguments
-    function_path = args.get("function_path", "")
-    question = args.get("question", "")
-    method_question = args.get("method_question", "")
+    args = tool_call.arguments or {}
+    function_path = str(args.get("function_path") or "").strip()
+    question = str(args.get("question") or "").strip()
+    method_question = str(args.get("method_question") or "").strip()
+    if not function_path and not method_question:
+        context.messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": (
+                "lookup_documentation requires at least one of function_path "
+                "or method_question."
+            ),
+        })
+        context.analysis_log.append(AnalysisStep(
+            step_number=context.step_count,
+            step_type="lookup_documentation",
+            agent_reasoning=context.agent_reasoning,
+            code_description="Documentation lookup missing target",
+        ))
+        return ToolAction.CONTINUE
+
     method_answer = ""
     if method_question:
         try:
             from ...services.method_rules import format_rule, search_rules
 
-            method_answer = method_guidance(
+            rule_answer = method_guidance(
                 method_question, format_rule=format_rule, search_rules=search_rules
             )
+            method_answer = rule_answer
+            if _method_decision_guidance_enabled(context.agent):
+                card_answer = ""
+                try:
+                    from ...services.method_decision_cards import guidance_for_query
+
+                    card_answer = guidance_for_query(method_question)
+                except Exception as exc:
+                    logger.warning(
+                        "[Bioinformatics] method decision card lookup failed: %s",
+                        exc,
+                    )
+                method_answer = (
+                    "Method decision guidance\n"
+                    + (card_answer or "No decision card covers that question.")
+                    + "\n\nRelated statistical caveats\n"
+                    + rule_answer
+                )
         except Exception as exc:
             logger.warning("[Bioinformatics] method rule lookup failed: %s", exc)
 
