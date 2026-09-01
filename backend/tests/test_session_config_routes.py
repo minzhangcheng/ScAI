@@ -152,6 +152,17 @@ async def test_agent_settings_route_updates_once_and_invalidates_before_next_cal
     cache_mock = AsyncMock(side_effect=lambda *_args, **_kwargs: events.append("cache"))
     monkeypatch.setattr(session_config, "async_save_session", save_mock)
     monkeypatch.setattr(session_config, "update_session_cache", cache_mock)
+    database = object()
+    monkeypatch.setattr(session_config, "get_db", AsyncMock(return_value=database))
+    monkeypatch.setattr(
+        session_config,
+        "load_agent_default_secrets",
+        AsyncMock(return_value={"agent_api_keys": {}, "literature": {}}),
+    )
+    save_defaults_mock = AsyncMock()
+    monkeypatch.setattr(
+        session_config, "save_agent_default_secrets", save_defaults_mock
+    )
 
     body = AgentSettingsUpdateRequest(
         agent="pi",
@@ -161,6 +172,7 @@ async def test_agent_settings_route_updates_once_and_invalidates_before_next_cal
         llm_base_url="https://new.example/v1",
         api_key=mask_api_key("sk-123456789"),
         vision_enabled=False,
+        save_as_user_default=True,
     )
     try:
         response = await session_config.update_agent_settings(session_id, _Request(), body)
@@ -177,12 +189,76 @@ async def test_agent_settings_route_updates_once_and_invalidates_before_next_cal
     }
     assert state.agent_vision_settings["pi"] is False
     assert response["models"]["pi"] == "mimo-v2.5"
+    assert response["default_settings_saved"] is True
     assert response["agent_server_configs"]["pi"]["api_key"] == mask_api_key("sk-123456789")
     cache_mock.assert_awaited_once_with(session_id, state)
     save_mock.assert_awaited_once_with(session_id, state)
     provider.clear_agent_client_cache.assert_called_once_with("pi")
     workflow.pi_agent.refresh_runtime_config_if_needed.assert_called_once()
     assert events == ["cache", "invalidate", "save"]
+    save_defaults_mock.assert_awaited_once_with(
+        database,
+        "user-1",
+        {"agent_api_keys": {"pi": "sk-123456789"}, "literature": {}},
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_settings_reports_default_secret_save_failure_after_session_save(monkeypatch):
+    state = _state("route-agent-default-save-failure")
+    monkeypatch.setattr(
+        session_config, "require_session_ownership", AsyncMock(return_value=state)
+    )
+    monkeypatch.setattr(
+        session_config, "resolve_config_for_user", AsyncMock(return_value=SystemConfig())
+    )
+    session_save = AsyncMock()
+    monkeypatch.setattr(session_config, "async_save_session", session_save)
+    monkeypatch.setattr(session_config, "update_session_cache", AsyncMock())
+    monkeypatch.setattr(session_config, "get_db", AsyncMock(return_value=object()))
+    monkeypatch.setattr(
+        session_config,
+        "load_agent_default_secrets",
+        AsyncMock(return_value={"agent_api_keys": {}, "literature": {}}),
+    )
+    monkeypatch.setattr(
+        session_config,
+        "save_agent_default_secrets",
+        AsyncMock(side_effect=RuntimeError("database unavailable")),
+    )
+
+    response = await session_config.update_agent_settings(
+        state.id,
+        _Request(),
+        AgentSettingsUpdateRequest(
+            agent="pi",
+            prompt="Updated PI prompt",
+            model="mimo-v2.5",
+            temperature=0.3,
+            llm_base_url="https://new.example/v1",
+            api_key="sk-new-key",
+            vision_enabled=False,
+            save_as_user_default=True,
+        ),
+    )
+
+    session_save.assert_awaited_once_with(state.id, state)
+    assert response["default_settings_saved"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_user_agent_default_settings_uses_effective_backend_config(monkeypatch):
+    config = SystemConfig()
+    config.models.pi_model = "configured-pi-model"
+    monkeypatch.setattr(
+        session_config, "resolve_config_for_user", AsyncMock(return_value=config)
+    )
+
+    response = await session_config.get_user_agent_default_settings("user-1")
+
+    assert response["models"]["pi"] == "configured-pi-model"
+    assert response["vision_settings"]["literature"] is True
+    assert response["literature_config"]["pubmed_email"] == ""
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.51.4 · **Last updated**: 2026-09-01
+**Version**: 0.51.5 · **Last updated**: 2026-09-01
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,23 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.51.x — (2026-08-31 onward)**
+
+- `0.51.5` — Adds per-user Agent defaults for newly created analyses. Non-secret
+  prompts, models, temperatures, server URLs, context windows, vision settings,
+  and literature options are carried from the current browser/user settings into
+  the authoritative session-start payload, while Agent API keys and literature
+  credentials are stored server-side in an encrypted, per-user payload with
+  masked read responses and serialized read-modify-write updates. Existing
+  session Agent saves can opt into those defaults and report a separate save
+  failure without losing the already persisted session change. Global, per-user,
+  per-Agent, and new-session HTTP endpoint inputs now require explicit HTTP(S)
+  hosts (with SOCKS5 retained for proxies), and masked API/proxy values preserve
+  the encrypted secret rather than overwriting it. Configuration and Agent
+  panels load authoritative settings before rendering editable fields, expose
+  retryable loading errors, avoid browser URL normalization, and keep new
+  analyses usable when the post-create load fails. Focused backend and frontend
+  configuration/defaults regressions plus version consistency passed; no image
+  build, deployment, push, or historical-session mutation was performed.
 
 - `0.51.4` — Completes stream-first compatibility for long LLM calls. Vision
   requests now aggregate streams over Chat Completions and Anthropic as well as

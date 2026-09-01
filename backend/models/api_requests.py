@@ -26,12 +26,6 @@ class ValidateKeyRequest(BaseModel):
     proxy_url: Optional[str] = None
 
 
-class StartRequest(BaseModel):
-    instruction: str
-    session_name: Optional[str] = None
-    round_wait_seconds: int = Field(ge=-1, le=3600, default=DEFAULT_ROUND_WAIT_SECONDS)
-
-
 class PromptUpdateRequest(BaseModel):
     agent: VALID_AGENTS
     prompt: str = Field(max_length=50000)
@@ -62,6 +56,38 @@ class LiteratureConfigRequest(BaseModel):
     max_search_rounds: int = Field(default=20, ge=1, le=50)
 
 
+class AgentServerSnapshotRequest(BaseModel):
+    llm_base_url: str = ""
+    context_window: Optional[int] = Field(default=None, ge=8_192)
+
+
+class LiteratureSettingsSnapshotRequest(BaseModel):
+    mode: Optional[Literal["deep_research", "gemini_deep_research", "pubmed_llm", "disabled"]] = None
+    deep_research_model: Optional[str] = None
+    deep_research_llm_base_url: Optional[str] = None
+    pubmed_email: Optional[str] = None
+    max_search_rounds: Optional[int] = Field(default=None, ge=1, le=50)
+
+
+class AgentSettingsSnapshotRequest(BaseModel):
+    """Non-secret Agent defaults copied into a newly created session."""
+    prompts: Dict[str, Annotated[str, Field(max_length=50000)]] = Field(default_factory=dict)
+    models: Dict[str, str] = Field(default_factory=dict)
+    temperatures: Dict[str, Annotated[float, Field(ge=0.0, le=2.0)]] = Field(
+        default_factory=dict
+    )
+    agent_server_configs: Dict[str, AgentServerSnapshotRequest] = Field(default_factory=dict)
+    vision_settings: Dict[str, bool] = Field(default_factory=dict)
+    literature_config: Optional[LiteratureSettingsSnapshotRequest] = None
+
+
+class StartRequest(BaseModel):
+    instruction: str
+    session_name: Optional[str] = None
+    round_wait_seconds: int = Field(ge=-1, le=3600, default=DEFAULT_ROUND_WAIT_SECONDS)
+    agent_settings: Optional[AgentSettingsSnapshotRequest] = None
+
+
 class AgentServerConfigRequest(BaseModel):
     agent: Literal["pi", "pathology", "bioinformatics", "biochemistry", "literature", "painter", "supervisor", "technique"]
     llm_base_url: str = ""
@@ -80,6 +106,7 @@ class AgentSettingsUpdateRequest(BaseModel):
     context_window: Optional[int] = Field(default=None, ge=8_192)
     vision_enabled: bool
     literature_config: Optional[LiteratureConfigRequest] = None
+    save_as_user_default: bool = False
 
 
 class AgentConfigUpdateRequest(BaseModel):

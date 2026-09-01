@@ -140,6 +140,27 @@ describe('Sidebar initial session', () => {
     expect(screen.getByRole('button', { name: 'Create' })).toBeInTheDocument()
   })
 
+  it('closes the form after creation even when loading the new analysis fails', async () => {
+    useAppStore.setState({ currentSession: null, messages: [], authUser: null, _hydrated: true })
+    listSessions.mockResolvedValue([session('completed', 'completed')])
+    createSession.mockResolvedValue({ id: 'created', status: 'pending' })
+    loadSession.mockRejectedValue(new Error('load failed'))
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
+
+    renderSidebar()
+
+    const dialog = await screen.findByRole('dialog', { name: 'Select Session' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'New Analysis' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(loadSession).toHaveBeenCalledWith('created'))
+    expect(screen.queryByRole('button', { name: 'Create' })).not.toBeInTheDocument()
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Analysis was created, but failed to load. Reopen it from saved analyses.',
+    )
+  })
+
   it('hides New Analysis for read-only users', async () => {
     useAppStore.setState({ currentSession: null, messages: [], authUser: { status: 'readonly' } as any, _hydrated: true })
     listSessions.mockReset()

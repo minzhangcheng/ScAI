@@ -20,22 +20,33 @@ export function ConfigPanel({ onClose, onSave, onReadMode, isAdmin = true }: Con
   const [localError, setLocalError] = useState<string | null>(null)
   const [showApiKey, setShowApiKey] = useState(false)
   const [uncertainWarning, setUncertainWarning] = useState<string | null>(null)
-
-  const [userApiKey, setUserApiKey] = useState('')
-  const [userLlmBaseUrl, setUserLlmBaseUrl] = useState('')
-  const [userProxyUrl, setUserProxyUrl] = useState('')
+  const [configLoaded, setConfigLoaded] = useState(false)
+  const [configLoadError, setConfigLoadError] = useState<string | null>(null)
+  const [draftApiKey, setDraftApiKey] = useState('')
+  const [draftLlmBaseUrl, setDraftLlmBaseUrl] = useState('')
+  const [draftProxyUrl, setDraftProxyUrl] = useState('')
+  const [loadGeneration, setLoadGeneration] = useState(0)
 
   useEffect(() => {
-    if (!isAdmin) {
-      userConfig.getUserConfig()
+    let cancelled = false
+    setConfigLoaded(false)
+    setConfigLoadError(null)
+    const load = isAdmin ? adminConfig.getConfig : userConfig.getUserConfig
+    load()
         .then((status) => {
-          if (status.llm_base_url) setUserLlmBaseUrl(status.llm_base_url)
-          if (status.masked_api_key) setUserApiKey(status.masked_api_key)
-          if (status.has_proxy_url) setUserProxyUrl('•••••')
+          if (cancelled) return
+          setDraftLlmBaseUrl(status.llm_base_url || 'https://openrouter.ai/api/v1')
+          setDraftApiKey(status.masked_api_key || '')
+          setDraftProxyUrl(status.has_proxy_url ? '•••••' : '')
+          setConfigLoaded(true)
         })
-        .catch(() => { /* fields stay blank */ })
-    }
-  }, [isAdmin, userConfig.getUserConfig])
+        .catch((error) => {
+          if (!cancelled) {
+            setConfigLoadError(error instanceof Error ? error.message : 'Failed to load config')
+          }
+        })
+    return () => { cancelled = true }
+  }, [isAdmin, adminConfig.getConfig, userConfig.getUserConfig, loadGeneration])
 
   const loading = isAdmin ? adminConfig.loading : userConfig.loading
   const hookError = isAdmin ? adminConfig.error : userConfig.error
@@ -51,7 +62,7 @@ export function ConfigPanel({ onClose, onSave, onReadMode, isAdmin = true }: Con
     clearErrors()
     if (isAdmin) adminConfig.clearError()
 
-    const apiKey = isAdmin ? adminConfig.apiConfig.apiKey : userApiKey
+    const apiKey = draftApiKey
     if (!apiKey) {
       setLocalError(validateMsg('请输入 API Key', 'Please enter API Key'))
       return
@@ -59,18 +70,16 @@ export function ConfigPanel({ onClose, onSave, onReadMode, isAdmin = true }: Con
 
     try {
       if (isAdmin) {
-        setApiConfig({ apiKey: adminConfig.apiConfig.apiKey, llmBaseUrl: adminConfig.apiConfig.llmBaseUrl, proxyUrl: adminConfig.apiConfig.proxyUrl })
-        await adminConfig.saveConfig()
+        await adminConfig.saveConfig({ apiKey: draftApiKey, llmBaseUrl: draftLlmBaseUrl, proxyUrl: draftProxyUrl })
       } else {
-        // Only update apiKey in store if user entered a real (non-masked) key.
-        // The backend preview is first 3 + six asterisks + last 3.
-        const isRealKey = userApiKey && !userApiKey.includes('******')
-        setApiConfig({
-          ...(isRealKey ? { apiKey: userApiKey } : {}),
-          llmBaseUrl: userLlmBaseUrl || 'https://openrouter.ai/api/v1',
-        })
-        await userConfig.saveUserConfig(userApiKey, userLlmBaseUrl, userProxyUrl)
+        await userConfig.saveUserConfig(draftApiKey, draftLlmBaseUrl, draftProxyUrl)
       }
+      const isRealKey = draftApiKey && !draftApiKey.includes('******')
+      setApiConfig({
+        ...(isRealKey ? { apiKey: draftApiKey } : {}),
+        llmBaseUrl: draftLlmBaseUrl || 'https://openrouter.ai/api/v1',
+        ...(draftProxyUrl === '•••••' ? {} : { proxyUrl: draftProxyUrl }),
+      })
       onSave()
     } catch {
       // Error already set in the hook
@@ -79,35 +88,53 @@ export function ConfigPanel({ onClose, onSave, onReadMode, isAdmin = true }: Con
 
   type FieldDef = { value: string; onChange: (v: string) => void }
 
-  const fields: Record<'llmBaseUrl' | 'apiKey' | 'proxyUrl', FieldDef> = isAdmin
-    ? {
-        llmBaseUrl: {
-          value: adminConfig.apiConfig.llmBaseUrl,
-          onChange: (v) => { adminConfig.setApiConfig({ llmBaseUrl: v }); clearErrors() },
-        },
-        apiKey: {
-          value: adminConfig.apiConfig.apiKey,
-          onChange: (v) => { adminConfig.setApiConfig({ apiKey: v }); clearErrors() },
-        },
-        proxyUrl: {
-          value: adminConfig.apiConfig.proxyUrl || '',
-          onChange: (v) => { adminConfig.setApiConfig({ proxyUrl: v }); clearErrors() },
-        },
-      }
-    : {
-        llmBaseUrl: {
-          value: userLlmBaseUrl,
-          onChange: (v) => { setUserLlmBaseUrl(v); clearErrors() },
-        },
-        apiKey: {
-          value: userApiKey,
-          onChange: (v) => { setUserApiKey(v); clearErrors() },
-        },
-        proxyUrl: {
-          value: userProxyUrl,
-          onChange: (v) => { setUserProxyUrl(v); clearErrors() },
-        },
-      }
+  const fields: Record<'llmBaseUrl' | 'apiKey' | 'proxyUrl', FieldDef> = {
+    llmBaseUrl: {
+      value: draftLlmBaseUrl,
+      onChange: (v) => { setDraftLlmBaseUrl(v); clearErrors() },
+    },
+    apiKey: {
+      value: draftApiKey,
+      onChange: (v) => { setDraftApiKey(v); clearErrors() },
+    },
+    proxyUrl: {
+      value: draftProxyUrl,
+      onChange: (v) => { setDraftProxyUrl(v); clearErrors() },
+    },
+  }
+
+  if (!configLoaded) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+        <div className="bg-white dark:bg-surface-900 rounded-2xl shadow-modal w-full max-w-md mx-4 p-8 text-center">
+          {configLoadError ? (
+            <>
+              <AlertCircle className="w-8 h-8 mx-auto mb-3 text-red-500" />
+              <p className="text-sm text-red-600 dark:text-red-400">{configLoadError}</p>
+              <div className="mt-4 flex justify-center gap-3">
+                <button onClick={onClose} className="px-4 py-2 text-sm bg-surface-100 dark:bg-surface-800 rounded-lg">
+                  {language === 'zh' ? '关闭' : 'Close'}
+                </button>
+                <button
+                  onClick={() => setLoadGeneration(value => value + 1)}
+                  className="px-4 py-2 text-sm text-white bg-accent-600 hover:bg-accent-700 rounded-lg"
+                >
+                  {language === 'zh' ? '重试' : 'Retry'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <Loader2 className="w-8 h-8 mx-auto mb-3 animate-spin text-accent-600" />
+              <p className="text-sm text-surface-500 dark:text-surface-400">
+                {language === 'zh' ? '正在读取已有配置...' : 'Loading saved configuration...'}
+              </p>
+            </>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
@@ -142,7 +169,11 @@ export function ConfigPanel({ onClose, onSave, onReadMode, isAdmin = true }: Con
               {language === 'zh' ? '默认 LLM 服务器' : 'Default LLM Server'} <span className="text-red-500">*</span>
             </label>
             <input
-              type="url"
+              type="text"
+              inputMode="url"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               value={fields.llmBaseUrl.value}
               onChange={(e) => fields.llmBaseUrl.onChange(e.target.value)}
               placeholder="https://openrouter.ai/api/v1"

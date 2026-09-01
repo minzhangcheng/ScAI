@@ -152,6 +152,7 @@ export interface AgentSettingsResponse {
   }>>
   vision_settings: Record<AgentType, boolean>
   literature_config: NonNullable<SessionLoadResponse['literature_config']>
+  default_settings_saved?: boolean
 }
 
 export interface RawTreatmentGroup {

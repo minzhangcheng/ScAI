@@ -158,21 +158,33 @@ export function useSidebarSessions() {
   const handleCreateSession = async () => {
     if (!instruction.trim()) return
 
+    let created
     try {
       clearMessages()
-      const session = await createSession(instruction, sessionName || undefined, roundWaitSeconds)
-      if (session) {
-        syncTabToSessionStatus(session)
-      }
-      setShowNewSession(false)
-      // Reset to defaults for next time
-      setInstruction(DEFAULT_SESSION_INSTRUCTION)
-      setSessionName(DEFAULT_SESSION_NAME)
-      setFormKey(prev => prev + 1)
+      created = await createSession(instruction, sessionName || undefined, roundWaitSeconds)
     } catch (e) {
       console.error('Failed to create session:', e)
       const msg = e instanceof Error ? e.message : String(e)
       alert(msg)
+      return
+    }
+
+    if (!created) return
+    syncTabToSessionStatus(created)
+    setShowNewSession(false)
+    // Reset to defaults for next time
+    setInstruction(DEFAULT_SESSION_INSTRUCTION)
+    setSessionName(DEFAULT_SESSION_NAME)
+    setFormKey(prev => prev + 1)
+
+    try {
+      const session = await loadSession(created.id)
+      if (session) syncTabToSessionStatus(session)
+    } catch (e) {
+      console.error('Session created but failed to load:', e)
+      alert(language === 'zh'
+        ? '分析已创建，但加载失败。请从已有分析中重新打开。'
+        : 'Analysis was created, but failed to load. Reopen it from saved analyses.')
     }
   }
 

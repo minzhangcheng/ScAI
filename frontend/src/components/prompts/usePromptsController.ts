@@ -8,6 +8,13 @@ import {
   type AgentType,
 } from '../../stores/appStore'
 import { buildLiteratureConfigPayload, resolveDeepResearchServerConfig } from '../../utils/literatureConfig'
+import {
+  agentSettingsFromStore,
+  loadLastAgentSettings,
+  mergeSavedAgentSetting,
+  saveLastAgentSettings,
+  type AgentDefaultSecretsResponse,
+} from '../../utils/lastAgentSettings'
 import { transformAgentSettings } from '../../utils/transformLoadResponse'
 import type { AgentSettingsResponse } from '../../types'
 
@@ -85,9 +92,50 @@ const colorStyles: Record<string, {
   }
 }
 
+async function loadPreviousAgentDefaults(userId?: string): Promise<AgentSettingsResponse> {
+  const storedDefaults = userId
+    ? loadLastAgentSettings(userId)?.settings
+    : undefined
+  return storedDefaults ?? apiFetch<AgentSettingsResponse>('/user/agent-default-settings')
+}
+
+async function saveAgentDefaultSecrets(
+  agent: AgentType,
+  apiKey: string,
+  deepResearchApiKey: string,
+  googleApiKey: string,
+) {
+  await apiFetch<AgentDefaultSecretsResponse>('/user/agent-default-secrets', {
+    method: 'POST',
+    body: JSON.stringify({
+      agent,
+      api_key: apiKey,
+      ...(agent === 'literature'
+        ? { deep_research_api_key: deepResearchApiKey, google_api_key: googleApiKey }
+        : {}),
+    }),
+  })
+}
+
+function resolveServerConfig(
+  llmBaseUrl: string,
+  apiKey: string,
+  globalConfig: { llmBaseUrl: string; apiKey: string },
+) {
+  return llmBaseUrl !== globalConfig.llmBaseUrl || apiKey !== globalConfig.apiKey
+    ? { llmBaseUrl, apiKey }
+    : { llmBaseUrl: '', apiKey: '' }
+}
+
+function defaultSaveError(language: string) {
+  return language === 'zh'
+    ? '会话设置已保存，但新建分析的默认设置保存失败，请重试。'
+    : 'Session settings were saved, but defaults for new analyses could not be saved. Please try again.'
+}
+
 export function usePromptsController() {
   const {
-    currentSession, language, apiConfig,
+    currentSession, language, apiConfig, authUser,
     prompts, setPrompt,
     models, setModel,
     temperatures, setTemperature,
@@ -246,17 +294,13 @@ export function usePromptsController() {
     setServerExpanded(false)
     setSaved(false)
   }
-
   const handleSave = async () => {
     setSaving(true)
     setSaveError(null)
     try {
-      // Only persist per-agent server config if different from global defaults
-      const isCustomServer = editedLlmBaseUrl !== apiConfig.llmBaseUrl || editedApiKey !== apiConfig.apiKey
-      const serverConfig = isCustomServer
-        ? { llmBaseUrl: editedLlmBaseUrl, apiKey: editedApiKey }
-        : { llmBaseUrl: '', apiKey: '' }
+      const serverConfig = resolveServerConfig(editedLlmBaseUrl, editedApiKey, apiConfig)
 
+      let savedSettings: AgentSettingsResponse
       if (currentSession) {
         const response = await apiFetch<AgentSettingsResponse>(
           `/session/${currentSession.id}/agent-settings`,
@@ -276,10 +320,18 @@ export function usePromptsController() {
               literature_config: selectedAgent === 'literature'
                 ? buildLiteratureConfigPayload(useAppStore.getState())
                 : undefined,
+              save_as_user_default: true,
             }),
           },
         )
         applyStoreUpdates(transformAgentSettings(response))
+        if (response.default_settings_saved === false) {
+          setContextWindowTouched(false)
+          setSaveError(defaultSaveError(language))
+          return
+        }
+        const previousDefaults = await loadPreviousAgentDefaults(authUser?.id)
+        savedSettings = mergeSavedAgentSetting(previousDefaults, response, selectedAgent)
       } else {
         setPrompt(selectedAgent, editedPrompt)
         setModel(selectedAgent, editedModel)
@@ -294,6 +346,18 @@ export function usePromptsController() {
             : {}),
         })
         setAgentVisionSetting(selectedAgent, editedVisionEnabled)
+        savedSettings = agentSettingsFromStore()
+      }
+      if (!currentSession) {
+        await saveAgentDefaultSecrets(
+          selectedAgent,
+          serverConfig.apiKey,
+          deepResearchApiKey,
+          googleApiKey,
+        )
+      }
+      if (authUser) {
+        saveLastAgentSettings(authUser.id, savedSettings)
       }
       setContextWindowTouched(false)
       setSaved(true)

@@ -1,4 +1,6 @@
 from backend.tests.split_facade import setattr_facade
+import asyncio
+import copy
 import io
 import json
 import logging
@@ -468,6 +470,77 @@ async def test_user_config_preview_is_exact_and_resubmission_preserves_key(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_agent_default_secrets_are_encrypted_and_masked(tmp_path):
+    from backend.routes.user_config import (
+        AgentDefaultSecretsRequest,
+        get_agent_default_secrets,
+        update_agent_default_secrets,
+    )
+    from backend.services.agent_default_secrets import load_agent_default_secrets
+
+    database = AppDB(tmp_path / "agent-default-secrets.db")
+    await database.init()
+    user_id = await database.create_user(
+        "agent-default-user",
+        "test-password-hash",
+        role="user",
+        status="active",
+    )
+
+    response = await update_agent_default_secrets(
+        AgentDefaultSecretsRequest(agent="pi", api_key=RAW_KEY),
+        user_id,
+        database,
+    )
+
+    encrypted = await database.get_user_agent_default_secrets(user_id)
+    assert RAW_KEY not in encrypted
+    assert response["agent_api_keys"]["pi"] == "sk-******789"
+    assert (await get_agent_default_secrets(user_id, database)) == response
+    assert (await load_agent_default_secrets(database, user_id))["agent_api_keys"]["pi"] == RAW_KEY
+
+
+@pytest.mark.asyncio
+async def test_agent_default_secret_updates_for_one_user_do_not_overwrite_each_other(monkeypatch):
+    from backend.routes import user_config
+
+    stored = {"agent_api_keys": {}, "literature": {}}
+
+    async def load_defaults(_db, _user_id):
+        snapshot = copy.deepcopy(stored)
+        await asyncio.sleep(0)
+        return snapshot
+
+    async def save_defaults(_db, _user_id, payload):
+        nonlocal stored
+        await asyncio.sleep(0)
+        stored = copy.deepcopy(payload)
+
+    monkeypatch.setattr(user_config, "load_agent_default_secrets", load_defaults)
+    monkeypatch.setattr(user_config, "save_agent_default_secrets", save_defaults)
+
+    await asyncio.gather(
+        user_config.update_agent_default_secrets(
+            user_config.AgentDefaultSecretsRequest(agent="pi", api_key="pi-secret"),
+            "user-1",
+            object(),
+        ),
+        user_config.update_agent_default_secrets(
+            user_config.AgentDefaultSecretsRequest(
+                agent="bioinformatics", api_key="bio-secret"
+            ),
+            "user-1",
+            object(),
+        ),
+    )
+
+    assert stored["agent_api_keys"] == {
+        "pi": "pi-secret",
+        "bioinformatics": "bio-secret",
+    }
+
+
+@pytest.mark.asyncio
 async def test_global_config_route_persists_encrypted_api_key(tmp_path, monkeypatch):
     from backend.models.api_requests import ConfigRequest
     from backend.routes import config as config_route
@@ -489,6 +562,17 @@ async def test_global_config_route_persists_encrypted_api_key(tmp_path, monkeypa
             ),
             "admin-user",
         )
+        status = await config_route.get_config("admin-user")
+        assert status["llm_base_url"] == "https://global.test/v1"
+        assert status["masked_api_key"] == "sk-******789"
+
+        await config_route.set_config(
+            ConfigRequest(
+                api_key=status["masked_api_key"],
+                llm_base_url="http://localhost:8000/v1",
+            ),
+            "admin-user",
+        )
         persisted = await database.get_meta("global_system_config")
     finally:
         system_config["current"] = previous_config
@@ -497,3 +581,4 @@ async def test_global_config_route_persists_encrypted_api_key(tmp_path, monkeypa
     payload = json.loads(persisted)
     assert payload["api"]["api_key"].startswith(SEALED_SECRET_PREFIX)
     assert open_system_config_payload(payload)["api"]["api_key"] == RAW_KEY
+    assert payload["api"]["llm_base_url"] == "http://localhost:8000/v1"

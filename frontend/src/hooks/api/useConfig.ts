@@ -10,7 +10,26 @@ export function useConfig() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   
-  const saveConfig = useCallback(async () => {
+  const getConfig = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      return await apiFetch<{
+        configured: boolean
+        has_api_key: boolean
+        llm_base_url: string
+        masked_api_key: string
+        has_proxy_url: boolean
+      }>('/config')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load config')
+      throw e
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  const saveConfig = useCallback(async (config = apiConfig) => {
     setLoading(true)
     setError(null)
     
@@ -18,9 +37,9 @@ export function useConfig() {
       await apiFetch('/config', {
         method: 'POST',
         body: JSON.stringify({
-          api_key: apiConfig.apiKey,
-          llm_base_url: apiConfig.llmBaseUrl,
-          proxy_url: apiConfig.proxyUrl || null,
+          api_key: config.apiKey,
+          llm_base_url: config.llmBaseUrl,
+          proxy_url: config.proxyUrl || null,
         }),
       })
     } catch (e) {
@@ -98,7 +117,7 @@ export function useConfig() {
     setError(null)
   }, [])
 
-  return { apiConfig, setApiConfig, saveConfig, checkStatus, validateApiKey, validateSavedConfig, loading, error, clearError }
+  return { apiConfig, setApiConfig, getConfig, saveConfig, checkStatus, validateApiKey, validateSavedConfig, loading, error, clearError }
 }
 // Prompts hook
 export function usePrompts() {

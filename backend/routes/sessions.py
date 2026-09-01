@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
+from cryptography.fernet import InvalidToken
 
 from backend.config import (
     SESSION_DIR, STATE_DIR, UPLOAD_DIR, WORKSPACE_DIR, REPORTS_DIR,
@@ -24,12 +25,81 @@ from backend.state import (
     session_access_times, last_save_times,
 )
 from backend.utils.auth import require_session_ownership, require_session_read_ownership
+from backend.utils.auth import get_db
+from backend.utils import crypto
 from backend.utils.files import validate_path_within, validate_session_id
+from backend.utils.url_validation import validated_http_url
 from backend.utils.websocket_delivery import serialize_realtime_message
 
 router = APIRouter(prefix="/api", tags=["sessions"])
 
 logger = logging.getLogger(__name__)
+
+_AGENT_NAMES = (
+    "pi", "pathology", "bioinformatics", "biochemistry",
+    "literature", "painter", "supervisor", "technique",
+)
+
+
+def _new_session_agent_settings(state, settings, secret_defaults) -> None:
+    """Copy one browser default snapshot into a new authoritative session."""
+    if settings is not None:
+        state.custom_prompts = {
+            agent: settings.prompts[agent]
+            for agent in _AGENT_NAMES
+            if agent in settings.prompts
+        }
+        state.custom_models = {
+            agent: settings.models[agent]
+            for agent in _AGENT_NAMES
+            if agent in settings.models
+        }
+        state.custom_temperatures = {
+            agent: settings.temperatures[agent]
+            for agent in _AGENT_NAMES
+            if agent in settings.temperatures
+        }
+        state.agent_vision_settings = {
+            agent: settings.vision_settings[agent]
+            for agent in _AGENT_NAMES
+            if agent in settings.vision_settings
+        }
+
+    saved_keys = secret_defaults.get("agent_api_keys") or {}
+    for agent in _AGENT_NAMES:
+        incoming = settings.agent_server_configs.get(agent) if settings is not None else None
+        api_key = saved_keys.get(agent, "")
+        if incoming is None and not api_key:
+            continue
+        raw_url = incoming.llm_base_url if incoming is not None else ""
+        try:
+            llm_base_url = validated_http_url(
+                raw_url, f"agent_server_configs.{agent}.llm_base_url", allow_empty=True
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        server = {"llm_base_url": llm_base_url, "api_key": api_key}
+        if incoming is not None and incoming.context_window is not None:
+            server["context_window"] = incoming.context_window
+        state.agent_server_configs[agent] = server
+
+    literature = dict(state.literature_config or {})
+    if settings is not None and settings.literature_config is not None:
+        incoming_literature = settings.literature_config.model_dump(exclude_unset=True)
+        if "deep_research_llm_base_url" in incoming_literature:
+            try:
+                incoming_literature["deep_research_llm_base_url"] = validated_http_url(
+                    incoming_literature["deep_research_llm_base_url"] or "",
+                    "literature_config.deep_research_llm_base_url",
+                    allow_empty=True,
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        literature.update(incoming_literature)
+    saved_literature = secret_defaults.get("literature") or {}
+    literature["deep_research_api_key"] = saved_literature.get("deep_research_api_key", "")
+    literature["google_api_key"] = saved_literature.get("google_api_key", "")
+    state.literature_config = literature
 
 
 def _serialize_realtime_messages(messages: list, limit: int = 500) -> list:
@@ -98,6 +168,15 @@ async def start_session(request: Request, body: StartRequest):
         round_wait_seconds=body.round_wait_seconds,
         artifact_registry_version=ARTIFACT_REGISTRY_VERSION,
     )
+    from backend.services.agent_default_secrets import load_agent_default_secrets
+
+    try:
+        secret_defaults = await load_agent_default_secrets(await get_db(), user_id)
+    except (crypto.ConfigEncryptionUnavailable, InvalidToken) as exc:
+        raise HTTPException(
+            503, "Encryption service unavailable; cannot load Agent defaults"
+        ) from exc
+    _new_session_agent_settings(state, body.agent_settings, secret_defaults)
 
     from backend.services.session_lifecycle import register_new_session_generation
     from backend.services.session_deletion import delete_session_generation

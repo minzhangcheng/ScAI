@@ -1,8 +1,6 @@
 """Per-user LLM configuration routes."""
 import logging
-from typing import Optional
-from urllib.parse import urlparse
-
+from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
@@ -14,6 +12,14 @@ from backend.utils.db import AppDB
 from cryptography.fernet import InvalidToken
 from backend.utils import crypto
 from backend.utils.secret_redaction import mask_api_key
+from backend.utils.settings_provider import MASKED_SECRET_VALUE
+from backend.utils.url_validation import validated_http_url
+from backend.services.agent_default_secrets import (
+    agent_default_secrets_lock,
+    load_agent_default_secrets,
+    masked_agent_default_secrets,
+    save_agent_default_secrets,
+)
 from backend.state import system_config
 
 logger = logging.getLogger(__name__)
@@ -36,6 +42,16 @@ class ValidateUserConfigRequest(BaseModel):
     proxy_url: Optional[str] = None
 
 
+class AgentDefaultSecretsRequest(BaseModel):
+    agent: Literal[
+        "pi", "pathology", "bioinformatics", "biochemistry",
+        "literature", "painter", "supervisor", "technique",
+    ]
+    api_key: Optional[str] = None
+    deep_research_api_key: Optional[str] = None
+    google_api_key: Optional[str] = None
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _mask_api_key(key: str) -> str:
@@ -45,9 +61,10 @@ def _mask_api_key(key: str) -> str:
 def _validate_url(url: str, field_name: str) -> None:
     if not url:
         return
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise HTTPException(400, f"{field_name} must use http or https scheme")
+    try:
+        validated_http_url(url, field_name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 def _decrypt_masked(row: dict, field_name: str) -> tuple[bool, str]:
@@ -93,6 +110,57 @@ async def get_user_config(
         "masked_api_key": masked_key,
         "has_proxy_url": has_proxy_url,
     }
+
+
+@router.get("/agent-default-secrets")
+async def get_agent_default_secrets(
+    user_id: str = Depends(require_auth),
+    db: AppDB = Depends(get_db),
+):
+    """Return masked credentials used for newly created analyses."""
+    try:
+        payload = await load_agent_default_secrets(db, user_id)
+    except (crypto.ConfigEncryptionUnavailable, InvalidToken) as exc:
+        raise HTTPException(503, "Encryption service unavailable; cannot load Agent defaults") from exc
+    return masked_agent_default_secrets(payload)
+
+
+@router.post("/agent-default-secrets")
+async def update_agent_default_secrets(
+    body: AgentDefaultSecretsRequest,
+    user_id: str = Depends(require_active_user),
+    db: AppDB = Depends(get_db),
+):
+    """Persist one Agent's new-analysis credentials under the installation key."""
+    try:
+        async with agent_default_secrets_lock(user_id):
+            payload = await load_agent_default_secrets(db, user_id)
+            agent_api_keys = payload.setdefault("agent_api_keys", {})
+            if body.api_key is not None:
+                existing_key = agent_api_keys.get(body.agent, "")
+                if body.api_key and body.api_key == mask_api_key(existing_key):
+                    incoming_key = existing_key
+                else:
+                    incoming_key = body.api_key
+                if incoming_key:
+                    agent_api_keys[body.agent] = incoming_key
+                else:
+                    agent_api_keys.pop(body.agent, None)
+
+            if body.agent == "literature":
+                literature = payload.setdefault("literature", {})
+                for field in ("deep_research_api_key", "google_api_key"):
+                    incoming = getattr(body, field)
+                    if incoming is None:
+                        continue
+                    if incoming == MASKED_SECRET_VALUE:
+                        incoming = literature.get(field, "")
+                    literature[field] = incoming
+
+            await save_agent_default_secrets(db, user_id, payload)
+    except (crypto.ConfigEncryptionUnavailable, InvalidToken) as exc:
+        raise HTTPException(503, "Encryption service unavailable; cannot save Agent defaults") from exc
+    return masked_agent_default_secrets(payload)
 
 
 @router.get("/config/status")

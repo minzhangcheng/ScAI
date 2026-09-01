@@ -1,5 +1,7 @@
 """Session configuration routes (prompts, models, temperatures, vision, rounds, literature, agent-server)."""
-from fastapi import APIRouter, HTTPException, Request
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from backend.config import AgentTemperatures, PI_AGENT_NAME, SystemConfig
@@ -8,21 +10,40 @@ from backend.models.api_requests import (
     VisionSettingUpdateRequest, LiteratureConfigRequest, AgentServerConfigRequest,
     AgentSettingsUpdateRequest,
 )
-from backend.models.schemas import APIResponse, DEFAULT_ROUND_WAIT_SECONDS
+from backend.models.schemas import AnalysisState, APIResponse, DEFAULT_ROUND_WAIT_SECONDS
+from backend.services.agent_default_secrets import (
+    agent_default_secrets_lock,
+    load_agent_default_secrets,
+    save_agent_default_secrets,
+)
 from backend.services.session_store import async_save_session, ensure_session_loaded, update_session_cache
 from backend.state import get_session_lock, workflows
-from backend.utils.auth import require_session_ownership, require_session_read_ownership
+from backend.utils.auth import (
+    get_db,
+    require_auth,
+    require_session_ownership,
+    require_session_read_ownership,
+)
 from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import validate_session_id
 from backend.utils.secret_redaction import mask_api_key
 from backend.utils.settings_provider import AgentSettingsProvider, resolve_context_window
+from backend.utils.url_validation import validated_http_url
 
 router = APIRouter(prefix="/api", tags=["session-config"])
+logger = logging.getLogger(__name__)
 
 _AGENT_NAMES = (
     "pi", "pathology", "bioinformatics", "biochemistry",
     "literature", "painter", "supervisor", "technique",
 )
+
+
+def _validated_optional_url(value: str, field_name: str) -> str:
+    try:
+        return validated_http_url(value, field_name, allow_empty=True)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 def _invalidate_active_agent_config(session_id: str, agent_name: str) -> None:
@@ -107,6 +128,19 @@ def _agent_settings_payload(state, config: SystemConfig) -> dict:
             state.literature_config
         ),
     }
+
+
+@router.get("/user/agent-default-settings")
+async def get_user_agent_default_settings(user_id: str = Depends(require_auth)):
+    """Return effective non-secret defaults when no prior browser snapshot exists."""
+    config = await resolve_config_for_user(user_id) or SystemConfig()
+    empty_state = AnalysisState(
+        id="agent-default-settings",
+        name="Agent Defaults",
+        user_id=user_id,
+        initial_instruction="",
+    )
+    return _agent_settings_payload(empty_state, config)
 
 
 class MaxRoundsRequest(BaseModel):
@@ -284,7 +318,9 @@ async def update_literature_config(session_id: str, request: Request, body: Lite
         incoming = {
             "mode": body.mode,
             "deep_research_model": body.deep_research_model,
-            "deep_research_llm_base_url": body.deep_research_llm_base_url,
+            "deep_research_llm_base_url": _validated_optional_url(
+                body.deep_research_llm_base_url, "deep_research_llm_base_url"
+            ),
             "deep_research_api_key": body.deep_research_api_key,
             "google_api_key": body.google_api_key,
             "pubmed_email": body.pubmed_email,
@@ -322,7 +358,7 @@ async def update_agent_server_config(session_id: str, request: Request, body: Ag
         if incoming_key and incoming_key == mask_api_key(existing.get("api_key", "")):
             incoming_key = existing.get("api_key", "")
         new_config = {
-            "llm_base_url": body.llm_base_url,
+            "llm_base_url": _validated_optional_url(body.llm_base_url, "llm_base_url"),
             "api_key": incoming_key,
         }
         if "context_window" not in body.model_fields_set:
@@ -378,7 +414,7 @@ async def update_agent_settings(
         state.custom_models[body.agent] = body.model
         state.custom_temperatures[body.agent] = body.temperature
         new_server = {
-            "llm_base_url": body.llm_base_url,
+            "llm_base_url": _validated_optional_url(body.llm_base_url, "llm_base_url"),
             "api_key": incoming_key,
         }
         if "context_window" not in body.model_fields_set:
@@ -391,14 +427,46 @@ async def update_agent_settings(
 
         if body.agent == "literature" and body.literature_config is not None:
             literature = body.literature_config
+            incoming_literature = literature.model_dump()
+            incoming_literature["deep_research_llm_base_url"] = _validated_optional_url(
+                literature.deep_research_llm_base_url,
+                "deep_research_llm_base_url",
+            )
             state.literature_config = AgentSettingsProvider.resolve_literature_config_update(
                 state.literature_config or {},
-                literature.model_dump(),
+                incoming_literature,
             )
 
         await update_session_cache(session_id, state)
         _invalidate_active_agent_config(session_id, body.agent)
         await async_save_session(session_id, state)
 
+        default_settings_saved = True
+        if body.save_as_user_default:
+            try:
+                db = await get_db()
+                async with agent_default_secrets_lock(user_id):
+                    defaults = await load_agent_default_secrets(db, user_id)
+                    agent_api_keys = defaults.setdefault("agent_api_keys", {})
+                    if incoming_key:
+                        agent_api_keys[body.agent] = incoming_key
+                    else:
+                        agent_api_keys.pop(body.agent, None)
+                    if body.agent == "literature":
+                        saved_literature = defaults.setdefault("literature", {})
+                        current_literature = state.literature_config or {}
+                        saved_literature["deep_research_api_key"] = current_literature.get(
+                            "deep_research_api_key", ""
+                        )
+                        saved_literature["google_api_key"] = current_literature.get(
+                            "google_api_key", ""
+                        )
+                    await save_agent_default_secrets(db, user_id, defaults)
+            except Exception:
+                default_settings_saved = False
+                logger.exception("Failed to persist Agent defaults for user %s", user_id)
+
     config = await resolve_config_for_user(user_id) or SystemConfig()
-    return _agent_settings_payload(state, config)
+    response = _agent_settings_payload(state, config)
+    response["default_settings_saved"] = default_settings_saved
+    return response

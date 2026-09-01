@@ -67,6 +67,14 @@ CREATE TABLE IF NOT EXISTS user_llm_config (
     updated_at TEXT NOT NULL,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS user_agent_default_secrets (
+    user_id TEXT PRIMARY KEY,
+    encrypted_payload TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
 """
 
 # Throttle API key last_used_at updates (seconds)
@@ -563,6 +571,36 @@ class AppDB:
                        encrypted_proxy_url=excluded.encrypted_proxy_url,
                        updated_at=excluded.updated_at""",
                 (user_id, encrypted_api_key, llm_base_url, encrypted_proxy_url, now, now),
+            )
+            await db.commit()
+
+    async def get_user_agent_default_secrets(self, user_id: str) -> Optional[str]:
+        """Return the encrypted per-user Agent-default secret payload."""
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            cur = await db.execute(
+                "SELECT encrypted_payload FROM user_agent_default_secrets WHERE user_id=?",
+                (user_id,),
+            )
+            row = await cur.fetchone()
+            return row[0] if row is not None else None
+
+    async def set_user_agent_default_secrets(
+        self,
+        user_id: str,
+        encrypted_payload: str,
+    ) -> None:
+        """Upsert the encrypted per-user Agent-default secret payload."""
+        now = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+            await db.execute(
+                """INSERT INTO user_agent_default_secrets
+                       (user_id, encrypted_payload, created_at, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                       encrypted_payload=excluded.encrypted_payload,
+                       updated_at=excluded.updated_at""",
+                (user_id, encrypted_payload, now, now),
             )
             await db.commit()
 

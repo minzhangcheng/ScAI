@@ -8,6 +8,10 @@ import type {
 } from '../../../types'
 import { useAppStore, type Session } from '../../../stores/appStore'
 import { devLog } from '../../../utils/logger'
+import {
+  loadLastAgentSettings,
+  newSessionAgentSettingsPayload,
+} from '../../../utils/lastAgentSettings'
 import { transformLoadResponse } from '../../../utils/transformLoadResponse'
 import { apiFetch } from '../client'
 
@@ -25,13 +29,26 @@ export function useSessionData(store: SessionDataStore) {
     store.setError(null)
     store.clearMessages()
     try {
+      const { authUser, pubmedEmail } = useAppStore.getState()
+      const previousDefaults = authUser
+        ? loadLastAgentSettings(authUser.id)?.settings
+        : undefined
       const response = await apiFetch<{
         success: boolean
         session_id: string
         data: { name: string }
       }>('/session/start', {
         method: 'POST',
-        body: JSON.stringify({ instruction, session_name: name, round_wait_seconds: roundWaitSeconds }),
+        body: JSON.stringify({
+          instruction,
+          session_name: name,
+          round_wait_seconds: roundWaitSeconds,
+          ...(previousDefaults
+            ? { agent_settings: newSessionAgentSettingsPayload(previousDefaults) }
+            : pubmedEmail
+              ? { agent_settings: { literature_config: { pubmed_email: pubmedEmail } } }
+              : {}),
+        }),
       })
       const session: Session = {
         id: response.session_id,
