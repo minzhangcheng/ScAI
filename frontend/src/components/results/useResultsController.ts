@@ -9,6 +9,7 @@ import {
   type PublicationTable,
 } from '../../stores/appStore'
 import type { GraphicAbstractContent } from '../../types'
+import { STRIPPED_FIGURE_PLACEHOLDER } from '../../constants/storage'
 import { downloadBlob } from '../../utils/download'
 import { normalizeImageBase64 } from '../../utils/image'
 
@@ -146,7 +147,11 @@ export function useResultsController() {
       }
       if (msg.type === 'integrated_report') {
         const content = msg.content as IntegratedReportContent
-        if (content?.report) {
+        if (
+          content?.report
+          && content.report !== STRIPPED_FIGURE_PLACEHOLDER
+          && !content.report.startsWith('@scai-blob:')
+        ) {
           setIntegratedReport(content.report)
         }
         if (Array.isArray(content?.figures) && content.figures.length > 0) {

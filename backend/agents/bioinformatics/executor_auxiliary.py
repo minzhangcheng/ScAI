@@ -95,8 +95,8 @@ async def finalize_run(context) -> dict:
         "analysis_log": context.analysis_log,
         "success": status != "error",
         "mechanism_programs": context.mechanism_programs,
-        # Producer-supplied execution IDs are candidates only. The workflow's
-        # Supervisor reconciliation promotes semantically valid links later.
+        # Producer-supplied execution IDs are candidates only. The workflow
+        # validates them against current successful execution receipts later.
         "evidence_verified": False,
         "evidence_gate_degraded": context.evidence_gate_degraded,
         "evidence_execution_ids": [],

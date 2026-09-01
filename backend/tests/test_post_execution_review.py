@@ -1,15 +1,17 @@
-"""Tests for Host evidence identity and Supervisor plan reconciliation."""
+"""Tests for Host evidence identity and PI-owned plan review."""
 import base64
 import hashlib
 import itertools
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from backend.models.schemas import (
     AnalysisPlan,
     AnalysisStep,
+    AnalysisState,
     CodeExecution,
     FigureReviewStatus,
     PlanStep,
@@ -32,7 +34,10 @@ from backend.workflow.post_execution_review import (
     step_is_conditional,
     unavailable_method_families,
 )
-from backend.workflow.post_execution_review_parts.reconciliation import _apply_links
+from backend.workflow.post_execution_review_parts.reconciliation import (
+    _apply_links,
+    reconcile_plan_evidence,
+)
 
 
 _ARTIFACT_ROOT: Path | None = None
@@ -186,6 +191,33 @@ def test_supervisor_confirmation_completes_only_its_semantic_plan_step():
     assert observations[1]["technical_linkage"] == "unverified"
 
 
+def test_host_execution_linkage_is_observation_not_plan_completion():
+    plan = AnalysisPlan(
+        id="receipt-plan",
+        phase="innovation",
+        steps=[
+            PlanStep(id=1, title="First", method="Run custom method"),
+            PlanStep(id=2, title="Second", method="Run another method"),
+        ],
+    )
+
+    audit = audit_plan_execution(
+        plan,
+        [_receipt(plan)],
+        round_number=2,
+        target_cohort_digest="a" * 64,
+    )
+
+    assert audit.evidence_mode == "host_execution_linkage"
+    assert [step.status for step in audit.steps] == ["pending", "pending"]
+    assert all(step.verifiable is False for step in audit.steps)
+    observations = audit.summary()["step_observations"]
+    assert observations[0]["technical_linkage"] == "execution_linked"
+    assert observations[1]["technical_linkage"] == "not_linked"
+    assert "receipt-1" in observations[0]["reason"]
+    assert "PI review determines scientific completion" in observations[0]["reason"]
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -213,7 +245,7 @@ def test_ineligible_v2_receipt_never_falls_back_to_keyword_inference(overrides):
         target_cohort_digest="a" * 64,
     )
 
-    assert audit.evidence_mode == "supervisor_semantic"
+    assert audit.evidence_mode == "host_execution_linkage"
     assert audit.steps[0].status == "pending"
     assert audit.steps[0].verifiable is False
 
@@ -242,6 +274,284 @@ def test_semantic_reconciliation_cannot_cross_cohort_generations():
 
     assert audit.steps[0].status == "pending"
     assert audit.steps[0].verifiable is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_linkage_skips_supervisor_and_verifies_current_receipts():
+    plan = AnalysisPlan(
+        id="runtime-link-plan",
+        phase="innovation",
+        steps=[PlanStep(id=1, title="Current", method="Run current analysis")],
+    )
+    execution = _receipt(plan, cohort_generation=1)
+    finding = {
+        "id": "finding-1",
+        "text": "A current execution-linked observation.",
+        "round_number": 2,
+        "lineage_id": "main",
+        "plan_id": plan.id,
+        "cohort_digest": "a" * 64,
+        "cohort_generation": 1,
+        "candidate_evidence_execution_ids": [execution.id],
+    }
+    state = AnalysisState(
+        id="runtime-link-state",
+        user_id="u",
+        current_round=2,
+        current_plan=plan,
+        code_history=[execution],
+        sandbox_state={
+            "cohort_identity_v1": {
+                "cohort_digest": "a" * 64,
+                "cohort_generation": 1,
+            }
+        },
+    )
+
+    class ForbiddenSupervisor:
+        async def review_plan_evidence(self, *_args, **_kwargs):
+            raise AssertionError("Supervisor reconciliation must not be called")
+
+    result = {
+        "finding_records": [finding],
+        "evidence_gate_degraded": False,
+        "evidence_gate_findings": [{"gate": "supervisor-plan-evidence"}],
+    }
+    reconciliation = await reconcile_plan_evidence(
+        SimpleNamespace(supervisor_agent=ForbiddenSupervisor(), session_id="s"),
+        state,
+        result,
+    )
+
+    assert reconciliation == {}
+    assert state.plan_evidence_reconciliations == []
+    assert result["evidence_verified"] is True
+    assert result["evidence_execution_ids"] == [execution.id]
+    assert result["evidence_gate_findings"] == []
+    assert finding["evidence_status"] == "verified"
+    assert finding["semantic_status"] == "unverified"
+    assert finding["confirmed_plan_step_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_linkage_uses_full_current_execution_history():
+    plan = AnalysisPlan(
+        id="long-runtime-link-plan",
+        phase="innovation",
+        steps=[PlanStep(id=1, title="Current", method="Run current analysis")],
+    )
+    target = _receipt(plan, id="oldest-current-receipt", cohort_generation=1)
+    later = [
+        _receipt(plan, id=f"later-current-receipt-{index}", cohort_generation=1)
+        for index in range(61)
+    ]
+    finding = {
+        "id": "finding-oldest-receipt",
+        "text": "A finding linked to an earlier current-plan execution.",
+        "round_number": 2,
+        "lineage_id": "main",
+        "plan_id": plan.id,
+        "cohort_digest": "a" * 64,
+        "cohort_generation": 1,
+        "candidate_evidence_execution_ids": [target.id],
+    }
+    state = AnalysisState(
+        id="long-runtime-link-state",
+        user_id="u",
+        current_round=2,
+        current_plan=plan,
+        code_history=[target, *later],
+        sandbox_state={"cohort_identity_v1": {
+            "cohort_digest": "a" * 64,
+            "cohort_generation": 1,
+        }},
+    )
+    result = {"finding_records": [finding], "evidence_gate_findings": []}
+
+    await reconcile_plan_evidence(
+        SimpleNamespace(supervisor_agent=None, session_id="s"), state, result,
+    )
+
+    assert result["evidence_verified"] is True
+    assert result["evidence_execution_ids"] == [target.id]
+
+
+def test_host_execution_linkage_is_awaiting_pi_not_unverifiable():
+    plan = AnalysisPlan(
+        id="host-pi-plan",
+        phase="innovation",
+        steps=[PlanStep(id=1, title="Current", method="Run current analysis")],
+    )
+
+    summary = audit_plan_execution(
+        plan,
+        [_receipt(plan)],
+        round_number=2,
+        target_cohort_digest="a" * 64,
+    ).summary()
+
+    assert summary["n_unverifiable"] == 0
+    assert summary["n_awaiting_pi_decision"] == 1
+    assert summary["step_observations"][0]["awaiting_pi_decision"] is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_linkage_does_not_pass_a_missing_execution_receipt():
+    plan = AnalysisPlan(
+        id="runtime-missing-plan",
+        phase="innovation",
+        steps=[PlanStep(id=1, title="Current", method="Run current analysis")],
+    )
+    finding = {
+        "id": "finding-missing",
+        "text": "An observation with a nonexistent receipt.",
+        "round_number": 2,
+        "lineage_id": "main",
+        "plan_id": plan.id,
+        "cohort_digest": "a" * 64,
+        "cohort_generation": 1,
+        "candidate_evidence_execution_ids": ["missing-execution"],
+    }
+    state = AnalysisState(
+        id="runtime-missing-state",
+        user_id="u",
+        current_round=2,
+        current_plan=plan,
+        sandbox_state={
+            "cohort_identity_v1": {
+                "cohort_digest": "a" * 64,
+                "cohort_generation": 1,
+            }
+        },
+    )
+    result = {
+        "finding_records": [finding],
+        "evidence_gate_degraded": False,
+        "evidence_gate_findings": [],
+    }
+
+    await reconcile_plan_evidence(
+        SimpleNamespace(supervisor_agent=None, session_id="s"),
+        state,
+        result,
+    )
+
+    assert result["evidence_verified"] is False
+    assert result["evidence_execution_ids"] == []
+    assert finding["evidence_status"] == "unverified"
+    assert result["evidence_gate_degraded"] is False
+    assert [item["gate"] for item in result["evidence_gate_findings"]] == [
+        "execution-evidence-linkage"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_linkage_rejects_stale_analysis_generation():
+    plan = AnalysisPlan(
+        id="runtime-generation-plan",
+        phase="innovation",
+        steps=[PlanStep(id=1, title="Current", method="Run current analysis")],
+    )
+    execution = _receipt(plan, analysis_generation=0, cohort_generation=1)
+    finding = {
+        "id": "finding-stale-generation",
+        "text": "An observation linked to stale analysis output.",
+        "round_number": 2,
+        "lineage_id": "main",
+        "plan_id": plan.id,
+        "analysis_generation": 1,
+        "cohort_digest": "a" * 64,
+        "cohort_generation": 1,
+        "candidate_evidence_execution_ids": [execution.id],
+    }
+    state = AnalysisState(
+        id="runtime-generation-state",
+        user_id="u",
+        current_round=2,
+        current_plan=plan,
+        code_history=[execution],
+        sandbox_state={
+            "analysis_generation": 1,
+            "cohort_identity_v1": {
+                "cohort_digest": "a" * 64,
+                "cohort_generation": 1,
+            },
+        },
+    )
+    result = {"finding_records": [finding], "evidence_gate_findings": []}
+
+    await reconcile_plan_evidence(
+        SimpleNamespace(supervisor_agent=None, session_id="s"), state, result,
+    )
+
+    assert result["evidence_verified"] is False
+    assert result["evidence_execution_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_linkage_rejects_explicit_failed_validation_output():
+    plan = AnalysisPlan(
+        id="runtime-validation-plan",
+        phase="innovation",
+        steps=[PlanStep(id=1, title="Current", method="Run current analysis")],
+    )
+    execution = _receipt(
+        plan,
+        output="Validation failed: required result was not produced.",
+        cohort_generation=1,
+    )
+    finding = {
+        "id": "finding-failed-validation",
+        "text": "An observation linked to rejected output.",
+        "round_number": 2,
+        "lineage_id": "main",
+        "plan_id": plan.id,
+        "cohort_digest": "a" * 64,
+        "cohort_generation": 1,
+        "candidate_evidence_execution_ids": [execution.id],
+    }
+    state = AnalysisState(
+        id="runtime-validation-state",
+        user_id="u",
+        current_round=2,
+        current_plan=plan,
+        code_history=[execution],
+        sandbox_state={"cohort_identity_v1": {
+            "cohort_digest": "a" * 64,
+            "cohort_generation": 1,
+        }},
+    )
+    result = {"finding_records": [finding], "evidence_gate_findings": []}
+
+    await reconcile_plan_evidence(
+        SimpleNamespace(supervisor_agent=None, session_id="s"), state, result,
+    )
+
+    assert result["evidence_verified"] is False
+    assert result["evidence_execution_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_linkage_without_structured_findings_is_unknown():
+    plan = AnalysisPlan(
+        id="runtime-no-findings-plan",
+        phase="innovation",
+        steps=[PlanStep(id=1, title="Current", method="Run current analysis")],
+    )
+    state = AnalysisState(
+        id="runtime-no-findings-state",
+        user_id="u",
+        current_round=2,
+        current_plan=plan,
+    )
+    result = {"finding_records": [], "evidence_gate_findings": []}
+
+    await reconcile_plan_evidence(
+        SimpleNamespace(supervisor_agent=None, session_id="s"), state, result,
+    )
+
+    assert result["evidence_verified"] is None
+    assert result["evidence_gate_findings"] == []
 
 
 def test_unverified_reconciliation_is_advisory_not_degraded():
@@ -776,6 +1086,7 @@ def test_pi_execution_audit_formats_every_plan_step():
     )
 
     assert "plan_step_id=21" in rendered
+    assert "awaiting PI completion decision 21" in rendered
 
 
 def test_sanitize_review_result_bounds_lists_and_survives_non_dict():

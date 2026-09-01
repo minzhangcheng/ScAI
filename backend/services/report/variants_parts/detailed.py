@@ -49,10 +49,10 @@ def _technical_evidence_observations_html(
     verified = _record_value(
         round_result, "bioinformatics_evidence_verified", None
     )
-    verification_label = {
-        True: "verified",
-        False: "not verified",
-        None: "not recorded",
+    linkage_label = {
+        True: "all structured findings have current successful execution receipts",
+        False: "one or more findings lack a current successful execution receipt",
+        None: "execution linkage was not recorded for this historical round",
     }[verified]
     execution_ids = list(
         _record_value(round_result, "evidence_execution_ids", []) or []
@@ -62,19 +62,6 @@ def _technical_evidence_observations_html(
         for value in (_record_value(round_result, "evidence_notes", []) or [])
         if str(value).strip()
     ]
-
-    reconciliation = _matching_round_record(
-        getattr(state, "plan_evidence_reconciliations", []), round_number
-    )
-    links = list(_record_value(reconciliation, "links", []) or [])
-    link_counts = {
-        status: sum(
-            1
-            for link in links
-            if str(_record_value(link, "status", "")).lower() == status
-        )
-        for status in ("evidenced", "partial", "unverified")
-    }
 
     parts = [
         '<div class="segment-section evidence-observations">',
@@ -86,34 +73,14 @@ def _technical_evidence_observations_html(
         ),
         '<ul>',
         (
-            '<li><strong>Bioinformatics evidence verification:</strong> '
-            f'{html_module.escape(verification_label)}</li>'
+            '<li><strong>Execution linkage:</strong> '
+            f'{html_module.escape(linkage_label)}</li>'
         ),
         (
             '<li><strong>Confirmed execution receipts:</strong> '
             f'{len(execution_ids)}</li>'
         ),
     ]
-    if reconciliation is not None:
-        status = str(_record_value(reconciliation, "status", "not recorded"))
-        parts.append(
-            '<li><strong>Plan/evidence reconciliation:</strong> '
-            f'{html_module.escape(status)}; '
-            f'{link_counts["evidenced"]} evidenced, '
-            f'{link_counts["partial"]} partial, '
-            f'{link_counts["unverified"]} unverified plan steps</li>'
-        )
-        reason = str(_record_value(reconciliation, "overall_reason", "") or "").strip()
-        if reason:
-            parts.append(
-                '<li><strong>Reconciliation note:</strong> '
-                f'{html_module.escape(reason)}</li>'
-            )
-    elif verified is False:
-        parts.append(
-            '<li><strong>Plan/evidence reconciliation:</strong> no retained '
-            'round-level reconciliation record</li>'
-        )
     for note in notes[:20]:
         parts.append(
             '<li><strong>Evidence note:</strong> '

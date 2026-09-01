@@ -56,4 +56,16 @@ describe('restored report downloads', () => {
       expect.objectContaining({ headers: expect.any(Object) }),
     ))
   })
+
+  it('renders GitHub-flavored Markdown tables', () => {
+    render(<IntegratedReport report={[
+      '| Candidate | Evidence |',
+      '|---|---|',
+      '| **MT stress** | Observed |',
+    ].join('\n')} />)
+
+    expect(screen.getByRole('table')).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Candidate' })).toBeInTheDocument()
+    expect(screen.getByRole('cell', { name: 'MT stress' })).toBeInTheDocument()
+  })
 })

@@ -100,7 +100,7 @@ def test_pathology_tile_coverage_is_bounded_and_survives_round_api_and_websocket
     assert ws_payload["pathology_coverage"][0]["image_type"] == "H&E"
 
 
-def test_partial_pathology_coverage_is_exactly_disclosed_in_report_limitations():
+def test_partial_pathology_coverage_is_retained_without_dedicated_html_block():
     coverage = _extract_coverage(_pathology_node_result())[:1]
     assert "pathology_coverage" in getattr(RoundResult, "model_fields", {})
     state = AnalysisState(
@@ -109,16 +109,16 @@ def test_partial_pathology_coverage_is_exactly_disclosed_in_report_limitations()
     )
 
     quality = build_quality_disclosures(state)
-    assert any("25/45 validated tiles" in item for item in quality["cautions"])
+    cautions = " ".join(quality["cautions"])
+    assert "25/45 validated tiles" in cautions
+    assert "55.6%" in cautions
+    assert "omitted tiles were not assessed" in cautions
 
     html = render_report_limitations_html({
         "status": "partial",
         "quality_disclosures": quality,
     })
-    assert 'class="report-limitations-details"' in html
-    assert "25/45 validated tiles" in html
-    assert "55.6%" in html
-    assert "omitted tiles were not assessed" in html
+    assert html == ""
 
 
 def test_missing_pathology_coverage_is_neutral_and_nonblocking():

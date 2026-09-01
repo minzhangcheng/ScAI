@@ -31,6 +31,10 @@ import inspect
 import json as _json
 from backend.services import ora_kernel
 from backend.services.marker_priors import MarkerDB, summarize_database_priors
+from backend.services.execution_evidence import (
+    _FAILED_EVIDENCE_OUTPUT_RE,
+    execution_supports_evidence as _execution_supports_evidence,
+)
 
 _ORA_KERNEL_SRC = inspect.getsource(ora_kernel)
 from ...utils.formatting import format_revision_history, truncate_for_llm
@@ -172,13 +176,6 @@ _CELL_TYPE_ASSIGN_RE = re.compile(
 )
 
 
-_FAILED_EVIDENCE_OUTPUT_RE = re.compile(
-    r"(?:\bvalidation\s+failed\b|\bcritical\s*:\s*[^\n]*(?:failed|no\s+\w+\s+found)|"
-    r"\bmatched\s+in\s+bulk\s*:\s*\[\s*\]|\bexecution\s+failed\b)",
-    re.IGNORECASE,
-)
-
-
 def build_approved_plan_context(
     plan: Any,
     *,
@@ -301,9 +298,7 @@ def code_is_statically_unsafe(
 
 def execution_supports_evidence(execution: CodeExecution) -> bool:
     """Return whether a code cell may be cited as scientific evidence."""
-    if execution.error or not execution.evidence_eligible:
-        return False
-    return not _FAILED_EVIDENCE_OUTPUT_RE.search(execution.output or "")
+    return _execution_supports_evidence(execution)
 
 
 def successful_evidence_executions(
@@ -314,6 +309,7 @@ def successful_evidence_executions(
     lineage_id: Optional[str] = None,
     cohort_digest: Optional[str] = None,
     cohort_generation: Optional[int] = None,
+    analysis_generation: Optional[int] = None,
     require_plan_binding: bool = False,
 ) -> List[CodeExecution]:
     """Filter code history to successful, non-contradictory executions."""
@@ -339,6 +335,11 @@ def successful_evidence_executions(
             cohort_generation is None
             or int(getattr(execution, "cohort_generation", 0) or 0)
             == int(cohort_generation)
+        )
+        and (
+            analysis_generation is None
+            or int(getattr(execution, "analysis_generation", 0) or 0)
+            == int(analysis_generation)
         )
         and (
             not require_plan_binding

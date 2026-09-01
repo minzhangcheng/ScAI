@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.models.schemas import AnalysisState
+from backend.services.execution_evidence import execution_is_current_receipt
 from backend.services.report.artifacts import (
     artifact_stems,
     eligible_artifacts,
@@ -546,39 +547,63 @@ def build_lineage_report_state(
     active_cohort_generation = int(
         active_cohort.get("cohort_generation", 0) or 0
     )
-    if active_cohort_generation:
-        report_state.publication_figures = [
-            figure
-            for figure in report_state.publication_figures
-            if str(getattr(figure, "cohort_digest", None) or "")
-            == active_cohort_digest
-            and int(getattr(figure, "cohort_generation", 0) or 0)
-            == active_cohort_generation
-        ]
-        report_state.publication_tables = [
-            table
-            for table in report_state.publication_tables
-            if str(getattr(table, "cohort_digest", None) or "")
-            == active_cohort_digest
-            and int(getattr(table, "cohort_generation", 0) or 0)
-            == active_cohort_generation
-        ]
-        current_execution_ids = {
-            str(execution.id)
+    active_analysis_generation = int(
+        (report_state.sandbox_state or {}).get("analysis_generation", 0) or 0
+    )
+    if active_cohort_generation or active_analysis_generation:
+        if active_cohort_generation:
+            report_state.publication_figures = [
+                figure
+                for figure in report_state.publication_figures
+                if str(getattr(figure, "cohort_digest", None) or "")
+                == active_cohort_digest
+                and int(getattr(figure, "cohort_generation", 0) or 0)
+                == active_cohort_generation
+            ]
+            report_state.publication_tables = [
+                table
+                for table in report_state.publication_tables
+                if str(getattr(table, "cohort_digest", None) or "")
+                == active_cohort_digest
+                and int(getattr(table, "cohort_generation", 0) or 0)
+                == active_cohort_generation
+            ]
+        eligible_execution_by_id = {
+            str(execution.id): execution
             for execution in report_state.code_history
-            if str(getattr(execution, "cohort_digest", None) or "")
-            == active_cohort_digest
-            and int(getattr(execution, "cohort_generation", 0) or 0)
-            == active_cohort_generation
-            and (getattr(execution, "lineage_id", None) or "main") == target
-            and getattr(execution, "evidence_schema_version", None) == 2
+            if execution_is_current_receipt(
+                execution,
+                lineage_id=target,
+                analysis_generation=active_analysis_generation,
+                cohort_digest=(
+                    active_cohort_digest if active_cohort_generation else None
+                ),
+                cohort_generation=(
+                    active_cohort_generation or None
+                ),
+            )
         }
+        current_execution_ids = set(eligible_execution_by_id)
         report_state.code_history = [
             execution for execution in report_state.code_history
             if str(execution.id) in current_execution_ids
-            and not getattr(execution, "error", None)
-            and getattr(execution, "execution_status", "succeeded") == "succeeded"
-            and bool(getattr(execution, "evidence_eligible", True))
+        ]
+        report_state.publication_tables = [
+            table for table in report_state.publication_tables
+            if (
+                (source_id := str(
+                    getattr(table, "source_execution_id", "") or ""
+                )) in current_execution_ids
+                and int(getattr(
+                    eligible_execution_by_id[source_id], "round_number", 0,
+                ) or 0) == int(getattr(table, "round_number", 0) or 0)
+                and (
+                    not str(getattr(table, "plan_id", "") or "")
+                    or str(getattr(
+                        eligible_execution_by_id[source_id], "plan_id", "",
+                    ) or "") == str(getattr(table, "plan_id", "") or "")
+                )
+            )
         ]
         report_state.method_decisions = [
             decision for decision in report_state.method_decisions
@@ -619,13 +644,36 @@ def build_lineage_report_state(
                     }
                     if (
                         str(record.get("lineage_id") or "main") == target
-                        and str(record.get("cohort_digest") or "")
-                        == active_cohort_digest
-                        and int(record.get("cohort_generation", 0) or 0)
-                        == active_cohort_generation
+                        and (
+                            not active_cohort_generation
+                            or (
+                                str(record.get("cohort_digest") or "")
+                                == active_cohort_digest
+                                and int(record.get("cohort_generation", 0) or 0)
+                                == active_cohort_generation
+                            )
+                        )
                     ):
                         retained = dict(record)
-                        valid_cited = sorted(cited & current_execution_ids)
+                        record_plan_id = str(record.get("plan_id") or "")
+                        valid_cited = sorted(
+                            execution_id
+                            for execution_id in cited & current_execution_ids
+                            if int(record.get(
+                                "analysis_generation", active_analysis_generation
+                            ) or 0) == active_analysis_generation
+                            and int(getattr(
+                                eligible_execution_by_id[execution_id],
+                                "round_number", 0,
+                            ) or 0) == int(round_result.round_number)
+                            and (
+                                not record_plan_id
+                                or str(getattr(
+                                    eligible_execution_by_id[execution_id],
+                                    "plan_id", "",
+                                ) or "") == record_plan_id
+                            )
+                        )
                         retained["evidence_execution_ids"] = valid_cited
                         if not valid_cited or cited != set(valid_cited):
                             retained["evidence_status"] = "unverified"
@@ -642,17 +690,15 @@ def build_lineage_report_state(
                     str(value)
                     for record in retained_records
                     if record.get("evidence_status") == "verified"
-                    and record.get("semantic_status") == "evidenced"
                     for value in (record.get("evidence_execution_ids") or [])
                     if str(value)
                 })
-                round_result.bioinformatics_evidence_verified = bool(
-                    retained_records
-                ) and all(
-                    record.get("evidence_status") == "verified"
-                    and record.get("semantic_status") == "evidenced"
-                    and bool(record.get("evidence_execution_ids"))
-                    for record in retained_records
+                round_result.bioinformatics_evidence_verified = (
+                    None if not retained_records else all(
+                        record.get("evidence_status") == "verified"
+                        and bool(record.get("evidence_execution_ids"))
+                        for record in retained_records
+                    )
                 )
                 if excluded_count:
                     round_result.evidence_notes = list(
@@ -662,25 +708,26 @@ def build_lineage_report_state(
                         "different lineage or cohort and remain only in source-session "
                         "audit history."
                     ]
-                unverified_count = sum(
+                unlinked_count = sum(
                     1 for record in retained_records
                     if record.get("evidence_status") != "verified"
-                    or record.get("semantic_status") != "evidenced"
+                    or not record.get("evidence_execution_ids")
                 )
-                if unverified_count:
+                if unlinked_count:
                     round_result.evidence_notes = list(
                         round_result.evidence_notes
                     ) + [
-                        f"{unverified_count} current-cohort bioinformatics finding(s) "
-                        "are retained as unverified observations for PI review."
+                        f"{unlinked_count} current-cohort bioinformatics finding(s) "
+                        "are not linked to a successful execution receipt for the "
+                        "same round and plan; they remain available for PI review."
                     ]
             else:
                 if round_result.bioinformatics_findings:
-                    round_result.bioinformatics_evidence_verified = False
+                    round_result.bioinformatics_evidence_verified = None
                     round_result.evidence_execution_ids = []
                     round_result.evidence_notes = list(round_result.evidence_notes) + [
-                        "Bioinformatics findings have no current structured finding "
-                        "records and are retained as unverified observations for PI review."
+                        "Execution linkage was not recorded for these historical "
+                        "bioinformatics findings; they remain available for PI review."
                     ]
         sandbox_state = dict(report_state.sandbox_state or {})
         sandbox_state["report_evidence_execution_ids"] = sorted(
@@ -689,6 +736,9 @@ def build_lineage_report_state(
         sandbox_state["report_evidence_cohort_digest"] = active_cohort_digest
         sandbox_state["report_evidence_cohort_generation"] = (
             active_cohort_generation
+        )
+        sandbox_state["report_evidence_analysis_generation"] = (
+            active_analysis_generation
         )
         report_state.sandbox_state = sandbox_state
     if target != "main":

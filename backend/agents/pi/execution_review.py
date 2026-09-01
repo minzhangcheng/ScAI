@@ -98,9 +98,9 @@ Why this review was triggered: {trigger_reason or "N/A"}
 
 ## Plan-versus-evidence observations
 Execution and artifact identities below are Host-validated technical facts. Semantic
-linkage from Supervisor is advisory. You, the PI, decide whether each plan step is
-completed, pending, or scientifically skipped; the Host will only validate step IDs and
-status syntax.
+sufficiency is not decided by a Supervisor reconciliation. You, the PI, decide whether
+each plan step is completed, pending, or scientifically skipped; the Host will only
+validate step IDs and status syntax.
 {audit_block}
 
 ## Findings this round reported
@@ -298,12 +298,15 @@ Reply with STRICT JSON only:
     def _format_execution_audit(cls, plan_audit: Dict[str, Any], admissions: List[str]) -> str:
         """Render `PlanAudit.summary()` plus the agent's own admissions."""
         audit = plan_audit or {}
+        awaiting_pi = audit.get("n_awaiting_pi_decision")
+        if awaiting_pi is None:
+            awaiting_pi = audit.get("n_unverifiable", 0)
         lines = [
             f"- Approved steps: {audit.get('n_steps', 0)} "
             f"(evidenced {audit.get('n_completed', 0)}, "
             f"legitimately skipped {audit.get('n_skipped', 0)}, "
             f"no execution evidence {audit.get('n_unmet', 0)}, "
-            f"not machine-checkable {audit.get('n_unverifiable', 0)})"
+            f"awaiting PI completion decision {awaiting_pi})"
         ]
         observations = audit.get("step_observations") or []
         if observations:
@@ -311,11 +314,16 @@ Reply with STRICT JSON only:
             for item in observations:
                 if not isinstance(item, dict):
                     continue
+                linkage = str(
+                    item.get("technical_linkage") or "linkage_not_recorded"
+                )[:40]
+                if linkage == "unverified":
+                    linkage = "linkage_not_recorded"
                 lines.append(
                     "  - plan_step_id={step_id}; linkage={linkage}; "
                     "verifiable={verifiable}; title={title}; reason={reason}".format(
                         step_id=item.get("plan_step_id", "?"),
-                        linkage=str(item.get("technical_linkage") or "unverified")[:40],
+                        linkage=linkage,
                         verifiable=bool(item.get("verifiable", False)),
                         title=str(item.get("title") or "")[:_MAX_PROMPT_ITEM_LEN],
                         reason=str(item.get("reason") or "")[:_MAX_PROMPT_ITEM_LEN],

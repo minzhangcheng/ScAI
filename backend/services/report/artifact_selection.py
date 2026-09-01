@@ -74,8 +74,6 @@ def is_report_eligible(artifact: Any, *, bindings) -> bool:
     if not is_figure and _artifact_value(
         artifact, "plan_binding_status", None
     ) is not None:
-        if str(_artifact_value(artifact, "plan_binding_status", "")) != "confirmed":
-            return False
         if not str(_artifact_value(artifact, "source_execution_id", "") or ""):
             return False
     if is_figure and not has_frozen_publication_pair(artifact):

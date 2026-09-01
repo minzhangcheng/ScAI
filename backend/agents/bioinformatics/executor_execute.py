@@ -50,9 +50,8 @@ def execution_plan_binding(
 ) -> tuple[str, list[int], str, str | None]:
     """Normalize an agent nomination without blocking scientific execution.
 
-    The nomination is only a candidate for the Supervisor's later semantic
-    reconciliation.  Invalid or missing IDs are recorded as unverified instead
-    of spending another autonomous-agent turn on a schema repair.
+    The nomination is retained as execution context for the PI's completion
+    decision. Invalid or missing IDs do not receive a technical plan link.
     """
     raw_purpose = str(args.get("execution_purpose") or "").strip().lower()
     purpose = raw_purpose or "unspecified"
@@ -101,8 +100,8 @@ def execution_plan_binding(
         else:
             status = "unverified"
             warnings.append(
-                "planned work had no valid current-plan step nomination; "
-                "Supervisor reconciliation will determine any semantic link"
+                "planned work had no valid current-plan step nomination; PI review "
+                "will determine its scientific relationship to the plan"
             )
     elif purpose == "supplementary":
         status = "supplementary"

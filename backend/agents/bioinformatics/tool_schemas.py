@@ -57,8 +57,8 @@ TOOLS = [
                         "items": {"type": "integer", "minimum": 1},
                         "description": (
                             "Current-plan step IDs this cell may support. The host records "
-                            "these as candidate links; only Supervisor semantic review can "
-                            "grant plan credit. Omit when uncertain."
+                            "these as technical candidate links; the PI decides whether "
+                            "the step is scientifically complete. Omit when uncertain."
                         ),
                         "default": [],
                     },
@@ -170,7 +170,8 @@ TOOLS = [
                                         "Candidate current-run execute_code IDs that may "
                                         "support this finding. The host validates objective "
                                         "identity and records missing or invalid links as "
-                                        "unverified without rejecting the report."
+                                        "missing current execution linkage without rejecting "
+                                        "the report."
                                     ),
                                     "default": [],
                                 },
@@ -197,7 +198,7 @@ TOOLS = [
                         "description": (
                             "Candidate IDs printed by successful execute_code calls. The "
                             "host keeps only objectively current IDs; uncertain links are "
-                            "retained as unverified rather than blocking completion."
+                            "retained for PI review rather than blocking completion."
                         ),
                         "default": [],
                     }
@@ -694,16 +695,16 @@ TOOLS = [
                         "type": "string",
                         "description": (
                             "Candidate current execution that produced the table. An "
-                            "invalid or missing value leaves the table unverified rather "
-                            "than granting plan credit."
+                            "invalid or missing value leaves the table without a valid "
+                            "producer receipt."
                         ),
                     },
                     "plan_step_ids": {
                         "type": "array",
                         "items": {"type": "integer", "minimum": 1},
                         "description": (
-                            "Candidate approved-plan steps supported by the table. "
-                            "Supervisor semantic review decides final plan credit."
+                            "Candidate approved-plan steps supported by the table. The PI "
+                            "decides whether those steps are scientifically complete."
                         ),
                         "default": [],
                     },

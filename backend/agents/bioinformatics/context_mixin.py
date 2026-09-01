@@ -275,7 +275,7 @@ class ContextMixin:
                 "When bulk findings depend on a method choice, record that choice with "
                 "register_method_decision. Register CSV outputs intended for reports "
                 "with register_publication_table. Missing registrations remain visible "
-                "as unverified observations and do not block the workflow.\n"
+                "for PI review and do not block the workflow.\n"
                 + "\n".join(profile_lines)
             )
         pending_repairs = [

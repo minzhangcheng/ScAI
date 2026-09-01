@@ -173,7 +173,7 @@ def _build_report_prompt(
         progs = (getattr(rr, "data_driven_mechanism_programs", []) or [])[:3]
         for p in progs:
             prefix = (
-                "[UNVERIFIED ROUND EVIDENCE] "
+                "[EXECUTION LINKAGE NOT RECORDED] "
                 if getattr(rr, "bioinformatics_evidence_verified", None) is False
                 else ""
             )
@@ -253,7 +253,7 @@ def _build_report_prompt(
 ## Cross-Direction Integration Analyses
 {integration_text}
 
-## Evidence Qualifications for the Final Limitations Subsection
+## Recorded Technical Limitations for the Existing Limitations Subsection
 {limitations_text}
 
 ## Mechanism Naming and Hypothesis Policy

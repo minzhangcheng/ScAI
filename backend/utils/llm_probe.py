@@ -1,8 +1,25 @@
 """Shared LLM credentials validation — pings the /models endpoint."""
-import httpx
 import logging
+from urllib.parse import urlsplit, urlunsplit
+
+import httpx
 
 logger = logging.getLogger(__name__)
+
+_LLM_ENDPOINT_SUFFIXES = ("/chat/completions", "/responses", "/messages")
+
+
+def _models_endpoint_url(llm_base_url: str) -> str:
+    """Build the models URL from either a base URL or a full LLM endpoint."""
+    parsed = urlsplit(llm_base_url)
+    path = parsed.path.rstrip("/")
+    lower_path = path.lower()
+    for suffix in _LLM_ENDPOINT_SUFFIXES:
+        if lower_path.endswith(suffix):
+            path = path[: -len(suffix)].rstrip("/")
+            break
+    models_path = f"{path}/models" if path else "/models"
+    return urlunsplit(parsed._replace(path=models_path))
 
 
 async def validate_llm_credentials(
@@ -10,13 +27,12 @@ async def validate_llm_credentials(
     llm_base_url: str,
     proxy_url: str | None = None,
 ) -> dict:
-    """Validate ``api_key`` against ``llm_base_url/models``.
+    """Validate ``api_key`` against the provider's derived ``/models`` URL.
 
     Returns a dict with keys:
         valid (bool), uncertain (bool), message (str)
     """
-    base_url = llm_base_url.rstrip("/")
-    models_url = f"{base_url}/models"
+    models_url = _models_endpoint_url(llm_base_url)
 
     headers = {
         "Authorization": f"Bearer {api_key}",

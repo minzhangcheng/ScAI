@@ -14,6 +14,7 @@
 import { render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ResultsPanel, mergeFigureMetadata } from '../ResultsPanel'
+import { STRIPPED_FIGURE_PLACEHOLDER } from '../../constants/storage'
 import { useAppStore, type Session, type PublicationFigure } from '../../stores/appStore'
 
 vi.mock('../../hooks/useApi', () => ({
@@ -115,6 +116,24 @@ describe('ResultsPanel — the curated list adds to the gallery, it does not rep
     render(<ResultsPanel />)
 
     expect(screen.getByText('kept')).toBeInTheDocument()
+  })
+
+  it('does not replace the authoritative report with a persisted blob placeholder', () => {
+    const placeholderMessage = integratedReportMessage([])
+    placeholderMessage.content.report = STRIPPED_FIGURE_PLACEHOLDER
+    useAppStore.setState({
+      currentSession: {
+        ...makeSession([]),
+        integratedReport: '# Authoritative report\n\nFull report content.',
+      },
+      messages: [placeholderMessage],
+    } as any)
+
+    render(<ResultsPanel />)
+
+    expect(screen.getByRole('heading', { name: 'Authoritative report' })).toBeInTheDocument()
+    expect(screen.getByText('Full report content.')).toBeInTheDocument()
+    expect(screen.queryByText(STRIPPED_FIGURE_PLACEHOLDER)).not.toBeInTheDocument()
   })
 
   it('does not duplicate a figure when the report is regenerated', () => {

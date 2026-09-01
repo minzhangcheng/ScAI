@@ -1,4 +1,5 @@
 from backend.models.schemas import RoundResult
+import pytest
 from backend.workflow.direction_coverage import (
     active_batch_complete,
     completed_innovation_direction_keys,
@@ -61,14 +62,15 @@ def test_agent_error_with_findings_marks_partial_not_complete():
     assert completed_innovation_direction_keys(state) == set()
 
 
-def test_unverified_execution_evidence_does_not_set_scientific_round_status():
+@pytest.mark.parametrize("linkage_status", [False, None])
+def test_execution_linkage_does_not_set_scientific_round_status(linkage_status):
     result = _round()
     derive_round_completion_status(
         {
             "bioinformatics_result": {
                 "status": "completed",
                 "findings": ["unsupported claim"],
-                "evidence_verified": False,
+                "evidence_verified": linkage_status,
             },
             "literature_result": {"status": "completed", "findings": ["paper"]},
         },

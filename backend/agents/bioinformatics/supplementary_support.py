@@ -30,12 +30,11 @@ logger = logging.getLogger(__name__)
 def _validated_supplementary_findings(
     findings: List[Any], executions: List[CodeExecution], state: Any,
 ) -> tuple[List[Dict[str, Any]], List[str]]:
-    """Retain findings as candidates for later Supervisor reconciliation.
+    """Retain findings with objective execution links for later PI review.
 
     Execution IDs embedded in prose are not a reliable binding contract.  The
     host therefore supplies the bounded set of successful executions from this
-    pass as candidates and leaves the finding unverified until the Supervisor
-    judges the scientific relationship.
+    pass and leaves scientific sufficiency to the PI.
     """
     evidence_by_id = {
         str(record.id): record
@@ -115,13 +114,13 @@ def _validated_supplementary_findings(
             )
         if not candidate_ids:
             warnings.append(
-                f"Supplementary finding {index} was retained as unverified "
-                "because this pass produced no successful execution receipt."
+                f"Supplementary finding {index} has no successful execution "
+                "receipt from this pass."
             )
         elif modality is None:
             warnings.append(
-                f"Supplementary finding {index} was retained for Supervisor "
-                "review because its execution modality was not established."
+                f"Supplementary finding {index} was retained for PI review because "
+                "its execution modality was not established."
             )
         records.append(record)
     return records, warnings
@@ -233,8 +232,7 @@ async def _execute_supplementary_pass(
             execution_purpose="repair",
             plan_binding_status="unverified",
             plan_binding_reason=(
-                "Supplementary repair execution awaits Supervisor semantic "
-                "reconciliation."
+                "Supplementary repair execution is retained for PI review."
             ),
             execution_status="failed" if error else "succeeded",
             lineage_id=getattr(state, "restore_branch_id", None) or "main",
@@ -385,14 +383,13 @@ async def _execute_supplementary_pass(
         str(w).strip() for w in (final_result.get("warnings") or []) if str(w).strip()
     ]
 
-    # With no successful execution there is nothing the Supervisor can promote
-    # to verified evidence. Keep the prose in audit history, but never discard
-    # it or let it support the current report.
+    # Without a successful receipt, retain the prose in audit history without
+    # letting it support the current report.
     if not any(execution_supports_evidence(r) for r in produced):
         if result["findings"]:
             result["warnings"].append(
                 "Supplementary findings have no successful execution receipt and "
-                "remain unverified audit history.")
+                "remain available only in audit history.")
         if result["status"] == "completed":
             result["status"] = "partial"
     return result

@@ -73,17 +73,6 @@ function ResultsRound({ expandedRounds, language, round, t, toggleRound }: Resul
                     }`}>
                       {t('evidenceBadge', { status: evidenceStatusLabel })}
                     </span>
-                    {round.bioinformaticsEvidenceVerified != null && (
-                      <span className={`rounded-full px-2 py-0.5 text-xs ${
-                        round.bioinformaticsEvidenceVerified
-                          ? 'bg-emerald-100 dark:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300'
-                          : 'bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300'
-                      }`}>
-                        {round.bioinformaticsEvidenceVerified
-                          ? t('evidenceVerified')
-                          : t('evidenceUnverified')}
-                      </span>
-                    )}
                     {round.directionCoverageEligible != null && (
                       <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-xs text-slate-600 dark:text-slate-300">
                         {round.directionCoverageEligible

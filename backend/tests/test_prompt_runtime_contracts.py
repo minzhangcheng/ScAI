@@ -550,21 +550,19 @@ async def test_integration_literature_framing_reaches_the_provider_payload():
 
 
 # --------------------------------------------------------------- report status
-def test_report_status_line_is_visible_and_not_collapsible():
+def test_report_status_banner_render_hook_is_retired():
     from backend.services.report.quality import render_report_status_line_html
 
-    partial = render_report_status_line_html({
+    assert render_report_status_line_html({
         "status": "partial",
         "partial_reasons": ["analysis_quality"],
         "quality_disclosures": {"blocking_issues": ["unverified"], "cautions": []},
-    })
-    assert "<details" not in partial, "the top-level status must not be foldable"
-    assert "Partial report" in partial
+    }) == ""
     assert render_report_status_line_html({"status": "completed"}) == ""
 
 
-def test_regenerated_report_shows_the_status_line_above_the_conclusions(tmp_path):
-    """Render a real partial report and check the banner is visible and early."""
+def test_regenerated_report_omits_deterministic_qualification_blocks(tmp_path):
+    """Partial and quality state remain in JSON without prominent HTML blocks."""
     from backend.services.report.regenerator import generate_html_report
 
     report = {
@@ -582,11 +580,14 @@ def test_regenerated_report_shows_the_status_line_above_the_conclusions(tmp_path
     (out / "report.json").write_text(json.dumps(report), encoding="utf-8")
 
     page = Path(generate_html_report(out)).read_text(encoding="utf-8")
-    assert "report-status-line" in page
-    assert page.index("report-status-line") < page.index("Conclusions"), (
-        "the status must be visible before the reader reaches the conclusions"
-    )
-    assert "<details" not in page.split("report-status-line")[0]
+    assert '<div class="report-status-line' not in page
+    assert '<details class="report-limitations-details"' not in page
+    assert "Detailed evidence qualifications" not in page
+    assert "Conclusions" in page
+    retained = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert retained["status"] == "partial"
+    assert retained["partial_reasons"] == ["analysis_quality"]
+    assert retained["quality_disclosures"]["blocking_issues"] == ["unverified round"]
 
 
 def test_pathology_projection_reports_what_it_omitted():

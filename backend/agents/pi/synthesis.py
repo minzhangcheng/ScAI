@@ -371,10 +371,15 @@ Current research direction: {current_direction or "N/A"}
         # Build summary of all rounds
         rounds_summary = []
         for result in state.round_results:
+            execution_linkage = {
+                True: "all structured findings linked to current successful receipts",
+                False: "one or more findings lack a current successful receipt",
+                None: "not recorded",
+            }[result.bioinformatics_evidence_verified]
             rounds_summary.append(f"""
 ### Round {result.round_number}
 **Round status**: {result.round_status}; evidence status: {result.evidence_status}
-**Bioinformatics execution evidence verified**: {result.bioinformatics_evidence_verified}
+**Bioinformatics execution linkage**: {execution_linkage}
 **Evidence notes**: {'; '.join(result.evidence_notes) if result.evidence_notes else 'None'}
 **Pathology findings**: {', '.join(str(f) for f in result.pathology_findings) if result.pathology_findings else 'None'}
 **Bioinformatics findings**: {', '.join(str(f) for f in result.bioinformatics_findings) if result.bioinformatics_findings else 'None'}
@@ -471,9 +476,9 @@ Please write a well-structured analysis report including:
    evidence sources, confidence, and explicitly labeled evidence gaps. Present
    low-confidence candidates as "hypotheses with evidence gaps", NOT confirmed conclusions.
 
-Any round marked partial or with bioinformatics execution evidence verified=False
-must remain explicitly labeled unverified. Do not describe its claims as validated,
-confirmed, causal, dominant, or independently replicated.
+Any round marked partial must remain explicitly partial. When bioinformatics execution
+linkage is false or absent, state the concrete missing linkage and do not describe the
+affected claims as validated, confirmed, causal, dominant, or independently replicated.
 
 Please write in academic paper style.
 """

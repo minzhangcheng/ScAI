@@ -134,9 +134,9 @@ def test_current_cohort_report_retains_legacy_findings_as_pi_observations():
     assert result.bioinformatics_findings == [
         "Legacy claim without a semantic receipt."
     ]
-    assert result.bioinformatics_evidence_verified is False
+    assert result.bioinformatics_evidence_verified is None
     assert any(
-        "retained as unverified observations for PI review" in note
+        "Execution linkage was not recorded" in note
         for note in result.evidence_notes
     )
     assert state.round_results[0].bioinformatics_findings == [
@@ -218,6 +218,7 @@ def test_report_requires_current_cohort_generation_even_for_same_digest():
         "id": "finding-generation-2",
         "text": "Current generation finding.",
         "cohort_generation": 2,
+        "semantic_status": "unverified",
         "evidence_execution_ids": [current_execution.id],
     }
     state = AnalysisState(
@@ -250,9 +251,167 @@ def test_report_requires_current_cohort_generation_even_for_same_digest():
     assert report_state.round_results[0].bioinformatics_findings == [
         "Current generation finding."
     ]
+    assert report_state.round_results[0].bioinformatics_evidence_verified is True
+    assert report_state.round_results[0].evidence_execution_ids == [
+        current_execution.id
+    ]
     assert state.round_results[0].bioinformatics_findings == [
         "Old generation finding.", "Current generation finding.",
     ]
+
+
+def test_report_rejects_failed_and_cross_plan_execution_links():
+    from backend.services.report.lineage import build_lineage_report_state
+
+    digest = "9" * 64
+    failed = CodeExecution(
+        id="failed-current-execution",
+        code="raise RuntimeError()",
+        error="failed",
+        round_number=1,
+        evidence_schema_version=2,
+        execution_status="failed",
+        plan_id="plan-a",
+        lineage_id="main",
+        cohort_generation=1,
+        cohort_digest=digest,
+    )
+    other_plan = failed.model_copy(update={
+        "id": "other-plan-execution",
+        "code": "successful_other_plan()",
+        "error": None,
+        "execution_status": "succeeded",
+        "plan_id": "plan-b",
+    })
+    records = [
+        {
+            "id": "failed-link",
+            "text": "Finding linked to failed execution.",
+            "round_number": 1,
+            "plan_id": "plan-a",
+            "lineage_id": "main",
+            "cohort_generation": 1,
+            "cohort_digest": digest,
+            "evidence_status": "verified",
+            "evidence_execution_ids": [failed.id],
+        },
+        {
+            "id": "cross-plan-link",
+            "text": "Finding linked to another plan.",
+            "round_number": 1,
+            "plan_id": "plan-a",
+            "lineage_id": "main",
+            "cohort_generation": 1,
+            "cohort_digest": digest,
+            "evidence_status": "verified",
+            "evidence_execution_ids": [other_plan.id],
+        },
+    ]
+    state = AnalysisState(
+        id="cohort-report-invalid-links",
+        user_id="user",
+        sandbox_state={"cohort_identity_v1": {
+            **_probe(digest), "cohort_generation": 1, "lineage_id": "main",
+        }},
+        code_history=[failed, other_plan],
+        publication_tables=[
+            PublicationTable(
+                name="failed table", description="failed source",
+                csv_path="failed.csv", plan_id="plan-a", round_number=1,
+                plan_binding_status="candidate", source_execution_id=failed.id,
+                lineage_id="main", cohort_generation=1, cohort_digest=digest,
+            ),
+            PublicationTable(
+                name="cross-plan table", description="wrong plan source",
+                csv_path="cross.csv", plan_id="plan-a", round_number=1,
+                plan_binding_status="candidate", source_execution_id=other_plan.id,
+                lineage_id="main", cohort_generation=1, cohort_digest=digest,
+            ),
+        ],
+        round_results=[RoundResult(
+            round_number=1,
+            lineage_id="main",
+            bioinformatics_findings=[record["text"] for record in records],
+            bioinformatics_finding_records=records,
+        )],
+    )
+
+    report_state = build_lineage_report_state(state, "main")
+    result = report_state.round_results[0]
+
+    assert [execution.id for execution in report_state.code_history] == [other_plan.id]
+    assert report_state.publication_tables == []
+    assert result.bioinformatics_evidence_verified is False
+    assert result.evidence_execution_ids == []
+    assert all(
+        record["evidence_status"] == "unverified"
+        and record["evidence_execution_ids"] == []
+        for record in result.bioinformatics_finding_records
+    )
+
+
+def test_report_rejects_stale_generation_and_failed_validation_output():
+    from backend.services.report.lineage import build_lineage_report_state
+
+    digest = "8" * 64
+    stale = CodeExecution(
+        id="stale-analysis-generation",
+        code="old_analysis()",
+        round_number=1,
+        evidence_schema_version=2,
+        execution_status="succeeded",
+        plan_id="plan-a",
+        lineage_id="main",
+        analysis_generation=1,
+        cohort_generation=1,
+        cohort_digest=digest,
+    )
+    rejected = stale.model_copy(update={
+        "id": "failed-validation-output",
+        "output": "Validation failed: required result was not produced.",
+        "analysis_generation": 2,
+    })
+    records = [
+        {
+            "id": f"finding-{execution.id}",
+            "text": f"Finding linked to {execution.id}.",
+            "round_number": 1,
+            "plan_id": "plan-a",
+            "lineage_id": "main",
+            "analysis_generation": 2,
+            "cohort_generation": 1,
+            "cohort_digest": digest,
+            "evidence_status": "verified",
+            "evidence_execution_ids": [execution.id],
+        }
+        for execution in (stale, rejected)
+    ]
+    state = AnalysisState(
+        id="cohort-report-analysis-generation",
+        user_id="user",
+        sandbox_state={
+            "analysis_generation": 2,
+            "cohort_identity_v1": {
+                **_probe(digest),
+                "cohort_generation": 1,
+                "lineage_id": "main",
+            },
+        },
+        code_history=[stale, rejected],
+        round_results=[RoundResult(
+            round_number=1,
+            lineage_id="main",
+            bioinformatics_findings=[record["text"] for record in records],
+            bioinformatics_finding_records=records,
+        )],
+    )
+
+    report_state = build_lineage_report_state(state, "main")
+    result = report_state.round_results[0]
+
+    assert report_state.code_history == []
+    assert result.bioinformatics_evidence_verified is False
+    assert result.evidence_execution_ids == []
 
 
 def test_unchanged_cohort_does_not_advance_generation():

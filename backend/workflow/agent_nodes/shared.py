@@ -172,7 +172,7 @@ This is Round 1 — comprehensive, unbiased exploration. You MUST:
     - Bioinformatics selects and justifies the method and implementation details.
     - Record the method decision and register publication tables produced by the work.
     - No specific bulk analysis or package is mandatory unless it appears in the
-      approved PI plan; missing semantic evidence is reported as unverified, not rejected.
+      approved PI plan; missing execution linkage is reported to the PI, not rejected.
 """
     instr += _MECHANISM_CAPTURE_INSTRUCTION
     return instr

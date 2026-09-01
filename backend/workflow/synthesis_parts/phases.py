@@ -119,13 +119,14 @@ async def synthesize_agent_results(self, state):
                 evidence_note = "Findings are linked to successful execution records."
             elif evidence_verified is False:
                 evidence_note = (
-                    "Treat these findings as partial/unverified and do not use "
-                    "validated, confirmed, or dominant wording."
+                    "One or more findings are not linked to a current successful "
+                    "execution receipt; do not upgrade those claims to validated, "
+                    "confirmed, or dominant wording."
                 )
             else:
                 evidence_note = (
-                    "Evidence binding for these findings is unknown; treat them as "
-                    "unverified and do not use validated, confirmed, or dominant wording."
+                    "Execution linkage was not recorded for these findings; do not "
+                    "upgrade them to validated, confirmed, or dominant wording."
                 )
             agent_results[agent_name] = json.dumps(
                 {
@@ -152,7 +153,8 @@ async def synthesize_agent_results(self, state):
                     "plan_coverage": {
                         k: audit.get(k)
                         for k in ("n_steps", "n_completed", "n_skipped", "n_unmet",
-                                  "n_unverifiable", "unmet_titles", "unmet_families")
+                                  "n_unverifiable", "n_awaiting_pi_decision",
+                                  "unmet_titles", "unmet_families")
                         if audit.get(k) is not None
                     } or None,
                     "supplementary_pass": {

@@ -138,9 +138,8 @@ async def test_regeneration_and_figureless_generator_html_are_stable(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_qualified_report_shows_the_limitations_block(tmp_path):
-    """The counterpart to the clean case above: when there IS something to
-    disclose, the block appears and names the specifics an audit needs."""
+async def test_qualified_report_omits_deterministic_blocks_but_retains_json(tmp_path):
+    """Qualified state remains auditable without a duplicate HTML block."""
     from backend.services.report.regenerator import generate_html_report
 
     report = {
@@ -177,10 +176,10 @@ async def test_qualified_report_shows_the_limitations_block(tmp_path):
 
     page = Path(generate_html_report(out_dir)).read_text(encoding="utf-8")
 
-    assert "Detailed evidence qualifications" in page
-    assert "Round 2 evidence is unverified" in page
-    assert "Only one biological replicate per condition" in page
-    # The specifics, not just the summary: a reader must be able to see WHICH
-    # plan step was missed and WHICH gap remains.
-    assert "Cell communication" in page
-    assert "Validate interaction" in page
+    assert '<div class="report-status-line' not in page
+    assert '<details class="report-limitations-details"' not in page
+    assert "Detailed evidence qualifications" not in page
+    assert "Round 2 evidence is unverified" not in page
+    retained = json.loads((out_dir / "report.json").read_text(encoding="utf-8"))
+    assert retained["status"] == "partial"
+    assert retained["quality_disclosures"] == report["quality_disclosures"]

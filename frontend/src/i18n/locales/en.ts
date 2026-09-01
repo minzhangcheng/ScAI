@@ -301,8 +301,6 @@ export const en = {
     evidenceStatusSubstantive: 'substantive',
     evidenceStatusEmpty: 'empty',
     evidenceStatusFailed: 'failed',
-    evidenceVerified: 'verified',
-    evidenceUnverified: 'unverified',
     coverageEligible: 'coverage eligible',
     coverageWithheld: 'coverage withheld',
     evidenceLimitations: 'Evidence limitations',

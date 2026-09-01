@@ -3,7 +3,7 @@ import hashlib
 from datetime import datetime
 from pathlib import Path
 
-from backend.models.schemas import FigureReviewStatus, PublicationFigure
+from backend.models.schemas import FigureReviewStatus, PublicationFigure, PublicationTable
 from backend.services.report.artifacts import (
     archival_render_available,
     eligible_artifacts,
@@ -69,6 +69,21 @@ def test_only_current_approved_artifacts_are_reportable():
     assert [f.name for f in eligible_artifacts([approved, reserved, pending, revision, stale])] == [
         "approved", "reserved"
     ]
+
+
+def test_table_eligibility_uses_producer_receipt_not_semantic_plan_credit():
+    table = PublicationTable(
+        name="linked table",
+        description="current output",
+        csv_path="linked.csv",
+        review_status=FigureReviewStatus.APPROVED,
+        plan_binding_status="candidate",
+        source_execution_id="execution-1",
+    )
+    missing_receipt = table.model_copy(update={"source_execution_id": None})
+
+    assert is_report_eligible(table) is True
+    assert is_report_eligible(missing_receipt) is False
 
 
 def test_technically_valid_unavailable_review_is_reportable_but_not_approved():

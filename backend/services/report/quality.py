@@ -1,7 +1,6 @@
 """Deterministic analysis-quality disclosures shared by every report surface."""
 from __future__ import annotations
 
-import html
 from typing import Any, Dict, Iterable, List, Optional
 
 from backend.utils.formatting import normalize_text_list
@@ -145,10 +144,13 @@ def _round_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Lis
                 )
         if current_evidence_schema and phase != "integration":
             if verified is False:
-                cautions.append(f"{label} bioinformatics evidence is unverified.")
+                cautions.append(
+                    f"{label} has bioinformatics findings that are not linked to "
+                    "a current successful execution receipt."
+                )
             elif verified is None:
                 cautions.append(
-                    f"{label} has no verifiable bioinformatics evidence verdict."
+                    f"{label} has no recorded bioinformatics execution-linkage verdict."
                 )
             elif verified is not True:
                 blocking.append(
@@ -228,10 +230,44 @@ def _review_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Li
         verdict_explicit = "verdict" in assessment
         audit_unmet = _integer(audit.get("n_unmet", 0))
         audit_unverifiable = _integer(audit.get("n_unverifiable", 0))
+        audit_steps = _integer(audit.get("n_steps", 0))
         review_plan = (
             raw.get("review_plan")
             if isinstance(raw.get("review_plan"), dict)
             else {}
+        )
+        step_decisions = {
+            _integer(item.get("plan_step_id", 0)): str(
+                item.get("status") or "pending"
+            ).lower()
+            for item in (review_plan.get("step_decisions") or [])
+            if isinstance(item, dict)
+            and _integer(item.get("plan_step_id", 0)) > 0
+        }
+        audited_step_ids = {
+            _integer(item.get("plan_step_id", 0))
+            for item in (audit.get("step_observations") or [])
+            if isinstance(item, dict)
+            and _integer(item.get("plan_step_id", 0)) > 0
+        }
+        missing_pi_step_ids = sorted(audited_step_ids - set(step_decisions))
+        pending_pi_step_ids = sorted(
+            step_id
+            for step_id, status in step_decisions.items()
+            if status == "pending"
+        )
+        missing_pi_decision_count = (
+            len(missing_pi_step_ids)
+            if audited_step_ids
+            else max(audit_steps - len(step_decisions), 0)
+        )
+        pi_steps_resolved = (
+            len(step_decisions) == audit_steps
+            and (not audited_step_ids or set(step_decisions) == audited_step_ids)
+            and all(
+                status in {"completed", "skipped"}
+                for status in step_decisions.values()
+            )
         )
 
         # ``no_action`` and ``skipped`` do not claim that a supplementary pass
@@ -244,6 +280,7 @@ def _review_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Li
             and not remaining
             and not audit_unmet
             and not audit_unverifiable
+            and pi_steps_resolved
         )
         skipped_without_gap = (
             review_status == "skipped"
@@ -272,6 +309,13 @@ def _review_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Li
             final_gap_status = "unresolved"
         elif no_action_complete:
             final_gap_status = "not_applicable"
+        elif (
+            review_status == "no_action"
+            and str(review_plan.get("verdict") or "").lower() == "no_action"
+            and not remaining
+            and not pi_steps_resolved
+        ):
+            final_gap_status = "pending_pi_decision"
         elif skipped_without_gap:
             final_gap_status = "not_assessed"
         elif (
@@ -293,11 +337,14 @@ def _review_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Li
             "review_reason": str(raw.get("review_reason") or ""),
             "final_gap_status": final_gap_status,
             "plan_audit": {
-                "n_steps": _integer(audit.get("n_steps", 0)),
+                "n_steps": audit_steps,
                 "n_completed": _integer(audit.get("n_completed", 0)),
                 "n_skipped": _integer(audit.get("n_skipped", 0)),
                 "n_unmet": audit_unmet,
                 "n_unverifiable": audit_unverifiable,
+                "n_awaiting_pi_decision": _integer(
+                    audit.get("n_awaiting_pi_decision", 0)
+                ),
                 "n_figure_steps": _integer(audit.get("n_figure_steps", 0)),
                 "n_figure_unmet": _integer(audit.get("n_figure_unmet", 0)),
                 "unmet_titles": _texts(audit.get("unmet_titles"), limit=20),
@@ -305,6 +352,18 @@ def _review_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Li
                 "unmet_figure_kinds": _texts(
                     audit.get("unmet_figure_kinds"), limit=20
                 ),
+            },
+            "pi_completion": {
+                "decisions": [
+                    {
+                        "plan_step_id": step_id,
+                        "status": status,
+                    }
+                    for step_id, status in sorted(step_decisions.items())[:100]
+                ],
+                "missing_decision_count": missing_pi_decision_count,
+                "missing_step_ids": missing_pi_step_ids[:100],
+                "pending_step_ids": pending_pi_step_ids[:100],
             },
             "supplementary_execution": {
                 "status": execution_status,
@@ -330,7 +389,19 @@ def _review_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Li
         elif final_gap_status == "failed":
             cautions.append(f"{label} failed to resolve its supplementary gaps.")
         elif final_gap_status == "unverifiable":
-            cautions.append(f"{label} has no verifiable final gap assessment.")
+            cautions.append(f"{label} has no usable final gap assessment record.")
+        elif final_gap_status == "pending_pi_decision":
+            if missing_pi_decision_count:
+                cautions.append(
+                    f"{label} has no recorded PI completion decision for "
+                    f"{missing_pi_decision_count} plan step(s)."
+                )
+            if pending_pi_step_ids:
+                cautions.append(
+                    f"{label} retained PI-pending plan step(s): "
+                    + ", ".join(str(value) for value in pending_pi_step_ids)
+                    + "."
+                )
         if final_gap_status == "not_assessed":
             cautions.append(f"{label} was skipped and has no final gap assessment.")
         if review_status in (_REVIEW_FAILURE_STATUSES | _REVIEW_PARTIAL_STATUSES):
@@ -517,182 +588,19 @@ def build_report_partial_fields(
 
 
 def render_report_status_line_html(report: Dict[str, Any] | None) -> str:
-    """One always-visible line saying the report is qualified, or nothing.
+    """Compatibility hook for the retired report-level status banner.
 
-    Deliberately minimal and deliberately NOT collapsible: the detail belongs in
-    the folded block near the conclusions, but whether a reader should trust the
-    conclusions at all has to be legible before they read them. Returns "" for a
-    report with nothing to qualify, so a clean report gains no banner.
+    Report status and qualification data remain machine-readable and continue to
+    inform the ordinary Limitations prose. They are no longer repeated as a
+    prominent deterministic HTML block.
     """
-    if not isinstance(report, dict):
-        return ""
-    reasons = _texts(
-        report.get("partial_reasons")
-        or ([report.get("partial_reason")] if report.get("partial_reason") else [])
-    )
-    quality = report.get("quality_disclosures") or {}
-    if not isinstance(quality, dict):
-        quality = {}
-    blocking = _texts(quality.get("blocking_issues"), limit=100)
-    cautions = _texts(quality.get("cautions"), limit=100)
-    is_partial = str(report.get("status") or "") == "partial" or bool(reasons)
-    if not (is_partial or blocking or cautions):
-        return ""
-
-    if blocking or str(quality.get("status") or "") == "incomplete":
-        tone, headline = "status-blocking", "Partial report — unresolved evidence gaps"
-    elif is_partial:
-        tone, headline = "status-partial", "Partial report"
-    else:
-        tone, headline = "status-qualified", "Report carries evidence qualifications"
-
-    counts = []
-    if blocking:
-        counts.append(f"{len(blocking)} unresolved issue" + ("s" if len(blocking) != 1 else ""))
-    if cautions:
-        counts.append(f"{len(cautions)} caution" + ("s" if len(cautions) != 1 else ""))
-    detail = "; ".join(counts) if counts else "see the qualifications below"
-    return (
-        f'<div class="report-status-line {tone}">'
-        f"<strong>{html.escape(headline)}.</strong> "
-        f"{html.escape(detail)} — read the conclusions in that light; the itemised "
-        "record is at the end of this report."
-        "</div>"
-    )
+    return ""
 
 
 def render_report_limitations_html(report: Dict[str, Any] | None) -> str:
-    """Render one collapsed deterministic qualification block at report end.
+    """Compatibility hook for the retired detailed qualification block.
 
-    The machine-readable report status and quality record remain unchanged. This
-    presentation avoids repeating the same partial state in multiple banners
-    while keeping every retained issue available for audit.
+    The underlying partial reasons and quality disclosures remain in report data
+    for API, persistence, regeneration, and audit consumers.
     """
-    if not isinstance(report, dict):
-        return ""
-
-    labels = {
-        "figure_coverage": "Figure coverage is incomplete.",
-        "degraded_fallback": "The report writer used a degraded summary.",
-        "approved_partial": "A qualified report was explicitly approved.",
-        "analysis_quality": "Retained analysis-quality gaps limit interpretation.",
-    }
-    reasons = _texts(
-        report.get("partial_reasons")
-        or ([report.get("partial_reason")] if report.get("partial_reason") else [])
-    )
-    details = [
-        labels.get(reason, reason.replace("_", " ").capitalize() + ".")
-        for reason in reasons
-    ]
-    figureless = _texts(report.get("figureless_sections"), limit=100)
-    unreported = _texts(report.get("unreported_figures"), limit=100)
-    if figureless:
-        details.append("Figureless result sections: " + ", ".join(figureless) + ".")
-    if unreported:
-        details.append("Unreported figures: " + ", ".join(unreported) + ".")
-
-    quality = report.get("quality_disclosures") or {}
-    if not isinstance(quality, dict):
-        quality = {}
-    details.extend(list(quality.get("blocking_issues") or []))
-    details.extend(list(quality.get("cautions") or []))
-    details = _texts(details, limit=200)
-
-    # The prose above summarises; it does not name. A caution reads "Round 1
-    # post-execution review failed to resolve its supplementary gaps" without
-    # saying WHICH step went unmet, and says nothing at all about annotation
-    # confirmation or per-round evidence. Those three groups were rendered by the
-    # two banners this block replaced in 0.49.3; the machine-readable record kept
-    # them but the report stopped showing them, so an audit could no longer see
-    # which obligation was missed. They belong here, inside the one collapsed
-    # block, which is what "keeping every retained issue available" meant.
-    review_items = []
-    for review in quality.get("post_execution_reviews") or []:
-        if not isinstance(review, dict):
-            continue
-        audit = review.get("plan_audit") or {}
-        assessment = review.get("assessment") or {}
-        unmet = _texts(audit.get("unmet_titles"), limit=20)
-        remaining = _texts(assessment.get("remaining_gaps"), limit=20)
-        if not unmet and not remaining:
-            continue
-        parts = []
-        if unmet:
-            parts.append("unmet plan steps: " + ", ".join(unmet))
-        if remaining:
-            parts.append("remaining gaps: " + ", ".join(remaining))
-        label = f"Round {review.get('round_number', 0)} post-execution review"
-        review_items.append(
-            f"<li><strong>{html.escape(label)}:</strong> "
-            f"{html.escape('; '.join(parts))}</li>"
-        )
-
-    # A block with nothing to disclose stays absent: annotation state and the
-    # round table are context for a qualification, never a qualification on
-    # their own, so they must not make a clean report grow an empty section.
-    if not details and not review_items:
-        return ""
-
-    body = ""
-    if details:
-        body += "<ul>" + "".join(
-            f"<li>{html.escape(item)}</li>" for item in details
-        ) + "</ul>"
-    if review_items:
-        body += (
-            "<h3>Post-execution review gaps</h3><ul>"
-            + "".join(review_items)
-            + "</ul>"
-        )
-
-    rows = []
-    for result in quality.get("rounds") or []:
-        if not isinstance(result, dict):
-            continue
-        rows.append(
-            "<tr>"
-            f"<td>{html.escape(str(result.get('round_number', '')))}</td>"
-            f"<td>{html.escape(str(result.get('round_status', '')))}</td>"
-            f"<td>{html.escape(str(result.get('evidence_status', '')))}</td>"
-            f"<td>{html.escape(str(result.get('direction_coverage_eligible')))}</td>"
-            f"<td>{html.escape(str(result.get('bioinformatics_evidence_verified')))}</td>"
-            "</tr>"
-        )
-    if rows:
-        body += (
-            "<table><thead><tr><th>Round</th><th>Status</th><th>Evidence</th>"
-            "<th>Coverage eligible</th><th>Evidence verified</th></tr></thead>"
-            f"<tbody>{''.join(rows)}</tbody></table>"
-        )
-
-    annotation = quality.get("annotation") or {}
-    if isinstance(annotation, dict) and annotation:
-        confirmation = (annotation.get("confirmation") or {}).get("status", "unknown")
-        validation = (annotation.get("validation") or {}).get("status", "unknown")
-        counts = annotation.get("cell_counts") or {}
-        body += (
-            "<p><strong>Annotation confirmation:</strong> "
-            f"{html.escape(str(confirmation))}; "
-            "<strong>validation:</strong> "
-            f"{html.escape(str(validation))}; "
-            "<strong>cluster cell counts:</strong> "
-            f"{int(counts.get('known_clusters', 0) or 0)} known / "
-            f"{int(counts.get('unknown_clusters', 0) or 0)} unknown.</p>"
-        )
-        validation_summary = str(
-            (annotation.get("validation") or {}).get("summary") or ""
-        )
-        if validation_summary:
-            body += (
-                "<p><strong>Annotation validation summary:</strong> "
-                f"{html.escape(validation_summary)}</p>"
-            )
-
-    return (
-        '<details class="report-limitations-details">'
-        "<summary>Detailed evidence qualifications</summary>"
-        "<p>The PI summary above consolidates the principal limitations; "
-        "the retained machine-derived details are listed here.</p>"
-        f"{body}</details>"
-    )
+    return ""

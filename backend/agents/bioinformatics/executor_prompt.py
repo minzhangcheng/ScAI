@@ -105,8 +105,8 @@ def _executor_prompt_methods() -> str:
 WORKFLOW GUIDELINES:
 - When known, nominate execution_purpose and plan_step_ids on execute_code. These
   fields record producer intent only. The host captures objective identity and the
-  Supervisor later decides semantic plan credit; uncertain or omitted links remain
-  unverified and never block the analysis.
+  PI later decides semantic plan credit; uncertain or omitted links remain available
+  for PI review and never block the analysis.
 - Cite every host BulkInputProfile read by the cell in input_profile_ids. Use an
   empty list only when the cell does not consume bulk input.
 - Technical steps can be done autonomously: data loading, QC, normalization, PCA, clustering, UMAP, basic DE

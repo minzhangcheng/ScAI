@@ -84,9 +84,10 @@ def test_report_regenerator_smoke(tmp_path):
     assert "<html" in html_content.lower(), "HTML structure missing"
     assert "<div" in html_content, "HTML div elements missing"
     assert "<h1" in html_content, "HTML h1 element missing"
-    assert "Detailed evidence qualifications" in html_content
+    assert "Detailed evidence qualifications" not in html_content
+    assert '<div class="report-status-line' not in html_content
+    assert '<details class="report-limitations-details"' not in html_content
     assert "overview" in html_content
-    assert "Evidence is qualified" in html_content
-    assert html_content.index("Conclusions") < html_content.index(
-        "Detailed evidence qualifications"
-    )
+    assert "Evidence is qualified" not in html_content
+    retained = json.loads(report_json_path.read_text(encoding="utf-8"))
+    assert retained["quality_disclosures"]["cautions"] == ["Evidence is qualified."]

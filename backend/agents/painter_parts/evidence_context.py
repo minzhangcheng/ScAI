@@ -58,8 +58,12 @@ def build_graphic_evidence_context(state: Any, max_chars: int = 4000) -> str:
         if status:
             header += f" [status: {status}]"
         verified = getattr(round_result, "bioinformatics_evidence_verified", None)
-        if verified is not None:
-            header += f" [evidence verified: {verified}]"
+        linkage = {
+            True: "all structured findings linked to current successful receipts",
+            False: "one or more findings lack a current successful receipt",
+            None: "execution linkage not recorded",
+        }[verified]
+        header += f" [execution linkage: {linkage}]"
         lines.append(header)
         for label, attr, limit in (
             ("bioinformatics", "bioinformatics_findings", 3),

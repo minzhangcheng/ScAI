@@ -18,11 +18,13 @@ class StepAudit:
     planned_figure_kinds: List[str] = field(default_factory=list)
     missing_figure_kinds: List[str] = field(default_factory=list)
     verifiable: bool = True
+    technical_linkage: Optional[str] = None
+    awaiting_pi_decision: bool = False
 
 
 @dataclass
 class PlanAudit:
-    """Aggregate plan-versus-evidence verdict for one execution."""
+    """Aggregate technical plan/execution observations for PI review."""
     steps: List[StepAudit] = field(default_factory=list)
     executed_families: List[str] = field(default_factory=list)
     unavailable_families: List[str] = field(default_factory=list)
@@ -44,9 +46,16 @@ class PlanAudit:
 
     @property
     def unverifiable(self) -> List[StepAudit]:
-        """Steps with no machine-checkable identifier. Never counted as gaps —
-        that conflation is what made free-text coverage scoring unusable."""
-        return [s for s in self.steps if not s.verifiable]
+        """Legacy steps for which no structured execution audit is available."""
+        return [
+            s for s in self.steps
+            if not s.verifiable and not s.awaiting_pi_decision
+        ]
+
+    @property
+    def awaiting_pi_decision(self) -> List[StepAudit]:
+        """Current structured steps whose scientific status belongs to the PI."""
+        return [s for s in self.steps if s.awaiting_pi_decision]
 
     def summary(self) -> Dict[str, Any]:
         figure_steps = [s for s in self.steps if s.planned_figure_kinds]
@@ -59,6 +68,7 @@ class PlanAudit:
             "n_skipped": len(self.skipped),
             "n_unmet": len(self.unmet),
             "n_unverifiable": len(self.unverifiable),
+            "n_awaiting_pi_decision": len(self.awaiting_pi_decision),
             "n_figure_steps": len(figure_steps),
             "n_figure_unmet": len(figure_unmet),
             "unmet_titles": [s.title for s in self.unmet][:20],
@@ -75,15 +85,19 @@ class PlanAudit:
                     "plan_step_id": step.step_id,
                     "title": step.title,
                     "technical_linkage": (
-                        "unverified"
-                        if not step.verifiable
-                        else {
-                            STATUS_COMPLETED: "evidenced",
-                            STATUS_PENDING: "not_evidenced",
-                            STATUS_SKIPPED: "technically_unavailable",
-                        }.get(step.status, "unverified")
+                        step.technical_linkage
+                        or (
+                            "unverified"
+                            if not step.verifiable
+                            else {
+                                STATUS_COMPLETED: "evidenced",
+                                STATUS_PENDING: "not_evidenced",
+                                STATUS_SKIPPED: "technically_unavailable",
+                            }.get(step.status, "unverified")
+                        )
                     ),
                     "verifiable": step.verifiable,
+                    "awaiting_pi_decision": step.awaiting_pi_decision,
                     "reason": step.reason[:2000],
                 }
                 for step in self.steps
@@ -155,6 +169,13 @@ def audit_plan_execution(
             == int(target_cohort_generation)
         )
     ]
+    eligible_receipt_records = [
+        execution
+        for execution in receipt_records
+        if not getattr(execution, "error", None)
+        and bool(getattr(execution, "evidence_eligible", True))
+        and getattr(execution, "execution_status", "succeeded") == "succeeded"
+    ]
     reconciliation_current = bool(
         isinstance(semantic_reconciliation, Mapping)
         and str(semantic_reconciliation.get("plan_id") or "") == plan_id
@@ -184,7 +205,11 @@ def audit_plan_execution(
     }
     receipt_mode = bool(plan_receipt_records)
     if receipt_mode:
-        audit.evidence_mode = "supervisor_semantic"
+        audit.evidence_mode = (
+            "supervisor_semantic"
+            if reconciliation_current
+            else "host_execution_linkage"
+        )
     else:
         audit.evidence_mode = "legacy_unverifiable"
     audit.executed_families = sorted(executed)
@@ -207,6 +232,48 @@ def audit_plan_execution(
         )
         step_id = int(getattr(step, "id", 0) or 0)
         title = str(getattr(step, "title", "") or "")[:300]
+
+        if receipt_mode and not reconciliation_current:
+            linked_execution_ids = [
+                str(execution.id)
+                for execution in eligible_receipt_records
+                if step_id in (getattr(execution, "plan_step_ids", None) or [])
+            ][:40]
+            if linked_execution_ids:
+                reason = (
+                    "Host verified current successful execution receipt(s) linked "
+                    "to this approved step: "
+                    + ", ".join(linked_execution_ids[:8])
+                    + ". PI review determines scientific completion."
+                )
+                if missing_figures:
+                    reason += (
+                        " Required reviewed artifact(s) remain missing: "
+                        + ", ".join(missing_figures)
+                        + "."
+                    )
+                technical_linkage = "execution_linked"
+            else:
+                reason = (
+                    "No current successful execution receipt is linked to this "
+                    "approved step. PI review determines whether it is completed, "
+                    "pending, or skipped."
+                )
+                technical_linkage = "not_linked"
+            audit.steps.append(StepAudit(
+                step_id=step_id,
+                title=title,
+                status=STATUS_PENDING,
+                reason=reason,
+                planned_families=sorted(planned),
+                missing_families=([] if linked_execution_ids else sorted(planned)),
+                planned_figure_kinds=sorted(planned_figures),
+                missing_figure_kinds=missing_figures,
+                verifiable=False,
+                technical_linkage=technical_linkage,
+                awaiting_pi_decision=True,
+            ))
+            continue
 
         if receipt_mode:
             semantic = semantic_links.get(step_id)
@@ -597,8 +664,8 @@ def should_run_post_execution_review(
 
     if audit.unverifiable:
         reasons.append(
-            f"Evidence reconciliation left {len(audit.unverifiable)} approved "
-            "step(s) technically unverifiable."
+            f"Technical linkage observations leave {len(audit.unverifiable)} "
+            "approved step(s) for PI completion assessment."
         )
 
     # A technically clean linkage record still does not establish scientific

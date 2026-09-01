@@ -72,8 +72,8 @@ Style Requirements:
 - If the study is descriptive, or its main result is negative, illustrate that honestly
   rather than composing a mechanism to fill the panel
 - Do not depict anything from a modality the Evidence Context does not list as analysed,
-  and do not present a finding the context marks as qualified, unverified or caveated as
-  though it were settled
+  and do not present a qualified or caveated finding, or one lacking current execution
+  linkage, as though it were settled
 - Color scheme: Use professional, publication-appropriate colors
 - Layout: Clear flow from left to right or top to bottom showing the research narrative
 - Avoid excessive text - focus on visual communication

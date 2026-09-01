@@ -12,6 +12,31 @@ vi.mock('./AnnotationConfirmationDialog', () => ({
 }))
 
 describe('restored report entry points', () => {
+  it('keeps round status but does not render a bioinformatics verification badge', () => {
+    render(<ResultsView controller={{
+      currentSession: {
+        id: 'session-evidence', name: 'Results', status: 'completed', currentRound: 1,
+        createdAt: '2026-08-29T00:00:00Z', instruction: 'test', treatmentGroups: [],
+        dataFiles: [], biochemistryIndicators: [], restoreBranchId: 'main',
+        roundResults: [{
+          round: 1, phase: 'exploration', roundStatus: 'partial',
+          evidenceStatus: 'substantive', bioinformaticsEvidenceVerified: false,
+          directionCoverageEligible: true, evidenceNotes: [], lineageId: 'main',
+          pathologyFindings: [], bioinformaticsFindings: [], biochemistryFindings: [],
+          literatureFindings: [], resultIdentityKey: 'main:1',
+        }],
+      },
+      curatedCount: 0, downloadReport: vi.fn(), expandedRounds: new Set(),
+      graphicAbstract: null, integratedReport: null, language: 'en', loading: false,
+      orderedFigures: [], publicationFigures: [], publicationTables: [],
+      t: (key: string) => key, toggleRound: vi.fn(),
+    } as never} />)
+
+    expect(screen.getByText('roundStatusPartial')).toBeInTheDocument()
+    expect(screen.queryByText('evidenceUnverified')).not.toBeInTheDocument()
+    expect(screen.queryByText('evidenceVerified')).not.toBeInTheDocument()
+  })
+
   it('scopes the Results full-report link to the restored branch', () => {
     render(<ResultsView controller={{
       currentSession: {

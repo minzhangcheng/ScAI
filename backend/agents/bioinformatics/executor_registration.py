@@ -193,7 +193,7 @@ async def handle_register_publication_table(context, tool_call) -> ToolAction:
         plan_step_ids=candidate_steps,
         plan_binding_status="candidate" if candidate_steps else "unverified",
         plan_binding_reason=(
-            "Candidate producer link awaiting Supervisor semantic reconciliation."
+            "Current producer receipt and nominated plan step recorded for PI review."
             if candidate_steps else
             (
                 f"No current eligible producer receipt was available: {source_error}."

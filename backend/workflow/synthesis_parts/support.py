@@ -472,7 +472,10 @@ def _direction_result_evidence_gaps(
     if not _direction_result_is_coverage_eligible(result):
         add("The attempt did not satisfy direction-coverage eligibility.")
     if result.bioinformatics_evidence_verified is False:
-        add("Bioinformatics findings were not fully bound to verified execution evidence.")
+        add(
+            "One or more bioinformatics findings lack a current successful "
+            "execution receipt."
+        )
 
     for program in result.data_driven_mechanism_programs or []:
         missing = (

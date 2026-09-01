@@ -133,7 +133,7 @@ def test_live_appendix_includes_complete_direction_selection_history():
     assert "Integration Cycle 1" in html
 
 
-def test_supervisor_html_moves_qualifications_after_conclusions(tmp_path):
+def test_supervisor_html_omits_deterministic_qualification_blocks(tmp_path):
     state = AnalysisState(id="s5", name="Partial", initial_instruction="x", user_id="u1")
     sup = _make_supervisor(state)
     report = {
@@ -173,10 +173,11 @@ def test_supervisor_html_moves_qualifications_after_conclusions(tmp_path):
     )
     html = path.read_text(encoding="utf-8")
 
-    assert "Detailed evidence qualifications" in html
-    assert "explicitly approved" in html
-    assert "Qualification retained" in html
-    assert "Analysis report is partial" not in html
-    assert html.index('<div class="conclusions">') < html.index(
-        "Detailed evidence qualifications"
-    )
+    assert 'class="report-status-line' not in html
+    assert 'class="report-limitations-details"' not in html
+    assert "Detailed evidence qualifications" not in html
+    assert "Qualification retained" not in html
+    assert '<div class="conclusions">' in html
+    assert report["status"] == "partial"
+    assert report["partial_reasons"] == ["approved_partial"]
+    assert report["quality_disclosures"]["cautions"] == ["Qualification retained."]

@@ -5,6 +5,7 @@ import { downloadBlob } from '../../utils/download'
 import { authHeaders } from '../../hooks/useApi'
 import { reportBranchQuery } from '../../utils/reportBranch'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   FileText,
   ChevronDown,
@@ -116,6 +117,7 @@ export function IntegratedReport({ report }: IntegratedReportProps) {
       {expanded && (
         <div className="bg-white dark:bg-surface-900 border border-slate-200 dark:border-slate-700 rounded-xl p-6 prose prose-slate prose-sm max-w-none">
           <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
             components={{
               // Custom rendering for figure references
               a: ({ href, children }) => {

@@ -199,6 +199,66 @@ def test_only_successful_execution_and_verifiable_resolved_assessment_closes_rev
     assert quality["post_execution_reviews"][0]["final_gap_status"] == "resolved"
 
 
+def test_pi_no_action_decisions_close_host_linkage_review():
+    review = {
+        "round_number": 1,
+        "review_status": "no_action",
+        "review_plan": {
+            "verdict": "no_action",
+            "step_decisions": [
+                {"plan_step_id": 1, "status": "completed"},
+                {"plan_step_id": 2, "status": "skipped"},
+            ],
+        },
+        "plan_audit": {
+            "n_steps": 2,
+            "n_unmet": 0,
+            "n_unverifiable": 0,
+            "n_awaiting_pi_decision": 2,
+        },
+        "review_result": {},
+        "assessment": {"remaining_gaps": []},
+    }
+    state = SimpleNamespace(
+        round_results=[], post_execution_reviews=[review],
+        annotation_record=None, annotation_state=None,
+    )
+
+    quality = build_quality_disclosures(state)
+
+    assert quality["status"] == "complete"
+    assert quality["post_execution_reviews"][0]["final_gap_status"] == "not_applicable"
+
+
+def test_pi_no_action_with_missing_step_decision_does_not_close_review():
+    review = {
+        "round_number": 1,
+        "review_status": "no_action",
+        "review_plan": {
+            "verdict": "no_action",
+            "step_decisions": [{"plan_step_id": 1, "status": "completed"}],
+        },
+        "plan_audit": {"n_steps": 2, "n_unmet": 0, "n_unverifiable": 0},
+        "review_result": {},
+        "assessment": {"remaining_gaps": []},
+    }
+    state = SimpleNamespace(
+        round_results=[], post_execution_reviews=[review],
+        annotation_record=None, annotation_state=None,
+    )
+
+    quality = build_quality_disclosures(state)
+
+    assert quality["status"] == "qualified"
+    disclosure = quality["post_execution_reviews"][0]
+    assert disclosure["final_gap_status"] == "pending_pi_decision"
+    assert disclosure["pi_completion"]["missing_decision_count"] == 1
+    assert any(
+        "no recorded PI completion decision for 1 plan step" in caution
+        for caution in quality["cautions"]
+    )
+
+
 @pytest.mark.parametrize("review_status", ["no_action", "skipped"])
 @pytest.mark.parametrize("unverifiable_source", ["execution", "assessment"])
 def test_declined_review_cannot_hide_explicit_unverifiable_result(
@@ -286,9 +346,10 @@ def test_quality_record_keeps_confirmation_validation_and_unknown_counts_separat
         "n_cells_known": False,
         "n_cells_source": "unknown",
     }
-    rendered = render_report_limitations_html({"quality_disclosures": quality})
-    assert "One low-confidence cluster remains" in rendered
-    assert "1 known / 1 unknown" in rendered
+    assert quality["annotation"]["validation"]["summary"] == (
+        "One low-confidence cluster remains."
+    )
+    assert render_report_limitations_html({"quality_disclosures": quality}) == ""
 
 
 def test_unverified_round_and_unmet_post_review_remain_nonblocking_observations():
@@ -316,12 +377,14 @@ def test_unverified_round_and_unmet_post_review_remain_nonblocking_observations(
     quality = build_quality_disclosures(state)
     assert quality["status"] == "qualified"
     assert quality["blocking_issues"] == []
-    assert any("unverified" in issue for issue in quality["cautions"])
-    html = render_report_limitations_html({"quality_disclosures": quality})
-    assert "Cell communication" in html, (
-        "the report must name WHICH plan step went unmet, not just that one did"
+    assert any(
+        "not linked to a current successful execution receipt" in issue
+        for issue in quality["cautions"]
     )
-    assert "Validate interaction" in html
+    retained_review = quality["post_execution_reviews"][0]
+    assert retained_review["plan_audit"]["unmet_titles"] == ["Cell communication"]
+    assert retained_review["assessment"]["remaining_gaps"] == ["Validate interaction"]
+    assert render_report_limitations_html({"quality_disclosures": quality}) == ""
     assert "max_steps_reached" in " ".join(quality["cautions"])
 
     neutral = SimpleNamespace(allow_partial_report=False)
@@ -351,40 +414,40 @@ def test_integration_round_does_not_require_bioinformatics_verification():
 
 
 @pytest.mark.parametrize(
-    ("reason", "extra", "expected"),
+    ("reason", "extra"),
     [
-        ("figure_coverage", {"figureless_sections": ["direction_1"]}, "direction_1"),
-        ("degraded_fallback", {}, "degraded summary"),
-        ("approved_partial", {}, "explicitly approved"),
-        ("analysis_quality", {}, "quality gaps"),
+        ("figure_coverage", {"figureless_sections": ["direction_1"]}),
+        ("degraded_fallback", {}),
+        ("approved_partial", {}),
+        ("analysis_quality", {}),
     ],
 )
-def test_limitations_cover_every_machine_readable_reason(reason, extra, expected):
+def test_deterministic_qualification_block_is_omitted_for_every_reason(reason, extra):
     report = {
         "status": "partial",
         "partial_reason": reason,
         "partial_reasons": [reason],
         **extra,
     }
-    html = render_report_limitations_html(report)
-    assert "Detailed evidence qualifications" in html
-    assert expected in html
+    assert render_report_limitations_html(report) == ""
+    assert report["partial_reason"] == reason
 
 
-def test_report_limitations_consolidate_partial_and_quality_details():
-    html = render_report_limitations_html({
+def test_report_limitations_hook_omits_blocks_without_mutating_details():
+    report = {
         "status": "partial",
         "partial_reasons": ["approved_partial", "analysis_quality"],
         "quality_disclosures": {
             "blocking_issues": ["Round 2 evidence is unverified."],
             "cautions": ["Optional modality unavailable."],
         },
-    })
+    }
 
-    assert html.count("Detailed evidence qualifications") == 1
-    assert "Round 2 evidence is unverified" in html
-    assert "Optional modality unavailable" in html
-    assert "Partial report" not in html
+    assert render_report_limitations_html(report) == ""
+    assert report["partial_reasons"] == ["approved_partial", "analysis_quality"]
+    assert report["quality_disclosures"]["blocking_issues"] == [
+        "Round 2 evidence is unverified."
+    ]
 
 
 def test_detailed_report_event_carries_partial_and_quality_contracts():

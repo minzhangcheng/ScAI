@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.51.5 · **Last updated**: 2026-09-01
+**Version**: 0.51.6 · **Last updated**: 2026-09-01
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,23 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.51.x — (2026-08-31 onward)**
+
+- `0.51.6` — Keeps execution evidence grounded in current, successful technical
+  receipts matched by round, plan, lineage, analysis generation, and cohort
+  identity. Post-execution review now records linkage observations and leaves
+  scientific completion and supplementary-work decisions to the PI instead of
+  applying Supervisor semantic verdicts or deterministic report gates. Reports
+  retain quality disclosures in machine-readable output while removing duplicate
+  deterministic limitation/status blocks and evidence-verification badges from
+  rendered views; integrated reports support GitHub-flavored Markdown tables.
+  Publication tables and lineage now require their producer execution receipt,
+  and credential validation accepts full Chat Completions, Responses, and
+  Anthropic endpoint URLs by deriving the provider `/models` path. Focused
+  results-state handling now ignores persisted figure/report blob placeholders
+  so an authoritative report already held by the client is not overwritten.
+  Focused backend regressions and version-consistency checks passed; frontend
+  installation/Vitest, image build, deployment, and historical-session mutation
+  were not performed.
 
 - `0.51.5` — Adds per-user Agent defaults for newly created analyses. Non-secret
   prompts, models, temperatures, server URLs, context windows, vision settings,

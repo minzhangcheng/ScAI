@@ -1,19 +1,15 @@
-"""Supervisor semantic reconciliation for current plan evidence."""
+"""Current execution-evidence linkage and legacy reconciliation helpers."""
 from __future__ import annotations
 
-import logging
 import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
+from ...services.execution_evidence import execution_is_current_receipt
 from ...services.report.artifacts import (
     eligible_artifacts,
     verified_artifact_bytes,
 )
-
-logger = logging.getLogger(__name__)
-
 
 def _identity_context(analysis_state, plan) -> Dict[str, Any]:
     cohort = dict(
@@ -25,6 +21,11 @@ def _identity_context(analysis_state, plan) -> Dict[str, Any]:
         "round_number": int(getattr(analysis_state, "current_round", 0) or 0),
         "lineage_id": getattr(analysis_state, "restore_branch_id", None) or "main",
         "plan_id": str(getattr(plan, "id", "") or ""),
+        "analysis_generation": int(
+            (getattr(analysis_state, "sandbox_state", None) or {}).get(
+                "analysis_generation", 0
+            ) or 0
+        ),
         "cohort_digest": str(cohort.get("cohort_digest") or "") or None,
         "cohort_generation": int(cohort.get("cohort_generation", 0) or 0),
     }
@@ -41,6 +42,10 @@ def _matches_current_identity(
     if (getattr(item, "lineage_id", None) or "main") != identity["lineage_id"]:
         return False
     if require_plan and str(getattr(item, "plan_id", "") or "") != identity["plan_id"]:
+        return False
+    if int(getattr(item, "analysis_generation", 0) or 0) != identity[
+        "analysis_generation"
+    ]:
         return False
     item_cohort = str(getattr(item, "cohort_digest", "") or "") or None
     if (
@@ -62,12 +67,18 @@ def _collect_current_evidence(
 ) -> Dict[str, list[Any]]:
     executions = [
         item for item in (getattr(analysis_state, "code_history", None) or [])
-        if getattr(item, "evidence_schema_version", None) == 2
-        and _matches_current_identity(item, identity)
-        and not getattr(item, "error", None)
-        and bool(getattr(item, "evidence_eligible", True))
-        and getattr(item, "execution_status", "succeeded") == "succeeded"
-    ][-60:]
+        if execution_is_current_receipt(
+            item,
+            round_number=identity["round_number"],
+            plan_id=identity["plan_id"],
+            lineage_id=identity["lineage_id"],
+            analysis_generation=identity["analysis_generation"],
+            cohort_digest=identity["cohort_digest"],
+            cohort_generation=(
+                identity["cohort_generation"] or None
+            ),
+        )
+    ]
     figures = [
         item for item in eligible_artifacts(
             getattr(analysis_state, "publication_figures", None) or []
@@ -101,6 +112,10 @@ def _collect_current_evidence(
         if str(record.get("lineage_id") or identity["lineage_id"]) != identity["lineage_id"]:
             continue
         if str(record.get("plan_id") or identity["plan_id"]) != identity["plan_id"]:
+            continue
+        if int(
+            record.get("analysis_generation", identity["analysis_generation"]) or 0
+        ) != identity["analysis_generation"]:
             continue
         if (
             identity["cohort_digest"]
@@ -438,6 +453,105 @@ def _apply_links(
     )
 
 
+def _apply_execution_links(
+    analysis_state,
+    result: Dict[str, Any],
+    evidence: Dict[str, list[Any]],
+    plan_id: str,
+) -> None:
+    """Verify finding-to-execution identity without making a scientific verdict."""
+    finding_records = evidence["finding_records"]
+    eligible_ids = {
+        str(item.id) for item in evidence["executions"] if str(item.id)
+    }
+    source_records = [
+        item for item in (result.get("finding_records") or [])[-40:]
+        if isinstance(item, dict) and str(item.get("text") or "").strip()
+    ]
+
+    for record in finding_records:
+        nominated = {
+            str(value)
+            for value in (
+                record.get("candidate_evidence_execution_ids")
+                or record.get("evidence_execution_ids")
+                or []
+            )
+            if str(value)
+        }
+        linked_ids = sorted(nominated & eligible_ids)[:40]
+        record.update({
+            "candidate_evidence_execution_ids": linked_ids,
+            "evidence_execution_ids": linked_ids,
+            "evidence_status": "verified" if linked_ids else "unverified",
+            # Execution identity is objective. Whether the execution scientifically
+            # completes a plan step remains a PI decision.
+            "confirmed_plan_step_ids": [],
+            "semantic_status": "unverified",
+        })
+
+    verified_ids = sorted({
+        str(value)
+        for record in finding_records
+        if record.get("evidence_status") == "verified"
+        for value in (record.get("evidence_execution_ids") or [])
+        if str(value)
+    })
+    result["evidence_execution_ids"] = verified_ids
+    result["candidate_evidence_execution_ids"] = sorted({
+        str(value)
+        for record in finding_records
+        for value in (record.get("candidate_evidence_execution_ids") or [])
+        if str(value)
+    })
+    _sync_analysis_log(analysis_state, finding_records)
+
+    records_verified = None if not source_records else (
+        len(finding_records) == len(source_records)
+        and all(
+            item.get("evidence_status") == "verified"
+            and bool(item.get("evidence_execution_ids"))
+            for item in finding_records
+        )
+    )
+    result["evidence_verified"] = records_verified
+
+    gates = [
+        item for item in (result.get("evidence_gate_findings") or [])
+        if not (
+            isinstance(item, dict)
+            and item.get("gate") in {
+                "supervisor-plan-evidence",
+                "execution-evidence-linkage",
+            }
+        )
+    ]
+    if source_records and records_verified is False:
+        gates.append({
+            "gate": "execution-evidence-linkage",
+            "rule_id": "scai-native/execution-evidence-linkage",
+            "detail": (
+                "One or more findings lacked a valid current successful execution "
+                "receipt. They remain retained as technically unlinked observations "
+                "for PI review."
+            ),
+            "subject": plan_id,
+            "severity": "advise",
+            "rejection_count": 0,
+            "rejection_limit": 0,
+            "forced_release": False,
+        })
+    result["evidence_gate_findings"] = gates
+    result["evidence_gate_degraded"] = bool(
+        result.get("evidence_gate_degraded")
+        or any(
+            item.get("forced_release")
+            for item in gates
+            if isinstance(item, dict)
+        )
+    )
+
+
 def _sync_analysis_log(analysis_state, finding_records: list[dict]) -> None:
     reconciled = {
         str(record.get("id") or ""): record for record in finding_records
@@ -457,7 +571,6 @@ def _sync_analysis_log(analysis_state, finding_records: list[dict]) -> None:
             str(value)
             for record in updated_records
             if record.get("evidence_status") == "verified"
-            and record.get("semantic_status") == "evidenced"
             for value in (record.get("evidence_execution_ids") or [])
             if str(value)
         })
@@ -468,39 +581,16 @@ async def reconcile_plan_evidence(
     analysis_state,
     result: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Ask Supervisor for semantic links; keep objective identity host-owned."""
+    """Bind findings to current successful receipts without an LLM verdict."""
     plan = getattr(analysis_state, "current_plan", None)
     if plan is None or not getattr(plan, "steps", None):
         return {}
     identity = _identity_context(analysis_state, plan)
     evidence = _collect_current_evidence(analysis_state, result, identity)
-    catalog = _build_catalog(analysis_state, plan, identity, evidence)
-    try:
-        if workflow.supervisor_agent is None:
-            raise RuntimeError("Supervisor agent is unavailable")
-        decision = await workflow.supervisor_agent.review_plan_evidence(
-            analysis_state, catalog
-        )
-    except Exception as exc:
-        logger.warning(
-            "[%s] Supervisor plan evidence reconciliation failed: %s",
-            workflow.session_id,
-            exc,
-        )
-        decision = _fallback_decision(plan, exc)
-
-    links = _normalize_links(decision, plan, evidence)
-    reconciliation = {
-        "id": str(uuid.uuid4()),
-        "created_at": datetime.now().isoformat(),
-        **identity,
-        "status": "unverified" if decision.get("parse_failed") else "completed",
-        "overall_reason": str(decision.get("overall_reason") or "")[:2000],
-        "links": links,
-    }
-    analysis_state.plan_evidence_reconciliations.append(reconciliation)
-    analysis_state.plan_evidence_reconciliations = (
-        analysis_state.plan_evidence_reconciliations[-40:]
+    _apply_execution_links(
+        analysis_state,
+        result,
+        evidence,
+        identity["plan_id"],
     )
-    _apply_links(analysis_state, result, evidence, links, identity["plan_id"])
-    return reconciliation
+    return {}

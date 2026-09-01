@@ -170,8 +170,9 @@ def _build_report_planning_prompt(
             )
             if rs.get("bioinformatics_evidence_verified") is False:
                 rounds_text += (
-                    "**EVIDENCE WARNING**: Bioinformatics findings are partial/unverified; "
-                    "never label them validated, confirmed, causal, dominant, or replicated.\n"
+                    "**EXECUTION LINKAGE NOTE**: One or more bioinformatics findings "
+                    "lack a current successful execution receipt; never label those "
+                    "claims validated, confirmed, causal, dominant, or replicated.\n"
                 )
             rounds_text += f"**PI Summary**: {rs['pi_summary'][:500]}\n"
             if rs['bioinformatics_findings']:
@@ -215,12 +216,13 @@ def _build_report_planning_prompt(
     for rs in analysis_record.get("round_summaries", []):
         if rs.get("bioinformatics_evidence_verified") is False:
             evidence_warnings.append(
-                f"- Round {rs['round_number']}: partial/unverified bioinformatics evidence. "
-                "Do not upgrade claims to validated, confirmed, causal, dominant, or replicated."
+                f"- Round {rs['round_number']}: one or more bioinformatics findings "
+                "lack a current successful execution receipt. Do not upgrade those "
+                "claims to validated, confirmed, causal, dominant, or replicated."
             )
     if evidence_warnings:
         analysis_context += (
-            "\n## Mandatory Evidence Qualification\n"
+            "\n## Recorded Execution-Linkage Limitations\n"
             + "\n".join(evidence_warnings)
             + "\nThese qualifications override stronger wording in summaries or literature.\n"
         )

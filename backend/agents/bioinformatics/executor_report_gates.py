@@ -118,6 +118,9 @@ async def prepare_report_attempt(context, tool_call) -> ReportAttempt | None:
         lineage_id=active_lineage,
         cohort_digest=active_cohort_digest,
         cohort_generation=active_cohort_generation,
+        analysis_generation=int(
+            (state.sandbox_state or {}).get("analysis_generation", 0) or 0
+        ),
         require_plan_binding=False,
     )
     for record in finding_records:
@@ -278,8 +281,8 @@ async def attach_report_observations(context, attempt) -> None:
                 rule_id="scai-native/bulk-method-decision",
                 detail=(
                     "No current bulk method decision was linked to eligible evidence. "
-                    "The findings were retained as unverified; the workflow was not "
-                    "blocked."
+                    "The findings remain available for PI review; the workflow was "
+                    "not blocked."
                 ),
                 severity="advise",
             ))

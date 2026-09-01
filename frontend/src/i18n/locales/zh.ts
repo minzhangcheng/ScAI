@@ -301,8 +301,6 @@ export const zh = {
     evidenceStatusSubstantive: '有实质证据',
     evidenceStatusEmpty: '无证据',
     evidenceStatusFailed: '证据失败',
-    evidenceVerified: '已核验',
-    evidenceUnverified: '未完全核验',
     coverageEligible: '计入覆盖',
     coverageWithheld: '不计入覆盖',
     evidenceLimitations: '证据限制',
