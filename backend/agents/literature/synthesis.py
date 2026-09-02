@@ -14,6 +14,7 @@ from ...models.schemas import (
     PubMedEvidenceItem,
     LiteratureMechanismSignal,
 )
+from ...utils.llm_client import UpstreamExhaustedError
 
 from .shared import (  # noqa: F401
     _FALLBACK_EXCEPTIONS,
@@ -286,6 +287,11 @@ If no mechanisms clearly co-occur with the observed data, return {{"mechanism_si
             # independent structured extraction that must not pollute or depend on the
             # literature agent's message history.
             response = await self.chat_without_history(prompt, temperature=0.3)
+        except UpstreamExhaustedError:
+            # Every retry the client owns has already been spent. Degrading here
+            # drops the signals with nothing but a log line to show for it, so
+            # let the node's LLM-failure gate offer retry/skip instead.
+            raise
         except Exception as e:
             logger.warning(f"[Literature] mechanism extraction LLM call failed: {e}")
             return None

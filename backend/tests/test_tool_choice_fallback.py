@@ -12,7 +12,23 @@ from unittest.mock import AsyncMock, MagicMock
 
 from openai import BadRequestError
 
+from backend.utils import llm_client
 from backend.utils.llm_client import is_tool_choice_error, UpstreamExhaustedError
+
+
+@pytest.fixture
+def no_retry_sleep(monkeypatch):
+    """Neutralize retry backoff for tests that deliberately exhaust retries.
+
+    Same seam as `captured_sleeps` in test_rate_limit_backoff.py. The retry
+    count, the classification and the raised exception are untouched; only
+    the wall clock between attempts is.
+    """
+
+    async def _instant(delay):
+        return None
+
+    monkeypatch.setattr(llm_client.asyncio, "sleep", _instant)
 
 
 @pytest_asyncio.fixture
@@ -174,7 +190,7 @@ class TestChatWithToolsFallback:
 
     @pytest.mark.asyncio
     async def test_unrelated_bad_request_propagates(
-        self, monkeypatch, close_stub_clients,
+        self, monkeypatch, close_stub_clients, no_retry_sleep,
     ):
         from backend.utils.llm_client import OpenAICompatibleClient
 

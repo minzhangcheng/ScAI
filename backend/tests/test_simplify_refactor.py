@@ -9,6 +9,7 @@ import pytest
 from pydantic import BaseModel, Field
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
 from backend.models.schemas import (
+    AgentType,
     AnalysisPlan,
     CrossModalMechanismCandidate,
     CrossModalEvidenceItem,
@@ -179,6 +180,12 @@ class TestBioinformaticsParseRetry:
     def agent(self):
         with patch("backend.agents.bioinformatics_agent.BioinformaticsAgent.__init__", lambda self: None):
             a = BioinformaticsAgent.__new__(BioinformaticsAgent)
+            # __init__ is bypassed, so the settings provider BaseAgent injects
+            # has to be supplied here: _call_planning_llm reads llm_client and
+            # model to label the replay-safe retry wrapper, and both resolve
+            # through _provider.
+            a._provider = MagicMock()
+            a.agent_type = AgentType.BIOINFORMATICS
             a._safe_parse_json = MagicMock()
             # The retry deliberately goes through chat_without_history: the retry prompt
             # already carries the full original request and must not inherit unrelated

@@ -7,6 +7,8 @@ import pytest
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
 from backend.models.schemas import AgentType, AnalysisPlan, AnalysisState, PlanStep
 from backend.utils.llm_client import StreamInterruptedError, UpstreamExhaustedError
+from backend.utils.llm_client_parts.responses import LLMResponse
+from backend.utils.settings_provider import BudgetedTextDispatch
 
 
 def _make_agent() -> BioinformaticsAgent:
@@ -25,24 +27,62 @@ def _make_state() -> AnalysisState:
     return AnalysisState(user_id="test-user")
 
 
+def _client_backed_agent(chat_side_effect):
+    """An agent whose replay budget is the real one.
+
+    These tests used to stub ``chat_without_history``. That method now owns the
+    replay budget for all of its call sites, so stubbing it removes the very
+    behaviour under test. Mock the client one level down instead and the real
+    method runs — which is also what makes the "one budget, not two" property
+    observable: a second budget would show up here as 16 client calls.
+    """
+    client = MagicMock()
+    client.chat = AsyncMock(side_effect=chat_side_effect)
+    client.base_url = "https://example.invalid"
+
+    provider = MagicMock()
+    provider.get_model.return_value = "test-model"
+    provider.get_system_prompt.return_value = "system"
+    provider.get_temperature.return_value = 0.3
+    provider.get_config_revision.return_value = 1
+    provider.get_vision_setting.return_value = False
+    provider.get_llm_client.return_value = client
+    provider.budget_text_dispatch = AsyncMock(
+        side_effect=lambda label, messages, **kwargs: BudgetedTextDispatch(
+            messages=[dict(m) for m in messages], report=None, max_tokens=None,
+        )
+    )
+    provider.acknowledge_text_dispatch = AsyncMock()
+
+    agent = BioinformaticsAgent(settings_provider=provider, sandbox=None)
+    agent.session_id = "test-session"
+    agent._notify = AsyncMock()
+    return agent, client
+
+
+def _reply(content: str) -> LLMResponse:
+    return LLMResponse(
+        content=content, model="test-model", usage={}, raw_response=None
+    )
+
+
 @pytest.mark.asyncio
 async def test_plan_stream_interruption_retries_three_times(monkeypatch):
     sleep = AsyncMock()
     monkeypatch.setattr(
         "backend.utils.llm_client_parts.retry.asyncio.sleep", sleep
     )
-    agent = _make_agent()
-    state = _make_state()
     valid = (
         '{"overview":"ok","steps":[{"id":1,"title":"QC",'
         '"method":"scanpy.pp.filter_cells","depends_on":[]}]}'
     )
-    agent.chat_without_history = AsyncMock(side_effect=[
+    agent, client = _client_backed_agent([
         StreamInterruptedError("eof 1"),
         StreamInterruptedError("eof 2"),
         StreamInterruptedError("eof 3"),
-        valid,
+        _reply(valid),
     ])
+    state = _make_state()
 
     plan = await agent.generate_analysis_plan(
         state=state,
@@ -52,9 +92,9 @@ async def test_plan_stream_interruption_retries_three_times(monkeypatch):
     )
 
     assert len(plan.steps) == 1
-    assert agent.chat_without_history.await_count == 4
-    first_call = agent.chat_without_history.await_args_list[0]
-    assert all(call == first_call for call in agent.chat_without_history.await_args_list)
+    assert client.chat.await_count == 4
+    first_call = client.chat.await_args_list[0]
+    assert all(call == first_call for call in client.chat.await_args_list)
     assert [call.args[0] for call in sleep.await_args_list] == [2.0, 4.0, 8.0]
 
 
@@ -65,9 +105,8 @@ async def test_plan_stream_interruption_exhaustion_enters_llm_failure_path(
     monkeypatch.setattr(
         "backend.utils.llm_client_parts.retry.asyncio.sleep", AsyncMock()
     )
-    agent = _make_agent()
-    agent.chat_without_history = AsyncMock(
-        side_effect=[StreamInterruptedError("eof")] * 4
+    agent, client = _client_backed_agent(
+        [StreamInterruptedError("eof")] * 4
     )
 
     with pytest.raises(UpstreamExhaustedError) as exc_info:
@@ -78,7 +117,7 @@ async def test_plan_stream_interruption_exhaustion_enters_llm_failure_path(
             phase="exploration",
         )
 
-    assert agent.chat_without_history.await_count == 4
+    assert client.chat.await_count == 4
     assert exc_info.value.failure_kind == "stream_interrupted"
     assert exc_info.value.agent_name == "bioinformatics"
     assert exc_info.value.model == "test-model"
@@ -93,7 +132,6 @@ async def test_plan_retries_classified_stream_interruption(monkeypatch):
     monkeypatch.setattr(
         "backend.utils.llm_client_parts.retry.asyncio.sleep", sleep
     )
-    agent = _make_agent()
     valid = (
         '{"overview":"ok","steps":[{"id":1,"title":"QC",'
         '"method":"scanpy.pp.filter_cells","depends_on":[]}]}'
@@ -104,8 +142,8 @@ async def test_plan_retries_classified_stream_interruption(monkeypatch):
         model="test-model",
         failure_kind="stream_interrupted",
     )
-    agent.chat_without_history = AsyncMock(
-        side_effect=[classified, classified, valid]
+    agent, client = _client_backed_agent(
+        [classified, classified, _reply(valid)]
     )
 
     plan = await agent.generate_analysis_plan(
@@ -116,7 +154,7 @@ async def test_plan_retries_classified_stream_interruption(monkeypatch):
     )
 
     assert len(plan.steps) == 1
-    assert agent.chat_without_history.await_count == 3
+    assert client.chat.await_count == 3
     assert [call.args[0] for call in sleep.await_args_list] == [2.0, 4.0]
 
 
@@ -131,14 +169,13 @@ async def test_classified_stream_interruption_exhaustion_reports_the_retry_count
     monkeypatch.setattr(
         "backend.utils.llm_client_parts.retry.asyncio.sleep", AsyncMock()
     )
-    agent = _make_agent()
     classified = UpstreamExhaustedError(
         "Responses stream ended after the first event without a terminal response",
         agent_name="transport",
         model="transport-model",
         failure_kind="stream_interrupted",
     )
-    agent.chat_without_history = AsyncMock(side_effect=[classified] * 4)
+    agent, client = _client_backed_agent([classified] * 4)
 
     with pytest.raises(UpstreamExhaustedError) as exc_info:
         await agent.generate_analysis_plan(
@@ -148,7 +185,7 @@ async def test_classified_stream_interruption_exhaustion_reports_the_retry_count
             phase="exploration",
         )
 
-    assert agent.chat_without_history.await_count == 4
+    assert client.chat.await_count == 4
     assert "after 3 retries" in str(exc_info.value)
     assert exc_info.value.failure_kind == "stream_interrupted"
     assert exc_info.value.agent_name == "bioinformatics"

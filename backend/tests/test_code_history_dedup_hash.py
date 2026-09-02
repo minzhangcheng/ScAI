@@ -4,22 +4,35 @@ import subprocess
 import sys
 
 
-def _run_with_seed(seed: str) -> str:
+def _run_with_seeds(*seeds: str) -> list:
+    """Probe every seed in its own interpreter, all started together.
+
+    What matters is that two independent interpreters agree, not that they
+    run one after the other, so the second no longer waits on the first's
+    backend import.
+    """
     code = (
         "from backend.workflow.agents import _stable_code_hash; "
         "print(_stable_code_hash('import scanpy as sc\\nsc.pp.pca(adata)'))"
     )
-    env = {**os.environ, "PYTHONPATH": "/workspace/cmz/ScAI/scai", "PYTHONHASHSEED": seed}
-    proc = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True, text=True, env=env, check=True,
-    )
-    return proc.stdout.strip()
+    processes = []
+    for seed in seeds:
+        env = {**os.environ, "PYTHONHASHSEED": seed}
+        processes.append(subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        ))
+
+    outputs = []
+    for seed, proc in zip(seeds, processes):
+        stdout, stderr = proc.communicate(timeout=300)
+        assert proc.returncode == 0, f"PYTHONHASHSEED={seed}: {stderr}"
+        outputs.append(stdout.strip())
+    return outputs
 
 
 def test_stable_hash_helper_matches_across_processes():
-    out1 = _run_with_seed("1")
-    out2 = _run_with_seed("9999")
+    out1, out2 = _run_with_seeds("1", "9999")
     assert out1 == out2, f"Hash differs across PYTHONHASHSEED: {out1!r} vs {out2!r}"
     assert out1
 

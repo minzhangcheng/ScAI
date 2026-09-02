@@ -92,6 +92,9 @@ def compact_figure_event_payload(
     }
 
 
+from ..agents.vision_replay import replay_safe_vision_call
+
+
 class CallbacksMixin:
     """Mixin providing callback methods invoked by sub-agents.
 
@@ -409,8 +412,13 @@ IMPORTANT: Respond in English only. Do not use any other language."""
         """Shared helper: call an agent's vision API to review a figure and parse the result."""
         try:
             agent._set_llm_context()
-            response = await agent.llm_client.chat_with_vision(
-                model=agent.model,
+            # Shared by every agent's figure review; without a replay each
+            # of them records an unavailable verdict for a stream that was
+            # merely cut short.
+            response = await replay_safe_vision_call(
+                agent.llm_client,
+                agent_name=label,
+                model=getattr(agent, "model", ""),
                 text_prompt=prompt,
                 images=[image_b64],
                 temperature=temperature,

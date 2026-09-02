@@ -367,6 +367,8 @@ class LiteratureNodeMixin:
                     report_ids,
                     observed_context,
                 )
+            except UpstreamExhaustedError:
+                raise  # reaches @with_retry("literature_research")'s HITL gate
             except Exception as e:
                 logger.warning(f"[{self.session_id}] mechanism signal persistence skipped: {e}")
 
@@ -412,6 +414,8 @@ class LiteratureNodeMixin:
                 references=combined_refs,
                 observed_context=observed_context,
             )
+        except UpstreamExhaustedError:
+            raise  # let the node gate decide; see the DR coverage path below
         except Exception as e:
             logger.warning(f"[{self.session_id}] literature mechanism extraction failed: {e}")
             return

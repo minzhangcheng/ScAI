@@ -91,6 +91,9 @@ _SUPERVISOR_EVALUATION_TOOL = {
 
 
 
+from ..vision_replay import replay_safe_vision_call
+
+
 class EvaluationMixin:
     """Rule-based and LLM evaluation of bioinformatics steps, plus PI escalation."""
 
@@ -171,7 +174,11 @@ class EvaluationMixin:
                 )
 
                 self._set_llm_context()
-                response = await self.llm_client.chat_with_vision(
+                # Falling back to text-only throws away the figures this
+                # step exists to look at, so replay a cut-short stream first.
+                response = await replay_safe_vision_call(
+                    self.llm_client,
+                    agent_name="supervisor",
                     model=self.model,
                     text_prompt=text_with_fig_note,
                     images=compressed,

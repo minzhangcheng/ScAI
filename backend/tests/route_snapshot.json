@@ -123,6 +123,12 @@
   [
     "/api/config",
     [
+      "GET"
+    ]
+  ],
+  [
+    "/api/config",
+    [
       "POST"
     ]
   ],
@@ -199,25 +205,25 @@
     ]
   ],
   [
-    "/api/session/{session_id}/agent-settings",
+    "/api/session/{session_id}/agent-server-config",
     [
       "GET"
     ]
   ],
   [
-    "/api/session/{session_id}/agent-settings",
+    "/api/session/{session_id}/agent-server-config",
     [
       "POST"
     ]
   ],
   [
-    "/api/session/{session_id}/agent-server-config",
+    "/api/session/{session_id}/agent-settings",
     [
       "GET"
     ]
   ],
   [
-    "/api/session/{session_id}/agent-server-config",
+    "/api/session/{session_id}/agent-settings",
     [
       "POST"
     ]
@@ -323,48 +329,6 @@
     "/api/session/{session_id}/failed-node",
     [
       "GET"
-    ]
-  ],
-  [
-    "/api/session/{session_id}/runtime-persistence/retry",
-    [
-      "POST"
-    ]
-  ],
-  [
-    "/api/session/{session_id}/runtime-persistence/recompute",
-    [
-      "POST"
-    ]
-  ],
-  [
-    "/api/session/{session_id}/runtime-persistence/terminate",
-    [
-      "POST"
-    ]
-  ],
-  [
-    "/api/session/{session_id}/snapshot-failure/retry",
-    [
-      "POST"
-    ]
-  ],
-  [
-    "/api/session/{session_id}/snapshot-failure/proceed",
-    [
-      "POST"
-    ]
-  ],
-  [
-    "/api/session/{session_id}/snapshot-failure/skip",
-    [
-      "POST"
-    ]
-  ],
-  [
-    "/api/session/{session_id}/snapshot-failure/terminate",
-    [
-      "POST"
     ]
   ],
   [
@@ -500,6 +464,12 @@
     ]
   ],
   [
+    "/api/session/{session_id}/messages",
+    [
+      "GET"
+    ]
+  ],
+  [
     "/api/session/{session_id}/models",
     [
       "GET"
@@ -509,12 +479,6 @@
     "/api/session/{session_id}/models",
     [
       "POST"
-    ]
-  ],
-  [
-    "/api/session/{session_id}/messages",
-    [
-      "GET"
     ]
   ],
   [
@@ -680,7 +644,49 @@
     ]
   ],
   [
+    "/api/session/{session_id}/runtime-persistence/recompute",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/runtime-persistence/retry",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/runtime-persistence/terminate",
+    [
+      "POST"
+    ]
+  ],
+  [
     "/api/session/{session_id}/save",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/snapshot-failure/proceed",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/snapshot-failure/retry",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/snapshot-failure/skip",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/snapshot-failure/terminate",
     [
       "POST"
     ]
@@ -837,6 +843,24 @@
   ],
   [
     "/api/sessions",
+    [
+      "GET"
+    ]
+  ],
+  [
+    "/api/user/agent-default-secrets",
+    [
+      "GET"
+    ]
+  ],
+  [
+    "/api/user/agent-default-secrets",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/user/agent-default-settings",
     [
       "GET"
     ]

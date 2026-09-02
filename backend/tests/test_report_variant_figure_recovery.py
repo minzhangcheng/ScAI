@@ -221,8 +221,10 @@ def test_detailed_report_discloses_unverified_technical_evidence(monkeypatch, tm
     )
 
     assert "Technical Evidence Observations" in segment_html
-    assert "not verified" in segment_html
-    assert "2 unverified plan steps" in segment_html
+    assert "lack a current successful execution receipt" in segment_html
+    assert (
+        "Bioinformatics evidence reconciliation was unavailable." in segment_html
+    )
     assert "do not block this report" in segment_html
 
     state.detailed_report_segments = [DetailedReportSegment(

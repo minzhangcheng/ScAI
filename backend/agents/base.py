@@ -15,7 +15,11 @@ from ..models.schemas import (
     AgentType, AgentMessage, MessageRole, AnalysisState
 )
 from ..constants import NO_OUTPUT_TOKEN_CAP
-from ..utils.llm_client import OpenAICompatibleClient, LLMResponse
+from ..utils.llm_client import (
+    OpenAICompatibleClient,
+    LLMResponse,
+    retry_replay_safe_llm_call,
+)
 from ..utils.formatting import safe_parse_json as _safe_parse_json_impl
 from ..utils.settings_provider import AgentSettingsProvider
 
@@ -294,7 +298,28 @@ class BaseAgent(ABC):
             }
             if dispatch.max_tokens is not None:
                 kwargs["max_tokens"] = dispatch.max_tokens
-            response = await client.chat(**kwargs)
+            # Stream completion is observed outside the transport retry
+            # boundary, so a generation cut short after its first event arrives
+            # here as UpstreamExhaustedError(failure_kind="stream_interrupted").
+            # The workflow node wrapper catches that class before its generic
+            # handler and parks the run on the LLM-failure gate, so without a
+            # replay budget of its own every agent on this path escalates a
+            # transient upstream blip to a human. Replay the request instead,
+            # the way bioinformatics planning already does.
+            #
+            # Only the client call is replayed. `_apply_context_budget` above
+            # writes state (`record_observation` persists under the session
+            # lock), so it stays outside: one logical dispatch is budgeted once
+            # however many times its transport is re-issued.
+            async def dispatch_request():
+                return await client.chat(**kwargs)
+
+            response = await retry_replay_safe_llm_call(
+                dispatch_request,
+                agent_name=self._agent_label(),
+                model_name=str(self.model or ""),
+                llm_server=str(getattr(client, "base_url", "") or ""),
+            )
             await self._acknowledge_context_budget(dispatch)
 
             # Handle empty response - return empty string instead of None
@@ -311,7 +336,7 @@ class BaseAgent(ABC):
         finally:
             self._provider.release_client(client)
 
-    async def chat_without_history(self, message: str, temperature: Optional[float] = None, system_prompt: Optional[str] = None, timeout: Optional[float] = None, max_retries: Optional[int] = None) -> str:
+    async def chat_without_history(self, message: str, temperature: Optional[float] = None, system_prompt: Optional[str] = None, timeout: Optional[float] = None, max_retries: Optional[int] = None, on_retry=None) -> str:
         """Send a message and get a response without using or modifying message history.
 
         Useful for isolated Q&A interactions that should not be influenced by
@@ -323,6 +348,9 @@ class BaseAgent(ABC):
             system_prompt: Override system prompt (uses default if None)
             timeout: Per-request timeout in seconds (uses client default if None)
             max_retries: Override retry count (uses client default if None)
+            on_retry: Awaited as ``(attempt, max_retries, delay, error)`` before
+                each replay, so a caller can surface the wait it is about to
+                spend without owning a second retry budget.
         """
         self.refresh_runtime_config_if_needed()
         client = self.llm_client
@@ -352,7 +380,26 @@ class BaseAgent(ABC):
             if dispatch.max_tokens is not None:
                 kwargs["max_tokens"] = dispatch.max_tokens
 
-            response = await client.chat(**kwargs)
+            # One budget for all of this method's call sites, for the same
+            # reason chat() carries its own: a generation cut short after its
+            # first event lands here as
+            # UpstreamExhaustedError(failure_kind="stream_interrupted"), and
+            # without a replay the workflow gate escalates a transient blip to
+            # a human. Callers must NOT wrap this method in a second
+            # retry_replay_safe_llm_call -- nested budgets multiply.
+            #
+            # Only the client call is replayed; _apply_context_budget above
+            # writes state and stays outside.
+            async def dispatch_request():
+                return await client.chat(**kwargs)
+
+            response = await retry_replay_safe_llm_call(
+                dispatch_request,
+                agent_name=self._agent_label(),
+                model_name=str(self.model or ""),
+                llm_server=str(getattr(client, "base_url", "") or ""),
+                on_retry=on_retry,
+            )
             await self._acknowledge_context_budget(dispatch)
 
             content = response.content if response and response.content else ""

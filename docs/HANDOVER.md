@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.51.10 · **Last updated**: 2026-09-02
+**Version**: 0.51.11 · **Last updated**: 2026-09-02
 
 ## 1. Runtime Architecture
 
@@ -332,11 +332,58 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 
 `scai_client` provides a `Client` and job-oriented batch API for submitting analysis configurations, waiting for completion, and downloading exports. Its package version follows the ScAI application release. See the [Python client README](../clients/python/README.md) for the authoritative API and examples.
 
+**`analysis.round_wait_seconds` also governs unattended recovery.** Every HITL
+gate reads this one setting, including the LLM-failure gate that a recoverable
+upstream failure parks on — not just the between-round checkpoints its name
+suggests. `0` returns immediately and the gate auto-retries (up to three times,
+then skips the node); a positive value waits that many seconds plus a 60-second
+delivery buffer before doing the same; `-1` means manual and blocks
+**indefinitely** waiting for a human. An unattended run configured with `-1`
+therefore stops for good on the first transient LLM failure, and the failure
+rate is not negligible — a stream that ends without a terminal response was
+observed roughly 0.3% of calls. Submit `0` for headless work. The client
+README's example configuration shows `-1`, which suits an attended session and
+is the wrong value to copy for a batch run; the `new_session*.json` files in use
+all set `0`. `DEFAULT_ROUND_WAIT_SECONDS` is 300, so omitting the field costs
+six minutes per occurrence rather than blocking.
+
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.51.x — (2026-08-31 onward)**
+
+- `0.51.11` — Gives a cut-short LLM stream a cheap replay before it becomes a
+  human's problem, and stops four failure paths from degrading in silence. A
+  generation interrupted after its first event is observed outside the transport
+  retry boundary, so it reached callers as an already-exhausted upstream and
+  parked the run on the LLM-failure gate; measured against one day of gateway
+  logs it happens on roughly 0.3% of calls, and the relay records the lost
+  attempt as a normal completion and bills it. `retry_replay_safe_llm_call`
+  existed for exactly this and had two call sites. It now lives inside
+  `BaseAgent.chat` and `chat_without_history`, which covers all 78 of their call
+  sites at once rather than one wrapper per caller; `chat_without_history` gained
+  an `on_retry` passthrough so the bioinformatics planner keeps its user-facing
+  retry notice while surrendering its own budget, which would otherwise have
+  nested into 4x4 paid attempts. Vision calls get the same budget at eight sites
+  through `agents/vision_replay.py`; pathology already routes through its own
+  HITL callback, figure revision already had a budget, and biochemistry already
+  retries twice and re-raises, so those are left alone. A deterministic payload
+  or capability rejection is not replay-safe and still passes straight through.
+
+  Separately, four `except Exception` handlers that swallowed an exhausted
+  upstream now re-raise it. Literature mechanism-signal extraction swallowed at
+  three layers, so a dead upstream finished the round "successfully" with the
+  signals missing from the cross-modal audit and nothing but a log line to show
+  for it — while the same file already guarded the DR coverage call one function
+  away. PI's `plan_agent_tasks` returned the unrefined list after its caller had
+  already announced that refinement was under way, and `plan_deep_research_tasks`
+  returned a value byte-identical to the caller's own "do not decompose" default,
+  erasing the difference between a decision and a failure. Handlers that degrade
+  for a documented reason are deliberately untouched: data profiling states that
+  it must never end a session, species inference surfaces the error inside the
+  species-input gate, and the annotation chain emits typed `failed` metadata at
+  every layer.
 
 - `0.51.10` — Stops one analysis cell from disarming the kernel's write
   boundary. The I/O guard installed at kernel start resolved every write target

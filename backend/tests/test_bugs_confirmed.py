@@ -11,6 +11,26 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 
+@pytest.fixture(autouse=True)
+def _no_node_retry_backoff(monkeypatch):
+    """Drop the @with_retry backoff to zero for this module.
+
+    These tests drive `_pi_planning` with a stub `pi_agent`, so the node
+    raises as soon as `build_pi_instructions` awaits the stub, and
+    `@with_retry` spends its four attempts on the same deterministic
+    TypeError. What they assert -- the plan reset, `plan_approved`, and the
+    `plan_revision_resume` default -- is written into `state` well before
+    that point and survives in the wrapper's `{**state}` return. The attempt
+    count and every assertion are unchanged; only the ~15s of exponential
+    sleep between four identical attempts goes away.
+    """
+    from backend.workflow import retry as workflow_retry
+
+    monkeypatch.setattr(
+        workflow_retry, "_retry_backoff_delay", lambda attempt: 0.0
+    )
+
+
 class TestApprovedPlanPreservedOnResume:
     """Bug fix: when a plan is already approved (from no-workflow fallback resume),
     _pi_planning must preserve the approval instead of resetting current_plan to None.

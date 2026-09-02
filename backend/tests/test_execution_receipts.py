@@ -49,7 +49,7 @@ def test_planned_and_repair_execution_without_steps_stays_unverified():
         )
         assert step_ids == []
         assert status == "unverified"
-        assert "Supervisor reconciliation" in warning
+        assert "no valid current-plan step nomination" in warning
 
 
 def test_supplementary_execution_is_explicitly_non_plan_evidence():

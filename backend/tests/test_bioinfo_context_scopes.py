@@ -99,6 +99,11 @@ def _bare_agent(monkeypatch, tmp_path) -> BioinformaticsAgent:
 @pytest.mark.asyncio
 async def test_plan_generation_does_not_use_or_modify_default_history():
     agent = BioinformaticsAgent.__new__(BioinformaticsAgent)
+    # Mirrors _agent() above: __init__ is bypassed, and _call_planning_llm
+    # labels its retry wrapper from llm_client/model, both of which resolve
+    # through BaseAgent._provider.
+    agent._provider = MagicMock()
+    agent.agent_type = AgentType.BIOINFORMATICS
     agent.message_history = [
         {"role": "user", "content": "legacy" * 100_000},
         {"role": "assistant", "content": "legacy response"},

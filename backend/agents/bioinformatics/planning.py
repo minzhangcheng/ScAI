@@ -50,7 +50,6 @@ from ...utils.direction_payload import (
     build_direction_context_block,
     resolve_direction_context,
 )
-from ...utils.llm_client import retry_replay_safe_llm_call
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -200,11 +199,12 @@ class PlanningMixin:
     """Analysis-plan generation, incremental revision, and checkpoint discovery."""
 
     async def _call_planning_llm(self, prompt: str, *, temperature: float) -> str:
-        """Run one no-history planning call with bounded outcome retries."""
-        client = self.llm_client
+        """Run one no-history planning call with bounded outcome retries.
 
-        async def call():
-            return await self.chat_without_history(prompt, temperature=temperature)
+        The budget lives in ``chat_without_history`` so every call site shares
+        one. Wrapping again here would nest two, and a persistently broken
+        upstream would then be paid for 4x4 = 16 times.
+        """
 
         async def notify_retry(attempt, max_retries, delay, error):
             await self._notify(
@@ -213,12 +213,8 @@ class PlanningMixin:
                 f"({attempt}/{max_retries}) in {delay:.0f}s.",
             )
 
-        return await retry_replay_safe_llm_call(
-            call,
-            agent_name="bioinformatics",
-            model_name=str(self.model or ""),
-            llm_server=str(getattr(client, "base_url", "") or ""),
-            on_retry=notify_retry,
+        return await self.chat_without_history(
+            prompt, temperature=temperature, on_retry=notify_retry,
         )
 
     def _method_decision_guidance_block(self, *query_parts: Any) -> str:

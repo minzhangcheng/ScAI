@@ -17,43 +17,64 @@ import pytest
 PROJECT_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        (None, "False"),
-        ("", "False"),
-        ("0", "False"),
-        ("false", "False"),
-        ("1", "True"),
-        ("true", "True"),
-        ("TRUE", "True"),
-        ("yes", "True"),
-    ],
-)
-def test_snapshot_v2_environment_gate(value, expected):
-    env = {**os.environ, "SCAI_DATA_DIR": "/tmp/scai_snapshot_gate_test"}
-    if value is None:
-        env.pop("SCAI_ENABLE_SNAPSHOT_V2", None)
-    else:
-        env["SCAI_ENABLE_SNAPSHOT_V2"] = value
+_GATE_CASES = [
+    (None, "False"),
+    ("", "False"),
+    ("0", "False"),
+    ("false", "False"),
+    ("1", "True"),
+    ("true", "True"),
+    ("TRUE", "True"),
+    ("yes", "True"),
+]
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "from backend.config._config import "
-                "is_snapshot_v2_enabled; print(is_snapshot_v2_enabled())"
-            ),
-        ],
-        cwd=PROJECT_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
 
-    assert result.stdout.strip() == expected
+@pytest.fixture(scope="module")
+def snapshot_v2_gate_probes():
+    """Read the gate once per value, each in its own fresh interpreter.
+
+    A pristine process is the point of this test: an in-process loop could
+    not distinguish an import-time read of SCAI_ENABLE_SNAPSHOT_V2 from a
+    call-time one. Every value still gets its own interpreter with its own
+    environment -- they are merely started together instead of one after
+    another, which turns eight serial backend imports into one wall clock.
+    """
+    processes = {}
+    for value, _ in _GATE_CASES:
+        env = {**os.environ, "SCAI_DATA_DIR": "/tmp/scai_snapshot_gate_test"}
+        if value is None:
+            env.pop("SCAI_ENABLE_SNAPSHOT_V2", None)
+        else:
+            env["SCAI_ENABLE_SNAPSHOT_V2"] = value
+        processes[value] = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from backend.config._config import "
+                    "is_snapshot_v2_enabled; print(is_snapshot_v2_enabled())"
+                ),
+            ],
+            cwd=PROJECT_ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    probes = {}
+    for value, process in processes.items():
+        stdout, stderr = process.communicate(timeout=300)
+        probes[value] = (process.returncode, stdout, stderr)
+    return probes
+
+
+@pytest.mark.parametrize(("value", "expected"), _GATE_CASES)
+def test_snapshot_v2_environment_gate(value, expected, snapshot_v2_gate_probes):
+    returncode, stdout, stderr = snapshot_v2_gate_probes[value]
+
+    assert returncode == 0, stderr
+    assert stdout.strip() == expected
 
 
 def test_snapshot_v2_system_config_accepts_explicit_disabled():

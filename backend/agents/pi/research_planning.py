@@ -14,6 +14,7 @@ from ...models.schemas import AnalysisState, RoundResult, DATA_TYPE_SCRNASEQ
 from ...constants import PI_REVIEW_FALLBACK_DECISION
 from ...services.sample_design import sequencing_design_instruction
 from ...utils.formatting import as_list, coerce_json_text, render_plan_steps
+from ...utils.llm_client import UpstreamExhaustedError
 
 from .shared import (  # noqa: F401
     _CONTROL_SIGNAL_RESULTS,
@@ -585,6 +586,12 @@ Keep tasks actionable and specific. Do NOT remove core tasks unless truly unnece
                     f"{len(refined)} tasks for {agent_name}"
                 )
                 return refined
+        except UpstreamExhaustedError:
+            # Returning the unrefined list here is indistinguishable from PI
+            # deciding not to refine, and the caller has already told the user
+            # that refinement is under way. Let the node's LLM-failure gate
+            # offer retry/skip instead.
+            raise
         except Exception as e:
             logger.warning(f"[PI] Dynamic planning failed for {agent_name}: {e}")
 
@@ -667,6 +674,11 @@ topics."""
                 f"{len(tasks)} task(s)"
             )
             return {"decompose": decompose, "tasks": tasks}
+        except UpstreamExhaustedError:
+            # This degraded value is byte-identical to the caller's own "do not
+            # decompose" default, so swallowing here erases the difference
+            # between a considered decision and a dead upstream.
+            raise
         except Exception as e:
             logger.warning(f"[PI] plan_deep_research_tasks failed: {e}")
             return {"decompose": False, "tasks": list(topics)}

@@ -118,6 +118,10 @@ _EXCLUDED_FIELDS = {
     # Persistent server-side incarnation used to reject stale writes/deletes;
     # clients use state_version and never submit a lifecycle generation.
     "lifecycle_generation",
+    # Host-side provenance: the ScAI release that produced this session. It is
+    # recorded for export/import and support, and no client reads it. Move it
+    # to _API_KEY_MAP instead if a client ever needs to display it.
+    "scai_version",
 }
 
 _COMPUTED_FIELDS = {

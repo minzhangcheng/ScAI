@@ -47,6 +47,10 @@ def _frozen_figure_artifact_root(tmp_path_factory):
 
 _REVIEW_JSON = json.dumps({
     "gaps": ["The approved pathway-activity step produced no result."],
+    # Plan completion is PI-owned since 0.49.8: the host audit observes and
+    # never writes PlanStep.status, so the reviewed step verdict has to come
+    # from the PI response itself.
+    "step_decisions": [{"plan_step_id": 1, "status": "completed"}],
     "supplementary_tasks": ["Run decoupler run_ulm on the existing object and report the top regulons."],
     "out_of_scope": ["Measure protein abundance — needs new laboratory work."],
     "verdict": "supplement",

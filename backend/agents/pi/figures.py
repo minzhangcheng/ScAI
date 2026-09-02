@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 from ...models.schemas import AnalysisState, PublicationFigure
 from ...constants import NO_OUTPUT_TOKEN_CAP
 from ...utils.llm_client import is_vision_capability_mismatch
+from ..vision_replay import replay_safe_vision_call
 from .figure_adoption_prompt import build_figure_adoption_prompt
 
 from .figure_text import build_ga_revision_history_text, describe_candidate
@@ -224,8 +225,8 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
         if self.has_vision:
             try:
                 self._set_llm_context()
-                response = await self.llm_client.chat_with_vision(
-                    model=self.model,
+                response = await replay_safe_vision_call(
+                    self.llm_client, agent_name="pi", model=self.model,
                     text_prompt=prompt,
                     images=[image_base64],
                     temperature=0.3,
@@ -361,8 +362,8 @@ Objective: {state.initial_instruction[:500] if state.initial_instruction else 'B
 
         try:
             self._set_llm_context()
-            response = await self.llm_client.chat_with_vision(
-                model=self.model,
+            response = await replay_safe_vision_call(
+                self.llm_client, agent_name="pi", model=self.model,
                 text_prompt=prompt,
                 images=[image_base64],
                 temperature=0.3,
@@ -470,8 +471,8 @@ Consider:
 
         try:
             self._set_llm_context()
-            response = await self.llm_client.chat_with_vision(
-                model=self.model,
+            response = await replay_safe_vision_call(
+                self.llm_client, agent_name="pi", model=self.model,
                 text_prompt=prompt,
                 images=candidates,
                 temperature=0.2,
@@ -858,8 +859,8 @@ an earlier version may win.
 
         try:
             self._set_llm_context()
-            response = await self.llm_client.chat_with_vision(
-                model=self.model,
+            response = await replay_safe_vision_call(
+                self.llm_client, agent_name="pi", model=self.model,
                 text_prompt=prompt,
                 images=images,
                 temperature=0.1,
