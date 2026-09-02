@@ -85,6 +85,77 @@ async def test_plan_stream_interruption_exhaustion_enters_llm_failure_path(
 
 
 @pytest.mark.asyncio
+async def test_plan_retries_classified_stream_interruption(monkeypatch):
+    """The client classifies stream interruption before the caller sees it, so
+    the replay-safe retry must recognise the classified shape too. Without
+    this the 0.51.7 planning retry silently stops firing."""
+    sleep = AsyncMock()
+    monkeypatch.setattr(
+        "backend.utils.llm_client_parts.retry.asyncio.sleep", sleep
+    )
+    agent = _make_agent()
+    valid = (
+        '{"overview":"ok","steps":[{"id":1,"title":"QC",'
+        '"method":"scanpy.pp.filter_cells","depends_on":[]}]}'
+    )
+    classified = UpstreamExhaustedError(
+        "LLM stream ended after the first event",
+        agent_name="bioinformatics",
+        model="test-model",
+        failure_kind="stream_interrupted",
+    )
+    agent.chat_without_history = AsyncMock(
+        side_effect=[classified, classified, valid]
+    )
+
+    plan = await agent.generate_analysis_plan(
+        state=_make_state(),
+        pi_tasks=["QC"],
+        overview="overview",
+        phase="exploration",
+    )
+
+    assert len(plan.steps) == 1
+    assert agent.chat_without_history.await_count == 3
+    assert [call.args[0] for call in sleep.await_args_list] == [2.0, 4.0]
+
+
+@pytest.mark.asyncio
+async def test_classified_stream_interruption_exhaustion_reports_the_retry_count(
+    monkeypatch,
+):
+    """The client now classifies the interruption before the caller sees it.
+    Exhaustion must still say how many attempts were spent — otherwise the HITL
+    gate reads like a single-shot failure, the misreading this work exists to
+    fix — and must carry the caller's agent and model, not the client's."""
+    monkeypatch.setattr(
+        "backend.utils.llm_client_parts.retry.asyncio.sleep", AsyncMock()
+    )
+    agent = _make_agent()
+    classified = UpstreamExhaustedError(
+        "Responses stream ended after the first event without a terminal response",
+        agent_name="transport",
+        model="transport-model",
+        failure_kind="stream_interrupted",
+    )
+    agent.chat_without_history = AsyncMock(side_effect=[classified] * 4)
+
+    with pytest.raises(UpstreamExhaustedError) as exc_info:
+        await agent.generate_analysis_plan(
+            state=_make_state(),
+            pi_tasks=["QC"],
+            overview="overview",
+            phase="exploration",
+        )
+
+    assert agent.chat_without_history.await_count == 4
+    assert "after 3 retries" in str(exc_info.value)
+    assert exc_info.value.failure_kind == "stream_interrupted"
+    assert exc_info.value.agent_name == "bioinformatics"
+    assert exc_info.value.model == "test-model"
+
+
+@pytest.mark.asyncio
 async def test_plan_non_target_llm_failure_is_not_retried():
     agent = _make_agent()
     failure = UpstreamExhaustedError(

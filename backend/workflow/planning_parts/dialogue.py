@@ -89,6 +89,9 @@ async def run_planning_dialogue_rounds(self, ctx, state):
         previous_plan = existing_plan.model_copy(deep=True) if existing_plan else None
 
         # --- Bioinformatics agent call (with LLM failure intervention) ---
+        from ..helpers import reset_unattended_gate_budget
+
+        reset_unattended_gate_budget(self, "planning_dialogue")
         while True:
             try:
                 if round_num == 1 and not existing_plan:
@@ -217,6 +220,9 @@ async def run_planning_dialogue_rounds(self, ctx, state):
                 return state
 
         # --- PI review call (with LLM failure intervention) ---
+        from ..helpers import reset_unattended_gate_budget
+
+        reset_unattended_gate_budget(self, "planning_dialogue")
         pi_review_attempt = 0
         while True:
             try:

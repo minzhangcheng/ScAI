@@ -158,6 +158,21 @@ async def wait_with_skip_time(
             deadline += frozen_for
 
 
+def reset_unattended_gate_budget(workflow, node_name: str) -> None:
+    """Start a fresh unattended-gate episode for ``node_name``.
+
+    The budget counts *consecutive* unanswered gate firings. It is cleared when
+    a gate resolves to anything but a retry, but not when the retry succeeds —
+    the gate never learns about that. Entering a node, or the retry loop that
+    owns a gate, is the caller's statement that whatever failed before is
+    settled, so the next failure deserves a full budget. Without this, a run
+    that recovers from three separate blips has nothing left for the fourth.
+    """
+    budget = getattr(workflow, "_unattended_gate_retries", None)
+    if isinstance(budget, dict):
+        budget.pop(node_name, None)
+
+
 def _retry_backoff_delay(attempt: int) -> float:
     """Compute exponential backoff delay with jitter (shared by @with_retry and inline retries)."""
     return min(2 ** attempt + random.uniform(0, 1), 30)

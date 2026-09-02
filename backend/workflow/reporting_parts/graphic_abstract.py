@@ -17,6 +17,7 @@ from ...models.schemas import (
 )
 from ...utils.llm_client import UpstreamExhaustedError
 from ...constants import LlmFailureAction
+from ..helpers import reset_unattended_gate_budget
 from ...config import get_session_reports, get_session_workspace
 from ...services.report import DetailedReportGenerator, compress_image_to_base64
 from ...services.report.figure_discovery import (
@@ -392,6 +393,7 @@ class GraphicAbstractMixin:
         # Text mode — with LLM failure intervention
         # (UpstreamExhaustedError propagates from _generate_text_graphic_abstract
         #  thanks to the except UpstreamExhaustedError: raise added above)
+        reset_unattended_gate_budget(self, "generate_graphic_abstract")
         while True:
             try:
                 return await self._generate_text_graphic_abstract(state)

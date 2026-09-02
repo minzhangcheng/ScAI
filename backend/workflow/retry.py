@@ -9,6 +9,7 @@ from ..models.schemas import AgentType
 from ..utils.llm_client import UpstreamExhaustedError
 from ..services.snapshot_v2.errors import RequiredSnapshotBlocked
 from .helpers import (
+    reset_unattended_gate_budget,
     _retry_backoff_delay,
     ack_restore_safe_point,
     WorkflowSupersededError,
@@ -33,6 +34,8 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
     def decorator(func):
         @wraps(func)
         async def wrapper(self, state: 'WorkflowState') -> 'WorkflowState':
+            reset_unattended_gate_budget(self, node_name)
+
             # Cooperative pause gate: if the workflow was paused, block here
             # before doing any work for this node. signal_resume() releases it.
             pause_event = getattr(self, '_pause_event', None)

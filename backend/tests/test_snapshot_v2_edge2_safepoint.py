@@ -170,6 +170,7 @@ async def test_shared_hitl_scaffold_hands_the_safe_point_to_a_pending_restore(
     workflow._llm_failure_lock = asyncio.Lock()
     workflow._llm_failure_events = {}
     workflow._llm_failure_generations = {}
+    workflow._unattended_gate_retries = {}
     workflow._llm_failure_actions = {}
     workflow._settings_provider = None
     workflow._set_status = lambda state, status: setattr(state, "status", status)

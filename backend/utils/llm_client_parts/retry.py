@@ -91,12 +91,20 @@ EMPTY_RESPONSE_MAX_RETRIES = 3
 REPLAY_SAFE_OUTCOME_MAX_RETRIES = 3
 
 
+_REPLAY_SAFE_FAILURE_KINDS = frozenset(
+    {"incomplete_response", "stream_interrupted"}
+)
+
+
 def _is_replay_safe_outcome_error(error: Exception) -> bool:
+    # The raw type is kept as defence in depth: adapters raise it before the
+    # client classifies it at its dispatch exit.  No in-tree caller sees the raw
+    # shape today, so do not read this branch as evidence of a live producer.
     return (
         isinstance(error, StreamInterruptedError)
         or (
             isinstance(error, UpstreamExhaustedError)
-            and error.failure_kind == "incomplete_response"
+            and error.failure_kind in _REPLAY_SAFE_FAILURE_KINDS
         )
     )
 
@@ -130,7 +138,14 @@ async def retry_replay_safe_llm_call(
             if not _is_replay_safe_outcome_error(error):
                 raise
             if attempt >= retry_budget:
-                if isinstance(error, StreamInterruptedError):
+                # The client classifies stream interruption before the caller
+                # sees it, so match the classified shape too — otherwise the
+                # bare re-raise drops the attempt count and the gate reads like
+                # a single-shot failure.
+                if (
+                    isinstance(error, StreamInterruptedError)
+                    or getattr(error, "failure_kind", None) == "stream_interrupted"
+                ):
                     raise UpstreamExhaustedError(
                         f"LLM stream remained incomplete after {attempt} retries: {error}",
                         agent_name=agent_name,

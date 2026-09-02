@@ -164,13 +164,19 @@ async def test_plain_chat_midstream_eof_is_not_replayed_nonstreaming():
     client = _client("https://x/v1/chat/completions")
     client.client.chat.completions.create = AsyncMock(return_value=chunks())
 
-    with pytest.raises(llm_mod.StreamInterruptedError, match="finish_reason"):
+    with pytest.raises(
+        llm_mod.UpstreamExhaustedError, match="finish_reason"
+    ) as exc_info:
         await client.chat(
             model="chat-model",
             messages=[{"role": "user", "content": "hi"}],
             prefer_stream=True,
         )
 
+    # The classified failure keeps the original error reachable and its
+    # message intact, so the wire shape that truncated stays diagnosable.
+    assert exc_info.value.failure_kind == "stream_interrupted"
+    assert isinstance(exc_info.value.__cause__, llm_mod.StreamInterruptedError)
     client.client.chat.completions.create.assert_awaited_once()
     assert client.client.chat.completions.create.call_args.kwargs["stream"] is True
 
@@ -601,6 +607,80 @@ async def test_responses_stream_remainder_is_consumed_after_retry_boundary(monke
 
 
 @pytest.mark.asyncio
+async def test_responses_stream_interruption_is_classified_as_upstream_exhausted():
+    """A stream that dies after its first event must leave the client as the
+    HITL-gated failure type. Workflow nodes gate on UpstreamExhaustedError; a
+    bare RuntimeError reaches their generic handler and kills the run."""
+
+    class TruncatedStream:
+        def __init__(self):
+            self.index = 0
+            self.close = AsyncMock()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            self.index += 1
+            if self.index == 1:
+                return SimpleNamespace(
+                    type="response.output_text.delta", delta="partial"
+                )
+            raise StopAsyncIteration
+
+    stream = TruncatedStream()
+    client = _client("https://x/v1")
+    client.client.responses.create = AsyncMock(return_value=stream)
+    client.client.chat.completions.create = AsyncMock()
+
+    with pytest.raises(llm_mod.UpstreamExhaustedError) as exc_info:
+        await client.chat(
+            model="gpt-x",
+            messages=[{"role": "user", "content": "hi"}],
+            prefer_stream=True,
+        )
+
+    assert exc_info.value.failure_kind == "stream_interrupted"
+    assert exc_info.value.agent_name == "t"
+    assert exc_info.value.model == "gpt-x"
+    assert exc_info.value.llm_server == "https://x/v1"
+    # The original error stays reachable: it names which wire shape truncated.
+    assert isinstance(exc_info.value.__cause__, llm_mod.StreamInterruptedError)
+    # Classification must not weaken the replay invariant: a partially emitted
+    # generation is never re-issued on another protocol.
+    client.client.chat.completions.create.assert_not_awaited()
+    stream.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_interruption_is_classified_as_upstream_exhausted():
+    """Classification is a property of the client, not of one wire protocol."""
+
+    async def chunks():
+        yield SimpleNamespace(
+            model="chat-model",
+            usage=None,
+            choices=[SimpleNamespace(
+                delta=SimpleNamespace(content="partial"), finish_reason=None
+            )],
+        )
+
+    client = _client("https://x/v1/chat/completions")
+    client.client.chat.completions.create = AsyncMock(return_value=chunks())
+
+    with pytest.raises(llm_mod.UpstreamExhaustedError) as exc_info:
+        await client.chat(
+            model="chat-model",
+            messages=[{"role": "user", "content": "hi"}],
+            prefer_stream=True,
+        )
+
+    assert exc_info.value.failure_kind == "stream_interrupted"
+    assert isinstance(exc_info.value.__cause__, llm_mod.StreamInterruptedError)
+    client.client.chat.completions.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_responses_midstream_failure_is_closed_and_not_replayed():
     error = InternalServerError(
         message="connection lost",
@@ -629,13 +709,19 @@ async def test_responses_midstream_failure_is_closed_and_not_replayed():
     client.client.responses.create = AsyncMock(return_value=stream)
     client.client.chat.completions.create = AsyncMock()
 
-    with pytest.raises(llm_mod.StreamInterruptedError, match="after the first event"):
+    with pytest.raises(
+        llm_mod.UpstreamExhaustedError, match="after the first event"
+    ) as exc_info:
         await client.chat(
             model="gpt-x",
             messages=[{"role": "user", "content": "hi"}],
             prefer_stream=True,
         )
 
+    # The classified failure keeps the original error reachable and its
+    # message intact, so the wire shape that truncated stays diagnosable.
+    assert exc_info.value.failure_kind == "stream_interrupted"
+    assert isinstance(exc_info.value.__cause__, llm_mod.StreamInterruptedError)
     client.client.responses.create.assert_awaited_once()
     client.client.chat.completions.create.assert_not_awaited()
     stream.close.assert_awaited_once()
@@ -663,7 +749,9 @@ async def test_responses_stream_idle_timeout_closes_without_replay():
     client = _client("https://x/v1/responses")
     client.client.responses.create = AsyncMock(return_value=stream)
 
-    with pytest.raises(llm_mod.StreamInterruptedError, match="TimeoutError"):
+    with pytest.raises(
+        llm_mod.UpstreamExhaustedError, match="TimeoutError"
+    ) as exc_info:
         await client.chat(
             model="gpt-x",
             messages=[{"role": "user", "content": "hi"}],
@@ -671,6 +759,10 @@ async def test_responses_stream_idle_timeout_closes_without_replay():
             prefer_stream=True,
         )
 
+    # The classified failure keeps the original error reachable and its
+    # message intact, so the wire shape that truncated stays diagnosable.
+    assert exc_info.value.failure_kind == "stream_interrupted"
+    assert isinstance(exc_info.value.__cause__, llm_mod.StreamInterruptedError)
     client.client.responses.create.assert_awaited_once()
     stream.close.assert_awaited_once()
 

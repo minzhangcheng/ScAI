@@ -80,6 +80,99 @@ async def test_typed_plan_generation_failure_terminates_without_review_loop():
     assert analysis_state.status == TaskStatus.FAILED
 
 
+@pytest.mark.asyncio
+async def test_planning_dialogue_entry_resets_the_unattended_retry_budget():
+    """planning_dialogue is not a @with_retry node, so nothing else clears its
+    budget. Without a reset an auto-retry that SUCCEEDS leaves the slot spent,
+    and a later transient gets no retries at all — aborting the run the budget
+    exists to protect."""
+    failure_type = getattr(bioinformatics_planning, "PlanGenerationFailure", None)
+    assert failure_type is not None
+
+    wf = _make_workflow()
+    wf._unattended_gate_retries = {"planning_dialogue": 3}
+    analysis_state = AnalysisState(user_id="test")
+    analysis_state.current_plan = None
+    analysis_state.analysis_phase = MagicMock()
+    analysis_state.analysis_phase.value = "exploration"
+    wf.bioinformatics_agent = MagicMock()
+    wf.bioinformatics_agent.generate_analysis_plan = AsyncMock(
+        side_effect=failure_type("no executable steps", phase="exploration", stage="full")
+    )
+    wf.pi_agent = MagicMock()
+    wf.pi_agent.review_bioinfo_plan = AsyncMock()
+
+    await wf._planning_dialogue(_make_state(analysis_state=analysis_state))
+
+    assert "planning_dialogue" not in wf._unattended_gate_retries
+
+
+@pytest.mark.asyncio
+async def test_client_stream_interruption_reaches_the_llm_failure_gate():
+    """Composition test: the failure is produced by the real client, not a mock.
+
+    An interrupted stream must reach _wait_for_llm_intervention. If it arrives
+    as a bare RuntimeError it lands in the generic handler instead, which ends
+    the workflow with no way for the user to retry.
+    """
+    from types import SimpleNamespace
+    from backend.utils.llm_client import OpenAICompatibleClient
+
+    class TruncatedStream:
+        def __init__(self):
+            self.index = 0
+            self.close = AsyncMock()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            self.index += 1
+            if self.index == 1:
+                return SimpleNamespace(
+                    type="response.output_text.delta", delta="partial"
+                )
+            raise StopAsyncIteration
+
+    client = OpenAICompatibleClient(
+        api_key="k", base_url="https://gate.example/v1", agent_name="bioinformatics"
+    )
+    client.client.responses.create = AsyncMock(return_value=TruncatedStream())
+
+    async def generate_via_real_client(*args, **kwargs):
+        return await client.chat(
+            model="gpt-x",
+            messages=[{"role": "user", "content": "plan"}],
+            prefer_stream=True,
+        )
+
+    wf = _make_workflow()
+    wf._wait_for_llm_intervention = AsyncMock(return_value=LlmFailureAction.SKIP)
+    analysis_state = AnalysisState(user_id="test")
+    analysis_state.current_plan = None
+    analysis_state.analysis_phase = MagicMock()
+    analysis_state.analysis_phase.value = "exploration"
+    wf.bioinformatics_agent = MagicMock()
+    wf.bioinformatics_agent.generate_analysis_plan = AsyncMock(
+        side_effect=generate_via_real_client
+    )
+    wf.pi_agent = MagicMock()
+    wf.pi_agent.review_bioinfo_plan = AsyncMock()
+
+    try:
+        result = await wf._planning_dialogue(
+            _make_state(analysis_state=analysis_state)
+        )
+    finally:
+        await client.close()
+
+    wf._wait_for_llm_intervention.assert_awaited_once()
+    wf.pi_agent.review_bioinfo_plan.assert_not_awaited()
+    assert result["planning_result"]["status"] == "failed"
+    # The upstream diagnosis survives classification and reaches the user.
+    assert "after the first event" in result["planning_result"]["error"]
+
+
 class TestPlanningDialogueBioinfoFailure:
     """Test bioinformatics agent UpstreamExhaustedError handling in _planning_dialogue."""
 

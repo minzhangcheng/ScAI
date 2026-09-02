@@ -564,9 +564,27 @@ class ClientDispatchMixin:
             if modality == TEXT_MODALITY
             else _route_protocol_order(self.base_url, model, modality)
         )
-        if len(order) == 1:
-            return await self._call_decided_protocol(order[0], call_for, model, modality)
-        return await self._probe_in_order(order, call_for, model, modality)
+        try:
+            if len(order) == 1:
+                return await self._call_decided_protocol(order[0], call_for, model, modality)
+            return await self._probe_in_order(order, call_for, model, modality)
+        except StreamInterruptedError as error:
+            # Stream completion is observed outside the transport retry
+            # boundary, so an interrupted generation reaches callers as a bare
+            # RuntimeError and lands in their generic handler — which, in the
+            # planning dialogue, ends the workflow. Classify it here, at the
+            # one exit every protocol shares, so it reaches the same
+            # UpstreamExhaustedError gate as any other exhausted upstream.
+            # This renames the failure only: nothing is re-issued, so the
+            # invariant that a partially emitted generation is never replayed
+            # (see _probe_in_order) still holds.
+            raise UpstreamExhaustedError(
+                str(error),
+                agent_name=self.agent_name,
+                model=model,
+                llm_server=self.base_url,
+                failure_kind="stream_interrupted",
+            ) from error
 
     def _responses_probe_decision(self, model: str) -> Optional[str]:
         key = (self.base_url, model)

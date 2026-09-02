@@ -11,6 +11,7 @@ def _bare_workflow():
     wf._llm_failure_events = {}
     wf._llm_failure_actions = {}
     wf._llm_failure_generations = {}
+    wf._unattended_gate_retries = {}
     wf._settings_provider = None
     async def _noop(*a, **k): pass
     wf._send_message = _noop
@@ -20,6 +21,9 @@ def _bare_workflow():
 
 
 class _State:
+    # AnalysisState always carries this; -1 keeps the gate in attended mode,
+    # which is what these plumbing tests signal into.
+    round_wait_seconds = -1
     wait_input_reason = None
     llm_failure_info = None
     agent_disabled_info = None

@@ -203,6 +203,7 @@ def __init__(
     self._llm_failure_events: Dict[str, asyncio.Event] = {}
     self._llm_failure_actions: Dict[str, Optional[str]] = {}
     self._llm_failure_generations: Dict[str, int] = {}  # monotonic counter per node for idempotency
+    self._unattended_gate_retries: Dict[str, int] = {}  # auto-retries spent per node at an unanswered gate
 
     # Runtime persistence gate. Unlike an ordinary node exception this gate
     # stays inside the running workflow so Retry still has the exact live

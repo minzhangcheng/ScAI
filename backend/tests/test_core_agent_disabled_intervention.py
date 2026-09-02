@@ -15,6 +15,7 @@ async def test_wait_for_disabled_agent_returns_retry_on_signal():
     wf._llm_failure_events = {}
     wf._llm_failure_actions = {}
     wf._llm_failure_generations = {}
+    wf._unattended_gate_retries = {}
     wf._settings_provider = MagicMock()
     wf._send_message = AsyncMock()
     wf._send_state_sync = AsyncMock()
@@ -42,6 +43,7 @@ async def test_wait_for_disabled_agent_returns_skip_on_signal():
     wf._llm_failure_events = {}
     wf._llm_failure_actions = {}
     wf._llm_failure_generations = {}
+    wf._unattended_gate_retries = {}
     wf._settings_provider = MagicMock()
     wf._send_message = AsyncMock()
     wf._send_state_sync = AsyncMock()

@@ -59,6 +59,7 @@ class _Harness(ReportingMixin):
         self._llm_failure_events = {}
         self._llm_failure_actions = {}
         self._llm_failure_generations = {}
+        self._unattended_gate_retries = {}
 
     def ensure_agent_ready(self, _name):
         return True
@@ -177,6 +178,9 @@ async def test_report_retry_disarms_fallback_and_retries_upstream(
         "generate_detailed_report",
         ANY,
         wait_seconds=final_report_module.DETAILED_REPORT_INTERVENTION_WAIT_SECONDS,
+        # This gate's unattended answer is the deterministic fallback, not a
+        # bounded re-run of the same exhausted upstream.
+        auto_retry=False,
     )
 
 

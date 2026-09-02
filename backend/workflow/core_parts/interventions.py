@@ -10,6 +10,72 @@ def bind_facade(facade) -> None:
     )
 
 
+# Bounded auto-retries for a HITL gate nobody answered.  The gate is only
+# reached after the LLM client already exhausted its own retries, so this is a
+# second-order budget: enough for a transient upstream to clear, small enough
+# that an automated run cannot spend hours re-running an expensive node.
+UNATTENDED_GATE_MAX_AUTO_RETRIES = 3
+
+
+async def _unattended_gate_backoff(event, attempt: int) -> None:
+    """Space out unattended auto-retries without going deaf.
+
+    Retrying instantly proves nothing about an upstream that was still degraded
+    a moment ago, and every attempt re-runs the caller's work.  The gate stays
+    answerable throughout: ``signal_llm_failure_action`` accepts an answer in
+    this window and reports success to the caller, so wait on the event rather
+    than sleeping through an answer the user was told had landed.
+    """
+    from ..helpers import _retry_backoff_delay
+
+    try:
+        await asyncio.wait_for(event.wait(), _retry_backoff_delay(attempt))
+    except asyncio.TimeoutError:
+        pass
+
+
+def _is_non_recoverable_llm_failure(error) -> bool:
+    """True when the LLM client already ruled this failure out for retry.
+
+    ``retry_with_backoff`` breaks out of its loop without retrying on auth,
+    permission and hard-quota errors, keeping the original as ``__cause__``.
+    Re-running the node cannot fix a rejected key or an exhausted budget, and
+    in an unattended run nobody is present to replace either.
+    """
+    from ...utils.llm_client import (
+        AuthenticationError,
+        PermissionDeniedError,
+        _is_hard_quota_error,
+    )
+
+    for candidate in (error, getattr(error, "__cause__", None)):
+        if candidate is None:
+            continue
+        if isinstance(candidate, (AuthenticationError, PermissionDeniedError)):
+            return True
+        if _is_hard_quota_error(candidate):
+            return True
+    return False
+
+
+async def _consume_unattended_gate_retry(self, node_name: str, event):
+    """Spend one unattended auto-retry for ``node_name``, or None when spent."""
+    used = self._unattended_gate_retries.get(node_name, 0)
+    if used >= UNATTENDED_GATE_MAX_AUTO_RETRIES:
+        logger.warning(
+            f"[{self.session_id}] {node_name}: unattended gate exhausted its "
+            f"{UNATTENDED_GATE_MAX_AUTO_RETRIES} auto-retries; skipping"
+        )
+        return None
+    self._unattended_gate_retries[node_name] = used + 1
+    logger.warning(
+        f"[{self.session_id}] {node_name}: nobody answered the gate; "
+        f"auto-retry {used + 1}/{UNATTENDED_GATE_MAX_AUTO_RETRIES}"
+    )
+    await _unattended_gate_backoff(event, used)
+    return LlmFailureAction.RETRY.value
+
+
 def _next_generation(self, node: str) -> int:
     """Increment and return the generation counter for a given node."""
     self._llm_failure_generations[node] = self._llm_failure_generations.get(node, 0) + 1
@@ -30,13 +96,21 @@ async def _drive_hitl_gate(
     enter_change: str,
     exit_change: str,
     clear_cache_on_retry: bool,
-    wait_seconds: int = -1,
+    wait_seconds: int | None = None,
+    auto_retry: bool = True,
 ) -> LlmFailureAction:
     """Shared HITL intervention scaffold (lock/event/generation/state_sync).
 
     Callers parameterize only what differs; behavior is otherwise identical
     across LLM-failure, disabled-agent, and marker-db gates.
+
+    ``wait_seconds=None`` inherits the session's ``round_wait_seconds``, the
+    same setting every other HITL gate honours.  A caller that supplies its
+    own budget owns its unattended path and should pass ``auto_retry=False``.
     """
+    effective_wait = (
+        analysis_state.round_wait_seconds if wait_seconds is None else wait_seconds
+    )
     async with self._llm_failure_lock:
         gen = self._next_generation(node_name)
         if node_name not in self._llm_failure_events:
@@ -65,14 +139,26 @@ async def _drive_hitl_gate(
         # all — and this gate has no timeout, so a user who walks away
         # strands it indefinitely.
         #
-        # Ordinary agent gates retain wait_seconds=-1 (block forever).
-        # Report content generation supplies a finite budget so an
-        # unattended run can select its deterministic fallback.
-        await wait_with_skip_time(
-            event, wait_seconds, self.session_id, node_name,
+        # Ordinary agent gates inherit the session's round_wait_seconds, so
+        # an automated run (0 = no wait) never parks on a dialog nobody will
+        # answer. Report content generation supplies a finite budget of its
+        # own so an unattended run can select its deterministic fallback.
+        signaled = await wait_with_skip_time(
+            event, effective_wait, self.session_id, node_name,
             safe_point_hook=getattr(self, "await_restore_safe_point", None),
         )
         action = self._llm_failure_actions.pop(node_name, None)
+        if action is None and not signaled and auto_retry and effective_wait >= 0:
+            # Nobody answered and nobody will. Falling straight through to skip
+            # abandons the node on the first blip; blocking strands the run.
+            action = await _consume_unattended_gate_retry(self, node_name, event)
+            late = self._llm_failure_actions.pop(node_name, None)
+            if late is not None:
+                # An answer landed during the backoff and the caller was told it
+                # was accepted, so it outranks the retry chosen on a timeout.
+                action = late
+        if action != LlmFailureAction.RETRY.value:
+            self._unattended_gate_retries.pop(node_name, None)
         analysis_state.wait_input_reason = None
         setattr(analysis_state, info_attr, None)
         self._set_status(analysis_state, TaskStatus.RUNNING)
@@ -102,7 +188,8 @@ async def _wait_for_llm_intervention(
     node_name: str,
     analysis_state: AnalysisState,
     *,
-    wait_seconds: int = -1,
+    wait_seconds: int | None = None,
+    auto_retry: bool = True,
 ) -> LlmFailureAction:
     """Block workflow, show LlmTimeoutDialog, wait for user action.
 
@@ -134,6 +221,7 @@ async def _wait_for_llm_intervention(
         exit_change=StateSyncChangeType.LLM_RETRY.value,
         clear_cache_on_retry=True,
         wait_seconds=wait_seconds,
+        auto_retry=auto_retry and not _is_non_recoverable_llm_failure(error),
     )
 
 async def _publish_runtime_persistence_transition(
@@ -472,6 +560,8 @@ async def _wait_for_disabled_agent_intervention(
         enter_change=StateSyncChangeType.AGENT_DISABLED.value,
         exit_change=StateSyncChangeType.AGENT_RESUMED.value,
         clear_cache_on_retry=True,
+        # Re-running the node against the same empty model cannot help.
+        auto_retry=False,
     )
 
 async def _wait_for_marker_db_intervention(

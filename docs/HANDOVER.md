@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.51.7 · **Last updated**: 2026-09-02
+**Version**: 0.51.8 · **Last updated**: 2026-09-02
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,19 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.51.x — (2026-08-31 onward)**
+
+- `0.51.8` — Makes an interrupted LLM stream reach the same human-intervention
+  gate as any other exhausted upstream, and stops that gate from parking an
+  automated run. The client classifies a stream that dies after its first event
+  as an upstream exhaustion at its dispatch exit, renaming the failure without
+  re-issuing anything, so the planning dialogue no longer ends the workflow
+  through its generic handler. The LLM-failure, disabled-agent and marker-db
+  gates now inherit the session's round wait instead of blocking forever, and on
+  a timeout spend up to three backed-off automatic retries before skipping;
+  authentication, permission and hard-quota failures skip those retries, and the
+  report gate keeps its own deterministic fallback. Focused and full backend
+  regressions passed against a same-commit baseline; frontend tests, image
+  build, and deployment were not performed.
 
 - `0.51.7` — Adds a bounded replay-safe retry path for LLM outcomes that are
   incomplete after a stream interruption or terminal incomplete response.

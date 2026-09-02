@@ -17,6 +17,7 @@ from ...models.schemas import (
 )
 from ...utils.llm_client import UpstreamExhaustedError
 from ...constants import LlmFailureAction
+from ..helpers import reset_unattended_gate_budget
 from ...config import get_session_reports, get_session_workspace
 from ...services.report import DetailedReportGenerator, compress_image_to_base64
 from ...services.report.figure_discovery import discover_workspace_figures
@@ -134,6 +135,7 @@ class FinalReportMixin:
         # Step 1: Generate final summary (with LLM failure intervention)
         await self._send_message("status", "Generating final summary...", AgentType.PI)
 
+        reset_unattended_gate_budget(self, "generate_final_report")
         while True:
             try:
                 final_summary = await self.pi_agent.generate_final_summary(analysis_state)
@@ -174,6 +176,7 @@ class FinalReportMixin:
         await self._send_message("status", "Generating integrated report with figures...", AgentType.PI)
 
         integrated_report = None
+        reset_unattended_gate_budget(self, "generate_final_report")
         while True:
             try:
                 integrated_report = await self.pi_agent.generate_integrated_report(analysis_state)
@@ -339,6 +342,10 @@ class FinalReportMixin:
                     "generate_detailed_report",
                     analysis_state,
                     wait_seconds=DETAILED_REPORT_INTERVENTION_WAIT_SECONDS,
+                    # This gate has its own unattended recovery: regenerate the
+                    # report with force_fallback. Auto-retrying first would
+                    # delay a fallback that is already the designed answer.
+                    auto_retry=False,
                 )
                 if action == LlmFailureAction.RETRY:
                     analysis_state.detailed_report_fallback_pending = False

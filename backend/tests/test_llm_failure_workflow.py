@@ -37,6 +37,227 @@ async def _signal_action_once(mock_self, node_name, action, timeout=5.0):
     mock_self._llm_failure_events[node_name].set()
 
 
+# ── Unattended gates: honour round_wait_seconds instead of blocking ───
+
+
+def _gate_self():
+    """Workflow stub with the real HITL gate bound, as the fixtures below do."""
+    from backend.workflow import SingleCellAnalysisWorkflow
+
+    mock = MagicMock()
+    mock.session_id = "test-session"
+    mock._llm_failure_lock = asyncio.Lock()
+    mock._llm_failure_events = {}
+    mock._llm_failure_actions = {}
+    mock._llm_failure_generations = {}
+    mock._unattended_gate_retries = {}
+    mock._send_message = AsyncMock()
+    mock._send_state_sync = AsyncMock()
+    mock._set_status = MagicMock()
+    mock._settings_provider = MagicMock()
+    mock.await_restore_safe_point = None
+    for name in (
+        "_wait_for_llm_intervention",
+        "_wait_for_disabled_agent_intervention",
+        "_drive_hitl_gate",
+        "_next_generation",
+        "_generation_for",
+        "signal_llm_failure_action",
+    ):
+        setattr(
+            mock, name,
+            getattr(SingleCellAnalysisWorkflow, name).__get__(mock, type(mock)),
+        )
+    return mock
+
+
+def _no_backoff(monkeypatch):
+    """Keep the unattended backoff out of the suite's wall clock."""
+    from backend.tests.split_facade import setattr_facade
+
+    slept = []
+
+    async def _record(event, attempt):
+        slept.append(attempt)
+
+    setattr_facade(
+        monkeypatch, "backend.workflow.core", "_unattended_gate_backoff", _record
+    )
+    return slept
+
+
+def _exhausted(cause=None):
+    error = UpstreamExhaustedError(
+        "upstream exhausted",
+        agent_name="bioinformatics",
+        model="m",
+        llm_server="https://x/v1",
+    )
+    if cause is not None:
+        error.__cause__ = cause
+    return error
+
+
+@pytest.mark.asyncio
+async def test_unattended_llm_gate_auto_retries_then_skips(monkeypatch):
+    """Nobody answers the dialog. The gate must hand back a bounded number of
+    retries and then skip — never park the run on an unanswerable dialog."""
+    slept = _no_backoff(monkeypatch)
+    wf = _gate_self()
+    state = AnalysisState(user_id="u")
+    state.round_wait_seconds = 0  # unattended
+
+    actions = [
+        await wf._wait_for_llm_intervention(_exhausted(), "bioinformatics", state)
+        for _ in range(5)
+    ]
+
+    assert actions == [
+        LlmFailureAction.RETRY,
+        LlmFailureAction.RETRY,
+        LlmFailureAction.RETRY,
+        LlmFailureAction.SKIP,
+        # Budget cleared on skip, so a later independent failure is not starved.
+        LlmFailureAction.RETRY,
+    ]
+    assert slept == [0, 1, 2, 0]
+
+
+@pytest.mark.asyncio
+async def test_unattended_llm_gate_does_not_retry_a_non_recoverable_failure(
+    monkeypatch,
+):
+    """The client breaks out of its own retry loop on auth errors. Re-running
+    the node cannot fix a bad key, and unattended nobody will replace it."""
+    from backend.utils.llm_client import AuthenticationError
+
+    slept = _no_backoff(monkeypatch)
+    wf = _gate_self()
+    state = AnalysisState(user_id="u")
+    state.round_wait_seconds = 0
+
+    auth = AuthenticationError.__new__(AuthenticationError)
+    Exception.__init__(auth, "Error code: 401 - Missing Authentication header")
+
+    action = await wf._wait_for_llm_intervention(
+        _exhausted(cause=auth), "pi_planning", state
+    )
+
+    assert action == LlmFailureAction.SKIP
+    assert slept == []
+    assert wf._unattended_gate_retries == {}
+
+
+@pytest.mark.asyncio
+async def test_answer_during_the_backoff_outranks_the_auto_retry(monkeypatch):
+    """The gate stays answerable while it backs off. signal_llm_failure_action
+    accepts an answer in that window and reports success to the caller, so the
+    gate must honour it instead of returning the retry it had already chosen."""
+    from backend.tests.split_facade import setattr_facade
+
+    wf = _gate_self()
+    state = AnalysisState(user_id="u")
+    state.round_wait_seconds = 0
+
+    async def _answer_late(event, attempt):
+        # Exactly what the lifecycle route does when the user clicks Terminate.
+        accepted = wf.signal_llm_failure_action(
+            "bioinformatics",
+            LlmFailureAction.TERMINATE.value,
+            wf._generation_for("bioinformatics"),
+        )
+        assert accepted is True, "the gate must still be answerable while backing off"
+
+
+
+    setattr_facade(
+        monkeypatch, "backend.workflow.core", "_unattended_gate_backoff", _answer_late
+    )
+
+    action = await wf._wait_for_llm_intervention(
+        _exhausted(), "bioinformatics", state
+    )
+
+    assert action == LlmFailureAction.TERMINATE
+    # The answer must be consumed, not left behind to leak into a later gate.
+    assert wf._llm_failure_actions == {}
+
+
+@pytest.mark.asyncio
+async def test_manual_wait_still_blocks_for_the_user(monkeypatch):
+    """round_wait_seconds=-1 is the attended mode: the gate must wait for a
+    real answer and must not spend the unattended budget."""
+    _no_backoff(monkeypatch)
+    wf = _gate_self()
+    state = AnalysisState(user_id="u")
+    state.round_wait_seconds = -1
+
+    gate = asyncio.create_task(
+        wf._wait_for_llm_intervention(_exhausted(), "bioinformatics", state)
+    )
+    await _signal_action_once(wf, "bioinformatics", LlmFailureAction.TERMINATE.value)
+
+    assert await gate == LlmFailureAction.TERMINATE
+    assert wf._unattended_gate_retries == {}
+
+
+@pytest.mark.asyncio
+async def test_explicit_wait_seconds_overrides_round_wait(monkeypatch):
+    """A caller that supplies its own budget owns the unattended path; the
+    session-wide round wait must not override it."""
+    _no_backoff(monkeypatch)
+    wf = _gate_self()
+    state = AnalysisState(user_id="u")
+    state.round_wait_seconds = -1  # would otherwise block forever
+
+    action = await wf._wait_for_llm_intervention(
+        _exhausted(), "generate_detailed_report", state,
+        wait_seconds=0, auto_retry=False,
+    )
+
+    assert action == LlmFailureAction.SKIP
+
+
+@pytest.mark.asyncio
+async def test_unattended_disabled_agent_gate_skips_without_retrying(monkeypatch):
+    """A disabled agent has an empty model. Retrying re-runs the node against
+    the same empty configuration, so unattended it must skip immediately."""
+    slept = _no_backoff(monkeypatch)
+    wf = _gate_self()
+    state = AnalysisState(user_id="u")
+    state.round_wait_seconds = 0
+
+    action = await wf._wait_for_disabled_agent_intervention(
+        "pathology", "pathology_analysis", state
+    )
+
+    assert action == LlmFailureAction.SKIP
+    assert slept == []
+
+
+@pytest.mark.asyncio
+async def test_node_entry_resets_the_unattended_retry_budget(monkeypatch):
+    """The budget bounds one failure episode. A node that fails, recovers and
+    later fails again must not inherit the spent budget."""
+    from backend.workflow import with_retry
+
+    _no_backoff(monkeypatch)
+    wf = _gate_self()
+    wf._pause_event = None
+    wf._unattended_gate_retries["data_profiling"] = 3
+
+    @with_retry("data_profiling")
+    async def node(self, state):
+        return {**state, "ok": True}
+
+    analysis_state = AnalysisState(user_id="u")
+    analysis_state.round_wait_seconds = 0
+    result = await node(wf, {"analysis_state": analysis_state, "skip_nodes": []})
+
+    assert result["ok"] is True
+    assert "data_profiling" not in wf._unattended_gate_retries
+
+
 # ── Test 1: @with_retry decorator LLM failure handling ────────────────
 
 
@@ -53,6 +274,7 @@ class TestWithRetryLlmFailure:
         mock._llm_failure_events = {}
         mock._llm_failure_actions = {}
         mock._llm_failure_generations = {}
+        mock._unattended_gate_retries = {}
         mock._send_message = AsyncMock()
         mock._send_state_sync = AsyncMock()
         mock._set_status = MagicMock()
@@ -240,6 +462,7 @@ class TestSignalLlmFailureAction:
         mock = MagicMock(spec=SingleCellAnalysisWorkflow)
         mock.session_id = "test-session"
         mock._llm_failure_generations = {}
+        mock._unattended_gate_retries = {}
         mock._llm_failure_events = {}
         mock._llm_failure_actions = {}
 
@@ -257,6 +480,7 @@ class TestSignalLlmFailureAction:
     def test_rejects_zero_generation(self, workflow):
         """signal returns False when current generation is 0 (no failure in progress)."""
         workflow._llm_failure_generations = {}
+        workflow._unattended_gate_retries = {}
         result = workflow.signal_llm_failure_action("pathology_analysis", "skip", 0)
         assert result is False
 
@@ -350,6 +574,7 @@ class TestBioinformaticsNodeUpstreamPropagation:
         mock._llm_failure_events = {}
         mock._llm_failure_actions = {}
         mock._llm_failure_generations = {}
+        mock._unattended_gate_retries = {}
         mock._send_message = AsyncMock()
         mock._send_state_sync = AsyncMock()
         mock._set_status = MagicMock()
