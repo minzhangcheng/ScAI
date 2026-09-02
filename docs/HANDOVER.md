@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.51.9 · **Last updated**: 2026-09-02
+**Version**: 0.51.10 · **Last updated**: 2026-09-02
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,30 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.51.x — (2026-08-31 onward)**
+
+- `0.51.10` — Stops one analysis cell from disarming the kernel's write
+  boundary. The I/O guard installed at kernel start resolved every write target
+  through the `Path` and `os` names in `__main__` — the same namespace the
+  analysis code runs in — so a figure cell doing `from matplotlib.path import
+  Path`, ordinary in code that draws connectors, rebound `Path` to a
+  vertex-array constructor. Every later path resolution raised `ValueError`
+  inside a silent `except`, the guard read that as "outside the workspace", and
+  the kernel could no longer write anything at all: the run stopped at a
+  `runtime_persistence_failure` gate whose message named the state directory
+  the guard itself allows, with `budget_violations` empty and no diagnostic in
+  any log. Observed in production on 2026-09-02, where revision 90 was refused
+  after 23 successful saves to that same path. The guard now resolves through
+  underscore-prefixed module aliases bound before any user code runs and
+  excluded from runtime persistence, and an unresolvable target reports the
+  resolution failure instead of masquerading as a boundary violation. The
+  savefig workspace-root redirect installed at kernel start carried the same
+  dependency and is fixed the same way — that half cost the run its figure.
+  Four regression tests, all red on the unpatched tree, cover a shadowed `Path`
+  and `os` against the generated guard source plus the whole path end to end in
+  a live kernel. The kernel profile matched a pristine-HEAD baseline node for
+  node (1 failure, 12 errors, all pre-existing) and each of the nine
+  backend-full failures also fails at HEAD; frontend tests, image build, and
+  deployment were not performed.
 
 - `0.51.9` — Removes the output-token cap. A thinking model spends its budget on
   private reasoning before it writes an answer, so a cap on output is a cap on

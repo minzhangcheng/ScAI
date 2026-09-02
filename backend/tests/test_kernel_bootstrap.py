@@ -90,10 +90,10 @@ async def test_bootstrap_injects_repr_safe_paths_before_workspace_use(tmp_path):
         repr(str(sandbox.notebook_state.state_dir)), repr("<state-dir>")
     )
     assert hashlib.sha256(normalized_common.encode()).hexdigest() == (
-        "c386ca26f2be5f3ce47ca59d930bd94693a252fee9214c4a83e18d7bb331ef49"
+        "fa78e6f3d675b3df84327de00efbef33473ed3808009258799f9c0b098a3d105"
     )
     assert hashlib.sha256(normalized_path.encode()).hexdigest() == (
-        "1963f14f4f6128b74e1fb5816ceac98b37f0ea1f5eb7ed32a016a4798d74c9df"
+        "3d244c95b341b84498e13e6a98381f76b1b1c62b00ff45e273514287d6c5113b"
     )
 
 
@@ -1078,5 +1078,52 @@ print("__SCAI_THREAD_BACKENDS__" + json.dumps({
         assert payload["positional_worker_types"] == ["Worker"]
         assert payload["network_shape"][1] == 3
         assert payload["network_shape"][0] > 0
+    finally:
+        await sandbox.stop(save=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not os.environ.get("SCAI_RUN_KERNEL_TESTS"),
+    reason="Set SCAI_RUN_KERNEL_TESTS=1 to run kernel-dependent tests",
+)
+async def test_live_kernel_survives_figure_cell_shadowing_path(tmp_path):
+    """A figure cell importing matplotlib's Path must not disarm the kernel.
+
+    ``from matplotlib.path import Path`` is ordinary in code that draws
+    connectors, and it rebinds the name that the savefig redirect and the I/O
+    write guard resolve through. In production one such cell cost a session
+    both its figure and its runtime generation: every subsequent kernel write
+    was refused, including the trusted runtime-persistence cell.
+    """
+    sandbox = _sandbox(tmp_path)
+    try:
+        await sandbox.start()
+        poisoned = await sandbox.execute(
+            """
+from matplotlib.path import Path
+from matplotlib.patches import FancyArrowPatch
+import matplotlib.pyplot as plt
+import pathlib as _probe_pathlib
+
+plt.figure()
+plt.plot([0, 1], [0, 1])
+plt.savefig('shadowed_path.png')
+plt.close('all')
+print(f'shadowed={Path is not _probe_pathlib.Path}')
+""",
+            save_to_history=False,
+            skip_safety_check=True,
+        )
+        assert poisoned.success, poisoned.error
+        assert "shadowed=True" in poisoned.output
+        assert (sandbox.working_dir / "figures" / "shadowed_path.jpg").is_file()
+        assert not (sandbox.working_dir / "shadowed_path.jpg").exists()
+
+        assert await sandbox.save_session() is True
+        assert (
+            sandbox.notebook_state.state_dir
+            / f"{sandbox.session_id}_session.pkl"
+        ).is_file()
     finally:
         await sandbox.stop(save=False)

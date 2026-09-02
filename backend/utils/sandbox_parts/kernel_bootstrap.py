@@ -136,6 +136,15 @@ import os
 import sys
 from pathlib import Path
 
+# Private aliases for the trusted wrappers installed further down. Analysis
+# cells share this namespace and routinely rebind `Path` -- `from
+# matplotlib.path import Path` is ordinary in code that draws connectors --
+# so a wrapper that resolves `Path` or `os` by its public name stops working
+# the moment a cell does. path_setup_code re-imports the same two names for
+# the I/O write guard.
+import os as _sandbox_os
+import pathlib as _pathlib
+
 if (
     os.environ.get('SCAI_KERNEL_REQUIRE_LANDLOCK') == '1'
     and not os.environ.get('SCAI_KERNEL_LANDLOCK_ACTIVE')
@@ -263,12 +272,14 @@ _WORKSPACE_DIR_RESOLVED = _WORKSPACE_DIR.resolve()
 def _combined_savefig(self, fname, *args, **kwargs):
     '''Combined patch: PNG->JPG conversion + workspace root redirect.'''
     # Step 1: Handle PNG->JPG conversion (if fname is a path string)
-    _fname_str = str(fname) if isinstance(fname, (str, os.PathLike)) else None
+    _fname_str = (
+        str(fname) if isinstance(fname, (str, _sandbox_os.PathLike)) else None
+    )
     _needs_jpg_convert = _fname_str and _fname_str.lower().endswith('.png')
 
     if _needs_jpg_convert:
         try:
-            _base, _ = os.path.splitext(_fname_str)
+            _base, _ = _sandbox_os.path.splitext(_fname_str)
             _jpg_path = _base + '.jpg'
             # Modify kwargs only; let the final return handle saving
             kwargs = dict(kwargs)
@@ -279,7 +290,10 @@ def _combined_savefig(self, fname, *args, **kwargs):
                 kwargs['pil_kwargs'] = {}
             kwargs['pil_kwargs'].setdefault('quality', 85)
             kwargs['pil_kwargs'].setdefault('optimize', True)
-            print(f"[Auto-convert] {os.path.basename(_fname_str)} -> {os.path.basename(_jpg_path)}")
+            print(
+                f"[Auto-convert] {_sandbox_os.path.basename(_fname_str)}"
+                f" -> {_sandbox_os.path.basename(_jpg_path)}"
+            )
             # Only update fname, do NOT save here — let final return handle it
             fname = _jpg_path
         except Exception as _err:
@@ -288,16 +302,20 @@ def _combined_savefig(self, fname, *args, **kwargs):
 
     # Step 2: Redirect workspace root -> figures/ (only for path strings)
     _redirect_failed = False
-    if isinstance(fname, (str, os.PathLike)):
+    if isinstance(fname, (str, _sandbox_os.PathLike)):
         try:
-            _p = Path(str(fname)).resolve()
+            _p = _pathlib.Path(str(fname)).resolve()
             if _p.parent == _WORKSPACE_DIR_RESOLVED:
                 _new = _FIGURES_DIR / _p.name
                 print(f"[savefig-redirect] {_p.name} -> figures/")
                 fname = str(_new)
             elif not str(_p).startswith(str(_WORKSPACE_DIR_RESOLVED)):
                 # Path resolved outside the workspace root — log for diagnostics (3c)
-                print(f"[savefig-redirect] skip: '{fname}' -> resolved to {_p} (workspace is {_WORKSPACE_DIR_RESOLVED}, cwd is {os.getcwd()})")
+                print(
+                    f"[savefig-redirect] skip: '{fname}' -> resolved to {_p} "
+                    f"(workspace is {_WORKSPACE_DIR_RESOLVED}, "
+                    f"cwd is {_sandbox_os.getcwd()})"
+                )
         except Exception as _redir_err:
             print(f"[savefig-redirect] failed: {_redir_err}, saving to original location")
             _redirect_failed = True
@@ -519,6 +537,7 @@ except Exception as _sc_err:
 # === Runtime I/O sandbox: intercept writes outside allowed directories ===
 import builtins as _builtins
 import io as _sandbox_io
+import os as _sandbox_os
 import pathlib as _pathlib
 
 _ORIGINAL_OPEN = _builtins.open
@@ -537,25 +556,40 @@ _ALLOWED_WRITE_ROOTS = [
     {repr(str(sandbox._session_tmp))},   # Per-session temporary files
 ]
 
+# The guard shares its namespace with the analysis code it guards, so it
+# must never resolve `Path` or `os` by their public names. A figure cell
+# doing `from matplotlib.path import Path` rebinds `Path` to a vertex-array
+# constructor; every path resolution then raises, the guard reads that as
+# "outside the workspace", and the kernel loses the ability to write anything
+# at all -- including the trusted runtime-persistence cell, which surfaces as
+# a runtime_persistence_failure with a workspace message that names the state
+# directory the guard itself allows. The underscore-prefixed aliases below are
+# bound before any user code runs and are excluded from the persisted
+# namespace, so they stay reachable no matter what a cell imports.
 def _resolve_guard_path(filepath, dir_fd=None):
     '''Resolve a path, including paths relative to an open directory fd.'''
     if isinstance(filepath, int):
         try:
-            return Path(os.readlink(f'/proc/self/fd/{{filepath}}')).resolve()
+            return _pathlib.Path(
+                _sandbox_os.readlink(f'/proc/self/fd/{{filepath}}')
+            ).resolve()
         except Exception:
             return None
     try:
-        raw_path = os.fspath(filepath)
+        raw_path = _sandbox_os.fspath(filepath)
         if isinstance(raw_path, bytes):
-            raw_path = os.fsdecode(raw_path)
-        candidate = Path(raw_path)
-    except (TypeError, ValueError):
+            raw_path = _sandbox_os.fsdecode(raw_path)
+        candidate = _pathlib.Path(raw_path)
+    except (TypeError, ValueError) as e:
+        print(f"[sandbox] Path resolution failed for {{filepath!r}}: {{e}}")
         return None
     if not candidate.is_absolute() and dir_fd not in (
-        None, -1, getattr(os, 'AT_FDCWD', -100)
+        None, -1, getattr(_sandbox_os, 'AT_FDCWD', -100)
     ):
         try:
-            candidate = Path(os.readlink(f'/proc/self/fd/{{dir_fd}}')) / candidate
+            candidate = _pathlib.Path(
+                _sandbox_os.readlink(f'/proc/self/fd/{{dir_fd}}')
+            ) / candidate
         except Exception:
             return None
     try:
@@ -575,7 +609,7 @@ def _is_write_allowed(filepath, dir_fd=None):
         r = root.rstrip('/')
         if resolved == r or resolved.startswith(r + '/'):
             return True
-    if resolved == os.devnull:
+    if resolved == _sandbox_os.devnull:
         return True
     return False
 
@@ -587,13 +621,15 @@ def _os_flags_request_write(flags):
     '''Return whether os.open flags request write/create/truncate semantics.'''
     if not isinstance(flags, int):
         return False
-    if (flags & getattr(os, 'O_ACCMODE', 3)) != getattr(os, 'O_RDONLY', 0):
+    if (
+        flags & getattr(_sandbox_os, 'O_ACCMODE', 3)
+    ) != getattr(_sandbox_os, 'O_RDONLY', 0):
         return True
     mutation_flags = (
-        getattr(os, 'O_CREAT', 0)
-        | getattr(os, 'O_TRUNC', 0)
-        | getattr(os, 'O_APPEND', 0)
-        | getattr(os, 'O_TMPFILE', 0)
+        getattr(_sandbox_os, 'O_CREAT', 0)
+        | getattr(_sandbox_os, 'O_TRUNC', 0)
+        | getattr(_sandbox_os, 'O_APPEND', 0)
+        | getattr(_sandbox_os, 'O_TMPFILE', 0)
     )
     return bool(flags & mutation_flags)
 
