@@ -14,7 +14,7 @@ import ast
 import re
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -30,7 +30,7 @@ from backend.services.report.artifacts import (
     publication_pdf_is_valid,
 )
 from backend.tests.figure_image_helpers import valid_image_bytes, valid_pdf_bytes
-from backend.utils.llm_client import BadRequestError
+from backend.utils.llm_client import BadRequestError, UpstreamExhaustedError
 
 BLOCKING = [{
     "kind": "text_over_text", "severity": "block", "text": "Con FXR/bile",
@@ -1074,6 +1074,79 @@ class _PayloadRejectLLM(_PromptLLM):
                 "code": 1214,
             }},
         )
+
+
+class _IncompleteVisionLLM(_PromptLLM):
+    def __init__(self, failures):
+        super().__init__()
+        self.failures = failures
+
+    async def chat_with_vision(self, **kwargs):
+        self.calls.append(("vision", kwargs))
+        if self.failures > 0:
+            self.failures -= 1
+            raise UpstreamExhaustedError(
+                "status=incomplete, incomplete_details=max_output_tokens",
+                agent_name="bioinformatics",
+                model=kwargs["model"],
+                failure_kind="incomplete_response",
+            )
+        return SimpleNamespace(content="revised vision code")
+
+
+@pytest.mark.asyncio
+async def test_figure_revision_incomplete_retries_without_changing_stream(
+    monkeypatch,
+):
+    sleep = AsyncMock()
+    monkeypatch.setattr(
+        "backend.utils.llm_client_parts.retry.asyncio.sleep", sleep
+    )
+    agent = _PromptAgent()
+    agent.llm_client = _IncompleteVisionLLM(failures=3)
+
+    revised = await agent._revise_figure_code(
+        "plot()",
+        "Fix the title",
+        [],
+        [],
+        "heatmap",
+        state=SimpleNamespace(treatment_groups=[]),
+        image_base64="aW1hZ2U=",
+    )
+
+    assert revised == "revised vision code"
+    assert [kind for kind, _kwargs in agent.llm_client.calls] == ["vision"] * 4
+    first_kwargs = agent.llm_client.calls[0][1]
+    assert all(kwargs == first_kwargs for _kind, kwargs in agent.llm_client.calls)
+    assert all(
+        kwargs["prefer_stream"] is True
+        for _kind, kwargs in agent.llm_client.calls
+    )
+    assert [call.args[0] for call in sleep.await_args_list] == [2.0, 4.0, 8.0]
+
+
+@pytest.mark.asyncio
+async def test_figure_revision_incomplete_exhaustion_propagates(monkeypatch):
+    monkeypatch.setattr(
+        "backend.utils.llm_client_parts.retry.asyncio.sleep", AsyncMock()
+    )
+    agent = _PromptAgent()
+    agent.llm_client = _IncompleteVisionLLM(failures=4)
+
+    with pytest.raises(UpstreamExhaustedError) as exc_info:
+        await agent._revise_figure_code(
+            "plot()",
+            "Fix the title",
+            [],
+            [],
+            "heatmap",
+            state=SimpleNamespace(treatment_groups=[]),
+            image_base64="aW1hZ2U=",
+        )
+
+    assert exc_info.value.failure_kind == "incomplete_response"
+    assert [kind for kind, _kwargs in agent.llm_client.calls] == ["vision"] * 4
 
 
 @pytest.mark.asyncio

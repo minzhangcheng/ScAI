@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.51.6 · **Last updated**: 2026-09-01
+**Version**: 0.51.7 · **Last updated**: 2026-09-02
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,16 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.51.x — (2026-08-31 onward)**
+
+- `0.51.7` — Adds a bounded replay-safe retry path for LLM outcomes that are
+  incomplete after a stream interruption or terminal incomplete response.
+  Bioinformatics planning and figure revision reuse the exact original request,
+  including protocol and streaming options, for up to three exponential-backoff
+  retries; transport failures and non-replay-safe errors keep their existing
+  handling, and retry progress is reported without changing scientific decisions.
+  Focused planning, figure-revision, and version-consistency regressions passed;
+  frontend installation/Vitest, image build, deployment, and historical-session
+  mutation were not performed.
 
 - `0.51.6` — Keeps execution evidence grounded in current, successful technical
   receipts matched by round, plan, lineage, analysis generation, and cohort

@@ -50,6 +50,7 @@ from ...utils.direction_payload import (
     build_direction_context_block,
     resolve_direction_context,
 )
+from ...utils.llm_client import retry_replay_safe_llm_call
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -197,6 +198,28 @@ class PlanGenerationFailure(RuntimeError):
 
 class PlanningMixin:
     """Analysis-plan generation, incremental revision, and checkpoint discovery."""
+
+    async def _call_planning_llm(self, prompt: str, *, temperature: float) -> str:
+        """Run one no-history planning call with bounded outcome retries."""
+        client = self.llm_client
+
+        async def call():
+            return await self.chat_without_history(prompt, temperature=temperature)
+
+        async def notify_retry(attempt, max_retries, delay, error):
+            await self._notify(
+                "status",
+                "Planning LLM response was incomplete; retrying the same request "
+                f"({attempt}/{max_retries}) in {delay:.0f}s.",
+            )
+
+        return await retry_replay_safe_llm_call(
+            call,
+            agent_name="bioinformatics",
+            model_name=str(self.model or ""),
+            llm_server=str(getattr(client, "base_url", "") or ""),
+            on_retry=notify_retry,
+        )
 
     def _method_decision_guidance_block(self, *query_parts: Any) -> str:
         """Return optional, bounded planning context without selecting a method."""
@@ -415,7 +438,7 @@ in key_decision_points for PI review.
         )
         # The retry prompt contains the complete original request, so it must not
         # inherit unrelated planning/validation turns from BaseAgent history.
-        resp2 = await self.chat_without_history(retry_prompt, temperature=0.3)
+        resp2 = await self._call_planning_llm(retry_prompt, temperature=0.3)
         data2 = self._safe_parse_json(resp2, default={})
         data2 = self._prepare_plan_data(
             data2,
@@ -673,7 +696,7 @@ Return the plan as a JSON object:
 
         # Planning is a bounded, explicit context assembled by the workflow.
         # Keep it isolated from the autonomous executor and prior rounds.
-        response = await self.chat_without_history(prompt, temperature=0.3)
+        response = await self._call_planning_llm(prompt, temperature=0.3)
         plan_data = self._safe_parse_json(response, default={})
 
         plan_data = await self._retry_on_parse_failure(prompt, plan_data, warn_on_double_failure=True, caller_name="generate_analysis_plan")
@@ -883,7 +906,7 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
     "expected_runtime": "~N steps"
 }}"""
 
-        response = await self.chat_without_history(prompt, temperature=0.3)
+        response = await self._call_planning_llm(prompt, temperature=0.3)
         plan_data = self._safe_parse_json(response, default={})
 
         plan_data = await self._retry_on_parse_failure(

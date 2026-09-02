@@ -28,7 +28,7 @@ from .error_signals import (
     _is_protocol_adaptation_signal,
     is_responses_input_shape_error,
 )
-from .errors import UpstreamExhaustedError
+from .errors import StreamInterruptedError, UpstreamExhaustedError
 
 
 # Hard per-attempt deadline for one LLM request (seconds). A reasoning model
@@ -83,6 +83,87 @@ _TRUNCATION_RETRY_CEILING = 32768
 # report). Distinct from the reasoning-truncation guard, which fires only when
 # finish_reason == "length".
 EMPTY_RESPONSE_MAX_RETRIES = 3
+
+# Explicit opt-in budget for callers that know replay cannot duplicate tools or
+# external side effects.  This is intentionally separate from transport retry:
+# stream completion and terminal response status are observed after the generic
+# adapter retry boundary.
+REPLAY_SAFE_OUTCOME_MAX_RETRIES = 3
+
+
+def _is_replay_safe_outcome_error(error: Exception) -> bool:
+    return (
+        isinstance(error, StreamInterruptedError)
+        or (
+            isinstance(error, UpstreamExhaustedError)
+            and error.failure_kind == "incomplete_response"
+        )
+    )
+
+
+async def retry_replay_safe_llm_call(
+    func: Callable[[], Awaitable[Any]],
+    *,
+    agent_name: str,
+    model_name: str,
+    llm_server: str = "",
+    max_retries: int = REPLAY_SAFE_OUTCOME_MAX_RETRIES,
+    retry_delay_base: float = RETRY_DELAY_BASE,
+    on_retry: Optional[
+        Callable[[int, int, float, Exception], Awaitable[None]]
+    ] = None,
+):
+    """Retry one explicitly replay-safe LLM call without changing its options.
+
+    ``func`` owns the complete request, including its current protocol and
+    streaming preference.  This helper only invokes that same callable again;
+    it never adds or changes ``stream``/``prefer_stream`` arguments.
+    """
+    retry_budget = max(0, max_retries)
+    attempt = 0
+    while True:
+        try:
+            return await func()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if not _is_replay_safe_outcome_error(error):
+                raise
+            if attempt >= retry_budget:
+                if isinstance(error, StreamInterruptedError):
+                    raise UpstreamExhaustedError(
+                        f"LLM stream remained incomplete after {attempt} retries: {error}",
+                        agent_name=agent_name,
+                        model=model_name,
+                        llm_server=llm_server,
+                        failure_kind="stream_interrupted",
+                    ) from error
+                raise
+
+            attempt += 1
+            delay = retry_delay_base * (2 ** (attempt - 1))
+            logger.warning(
+                "[%s] Replay-safe LLM outcome retry %s/%s in %.1fs "
+                "after %s (model=%s)",
+                agent_name,
+                attempt,
+                retry_budget,
+                delay,
+                type(error).__name__,
+                model_name,
+            )
+            if on_retry is not None:
+                try:
+                    await on_retry(attempt, retry_budget, delay, error)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "[%s] Failed to emit replay-safe retry notification",
+                        agent_name,
+                        exc_info=True,
+                    )
+            await asyncio.sleep(delay)
 
 def compute_rate_limit_delay(rate_limit_attempt: int, max_retries: int) -> Optional[float]:
     """Delay (seconds) for the given 0-based 429 retry attempt, or None when the

@@ -93,7 +93,9 @@ from ..llm_client_parts.retry import (  # noqa: F401
     _TRUNCATION_RETRY_FLOOR,
     _TRUNCATION_RETRY_CEILING,
     EMPTY_RESPONSE_MAX_RETRIES,
+    REPLAY_SAFE_OUTCOME_MAX_RETRIES,
     compute_rate_limit_delay,
+    retry_replay_safe_llm_call,
     retry_with_backoff,
 )
 from ..llm_client_parts.protocol import (  # noqa: F401

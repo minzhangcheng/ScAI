@@ -46,6 +46,7 @@ from ...utils.error_parsing import compact_traceback
 from ...utils.llm_client import (
     is_vision_capability_mismatch,
     is_vision_request_shape_error,
+    retry_replay_safe_llm_call,
 )
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ...services.figure_layout import (
@@ -315,6 +316,27 @@ from .shared import (  # noqa: F401
 
 class FiguresMixin:
     """Publication-figure generation, review loop, and revision."""
+
+    async def _call_figure_revision_llm(self, call):
+        """Run one side-effect-free revision call with bounded outcome retries."""
+        client = self.llm_client
+
+        async def notify_retry(attempt, max_retries, delay, error):
+            notify = getattr(self, "_notify", None)
+            if callable(notify):
+                await notify(
+                    "status",
+                    "Figure revision LLM response was incomplete; retrying the "
+                    f"same request ({attempt}/{max_retries}) in {delay:.0f}s.",
+                )
+
+        return await retry_replay_safe_llm_call(
+            call,
+            agent_name="bioinformatics",
+            model_name=str(self.model or ""),
+            llm_server=str(getattr(client, "base_url", "") or ""),
+            on_retry=notify_retry,
+        )
 
     async def _environment_api_hint(
         self,
@@ -665,7 +687,7 @@ Return only the Python code:{note}"""
         if image_base64 and self.has_vision:
             # Use vision API so the agent can see the current figure
             try:
-                response = await self.llm_client.chat_with_vision(
+                vision_kwargs = dict(
                     model=self.model,
                     text_prompt=prompt,
                     images=[image_base64],
@@ -673,6 +695,9 @@ Return only the Python code:{note}"""
                     max_tokens=32768,
                     system_prompt=self.system_prompt,
                     prefer_stream=True,
+                )
+                response = await self._call_figure_revision_llm(
+                    lambda: self.llm_client.chat_with_vision(**vision_kwargs)
                 )
             except Exception as vision_err:
                 _is_vision_unsupported = is_vision_capability_mismatch(vision_err)
@@ -695,24 +720,32 @@ Return only the Python code:{note}"""
                         "**Current Figure:** (Image not available for this request. "
                         "Revise code based on PI feedback text only.)\n\n",
                     )
-                    response = await self._budgeted_text_call(
-                        self.llm_client.chat,
+                    text_kwargs = dict(
                         model=self.model,
                         messages=[{"role": "user", "content": prompt}],
                         temperature=revision_temp,
                         max_tokens=32768,
                         prefer_stream=True,
                     )
+                    response = await self._call_figure_revision_llm(
+                        lambda: self._budgeted_text_call(
+                            self.llm_client.chat, **text_kwargs
+                        )
+                    )
                 else:
                     raise
         else:
-            response = await self._budgeted_text_call(
-                self.llm_client.chat,
+            text_kwargs = dict(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=revision_temp,
                 max_tokens=32768,
                 prefer_stream=True,
+            )
+            response = await self._call_figure_revision_llm(
+                lambda: self._budgeted_text_call(
+                    self.llm_client.chat, **text_kwargs
+                )
             )
 
         response_text = response.content if response and response.content else None

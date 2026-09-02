@@ -6,6 +6,7 @@ import pytest
 
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
 from backend.models.schemas import AgentType, AnalysisPlan, AnalysisState, PlanStep
+from backend.utils.llm_client import StreamInterruptedError, UpstreamExhaustedError
 
 
 def _make_agent() -> BioinformaticsAgent:
@@ -22,6 +23,87 @@ def _make_agent() -> BioinformaticsAgent:
 
 def _make_state() -> AnalysisState:
     return AnalysisState(user_id="test-user")
+
+
+@pytest.mark.asyncio
+async def test_plan_stream_interruption_retries_three_times(monkeypatch):
+    sleep = AsyncMock()
+    monkeypatch.setattr(
+        "backend.utils.llm_client_parts.retry.asyncio.sleep", sleep
+    )
+    agent = _make_agent()
+    state = _make_state()
+    valid = (
+        '{"overview":"ok","steps":[{"id":1,"title":"QC",'
+        '"method":"scanpy.pp.filter_cells","depends_on":[]}]}'
+    )
+    agent.chat_without_history = AsyncMock(side_effect=[
+        StreamInterruptedError("eof 1"),
+        StreamInterruptedError("eof 2"),
+        StreamInterruptedError("eof 3"),
+        valid,
+    ])
+
+    plan = await agent.generate_analysis_plan(
+        state=state,
+        pi_tasks=["QC"],
+        overview="overview",
+        phase="exploration",
+    )
+
+    assert len(plan.steps) == 1
+    assert agent.chat_without_history.await_count == 4
+    first_call = agent.chat_without_history.await_args_list[0]
+    assert all(call == first_call for call in agent.chat_without_history.await_args_list)
+    assert [call.args[0] for call in sleep.await_args_list] == [2.0, 4.0, 8.0]
+
+
+@pytest.mark.asyncio
+async def test_plan_stream_interruption_exhaustion_enters_llm_failure_path(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "backend.utils.llm_client_parts.retry.asyncio.sleep", AsyncMock()
+    )
+    agent = _make_agent()
+    agent.chat_without_history = AsyncMock(
+        side_effect=[StreamInterruptedError("eof")] * 4
+    )
+
+    with pytest.raises(UpstreamExhaustedError) as exc_info:
+        await agent.generate_analysis_plan(
+            state=_make_state(),
+            pi_tasks=["QC"],
+            overview="overview",
+            phase="exploration",
+        )
+
+    assert agent.chat_without_history.await_count == 4
+    assert exc_info.value.failure_kind == "stream_interrupted"
+    assert exc_info.value.agent_name == "bioinformatics"
+    assert exc_info.value.model == "test-model"
+
+
+@pytest.mark.asyncio
+async def test_plan_non_target_llm_failure_is_not_retried():
+    agent = _make_agent()
+    failure = UpstreamExhaustedError(
+        "authentication failed",
+        agent_name="bioinformatics",
+        failure_kind="upstream_exhausted",
+    )
+    agent.chat_without_history = AsyncMock(side_effect=failure)
+
+    with pytest.raises(UpstreamExhaustedError) as exc_info:
+        await agent.generate_analysis_plan(
+            state=_make_state(),
+            pi_tasks=["QC"],
+            overview="overview",
+            phase="exploration",
+        )
+
+    assert exc_info.value is failure
+    assert agent.chat_without_history.await_count == 1
 
 
 @pytest.mark.asyncio
