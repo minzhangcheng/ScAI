@@ -5,6 +5,7 @@ continue to affect a resumed executor without creating an import cycle.
 """
 from __future__ import annotations
 
+from ...constants import NO_OUTPUT_TOKEN_CAP
 from .executor_auxiliary import LoopExit, TurnEffects, TurnStart, finalize_run
 
 
@@ -161,7 +162,7 @@ async def start_turn(context) -> TurnStart:
         response = await context.agent._budgeted_text_call(
             context.agent.llm_client.chat_with_tools,
             messages=context.messages,
-            max_tokens=32768,
+            max_tokens=NO_OUTPUT_TOKEN_CAP,
             anchor_count=context.agent._context_anchor_count(context.messages),
             summarize=context.agent._summarize_dropped_messages,
             model=context.agent.model,

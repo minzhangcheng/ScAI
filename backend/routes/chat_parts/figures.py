@@ -16,6 +16,7 @@ from fastapi import APIRouter, Form, HTTPException, Request, UploadFile, File
 from fastapi.responses import JSONResponse
 
 from backend.config import get_session_workspace, get_session_reports, get_session_uploads, get_session_states, PI_AGENT_NAME
+from backend.constants import NO_OUTPUT_TOKEN_CAP
 from backend.models.schemas import WebSocketMessage, AgentType, DataFile, AnalysisState
 from backend.services.session_store import ensure_session_loaded, async_save_session, update_session_cache
 from backend.state import (
@@ -221,7 +222,7 @@ async def _generate_figures_in_chat(
                 dispatch = await provider.budget_text_dispatch(
                     "bioinformatics",
                     [{"role": "user", "content": code_prompt}],
-                    max_tokens=32768,
+                    max_tokens=NO_OUTPUT_TOKEN_CAP,
                 )
                 code_resp = await llm_client.chat(
                     model=bio_model,

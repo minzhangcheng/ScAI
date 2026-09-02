@@ -9,7 +9,7 @@ import logging
 import re
 import hashlib
 
-from ...constants import REASONING_MODEL_MIN_TOKENS
+from ...constants import NO_OUTPUT_TOKEN_CAP
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +176,7 @@ class EvaluationMixin:
                     text_prompt=text_with_fig_note,
                     images=compressed,
                     temperature=self.temperature,
-                    max_tokens=REASONING_MODEL_MIN_TOKENS,  # reasoning models need headroom or content comes back empty
+                    max_tokens=NO_OUTPUT_TOKEN_CAP,
                     system_prompt=effective_prompt,
                     prefer_stream=True,
                 )
@@ -243,7 +243,7 @@ class EvaluationMixin:
                     "function": {"name": _SUPERVISOR_EVALUATION_TOOL_NAME},
                 },
                 temperature=self.temperature,
-                max_tokens=REASONING_MODEL_MIN_TOKENS,
+                max_tokens=NO_OUTPUT_TOKEN_CAP,
             )
 
             for tool_call in response.tool_calls:
@@ -338,7 +338,7 @@ class EvaluationMixin:
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=self.temperature,
-                max_tokens=1200,
+                max_tokens=NO_OUTPUT_TOKEN_CAP,
                 prefer_stream=True,
             )
             content = str(getattr(response, "content", "") or "").strip()

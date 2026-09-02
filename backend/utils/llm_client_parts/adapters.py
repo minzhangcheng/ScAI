@@ -33,7 +33,11 @@ from .responses import LLMResponse, LLMToolResponse, _tool_calls_to_raw_assistan
 from .retry import DEFAULT_REQUEST_TIMEOUT
 
 
-_ANTHROPIC_DEFAULT_MAX_TOKENS = 4096
+# Anthropic's Messages API rejects a request without max_tokens, so this is the
+# one protocol that cannot honour NO_OUTPUT_TOKEN_CAP.  Sized to the ceiling the
+# rest of the tree used before it was removed.  A model whose own output limit
+# is lower will reject this value; no adaptation exists for that yet.
+_ANTHROPIC_DEFAULT_MAX_TOKENS = 32768
 
 
 async def _close_stream(stream) -> None:
@@ -63,19 +67,52 @@ class _StartedStream:
     consumer: Callable[["_StartedStream"], Awaitable[Any]]
     idle_timeout: float
     label: str
+    deadline: Optional[float] = None
+    total_timeout: Optional[float] = None
     _closed: bool = False
+
+    def _remaining(self) -> Optional[float]:
+        """Seconds left on the total deadline, or None when unbounded."""
+        if self.deadline is None:
+            return None
+        return self.deadline - time.monotonic()
 
     async def events(self):
         yield self.first_event
         while True:
+            # A runaway generation that keeps emitting deltas never stalls, so
+            # the per-event idle bound cannot see it.  Only elapsed wall-clock
+            # can.  A stall is left to the wait_for below, which reports it the
+            # way it always has.
+            wait = self.idle_timeout
+            remaining = self._remaining()
+            if remaining is not None:
+                if remaining <= 0:
+                    raise StreamInterruptedError(
+                        f"{self.label} exceeded its "
+                        f"{self.total_timeout:.0f}s request deadline"
+                    )
+                wait = min(wait, remaining)
             try:
                 event = await asyncio.wait_for(
-                    self.iterator.__anext__(), timeout=self.idle_timeout
+                    self.iterator.__anext__(), timeout=wait
                 )
             except StopAsyncIteration:
                 return
             except asyncio.CancelledError:
                 raise
+            except asyncio.TimeoutError as error:
+                # The deadline and the idle allowance are the same value, so a
+                # stall and an overrun are not separable here and must not be
+                # reported as if they were.  Name the budget, keep the cause.
+                raise StreamInterruptedError(
+                    f"{self.label} exceeded its "
+                    f"{self.total_timeout:.0f}s request deadline: "
+                    f"{type(error).__name__}: {error}"
+                    if self.total_timeout is not None
+                    else f"{self.label} interrupted after the first event: "
+                    f"{type(error).__name__}: {error}"
+                ) from error
             except Exception as error:
                 raise StreamInterruptedError(
                     f"{self.label} interrupted after the first event: "
@@ -99,6 +136,11 @@ class _StartedStream:
 async def _start_stream(stream, consumer, *, timeout, label) -> _StartedStream:
     """Receive the first event before returning control to the retry layer."""
     idle_timeout = timeout if timeout is not None else DEFAULT_REQUEST_TIMEOUT
+    # Total deadline, matching the non-streaming path: without an output-token
+    # cap, a runaway thinking chain that keeps emitting deltas would otherwise
+    # never trip the per-event idle bound (one observed upstream generation ran
+    # 2917s).  The clock starts with the request, not with the first event.
+    started_at = time.monotonic()
     iterator = stream.__aiter__()
     try:
         first_event = await asyncio.wait_for(
@@ -119,6 +161,8 @@ async def _start_stream(stream, consumer, *, timeout, label) -> _StartedStream:
         consumer=consumer,
         idle_timeout=idle_timeout,
         label=label,
+        deadline=started_at + idle_timeout,
+        total_timeout=idle_timeout,
     )
 
 

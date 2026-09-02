@@ -18,6 +18,7 @@ import json
 import logging
 from typing import Any, Dict, List
 
+from ...constants import NO_OUTPUT_TOKEN_CAP
 from ...models.schemas import SampleCountRecord
 from ...services.sample_design import canonical_modality
 from .shared import (
@@ -106,7 +107,7 @@ class ProfilingMixin:
                     "tools": PROFILING_TOOLS,
                     "tool_choice": "auto",
                     "temperature": self.config.temperature,
-                    "max_tokens": 8192,
+                    "max_tokens": NO_OUTPUT_TOKEN_CAP,
                     "prefer_stream": True,
                 }
                 if callable(getattr(self, "_budgeted_text_call", None)):

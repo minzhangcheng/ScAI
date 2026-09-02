@@ -251,15 +251,17 @@ class TestModelCopyIdSemantics:
         assert original.steps[0].title == "S1"
 
 
-class TestReasoningModelMinTokens:
-    def test_constant_exists_and_value(self):
-        from backend.constants import REASONING_MODEL_MIN_TOKENS
-        assert REASONING_MODEL_MIN_TOKENS == 4096
+class TestNoOutputTokenCap:
+    """The reasoning-model output floor was removed: a cap on a thinking model
+    is a cap on thinking, and running out returns an empty answer channel."""
 
-    def test_importable_from_constants(self):
-        from backend.constants import REASONING_MODEL_MIN_TOKENS as v
-        assert isinstance(v, int)
-        assert v > 0
+    def test_sentinel_is_none(self):
+        from backend.constants import NO_OUTPUT_TOKEN_CAP
+        assert NO_OUTPUT_TOKEN_CAP is None
+
+    def test_reasoning_floor_is_gone(self):
+        import backend.constants as constants
+        assert not hasattr(constants, "REASONING_MODEL_MIN_TOKENS")
 
 
 class TestSelectFallbackPlanFromHistory:

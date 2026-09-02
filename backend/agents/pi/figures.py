@@ -12,7 +12,7 @@ from ...services.figure_layout import format_violations_for_prompt
 # Configure logger
 logger = logging.getLogger(__name__)
 from ...models.schemas import AnalysisState, PublicationFigure
-from ...constants import REASONING_MODEL_MIN_TOKENS
+from ...constants import NO_OUTPUT_TOKEN_CAP
 from ...utils.llm_client import is_vision_capability_mismatch
 from .figure_adoption_prompt import build_figure_adoption_prompt
 
@@ -973,7 +973,7 @@ Example: ["umap_cell_types", "cell_type_proportions", "volcano_<celltype>_<condi
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                max_tokens=REASONING_MODEL_MIN_TOKENS,  # reasoning models need headroom or content comes back empty
+                max_tokens=NO_OUTPUT_TOKEN_CAP,
                 prefer_stream=True,
             )
             text = (response.content or "").strip()

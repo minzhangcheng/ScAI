@@ -1,6 +1,7 @@
 """PI review mixin for DetailedReportGenerator."""
 from typing import Dict, Any, List, Optional
 
+from backend.constants import NO_OUTPUT_TOKEN_CAP
 from backend.utils.report_html import _safe_parse_json
 
 
@@ -356,7 +357,7 @@ Provide a detailed technical summary of this analysis phase covering:
         if phase_images:
             return await self._chat_with_vision_fallback(
                 text_prompt=prompt, images=phase_images,
-                temperature=0.3, max_tokens=32768, request_timeout=600.0,
+                temperature=0.3, max_tokens=NO_OUTPUT_TOKEN_CAP, request_timeout=600.0,
             )
         else:
             return await self._pi_chat(prompt, temperature=0.3)
@@ -562,10 +563,10 @@ IMPORTANT:
             if all_images:
                 response = await self._chat_with_vision_fallback(
                     text_prompt=prompt, images=all_images[:20],
-                    temperature=0.3, max_tokens=8192, request_timeout=600.0,
+                    temperature=0.3, max_tokens=NO_OUTPUT_TOKEN_CAP, request_timeout=600.0,
                 )
             else:
-                response = await self._pi_chat(prompt, temperature=0.3, max_tokens=8192)
+                response = await self._pi_chat(prompt, temperature=0.3, max_tokens=NO_OUTPUT_TOKEN_CAP)
         except Exception as e:
             logger.exception("PI comprehensive review failed")
             return self._empty_analysis_summary()

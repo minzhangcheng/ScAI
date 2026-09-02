@@ -25,6 +25,7 @@ from datetime import datetime
 
 import aiofiles
 
+from ...constants import NO_OUTPUT_TOKEN_CAP
 from ..base import BaseAgent, AgentConfig
 from ...utils.settings_provider import AgentSettingsProvider
 from ...utils.sandbox import (
@@ -692,7 +693,7 @@ Return only the Python code:{note}"""
                     text_prompt=prompt,
                     images=[image_base64],
                     temperature=revision_temp,
-                    max_tokens=32768,
+                    max_tokens=NO_OUTPUT_TOKEN_CAP,
                     system_prompt=self.system_prompt,
                     prefer_stream=True,
                 )
@@ -724,7 +725,7 @@ Return only the Python code:{note}"""
                         model=self.model,
                         messages=[{"role": "user", "content": prompt}],
                         temperature=revision_temp,
-                        max_tokens=32768,
+                        max_tokens=NO_OUTPUT_TOKEN_CAP,
                         prefer_stream=True,
                     )
                     response = await self._call_figure_revision_llm(
@@ -739,7 +740,7 @@ Return only the Python code:{note}"""
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=revision_temp,
-                max_tokens=32768,
+                max_tokens=NO_OUTPUT_TOKEN_CAP,
                 prefer_stream=True,
             )
             response = await self._call_figure_revision_llm(

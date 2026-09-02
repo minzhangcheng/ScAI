@@ -1,6 +1,7 @@
 """LLM calls mixin for DetailedReportGenerator."""
 from typing import List, Dict, Any, Optional
 
+from backend.constants import NO_OUTPUT_TOKEN_CAP
 from backend.utils.report_html import _safe_parse_json
 
 
@@ -113,7 +114,7 @@ class LLMCallsMixin:
             await acknowledge(agent_name, dispatch)
         return response
 
-    async def _pi_chat(self, prompt: str, temperature: float = 0.3, max_tokens: int = 32768) -> str:
+    async def _pi_chat(self, prompt: str, temperature: float = 0.3, max_tokens: Optional[int] = NO_OUTPUT_TOKEN_CAP) -> str:
         """Chat with PI Agent"""
         self._set_llm_context("report_pi")
         response = await self._budgeted_text_call(
@@ -135,7 +136,7 @@ class LLMCallsMixin:
         text_prompt: str,
         images: List[str],
         temperature: float = 0.3,
-        max_tokens: int = 32768,
+        max_tokens: Optional[int] = NO_OUTPUT_TOKEN_CAP,
         request_timeout: float = 600.0,
     ) -> str:
         """Vision call with agent fallback chain: PI -> bio -> supervisor -> text-only."""
@@ -191,6 +192,6 @@ class LLMCallsMixin:
             messages=messages,
             tools=REPORT_TOOLS,
             temperature=temperature,
-            max_tokens=32768,
+            max_tokens=NO_OUTPUT_TOKEN_CAP,
             prefer_stream=True,
         )

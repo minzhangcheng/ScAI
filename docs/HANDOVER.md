@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.51.8 · **Last updated**: 2026-09-02
+**Version**: 0.51.9 · **Last updated**: 2026-09-02
 
 ## 1. Runtime Architecture
 
@@ -337,6 +337,25 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.51.x — (2026-08-31 onward)**
+
+- `0.51.9` — Removes the output-token cap. A thinking model spends its budget on
+  private reasoning before it writes an answer, so a cap on output is a cap on
+  thinking: when it runs out the provider returns `status=incomplete` with an
+  empty answer channel and the entire generation is discarded. Measured across
+  one run against a single model, capped calls failed that way 11 times (4096:
+  6/79, 8192: 1/1, 32768: 4/156) while 60 uncapped calls on that same model
+  failed none — and three of those legitimately produced 33841–48555 tokens,
+  past what a 32768 cap allows. All 33 call sites now pass
+  `NO_OUTPUT_TOKEN_CAP` and `REASONING_MODEL_MIN_TOKENS` is gone; Anthropic's
+  Messages API still mandates the field, so that protocol alone keeps a fallback
+  (raised to 32768). Wall-clock replaces the cap as the bound: a started stream
+  now carries a total deadline armed when the request starts, alongside its
+  per-event idle allowance, so a runaway chain that keeps emitting deltas is cut
+  off instead of streaming indefinitely, and reaches the replay-safe retry and
+  human-intervention gate added in 0.51.7–0.51.8. Full backend regressions
+  matched a same-commit baseline exactly — 43 pre-existing failures, none new,
+  and the 19 new tests fail 18-of-19 on the unpatched tree; frontend tests,
+  image build, and deployment were not performed.
 
 - `0.51.8` — Makes an interrupted LLM stream reach the same human-intervention
   gate as any other exhausted upstream, and stops that gate from parking an

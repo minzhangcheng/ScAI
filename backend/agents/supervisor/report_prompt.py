@@ -1,6 +1,7 @@
 """Detailed-report prompt, narrative, parsing, and fallback helpers."""
 from __future__ import annotations
 
+from ...constants import NO_OUTPUT_TOKEN_CAP
 from ...services.report.quality import build_quality_disclosures
 
 
@@ -670,7 +671,7 @@ async def prepare_report_generation(
                             {"role": "user", "content": report_prompt},
                         ],
                         temperature=0.3,
-                        max_tokens=32768,
+                        max_tokens=NO_OUTPUT_TOKEN_CAP,
                         timeout=900.0,  # 15 min — large narratives need long generation time
                         prefer_stream=True,
                     )

@@ -1,6 +1,7 @@
 """Planning mixin for DetailedReportGenerator."""
 from typing import Dict, Any, List, Optional
 
+from backend.constants import NO_OUTPUT_TOKEN_CAP
 from backend.utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from backend.utils.report_html import _safe_parse_json
 from .analysis_log import build_round_summaries
@@ -334,7 +335,7 @@ async def _plan_report_from_analysis_impl(
         generator, state, analysis_record, findings, existing_figures,
         existing_tables, language, analysis_summary,
     )
-    response = await generator._pi_chat(prompt, temperature=0.4, max_tokens=32768)
+    response = await generator._pi_chat(prompt, temperature=0.4, max_tokens=NO_OUTPUT_TOKEN_CAP)
     round_summaries = build_round_summaries(state)
 
     try:
@@ -650,7 +651,7 @@ async def _generate_section_from_existing_figures_impl(
             if section_images:
                 response = await generator._chat_with_vision_fallback(
                     text_prompt=prompt, images=section_images[:6],
-                    temperature=0.3, max_tokens=32768, request_timeout=600.0,
+                    temperature=0.3, max_tokens=NO_OUTPUT_TOKEN_CAP, request_timeout=600.0,
                 )
             else:
                 response = await generator._pi_chat(prompt, temperature=0.3)

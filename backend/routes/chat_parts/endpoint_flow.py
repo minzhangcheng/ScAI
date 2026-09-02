@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from fastapi import File, Form
 
+from backend.constants import NO_OUTPUT_TOKEN_CAP
+
 _OWNED_NAMES = frozenset({"chat_with_pi"})
 
 def bind_facade(facade) -> None:
@@ -137,7 +139,7 @@ async def chat_with_pi(
                 text_prompt=full_prompt,
                 images=image_b64_list,
                 temperature=pi_temp,
-                max_tokens=32768,
+                max_tokens=NO_OUTPUT_TOKEN_CAP,
                 prefer_stream=True,
             )
         else:
@@ -157,7 +159,7 @@ async def chat_with_pi(
             dispatch = await provider.budget_text_dispatch(
                 PI_AGENT_NAME,
                 chat_messages_list,
-                max_tokens=32768,
+                max_tokens=NO_OUTPUT_TOKEN_CAP,
             )
             response = await llm_client.chat(
                 model=pi_model,

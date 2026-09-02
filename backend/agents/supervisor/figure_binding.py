@@ -5,7 +5,7 @@ import json
 import logging
 from typing import Any, Dict
 
-from ...constants import REASONING_MODEL_MIN_TOKENS
+from ...constants import NO_OUTPUT_TOKEN_CAP
 from ...services.figure_contract import (
     audit_figure_contract,
     collect_plan_figure_requirements,
@@ -244,7 +244,7 @@ class FigureBindingMixin:
                 tools=[_TOOL],
                 tool_choice={"type": "function", "function": {"name": _TOOL_NAME}},
                 temperature=self.temperature,
-                max_tokens=REASONING_MODEL_MIN_TOKENS,
+                max_tokens=NO_OUTPUT_TOKEN_CAP,
             )
             for call in response.tool_calls:
                 if call.name != _TOOL_NAME or call.parse_error:
@@ -301,7 +301,7 @@ class FigureBindingMixin:
                     "function": {"name": _PLAN_EVIDENCE_TOOL_NAME},
                 },
                 temperature=self.temperature,
-                max_tokens=REASONING_MODEL_MIN_TOKENS,
+                max_tokens=NO_OUTPUT_TOKEN_CAP,
             )
             for call in response.tool_calls:
                 if call.name != _PLAN_EVIDENCE_TOOL_NAME or call.parse_error:

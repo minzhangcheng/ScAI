@@ -1287,6 +1287,9 @@ async def test_figure_revision_prompt_has_shared_stable_prefix_and_unchanged_dyn
     assert "IMAGE_TWO" not in vision_prompt
     for kind, kwargs in calls:
         assert kwargs["temperature"] == 0.2
-        assert kwargs["max_tokens"] == 32768
+        # No output cap: this call revises a full plotting script off a vision
+        # prompt, and a capped thinking budget returned an empty answer channel
+        # four times in a row on real data.
+        assert kwargs["max_tokens"] is None
         if kind == "vision":
             assert kwargs["system_prompt"] == "prompt-system"

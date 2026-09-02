@@ -10,7 +10,7 @@ import re
 import logging
 from typing import Optional, Dict, Any, AsyncGenerator, Callable, Awaitable
 
-from ..constants import REASONING_MODEL_MIN_TOKENS
+from ..constants import NO_OUTPUT_TOKEN_CAP
 from .base import BaseAgent, AgentConfig
 from ..models.schemas import AgentType, AnalysisState
 from ..utils.error_parsing import (
@@ -257,7 +257,7 @@ except ImportError as e:
                     {"role": "user", "content": user_msg},
                 ],
                 temperature=self.config.temperature,
-                max_tokens=REASONING_MODEL_MIN_TOKENS,  # reasoning models need headroom or content comes back empty
+                max_tokens=NO_OUTPUT_TOKEN_CAP,
                 prefer_stream=True,
             )
             summary = response.content if response.content else raw_doc[:2000]
@@ -349,7 +349,7 @@ except ImportError as e:
                     {"role": "user", "content": user_msg},
                 ],
                 temperature=self.config.temperature,
-                max_tokens=REASONING_MODEL_MIN_TOKENS,  # reasoning models need headroom or content comes back empty
+                max_tokens=NO_OUTPUT_TOKEN_CAP,
                 prefer_stream=True,
             )
             summary = response.content if response.content else combined[:1500]

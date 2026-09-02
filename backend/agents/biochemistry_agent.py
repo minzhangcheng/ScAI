@@ -14,6 +14,7 @@ import re
 import os
 import logging
 
+from ..constants import NO_OUTPUT_TOKEN_CAP
 from .base import BaseAgent
 from .biochemistry_parts.prompts import (
     file_extraction_prompt as _file_extraction_prompt,
@@ -430,7 +431,7 @@ insufficient for interpretation. Then provide the full analysis below that line.
                     text_prompt=prompt,
                     images=[image_data],
                     temperature=0.2,
-                    max_tokens=32768,
+                    max_tokens=NO_OUTPUT_TOKEN_CAP,
                     system_prompt=self.system_prompt,
                     prefer_stream=True,
                 )

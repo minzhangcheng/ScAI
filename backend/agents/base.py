@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 from ..models.schemas import (
     AgentType, AgentMessage, MessageRole, AnalysisState
 )
+from ..constants import NO_OUTPUT_TOKEN_CAP
 from ..utils.llm_client import OpenAICompatibleClient, LLMResponse
 from ..utils.formatting import safe_parse_json as _safe_parse_json_impl
 from ..utils.settings_provider import AgentSettingsProvider
@@ -23,7 +24,7 @@ from ..utils.settings_provider import AgentSettingsProvider
 class AgentConfig:
     """Runtime configuration for an agent."""
     temperature: float = 0.5
-    max_tokens: int = 32768
+    max_tokens: Optional[int] = NO_OUTPUT_TOKEN_CAP
 
 
 class BaseAgent(ABC):

@@ -1,6 +1,8 @@
 """Phases for _run_chat_delegation."""
 from __future__ import annotations
 
+from backend.constants import NO_OUTPUT_TOKEN_CAP
+
 _OWNED_NAMES = frozenset({"_run_chat_delegation"})
 
 def bind_facade(facade) -> None:
@@ -160,7 +162,7 @@ async def _execute_delegation_success(
     dispatch = await delegation_provider.budget_text_dispatch(
         PI_AGENT_NAME,
         [{"role": "user", "content": synthesis_prompt}],
-        max_tokens=32768,
+        max_tokens=NO_OUTPUT_TOKEN_CAP,
     )
     pi_response = await llm_manager.openrouter.chat(
         model=pi_model,

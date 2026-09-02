@@ -2,7 +2,7 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from ..constants import PLAN_REVISION_NEEDED_TAG, REASONING_MODEL_MIN_TOKENS, StateSyncChangeType, WaitInputReason
+from ..constants import PLAN_REVISION_NEEDED_TAG, NO_OUTPUT_TOKEN_CAP, StateSyncChangeType, WaitInputReason
 from ..models.schemas import AgentType, AnalysisState, ClusterAnnotation, PublicationFigure, TaskStatus
 from ..utils.formatting import safe_parse_json
 from ..services.report.artifacts import has_blocking_layout_defects
@@ -535,7 +535,7 @@ Approve if quality_score >= 7."""
 
         review = await self._vision_figure_review(
             self.supervisor_agent, figure, prompt, compressed,
-            temperature=0.2, label="Supervisor", max_tokens=REASONING_MODEL_MIN_TOKENS,  # reasoning headroom
+            temperature=0.2, label="Supervisor", max_tokens=NO_OUTPUT_TOKEN_CAP,
         )
 
         if review.get("review_unavailable") is True:

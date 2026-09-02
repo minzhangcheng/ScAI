@@ -24,7 +24,7 @@ from urllib.parse import quote as url_quote
 from ..utils.formatting import safe_parse_json, format_revision_history
 from ..utils.files import resolve_figure_in_workspace
 from ..utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
-from ..constants import REASONING_MODEL_MIN_TOKENS
+from ..constants import NO_OUTPUT_TOKEN_CAP
 
 logger = logging.getLogger(__name__)
 

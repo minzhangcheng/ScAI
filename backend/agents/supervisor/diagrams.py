@@ -6,7 +6,7 @@ from typing import List, Dict, Any
 import logging
 
 from ...utils.formatting import safe_parse_json, format_revision_history
-from ...constants import REASONING_MODEL_MIN_TOKENS
+from ...constants import NO_OUTPUT_TOKEN_CAP
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ Respond in JSON:
                 {"role": "user", "content": user_message},
             ],
             temperature=0.1,  # Strict review
-            max_tokens=REASONING_MODEL_MIN_TOKENS,  # reasoning models need headroom or content comes back empty
+            max_tokens=NO_OUTPUT_TOKEN_CAP,
             prefer_stream=True,
         )
         response_text = response.content if response and response.content else ""

@@ -5,7 +5,7 @@ action enums, and LLM failure intervention constants.
 """
 from enum import Enum
 
-VERSION = "0.51.8"
+VERSION = "0.51.9"
 
 
 # ── Authoritative graph node registry — single source of truth ─────
@@ -161,9 +161,21 @@ STOP_KEYWORDS: frozenset[str] = frozenset({
     "停止", "终止", "结束", "总结", "报告",
 })
 
-# ── Reasoning model output-token floor ──────────────────────────────
-# OpenAI-style reasoning models (o1, o3, o4) may produce empty content
-# when max_tokens is too low because the reasoning budget consumes the
-# entire allocation.  This floor ensures enough headroom for the actual
-# content.  Call sites should use this constant instead of hardcoding 4096.
-REASONING_MODEL_MIN_TOKENS: int = 4096
+# ── Output-token cap ────────────────────────────────────────────────
+# There is none, deliberately.  A thinking model spends its output budget on
+# private reasoning first, so any cap we set is a cap on *thinking*, not on the
+# answer: when the budget runs out the provider returns status=incomplete with
+# an empty answer channel and every generated token is wasted.  Measured over
+# one run on a single model, capped calls failed this way 11 times (4096: 6/79,
+# 8192: 1/1, 32768: 4/156) while 60 uncapped calls on the same model failed 0
+# times -- and three of those legitimately produced 33841-48555 tokens, which a
+# 32768 cap would have destroyed.  Omitting the field entirely lets the model
+# finish.
+#
+# What bounds a request instead is wall-clock: DEFAULT_REQUEST_TIMEOUT is a
+# total deadline on both the non-streaming call and the streaming one (see
+# _StartedStream in utils/llm_client_parts/adapters.py).
+#
+# Pass this at call sites rather than a bare None so the intent is greppable and
+# nobody reintroduces a number by accident.
+NO_OUTPUT_TOKEN_CAP: None = None
