@@ -94,6 +94,11 @@ class DirectionSelectionRecord(BaseModel):
     literature_evidence: List[Dict[str, Any]] = Field(default_factory=list)
     selections: List[SelectionEntry] = Field(default_factory=list)
     pi_selected: List[Dict[str, str]] = Field(default_factory=list)
+    # What this gate passed over and why. Without it a later gate re-offers a
+    # declined direction with no idea it was ever weighed, and the report cannot
+    # tell a direction nobody considered from one that was considered and
+    # turned down.
+    declined: List[Dict[str, Any]] = Field(default_factory=list)
     supplementary_requests: List[str] = Field(default_factory=list)
     # An empty pi_selected has two very different causes. Without these, a tooling
     # failure and a deliberate "nothing here is worth a round" are the same record.
@@ -285,6 +290,9 @@ class DirectionSearchQuery(BaseModel):
         "prior_art",
         "tier3_support",
         "tier3_challenge",
+        # Session-cached articles, triaged once per candidate rather than once
+        # per query. Always degraded, so it never counts toward axis coverage.
+        "session_cache",
     ]
     query: str
     result_count: int = 0

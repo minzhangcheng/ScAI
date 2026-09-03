@@ -3,11 +3,30 @@
 Moved verbatim out of backend/agents/literature_agent.py; composed into LiteratureAgent.
 """
 from typing import Dict, Any, List, Optional, Tuple
+import asyncio
 import logging
 import time
 
 
 logger = logging.getLogger(__name__)
+
+# Step and direction budgets for the novelty gate.
+#
+# These were 30s and 180s. A triage call's median latency on the models this
+# agent runs on sits just under 30s, so roughly half of every step hit the bound
+# and the direction budget was spent producing nothing: an entire integration
+# gate could return "unknown_due_to_timeout" for every candidate after ~16
+# minutes of work. The bounds below sit above the observed p90 instead, and the
+# wall clock is paid back by evaluating candidates concurrently rather than one
+# after another.
+NOVELTY_QUERY_TIMEOUT_SECONDS = 90.0
+NOVELTY_DIRECTION_TIMEOUT_SECONDS = 420.0
+NOVELTY_TIER3_QUERY_TIMEOUT_SECONDS = 90.0
+
+# Candidates share no state, so the gate's wall clock does not have to be the
+# sum of their budgets. Bounded so a wide candidate list cannot open an
+# unlimited number of concurrent gateway calls.
+NOVELTY_CANDIDATE_CONCURRENCY = 4
 from ...models.schemas import AnalysisState, DirectionSearchQuery, PubMedEvidenceItem
 
 from .shared import (  # noqa: F401
@@ -170,17 +189,28 @@ class DirectionNoveltyMixin:
         triage_metadata_list: List[Dict[str, Any]] = []
         limitations: List[str] = []
         matching_cache = [a for a in cached_articles if self._article_matches_candidate(a, candidate)]
+        deadline = time.monotonic() + direction_timeout_seconds
+        cache_ev, cache_meta, cache_timed_out, cache_limits = (
+            await self._triage_cached_articles_once(
+                candidate, matching_cache, query_timeout_seconds, deadline
+            )
+        )
+        evidence.extend(cache_ev)
+        if cache_meta:
+            triage_metadata_list.append(cache_meta)
+        limitations.extend(cache_limits)
         timed_out = await self._run_query_batches(
             queries,
             candidate,
-            matching_cache,
+            [],
             query_timeout_seconds,
             all_evidence=evidence,
             executed_categories=executed_categories,
             triage_metadata_list=triage_metadata_list,
             all_limitations=limitations,
-            deadline=time.monotonic() + direction_timeout_seconds,
+            deadline=deadline,
         )
+        timed_out = timed_out or cache_timed_out
         if timed_out and "Minimum-attempt query timed out" not in limitations:
             limitations.append("Minimum-attempt query timed out")
         return self._finalize_seeded_direction_result(
@@ -191,6 +221,51 @@ class DirectionNoveltyMixin:
             fallback_tier="minimum_attempt",
             scheduler_limitation=scheduler_limitation,
         )
+
+    async def _triage_cached_articles_once(
+        self,
+        candidate: Dict[str, Any],
+        matching_cache: List[Dict[str, Any]],
+        query_timeout_seconds: float,
+        deadline: Optional[float],
+    ) -> Tuple[List[PubMedEvidenceItem], Dict[str, Any], bool, List[str]]:
+        """Triage this candidate's cached articles once, not once per query.
+
+        ``matching_cache`` is computed per candidate and is identical for every
+        one of its queries, but the per-query path re-triaged it each time --
+        five to seven identical LLM calls per candidate, each able to consume a
+        whole step budget. That, not PubMed, is what exhausted the direction
+        budget before any searched evidence could be triaged.
+        """
+        evidence: List[PubMedEvidenceItem] = []
+        meta: Dict[str, Any] = {}
+        limitations: List[str] = []
+        if not matching_cache:
+            return evidence, meta, False, limitations
+        step_timeout = query_timeout_seconds
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return evidence, meta, True, ["Direction-level timeout exceeded"]
+            step_timeout = min(step_timeout, remaining)
+        cache_query = DirectionSearchQuery(
+            category="session_cache",
+            query="",
+            degraded=True,
+            notes="Session-cached articles, triaged once per candidate",
+        )
+        try:
+            evidence, meta = await asyncio.wait_for(
+                self._triage_articles_with_llm(matching_cache, candidate, cache_query),
+                timeout=step_timeout,
+            )
+        except asyncio.TimeoutError:
+            if deadline is not None and time.monotonic() >= deadline:
+                return evidence, meta, True, ["Direction-level timeout exceeded"]
+            return evidence, meta, True, ["Cache triage timeout for query: session_cache"]
+        except Exception as exc:
+            return evidence, meta, False, [f"Cache triage failed: {str(exc)[:100]}"]
+        return evidence, meta, False, limitations
 
     async def _evaluate_single_candidate(
         self,
@@ -221,11 +296,26 @@ class DirectionNoveltyMixin:
         def direction_deadline_expired() -> bool:
             return deadline is not None and time.monotonic() >= deadline
 
-        # Cached articles matching this candidate are invariant across all batches.
+        # Cached articles matching this candidate are invariant across all batches,
+        # so they are triaged once here and the per-query path is handed an empty
+        # cache. Passing them down would re-run this call for every query.
         matching_cache = [a for a in cached_articles if self._article_matches_candidate(a, candidate)]
 
         if direction_deadline_expired():
             mark_direction_timeout()
+
+        if not timed_out_flag:
+            cache_ev, cache_meta, cache_timed_out, cache_limits = (
+                await self._triage_cached_articles_once(
+                    candidate, matching_cache, query_timeout_seconds, deadline
+                )
+            )
+            all_evidence.extend(cache_ev)
+            if cache_meta:
+                triage_metadata_list.append(cache_meta)
+            all_limitations.extend(cache_limits)
+            if cache_timed_out:
+                timed_out_flag = True
 
         # Phase 1: Standard queries
         standard_queries = self._direction_queries(candidate, deep=False)
@@ -233,7 +323,7 @@ class DirectionNoveltyMixin:
 
         if not timed_out_flag:
             if await self._run_query_batches(
-                standard_queries, candidate, matching_cache, query_timeout_seconds,
+                standard_queries, candidate, [], query_timeout_seconds,
                 all_evidence=all_evidence, executed_categories=executed_categories,
                 triage_metadata_list=triage_metadata_list, all_limitations=all_limitations,
                 deadline=deadline,
@@ -259,7 +349,7 @@ class DirectionNoveltyMixin:
             queries.extend(deep_queries)
             search_tier = "deep"
             if await self._run_query_batches(
-                deep_queries, candidate, matching_cache, query_timeout_seconds,
+                deep_queries, candidate, [], query_timeout_seconds,
                 all_evidence=all_evidence, executed_categories=executed_categories,
                 triage_metadata_list=triage_metadata_list, all_limitations=all_limitations,
                 deadline=deadline,
@@ -291,7 +381,7 @@ class DirectionNoveltyMixin:
                 await self._run_query_batches(
                     tier3_queries,
                     candidate,
-                    matching_cache,
+                    [],
                     min(tier3_query_timeout_seconds, query_timeout_seconds),
                     all_evidence=all_evidence,
                     executed_categories=executed_categories,
@@ -630,59 +720,69 @@ Respond ONLY with valid JSON (no markdown, no code fences):
         self,
         candidates: List[Dict[str, Any]],
         state: Optional[AnalysisState] = None,
-        query_timeout_seconds: float = 30.0,
-        direction_timeout_seconds: float = 180.0,
-        max_full_evidence_candidates: int = 4,
-        tier3_query_timeout_seconds: float = 45.0,
+        query_timeout_seconds: float = NOVELTY_QUERY_TIMEOUT_SECONDS,
+        direction_timeout_seconds: float = NOVELTY_DIRECTION_TIMEOUT_SECONDS,
+        max_full_evidence_candidates: int = 8,
+        tier3_query_timeout_seconds: float = NOVELTY_TIER3_QUERY_TIMEOUT_SECONDS,
+        concurrency: int = NOVELTY_CANDIDATE_CONCURRENCY,
     ) -> List[Dict[str, Any]]:
-        results: List[Dict[str, Any]] = []
+        """Judge each candidate's prior art. One record per candidate, in order.
+
+        Candidates are independent, so they are evaluated concurrently under a
+        bounded semaphore: serially, the gate's wall clock was the sum of every
+        candidate's direction budget, which is what made a generous budget
+        unaffordable and a stingy one useless.
+        """
         cached_articles = self._extract_session_cached_pubmed_articles(state)
+        semaphore = asyncio.Semaphore(max(1, concurrency))
 
-        for index, candidate in enumerate(candidates):
+        async def evaluate_one(index: int, candidate: Dict[str, Any]) -> Dict[str, Any]:
             direction_id = candidate.get("direction_id", "")
-            direction_name = candidate.get("direction", "")
-            if index >= max_full_evidence_candidates:
-                results.append(await self._evaluate_minimum_attempt_candidate(
-                    candidate,
-                    cached_articles,
-                    query_timeout_seconds=query_timeout_seconds,
-                    direction_timeout_seconds=direction_timeout_seconds,
-                    scheduler_limitation="full_evaluation_skipped_by_candidate_cap",
-                ))
-                continue
-
-            deadline = time.monotonic() + direction_timeout_seconds
-            try:
-                dir_result = await self._evaluate_single_candidate(
-                    candidate,
-                    cached_articles,
-                    query_timeout_seconds,
-                    deadline=deadline,
-                    direction_timeout_seconds=direction_timeout_seconds,
-                    tier3_query_timeout_seconds=tier3_query_timeout_seconds,
-                )
-                if not dir_result.get("queries"):
-                    dir_result = await self._evaluate_minimum_attempt_candidate(
+            async with semaphore:
+                if index >= max_full_evidence_candidates:
+                    return await self._evaluate_minimum_attempt_candidate(
                         candidate,
                         cached_articles,
                         query_timeout_seconds=query_timeout_seconds,
                         direction_timeout_seconds=direction_timeout_seconds,
-                        scheduler_limitation="full_evaluation_returned_no_queries",
+                        scheduler_limitation="full_evaluation_skipped_by_candidate_cap",
                     )
-                results.append(dir_result)
-            except Exception as exc:
-                logger.warning(f"[Literature] Direction evaluation failed for {direction_id}: {exc}")
-                fallback = await self._evaluate_minimum_attempt_candidate(
-                    candidate,
-                    cached_articles,
-                    query_timeout_seconds=query_timeout_seconds,
-                    direction_timeout_seconds=direction_timeout_seconds,
-                    scheduler_limitation="full_evaluation_failed_before_minimum_attempt",
-                )
-                fallback["status"] = "failed" if not fallback.get("queries") else "partial"
-                fallback["limitations"].append(str(exc)[:200])
-                if not fallback.get("timed_out"):
-                    fallback["novelty_status"] = "unknown_due_to_failure"
-                results.append(fallback)
 
-        return results
+                deadline = time.monotonic() + direction_timeout_seconds
+                try:
+                    dir_result = await self._evaluate_single_candidate(
+                        candidate,
+                        cached_articles,
+                        query_timeout_seconds,
+                        deadline=deadline,
+                        direction_timeout_seconds=direction_timeout_seconds,
+                        tier3_query_timeout_seconds=tier3_query_timeout_seconds,
+                    )
+                    if not dir_result.get("queries"):
+                        dir_result = await self._evaluate_minimum_attempt_candidate(
+                            candidate,
+                            cached_articles,
+                            query_timeout_seconds=query_timeout_seconds,
+                            direction_timeout_seconds=direction_timeout_seconds,
+                            scheduler_limitation="full_evaluation_returned_no_queries",
+                        )
+                    return dir_result
+                except Exception as exc:
+                    logger.warning(f"[Literature] Direction evaluation failed for {direction_id}: {exc}")
+                    fallback = await self._evaluate_minimum_attempt_candidate(
+                        candidate,
+                        cached_articles,
+                        query_timeout_seconds=query_timeout_seconds,
+                        direction_timeout_seconds=direction_timeout_seconds,
+                        scheduler_limitation="full_evaluation_failed_before_minimum_attempt",
+                    )
+                    fallback["status"] = "failed" if not fallback.get("queries") else "partial"
+                    fallback["limitations"].append(str(exc)[:200])
+                    if not fallback.get("timed_out"):
+                        fallback["novelty_status"] = "unknown_due_to_failure"
+                    return fallback
+
+        # gather preserves input order, which the candidate cap above depends on.
+        return list(await asyncio.gather(
+            *(evaluate_one(index, candidate) for index, candidate in enumerate(candidates))
+        ))

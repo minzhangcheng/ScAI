@@ -1,9 +1,10 @@
 """
 PI Agent - Principal Investigator that coordinates all agents
 """
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import logging
 
+from ...utils.direction_payload import normalize_direction_text
 from ...utils.formatting import as_list
 
 # Configure logger
@@ -101,6 +102,88 @@ def _normalize_direction_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
     normalized.pop("decision_criteria", None)
     normalized["validation_plan"] = validation_plan
     return normalized
+
+
+def _coerce_priority_rank(value: Any) -> Optional[int]:
+    """The rank as an int, or None when it is not one.
+
+    Models return this as "1" about as often as 1, and ``isinstance(True, int)``
+    is True, so a naive int check reads a boolean as rank 1.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lstrip("+-").isdigit():
+            return int(text)
+    return None
+
+
+def _restore_unscored_candidates(
+    scored: List[Dict[str, Any]], raw_candidates: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Put back every candidate the scoring step did not return.
+
+    Scoring ranks; it has no power to remove. An omission is unrecoverable --
+    nothing downstream rereads ``raw_candidates``, and the integration node reads
+    an empty scored list as the scientific statement that no direction is worth
+    another round -- so an omitted candidate is restored here and the scoring
+    step gets to say what it thinks through ``priority_rank`` instead.
+
+    Restored candidates keep their original order and rank after every scored
+    one. Deterministic and domain-neutral: it compares identity, never subject
+    matter.
+    """
+    kept_ids = set()
+    kept_directions = set()
+    ranks: List[int] = []
+    for candidate in scored:
+        if not isinstance(candidate, dict):
+            continue
+        direction_id = str(candidate.get("direction_id", "")).strip()
+        if direction_id:
+            kept_ids.add(direction_id)
+        direction = normalize_direction_text(candidate.get("direction"))
+        if direction:
+            kept_directions.add(direction)
+        rank = _coerce_priority_rank(candidate.get("priority_rank"))
+        if rank is None:
+            candidate.pop("priority_rank", None)
+        else:
+            candidate["priority_rank"] = rank
+            ranks.append(rank)
+
+    # Ranked entries without a usable rank still have to come before restored
+    # ones, so the floor is the number of them, not zero.
+    next_rank = max([len(scored)] + ranks) + 1
+
+    restored = list(scored)
+    for raw in raw_candidates:
+        if not isinstance(raw, dict):
+            continue
+        direction_id = str(raw.get("direction_id", "")).strip()
+        direction = normalize_direction_text(raw.get("direction"))
+        if direction_id and direction_id in kept_ids:
+            continue
+        if direction and direction in kept_directions:
+            continue
+        recovered = _normalize_direction_candidate(dict(raw))
+        recovered["priority_rank"] = next_rank
+        next_rank += 1
+        flags = recovered.get("risk_flags")
+        if not isinstance(flags, list):
+            flags = []
+        if "unscored_by_gate" not in flags:
+            flags.append("unscored_by_gate")
+        recovered["risk_flags"] = flags
+        logger.info(
+            "[PI] Candidate %r came back unscored; passing it on ranked last",
+            (str(raw.get("direction", ""))[:120] or direction_id or "unnamed"),
+        )
+        restored.append(recovered)
+    return restored
 
 
 def _normalize_integration_scored_candidates(

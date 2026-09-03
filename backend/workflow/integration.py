@@ -8,6 +8,7 @@ import logging
 from typing import List
 
 from ..models.schemas import AnalysisPhase, TaskStatus, RoundResult, AgentType
+from ..utils.direction_payload import merge_unpursued_candidates
 from .helpers import build_integration_gate_payload
 from .retry import with_retry
 from .state import WorkflowState
@@ -91,6 +92,19 @@ class IntegrationMixin:
                     notes.append(candidate_failure)
                     latest_round.evidence_notes = notes
 
+        # Only now bring back what earlier gates left unpursued. A direction
+        # deferred at an earlier gate is otherwise never reconsidered: generation
+        # sees only the integration report, and the prerequisite that blocked it
+        # may have completed rounds ago. Recycling before the check above would
+        # have made a generation failure look like a successful proposal.
+        raw_candidates = merge_unpursued_candidates(analysis_state, raw_candidates)
+        carried_only = bool(raw_candidates) and bool(candidate_failure)
+        if carried_only:
+            logger.warning(
+                f"[{session_id}] Candidate generation failed; the gate is being offered "
+                f"{len(raw_candidates)} candidate(s) carried from earlier gates only"
+            )
+
         scored_candidates = []
         literature_evidence = []
         if raw_candidates:
@@ -104,6 +118,16 @@ class IntegrationMixin:
             scored_candidates = await self.pi_agent.score_integration_directions_with_evidence(
                 analysis_state, raw_candidates, literature_evidence
             )
+            scoring_failure = getattr(
+                self.pi_agent, "last_candidate_scoring_error", None
+            )
+            if scoring_failure:
+                latest_round = analysis_state.get_latest_round()
+                if latest_round is not None:
+                    notes = list(getattr(latest_round, "evidence_notes", []) or [])
+                    if scoring_failure not in notes:
+                        notes.append(scoring_failure)
+                        latest_round.evidence_notes = notes
 
         analysis_state.current_round += 1
         analysis_state.integration_cycle += 1

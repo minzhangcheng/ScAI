@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.51.11 · **Last updated**: 2026-09-02
+**Version**: 0.52.1 · **Last updated**: 2026-09-03
 
 ## 1. Runtime Architecture
 
@@ -53,7 +53,7 @@ scai/
 | `admin.py`         | `/api/admin/*` — user management, cascade cleanup.                                        |
 | `config.py`        | `/api/config/*` — LLM API key / proxy / PubMed email, with validation.                    |
 | `sessions.py`      | `/api/sessions/*` — session CRUD, listing, load.                                          |
-| `session_config.py`| Per-session agent configs (models, temperatures, prompts, vision flags) and round-wait setting. |
+| `session_config.py`| Per-session agent configs (models, temperatures, prompts, vision flags), round-wait, max-rounds, and the per-gate direction cap. |
 | `indicators.py`    | Biochemistry indicator create/update/delete.                                              |
 | `upload.py`        | Chunked upload endpoints with integrity verification.                                     |
 | `files.py`         | File serving (uploaded data, generated figures).                                          |
@@ -350,6 +350,108 @@ six minutes per occurrence rather than blocking.
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.52.x — (2026-09-03 onward)**
+
+- `0.52.1` — Stops the integration gate from discarding research directions, and
+  repairs the novelty search that was never finishing in time to inform it. A
+  run whose stated objective was to identify the mechanism of hepatocyte death
+  proposed a death-mechanism direction at three separate gates and lost it at
+  all three, then reported "No sufficiently novel research direction was found"
+  — a scientific statement that none of the four defects behind it had earned.
+
+  **The scoring prompt truncated its own input.**
+  `json.dumps(raw_candidates)[:8000]`, against candidates that serialise to 7-10
+  KB, put the cut inside the first or second entry, so every later candidate was
+  absent from the prompt entirely; one recorded cycle showed the scorer a single
+  candidate out of three, and since the list is in generation order the
+  surviving position was always the same one. A model cannot keep, rank, or
+  reject an entry it never received, so the truncation decided the outcome and
+  the reply was then read as judgement. `budgeted_prompt_block`
+  (`backend/utils/direction_payload.py`) gives every entry a slot and shortens
+  from inside it instead — tail-first through a declared field order, leaving a
+  count of what it dropped — and the novelty records are projected to the
+  verdict and its caveats rather than carrying every per-article dump and query
+  string, which is about a tenth of the bytes for every candidate instead of the
+  first two. The unbounded sibling blocks in both selection prompts go through
+  the same helper.
+
+  **Scoring was authorised to remove candidates on two unsatisfiable grounds.**
+  "NOT novel (already established in literature)" makes prior-art volume a
+  verdict on whether a question is open *for this project*, and prior-art volume
+  is also the only signal left when the novelty search fails, so the
+  best-documented candidate was the likeliest to be removed. "lack observed
+  supporting data" made producing the data a precondition for being allowed to
+  produce it, which no direction proposed at an integration gate can satisfy by
+  construction. The step now ranks and never removes: a candidate missing from
+  the reply is restored by `_restore_unscored_candidates`, ranked after
+  everything that was scored, whatever the novelty record says. An earlier
+  in-tree attempt made that repair conditional on the verdict being
+  untrustworthy, which leaves the drop standing on `known_area` — a status
+  `_resolve_novelty_status` returns whenever any article was found at all, so
+  the condition reinstated exactly the rule it was written to undo. The scorer
+  also gained the two-attempt readability retry and the distinct tooling-failure
+  reason its three sibling calls already had; returning `[]` from a parse error
+  reached the user as a conclusion about the science.
+
+  **The novelty gate could not finish inside its budget.** Its 30s per-step
+  bound sat at the triage model's median latency (p50 29.3s, p90 60.8s over 173
+  calls in one session), so roughly half of every step timed out on a healthy
+  system; and `matching_cache`, which is computed once per candidate and is
+  identical across all of that candidate's queries, was re-triaged once per
+  query — five to seven full LLM calls that consumed the direction budget before
+  any searched evidence could be triaged. Every verdict in both integration
+  cycles came back `unknown_due_to_timeout` after roughly sixteen minutes of
+  work. PubMed was not the problem; the failures are `Cache triage timeout` and
+  `LLM triage timeout`, and the searches had returned articles. The cache is now
+  triaged once per candidate through `_triage_cached_articles_once`, the bounds
+  clear the observed p90 (`NOVELTY_QUERY_TIMEOUT_SECONDS` 90s,
+  `NOVELTY_DIRECTION_TIMEOUT_SECONDS` 420s, minimum-attempt 60s/150s because
+  10s/15s could not complete one call), and candidates are evaluated
+  concurrently under a bounded semaphore rather than serially, which is what
+  made a budget large enough to succeed unaffordable in the first place. The
+  full-evaluation cap rises from 4 to 8 so carried candidates, which are
+  appended last, are not structurally guaranteed the degraded path.
+
+  **Candidates an earlier gate passed over were never reconsidered.** The gate
+  deduplicated against `user_chosen_directions`, which by design holds only the
+  most recent batch, and nothing ever reread the frozen candidate list each gate
+  persists — so a direction deferred at round 1 could only return if the model
+  reinvented it, and the prerequisite that blocked it completing changed
+  nothing. `unpursued_prior_candidates` carries them into the next gate, newest
+  copy first so a re-scored version wins over its original, matching
+  restatements rather than exact text (with a length floor, since a short stored
+  placeholder is a substring of everything), resolving prerequisite ids once at
+  carry time and keeping the resolved text, and never writing an unresolvable id
+  into the prompt as a direction name. A direction an earlier gate declined is
+  carried too, annotated with what was said — recorded in the new
+  `DirectionSelectionRecord.declined` — rather than suppressed, because the
+  results that have arrived since are exactly what could change the answer.
+  Carrying now runs after the generation-failure check, so recycled candidates
+  cannot make a failed generation look like a successful proposal.
+
+  Separately, `max_directions_per_gate` becomes a per-session setting
+  (`POST`/`GET /api/session/{session_id}/max-directions-per-gate`) defaulting to
+  no cap: both gates extend `max_rounds` by exactly the number of directions
+  selected, so how long a run may grow is an operator's decision rather than a
+  constant's. When a cap is set it counts promoted prerequisites as the rounds
+  they are and defers a dependency chain whole — `select_best_directions`
+  appends the prerequisites its closure promotes to the *end* of the selection
+  list, so a positional slice commits the dependent directions and defers what
+  they depend on, which is the inversion the closure exists to prevent.
+
+  Verified by replaying the session that motivated the work — its real
+  candidates, scorer replies, and novelty records — through the rebuilt gate: at
+  both integration cycles every candidate now reaches the scoring and selection
+  steps, including the one naming ferroptosis, where previously one of three
+  did. The four end-to-end guards in `test_gate_candidate_survival.py` import
+  nothing this version introduces and fail on `1c7c8884`. Backend-full recorded
+  `35 failed / 6359 passed / 95 skipped`; the failure set is identical, node for
+  node, to a `1c7c8884` baseline run in an equivalent worktree (`35 failed /
+  6261 passed`), and all 35 are the file-mode and startup-contract assertions
+  that fail only because the checkout carries group-writable modes. Frontend,
+  kernel, and client suites were not run because no frontend, kernel, or client
+  source changed.
 
 **0.51.x — (2026-08-31 onward)**
 

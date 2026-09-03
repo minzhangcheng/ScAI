@@ -17,6 +17,7 @@ and never assume a subject area.
 """
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+import json
 import re
 
 from ..models.schema_parts.enums import AgentType
@@ -135,6 +136,320 @@ def _dedupe(items: Iterable[str]) -> List[str]:
         seen.add(marker)
         unique.append(text)
     return unique
+
+
+# --- what earlier gates already decided --------------------------------------
+
+# A gate can leave many candidates behind, and every carried candidate costs a
+# novelty search and a slot in the scoring prompt. Carry the most promising few
+# rather than the whole backlog.
+MAX_CARRIED_CANDIDATES = 5
+
+
+def _record_label(record: Any) -> str:
+    """Human-readable name of the gate a candidate came from."""
+    phase = str(_get(record, "phase", "") or "")
+    cycle = _get(record, "integration_cycle")
+    if phase == "integration" and cycle is not None:
+        return f"Integration Cycle {cycle} - integration"
+    return f"Round {_get(record, 'round_number', 0)} - {phase or 'exploration'}"
+
+
+def _record_selections(record: Any) -> List[Any]:
+    """Both shapes a gate writes its choices in: PI-decided and user-picked."""
+    return list(_get(record, "pi_selected") or []) + list(_get(record, "selections") or [])
+
+
+def investigated_direction_texts(state: Any) -> List[str]:
+    """Every direction a gate has committed to, oldest first.
+
+    ``user_chosen_directions`` deliberately holds only the most recent batch, so
+    an integration gate deduplicating against it cannot see what earlier cycles
+    already ran and re-proposes those directions as new. The selection records
+    are the durable trail, and the legacy field remains the fallback for
+    sessions that predate them.
+    """
+    texts: List[str] = []
+    for record in getattr(state, "direction_selection_records", None) or []:
+        for entry in _record_selections(record):
+            text = str(_get(entry, "direction", "") or "").strip()
+            if text:
+                texts.append(text)
+    for entry in getattr(state, "user_chosen_directions", None) or []:
+        text = str(_get(entry, "direction", "") or "").strip()
+        if text:
+            texts.append(text)
+    return _dedupe(texts)
+
+
+# Containment only means something once a direction text is long enough to be
+# one. Below this a stored placeholder like "A" is a substring of every
+# candidate, and containment would swallow the whole list.
+MIN_CONTAINMENT_MATCH_CHARS = 12
+
+
+def _covers_same_direction(text: str, investigated: Sequence[str]) -> bool:
+    """Whether an investigated direction already covers ``text``.
+
+    Exact matching is not enough. A gate restates the same question in its own
+    words -- "What initiates the interferon state?" and "Identify the source of
+    the interferon response" are one direction with two names -- and an exact
+    comparison re-offers work that has already run. This is the containment rule
+    ``find_direction_candidate`` already uses for the same reason, with a length
+    floor so a short placeholder cannot match everything.
+    """
+    key = normalize_direction_text(text)
+    if not key:
+        return False
+    for other in investigated:
+        if not other:
+            continue
+        if key == other:
+            return True
+        shorter, longer = (key, other) if len(key) <= len(other) else (other, key)
+        if len(shorter) >= MIN_CONTAINMENT_MATCH_CHARS and shorter in longer:
+            return True
+    return False
+
+
+def _declined_reason(record: Any, text: str) -> Optional[Dict[str, str]]:
+    """What an earlier gate said when it passed this direction over."""
+    key = normalize_direction_text(text)
+    for entry in _get(record, "declined") or []:
+        if normalize_direction_text(_get(entry, "direction", "")) == key:
+            return {
+                "gate": _record_label(record),
+                "reason": str(_get(entry, "reason_not_selected", "") or "")[:400],
+                "follow_up_value": str(_get(entry, "follow_up_value", "") or ""),
+            }
+    return None
+
+
+def unpursued_prior_candidates(state: Any) -> List[Dict[str, Any]]:
+    """Candidates an earlier gate proposed that no round ever ran.
+
+    Each gate persists its frozen candidate list, but nothing reads it back: the
+    integration gate builds candidates from the integration report alone, so a
+    direction deferred at an earlier gate returns only if the model reinvents
+    it. A prerequisite finishing does not bring it back either, because
+    prerequisite handling runs once, at the gate that deferred it.
+
+    Records are walked newest first, so a direction that was re-proposed and
+    re-scored at a later gate is carried in that later, better-informed form
+    rather than in its original one.
+
+    A direction an earlier gate explicitly declined is still carried, annotated
+    with what was said, rather than suppressed: the results that arrived since
+    are exactly what could change the answer, and a gate that cannot see the
+    direction cannot revisit it. The stored record is never modified.
+    """
+    investigated = [normalize_direction_text(t) for t in investigated_direction_texts(state)]
+    seen: set = set()
+    carried: List[Dict[str, Any]] = []
+    records = list(getattr(state, "direction_selection_records", None) or [])
+    for order, record in enumerate(reversed(records)):
+        candidates = [c for c in (_get(record, "candidates") or []) if isinstance(c, dict)]
+        # Prerequisite ids are only meaningful among the candidates of the gate
+        # that issued them; the same id is reused by every later gate.
+        text_by_id = {}
+        for candidate in candidates:
+            candidate_id = str(candidate.get("direction_id") or "").strip()
+            if candidate_id and candidate_id not in text_by_id:
+                text_by_id[candidate_id] = str(candidate.get("direction") or "").strip()
+        label = _record_label(record)
+        for candidate in candidates:
+            text = str(candidate.get("direction") or "")
+            key = normalize_direction_text(text)
+            if not key or key in seen or _covers_same_direction(text, investigated):
+                continue
+            seen.add(key)
+            enriched = dict(candidate)
+            # Resolve prerequisites once, here, and keep the resolved text. A
+            # carried candidate re-stored by a later gate keeps ids minted by the
+            # gate that first issued it, so re-resolving them against a later
+            # gate's id space names an unrelated direction.
+            if "unmet_prerequisites" not in enriched:
+                unmet: List[str] = []
+                for prereq_id in as_list(candidate.get("prerequisite_dependencies")):
+                    prereq_text = text_by_id.get(str(prereq_id), "")
+                    if not prereq_text:
+                        # A dangling id is an unknown prerequisite, not a
+                        # direction named after the id token.
+                        continue
+                    if not _covers_same_direction(prereq_text, investigated):
+                        unmet.append(prereq_text)
+                enriched["unmet_prerequisites"] = unmet
+            enriched["prerequisites_satisfied"] = not enriched.get("unmet_prerequisites")
+            enriched.setdefault("carried_from_gate", label)
+            declined = _declined_reason(record, text)
+            if declined:
+                enriched["previously_declined"] = declined
+            enriched["_carry_recency"] = order
+            carried.append(enriched)
+    return carried
+
+
+def merge_unpursued_candidates(
+    state: Any,
+    fresh_candidates: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Append earlier gates' unpursued candidates to a freshly generated batch.
+
+    Freshly generated candidates keep their order and precedence: one that
+    restates a carried direction wins, because it was written against the
+    current evidence. Carried candidates follow, those whose prerequisites have
+    since been satisfied first and, within that, the most recently deferred
+    first -- the cap must not spend every slot on the oldest gate's backlog and
+    cut the directions the last gate just held back.
+    """
+    fresh = [c for c in (fresh_candidates or []) if isinstance(c, dict)]
+    covered = [normalize_direction_text(c.get("direction")) for c in fresh]
+    carried = [
+        candidate
+        for candidate in unpursued_prior_candidates(state)
+        if not _covers_same_direction(str(candidate.get("direction") or ""), covered)
+    ]
+    carried.sort(
+        key=lambda c: (not c.get("prerequisites_satisfied", False), c.get("_carry_recency", 0))
+    )
+    for candidate in carried:
+        candidate.pop("_carry_recency", None)
+    return fresh + carried[:MAX_CARRIED_CANDIDATES]
+
+
+# --- fitting a candidate list into a prompt ---------------------------------
+
+# Fields a gate reasons over, most decisive first. A candidate that cannot have
+# all of them loses its least decisive ones, never its place in the list. The
+# first two are the identity and are always emitted: a candidate the model
+# cannot name is one it can neither score nor reject.
+CANDIDATE_PROMPT_FIELDS: Sequence[str] = (
+    "direction_id",
+    "direction",
+    "core_observation",
+    "main_hypothesis",
+    "rationale",
+    "functional_impact_hypothesis",
+    "key_genes",
+    "key_pathways",
+    "key_cell_types",
+    "supporting_data",
+    "alternative_hypotheses",
+    "artifact_risks",
+    "prerequisite_dependencies",
+    "unmet_prerequisites",
+    "carried_from_gate",
+    "previously_declined",
+    "risk_flags",
+    "novelty_score",
+    "literature_novelty",
+    "evidence_strength",
+    "confidence",
+    "priority_rank",
+    "report_recommendation",
+)
+
+# The novelty record's verdict and its caveats. The per-article dumps and the
+# full query strings are the bulk of the record and none of them change a
+# scoring decision, so they are not sent.
+EVIDENCE_PROMPT_FIELDS: Sequence[str] = (
+    "direction_id",
+    "novelty_status",
+    "prior_art_level",
+    "support_level",
+    "contradiction_level",
+    "direct_evidence_count",
+    "analogous_evidence_count",
+    "contradictory_evidence_count",
+    "species_tissue_qualification",
+    "gap_assessment",
+    "summary",
+    "limitations",
+    "scheduler_limitation",
+    "fallback_tier",
+    "timed_out",
+)
+
+
+def _shorten(value: Any, budget: int) -> Any:
+    """A JSON-serialisable copy of ``value`` that fits in about ``budget`` chars."""
+    if budget <= 0:
+        return None
+    if isinstance(value, str):
+        if len(value) <= budget:
+            return value
+        return value[: max(1, budget - 3)].rstrip() + "..."
+    if isinstance(value, list):
+        kept: List[Any] = []
+        used = 2
+        for item in value:
+            piece = _shorten(item, budget - used)
+            if piece is None:
+                break
+            used += len(json.dumps(piece, ensure_ascii=False)) + 1
+            if used > budget:
+                break
+            kept.append(piece)
+        return kept
+    if isinstance(value, dict):
+        kept_map: Dict[str, Any] = {}
+        used = 2
+        for key, item in value.items():
+            piece = _shorten(item, budget - used - len(str(key)) - 6)
+            if piece is None:
+                break
+            used += len(json.dumps({str(key): piece}, ensure_ascii=False))
+            if used > budget:
+                break
+            kept_map[str(key)] = piece
+        return kept_map
+    return value
+
+
+def budgeted_prompt_block(
+    items: Optional[Sequence[Dict[str, Any]]],
+    fields: Sequence[str],
+    budget: int,
+    *,
+    floor: int = 320,
+) -> str:
+    """Render every item as JSON, shortening each to its share of ``budget``.
+
+    ``json.dumps(items)[:budget]`` keeps the first entry or two whole and removes
+    the rest without a trace. The model cannot keep, score, or reject an entry it
+    never received, so a prompt built that way silently decides the outcome for
+    everything past the cut. Here each item gets a slot and what does not fit is
+    dropped from inside that item, tail-first, leaving a count behind.
+
+    The block may exceed ``budget`` when there are more items than ``floor``
+    allows for; every item appearing is the property worth keeping.
+    """
+    entries = [item for item in (items or []) if isinstance(item, dict)]
+    if not entries:
+        return "[]"
+    share = max(floor, budget // len(entries))
+    rendered: List[Dict[str, Any]] = []
+    for item in entries:
+        kept: Dict[str, Any] = {}
+        omitted = 0
+        used = 2
+        for field in fields:
+            value = item.get(field)
+            if value is None or value == "" or value == [] or value == {}:
+                continue
+            piece = _shorten(value, max(0, share - used - len(field) - 6))
+            if piece is None or piece == "" or piece == [] or piece == {}:
+                omitted += 1
+                continue
+            kept[field] = piece
+            used = len(json.dumps(kept, ensure_ascii=False))
+        for field in fields[:2]:
+            if field not in kept and item.get(field) not in (None, ""):
+                kept[field] = item.get(field)
+        if omitted:
+            kept["fields_omitted_for_prompt_budget"] = omitted
+        rendered.append(kept)
+    return json.dumps(rendered, ensure_ascii=False, indent=1)
 
 
 def _collect(candidate: Optional[Dict[str, Any]], fields: Sequence[str]) -> List[str]:

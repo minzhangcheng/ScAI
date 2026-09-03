@@ -6,7 +6,16 @@ from typing import Dict, Any, List
 import json
 import logging
 
+from ...utils.direction_payload import (
+    CANDIDATE_PROMPT_FIELDS,
+    budgeted_prompt_block,
+    investigated_direction_texts,
+)
 from ...utils.formatting import as_list
+
+# The selection step is the only place a direction can now be turned down, so
+# its candidate list is never shortened by dropping entries.
+SELECTION_CANDIDATE_BUDGET = 20000
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -295,7 +304,7 @@ Select directions that respect dependency ordering: dependent directions should 
 {exploration_context}
 {dependency_graph_section}
 ## Candidates
-{json.dumps(candidates, ensure_ascii=False, indent=2)}
+{budgeted_prompt_block(candidates, CANDIDATE_PROMPT_FIELDS, SELECTION_CANDIDATE_BUDGET)}
 
 Select the direction(s) — usually 1 to 2 — that together provide the most informative outcomes while respecting prerequisite dependencies. If no candidate clears the reliability bar, it is a valid and useful answer to select none and say what would have to be measured or resolved first; do not promote a weak candidate merely to fill the slot.
 
@@ -307,7 +316,7 @@ SELECTION CRITERIA:
 2. **Innovation + Novelty** raise priority only after reliability and artifact risk have been
    accounted for. Discount any novelty claim by the candidate's artifact_risk and
    data_sufficiency; a high-novelty, high-artifact-risk candidate ranks below a solid one.
-3. Selected directions should ideally be complementary (not redundant)
+3. Selected directions should ideally be complementary (not redundant), and selected_directions must be listed in priority order, most important first
 4. Consider the dependency graph: if a direction has prerequisites, ensure its prerequisites are also selected or the direction is independently viable
 5. For each rejected direction, provide an explanation
 
@@ -402,8 +411,14 @@ Return JSON:
                 for prereq_id in as_list(cand.get("prerequisite_dependencies")):
                     prereq_text = text_by_id.get(prereq_id)
                     if prereq_text and prereq_text not in selected_texts:
+                        # Tagged, not just described: a per-gate direction cap
+                        # slices the tail of this list, which is exactly where
+                        # promoted prerequisites land. Without a field to read,
+                        # the cap commits the dependent and defers the thing it
+                        # depends on.
                         selected.append({"direction": prereq_text,
-                                         "notes": f"Added to satisfy prerequisite of '{d.get('direction', '')}'."})
+                                         "notes": f"Added to satisfy prerequisite of '{d.get('direction', '')}'.",
+                                         "prerequisite_for": d.get("direction", "")})
                         selected_texts.add(prereq_text)
                         changed = True
 
@@ -447,7 +462,10 @@ Return JSON:
                 "selection_rationale": "No integration candidates available; proceeding to final report.",
             }
 
-        already_chosen = [d.get("direction", "") for d in (state.user_chosen_directions or [])]
+        # Not user_chosen_directions: that field holds only the most recent
+        # batch, so every earlier cycle's choices would be invisible here and an
+        # already-investigated direction could come back as "new".
+        already_chosen = investigated_direction_texts(state)
         rounds_block = []
         for rr in (state.round_results or []):
             if getattr(rr, "phase", None) != "innovation":
@@ -475,18 +493,24 @@ Return JSON:
 ## Innovation Rounds (cumulative)
 {chr(10).join(rounds_block) if rounds_block else "No innovation rounds yet."}
 
-## Integration Direction Candidates (scored by novelty and evidence)
-{json.dumps(scored_candidates, ensure_ascii=False, indent=2)}
+## Integration Direction Candidates (ranked by the scoring step, not filtered by it)
+{budgeted_prompt_block(scored_candidates, CANDIDATE_PROMPT_FIELDS, SELECTION_CANDIDATE_BUDGET)}
+
+A candidate carrying "carried_from_gate" was proposed at an earlier gate and never run; one carrying "previously_declined" was turned down there, with the reason given. Neither is a verdict you have to keep: the results that have arrived since are exactly what could change the answer. A "risk_flags" entry of "unscored_by_gate" means the scoring step did not return that candidate and it reached you unranked, which says nothing about its merit.
 
 ## Already-Investigated Directions (DO NOT repeat)
 {json.dumps(already_chosen, ensure_ascii=False)}
 
-Evaluate each candidate direction. Select ONLY those that are:
-1. Genuinely NOVEL relative to already-investigated directions
-2. Well-supported by concrete evidence from the integration analysis
-3. Likely to yield meaningful new biological insights
+Evaluate each candidate direction. Select those that are:
+1. Genuinely NEW relative to the already-investigated directions listed above
+2. Answerable by analyses a further round could actually run on the data this project has
+3. Likely to yield meaningful new biological insight
 
-IMPORTANT: If none of the candidates are sufficiently novel and evidence-supported, return an EMPTY selected_directions list. It is better to proceed to the final report than to pursue a direction that lacks solid evidence.
+On criterion 2, separate two kinds of thin evidence, because only one of them is a reason to stop. A direction this project's own results already argue against is not worth a round. A direction that is merely unmeasured is the opposite case: no round has tested it, and running it is what would produce the evidence. Never reject a direction for lacking evidence that only running it could produce. Prior-art volume is not a verdict either; a well-studied mechanism can still be the unanswered question in this project. Judge a direction on whether this project's data can speak to it, and rank one that addresses the stated research objective head-on above one that does not.
+
+IMPORTANT: An EMPTY selected_directions list is the right answer when every candidate repeats work already done, is contradicted by this project's own results, or cannot be advanced with the data available. It is not the right answer merely because the candidates are unproven -- being unproven is the reason to run a round, not to skip one.
+
+List selected_directions in priority order, most important first: when a run has a per-gate direction cap, that order is what decides which ones run now.
 
 Return JSON:
 {{

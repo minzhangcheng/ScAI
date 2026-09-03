@@ -21,6 +21,13 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ROUND_WAIT_SECONDS: int = 300
 
+# How many directions one PI-decide gate may commit to at once. Both gates
+# extend max_rounds by exactly the number of directions selected, so an
+# ambitious selection multiplies a run's wall clock with nobody having chosen
+# that trade. 0 means no ceiling, which is the shipped default: how long a run
+# may grow is the operator's call, not a constant's.
+DEFAULT_MAX_DIRECTIONS_PER_GATE: int = 0
+
 # Sequencing data type constants
 DATA_TYPE_SCRNASEQ = "scRNA-seq"
 DATA_TYPE_BULK_RNASEQ = "bulk RNA-seq"
@@ -149,6 +156,7 @@ class AnalysisState(BaseModel):
     max_rounds: int = 3  # User-configurable maximum rounds
     original_max_rounds: Optional[int] = Field(default=None)  # Preserved during stop to avoid clobbering max_rounds
     round_wait_seconds: int = DEFAULT_ROUND_WAIT_SECONDS  # Countdown seconds between rounds (-1=manual, 0=no wait)
+    max_directions_per_gate: int = DEFAULT_MAX_DIRECTIONS_PER_GATE  # 0 = no ceiling
     plan_review_wait_seconds: int = -1
     auto_approve_plans: bool = False
     allow_partial_report: bool = False
@@ -442,6 +450,7 @@ class AnalysisState(BaseModel):
         "current_round": "current_round",
         "max_rounds": "max_rounds",
         "round_wait_seconds": "round_wait_seconds",
+        "max_directions_per_gate": "max_directions_per_gate",
         "waiting_input_started_at": "waiting_input_started_at",
         "created_at": "created_at",
         "updated_at": "updated_at",

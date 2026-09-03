@@ -124,6 +124,143 @@ def _selected_directions_from_decision(selection_decision):
     return selection_decision if isinstance(selection_decision, list) else []
 
 
+def _declined_directions(selection_decision) -> list:
+    """What the gate turned down, in the shape the record stores.
+
+    Both selectors already return this; it was thrown away. A later gate that
+    re-offers the direction then has no idea it was ever weighed, and the report
+    cannot tell a direction nobody considered from one that was considered and
+    declined.
+    """
+    if not isinstance(selection_decision, dict):
+        return []
+    declined = []
+    for entry in selection_decision.get("rejected_directions") or []:
+        if not isinstance(entry, dict):
+            continue
+        direction = str(entry.get("direction", "")).strip()
+        if not direction:
+            continue
+        declined.append({
+            "direction": direction,
+            "reason_not_selected": str(entry.get("reason_not_selected", ""))[:1000],
+            "follow_up_value": str(entry.get("follow_up_value", "")),
+            "dependency_note": str(entry.get("dependency_note", ""))[:500],
+        })
+    return declined
+
+
+def _direction_budget(state) -> int:
+    """The session's per-gate direction cap; 0 (the default) means no cap."""
+    try:
+        return max(0, int(getattr(state, "max_directions_per_gate", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_promoted_prerequisite(direction) -> bool:
+    return bool(isinstance(direction, dict) and str(direction.get("prerequisite_for") or "").strip())
+
+
+def _selected_directions_within_budget(selection_decision, state=None):
+    """Split a PI gate's selection into what runs now and what waits.
+
+    Returns ``(committed, deferred)``. With no cap configured -- the default --
+    everything the PI selected is committed and nothing is deferred.
+
+    When a cap is set, two things govern what is cut:
+
+    * The PI's own ordering. ``selected_directions`` carries no rank, so its
+      order is the ranking, and the prompt asks for it to be given in priority
+      order.
+    * A prerequisite that ``select_best_directions`` promoted into the selection
+      is never cut, even past the cap. The closure appends promoted
+      prerequisites after the directions that depend on them, so a plain slice
+      removes precisely the direction that has to run first and commits the ones
+      that cannot run without it.
+
+    Deferred directions are not discarded: the gate records its full candidate
+    list, so the next integration gate offers them again through
+    ``unpursued_prior_candidates``.
+
+    Applies to the PI's own decisions only. An explicit user selection is an
+    instruction rather than a proposal and is installed unbudgeted.
+    """
+    selected = _selected_directions_from_decision(selection_decision)
+    limit = _direction_budget(state)
+    if limit <= 0 or len(selected) <= limit:
+        return list(selected), []
+
+    proposed = [d for d in selected if not _is_promoted_prerequisite(d)]
+    promoted = [d for d in selected if _is_promoted_prerequisite(d)]
+
+    def closure(direction) -> list:
+        """A direction plus every promoted prerequisite it transitively needs."""
+        chain = [direction]
+        chain_texts = {str(direction.get("direction", "")).strip()}
+        changed = True
+        while changed:
+            changed = False
+            for candidate in promoted:
+                text = str(candidate.get("direction", "")).strip()
+                if text in chain_texts:
+                    continue
+                if str(candidate.get("prerequisite_for", "")).strip() in chain_texts:
+                    chain.append(candidate)
+                    chain_texts.add(text)
+                    changed = True
+        return chain
+
+    # A promoted prerequisite is a full round too, so it counts against the cap
+    # rather than riding along free. A direction whose chain does not fit is
+    # deferred whole: committing it without its prerequisite is exactly the
+    # inversion the closure exists to prevent.
+    committed: list = []
+    committed_texts: set = set()
+    for direction in proposed:
+        text = str(direction.get("direction", "")).strip()
+        if text in committed_texts:
+            continue
+        chain = [d for d in closure(direction)
+                 if str(d.get("direction", "")).strip() not in committed_texts]
+        if len(committed) + len(chain) > limit:
+            continue
+        committed.extend(chain)
+        committed_texts.update(str(d.get("direction", "")).strip() for d in chain)
+
+    if not committed and proposed:
+        # A cap must never turn a real selection into no selection: downstream
+        # that reads as the PI choosing to stop, which is a different decision.
+        committed = closure(proposed[0])
+        committed_texts = {str(d.get("direction", "")).strip() for d in committed}
+
+    deferred = [
+        d for d in selected
+        if str((d or {}).get("direction", "")).strip() not in committed_texts
+    ]
+    return committed, deferred
+
+
+def note_deferred_directions(rationale: str, deferred, limit: int) -> str:
+    """Record in the gate's rationale which directions the cap held back.
+
+    Without this the record shows a shortened selection and no trace that the PI
+    had asked for more, which reads as a scientific judgement it never made.
+    """
+    names = [
+        str((d or {}).get("direction", "")).strip()
+        for d in (deferred or [])
+        if str((d or {}).get("direction", "")).strip()
+    ]
+    if not names:
+        return rationale
+    note = (
+        f"Held back by this session's per-gate cap of {limit} direction(s); "
+        f"offered again at the next integration gate: " + "; ".join(names)
+    )
+    return f"{rationale} {note}".strip() if rationale else note
+
+
 def populate_plan_scope(plan: AnalysisPlan, state: AnalysisState) -> AnalysisPlan:
     direction = state.current_round_direction or ""
     plan.round_number = state.current_round

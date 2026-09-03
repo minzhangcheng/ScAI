@@ -6,8 +6,19 @@ from typing import Dict, Any, List
 import json
 import logging
 
+from ...utils.direction_payload import (
+    CANDIDATE_PROMPT_FIELDS,
+    EVIDENCE_PROMPT_FIELDS,
+    budgeted_prompt_block,
+    investigated_direction_texts,
+)
 from ...utils.formatting import safe_parse_json_array
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
+
+# How much of the scoring prompt the candidate list and the novelty records may
+# use. Both blocks give every entry a slot rather than cutting the list short.
+SCORER_CANDIDATE_BUDGET = 16000
+SCORER_EVIDENCE_BUDGET = 6000
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -21,6 +32,7 @@ from .shared import (  # noqa: F401
     _normalize_supporting_data,
     _normalize_direction_candidate,
     _normalize_integration_scored_candidates,
+    _restore_unscored_candidates,
     _bounded_brief_fallback,
     _format_database_priors_block,
     _build_default_bio_tasks,
@@ -197,7 +209,10 @@ Return a JSON object with a single key "candidates" containing the list of candi
         innovation rounds (round 2..current). Excludes already-chosen directions
         (dedup). Output field schema matches generate_raw_direction_candidates."""
         self.reset_history()
-        already_chosen = [d.get("direction", "") for d in (state.user_chosen_directions or [])]
+        # Not user_chosen_directions: that field holds only the most recent
+        # batch, so every earlier cycle's choices would be invisible here and an
+        # already-investigated direction could come back as "new".
+        already_chosen = investigated_direction_texts(state)
         rounds_block = []
         for rr in cumulative_rounds:
             rounds_block.append(
@@ -304,33 +319,68 @@ Return a JSON array. Return [] if no sufficiently novel direction exists."""
         if not raw_candidates:
             return []
         self.reset_history()
+        candidate_count = len(raw_candidates)
         prompt = f"""You are the PI scoring NEW research direction candidates that emerged from cross-direction integration.
 
 ## Project Context
 - Name: {state.name}
 - Research Objective: {state.initial_instruction}
 
-## Raw Direction Candidates
-{json.dumps(raw_candidates, ensure_ascii=False)[:8000]}
+## Direction Candidates ({candidate_count} in total, every one of them listed)
+{budgeted_prompt_block(raw_candidates, CANDIDATE_PROMPT_FIELDS, SCORER_CANDIDATE_BUDGET)}
 
 ## Literature Novelty Evidence (per candidate)
-{json.dumps(literature_evidence, ensure_ascii=False)[:6000]}
+{budgeted_prompt_block(literature_evidence, EVIDENCE_PROMPT_FIELDS, SCORER_EVIDENCE_BUDGET)}
 
-For each candidate, add:
+Score every one of the {candidate_count} candidates. Return all {candidate_count}; this step ranks, it does not filter. Selecting which directions to pursue happens in a later step that reads your ranking, and a candidate missing from your reply cannot be reconsidered there.
+
+For each candidate, keep every field it already has and add:
 - novelty_score: 0-10 (higher = more novel vs existing literature)
 - evidence_strength: "strong" | "moderate" | "weak"
 - confidence: "high" | "medium" | "low"
 - report_recommendation: "headline" | "secondary" | "future_direction" | "do_not_emphasize"
-- priority_rank: integer (1 = highest)
-Keep every original field. Drop candidates that are NOT novel (already established in literature) or lack observed supporting data.
+- priority_rank: integer, 1 = highest, each candidate a distinct rank
 
-Return the surviving candidates as a JSON array, sorted by priority_rank ascending."""
-        response = await self.chat(prompt, temperature=0.3)
-        # This prompt contracts for a top-level JSON array; the dict parser drops valid arrays.
-        data = safe_parse_json_array(response, default=[])
-        if not isinstance(data, list):
-            return []
-        return _normalize_integration_scored_candidates(data, raw_candidates)
+Two things to weigh, neither of which lowers a candidate below another on its own:
+- Prior-art volume. A heavily published mechanism means the field is active, not that the question is answered for this project. Let it inform novelty_score. When the novelty record is unknown, timed out, or absent, prior-art volume is the only signal left and it settles nothing.
+- Absence of observed supporting data. These candidates are directions no round has run, so by construction none of them has observed support yet. Producing that support is what running the direction is for. Record the shortfall in evidence_strength and confidence.
+
+Rank a candidate that speaks directly to the stated research objective above one that does not.
+
+Return a JSON array of all {candidate_count} candidates, sorted by priority_rank ascending."""
+        data: List[Any] = []
+        readable = False
+        for attempt in range(2):
+            response = await self.chat(prompt, temperature=0.3)
+            # This prompt contracts for a top-level JSON array; the dict parser drops valid arrays.
+            data = safe_parse_json_array(response, default=[])
+            readable = isinstance(data, list) and bool(data)
+            if readable:
+                break
+            logger.warning(
+                "[PI] Integration-scoring response unreadable (attempt %s/2)", attempt + 1
+            )
+        if not readable:
+            # Every sibling call on this path retries and then says which of the two
+            # things happened. Returning [] here would hand the integration node an
+            # empty candidate list, which it reports as "no sufficiently novel
+            # direction remains" -- a scientific conclusion drawn from a parse error.
+            self.last_candidate_scoring_error = (
+                "DIRECTION SCORING UNAVAILABLE: the PI's scoring response could not be "
+                "read after a retry, so the candidates carry no ranking. This is a "
+                "tooling failure, not a judgement about the candidates; all of them are "
+                "passed on unranked."
+            )
+            logger.error(
+                "[PI] Integration scoring unreadable after retry; passing candidates on unranked"
+            )
+            return _restore_unscored_candidates([], raw_candidates)
+        self.last_candidate_scoring_error = None
+        scored = _normalize_integration_scored_candidates(data, raw_candidates)
+        # Ranking is not a licence to remove. An omission here is unrecoverable --
+        # nothing downstream rereads raw_candidates -- so it is repaired rather
+        # than read as a verdict.
+        return _restore_unscored_candidates(scored, raw_candidates)
 
     async def score_directions_with_evidence(
         self,
@@ -372,7 +422,7 @@ Return the surviving candidates as a JSON array, sorted by priority_rank ascendi
 {json.dumps(raw_candidates, ensure_ascii=False, indent=2)}
 
 ## Literature Evidence
-{json.dumps(literature_evidence, ensure_ascii=False, indent=2) if literature_evidence else "No literature evidence provided."}
+{budgeted_prompt_block(literature_evidence, EVIDENCE_PROMPT_FIELDS, SCORER_EVIDENCE_BUDGET) if literature_evidence else "No literature evidence provided."}
 
 ### PI SCORING RULES
 

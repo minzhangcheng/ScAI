@@ -67,7 +67,8 @@ class TestAnalysisStateApiDictRoundTrip:
         # These are all the keys the frontend load_session endpoint expects
         expected_keys = {
             "session_id", "user_id", "name", "status", "current_round",
-            "max_rounds", "round_wait_seconds", "waiting_input_started_at",
+            "max_rounds", "round_wait_seconds", "max_directions_per_gate",
+            "waiting_input_started_at",
             "created_at", "updated_at", "initial_instruction",
             "treatment_groups", "data_files", "biochemistry_indicators",
             "round_results", "final_summary",

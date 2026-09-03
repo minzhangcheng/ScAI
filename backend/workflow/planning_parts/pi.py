@@ -344,7 +344,9 @@ async def build_pi_instructions(self, ctx, state):
                         analysis_state.integration_gate_candidates,
                         analysis_state.multi_direction_correlation or "",
                     )
-                    selected_dirs = _selected_directions_from_decision(selection_decision)
+                    selected_dirs, deferred_dirs = _selected_directions_within_budget(
+                        selection_decision, analysis_state
+                    )
 
                     # Close or create the integration pi_decide record.
                     # IMPORTANT: Do NOT use populate_direction_record_from_state here!
@@ -371,7 +373,12 @@ async def build_pi_instructions(self, ctx, state):
                         for d in selected_dirs
                     ]
                     _rec.event_type = "pi_decide"
-                    _rec.selection_rationale = _selection_rationale(selection_decision)
+                    _rec.declined = _declined_directions(selection_decision)
+                    _rec.selection_rationale = note_deferred_directions(
+                        _selection_rationale(selection_decision),
+                        deferred_dirs,
+                        _direction_budget(analysis_state),
+                    )
                     _rec.decision_outcome = _decision_outcome(
                         selection_decision, selected_dirs, _rec.selection_rationale
                     )
@@ -416,7 +423,9 @@ async def build_pi_instructions(self, ctx, state):
                     # Round 1 direction selection (exploration gate PI_DECIDE)
                     logger.info(f"[{self.session_id}] Innovation phase: PI selecting best directions")
                     selection_decision = await self.pi_agent.select_best_directions(analysis_state)
-                    selected_dirs = _selected_directions_from_decision(selection_decision)
+                    selected_dirs, deferred_dirs = _selected_directions_within_budget(
+                        selection_decision, analysis_state
+                    )
                     rec = find_open_pi_decide_record(analysis_state)
                     if rec is None:
                         rec = get_or_open_direction_record(
@@ -432,14 +441,27 @@ async def build_pi_instructions(self, ctx, state):
                         for d in selected_dirs
                     ]
                     rec.event_type = "pi_decide"
-                    rec.selection_rationale = _selection_rationale(selection_decision)
+                    rec.declined = _declined_directions(selection_decision)
+                    rec.selection_rationale = note_deferred_directions(
+                        _selection_rationale(selection_decision),
+                        deferred_dirs,
+                        _direction_budget(analysis_state),
+                    )
                     rec.decision_outcome = _decision_outcome(
                         selection_decision, selected_dirs, rec.selection_rationale
                     )
                     if rec.decision_outcome == "tooling_failure":
                         _note_round_evidence(analysis_state, rec.selection_rationale)
                     if analysis_state.exploration_report and isinstance(selection_decision, dict):
-                        analysis_state.exploration_report.direction_selection_summary = selection_decision
+                        # What the gate committed, not what the model asked for:
+                        # this summary is copied verbatim into the snapshot gate
+                        # capsule, so a restored session would otherwise show
+                        # directions the cap had already held back.
+                        analysis_state.exploration_report.direction_selection_summary = {
+                            **selection_decision,
+                            "selected_directions": list(selected_dirs),
+                            "deferred_directions": list(deferred_dirs),
+                        }
                     instructions, skip_nodes = await _apply_round1_direction_selection(
                         self, analysis_state, selected_dirs
                     )

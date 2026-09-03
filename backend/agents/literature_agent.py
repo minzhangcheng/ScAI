@@ -80,9 +80,12 @@ class LiteratureAgent(
 
     # Upper bounds on the per-query / per-direction budget for the cheap
     # minimum-attempt fallback path, so a slow fallback can't consume the full
-    # budget meant for the primary evaluation.
-    MIN_ATTEMPT_QUERY_TIMEOUT = 10.0
-    MIN_ATTEMPT_DIRECTION_TIMEOUT = 15.0
+    # budget meant for the primary evaluation. They still have to be large
+    # enough for one triage call to finish: at 10s/15s the fallback timed out
+    # before any model could answer, which turned "cheap" into "guaranteed
+    # unknown".
+    MIN_ATTEMPT_QUERY_TIMEOUT = 60.0
+    MIN_ATTEMPT_DIRECTION_TIMEOUT = 150.0
 
     # Citation guidance for the deep_research-LLM prompt. Deliberately format-agnostic:
     # _extract_references_from_text accepts BOTH end-of-text "[N] Title URL" lists and

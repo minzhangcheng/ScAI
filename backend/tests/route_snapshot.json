@@ -1013,5 +1013,17 @@
       "GET",
       "HEAD"
     ]
+  ],
+  [
+    "/api/session/{session_id}/max-directions-per-gate",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/max-directions-per-gate",
+    [
+      "GET"
+    ]
   ]
 ]

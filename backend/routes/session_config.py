@@ -10,7 +10,12 @@ from backend.models.api_requests import (
     VisionSettingUpdateRequest, LiteratureConfigRequest, AgentServerConfigRequest,
     AgentSettingsUpdateRequest,
 )
-from backend.models.schemas import AnalysisState, APIResponse, DEFAULT_ROUND_WAIT_SECONDS
+from backend.models.schemas import (
+    AnalysisState,
+    APIResponse,
+    DEFAULT_MAX_DIRECTIONS_PER_GATE,
+    DEFAULT_ROUND_WAIT_SECONDS,
+)
 from backend.services.agent_default_secrets import (
     agent_default_secrets_lock,
     load_agent_default_secrets,
@@ -149,6 +154,12 @@ class MaxRoundsRequest(BaseModel):
 
 class RoundWaitRequest(BaseModel):
     round_wait_seconds: int = Field(ge=-1, le=3600, default=DEFAULT_ROUND_WAIT_SECONDS)
+
+
+class MaxDirectionsPerGateRequest(BaseModel):
+    max_directions_per_gate: int = Field(
+        ge=0, le=20, default=DEFAULT_MAX_DIRECTIONS_PER_GATE
+    )
 
 
 @router.post("/session/{session_id}/prompts")
@@ -292,6 +303,37 @@ async def get_max_rounds(session_id: str, request: Request):
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
     return {"max_rounds": state.max_rounds}
+
+
+@router.post("/session/{session_id}/max-directions-per-gate")
+async def update_max_directions_per_gate(
+    session_id: str, request: Request, body: MaxDirectionsPerGateRequest
+):
+    """Cap how many directions one PI-decide gate may commit to (0 = no cap)."""
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    async with get_session_lock(session_id):
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
+        state.max_directions_per_gate = body.max_directions_per_gate
+        await update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
+
+    limit = body.max_directions_per_gate
+    return APIResponse(
+        success=True,
+        message=(
+            "Per-gate direction cap removed" if limit == 0
+            else f"Per-gate direction cap updated to {limit}"
+        ),
+    )
+
+
+@router.get("/session/{session_id}/max-directions-per-gate")
+async def get_max_directions_per_gate(session_id: str, request: Request):
+    """Get the current per-gate direction cap (0 = no cap)."""
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    return {"max_directions_per_gate": state.max_directions_per_gate}
 
 
 @router.post("/session/{session_id}/round-wait")
