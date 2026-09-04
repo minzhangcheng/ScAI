@@ -1450,3 +1450,58 @@ def test_all_undetermined_group_still_shows_declared_count_and_the_gap():
 
     assert "3 sample(s)" in detected_line
     assert "image" in undetermined_line and "file" in undetermined_line
+
+
+def test_the_reassurance_is_withheld_when_the_same_modality_is_also_unresolved():
+    """The note asserts a fact; the data must actually establish it.
+
+    Membership was tested against a global set of data types with no link to the
+    files being described, so two groups with detected bulk samples PLUS a
+    genuinely unassigned bulk file printed "it is not an additional unidentified
+    sample" directly above "detected counts not safely assignable to groups:
+    bulk RNA-seq: 2" -- and the assertive half was the wrong one. 0.52.4 was
+    written to stop a phantom sample being invented; this is the same error
+    mirrored, hiding a real one.
+    """
+    state = _state_with(
+        records=[
+            _rec("g1", "Con", "sequencing", "bulk RNA-seq", 3, 3, "matrix_columns"),
+            _rec("g2", "DKO", "sequencing", "bulk RNA-seq", 3, 3, "matrix_columns"),
+            _rec(None, "", "sequencing", "bulk RNA-seq", 2, None, "matrix_columns"),
+        ],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+        files=[DataFile(
+            filename="extra_cohort.csv", file_path="/tmp/extra_cohort.csv",
+            section="sequencing", data_type="bulk RNA-seq", group_id=None,
+        )],
+    )
+
+    summary = state.build_experimental_design_summary()
+
+    assert "detected counts not safely assignable to groups" in summary
+    assert "already counted in the groups above" not in summary
+
+
+def test_the_reassurance_survives_a_modality_spelled_two_ways():
+    """`SampleCountRecord.data_type` is written from a model's own words while
+    `DataFile.data_type` is the stored upload type, so "loom" and "scRNA-seq" are
+    one modality spelled twice. Every other comparison of the two goes through
+    `canonical_modality`; comparing raw strings made the note vanish silently
+    for the very uploads it was written for."""
+    state = _state_with(
+        records=[
+            _rec("g1", "Con", "sequencing", "scRNA-seq", 3, 3, "obs_column:sample"),
+            _rec("g2", "DKO", "sequencing", "scRNA-seq", 3, 3, "obs_column:sample"),
+        ],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+        files=[DataFile(
+            filename="all_samples.loom", file_path="/tmp/all_samples.loom",
+            section="sequencing", data_type="loom", group_id=None,
+        )],
+    )
+
+    summary = state.build_experimental_design_summary()
+
+    assert "already counted in the groups above" in summary

@@ -259,3 +259,90 @@ async def test_a_complete_body_asks_the_writer_for_nothing():
 
     assert client.calls == []
     assert ctx["missing_sections"] == []
+
+
+# ---------------------------------------------------------------------------
+# "Best effort" has to mean the whole pass. A recovery path that can raise turns
+# a publishable report missing its tail into no report at all, which is strictly
+# worse than not running it. The single exception is an exhausted upstream: the
+# workflow gate is where the user can Retry or change the report model.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_build_failure_still_publishes_the_report():
+    client = _client(lambda _kwargs: SimpleNamespace(content=_CONTINUATION_BODY))
+    agent = _agent(client)
+
+    def _explode(*_args, **_kwargs):
+        raise RuntimeError("narrative rebuild failed")
+
+    agent._build_report_prompt = _explode
+    ctx = _ctx(client)
+
+    await _run(agent, ctx)
+
+    assert client.calls == []
+    assert "direction_1" in _ids(ctx["sections"])
+    assert ctx["missing_sections"] == _UNWRITTEN
+
+
+@pytest.mark.asyncio
+async def test_a_parse_failure_on_the_continuation_still_publishes_the_report():
+    client = _client(lambda _kwargs: SimpleNamespace(content=_CONTINUATION_BODY))
+    agent = _agent(client)
+    ctx = _ctx(client)
+
+    real_parse = agent._parse_report_sections
+    seen = {"n": 0}
+
+    def _second_call_explodes(content, language, outline=None):
+        seen["n"] += 1
+        if seen["n"] > 1:
+            raise ValueError("continuation body is not parseable")
+        return real_parse(content, language, outline=outline)
+
+    agent._parse_report_sections = _second_call_explodes
+
+    await _run(agent, ctx)
+
+    assert len(client.calls) == 1
+    assert "direction_1" in _ids(ctx["sections"])
+    assert ctx["missing_sections"] == _UNWRITTEN
+
+
+@pytest.mark.asyncio
+async def test_an_exhausted_upstream_reaches_the_workflow_gate():
+    from backend.utils.llm_client import UpstreamExhaustedError
+
+    def _exhausted(_kwargs):
+        raise UpstreamExhaustedError("gateway gave up")
+
+    client = _client(_exhausted)
+    agent = _agent(client)
+    ctx = _ctx(client)
+
+    with pytest.raises(UpstreamExhaustedError):
+        await _run(agent, ctx)
+
+
+@pytest.mark.asyncio
+async def test_the_continuation_allocates_figures_over_the_whole_outline():
+    """Allocation decides ownership by round, over the whole report.
+
+    Handed only the pending sections it finds no claimant for any round an
+    already-written chapter owns, and lists those figures as free candidates —
+    inside the block the prompt labels BINDING. The recovered chapters then cite
+    figures that belong to chapters written in the first pass.
+    """
+    client = _client(lambda _kwargs: SimpleNamespace(content=_CONTINUATION_BODY))
+    agent = _agent(client)
+    ctx = _ctx(client)
+
+    await _run(agent, ctx)
+
+    kwargs = agent.prompt_calls[0]
+    assert [osec.id for osec in kwargs["outline"]] == _UNWRITTEN
+    assert [osec.id for osec in kwargs["figure_outline"]] == [
+        osec.id for osec in ctx["outline"]
+    ]

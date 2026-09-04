@@ -92,8 +92,17 @@ def _build_report_prompt(
     outline: Optional[Sequence["OutlineSection"]] = None,
     attribution: Optional[Dict[str, int]] = None,
     figure_metadata_by_stem: Optional[Dict[str, Dict[str, Any]]] = None,
+    figure_outline: Optional[Sequence["OutlineSection"]] = None,
 ) -> str:
-    """Build the prompt for the report-writing LLM."""
+    """Build the prompt for the report-writing LLM.
+
+    ``outline`` is what the model is asked to WRITE. ``figure_outline``, when
+    given, is the outline the figure allocation is computed from, and it must
+    stay the whole report's outline even when only part of it is being written:
+    allocation decides ownership by round, so a partial outline leaves every
+    figure of an unwritten-here chapter with no claimant and offers it to the
+    model as a free candidate inside a block labelled BINDING.
+    """
     attribution = attribution or {}
     figure_metadata_by_stem = figure_metadata_by_stem or publication_figure_metadata(
         state.publication_figures, report_only=True,
@@ -202,7 +211,7 @@ def _build_report_prompt(
     # figures are its own, so the model never has to infer round provenance
     # from a filename — the failure mode this replaces.
     figure_allocation = self._build_figure_allocation_text(
-        outline, figure_map, attribution
+        figure_outline or outline, figure_map, attribution
     )
 
     # Integration gates are hinges, not chapters — the 300-500 word floor
@@ -728,7 +737,12 @@ async def _request_unwritten_sections(
     Asking the writer to finish the chapters it planned is that agent's own
     work handed back to it, not a host gate over the science. It is therefore
     strictly best effort: one request, every failure swallowed, and whatever
-    is still absent afterwards is disclosed rather than enforced.
+    is still absent afterwards is disclosed rather than enforced. "Swallowed"
+    has to cover the whole pass — building the second prompt and parsing an
+    arbitrary continuation body included — because a recovery path that can
+    raise turns "a report missing its tail chapters", which is publishable,
+    into no report at all. The one exception is an exhausted upstream, which
+    the workflow's own gate must still see so the user can Retry or Skip.
     """
     language = ctx["language"]
     client = ctx["client"]
@@ -737,28 +751,33 @@ async def _request_unwritten_sections(
         for section in sections
         if str(section.get("content") or "").strip()
     ]
-    continuation = (
-        "## Continuation of an unfinished report\n"
-        "An earlier pass of this same report ended before it wrote every "
-        "planned section. These sections are already written and MUST NOT be "
-        "repeated, rewritten or referred to as pending: "
-        f"{', '.join(written) or 'none'}.\n"
-        "Write ONLY the sections listed below, in the same "
-        "`## [section_id] Title` format, and emit nothing else — no preamble, "
-        "no closing remarks, no sections outside that list.\n\n"
-    ) + self._build_report_prompt(
-        ctx.get("narrative", ""),
-        ctx.get("stats", {}),
-        analysis_state,
-        ctx["figure_map"],
-        language,
-        table_list=ctx.get("table_list"),
-        outline=list(pending),
-        attribution=ctx["attribution"],
-        figure_metadata_by_stem=ctx["figure_metadata_by_stem"],
-    )
 
     try:
+        continuation = (
+            "## Continuation of an unfinished report\n"
+            "An earlier pass of this same report ended before it wrote every "
+            "planned section. These sections are already written and MUST NOT be "
+            "repeated, rewritten or referred to as pending: "
+            f"{', '.join(written) or 'none'}.\n"
+            "Write ONLY the sections listed below, in the same "
+            "`## [section_id] Title` format, and emit nothing else — no preamble, "
+            "no closing remarks, no sections outside that list.\n\n"
+        ) + self._build_report_prompt(
+            ctx.get("narrative", ""),
+            ctx.get("stats", {}),
+            analysis_state,
+            ctx["figure_map"],
+            language,
+            table_list=ctx.get("table_list"),
+            outline=list(pending),
+            attribution=ctx["attribution"],
+            figure_metadata_by_stem=ctx["figure_metadata_by_stem"],
+            # Ownership is decided by round over the WHOLE report. Handing the
+            # allocation only the pending sections leaves every figure of an
+            # already-written chapter unclaimed, and the prompt then offers it to
+            # this pass as a free candidate — inside the block it calls BINDING.
+            figure_outline=ctx["outline"],
+        )
         client.set_context(self.session_id, "report_generator")
         response = await self._budgeted_text_call(
             client.chat,
@@ -773,6 +792,14 @@ async def _request_unwritten_sections(
             prefer_stream=True,
         )
         content = response.content or ""
+        parsed = self._parse_report_sections(
+            content, language, outline=ctx["outline"]
+        )
+    except UpstreamExhaustedError:
+        # The sibling first-pass call re-raises this for the same reason: the
+        # workflow HITL gate is where the user can retry, or change the report
+        # model, and swallowing it here spends that chance silently.
+        raise
     except Exception:
         logger.exception(
             f"[{self.session_id}] Could not ask the report writer to complete "
@@ -785,9 +812,7 @@ async def _request_unwritten_sections(
     wanted = {osec.id for osec in pending}
     recovered = {
         str(section.get("id") or ""): section
-        for section in self._parse_report_sections(
-            content, language, outline=ctx["outline"]
-        )
+        for section in parsed
         if str(section.get("id") or "") in wanted
         and str(section.get("content") or "").strip()
     }

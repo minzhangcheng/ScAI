@@ -450,3 +450,154 @@ def test_workflow_node_actually_calls_the_service():
     }
     assert "ensure_innovation_baseline_figures" in called
     assert "should_render_innovation_baselines" in called
+
+
+# ---------------------------------------------------------------------------
+# The vocabulary these panels are actually pointed at. The fixtures above are
+# DESeq2- and Enrichr-shaped; this platform's own executor is told to build
+# differential frames with `sc.get.rank_genes_groups_df`, whose columns are
+# names / scores / logfoldchanges / pvals / pvals_adj -- and every defect below
+# was invisible precisely because no fixture used them.
+# ---------------------------------------------------------------------------
+
+
+def _make_scanpy_de_table(rows=2000):
+    np = pytest.importorskip("numpy")
+    pd = pytest.importorskip("pandas")
+    rng = np.random.default_rng(3)
+    return pd.DataFrame({
+        "names": [f"gene_{i}" for i in range(rows)],
+        "scores": rng.normal(size=rows),
+        "logfoldchanges": rng.normal(scale=1.5, size=rows),
+        "pvals": rng.uniform(1e-12, 1.0, size=rows),
+        "pvals_adj": rng.uniform(1e-9, 1.0, size=rows),
+    })
+
+
+def test_the_volcano_uses_the_adjusted_p_value_when_the_table_has_one():
+    """None of the "adjusted" hints is a substring of scanpy's `pvals_adj`, while
+    the generic `pval` IS a substring of its `pvals`. Matching by hint order alone
+    handed the raw p-value to a panel that draws a 0.05 line and calls it
+    significance."""
+    parsed = _exec_probe({"marker_de": _make_scanpy_de_table()})
+
+    assert parsed is not None
+    assert parsed["de_tables"][0]["pval"] == "pvals_adj"
+
+
+def test_a_short_differential_table_produces_no_panel_at_all():
+    """A table too short to be an effect-size landscape is not one -- and it is
+    not a term enrichment either. `_TERM_HINTS` contains "name", which
+    substring-matches scanpy's `names`, so falling through published gene symbols
+    as a ranked bar chart of enriched terms. The executor is told to take per
+    cluster top-N frames, so short differential tables are routine."""
+    parsed = _exec_probe({"top20": _make_scanpy_de_table(rows=20)})
+
+    assert parsed is None, "a 20-row differential frame supports no baseline panel"
+
+
+def test_table_panels_survive_a_kernel_with_no_anndata():
+    """The volcano and the enrichment chart need only pandas. Sharing one try
+    with the AnnData scan meant an import failure there suppressed them too,
+    against this module's rule that a panel is suppressed only by its own
+    missing input."""
+    import sys
+
+    pytest.importorskip("pandas")
+    namespace = {"marker_de": _make_scanpy_de_table(), "go_bp": _make_enrichment_table()}
+
+    saved = sys.modules.get("anndata", "absent")
+    sys.modules["anndata"] = None
+    try:
+        parsed = _exec_probe(namespace)
+    finally:
+        if saved == "absent":
+            sys.modules.pop("anndata", None)
+        else:
+            sys.modules["anndata"] = saved
+
+    assert parsed is not None
+    assert [t["var"] for t in parsed["de_tables"]] == ["marker_de"]
+    assert [t["var"] for t in parsed["enrichment_tables"]] == ["go_bp"]
+    assert parsed["var"] == "" and parsed["score_keys"] == []
+
+
+def test_the_volcano_legend_counts_the_table_not_the_subsample():
+    """Points are thinned above a cap so the PNG stays renderable. Deriving the
+    legend from what survived stated a significant-feature count that was a
+    fraction of the truth, inside a figure registered as a platform diagnostic
+    and therefore never put in front of a reviewer."""
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    np = pytest.importorskip("numpy")
+
+    table = _make_scanpy_de_table(rows=200_000)
+    truth = int((
+        (-np.log10(table["pvals_adj"].to_numpy()) >= 1.30103)
+        & (np.abs(table["logfoldchanges"].to_numpy()) >= 1.0)
+    ).sum())
+    assert truth > 0
+
+    namespace = {"marker_de": table}
+    parsed = _exec_probe(namespace)
+    volcano = next(
+        spec for spec in build_innovation_baseline_figure_specs(parsed, round_number=2)
+        if spec.figure_type == "volcano"
+    )
+
+    plt.close("all")
+    exec(compile(volcano.code, "<volcano>", "exec"), namespace, namespace)
+    labels = [text.get_text() for text in namespace["_ib_ax"].get_legend().get_texts()]
+    plt.close("all")
+
+    assert any(f"{truth:,}" in label for label in labels), labels
+
+
+def _scored_adata(score_names, n_obs=200):
+    """An object whose obs carries the given score columns, in the given order."""
+    ad = pytest.importorskip("anndata")
+    np = pytest.importorskip("numpy")
+    pd = pytest.importorskip("pandas")
+    rng = np.random.default_rng(17)
+    obs = pd.DataFrame(
+        {"condition": np.repeat(["CON", "DKO"], n_obs // 2)},
+        index=[f"cell_{i}" for i in range(n_obs)],
+    )
+    for name in score_names:
+        obs[name] = rng.normal(size=n_obs)
+    return ad.AnnData(
+        X=rng.gamma(1.5, 1.0, size=(n_obs, 8)).astype("float32"),
+        obs=obs,
+        var=pd.DataFrame(index=[f"gene_{i}" for i in range(8)]),
+    )
+
+
+def test_the_score_panel_shows_this_rounds_scores_not_round_ones_qc():
+    """obs columns are appended as the analysis proceeds, so the tail is this
+    round's work. Truncating from the front kept round 1's doublet and cell-cycle
+    scores and dropped the signature the panel exists to show."""
+    adata = _scored_adata([
+        "doublet_score", "S_score", "G2M_score", "phase_score",
+        "stress_score", "redox_score", "copper_signature_score",
+    ])
+
+    parsed = _exec_probe({"adata": adata})
+
+    assert parsed is not None
+    assert "copper_signature_score" in parsed["score_keys"]
+    assert "doublet_score" not in parsed["score_keys"]
+
+
+def test_the_object_carrying_the_rounds_score_wins_over_the_bigger_one():
+    """A round that scores a subset leaves the full object with only the
+    inherited scores. Ranking by cell count picked the object the round's own
+    result is not on."""
+    full = _scored_adata(["doublet_score"], n_obs=400)
+    subset = _scored_adata(["doublet_score", "copper_signature_score"], n_obs=120)
+
+    parsed = _exec_probe({"adata": full, "adata_subset": subset})
+
+    assert parsed is not None
+    assert parsed["var"] == "adata_subset"
+    assert "copper_signature_score" in parsed["score_keys"]

@@ -27,6 +27,11 @@ logger = logging.getLogger(__name__)
 
 _MARKER = "measurement_extraction"
 
+# Every indicator ever minted is rendered into step 1's classification
+# prompt, which does not truncate. How many rows one figure may contribute
+# is therefore bounded here rather than left to whatever the model emits.
+_MAX_ROWS_PER_IMAGE = 60
+
 
 def analysis_fingerprint(bio_file: DataFile, analysis: str) -> str:
     """Identify the image version these measurements were read from.
@@ -96,11 +101,35 @@ def provenance_notes(filename: str, row: Dict[str, Any]) -> List[str]:
     annotation = clean_optional_text(row.get("statistical_annotation"))
     if annotation:
         notes.append(f"figure annotates {annotation}")
+    # Kept as prose, never as BiochemistryIndicator.sample_number -- see
+    # register_rows for why a replicate label read off a panel must not become
+    # the study's replicate count.
+    replicate = clean_optional_text(row.get("sample"))
+    if replicate:
+        notes.append(f"figure labels this reading {replicate!r}")
     return notes
 
 
+def extraction_is_readable(payload: Any) -> bool:
+    """Whether the extraction response can be read at all.
+
+    A readable answer carries ``results`` as a list; an EMPTY one is a real
+    answer about a qualitative panel, and the image is finished with. Anything
+    else means the response could not be read, and the two must not be
+    conflated: the once-only marker is permanent, so recording "nothing to
+    mint" for a response that was merely unparseable silences that image for
+    the rest of the session, including after the operator switches models.
+
+    The unreadable case is not hypothetical. ``_safe_parse_json`` returns the
+    FIRST balanced object it finds, so a model that answers with a bare JSON
+    array — observed behaviour on at least one configured vision model — yields
+    a single measurement row carrying no ``results`` key at all.
+    """
+    return isinstance(payload, dict) and isinstance(payload.get("results"), list)
+
+
 def usable_rows(payload: Any) -> List[Dict[str, Any]]:
-    """Keep the rows that carry a name and a real number."""
+    """Keep the rows that carry a name and a real number, bounded."""
     rows = payload.get("results") if isinstance(payload, dict) else None
     kept: List[Dict[str, Any]] = []
     for row in rows or []:
@@ -121,6 +150,12 @@ def usable_rows(payload: Any) -> List[Dict[str, Any]]:
             logger.warning("[BiochemistryImage] non-finite value for %r", indicator)
             continue
         kept.append({**row, "indicator": indicator, "value": value})
+        if len(kept) >= _MAX_ROWS_PER_IMAGE:
+            logger.warning(
+                "[BiochemistryImage] capping this image at %d measurement(s)",
+                _MAX_ROWS_PER_IMAGE,
+            )
+            break
     return kept
 
 
@@ -130,29 +165,52 @@ async def register_rows(agent, bio_file: DataFile, rows: List[Dict[str, Any]],
 
     ``reconcile_provenance`` already accepts a group label parsed from a file
     body when the upload declared none, and records that it did so. That is
-    exactly the image case: the label can only live inside the picture.
+    exactly the image case: the label can only live inside the picture — and
+    for an image it is authoritative, because one figure carries every group it
+    plots and so can be uploaded under only one of them. Left to the ordinary
+    declared-wins rule, a Control-vs-treated chart uploaded under either arm
+    mints both arms' bars under that one group and the comparison runs against
+    itself.
+
+    Replicate identity is deliberately NOT taken from the figure.
+    ``biochemistry_sample_counts`` derives a group's detected n from the
+    distinct ``sample_number`` values on its indicators and reports it as
+    authoritative over the declared design, so one replicate label read off a
+    panel of group means would restate the study as n=1. What the figure says
+    about replicates is kept in ``provenance_notes`` instead.
+
+    All or nothing: ``add_result`` commits to ``state`` as it goes, so a row
+    that raises part way would leave the earlier rows behind with no once-only
+    marker, and the next round would mint the whole figure again on top of them
+    — duplicates that read downstream as replicates the experiment never had.
     """
+    start = len(state.biochemistry_indicators)
     minted: List[str] = []
-    for row in rows:
-        group_id, sample_number, label, notes = reconcile_provenance(
-            file_group_id=bio_file.group_id,
-            file_sample_number=bio_file.sample_number,
-            row_group_label=row.get("group"),
-            row_sample_value=row.get("sample"),
-            state=state,
-        )
-        record = await agent.add_result(
-            indicator=row["indicator"],
-            value=row["value"],
-            unit=clean_optional_text(row.get("unit")) or "",
-            state=state,
-            reference_range=clean_optional_text(row.get("reference_range")),
-            group_id=group_id,
-            sample_number=sample_number,
-            source_group_label=label,
-            provenance_notes=provenance_notes(bio_file.filename, row) + notes,
-        )
-        minted.append(record.id)
+    try:
+        for row in rows:
+            group_id, sample_number, label, notes = reconcile_provenance(
+                file_group_id=bio_file.group_id,
+                file_sample_number=bio_file.sample_number,
+                row_group_label=row.get("group"),
+                row_sample_value=None,
+                state=state,
+                row_label_is_authoritative=True,
+            )
+            record = await agent.add_result(
+                indicator=row["indicator"],
+                value=row["value"],
+                unit=clean_optional_text(row.get("unit")) or "",
+                state=state,
+                reference_range=clean_optional_text(row.get("reference_range")),
+                group_id=group_id,
+                sample_number=sample_number,
+                source_group_label=label,
+                provenance_notes=provenance_notes(bio_file.filename, row) + notes,
+            )
+            minted.append(record.id)
+    except BaseException:
+        del state.biochemistry_indicators[start:]
+        raise
     return minted
 
 
@@ -167,8 +225,15 @@ async def extract_image_measurements(agent, state: AnalysisState,
     analyses: Dict[str, Optional[str]] = {}
     for bio_file in image_files:
         prior_marker = (bio_file.extracted_data or {}).get(_MARKER)
-        analysis = await agent._analyze_single_image(bio_file, instruction)
-        carry_marker_across_vision(bio_file, prior_marker)
+        try:
+            analysis = await agent._analyze_single_image(bio_file, instruction)
+        finally:
+            # The vision step also replaces ``extracted_data`` on the path where
+            # it RAISES: an exhausted upstream writes {"error": ...} and re-raises
+            # so the workflow's LLM-failure gate can offer Retry, and that retry
+            # re-enters this node. Restoring the marker unconditionally is what
+            # stops the retry from minting the same figure a second time.
+            carry_marker_across_vision(bio_file, prior_marker)
         analyses[bio_file.file_path] = analysis
         if not analysis:
             continue
@@ -186,9 +251,17 @@ async def extract_image_measurements(agent, state: AnalysisState,
                 image_measurement_extraction_prompt(bio_file.filename, analysis),
                 temperature=0.1,
             )
-            rows = usable_rows(
-                agent._safe_parse_json(response, agent_label="BiochemistryAgent")
+            payload = agent._safe_parse_json(
+                response, agent_label="BiochemistryAgent"
             )
+            if not extraction_is_readable(payload):
+                logger.warning(
+                    "[BiochemistryImage] unreadable extraction response for %s; "
+                    "leaving the image unmarked so a later round can retry",
+                    bio_file.filename,
+                )
+                continue
+            rows = usable_rows(payload)
             minted = await register_rows(agent, bio_file, rows, state)
         except UpstreamExhaustedError:
             raise

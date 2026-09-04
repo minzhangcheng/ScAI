@@ -75,9 +75,38 @@ class PlanAudit:
         """
         return [s for s in self.steps if s.missing_figure_kinds]
 
+    @property
+    def family_unmet(self) -> List[StepAudit]:
+        """Steps where the audit LOOKED for a named method and found none linked.
+
+        ``figure_unmet``'s counterpart, and for the same reason. Whether an
+        approved step's named method appears in this round's executions is a
+        technical observation about linkage; ``unmet`` carries the completion
+        verdict that ``host_execution_linkage`` mode leaves to the PI, so
+        routing this fact through it left ``unmet_families`` permanently empty
+        for exactly the rounds that run in that mode — while
+        ``missing_families`` was populated on every step there. The PI read
+        "no execution evidence 0" with no families line for a round whose named
+        methods never ran, and the published quality record affirmed
+        ``unmet_families: []``.
+
+        Unlike the figure list this cannot simply read every step, because
+        ``missing_families`` is NOT always an observation: the legacy and
+        Supervisor-unverified branches set it to the whole planned list to mean
+        "this cannot be checked", and reporting that as "nothing ran" asserts an
+        absence the audit never established. Those are precisely the steps
+        ``unverifiable`` collects, so they are excluded here. Informs review;
+        gates nothing.
+        """
+        return [
+            s for s in self.steps
+            if s.missing_families and (s.verifiable or s.awaiting_pi_decision)
+        ]
+
     def summary(self) -> Dict[str, Any]:
         figure_steps = [s for s in self.steps if s.planned_figure_kinds]
         figure_unmet = self.figure_unmet
+        family_unmet = self.family_unmet
         return {
             "n_steps": len(self.steps),
             "n_completed": len(self.completed),
@@ -87,8 +116,11 @@ class PlanAudit:
             "n_awaiting_pi_decision": len(self.awaiting_pi_decision),
             "n_figure_steps": len(figure_steps),
             "n_figure_unmet": len(figure_unmet),
+            "n_family_unmet": len(family_unmet),
             "unmet_titles": [s.title for s in self.unmet][:20],
-            "unmet_families": sorted({f for s in self.unmet for f in s.missing_families}),
+            "unmet_families": sorted({
+                f for s in family_unmet for f in s.missing_families
+            }),
             "unmet_figure_kinds": sorted({
                 kind for s in figure_unmet for kind in s.missing_figure_kinds
             }),
@@ -677,6 +709,25 @@ def should_run_post_execution_review(
             f"{len(unmet)} approved step(s) show no eligible execution/artifact "
             f"evidence ({', '.join(absent[:6])})."
         )
+    else:
+        # `unmet` is empty by construction in host_execution_linkage mode, so the
+        # same absences have to be read off the steps directly — otherwise the
+        # reason names nothing for exactly the rounds that run in that mode.
+        linkage_steps = {s.step_id for s in audit.family_unmet} | {
+            s.step_id for s in audit.figure_unmet
+        }
+        if linkage_steps:
+            families = sorted({
+                f for s in audit.family_unmet for f in s.missing_families
+            })
+            figures = sorted({
+                kind for s in audit.figure_unmet for kind in s.missing_figure_kinds
+            })
+            absent = families + [f"figure:{kind}" for kind in figures]
+            reasons.append(
+                f"{len(linkage_steps)} approved step(s) have no linked execution "
+                f"or artifact evidence ({', '.join(absent[:6])})."
+            )
 
     if audit.unverifiable:
         reasons.append(

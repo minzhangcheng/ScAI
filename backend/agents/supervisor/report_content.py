@@ -137,13 +137,14 @@ class ReportContentMixin:
     def _build_report_prompt(
         self, narrative, stats, state, figure_map, language,
         table_list=None, outline=None, attribution=None,
-        figure_metadata_by_stem=None,
+        figure_metadata_by_stem=None, figure_outline=None,
     ) -> str:
         report_prompt.bind_facade(sys.modules[__name__])
         return report_prompt._build_report_prompt(
             self, narrative, stats, state, figure_map, language,
             table_list=table_list, outline=outline, attribution=attribution,
             figure_metadata_by_stem=figure_metadata_by_stem,
+            figure_outline=figure_outline,
         )
 
     def _get_report_system_prompt(self, language: str) -> str:

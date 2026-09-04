@@ -423,6 +423,16 @@ async def collect_bioinformatics_results(self, ctx, result):
                 f"{innovation_err!r}"
             )
 
+    # Adoption first. It binds workspace renders the executor produced with a
+    # bare savefig to unmet plan requirements, and the plan audit below reads
+    # `state.publication_figures` and nothing else — so run after it, those
+    # records exist but no requirement ever consults them. That was harmless
+    # only while `figure_unmet` was permanently empty; it now reaches the PI's
+    # review prompt, where a round whose figures were adopted would otherwise be
+    # reported as having produced none. The post-adoption `audit_figure_contract`
+    # below is unaffected: it still re-reads after every workflow-owned pass.
+    await self._adopt_workspace_figures(analysis_state, planning_stage)
+
     # Step 2b: audit the approved plan against what actually ran, then — only
     # on hard structural signals — let the PI commission a bounded repair pass.
     # Both run inside this node so the round still produces exactly one
@@ -448,8 +458,6 @@ async def collect_bioinformatics_results(self, ctx, result):
             analysis_state, result, reconciliation
         )
         review_meta["plan_audit"] = audit_summary
-
-    await self._adopt_workspace_figures(analysis_state, planning_stage)
 
     # Re-evaluate after deterministic baselines and any supplementary work.
     # The executor's own audit was taken before these workflow-owned repair

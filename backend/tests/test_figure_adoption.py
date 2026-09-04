@@ -378,6 +378,16 @@ def test_adoption_runs_before_the_workflow_audit():
         "adoption must run before audit_figure_contract; after it, adopted "
         "records cannot satisfy any requirement"
     )
+    # The plan audit reads state.publication_figures too, and since 0.52.3 its
+    # missing-figure list is printed to the PI instead of being permanently
+    # empty. Adopted records have to exist before it runs or the round is
+    # reported to the PI as having produced figures it in fact registered.
+    plan_audit = src.find("audit_summary = self._audit_round_plan_execution(")
+    assert plan_audit != -1, "the workflow plan audit call site moved"
+    assert adopt < plan_audit, (
+        "adoption must run before the plan audit; after it, the PI is told a "
+        "figure is missing that adoption already registered"
+    )
 
 
 def test_bioinformatics_analysis_keeps_its_retry_decorator():

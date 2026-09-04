@@ -77,6 +77,7 @@ def detailed_report_event_payload(report: Dict[str, Any]) -> Dict[str, Any]:
         "tables_count": len(report.get("tables", [])),
         "partial_reason": report.get("partial_reason"),
         "partial_reasons": list(report.get("partial_reasons") or []),
+        "missing_sections": list(report.get("missing_sections") or []),
         "figureless_sections": list(report.get("figureless_sections") or []),
         "unreported_figures": list(report.get("unreported_figures") or []),
         "quality_disclosures": report.get("quality_disclosures") or {},

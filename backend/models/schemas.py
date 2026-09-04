@@ -616,10 +616,28 @@ class AnalysisState(BaseModel):
         if ungrouped:
             parts.append("  - Files with no group label of their own "
                          "(file counts, not sample counts):")
-            grouped_types = {
-                record.data_type
+            # Imported here, not at module scope: models must not depend on
+            # services. SampleCountRecord.data_type is written from a model's own
+            # words while DataFile.data_type is the stored upload type, so "loom"
+            # and "scRNA-seq" are one modality spelled two ways — every other
+            # comparison of the two goes through this function, and a raw string
+            # comparison makes the note below vanish silently instead.
+            from ..services.sample_design import canonical_modality
+
+            grouped_modalities = {
+                (record.section, canonical_modality(record.section, record.data_type))
                 for record in (self.detected_sample_counts or [])
                 if record.group_id is not None and record.detected_count >= 1
+            }
+            # A modality that ALSO has detected samples no group could claim is
+            # exactly where an unlabelled file may hold a real unidentified
+            # sample. The sentence below asserts a fact, so it is withheld there
+            # rather than contradicting the "not safely assignable" line printed
+            # a few lines down — which is the one the planner must act on.
+            unresolved_modalities = {
+                (record.section, canonical_modality(record.section, record.data_type))
+                for record in (self.detected_sample_counts or [])
+                if record.group_id is None and record.detected_count >= 1
             }
             attributed: List[str] = []
             for section in ["pathology", "sequencing", "biochemistry"]:
@@ -627,7 +645,13 @@ class AnalysisState(BaseModel):
                 if section_files:
                     types = Counter(f.data_type for f in section_files)
                     parts.append(f"    {section}: {dict(types)}")
-                    attributed.extend(t for t in types if t in grouped_types)
+                    attributed.extend(
+                        t for t in types
+                        if (section, canonical_modality(section, t))
+                        in grouped_modalities
+                        and (section, canonical_modality(section, t))
+                        not in unresolved_modalities
+                    )
             if attributed:
                 parts.append(
                     "    Samples inside these files are already counted in the "

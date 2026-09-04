@@ -347,6 +347,7 @@ def _review_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Li
                 ),
                 "n_figure_steps": _integer(audit.get("n_figure_steps", 0)),
                 "n_figure_unmet": _integer(audit.get("n_figure_unmet", 0)),
+                "n_family_unmet": _integer(audit.get("n_family_unmet", 0)),
                 "unmet_titles": _texts(audit.get("unmet_titles"), limit=20),
                 "unmet_families": _texts(audit.get("unmet_families"), limit=20),
                 "unmet_figure_kinds": _texts(

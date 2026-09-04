@@ -780,3 +780,73 @@ def test_host_linkage_figure_report_stays_silent_for_a_waived_step():
     assert summary["n_figure_unmet"] == 1
     assert summary["unmet_figure_kinds"] == ["heatmap"]
     assert [step.step_id for step in audit.figure_unmet] == [1]
+
+
+def test_host_linkage_mode_reports_methods_that_never_ran():
+    """The figure list was moved out of `unmet` in 0.52.3; the family list was not.
+
+    `unmet` is `pending AND verifiable`, and every step in host_execution_linkage
+    mode is `verifiable=False` -- while `missing_families` IS populated there. So
+    the PI read "no execution evidence 0" with no families line at all for a round
+    whose named methods never ran, and `quality.py` wrote `unmet_families: []`
+    into the published report.
+    """
+    plan = _plan(
+        PlanStep(
+            id=1,
+            title="Cluster-level differential expression",
+            method="Run marker DE with sc.tl.rank_genes_groups",
+        ),
+        PlanStep(
+            id=2,
+            title="Pathway enrichment of the markers",
+            method="Run enrichment with gseapy.enrichr",
+        ),
+    )
+    receipt = CodeExecution(
+        id="linked-to-step-one-only",
+        code="run_marker_de()",
+        round_number=2,
+        evidence_schema_version=2,
+        plan_id=plan.id,
+        plan_step_ids=[1],
+        execution_purpose="planned",
+        execution_status="succeeded",
+        lineage_id="main",
+    )
+
+    audit = audit_plan_execution(plan, [receipt], round_number=2)
+    summary = audit.summary()
+
+    assert summary["evidence_mode"] == "host_execution_linkage"
+    assert summary["n_unmet"] == 0
+    assert [step.step_id for step in audit.family_unmet] == [2]
+    assert summary["n_family_unmet"] == 1
+    assert summary["unmet_families"] == ["enrichment"]
+
+
+def test_a_legacy_session_still_claims_no_method_is_missing():
+    """The counterpart, and the reason this cannot simply read every step.
+
+    In legacy mode `missing_families` is set to the whole planned list to mean
+    "this cannot be checked" -- exactly the steps `unverifiable` collects.
+    Reporting that as "nothing ran" asserts an absence the audit never
+    established.
+    """
+    plan = _plan(PlanStep(
+        id=1,
+        title="Cluster-level differential expression",
+        method="Run marker DE with sc.tl.rank_genes_groups",
+    ))
+    legacy = CodeExecution(
+        id="legacy-no-receipt-identity",
+        code="sc.tl.rank_genes_groups(adata, 'leiden')",
+        round_number=2,
+    )
+
+    audit = audit_plan_execution(plan, [legacy], round_number=2)
+    summary = audit.summary()
+
+    assert summary["evidence_mode"] == "legacy_unverifiable"
+    assert audit.unverifiable and audit.family_unmet == []
+    assert summary["unmet_families"] == []

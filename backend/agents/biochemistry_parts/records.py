@@ -61,6 +61,7 @@ def reconcile_provenance(
     row_group_label: Any,
     row_sample_value: Any,
     state: AnalysisState,
+    row_label_is_authoritative: bool = False,
 ) -> tuple[Optional[str], Optional[int], Optional[str], list]:
     """Combine upload-declared metadata with what the file body says.
 
@@ -69,6 +70,13 @@ def reconcile_provenance(
     therefore: declared wins, parsed fills a gap, and a disagreement is RECORDED
     rather than resolved — silently overwriting a declared group with a parsed one
     can change how many independent samples a comparison believes it has.
+
+    ``row_label_is_authoritative`` inverts that one rule, and only for a source
+    where the file-level group cannot be a per-measurement declaration: a figure
+    plots every group it compares, so it can be uploaded only once and under only
+    one of them. Keeping the declared value there collapses a two-arm chart into
+    a single arm and the comparison silently runs against itself. The
+    disagreement is still recorded either way; only which side wins changes.
 
     Returns (group_id, sample_number, source_group_label, provenance_notes).
     """
@@ -82,10 +90,18 @@ def reconcile_provenance(
         if row_group_id is not None:
             notes.append(f"group taken from the file body ({label!r}); not declared at upload")
     elif row_group_id is not None and row_group_id != file_group_id:
-        notes.append(
-            f"group conflict: upload declared {file_group_id!r}, file body says {label!r}; "
-            "kept the declared value"
-        )
+        if row_label_is_authoritative:
+            group_id = row_group_id
+            notes.append(
+                f"group {label!r} read from inside the file; the upload declared "
+                f"{file_group_id!r} for the whole file, which cannot be a "
+                "per-measurement statement for this source"
+            )
+        else:
+            notes.append(
+                f"group conflict: upload declared {file_group_id!r}, file body says {label!r}; "
+                "kept the declared value"
+            )
     if label is not None and row_group_id is None:
         notes.append(
             f"group label {label!r} in the file body matches no declared treatment group"

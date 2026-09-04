@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.52.5 · **Last updated**: 2026-09-04
+**Version**: 0.52.6 · **Last updated**: 2026-09-04
 
 ## 1. Runtime Architecture
 
@@ -352,6 +352,140 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.52.x — (2026-09-03 onward)**
+
+- `0.52.6` — Repairs the defects the 0.52.2–0.52.5 changes introduced, and
+  finishes the two they left half-done. Nothing here is a new capability; every
+  item is a place where one of those four versions made a claim its code did
+  not keep.
+
+  **The once-only marker that stops a figure being minted twice had four ways
+  to fail.** `mark_minted` was written whenever the extraction call returned,
+  including when its response could not be read at all — and the marker is
+  permanent, so one malformed answer silenced that image for the rest of the
+  session, including after the operator switched models. That case is not
+  hypothetical: `_safe_parse_json` returns the FIRST balanced object it finds,
+  so a model answering with a bare JSON array yields one measurement row and no
+  `results` key. New `extraction_is_readable` separates "this figure has no
+  numbers", which is a real answer that finishes the image, from "this response
+  could not be read", which leaves it for a later round. In the other
+  direction, `_analyze_single_image` replaces `extracted_data` on the path where
+  it RAISES — an exhausted upstream writes `{"error": ...}` and re-raises so the
+  workflow's LLM-failure gate can offer Retry — and the marker went with it, so
+  that retry minted the same figure again. The vision call is now wrapped so the
+  marker is restored whichever way it returns. `register_rows` committed each
+  row to state as it went while the marker was written only at the end, so a row
+  that raised part way left orphans with no marker and the next round minted the
+  whole figure on top of them; it is now all or nothing. And the number of rows
+  one image may contribute is bounded, because step 1 renders every indicator
+  ever minted into its classification prompt without truncating.
+
+  **A figure's own group labels lost to the group it was uploaded under.**
+  `reconcile_provenance` resolves a disagreement in favour of the upload, which
+  is right for a data file, where the upload is a per-sample declaration. A
+  figure plots every arm it compares and so can be uploaded under only one of
+  them, and the extraction prompt says as much — but the path it fed applied the
+  data-file rule, so a Control-vs-treated chart uploaded under either arm minted
+  both arms' bars under that one group and the comparison ran against itself.
+  The image path now passes `row_label_is_authoritative`; the default, and every
+  data-file caller, is unchanged, and the disagreement is still recorded either
+  way. Replicate identity moves the other way. `biochemistry_sample_counts`
+  derives a group's detected n from the distinct `sample_number` values on its
+  indicators and reports it as authoritative over the declared design, so one
+  replicate label read off a panel of group means would have restated a
+  six-replicate arm as n=1. What the figure says about replicates is kept as
+  provenance and no longer reaches `sample_number` — which is what `0.52.2`
+  said it did.
+
+  **The innovation baselines were pointed at a column vocabulary this platform
+  does not produce.** Their fixtures are DESeq2- and Enrichr-shaped; the
+  executor is instructed to build differential frames with
+  `sc.get.rank_genes_groups_df`, whose columns are names / scores /
+  logfoldchanges / pvals / pvals_adj — and every defect below was invisible for
+  exactly that reason. None of the "adjusted" hints is a substring of
+  `pvals_adj` while the generic `pval` is a substring of `pvals`, so the volcano
+  drew its 0.05 threshold and its `p<0.05` legend on RAW p-values; a new
+  `_ib_pick_pval` asks which candidate column says it is adjusted. A table with
+  an effect-size column but too few rows fell through to the enrichment branch,
+  where `name` substring-matches `names` and gene symbols were published as a
+  ranked bar chart of enriched terms, titled "top terms" — and per-cluster
+  top-N frames are routine. Such a table now yields no panel at all. The
+  volcano's significance mask was evaluated AFTER the 120k-point subsample, so
+  the legend stated a significant-feature count that was a fraction of the
+  truth; counts are now taken over the whole table, thinning keeps every
+  significant point, and the figure says so when it happened. The probe wrapped
+  `import anndata` and the AnnData scan in the same `try` as the DataFrame
+  discovery, so a failure there suppressed the volcano and the enrichment chart
+  too, against the module's own rule that a panel is suppressed only by its own
+  missing input. Finally the score panel took the first six obs columns matching
+  "score" and ranked candidate objects by cell count: obs columns are appended
+  as the analysis proceeds, so that kept round 1's doublet and cell-cycle scores
+  and dropped the signature the panel exists to show, and a round that scored a
+  subset lost to the full object that carried only inherited scores.
+
+  **The plan audit read the figure list before adoption wrote to it.**
+  `_adopt_workspace_figures` binds workspace renders the executor produced with
+  a bare `savefig` to unmet plan requirements, and it ran twenty lines after the
+  audit that reads `state.publication_figures` and nothing else. That was
+  harmless only while `figure_unmet` was permanently empty; `0.52.3` made it
+  live and printed it to the PI, so a round whose figures were adopted would be
+  reported as having produced none. Adoption now runs first, and the ordering
+  guard that already covered `audit_figure_contract` covers the plan audit too.
+
+  **`unmet_families` still carried the defect `0.52.3` fixed for figures.**
+  `unmet` is `pending AND verifiable`, and every step in `host_execution_linkage`
+  mode is `verifiable=False` — while `missing_families` is populated there. The
+  PI therefore read "no execution evidence 0" with no families line at all for a
+  round whose named methods never ran, and `quality.py` wrote `unmet_families:
+  []` into the published record. A `family_unmet` property reads the steps
+  directly. Unlike the figure list it cannot simply read every step: the legacy
+  and Supervisor-unverified branches set `missing_families` to the whole planned
+  list to mean "this cannot be checked", and reporting that as "nothing ran"
+  asserts an absence the audit never established — those are exactly the steps
+  `unverifiable` collects, and they are excluded.
+
+  **A best-effort report repair could fail the report it exists to save.**
+  `_request_unwritten_sections` documents itself as "one request, every failure
+  swallowed", but only the LLM call was inside the `try`: rebuilding the prompt
+  ran before it and parsing the continuation body after the `finally`, so either
+  could turn a report missing its tail chapters, which is publishable, into no
+  report at all. Both are now inside it. The one exception is
+  `UpstreamExhaustedError`, which the broad handler had been swallowing: the
+  first-pass call re-raises it so the workflow gate can offer Retry or a
+  different report model, and this pass now does the same. The continuation also
+  handed `_build_figure_allocation_text` only the pending sections, so every
+  figure belonging to an already-written chapter had no claimant and was offered
+  to the model as a free candidate — inside the block the prompt labels BINDING.
+  A `figure_outline` argument keeps allocation over the whole report while the
+  sections to write stay restricted.
+
+  **The note that stops a phantom sample could hide a real one.** `0.52.4` added
+  "samples inside these files are already counted in the groups above", tested
+  only that a data type appears somewhere in the grouped detections. A modality
+  with grouped samples AND a genuinely unassignable file therefore printed that
+  reassurance directly above "detected counts not safely assignable to groups:
+  bulk RNA-seq: 2" — the assertive half being the wrong one, and the mirror
+  image of the defect it was written to fix. The note is now withheld for a
+  modality that also has unresolved counts. Both sides of the comparison also go
+  through `canonical_modality`, as every other comparison of a
+  `SampleCountRecord` against a `DataFile` does: the record's type is written
+  from a model's own words and the file's is the stored upload type, so "loom"
+  and "scRNA-seq" are one modality spelled twice and the raw comparison made the
+  note vanish for the uploads it was written for. `detailed_report_event_payload`
+  gained `missing_sections`, which `0.52.5` added everywhere except the terminal
+  event, leaving `partial_reason: section_coverage` there with nothing to
+  resolve it against.
+
+  **What this does not change.** `approved_partial` still ranks below
+  `section_coverage` and `figure_coverage` in the single `partial_reason` field,
+  as it did below `figure_coverage` before `0.52.5`. The approval covers
+  publishing with unresolved evidence qualifications, not a writer that lost two
+  chapters, so the objective gap is the more informative primary; the approval
+  is never lost — it stays in `partial_reasons` and in the status text. Four
+  costs are also left standing on purpose: `MECHANISM_EVIDENCE_POLICY` is 2,500
+  characters and rides inside `tools=TOOLS` on every executor turn, image
+  extraction uses the history-carrying `chat`, the innovation baselines re-render
+  on every node re-entry, and roughly 156 lines are byte-identical across the
+  three baseline modules.
 
 - `0.52.5` — Stops a report body that ended early from deleting whole analysis
   rounds, and hands the chapters it never wrote back to the report writer.
