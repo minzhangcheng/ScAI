@@ -199,6 +199,53 @@ def test_ungrouped_bulk_total_does_not_invent_group_membership():
     assert has_replicated_condition_design(state, BULK_RNASEQ_MODALITY) is False
 
 
+def test_an_ungrouped_file_is_not_read_as_an_unidentified_extra_sample():
+    """The measured failure: one six-column bulk matrix read as a seventh sample.
+
+    `merged_counts.csv` carries no group label of its own, so it lands in the
+    ungrouped list, which is rendered in FILES. Its six columns were detected
+    and attributed three-and-three to the two groups, which is rendered in
+    SAMPLES. Printed side by side those read as "3 + 3 grouped, plus 1
+    unidentified", and the PI planned round after round to resolve the identity
+    and provenance of a sample that does not exist.
+    """
+    state = _state_with(
+        records=[
+            _rec("g1", "Con", "sequencing", "bulk RNA-seq", 3, 3, "matrix_columns"),
+            _rec("g2", "DKO", "sequencing", "bulk RNA-seq", 3, 3, "matrix_columns"),
+        ],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3),
+                TreatmentGroup(id="g2", name="DKO", sample_count=3)],
+        files=[DataFile(
+            filename="merged_counts.csv", file_path="/tmp/merged_counts.csv",
+            section="sequencing", data_type="bulk RNA-seq", group_id=None,
+        )],
+    )
+
+    summary = state.build_experimental_design_summary()
+
+    assert "file counts, not sample counts" in summary
+    assert "bulk RNA-seq" in summary
+    assert "already counted in the groups above" in summary
+
+
+def test_the_reassurance_is_absent_where_samples_really_are_unattributed():
+    """The note states a fact, so it must not appear when the fact is false."""
+    state = _state_with(
+        records=[_rec("g1", "Con", "sequencing", "scRNA-seq", 1, 3)],
+        groups=[TreatmentGroup(id="g1", name="Con", sample_count=3)],
+        files=[DataFile(
+            filename="biochem.png", file_path="/tmp/biochem.png",
+            section="biochemistry", data_type="image", group_id=None,
+        )],
+    )
+
+    summary = state.build_experimental_design_summary()
+
+    assert "file counts, not sample counts" in summary
+    assert "already counted in the groups above" not in summary
+
+
 def test_ungrouped_total_must_match_declared_group_sum_before_distribution():
     state = _state_with(
         records=[_rec(None, "", "sequencing", "bulk RNA-seq", 2, None)],

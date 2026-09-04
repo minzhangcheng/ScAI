@@ -604,15 +604,37 @@ class AnalysisState(BaseModel):
                     types = Counter(f.data_type for f in section_files)
                     parts.append(f"    {section}: {dict(types)}")
 
-        # Also show ungrouped data
+        # Also show ungrouped data. These are FILE counts, while the per-group
+        # block above is SAMPLE counts. A file carrying no group label of its
+        # own can still hold samples that were detected and attributed to those
+        # groups -- a merged count matrix whose columns split three-and-three is
+        # exactly that. Printed side by side without the distinction, "bulk
+        # RNA-seq: 3", "bulk RNA-seq: 3" and "bulk RNA-seq: 1" read as a seventh
+        # unidentified sample, and rounds were spent planning provenance work to
+        # establish the identity of a sample that does not exist.
         ungrouped = self.get_files_by_group(None)
         if ungrouped:
-            parts.append("  - Ungrouped data:")
+            parts.append("  - Files with no group label of their own "
+                         "(file counts, not sample counts):")
+            grouped_types = {
+                record.data_type
+                for record in (self.detected_sample_counts or [])
+                if record.group_id is not None and record.detected_count >= 1
+            }
+            attributed: List[str] = []
             for section in ["pathology", "sequencing", "biochemistry"]:
                 section_files = [f for f in ungrouped if f.section == section]
                 if section_files:
                     types = Counter(f.data_type for f in section_files)
                     parts.append(f"    {section}: {dict(types)}")
+                    attributed.extend(t for t in types if t in grouped_types)
+            if attributed:
+                parts.append(
+                    "    Samples inside these files are already counted in the "
+                    "groups above for: " + ", ".join(sorted(set(attributed)))
+                    + ". The file carries no group label; it is not an "
+                    "additional unidentified sample."
+                )
         ungrouped_counts = [
             record for record in (self.detected_sample_counts or [])
             if record.group_id is None

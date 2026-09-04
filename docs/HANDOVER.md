@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.52.3 · **Last updated**: 2026-09-04
+**Version**: 0.52.4 · **Last updated**: 2026-09-04
 
 ## 1. Runtime Architecture
 
@@ -352,6 +352,50 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.52.x — (2026-09-03 onward)**
+
+- `0.52.4` — Stops the planner from being told there is an unidentified sample
+  that does not exist, and from re-planning work an earlier round already ruled
+  out.
+
+  **One bulk matrix was read as a seventh sample, and rounds went to
+  establishing its identity.** `build_experimental_design_summary` renders two
+  blocks from two different units. A group's `detected by modality` line comes
+  from `detected_sample_counts` and counts SAMPLES; the ungrouped block comes
+  from `get_files_by_group(None)` and counts FILES. Round 0 had detected
+  `merged_counts.csv`'s six columns correctly and attributed them three-and-three
+  to the two groups, recording the column names as evidence, but the file itself
+  carries no group label of its own and so also appeared in the ungrouped list.
+  Printed together, "bulk RNA-seq: 3", "bulk RNA-seq: 3" and "bulk RNA-seq: 1"
+  read as six grouped samples plus one unidentified one. The PI planned
+  accordingly — "exclude or separately label the ungrouped bulk sample until its
+  identity is resolved" — and the same provenance, manifest and correspondence
+  work was planned again every round. Eleven of round 2's nineteen approved steps
+  were audit- or register-shaped, against four of seventeen in Stage 1, and that
+  round's executor spent fifteen of its sixteen executions on inventories,
+  registers and audits, with three AnnData computations and no figure at all. The
+  ungrouped block now states its unit, and where a data type's samples are
+  already counted in the groups above it says so, so the file is not mistaken for
+  an additional unidentified sample. That note asserts a fact, so it is omitted
+  where the samples really are unattributed.
+
+  **`out_of_scope` was written every round and read by nothing.** The PI records
+  there the follow-ups needing data, metadata or experiments the session does not
+  hold, and it recorded the unresolved cross-modal animal correspondence there in
+  four separate rounds. No code consumed the list. The findings the next round's
+  planner did receive, meanwhile, reported that same work as unfinished, so it was
+  planned again under a new title each round: "Establish cross-modal sample
+  correspondence", then "Resolve sample identities and evidentiary units", then
+  "Resolve specimen provenance and experimental matching". New
+  `build_out_of_scope_context` collects and deduplicates those entries and puts
+  them to the innovation planner as limits no analysis step can lift, asking it to
+  state the limit in a dependent task's expected outcome and plan what the
+  available data can answer instead. It informs; the PI still decides what to
+  plan. A long session accumulates more of these than the section admits -- 41
+  distinct entries in one measured eight-round run against a cap of 20 -- so the
+  cap keeps the most recent, which are the rulings bearing on the round about to
+  be planned. Deduplication is exact, and measured sessions repeat these limits
+  in re-worded form rather than verbatim, so it collapses less than the wording
+  of the same limit round to round would suggest.
 
 - `0.52.3` — Gives an innovation round the same deterministic visual floor
   Stage 1 has, and makes the round's own artifact accounting visible instead of

@@ -2,7 +2,7 @@
 
 Moved verbatim out of backend/agents/pi_agent.py; composed into PIAgent.
 """
-from typing import Dict, Any
+from typing import Any, Dict, List, Mapping
 import json
 import logging
 
@@ -35,6 +35,51 @@ _INSTRUCTION_LIST_FIELDS = (
     "literature_topics",
     "recommended_future_experiments",
 )
+
+
+def build_out_of_scope_context(state: Any) -> str:
+    """Render the follow-ups previous rounds ruled out as unrunnable here.
+
+    A round records in ``out_of_scope`` the work that needs data, metadata, or
+    experiments this session does not hold. Nothing consumed that list, while
+    the findings the next planner *did* receive reported the same work as
+    unfinished -- so the same provenance, manifest and replication steps were
+    planned again round after round, and the executor spent its budget
+    re-deriving a limit that no analysis step can lift.
+
+    Naming them here closes that loop without deciding anything: the PI is told
+    what was already ruled out, and still chooses what to plan. Pure so the
+    carryover is testable without running a round.
+    """
+    seen: List[str] = []
+    for review in (getattr(state, "post_execution_reviews", None) or []):
+        if not isinstance(review, Mapping):
+            continue
+        plan = review.get("review_plan")
+        if not isinstance(plan, Mapping):
+            continue
+        for item in (plan.get("out_of_scope") or []):
+            text = str(item).strip()
+            if text and text not in seen:
+                seen.append(text)
+    if not seen:
+        return ""
+    # Most recent last, and the cap keeps that end: a long session accumulates
+    # far more of these than fit (41 distinct entries in one measured 8-round
+    # run), and the rulings that bear on the round about to be planned are the
+    # ones the latest review just made.
+    lines = "\n".join(f"- {text}" for text in seen[-20:])
+    return f"""
+## Already ruled out in previous rounds
+Earlier rounds determined that each of the following needs data, metadata, or
+experiments this session does not hold. They are not unfinished work, and no
+analysis step can supply what they are missing. Do NOT plan a step whose
+purpose is to establish one of them: a round that tries spends its budget
+re-deriving the same limit. Where one of them would block a task you would
+otherwise propose, state the limit in that task's expected outcome and plan
+what the available data CAN answer instead.
+{lines}
+"""
 
 
 def _normalize_instruction_payload(value: Any) -> Dict[str, Any] | None:
@@ -276,6 +321,10 @@ PI Direction Assessment: {state.exploration_report.pi_direction_assessment[:500]
         if notes and notes.strip():
             notes_section = f"\n## User Notes for This Direction\n{notes.strip()}\n"
 
+        # What earlier rounds already ruled out. Without this the planner sees
+        # only the findings, which report the same work as unfinished.
+        out_of_scope_section = build_out_of_scope_context(state)
+
         # Detect data types for conditional toolkit inclusion
         has_bulk_data = state.has_bulk_rnaseq()
         scoring_entry = (
@@ -334,7 +383,7 @@ PI Direction Assessment: {state.exploration_report.pi_direction_assessment[:500]
 ## Research Objective: {state.initial_instruction}
 ## User's Chosen Research Direction: {user_direction}
 {exploration_context}
-{notes_section}
+{notes_section}{out_of_scope_section}
 ## Available Data
 {state.build_experimental_design_summary()}
 
