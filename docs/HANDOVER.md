@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.52.4 · **Last updated**: 2026-09-04
+**Version**: 0.52.5 · **Last updated**: 2026-09-04
 
 ## 1. Runtime Architecture
 
@@ -352,6 +352,40 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.52.x — (2026-09-03 onward)**
+
+- `0.52.5` — Stops a report body that ended early from deleting whole analysis
+  rounds, and hands the chapters it never wrote back to the report writer.
+
+  **A report of eight rounds was published as four chapters, and nothing said
+  so.** The detailed report is written in a single `report_generator` call. In
+  one measured session that call returned exactly its 32,768-token output cap
+  while carrying 19,355 characters of visible text — the rest spent on private
+  reasoning — and stopped mid-sentence inside the chapter for round 3, five of a
+  planned twelve sections written. `align_sections_to_outline` then kept a
+  planned section the writer had skipped only where it owned an attributed
+  figure, so the round-5 direction and the round-6 integration gate were dropped
+  outright, while rounds 4, 7 and 8 survived as chapters of 1,270 to 1,762
+  characters containing nothing but `[FIGURE:]` markers and their captions. The
+  report was labelled `partial` for `figure_coverage` — the one gap it could
+  see — and recorded nothing about eight rounds having become four chapters.
+  The cap on that call went in `0.51.9` (`NO_OUTPUT_TOKEN_CAP`), which removes
+  the common trigger but not the wall-clock deadline or a dropped stream.
+
+  **The unwritten chapters go back to the writer, and what it still does not
+  write is disclosed.** Before alignment drops anything,
+  `missing_outline_section_ids` names the planned sections the body does not
+  carry — absent, or materialised without prose — and
+  `_request_unwritten_sections` asks the report writer once to complete exactly
+  those, listing what is already written so none of it is repeated and
+  allocating only the figures those sections own. That is the writer's own work
+  handed back to it rather than a gate over the science: one uncapped request,
+  every failure swallowed, the report published either way. Whatever remains
+  unwritten is recorded in `report.missing_sections` under the new
+  `partial_reason` `section_coverage`, which ranks ahead of `figure_coverage`
+  because an absent chapter is the larger gap, and the report panel names those
+  chapters instead of falling through to its generic partial notice. The
+  non-Supervisor `DetailedReportGenerator` path is unchanged and carries
+  neither the request nor the disclosure.
 
 - `0.52.4` — Stops the planner from being told there is an unidentified sample
   that does not exist, and from re-planning work an earlier round already ruled

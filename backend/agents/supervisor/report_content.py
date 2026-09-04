@@ -40,6 +40,7 @@ from ...services.report.report_outline import (
     OutlineSection,
     align_sections_to_outline,
     build_report_outline,
+    missing_outline_section_ids,
 )
 from ...services.report.output_cleanup import reset_report_asset_directories
 from ...services.report.output_generation import (

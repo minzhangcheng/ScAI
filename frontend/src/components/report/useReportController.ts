@@ -71,8 +71,9 @@ export interface DetailedReport {
   current_step: string
   html_path?: string
   appendix?: ReportAppendix
-  partial_reason?: 'degraded_fallback' | 'figure_coverage' | 'approved_partial' | string | null
+  partial_reason?: 'degraded_fallback' | 'section_coverage' | 'figure_coverage' | 'approved_partial' | string | null
   figureless_sections?: string[]
+  missing_sections?: string[]
   unreported_figures?: string[]
 }
 
@@ -104,6 +105,7 @@ export function partialReportNotice(
   if (report.status !== 'partial') return null
 
   const figurelessSections = report.figureless_sections ?? []
+  const missingSections = report.missing_sections ?? []
   const unreportedFigures = report.unreported_figures ?? []
   const coverageDetails: string[] = []
   if (figurelessSections.length > 0) {
@@ -128,6 +130,22 @@ export function partialReportNotice(
     return coverageDetails.length > 0
       ? `${base} ${coverageDetails.join('；')}`
       : base
+  }
+
+  if (
+    report.partial_reason === 'section_coverage'
+    || missingSections.length > 0
+  ) {
+    const base = language === 'zh'
+      ? '报告已生成，但计划中的部分章节没有写入。'
+      : 'The report was generated without some of its planned sections.'
+    const details = [
+      language === 'zh'
+        ? `缺失章节：${missingSections.join(', ')}`
+        : `absent sections: ${missingSections.join(', ')}`,
+      ...coverageDetails,
+    ].filter((detail) => detail.length > 0)
+    return details.length > 0 ? `${base} ${details.join('；')}` : base
   }
 
   if (

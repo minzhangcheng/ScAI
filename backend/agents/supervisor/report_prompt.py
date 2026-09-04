@@ -712,6 +712,104 @@ async def prepare_report_generation(
         "used_fallback": used_fallback, "client": client,
     }
 
+async def _request_unwritten_sections(
+    self, ctx, analysis_state, sections, pending, report_model,
+):
+    """Hand the chapters the first pass never wrote back to the report writer.
+
+    A report body can end before the outline does — the writer spends its
+    output budget on private reasoning, or the request hits its wall-clock
+    deadline — and the tail of the outline is then simply absent. Downstream
+    that absence was invisible: ``align_sections_to_outline`` keeps a skipped
+    section only when it owns a figure, so a text-only gate and a direction
+    whose figures were all attributed elsewhere both vanished, taking their
+    analysis rounds with them.
+
+    Asking the writer to finish the chapters it planned is that agent's own
+    work handed back to it, not a host gate over the science. It is therefore
+    strictly best effort: one request, every failure swallowed, and whatever
+    is still absent afterwards is disclosed rather than enforced.
+    """
+    language = ctx["language"]
+    client = ctx["client"]
+    written = [
+        str(section.get("id") or "")
+        for section in sections
+        if str(section.get("content") or "").strip()
+    ]
+    continuation = (
+        "## Continuation of an unfinished report\n"
+        "An earlier pass of this same report ended before it wrote every "
+        "planned section. These sections are already written and MUST NOT be "
+        "repeated, rewritten or referred to as pending: "
+        f"{', '.join(written) or 'none'}.\n"
+        "Write ONLY the sections listed below, in the same "
+        "`## [section_id] Title` format, and emit nothing else — no preamble, "
+        "no closing remarks, no sections outside that list.\n\n"
+    ) + self._build_report_prompt(
+        ctx.get("narrative", ""),
+        ctx.get("stats", {}),
+        analysis_state,
+        ctx["figure_map"],
+        language,
+        table_list=ctx.get("table_list"),
+        outline=list(pending),
+        attribution=ctx["attribution"],
+        figure_metadata_by_stem=ctx["figure_metadata_by_stem"],
+    )
+
+    try:
+        client.set_context(self.session_id, "report_generator")
+        response = await self._budgeted_text_call(
+            client.chat,
+            model=report_model,
+            messages=[
+                {"role": "system", "content": self._get_report_system_prompt(language)},
+                {"role": "user", "content": continuation},
+            ],
+            temperature=0.3,
+            max_tokens=NO_OUTPUT_TOKEN_CAP,
+            timeout=900.0,
+            prefer_stream=True,
+        )
+        content = response.content or ""
+    except Exception:
+        logger.exception(
+            f"[{self.session_id}] Could not ask the report writer to complete "
+            f"the missing sections; publishing the report as written"
+        )
+        return sections
+    finally:
+        self._set_llm_context()
+
+    wanted = {osec.id for osec in pending}
+    recovered = {
+        str(section.get("id") or ""): section
+        for section in self._parse_report_sections(
+            content, language, outline=ctx["outline"]
+        )
+        if str(section.get("id") or "") in wanted
+        and str(section.get("content") or "").strip()
+    }
+    if not recovered:
+        logger.warning(
+            f"[{self.session_id}] Report writer returned no usable section on "
+            f"the completion request; {len(wanted)} section(s) stay unwritten"
+        )
+        return sections
+
+    completed = len(recovered)
+    merged = [
+        recovered.pop(str(section.get("id") or ""), section)
+        for section in sections
+    ]
+    merged.extend(recovered.values())
+    logger.info(
+        f"[{self.session_id}] Report writer completed {completed} of "
+        f"{len(wanted)} unwritten section(s)"
+    )
+    return merged
+
 async def parse_and_place_report(
     self, ctx, analysis_state, workspace_dir, chat_messages,
     progress_callback, report_model,
@@ -757,12 +855,39 @@ async def parse_and_place_report(
     # text-only sections (integration gates and closing syntheses) are not
     # included.
     figureless_sections: List[str] = []
+    # Planned sections the published body does not carry. A degraded fallback
+    # is already reported as such, so it leaves this empty rather than naming
+    # every chapter of an outline it was never written against.
+    missing_sections: List[str] = []
 
     # The fallback body is a degraded step summary with its own fixed
     # sections; forcing it through an outline it was never written against
     # would only scramble it. Its figures fall through to the supplementary
     # section, which is the honest presentation for a failed report.
     if not used_fallback:
+        # The alignment below keeps a section the model skipped only when it
+        # owns a figure, so a body that stopped early silently loses whole
+        # chapters — and with them their analysis rounds. Give the writer one
+        # chance to finish what it planned before anything is dropped.
+        pending = [
+            osec for osec in outline
+            if osec.id not in {
+                str(section.get("id") or "")
+                for section in sections
+                if str(section.get("content") or "").strip()
+            }
+        ]
+        if pending:
+            logger.warning(
+                f"[{self.session_id}] Report body is missing {len(pending)} "
+                f"planned section(s): "
+                f"{', '.join(osec.id for osec in pending)} — asking the report "
+                f"writer to complete them"
+            )
+            sections = await _request_unwritten_sections(
+                self, ctx, analysis_state, sections, pending, report_model,
+            )
+
         # Reading order follows the outline, not the order the model emitted.
         # Sections owning figures are materialised even when skipped, so their
         # figures have a home in the right place.
@@ -775,6 +900,18 @@ async def parse_and_place_report(
         sections = align_sections_to_outline(
             sections, outline, require_ids=sections_with_figures
         )
+
+        # Read before placement, while section content is still pure prose: a
+        # section carrying nothing but appended figure markers has no narrative
+        # and is exactly the gap being recorded. What remains unwritten is
+        # disclosed to the PI and the reader; it never blocks publication.
+        missing_sections = missing_outline_section_ids(sections, outline)
+        if missing_sections:
+            logger.warning(
+                f"[{self.session_id}] Report published without "
+                f"{len(missing_sections)} planned section(s): "
+                f"{', '.join(missing_sections)}"
+            )
 
         # Placement is enforced in code, not left to the model's compliance:
         # it relocates cross-round references, drops repeats, and appends
@@ -846,5 +983,6 @@ async def parse_and_place_report(
 
     ctx.update(
         sections=sections, figureless_sections=figureless_sections,
+        missing_sections=missing_sections,
         abstract=abstract, conclusions=conclusions, filtered_sections=filtered_sections,
     )

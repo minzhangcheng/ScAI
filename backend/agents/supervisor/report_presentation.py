@@ -115,6 +115,7 @@ async def assemble_and_persist_report(self, ctx, analysis_state):
     used_fallback = ctx["used_fallback"]
     unreported_figures = ctx["unreported_figures"]
     figureless_sections = ctx["figureless_sections"]
+    missing_sections = ctx.get("missing_sections") or []
     abstract = ctx["abstract"]
     conclusions = ctx["conclusions"]
     filtered_sections = ctx["filtered_sections"]
@@ -155,6 +156,7 @@ async def assemble_and_persist_report(self, ctx, analysis_state):
         degraded_fallback=used_fallback,
         unreported_figures=unreported_figures,
         figureless_sections=figureless_sections,
+        missing_sections=missing_sections,
         approved_partial=bool(
             getattr(analysis_state, "allow_partial_report", False)
         ),
@@ -184,6 +186,7 @@ async def assemble_and_persist_report(self, ctx, analysis_state):
         # Recorded so an incomplete report is a reportable condition rather
         # than something an operator has to notice by eye.
         "figureless_sections": figureless_sections,
+        "missing_sections": missing_sections,
         "unreported_figures": unreported_figures,
         "partial_reason": partial_reason,
         "partial_reasons": partial_reasons,

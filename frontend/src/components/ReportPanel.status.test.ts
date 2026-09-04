@@ -58,6 +58,17 @@ describe('ReportPanel partial report status', () => {
     expect(notice).toContain('figures not included in the report: missing.png')
   })
 
+  it('names the planned sections a report was published without', () => {
+    const notice = partialReportNotice(report({
+      partial_reason: 'section_coverage',
+      missing_sections: ['direction_2', 'integrated_findings'],
+      figureless_sections: ['direction_1'],
+    }), 'en')
+
+    expect(notice).toContain('absent sections: direction_2, integrated_findings')
+    expect(notice).toContain('sections without result figures: direction_1')
+  })
+
   it('labels a degraded fallback independently from figure coverage', () => {
     const notice = partialReportNotice(report({
       partial_reason: 'degraded_fallback',

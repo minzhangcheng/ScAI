@@ -347,3 +347,28 @@ def align_sections_to_outline(
                 "tables": [],
             })
     return ordered + extras
+
+
+def missing_outline_section_ids(
+    sections: Sequence[Dict[str, Any]],
+    outline: Sequence[OutlineSection],
+) -> List[str]:
+    """Planned sections the report body does not carry, in outline order.
+
+    A section is missing when it was never emitted, and equally when it was
+    materialised without prose — a chapter heading over nothing states no
+    result. Both cases used to leave no trace: a planned section owning no
+    figure is dropped by ``align_sections_to_outline``, and a whole analysis
+    round then disappeared from the report with only the model's own
+    compliance standing between the reader and a silent gap.
+
+    This is an observation, never a verdict. Callers disclose what it returns
+    and publish the report regardless; whether an absent chapter matters to
+    the science is the PI's call, not this function's.
+    """
+    written = {
+        str(section.get("id") or "")
+        for section in (sections or [])
+        if str(section.get("content") or "").strip()
+    }
+    return [osec.id for osec in outline if osec.id not in written]

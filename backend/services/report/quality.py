@@ -541,17 +541,28 @@ def build_report_partial_fields(
     degraded_fallback: bool = False,
     unreported_figures: Iterable[Any] | None = None,
     figureless_sections: Iterable[Any] | None = None,
+    missing_sections: Iterable[Any] | None = None,
     approved_partial: bool = False,
     quality_disclosures: Dict[str, Any] | None = None,
 ) -> tuple[str, str, Optional[str], List[str]]:
     """Return one canonical status/current-step/reason tuple for every writer."""
     unreported = _texts(unreported_figures, limit=100)
     figureless = _texts(figureless_sections, limit=100)
+    missing = _texts(missing_sections, limit=100)
     reasons: List[str] = []
     details: List[str] = []
     if degraded_fallback:
         reasons.append("degraded_fallback")
         details.append("Degraded fallback report")
+    # A planned chapter that never made it into the body is a larger gap than a
+    # chapter that made it without a figure, so it is named first. Naming is all
+    # this does: the report is written, published and downloadable either way.
+    if missing:
+        reasons.append("section_coverage")
+        section_text = "planned sections absent from the report: " + ", ".join(missing)
+        details.append(
+            section_text if details else "Complete with " + section_text
+        )
     if figureless or unreported:
         reasons.append("figure_coverage")
         if unreported and not figureless:

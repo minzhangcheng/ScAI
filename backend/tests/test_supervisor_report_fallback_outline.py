@@ -87,6 +87,19 @@ def _state_with_complete_visual_coverage(tmp_path):
     return state
 
 
+def _complete_body():
+    """Every section the round-derived outline plans, so nothing is absent."""
+    return (
+        "## [abstract] Summary\nsummary text\n\n"
+        "## [methods] How it was done\nprocedure\n\n"
+        "## [exploration_findings] What the first pass found\ncomposition\n\n"
+        "## [direction_1] What direction A showed\nbody\n\n"
+        "## [integrated_findings] Cross-direction synthesis\ncombined interpretation\n\n"
+        "## [mechanism_candidates] Candidate mechanisms\nhypotheses\n\n"
+        "## [conclusions] Wrap up\nend matter\n"
+    )
+
+
 @pytest.mark.asyncio
 async def test_fallback_report_keeps_its_own_section_order(tmp_path):
     agent, client = _agent(RuntimeError("model down"))
@@ -148,7 +161,11 @@ async def test_successful_report_is_aligned_to_the_round_outline(tmp_path):
         "## [abstract] Summary\nsummary text\n\n"
         "## [methods] How it was done\nprocedure\n"
     )
-    agent, client = _agent([SimpleNamespace(content=body)])
+    # The body omits planned sections, so the writer is asked once to complete
+    # them; here it answers with nothing and the gap is disclosed instead.
+    agent, client = _agent([
+        SimpleNamespace(content=body), SimpleNamespace(content=""),
+    ])
     out = tmp_path / "reports"
     ws = tmp_path / "workspace"
     (ws / "figures").mkdir(parents=True, exist_ok=True)
@@ -165,8 +182,14 @@ async def test_successful_report_is_aligned_to_the_round_outline(tmp_path):
     assert report["figureless_sections"] == [
         "exploration_findings", "direction_1",
     ]
+    assert report["missing_sections"] == [
+        "exploration_findings", "integrated_findings", "mechanism_candidates",
+    ]
     assert report["status"] == "partial"
-    assert report["partial_reason"] == "figure_coverage"
+    # An absent chapter outranks a chapter that is merely figureless, but both
+    # stay on the record.
+    assert report["partial_reason"] == "section_coverage"
+    assert "figure_coverage" in report["partial_reasons"]
     assert report["unreported_figures"] == []
     assert "figure coverage gaps" in report["current_step"]
     assert "direction_1" in report["current_step"]
@@ -249,13 +272,7 @@ async def test_chat_sections_reuse_supervisor_fallback_client_when_none_passed(
 
 @pytest.mark.asyncio
 async def test_text_only_integration_does_not_downgrade_report_status(tmp_path):
-    body = (
-        "## [abstract] Summary\nsummary text\n\n"
-        "## [methods] How it was done\nprocedure\n\n"
-        "## [integrated_findings] Cross-direction synthesis\ncombined interpretation\n\n"
-        "## [conclusions] Wrap up\nend matter\n"
-    )
-    agent, client = _agent([SimpleNamespace(content=body)])
+    agent, client = _agent([SimpleNamespace(content=_complete_body())])
     out = tmp_path / "reports"
     ws = tmp_path / "workspace"
     (ws / "figures").mkdir(parents=True, exist_ok=True)
@@ -276,13 +293,7 @@ async def test_text_only_integration_does_not_downgrade_report_status(tmp_path):
 
 @pytest.mark.asyncio
 async def test_explicit_partial_report_flag_is_preserved_in_status(tmp_path):
-    body = (
-        "## [abstract] Summary\nsummary text\n\n"
-        "## [methods] How it was done\nprocedure\n\n"
-        "## [integrated_findings] Cross-direction synthesis\ncombined interpretation\n\n"
-        "## [conclusions] Wrap up\nend matter\n"
-    )
-    agent, client = _agent([SimpleNamespace(content=body)])
+    agent, client = _agent([SimpleNamespace(content=_complete_body())])
     out = tmp_path / "reports"
     ws = tmp_path / "workspace"
     (ws / "figures").mkdir(parents=True, exist_ok=True)
