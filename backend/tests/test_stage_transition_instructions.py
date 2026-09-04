@@ -28,6 +28,8 @@ def test_stage1_to_stage2_clears_task_lists_in_pi_instructions():
     assert new_instructions["biochemistry_tasks"] == []
     assert new_instructions["literature_topics"] == []
     assert new_instructions["overview"] == ""
+    assert new_instructions["deferred_literature_topics"] == ["stage1: liver QC"]
+    assert new_instructions["deferred_literature_overview"] == "stage1 exploration"
 
 
 def test_stage1_to_stage2_preserves_round_global_fields():
@@ -50,3 +52,4 @@ def test_reset_returns_new_dict():
 
     assert new_instructions is not original
     assert original["bioinformatics_tasks"] == ["stage1: QC", "stage1: clustering"]
+    assert "deferred_literature_topics" not in original

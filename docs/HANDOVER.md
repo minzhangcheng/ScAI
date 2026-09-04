@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.52.6 · **Last updated**: 2026-09-04
+**Version**: 0.52.7 · **Last updated**: 2026-09-05
 
 ## 1. Runtime Architecture
 
@@ -352,6 +352,19 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.52.x — (2026-09-03 onward)**
+
+- `0.52.7` — Repairs Literature query construction and bounded recovery for
+  PubMed searches. Stage 1 → Stage 2 now preserves deferred Literature topics;
+  the query prompt separates the authoritative question from experimental
+  context; true zero-hit searches get one concept-preserving semantic revision;
+  technical failures and exhausted LLM upstreams remain distinguishable; and
+  initial query/revision attempts plus a policy version are recorded for audit
+  and stale PubMed
+  node caches are re-executed. A missing focused topic is reported explicitly
+  without fabricating a query from truncated findings. Focused container tests
+  were not run because the verified local `scai-test-deps` image was unavailable;
+  syntax and whitespace checks passed. No deployment or live-session repair was
+  performed.
 
 - `0.52.6` — Repairs the defects the 0.52.2–0.52.5 changes introduced, and
   finishes the two they left half-done. Nothing here is a new capability; every

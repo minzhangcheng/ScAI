@@ -21,11 +21,26 @@ else:
 
 def _reset_pi_instructions_for_stage2(pi_instructions: Dict[str, Any]) -> Dict[str, Any]:
     cleared = dict(pi_instructions)
+    deferred_topics = (
+        pi_instructions.get("literature_topics")
+        or pi_instructions.get("deferred_literature_topics")
+        or []
+    )
+    deferred_overview = (
+        pi_instructions.get("overview")
+        or pi_instructions.get("deferred_literature_overview")
+        or ""
+    )
     cleared["bioinformatics_tasks"] = []
     cleared["pathology_tasks"] = []
     cleared["biochemistry_tasks"] = []
     cleared["literature_topics"] = []
     cleared["overview"] = ""
+    # Literature runs only after Stage 2. Preserve its round-level intent under
+    # dedicated keys without leaking Stage 1 execution tasks into the approved
+    # Stage 2 bioinformatics plan.
+    cleared["deferred_literature_topics"] = deferred_topics
+    cleared["deferred_literature_overview"] = deferred_overview
     return cleared
 
 

@@ -11,6 +11,7 @@ from ...models.schemas import AgentType, AnalysisPhase, AnalysisStep, MessageRol
 from ...utils.llm_client import UpstreamExhaustedError
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ...agents.bioinformatics_agent import count_saved_figures
+from ...agents.literature.pubmed import PUBMED_QUERY_POLICY_VERSION
 from ..helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, prepend_species, safe_pi_brief, STAGE1_KEYWORDS
 from ...utils.blob_store import BLOB_REF_PREFIX
 from ..retry import with_retry
@@ -126,6 +127,21 @@ class LiteratureNodeMixin:
 
         cached = cache_hit(analysis_state, AgentType.LITERATURE)
         if cached is not None:
+            cached_uses_pubmed = any(
+                "pubmed" in str(mode).lower()
+                for mode in (cached.get("search_modes") or [])
+            )
+            if (
+                cached_uses_pubmed
+                and cached.get("query_policy_version") != PUBMED_QUERY_POLICY_VERSION
+            ):
+                logger.info(
+                    f"[{self.session_id}] stale literature query-policy cache; "
+                    "re-executing literature research"
+                )
+                cache_invalidate(analysis_state, AgentType.LITERATURE)
+                cached = None
+        if cached is not None:
             logger.info(f"[{self.session_id}] literature cache hit, skipping re-execution")
             # Restore the actually-used model label so the report stays accurate
             # even when literature execution is served entirely from cache.
@@ -143,13 +159,21 @@ class LiteratureNodeMixin:
 
         instructions = state["pi_instructions"]
 
-        topics = _normalize_tasks(instructions.get("literature_topics", []))
+        topics = _normalize_tasks(
+            instructions.get("literature_topics")
+            or instructions.get("deferred_literature_topics")
+            or []
+        )
         logger.info(f"[{self.session_id}] Starting literature research with topics: {topics}")
 
         # Dynamic PI planning: refine literature topics based on all completed results
-        overview = instructions.get("overview", "")
+        overview = (
+            instructions.get("overview")
+            or instructions.get("deferred_literature_overview")
+            or ""
+        )
+        completed = self._collect_current_round_results(state)
         if overview and topics:
-            completed = self._collect_current_round_results(state)
             if completed:
                 await self._send_message("status", "PI is refining literature topics...", AgentType.PI)
                 topics = await self.pi_agent.plan_agent_tasks(
@@ -161,35 +185,34 @@ class LiteratureNodeMixin:
                     state=analysis_state,
                 )
 
+        if not topics and completed:
+            await self._send_message(
+                "status", "PI is defining focused literature topics...", AgentType.PI
+            )
+            topics = await self.pi_agent.plan_agent_tasks(
+                agent_name="literature",
+                original_tasks=[],
+                completed_results=completed,
+                overall_strategy=overview,
+                research_objective=analysis_state.initial_instruction,
+                state=analysis_state,
+            )
+
+        no_topic_reason = ""
         if not topics:
-            # Default topics based on other findings
-            path_findings = state.get("pathology_result", {}).get("findings", []) if state.get("pathology_result") else []
-            bio_findings = state.get("bioinformatics_result", {}).get("findings", []) if state.get("bioinformatics_result") else []
-            biochem_findings = state.get("biochemistry_result", {}).get("findings", []) if state.get("biochemistry_result") else []
+            no_topic_reason = (
+                "No focused literature topic was planned, so no literature "
+                "search query was executed."
+            )
+            logger.warning(
+                f"[{self.session_id}] No focused literature topics were planned; "
+                "skipping literature search execution"
+            )
 
-            all_source_findings = path_findings + bio_findings + biochem_findings
-            if all_source_findings:
-                # Use truncated findings as search keywords (full findings are too long for search queries)
-                short_findings = [
-                    (f[:80] if isinstance(f, str) else str(f)[:80])
-                    for f in all_source_findings[:3]
-                ]
-                objective = (analysis_state.initial_instruction or "").strip()
-                objective_prefix = f"{objective[:120]} — " if objective else ""
-                topics = [f"{objective_prefix}single cell sequencing {' '.join(short_findings)}"]
-            else:
-                # No findings from other agents — build topic from research objective and treatment groups
-                objective = analysis_state.initial_instruction or ""
-                group_names = [g.name for g in (analysis_state.treatment_groups or []) if g.name]
-                if objective:
-                    topics = [f"single cell sequencing {objective[:120]}"]
-                elif group_names:
-                    topics = [f"single cell sequencing {' '.join(group_names[:3])}"]
-                else:
-                    logger.warning(f"[{self.session_id}] No findings or objective for literature search, skipping")
-                    topics = []
-
-        await self._send_message("status", "Literature research in progress...", AgentType.LITERATURE)
+        if topics:
+            await self._send_message(
+                "status", "Literature research in progress...", AgentType.LITERATURE
+            )
 
         # Collect current round findings from other agents for literature context
         current_round_findings: List[str] = []
@@ -290,12 +313,8 @@ class LiteratureNodeMixin:
                         logger.info(f"[{self.session_id}] Deep Research gaps detected, PubMed fallback for: {gaps}")
                         await self._send_message("status", f"Supplementing {len(gaps)} topic(s) via PubMed...", AgentType.LITERATURE)
                         for gap_topic in gaps:
-                            enriched = gap_topic
-                            if previous_lit_context:
-                                enriched = f"{gap_topic}\n{previous_lit_context}\nFocus on aspects NOT already covered."
-                            enriched = prepend_species(enriched, analysis_state.species)
                             gap_result = await self.literature_agent.process(
-                                analysis_state, enriched, use_deep_research=True,
+                                analysis_state, gap_topic, use_deep_research=True,
                                 current_round_findings=current_round_findings,
                                 mode_override="pubmed_llm",
                             )
@@ -304,13 +323,9 @@ class LiteratureNodeMixin:
             # === PubMed mode: per-topic search ===
             results = []
             for topic in limited_topics:
-                enriched_topic = topic
-                if previous_lit_context:
-                    enriched_topic = f"{topic}\n{previous_lit_context}\nFocus on aspects NOT already covered above."
-                enriched_topic = prepend_species(enriched_topic, analysis_state.species)
                 result = await self.literature_agent.process(
                     analysis_state,
-                    enriched_topic,
+                    topic,
                     # True routes to _do_research() for full PubMed pipeline,
                     # not the external Deep Research API (guarded by is_deep_research_available).
                     use_deep_research=True,
@@ -333,6 +348,17 @@ class LiteratureNodeMixin:
             if r.get("search_mode"):
                 combined_result["search_modes"].append(r["search_mode"])
 
+        if no_topic_reason:
+            combined_result.update({
+                "status": "no_focused_topic",
+                "reason": no_topic_reason,
+            })
+        elif any(
+            "pubmed" in str(mode).lower()
+            for mode in combined_result["search_modes"]
+        ):
+            combined_result["query_policy_version"] = PUBMED_QUERY_POLICY_VERSION
+
         label = self._literature_model_label(combined_result["search_modes"])
         if label:
             analysis_state.literature_actual_model = label
@@ -353,10 +379,9 @@ class LiteratureNodeMixin:
 
         # Non-critical: extract generic mechanism signals co-occurring with
         # observed data, persisted onto LiteratureReport for the cross-modal audit.
-        # GUARD (B3): combined_result has NO "status" key (verified — it only holds
-        # topics/findings/reports/search_modes), so gate on whether this round actually
-        # produced reports. Disabled/skipped is already handled by the _require_core_agent
-        # early-return above; no_data rounds produce no report_ids and short-circuit here.
+        # Gate on whether this round actually produced reports. Disabled/skipped is
+        # handled by the _require_core_agent early return above; no-topic rounds have
+        # an explicit status but no report IDs and therefore short-circuit here.
         report_ids = [r.get("report_id") for r in results if r.get("report_id")]
         if report_ids:
             try:

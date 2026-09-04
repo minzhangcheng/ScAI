@@ -45,6 +45,7 @@ class SynthesisMixin:
         """
         context: Dict[str, Any] = {
             "topic": topic,
+            "species": "",
             "initial_instruction": "",
             "biochemistry_indicators": [],
             "treatment_groups": [],
@@ -56,6 +57,7 @@ class SynthesisMixin:
             return context
 
         context["initial_instruction"] = state.initial_instruction or ""
+        context["species"] = state.species or ""
 
         if state.treatment_groups:
             context["treatment_groups"] = [g.name for g in state.treatment_groups]

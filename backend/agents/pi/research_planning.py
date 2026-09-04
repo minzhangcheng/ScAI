@@ -543,6 +543,16 @@ so prioritize speed - plan only the minimum necessary analysis."""
         results_summary = self._format_completed_results(completed_results)
 
         data_summary = state.build_experimental_design_summary() if state else "Not available"
+        task_contract = ""
+        if agent_name.strip().lower() == "literature":
+            task_contract = """
+For Literature Agent tasks:
+- Return 1-3 self-contained, answerable biomedical literature questions.
+- Keep one principal claim, mechanism, or evidence question per task.
+- State whether the task seeks direct matched-model evidence or related mechanistic evidence.
+- Do not copy truncated findings or the full experimental background into a task.
+- Experimental context may disambiguate the question but must not become a list of mandatory filters.
+"""
 
         prompt = f"""You are the PI coordinating a multi-agent analysis.
 
@@ -568,6 +578,7 @@ Based on the completed results, refine the tasks for the {agent_name} agent.
 You may: keep tasks unchanged, add specific focus areas, modify tasks to leverage
 insights, or add cross-referencing instructions.
 Ensure refined tasks are grounded in the available data. Do NOT add tasks requiring data that is not available.
+{task_contract}
 
 Return a JSON object:
 {{

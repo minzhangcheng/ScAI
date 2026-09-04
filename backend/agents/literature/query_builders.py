@@ -9,6 +9,7 @@ import logging
 
 
 from ...utils.formatting import as_list
+from ...utils.llm_client import UpstreamExhaustedError
 
 logger = logging.getLogger(__name__)
 from ...models.schemas import AnalysisState, DirectionSearchQuery
@@ -289,39 +290,59 @@ class QueryBuildersMixin:
         """
         ctx = self._build_research_context(topic, state, current_round_findings)
 
-        # Build optional context sections
+        # Build optional context sections. These inform terminology selection;
+        # they are not additional scientific requirements for the query.
         extra_sections = []
         if ctx["treatment_groups"]:
-            extra_sections.append(f"Treatment groups: {', '.join(ctx['treatment_groups'])}")
+            extra_sections.append(
+                f"Treatment groups (context only): {', '.join(ctx['treatment_groups'])}"
+            )
         if ctx["biochemistry_indicators"]:
-            extra_sections.append(f"Biochemistry indicators: {', '.join(ctx['biochemistry_indicators'][:8])}")
+            extra_sections.append(
+                "Biochemistry indicators (context only): "
+                f"{', '.join(ctx['biochemistry_indicators'][:8])}"
+            )
         if ctx["previous_findings"]:
-            extra_sections.append(f"Previous analysis findings:\n{ctx['previous_findings'][:500]}")
+            extra_sections.append(
+                "Prior coverage (do not use as positive query filters):\n"
+                f"{ctx['previous_findings'][:500]}"
+            )
         if ctx["current_round_findings"]:
-            extra_sections.append(f"Current round findings:\n{ctx['current_round_findings'][:300]}")
+            extra_sections.append(
+                "Current findings (context only):\n"
+                f"{ctx['current_round_findings'][:300]}"
+            )
         extra_block = "\n\n".join(extra_sections)
 
         prompt = f"""Convert the following research topic into an optimized PubMed search query.
 
-Research topic: {topic}
+Authoritative research question:
+{topic}
 
+Context for terminology and disambiguation only:
+Study species: {ctx.get("species") or "Not specified."}
 Experimental background:
 {ctx["initial_instruction"][:500] if ctx["initial_instruction"] else "Not available."}
 
 {extra_block}
 
+This context is not part of the authoritative question. Use it to understand terminology,
+but do not automatically convert it into PubMed filters.
+
 Rules for PubMed query:
-1. Use MeSH terms where appropriate (e.g., "Mice, Knockout"[MeSH])
+1. Use MeSH terms where appropriate (e.g., "Liver"[MeSH Terms])
 2. Use Boolean operators (AND, OR, NOT)
 3. Keep the query focused but not overly restrictive. Do NOT tune the query toward a
    target number of hits: a precise query that returns few results on a genuinely narrow
    topic is a correct outcome, and broadening it until some count is reached only buys
    tangentially related papers that later get cited as support
-4. Identify species, tissue/organ, and disease model from the background and include as filters
-5. If specific gene names appear in the findings, include the ones that carry the question —
-   as many as that takes, and no more; a gene added to widen the net is noise
-6. Use field tags like [Title/Abstract], [MeSH] when helpful
-7. Prefer the terms that match the question. If a precise query returns nothing, first
+4. Every top-level AND concept must be explicitly required by the authoritative research question
+5. Add species, tissue, perturbation, disease model, or treatment as mandatory filters only when
+   the authoritative question explicitly asks for evidence matched on that dimension
+6. Use gene aliases as OR alternatives for the same target. Do not turn multiple genes found only
+   in the context into separate mandatory AND concepts
+7. Use field tags like [Title/Abstract], [MeSH] when helpful
+8. Prefer the terms that match the question. If a precise query returns nothing, first
    check the terminology (synonyms, MeSH wording, gene aliases) before broadening the
    scope — a genuinely novel topic with no directly relevant literature is a finding,
    and widening the query until something matches only replaces it with a different topic
@@ -335,6 +356,40 @@ Return ONLY the PubMed query string, nothing else."""
         query = re.sub(r'^```\w*\n?', '', query)
         query = re.sub(r'\n?```$', '', query)
         return query.strip()
+
+    async def _revise_zero_hit_query(
+        self,
+        topic: str,
+        query: str,
+        state: Optional[AnalysisState] = None,
+        current_round_findings: Optional[List[str]] = None,
+    ) -> str:
+        """Revise one true-zero query without changing its scientific question."""
+        ctx = self._build_research_context(topic, state, current_round_findings)
+        prompt = f"""Revise a PubMed query that completed successfully but returned zero results.
+
+Authoritative research question:
+{topic}
+
+Executed query:
+{query}
+
+Context for terminology and disambiguation only:
+Study species: {ctx.get("species") or "Not specified."}
+Experimental background: {ctx["initial_instruction"][:500] or "Not available."}
+Current findings: {ctx["current_round_findings"][:300] or "Not available."}
+
+Return one concept-preserving PubMed query. Keep every concept explicitly required by the
+authoritative question. You may correct MeSH wording, add synonyms or gene aliases as OR
+alternatives, and remove species, tissue, model, treatment, or other constraints that came
+only from context. Do not replace the target mechanism or broaden to a different topic.
+
+Return ONLY the revised PubMed query string, nothing else."""
+        response, _ = await self._chat_with_fallback(prompt, temperature=0.2)
+        revised = response.strip().strip('"').strip("'").strip("`")
+        revised = re.sub(r'^```\w*\n?', '', revised)
+        revised = re.sub(r'\n?```$', '', revised)
+        return revised.strip()
 
     def _meaningful_term_count(self, terms: Dict[str, List[str]]) -> int:
         count = 0
@@ -372,13 +427,19 @@ Return ONLY the PubMed query string, nothing else."""
         self,
         query: str,
         topic: str,
-        max_results: int = 20
+        max_results: int = 20,
+        *,
+        state: Optional[AnalysisState] = None,
+        current_round_findings: Optional[List[str]] = None,
+        enable_semantic_revision: bool = False,
+        attempt_log: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[str, List[Dict[str, str]]]:
-        """Try the query; if PubMed returns 0 results, progressively simplify.
+        """Try a query and perform at most one bounded second attempt.
 
-        Degradation strategy:
-        1. Original LLM-generated query
-        2. Strip field tags and MeSH qualifiers, keep core terms
+        General literature searches receive one concept-preserving semantic
+        revision after a true zero result. PI-guided searches retain their
+        legacy syntax-only degradation. A technical failure is retried without
+        changing the scientific query.
 
         Returns (final_query, articles) tuple.
         """
@@ -386,28 +447,83 @@ Return ONLY the PubMed query string, nothing else."""
         max_attempts = 2
         last_error: Optional[Exception] = None
         last_search_failed = False
+        attempts = attempt_log if attempt_log is not None else []
+        next_attempt_kind = "initial"
         while attempt < max_attempts:
+            kind = next_attempt_kind
             try:
                 articles = await self._pubmed_search(query, max_results=max_results)
                 last_search_failed = False
+                attempts.append({
+                    "kind": kind,
+                    "query": query,
+                    "result_count": len(articles),
+                })
                 if articles:
                     if attempt > 0:
-                        logger.info(f"[Literature] Query succeeded after {attempt} degradation(s): {query[:80]}")
+                        logger.info(
+                            f"[Literature] Query succeeded after {attempt} "
+                            f"retry/revision(s): {query[:80]}"
+                        )
                     return query, articles
             except Exception as e:
                 last_error = e
                 last_search_failed = True
+                attempts.append({
+                    "kind": kind,
+                    "query": query,
+                    "result_count": None,
+                    "error": str(e)[:500],
+                })
                 logger.warning(f"[Literature] PubMed search error (attempt {attempt + 1}): {e}")
 
             # Degrade the query
             if attempt == 0:
-                # Strategy 1: Strip field tags and quotes
-                degraded = re.sub(r'\[(?:MeSH|Title/Abstract|Title|Author|Journal)\]', '', query)
-                degraded = re.sub(r'"([^"]*)"', r'\1', degraded)
-                degraded = degraded.strip()
-                if degraded and degraded != query:
+                if enable_semantic_revision and not last_search_failed:
+                    try:
+                        degraded = await self._revise_zero_hit_query(
+                            topic,
+                            query,
+                            state=state,
+                            current_round_findings=current_round_findings,
+                        )
+                    except UpstreamExhaustedError:
+                        raise
+                    except Exception as e:
+                        logger.warning(
+                            f"[Literature] Zero-hit query revision unavailable: {e}"
+                        )
+                        break
+                elif enable_semantic_revision:
+                    # A technical failure is retried without changing the
+                    # scientific query. It must not trigger semantic broadening.
+                    degraded = query
+                else:
+                    # Legacy PI-guided path: strip field tags and quotes.
+                    degraded = re.sub(
+                        r'\[(?:MeSH(?: Terms)?|Title/Abstract|Title|Author|Journal)\]',
+                        '',
+                        query,
+                        flags=re.IGNORECASE,
+                    )
+                    degraded = re.sub(r'"([^"]*)"', r'\1', degraded)
+                    degraded = degraded.strip()
+                same_query = (
+                    re.sub(r'\s+', ' ', degraded).strip().lower()
+                    == re.sub(r'\s+', ' ', query).strip().lower()
+                )
+                if degraded and not same_query:
                     query = degraded
-                    logger.info(f"[Literature] Degrading query (strip tags): {query[:80]}")
+                    next_attempt_kind = (
+                        "zero_hit_revision"
+                        if enable_semantic_revision else "syntax_degradation"
+                    )
+                    logger.info(f"[Literature] Revising zero-result query: {query[:80]}")
+                    await asyncio.sleep(0.4)
+                    attempt += 1
+                    continue
+                if enable_semantic_revision and last_search_failed:
+                    next_attempt_kind = "technical_retry"
                     await asyncio.sleep(0.4)
                     attempt += 1
                     continue

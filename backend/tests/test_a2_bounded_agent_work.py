@@ -10,7 +10,7 @@ from PIL import Image
 
 from backend.agents.biochemistry_agent import BiochemistryAgent
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
-from backend.agents.literature.pubmed import PubMedMixin
+from backend.agents.literature.pubmed import PubMedMixin, _search_cache_key
 from backend.models.schemas import AgentType, DataFile
 
 
@@ -32,7 +32,15 @@ class _EmptyPubMedAgent(PubMedMixin):
         return "  exact empty query  "
 
     async def _validate_and_degrade_query(self, query, *_args, **kwargs):
-        return query, await self._pubmed_search(query, **kwargs)
+        attempt_log = kwargs.pop("attempt_log", None)
+        articles = await self._pubmed_search(query, **kwargs)
+        if attempt_log is not None:
+            attempt_log.append({
+                "kind": "initial",
+                "query": query,
+                "result_count": len(articles),
+            })
+        return query, articles
 
     async def _pubmed_search(self, _query, **_kwargs):
         self.search_calls += 1
@@ -40,6 +48,25 @@ class _EmptyPubMedAgent(PubMedMixin):
 
     async def _quick_search(self, topic, _state):
         return {"status": "completed", "report": f"Fallback: {topic}"}
+
+
+def test_pubmed_cache_key_includes_query_policy_version():
+    kwargs = {
+        "topic": "topic",
+        "query": "query",
+        "organism": "mouse",
+        "tissue": "liver",
+        "pi_guided": False,
+    }
+
+    assert _search_cache_key(**kwargs, query_policy_version=1) != _search_cache_key(
+        **kwargs, query_policy_version=2
+    )
+
+    kwargs["pi_guided"] = True
+    assert _search_cache_key(**kwargs, query_policy_version=1) == _search_cache_key(
+        **kwargs, query_policy_version=2
+    )
 
 
 @pytest.mark.asyncio
@@ -52,6 +79,12 @@ async def test_pubmed_each_budget_stops_and_exact_empty_result_is_cached():
     assert first["search_meta"]["stop_reason"] == "no_pubmed_results"
     assert first["search_meta"]["fallback"] == "none"
     assert first["search_meta"]["rounds"] == 1
+    assert first["search_meta"]["query_policy_version"] == 2
+    assert first["search_meta"]["query_attempts"] == [{
+        "kind": "initial",
+        "query": "  exact empty query  ",
+        "result_count": 0,
+    }]
     assert agent.search_calls == 1
 
     calls = agent.search_calls

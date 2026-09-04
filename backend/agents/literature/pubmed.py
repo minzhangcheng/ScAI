@@ -18,13 +18,21 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+PUBMED_QUERY_POLICY_VERSION = 2
+
 
 def _normalized_search_text(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
 def _search_cache_key(
-    *, topic: str, query: str, organism: str, tissue: str, pi_guided: bool
+    *,
+    topic: str,
+    query: str,
+    organism: str,
+    tissue: str,
+    pi_guided: bool,
+    query_policy_version: int = PUBMED_QUERY_POLICY_VERSION,
 ) -> str:
     payload = {
         "topic": _normalized_search_text(topic),
@@ -33,6 +41,8 @@ def _search_cache_key(
         "tissue": _normalized_search_text(tissue),
         "pi_guided": bool(pi_guided),
     }
+    if not pi_guided:
+        payload["query_policy_version"] = int(query_policy_version)
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -468,10 +478,14 @@ IMPORTANT:
         """
         pi_guided = initial_query is not None and evaluate_fn is not None
         label = "PI-guided PubMed" if pi_guided else "PubMed"
+        active_query_policy_version = (
+            1 if pi_guided else PUBMED_QUERY_POLICY_VERSION
+        )
 
         all_articles: List[Dict[str, str]] = []
         seen_pmids: Set[str] = set()
         search_history: List[Dict[str, Any]] = []
+        query_attempts: List[Dict[str, Any]] = []
         latest_triage: Dict[str, Any] = {}
         # Separate from latest_triage, which is the annotation triage payload:
         # only the PI-guided branch ever wrote that, so the plain PubMed branch
@@ -508,6 +522,7 @@ IMPORTANT:
             organism=organism,
             tissue=tissue,
             pi_guided=pi_guided,
+            query_policy_version=active_query_policy_version,
         )
         normalized_cache_query = _normalized_search_text(query)
 
@@ -553,7 +568,11 @@ IMPORTANT:
                     query, articles = await asyncio.wait_for(
                         self._validate_and_degrade_query(
                             query, topic,
-                            max_results=pubmed_max_results or 20
+                            max_results=pubmed_max_results or 20,
+                            state=state,
+                            current_round_findings=current_round_findings,
+                            enable_semantic_revision=not pi_guided,
+                            attempt_log=query_attempts,
                         ),
                         timeout=max(0.001, deadline - time.monotonic()),
                     )
@@ -694,6 +713,8 @@ IMPORTANT:
                 "sufficiency_evaluations": evaluation_count,
                 "elapsed_seconds": round(time.monotonic() - search_started, 3),
                 "fallback": "none",
+                "query_policy_version": active_query_policy_version,
+                "query_attempts": copy.deepcopy(query_attempts),
                 **_evaluation_meta({
                     "search_exhausted": True,
                     "evidence_strength": "unassessed",
@@ -772,6 +793,8 @@ IMPORTANT:
             "article_count": len(all_articles),
             "sufficiency_evaluations": evaluation_count,
             "elapsed_seconds": round(time.monotonic() - search_started, 3),
+            "query_policy_version": active_query_policy_version,
+            "query_attempts": copy.deepcopy(query_attempts),
             **_evaluation_meta(latest_evaluation),
         }
         cache_result(final)
