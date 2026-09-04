@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.52.2 · **Last updated**: 2026-09-04
+**Version**: 0.52.3 · **Last updated**: 2026-09-04
 
 ## 1. Runtime Architecture
 
@@ -352,6 +352,62 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.52.x — (2026-09-03 onward)**
+
+- `0.52.3` — Gives an innovation round the same deterministic visual floor
+  Stage 1 has, and makes the round's own artifact accounting visible instead of
+  silently empty.
+
+  **A round could declare seventeen figures, produce two, and have the audit
+  report nothing missing.** `PlanAudit.summary()` derived `figure_unmet` from the
+  `unmet` property, which selects steps that are `STATUS_PENDING` *and*
+  `verifiable`. In `host_execution_linkage` mode — the mode every innovation
+  round actually runs in, since Supervisor semantic reconciliation is absent
+  there — every step is recorded as `awaiting_pi_decision` with
+  `verifiable=False`, because the completion call belongs to the PI. `unmet` was
+  therefore always empty, `n_figure_unmet` always `0`, `unmet_figure_kinds`
+  always `[]`, and the line in the PI's execution-review prompt naming missing
+  figure types, printed only when that list is non-empty, never appeared. The
+  audit reported "17 figure steps, 0 unmet" for a round that had rendered two.
+  `figure_unmet` is now its own property, reading `missing_figure_kinds` off
+  every step directly. Whether a declared artifact exists and links to this round
+  is a technical observation about artifact linkage, not the scientific
+  completion verdict, so routing it through that verdict was the defect. The
+  upstream waiver still applies: a step the plan excused, or one marked
+  text-only, never populates `missing_figure_kinds`, so a step that legitimately
+  produces no figure is not reported. The observation gates nothing, retries
+  nothing, and rejects nothing. The review prompt additionally states the scale —
+  "17 approved step(s) declared one; 15 produced no linked figure this round" —
+  and says in the same sentence that whether those figures matter, and whether to
+  ask for the work again, is the PI's decision.
+
+  **Rounds 2+ had no deterministic visual baseline.** Round 1 has one:
+  `bioinformatics_node` calls `ensure_exploration_diagnostic_figure` and
+  `ensure_stage1_baseline_figures` while `current_round <= 1`, and those probe
+  the live kernel and render the representation themselves, so Stage 1 and Stage
+  2 cannot settle without a floor. Every panel in an innovation round was instead
+  the executor's own choice, and nothing downstream can turn a computed result
+  into an artifact once the round has settled: the restricted supplementary pass
+  is explicitly barred from registering a PublicationFigure and told to leave
+  such a gap to the main executor, and the required-figure contract is
+  deliberately not a clause in `decide_bioinfo_post_execution`, because a figure
+  the review loop abandoned cannot be made report-eligible by replanning. A round
+  that executed nine method families could therefore register two figures with
+  every mechanism behaving exactly as designed. New
+  `backend/agents/bioinformatics/innovation_baseline_figures.py` gives rounds 2+
+  the same three-part shape: a read-only probe reporting what the kernel holds,
+  independent panel specs each suppressed only by its own missing input, and
+  fail-soft rendering, where a probe failure or a single failed panel costs that
+  panel rather than the round. It builds the views the innovation instruction
+  already prescribes — an effect-size-versus-significance plot for a differential
+  table, a ranked bar chart for a term enrichment, and a distribution across the
+  compared groups for registered scores — discovered from `obs` score columns
+  plus an experimental-design field, and from DataFrames whose own columns
+  identify them; a table too short to be an effect-size landscape is not one.
+  Panels render before the plan audit, so the PI reviews the round as it will
+  actually be reported, and they are registered as platform diagnostics that
+  cannot take a name an analysis-owned figure already holds. Names carry the
+  round number, because an innovation round's result is not a refresh of the
+  previous round's — unlike Stage 1, where a stable name upserts deliberately.
 
 - `0.52.2` — Gives a biochemistry figure somewhere structured to land, and stops
   the mechanism policy from reporting the limit of an assay as a result about the

@@ -1089,6 +1089,51 @@ def test_pi_execution_audit_formats_every_plan_step():
     assert "awaiting PI completion decision 21" in rendered
 
 
+def test_pi_execution_audit_reports_the_scale_of_missing_figures():
+    """The PI must see how many declared figures the round did not produce.
+
+    `unmet_figure_kinds` names the types but not the scale, and the headline
+    counters describe method evidence only. A round where 17 approved steps
+    declared a figure and 15 produced none is exactly the observation the PI
+    needs in order to decide whether to ask for that work again. It is reported
+    as a fact, not enforced: the decision stays with the PI.
+    """
+    from backend.agents.pi.execution_review import ExecutionReviewMixin
+
+    rendered = ExecutionReviewMixin._format_execution_audit(
+        {
+            "n_steps": 19,
+            "n_awaiting_pi_decision": 19,
+            "n_figure_steps": 17,
+            "n_figure_unmet": 15,
+            "unmet_figure_kinds": ["heatmap", "umap"],
+            "step_observations": [],
+        },
+        [],
+    )
+
+    assert "Required figures: 17 approved step(s) declared one" in rendered
+    assert "15 produced no linked figure this round" in rendered
+
+
+def test_pi_execution_audit_omits_the_figure_line_when_none_were_declared():
+    """A plan that declared no figure deliverable gets no figure observation."""
+    from backend.agents.pi.execution_review import ExecutionReviewMixin
+
+    rendered = ExecutionReviewMixin._format_execution_audit(
+        {
+            "n_steps": 3,
+            "n_awaiting_pi_decision": 3,
+            "n_figure_steps": 0,
+            "n_figure_unmet": 0,
+            "step_observations": [],
+        },
+        [],
+    )
+
+    assert "Required figures:" not in rendered
+
+
 def test_sanitize_review_result_bounds_lists_and_survives_non_dict():
     out = sanitize_review_result({
         "status": "completed",

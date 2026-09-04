@@ -16,6 +16,10 @@ from ..agents.bioinformatics.exploration_diagnostics import (
 from ..agents.bioinformatics.stage1_baseline_figures import (
     ensure_stage1_baseline_figures,
 )
+from ..agents.bioinformatics.innovation_baseline_figures import (
+    ensure_innovation_baseline_figures,
+    should_render_innovation_baselines,
+)
 from ..services.figure_contract import audit_figure_contract
 from ..services.sample_design import sequencing_design_instruction
 from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, MAX_EXECUTION_REVISION_ATTEMPTS, prepend_species, safe_pi_brief, STAGE1_KEYWORDS, WorkflowSupersededError

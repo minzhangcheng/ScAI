@@ -308,6 +308,15 @@ Reply with STRICT JSON only:
             f"no execution evidence {audit.get('n_unmet', 0)}, "
             f"awaiting PI completion decision {awaiting_pi})"
         ]
+        figure_steps = audit.get("n_figure_steps") or 0
+        if figure_steps:
+            lines.append(
+                f"- Required figures: {figure_steps} approved step(s) declared one; "
+                f"{audit.get('n_figure_unmet', 0)} produced no linked figure this "
+                "round. Artifact linkage is a technical observation; whether the "
+                "missing figures matter, and whether to ask for that work again, "
+                "is your decision."
+            )
         observations = audit.get("step_observations") or []
         if observations:
             lines.append("- Per-step technical observations (use these plan_step_id values):")

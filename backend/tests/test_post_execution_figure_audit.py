@@ -685,3 +685,98 @@ def test_integration_phase_text_only_does_not_waive_a_mixed_quantitative_step():
     assert mixed_verdict.status == "pending"
     assert mixed_verdict.planned_figure_kinds == ["result"]
     assert mixed_verdict.missing_figure_kinds == ["result"]
+
+
+def test_host_linkage_mode_reports_missing_figures_for_pi_review():
+    """A missing required artifact must reach the PI in host-linkage mode.
+
+    Innovation rounds run without Supervisor semantic reconciliation, so every
+    step is left `awaiting_pi_decision` and `verifiable=False` — the scientific
+    completion call belongs to the PI. Whether the round produced the artifact
+    a step asked for is a technical fact about artifact linkage, not that
+    scientific call, so it must still be summarized rather than dropped along
+    with the verdict.
+    """
+    plan = _plan(PlanStep(
+        id=1,
+        title="Condition-level expression heatmap",
+        method="Plot the condition-level expression heatmap",
+        expected_output="Publication-quality heatmap",
+        figure_requirements=[FigureRequirement(figure_type="heatmap")],
+    ))
+    receipt = CodeExecution(
+        id="host-linkage-receipt",
+        code="run_condition_heatmap_step()",
+        round_number=2,
+        evidence_schema_version=2,
+        plan_id=plan.id,
+        plan_step_ids=[1],
+        execution_purpose="planned",
+        execution_status="succeeded",
+        lineage_id="main",
+    )
+
+    summary = audit_plan_execution(
+        plan,
+        [receipt],
+        round_number=2,
+        publication_figures=[],
+    ).summary()
+
+    assert summary["evidence_mode"] == "host_execution_linkage"
+    assert summary["n_awaiting_pi_decision"] == 1
+    assert summary["n_figure_steps"] == 1
+    assert summary["n_figure_unmet"] == 1
+    assert summary["unmet_figure_kinds"] == ["heatmap"]
+
+
+def test_host_linkage_figure_report_stays_silent_for_a_waived_step():
+    """A step that legitimately produces no figure is not reported as missing.
+
+    The counterpart to the report above: the observation must distinguish "the
+    plan asked for an artifact and the round did not produce it" from "this
+    step was never going to produce one". A step with no declared requirement
+    whose text-only exception explains that it computes no new result is the
+    latter, and must not inflate the observation the PI reviews.
+    """
+    plan = _plan(
+        PlanStep(
+            id=1,
+            title="Condition-level expression heatmap",
+            method="Plot the condition-level expression heatmap",
+            expected_output="Publication-quality heatmap",
+            figure_requirements=[FigureRequirement(figure_type="heatmap")],
+        ),
+        PlanStep(
+            id=2,
+            title="Narrative synthesis of prior evidence",
+            method="Summarize prior evidence in prose",
+            allow_text_only=True,
+            text_only_reason=(
+                "No new data result is computed in this synthesis step."
+            ),
+        ),
+    )
+    receipt = CodeExecution(
+        id="host-linkage-receipt-two-steps",
+        code="run_plan_steps()",
+        round_number=2,
+        evidence_schema_version=2,
+        plan_id=plan.id,
+        plan_step_ids=[1, 2],
+        execution_purpose="planned",
+        execution_status="succeeded",
+        lineage_id="main",
+    )
+
+    audit = audit_plan_execution(
+        plan, [receipt], round_number=2, publication_figures=[]
+    )
+    summary = audit.summary()
+
+    assert summary["evidence_mode"] == "host_execution_linkage"
+    assert summary["n_steps"] == 2
+    assert summary["n_figure_steps"] == 1
+    assert summary["n_figure_unmet"] == 1
+    assert summary["unmet_figure_kinds"] == ["heatmap"]
+    assert [step.step_id for step in audit.figure_unmet] == [1]

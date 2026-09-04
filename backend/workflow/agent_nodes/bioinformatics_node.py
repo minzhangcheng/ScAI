@@ -405,6 +405,23 @@ async def collect_bioinformatics_results(self, ctx, result):
             logger.warning(
                 f"[{self.session_id}] Stage 1 baseline rendering skipped: {baseline_err!r}"
             )
+    elif should_render_innovation_baselines(analysis_state.current_round):
+        # The same guarantee for rounds 2+. Every panel an innovation round
+        # shows is otherwise the executor's own choice, so a round could
+        # execute a dozen method families and register almost nothing, and
+        # nothing downstream can turn a computed result into an artifact once
+        # the round has settled. Rendered before the plan audit below, so the
+        # PI reviews the round as it will actually be reported. Fail-soft: a
+        # missing panel must never fail a completed analysis.
+        try:
+            await ensure_innovation_baseline_figures(
+                self.bioinformatics_agent, analysis_state
+            )
+        except Exception as innovation_err:
+            logger.warning(
+                f"[{self.session_id}] Innovation baseline rendering skipped: "
+                f"{innovation_err!r}"
+            )
 
     # Step 2b: audit the approved plan against what actually ran, then — only
     # on hard structural signals — let the PI commission a bounded repair pass.

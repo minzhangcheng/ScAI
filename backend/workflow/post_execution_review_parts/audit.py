@@ -57,11 +57,27 @@ class PlanAudit:
         """Current structured steps whose scientific status belongs to the PI."""
         return [s for s in self.steps if s.awaiting_pi_decision]
 
+    @property
+    def figure_unmet(self) -> List[StepAudit]:
+        """Steps that named a required figure the round did not produce.
+
+        Deliberately not filtered through ``unmet``. Whether an approved step's
+        declared artifact exists and links to this round is a technical
+        observation, while ``unmet`` carries a completion verdict that
+        ``host_execution_linkage`` mode leaves to the PI (every step there is
+        ``awaiting_pi_decision`` with ``verifiable=False``). Routing the
+        artifact fact through the verdict made this list permanently empty for
+        exactly the rounds that rely on it. Steps whose requirement the plan
+        waived, or that are text-only, never populate ``missing_figure_kinds``
+        upstream, so a step that legitimately produces no figure is not
+        reported here. This observation informs PI review; it does not gate,
+        retry, or reject anything.
+        """
+        return [s for s in self.steps if s.missing_figure_kinds]
+
     def summary(self) -> Dict[str, Any]:
         figure_steps = [s for s in self.steps if s.planned_figure_kinds]
-        figure_unmet = [
-            s for s in self.unmet if s.missing_figure_kinds
-        ]
+        figure_unmet = self.figure_unmet
         return {
             "n_steps": len(self.steps),
             "n_completed": len(self.completed),
