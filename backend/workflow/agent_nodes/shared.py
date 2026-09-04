@@ -111,7 +111,8 @@ changes.
 
 For each program include: the cell type/compartment, concrete triggering observations,
 supporting genes/pathways/scores/tables, whether bulk RNA-seq supports it if bulk data exists,
-alternative explanations, missing evidence, and a cautious interpretation.
+alternative explanations, missing evidence, and an interpretation stating what the evidence supports
+at the strongest class of evidence the available modalities reach.
 
 Call register_mechanism_programs BEFORE report_findings. If no supportable program exists, call
 register_mechanism_programs with an empty programs list and explain why in no_program_reason.

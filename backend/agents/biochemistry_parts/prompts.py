@@ -67,6 +67,89 @@ Reply in JSON format:
     "suggested_experiments": ["experiment 1", ...]
 }}
 """
+def image_measurement_extraction_prompt(filename: str, analysis_text: str) -> str:
+    return f"""Extract every quantitative measurement from the following visual analysis
+of a biochemistry figure, one row per MEASUREMENT.
+
+Filename: {filename}
+
+## Visual analysis
+{analysis_text}
+
+The same indicator reported for two groups is TWO rows. A figure is the one place a
+group label can live for an image — the same picture cannot be uploaded twice under
+two different group labels — so a row that drops its group label leaves a number that
+nothing downstream can compare against anything.
+
+For each measurement, record:
+1. indicator — the name as the figure writes it, including any normalisation the figure
+   states (for example a relative or fold-change readout). Keep the source name; do not
+   rename it into a panel abbreviation or a clinical scheme the figure does not use
+2. value — the number. Where the analysis gives an approximation or a range, take the
+   stated central value
+3. unit — as given; the empty string when the figure prints none
+4. group — the experimental group or condition this number belongs to, exactly as the
+   figure labels it
+5. sample — the replicate identifier, when the analysis names one for this number
+6. panel — the panel or sub-figure label, if any
+7. readout — "printed_number" when the value appears in the figure as text (a table
+   cell, a bar label, an axis annotation), "chart_estimate" when it was read off a
+   plotted element against an axis. A reader who cannot tell these apart over-trusts
+   the second kind
+8. statistical_annotation — the significance marker the figure itself prints for this
+   comparison (a star notation, "ns", a p-value), verbatim, with what it compares if
+   stated; null when the figure prints none. This is the test the authors actually ran
+9. reference_range — the reference interval printed alongside, if any
+
+Emit no row for something the analysis describes only in words with no number, and do
+not compute a value the figure does not show — a difference, ratio, or percentage you
+would have to derive is not a measurement. Qualitative panels (photographs, gels with
+no densitometry) produce no rows.
+
+Reply ONLY in JSON format:
+{{
+    "results": [
+        {{"indicator": "<name as written in the figure>", "value": 0.0, "unit": "<as written>",
+          "group": "<group label or null>", "sample": "<sample id or null>",
+          "panel": "<panel label or null>", "readout": "printed_number|chart_estimate",
+          "statistical_annotation": "<as printed, or null>",
+          "reference_range": "<as printed, or null>"}},
+        ...
+    ],
+    "notes": "Anything that limits how these numbers should be read"
+}}
+"""
+
+
+def image_consolidation_prompt(combined_text: str, instruction: str) -> str:
+    return f"""Based on the following visual analysis of biochemistry experiment images,
+please consolidate the findings into a structured summary.
+
+## Image Analysis Results:
+{combined_text}
+
+## Research Context:
+{instruction}
+
+Synthesize the image analysis into a structured JSON response:
+{{
+    "image_findings": ["key finding from images 1", "key finding 2", ...],
+    "observed_values": [
+        {{"indicator": "name", "value_description": "description of observed value or trend", "significance": "explanation"}},
+        ...
+    ],
+    "image_mechanisms": ["mechanism suggested by image data 1", ...],
+    "image_suggested_experiments": ["suggested experiment based on image findings 1", ...]
+}}
+
+Focus on:
+1. Key differences between experimental groups visible in the images
+2. Statistical significance markers if present
+3. Trends and patterns across multiple images
+4. Any abnormal or noteworthy observations
+"""
+
+
 def file_extraction_prompt(filename: str, content: str) -> str:
     return f"""Analyze this biochemistry data file and extract ALL numerical values.
 

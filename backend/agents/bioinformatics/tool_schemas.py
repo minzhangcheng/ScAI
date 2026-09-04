@@ -756,7 +756,19 @@ TOOLS = [
                                 "specificity": {"type": "string", "enum": ["high", "medium", "low"]},
                                 "alternative_explanations": {"type": "array", "items": {"type": "string"}},
                                 "missing_evidence": {"type": "array", "items": {"type": "string"}},
-                                "interpretation": {"type": "string", "description": "Cautious interpretation; do not claim confirmation."},
+                                "interpretation": {
+                                    "type": "string",
+                                    "description": (
+                                        "What the evidence supports, stated at the "
+                                        "strongest class of evidence the available "
+                                        "modalities reach. Where the analysis ranks the "
+                                        "candidates, name the most probable one as an "
+                                        "explicit inference carrying its residual "
+                                        "uncertainty. Do not present an assay limit as a "
+                                        "finding, and do not claim support the data do "
+                                        "not carry."
+                                    ),
+                                },
                                 "downstream_literature_queries": {"type": "array", "items": {"type": "string"}},
                             },
                             "required": ["label", "triggering_observations", "evidence_execution_ids", "evidence_strength", "specificity", "interpretation"],

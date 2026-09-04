@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.52.1 · **Last updated**: 2026-09-03
+**Version**: 0.52.2 · **Last updated**: 2026-09-04
 
 ## 1. Runtime Architecture
 
@@ -352,6 +352,85 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.52.x — (2026-09-03 onward)**
+
+- `0.52.2` — Gives a biochemistry figure somewhere structured to land, and stops
+  the mechanism policy from reporting the limit of an assay as a result about the
+  biology.
+
+  **An uploaded figure produced no indicator records at all.** The vision pass
+  read each panel correctly — group labels, per-group values, the significance
+  markers the figure itself prints — and wrote all of it into prose in
+  `extracted_data["analysis"]`; step 2 then consolidated those numbers into
+  `value_description` strings carrying no group field. Only
+  `_step1_process_indicators`, which handles non-image data files, ever called
+  `add_result`. `state.biochemistry_indicators` is the structured sink that group
+  comparison, status classification and mechanism adjudication all read from, so a
+  study whose biochemistry arrived as a figure had no biochemistry anywhere
+  downstream: the file stayed in `uploads/biochemistry/_ungrouped/` with a null
+  `group_id`, the plan rule that keeps an unassigned image out of group
+  comparisons excluded it, and the gates correctly reported that nothing could be
+  adjudicated. New `backend/agents/biochemistry_parts/image_measurements.py` and
+  `_step0_extract_image_measurements` mint one record per measurement through the
+  same `reconcile_provenance` → `add_result` path the data-file route already
+  uses. Step 0 runs before step 1 because step 1 is where a measurement is
+  classified — minting after it leaves records ungraded, which is as invisible as
+  not minting them — and it reuses the vision pass step 2 will consume rather than
+  spending a second one. A value read off a plotted element against an axis is
+  minted as an ordinary indicator but carries `provenance_notes` naming the image
+  and panel, recording that the value is a chart estimate, and quoting the
+  figure's own significance marker, so a reader can tell it from a printed number.
+  The two image prompts moved to `biochemistry_parts/prompts.py`, which is where
+  the agent's prompts already live and keeps the agent module inside its size
+  contract.
+
+  **A mechanism no instrument in the study can reach was being reported as a
+  finding.** `MECHANISM_EVIDENCE_POLICY` ended at "distinguish pathway activity,
+  susceptibility, or priming from causal mechanism execution". Where execution-
+  level evidence is unobtainable by construction — the direct assay, the
+  perturbation, the rescue — every candidate parked at susceptibility
+  permanently, and the agent reported that ceiling round after round as though it
+  were a result. The policy now requires the strongest class of evidence the
+  available modalities can reach to be stated, separates a mechanism that is not
+  demonstrated from one that no measurement in this study could demonstrate, and
+  where that limit is reached with independent modalities converging requires the
+  remaining candidates to be ranked and the most probable one named as an explicit
+  inference carrying its residual uncertainty. Two rules landed with it. An
+  observation running counter to a hypothesised mechanism may be that mechanism's
+  counter-regulation rather than its absence, and an induced compensatory program
+  may be a response to a pressure rather than proof the pressure prevailed; the
+  escape hatch is closed on purpose, because "that is only compensation" would
+  otherwise explain away every inconvenient result. And a population depleted from
+  the captured data is an observation to explain with its causes held open — a
+  change of state or identity, loss during dissociation or capture, movement out
+  of the sampled compartment, elimination — described deliberately without
+  survival vocabulary, which would presume the question this is meant to leave
+  open. `PIAgent.build_cross_modal_synthesis` no longer instructs that mechanisms
+  be presented as "supported but incomplete" rather than conclusive: a gap is
+  reported alongside a verdict and bounds it, not instead of it. The final
+  summary's Conclusions section must name the most probable mechanism where the
+  analysis has ranked one.
+
+  **The policy paragraph was not the only place the old ceiling was written
+  down.** Two restatements of it sat closer to the point of generation and would
+  have cancelled the new rule exactly where it applies. The `interpretation` field
+  of `register_mechanism_programs` — the field that carries the verdict — was
+  described as "Cautious interpretation; do not claim confirmation", and
+  `_MECHANISM_CAPTURE_INSTRUCTION` interpolated the policy and then closed with
+  "and a cautious interpretation". Both now ask for what the evidence supports at
+  the strongest class the available modalities reach, while keeping an explicit
+  prohibition on presenting an assay limit as a finding or claiming support the
+  data do not carry. Both are pinned by raw-source tests, so a future edit that
+  reintroduces a blanket retraction next to the output fails.
+
+  **What this does not fix.** Two upstream defects still cost a mechanism its
+  name before any of this applies: a plan revision drops named mechanisms from the
+  step it was written to test (measured across 22 sessions, the eleven that went
+  to revision retained a median of 20% and four ended at zero), and
+  `report_findings` remains outside the policy's reach, so a mechanism that was
+  measured can still go unreported. Biochemistry `n` also stays unknown for a
+  figure: `detected_sample_counts` is untouched and a figure gives group means
+  with no replicate count, so the figure's own significance marker is what
+  adjudicates, not a recomputed test.
 
 - `0.52.1` — Stops the integration gate from discarding research directions, and
   repairs the novelty search that was never finishing in time to inform it. A

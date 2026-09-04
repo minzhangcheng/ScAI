@@ -1,10 +1,7 @@
 """
 Biochemistry Agent - Handles biochemical experiment results
 
-Three-step analysis pipeline:
-  Step 1: Process structured indicators and data files (skip if none)
-  Step 2: Process images with full visual analysis (skip if none)
-  Step 3: Summarize findings from steps 1 & 2, provide conclusions and experiment suggestions
+The analysis steps are documented on ``BiochemistryAgent.process``.
 """
 from typing import Dict, Any, List, Optional
 import hashlib
@@ -18,7 +15,11 @@ from ..constants import NO_OUTPUT_TOKEN_CAP
 from .base import BaseAgent
 from .biochemistry_parts.prompts import (
     file_extraction_prompt as _file_extraction_prompt,
+    image_consolidation_prompt as _image_consolidation_prompt,
     indicator_analysis_prompt as _indicator_analysis_prompt,
+)
+from .biochemistry_parts.image_measurements import (
+    extract_image_measurements as _extract_image_measurements,
 )
 from .biochemistry_parts.records import (
     clean_optional_text as _clean_optional_text,
@@ -77,8 +78,9 @@ class BiochemistryAgent(BaseAgent):
         instruction: str,
         **kwargs
     ) -> Dict[str, Any]:
-        """Process biochemistry analysis in three steps:
+        """Process biochemistry analysis:
 
+        Step 0: Register measurements printed in images as indicators
         Step 1: Process structured indicators + data files (skip if none)
         Step 2: Analyze images with vision model (skip if none)
         Step 3: Summarize results, provide conclusions and experiment suggestions
@@ -92,6 +94,15 @@ class BiochemistryAgent(BaseAgent):
         data_files = [f for f in bio_files if f.data_type != 'image']
 
         # ====================================================================
+        # Step 0: Register measurements the images print. Ahead of step 1
+        # because step 1 is where a measurement is classified: minting after it
+        # leaves records ungraded, which is as invisible as not minting them.
+        # ====================================================================
+        image_analyses = await self._step0_extract_image_measurements(
+            state, image_files, instruction
+        )
+
+        # ====================================================================
         # Step 1: Process structured indicators and data files
         # ====================================================================
         step1_result = await self._step1_process_indicators(
@@ -102,7 +113,7 @@ class BiochemistryAgent(BaseAgent):
         # Step 2: Process images with full visual analysis
         # ====================================================================
         step2_result = await self._step2_process_images(
-            image_files, instruction
+            image_files, instruction, analyses=image_analyses
         )
 
         # ====================================================================
@@ -115,6 +126,19 @@ class BiochemistryAgent(BaseAgent):
         )
 
         return final_result
+
+    # ------------------------------------------------------------------
+    # Step 0: Register measurements printed in images
+    # ------------------------------------------------------------------
+
+    async def _step0_extract_image_measurements(
+        self, state: AnalysisState, image_files: List[DataFile], instruction: str,
+    ) -> Dict[str, Optional[str]]:
+        """Mint indicator records from the measurements each image prints.
+
+        Returns {file_path: analysis-or-None} so step 2 reuses this vision pass.
+        """
+        return await _extract_image_measurements(self, state, image_files, instruction)
 
     # ------------------------------------------------------------------
     # Step 1: Process indicators
@@ -250,12 +274,17 @@ class BiochemistryAgent(BaseAgent):
         self,
         image_files: List[DataFile],
         instruction: str,
+        analyses: Optional[Dict[str, Optional[str]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Step 2: Analyze images with full visual analysis.
 
         Instead of extracting only JSON numbers, performs a comprehensive
         visual analysis of each image (chart type, trends, values, significance).
         Returns None if there are no images to analyze.
+
+        ``analyses`` carries what step 0 already read, keyed by file path: a
+        present key is not analyzed again (None means step 0 saw it fail); an
+        absent one falls back to a fresh call, as a caller without step 0 gets.
         """
 
         if not image_files:
@@ -269,8 +298,12 @@ class BiochemistryAgent(BaseAgent):
         image_analyses: List[str] = []
         failed_files: List[str] = []
 
+        cached_analyses = analyses or {}
         for bio_file in image_files:
-            analysis = await self._analyze_single_image(bio_file, instruction)
+            if bio_file.file_path in cached_analyses:
+                analysis = cached_analyses[bio_file.file_path]
+            else:
+                analysis = await self._analyze_single_image(bio_file, instruction)
             if analysis:
                 image_analyses.append(
                     f"### Image: {bio_file.filename}\n{analysis}"
@@ -294,34 +327,10 @@ class BiochemistryAgent(BaseAgent):
         # Consolidate all image analyses into structured findings
         combined_text = "\n\n".join(image_analyses)
 
-        prompt = f"""Based on the following visual analysis of biochemistry experiment images,
-please consolidate the findings into a structured summary.
-
-## Image Analysis Results:
-{combined_text}
-
-## Research Context:
-{instruction}
-
-Synthesize the image analysis into a structured JSON response:
-{{
-    "image_findings": ["key finding from images 1", "key finding 2", ...],
-    "observed_values": [
-        {{"indicator": "name", "value_description": "description of observed value or trend", "significance": "explanation"}},
-        ...
-    ],
-    "image_mechanisms": ["mechanism suggested by image data 1", ...],
-    "image_suggested_experiments": ["suggested experiment based on image findings 1", ...]
-}}
-
-Focus on:
-1. Key differences between experimental groups visible in the images
-2. Statistical significance markers if present
-3. Trends and patterns across multiple images
-4. Any abnormal or noteworthy observations
-"""
-
-        response = await self.chat(prompt, temperature=0.3)
+        response = await self.chat(
+            _image_consolidation_prompt(combined_text, instruction),
+            temperature=0.3,
+        )
         data = self._safe_parse_json(response, agent_label="BiochemistryAgent")
 
         return {

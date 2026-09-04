@@ -319,7 +319,7 @@ Current research direction: {current_direction or "N/A"}
 - Each candidate must draw evidence from at least TWO different sources, and at least one must be an experimental-data agent (biochemistry, pathology, or bioinformatics) — not purely literature.
 - Each supporting_evidence item must cite a concrete observation (value, gene, pathway, morphological feature, PMID), not a vague summary.
 - STRICT evidentiary separation: items that appear only as suggested future experiments (in next_steps or data_requests) can ONLY populate missing_evidence, never supporting_evidence. A candidate built mainly from suggested future experiments must have confidence="low" and report_recommendation="future_direction" unless independent observed data also supports it.
-- Populate missing_evidence for every candidate so the report can present mechanisms as "supported but incomplete" rather than conclusive.
+- Populate missing_evidence for every candidate, including the ones you grade high: an evidence gap is reported ALONGSIDE the verdict, not instead of it. A gap lowers confidence and bounds the claim; it does not turn a well-supported candidate back into an open question.
 - Return a SINGLE JSON object. Do NOT include example candidates or invented mechanisms.
 """
 
@@ -470,7 +470,10 @@ Please write a well-structured analysis report including:
    - Single-cell transcriptomic features
    - Biochemical indicator changes
 3. Molecular Mechanism Analysis
-4. Conclusions
+4. Conclusions: where the evidence ranks the candidate mechanisms, name the
+   most probable one and label it as an inference with its residual
+   uncertainty. Do not restate as an open question something the analysis has
+   already ranked.
 5. Limitations and Future Directions
 6. Cross-Modal Mechanism Candidates: for any candidate above, present it with its
    evidence sources, confidence, and explicitly labeled evidence gaps. Present
