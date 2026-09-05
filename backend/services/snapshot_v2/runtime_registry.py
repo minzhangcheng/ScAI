@@ -160,6 +160,19 @@ def build_required_runtime_set(
     return set(manifest.required)
 
 
+# Handles and connections are the dangerous case: dill often "succeeds" on them
+# by recording a path or fd, then reopens it on restore, so a pickling probe
+# cannot see the problem and a later restore on another machine aborts. They are
+# excluded by type both when the save runs and when a name is considered for
+# promotion, so the two decisions cannot drift apart.
+VOLATILE_RUNTIME_TYPE_PREFIXES = (
+    "_io.", "io.", "socket.", "_socket.", "ssl.",
+    "_thread.", "threading.", "multiprocessing.", "concurrent.", "asyncio.",
+    "sqlite3.", "h5py.", "tables.", "loompy.", "zarr.",
+    "subprocess.", "tempfile.",
+)
+
+
 class RuntimeDependencyTracker:
     """Tracks created/loaded/declared user-globals across successful cells.
 
@@ -175,10 +188,18 @@ class RuntimeDependencyTracker:
         self._persistence_failures: dict[str, int] = {}
         self._release_log: list[dict[str, str]] = []
         self._needs_legacy_declared_cleanup = False
+        # Names the kernel proved unserializable when the cell bound them. They
+        # exist and are usable; they simply cannot be continuation state, so
+        # promotion must not reach for them again on a later read.
+        self._unpersistable: set[str] = set()
 
     @property
     def required_outputs(self) -> set[str]:
         return set(self._required)
+
+    @property
+    def unpersistable_outputs(self) -> set[str]:
+        return set(self._unpersistable)
 
     @property
     def created_outputs(self) -> set[str]:
@@ -198,20 +219,41 @@ class RuntimeDependencyTracker:
         loaded: set[str] | None = None,
         declared: set[str] | None = None,
         removed: set[str] | None = None,
+        unpersistable: set[str] | None = None,
+        probed: set[str] | None = None,
     ) -> set[str]:
         created = set(created or set())
         loaded = set(loaded or set())
         declared = set(declared or set())
         removed = set(removed or set())
+        unpersistable = set(unpersistable or set())
+        # Only a name the kernel actually examined this cell gets a fresh
+        # verdict. Anything else keeps the one it already had, so a value bound
+        # once to an open handle is not promoted again the next time it is read.
+        probed = set(probed or set()) | unpersistable
+        self._unpersistable -= probed
+        self._unpersistable |= unpersistable
 
         self._created.update(created)
         for name in created:
             self._persistence_failures.pop(name, None)
         # Declared outputs are required immediately.
-        self._required.update(declared)
+        self._required.update(declared - self._unpersistable)
         # Cross-cell promotion: prior-created name later loaded becomes required.
-        promoted = loaded & self._created
+        # Promoting a value the kernel cannot serialize makes every later save
+        # fail on it with no way for the run to recover, so it is left out.
+        promoted = (loaded & self._created) - self._unpersistable
         self._required.update(promoted)
+        stale_required = self._required & self._unpersistable
+        if stale_required:
+            self.release(
+                stale_required,
+                lifecycle="superseded",
+                reason=(
+                    "The kernel proved this value unserializable when the cell "
+                    "bound it, so it cannot carry across a runtime generation."
+                ),
+            )
         # A name removed from the namespace (del / rebinding out of existence) is
         # no longer capturable and must drop out of the required set. Without this
         # a transient object (e.g. a loompy connection) declared as a persistent
@@ -241,6 +283,10 @@ class RuntimeDependencyTracker:
             raise ValueError("runtime dependency release requires names and a reason")
         self._required.difference_update(clean)
         self._created.difference_update(clean)
+        if lifecycle == "explicit_delete":
+            # The name is gone from the namespace; a later cell that recreates
+            # it deserves a fresh verdict rather than this one.
+            self._unpersistable.difference_update(clean)
         for name in clean:
             self._persistence_failures.pop(name, None)
             self._release_log.append({
@@ -297,9 +343,10 @@ class RuntimeDependencyTracker:
 
     def to_state_dict(self) -> dict:
         return {
-            "version": 3,
+            "version": 4,
             "created": sorted(self._created),
             "required": sorted(self._required),
+            "unpersistable": sorted(self._unpersistable),
             "persistence_failures": dict(sorted(self._persistence_failures.items())),
             "release_log": list(self._release_log),
         }
@@ -311,6 +358,7 @@ class RuntimeDependencyTracker:
             return tracker
         tracker._created = set(data.get("created") or [])
         tracker._required = set(data.get("required") or [])
+        tracker._unpersistable = set(data.get("unpersistable") or [])
         tracker._persistence_failures = {
             str(name): max(0, int(count))
             for name, count in (data.get("persistence_failures") or {}).items()

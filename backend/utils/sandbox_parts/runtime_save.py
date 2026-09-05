@@ -22,6 +22,9 @@ class SaveContext:
     SessionGoneError: type[BaseException]
     assert_session_generation_active: Any
     lifecycle_file_lock: Any
+    # Defaulted so a caller building a context by hand still produces valid
+    # kernel code; _build_save_code substitutes the canonical tuple when empty.
+    escaped_volatile_prefixes: str = ""
 
 
 class RequiredValueDemoted(Exception):
@@ -341,6 +344,9 @@ async def _prepare_save(sandbox, *, bindings):
     required_names = set(sandbox.get_runtime_dependency_names())
     required_names |= set(CANONICAL_RUNTIME_ARTIFACTS) & set(live_names)
     escaped_required = repr(sorted(required_names))
+    from backend.services.snapshot_v2.runtime_registry import (
+        VOLATILE_RUNTIME_TYPE_PREFIXES,
+    )
     return SaveContext(
         sandbox=sandbox,
         restore_failed=restore_failed,
@@ -349,6 +355,7 @@ async def _prepare_save(sandbox, *, bindings):
         required_names=required_names,
         escaped_required=escaped_required,
         escaped_path=escaped_path,
+        escaped_volatile_prefixes=repr(VOLATILE_RUNTIME_TYPE_PREFIXES),
         record_generation_failure=_record_generation_failure,
         restore_previous_persistence=_restore_previous_persistence,
         SessionGenerationError=SessionGenerationError,
@@ -359,6 +366,14 @@ async def _prepare_save(sandbox, *, bindings):
 
 
 def _build_save_code(context: SaveContext) -> str:
+    from backend.services.snapshot_v2.runtime_registry import (
+        VOLATILE_RUNTIME_TYPE_PREFIXES,
+    )
+
+    volatile_prefixes = (
+        context.escaped_volatile_prefixes
+        or repr(VOLATILE_RUNTIME_TYPE_PREFIXES)
+    )
     save_code = """\
 import dill
 import io
@@ -420,12 +435,7 @@ def _scai_is_anndata(_o):
 # path may not exist, and a raising frame aborts the whole restore -- so an open
 # loom/h5py/sqlite handle could cost the user every other variable. Exclude by
 # type rather than waiting for a pickling error that may never come.
-_scai_volatile_prefixes = (
-    "_io.", "io.", "socket.", "_socket.", "ssl.",
-    "_thread.", "threading.", "multiprocessing.", "concurrent.", "asyncio.",
-    "sqlite3.", "h5py.", "tables.", "loompy.", "zarr.",
-    "subprocess.", "tempfile.",
-)
+_scai_volatile_prefixes = """ + volatile_prefixes + """
 
 
 def _scai_is_volatile(_o):

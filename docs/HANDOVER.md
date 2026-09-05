@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.52.8 · **Last updated**: 2026-09-05
+**Version**: 0.52.9 · **Last updated**: 2026-09-05
 
 ## 1. Runtime Architecture
 
@@ -352,6 +352,20 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.52.x — (2026-09-03 onward)**
+
+- `0.52.9` — Decides persistability in the cell that binds the value instead of
+  at a save boundary. The post-cell globals probe now also asks the kernel what
+  it can serialize, over the round trip the created/loaded diff already costs,
+  and a value that dill refuses is never promoted into the required set. Open
+  handles are excluded by type from one shared list that the save script and the
+  probe both read, so the two decisions cannot drift. Bulk containers (AnnData,
+  pandas, numpy, scipy, polars, pyarrow) are skipped rather than serialized, and
+  anything past an 8 MiB budget gets no verdict at all, so a large analysis
+  object is never refused for failing to fit. A verdict is refreshed whenever
+  the cell touches the name, so rebinding repairs it. The agent is told in the
+  cell that bound the value: an unserializable declared `persistent_outputs`
+  entry now fails the cell with an actionable message, and any other
+  unserializable binding is reported as a note.
 
 - `0.52.8` — Stops one unpicklable scratch variable from wedging runtime
   persistence. Binding a bulk copy of the kernel namespace

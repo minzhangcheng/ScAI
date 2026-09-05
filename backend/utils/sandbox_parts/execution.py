@@ -168,6 +168,46 @@ class ExecutionMixin:
             str(self._session_tmp.resolve()),
         ]
 
+    @staticmethod
+    def _surface_unpersistable_outputs(result, declared, unpersistable) -> None:
+        """Report what this cell bound that cannot survive a kernel restart.
+
+        The failure this replaces surfaced minutes later at a save boundary, in
+        a message addressed to the operator rather than to the agent, about a
+        cell that had long since scrolled away. Naming it here is the only point
+        where rewriting the code is still cheap.
+        """
+        if not unpersistable:
+            return
+        described = {
+            name: f"{name} ({reason})" for name, reason in unpersistable.items()
+        }
+        # A declared output that cannot be serialized is a broken contract, not
+        # a note: the agent asked for that value to survive the round.
+        broken = sorted(set(declared) & set(unpersistable)) if result.success else []
+        if broken:
+            contract_error = (
+                "Declared persistent outputs cannot be serialized: "
+                + "; ".join(described[name] for name in broken)
+                + ". persistent_outputs names values that must survive a kernel "
+                "restart. Declare the data you need kept instead -- a DataFrame, "
+                "an array, plain Python values -- or drop the declaration and "
+                "rebuild this object in the step that uses it."
+            )
+            result.success = False
+            result.error = (
+                f"{result.error}\n{contract_error}"
+                if result.error else contract_error
+            )
+        noted = sorted(set(unpersistable) - set(broken))
+        if noted:
+            result.output = (result.output or "") + (
+                "\n[Kernel] Bound but not carried across a kernel restart: "
+                + "; ".join(described[name] for name in noted)
+                + ". They stay usable in this session and are not runtime state, "
+                "so a later step must rebuild them or keep what it needs as data."
+            )
+
     async def execute(
         self,
         code: str,
@@ -220,7 +260,16 @@ class ExecutionMixin:
                     "(e.g. 'adata', not 'adata.h5ad')."
                 )
             if should_track:
-                after = await self._snapshot_user_globals()
+                loaded_names = self._loaded_global_names_from_code(code)
+                # The same round trip that produces the diff also asks the
+                # kernel what it can serialize, so a value that cannot be
+                # continuation state is never promoted into the required set
+                # in the first place.
+                after, unpersistable, probed = (
+                    await self._snapshot_globals_with_persistability(
+                        before, loaded_names
+                    )
+                )
                 # A failed cell can still create or delete globals before the
                 # exception. Always reconcile the tracker with the live
                 # namespace so removed outputs cannot poison later saves.
@@ -231,7 +280,9 @@ class ExecutionMixin:
                     before,
                     after,
                     declared=confirmed_declared,
-                    loaded=self._loaded_global_names_from_code(code),
+                    loaded=loaded_names,
+                    unpersistable=set(unpersistable),
+                    probed=probed,
                 )
                 missing_declared = declared - after if result.success else set()
                 if missing_declared:
@@ -246,6 +297,9 @@ class ExecutionMixin:
                         f"{result.error}\n{contract_error}"
                         if result.error else contract_error
                     )
+                self._surface_unpersistable_outputs(
+                    result, declared, unpersistable
+                )
         if result.success and save_to_history:
             self.runtime_revision += 1
             if confirmed_declared:
