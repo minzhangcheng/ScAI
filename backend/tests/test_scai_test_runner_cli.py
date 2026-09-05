@@ -1342,11 +1342,29 @@ def test_evidence_hashes_payloads_but_never_itself_or_its_detached_manifest():
     assert 'if path.name not in {"evidence.json", "artifact-manifest.json"}' in RUNNER
 
 
-def test_evidence_records_snapshot_v2_conftest_effective_configuration():
+def test_evidence_records_the_measured_snapshot_v2_configuration():
+    """The field says which configuration ran, not that one particular one did.
+
+    Requiring "true" made the shipped configuration unmeasurable: a deliberate
+    disabled run aborted inside the collection plugin and published no evidence
+    at all, so no deletion could ever be compared against the configuration a
+    deployment runs.
+    """
     payload = valid_collection_payload()
     payload["effective_config"]["SCAI_ENABLE_SNAPSHOT_V2"]["value"] = "false"
-    with pytest.raises(TREE.ContractError, match="effective configuration"):
-        TREE.validate_collection(json.dumps(payload).encode())
+    payload["effective_config"]["SCAI_ENABLE_SNAPSHOT_V2"]["source"] = "caller environment"
+    TREE.validate_collection(json.dumps(payload).encode())
+
+    for broken in (
+        {"value": None},
+        {"value": "yes"},
+        {"source": "somewhere else"},
+        {"production_default": "enabled"},
+    ):
+        payload = valid_collection_payload()
+        payload["effective_config"]["SCAI_ENABLE_SNAPSHOT_V2"].update(broken)
+        with pytest.raises(TREE.ContractError, match="effective configuration"):
+            TREE.validate_collection(json.dumps(payload).encode())
     assert '"pytest_effective_config": collection["effective_config"]' in RUNNER
 
 

@@ -23,7 +23,16 @@ _DEFAULT_DATA_DIR = "/tmp/scai_test_data"
 
 # Snapshot regression tests exercise the explicitly enabled lifecycle. Default
 # disabled behavior is covered in fresh subprocesses and targeted gate tests.
+_SNAPSHOT_V2_FROM_CALLER = "SCAI_ENABLE_SNAPSHOT_V2" in os.environ
 os.environ.setdefault("SCAI_ENABLE_SNAPSHOT_V2", "true")
+# The evidence contract records which configuration a run measured. Without a
+# provenance marker a deliberate run in the shipped (disabled) configuration is
+# indistinguishable from an accident, so the contract could only be written to
+# accept one of the two configurations this project actually has -- which made
+# the shipped one unmeasurable.
+os.environ["SCAI_ENABLE_SNAPSHOT_V2_SOURCE"] = (
+    "caller environment" if _SNAPSHOT_V2_FROM_CALLER else "root conftest.py setdefault"
+)
 
 
 def _is_writable_data_dir(path: str) -> bool:
