@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Prove a regression test fails on the tree that does not yet contain its fix.
+#
+# An exported tarball of a commit cannot be used: scripts/scai-test resolves
+# HEAD before it reaches pytest and dies without a repository, so the run
+# produces no evidence at all while looking like a failure. A detached
+# worktree has a .git file pointing at the main repository, so the runner
+# works there.
+#
+# Note for test authors: a module that raises while being collected makes the
+# runner report an incomplete collection and publish nothing. Read the artifact
+# under test inside the test functions, not at import, or the red evidence is
+# unreadable.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
+
+die() { echo "error: $*" >&2; exit 2; }
+[[ $# -ge 2 ]] || die "usage: scripts/scai-red-tree <base-ref> <test-file> [<node> ...]"
+
+BASE_REF="$1"; shift
+TEST_FILE="$1"; shift
+[[ -f "$TEST_FILE" ]] || die "no such test file: $TEST_FILE"
+
+BASE_SHA="$(git rev-parse --verify "${BASE_REF}^{commit}")"
+WORKTREE="/home/minzhang/scai-red-tree/${BASE_SHA:0:12}"
+
+cleanup() {
+    git worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true
+    rm -rf "$WORKTREE"
+    git worktree prune >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+rm -rf "$WORKTREE"
+git worktree prune >/dev/null 2>&1 || true
+mkdir -p "$(dirname "$WORKTREE")"
+git worktree add --detach "$WORKTREE" "$BASE_SHA" >/dev/null
+
+mkdir -p "$WORKTREE/$(dirname "$TEST_FILE")"
+cp "$TEST_FILE" "$WORKTREE/$TEST_FILE"
+
+declare -a NODES=()
+if [[ $# -gt 0 ]]; then NODES=("$@"); else NODES=("$TEST_FILE"); fi
+
+set +e
+( cd "$WORKTREE" && scripts/scai-test fast "${NODES[@]}" )
+STATUS=$?
+set -e
+
+if [[ "$STATUS" -eq 0 ]]; then
+    echo "RED-TREE FAILED: the test passed at $BASE_SHA, so it proves nothing" >&2
+    exit 1
+fi
+echo "RED-TREE OK: failed at $BASE_SHA as required (exit $STATUS)"
