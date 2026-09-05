@@ -22,6 +22,23 @@ def _restored_terminal_task_status(state: AnalysisState) -> TaskStatus:
     }.get(str(raw_status or "").lower(), TaskStatus.COMPLETED)
 
 
+def _recursion_limit_for(self, analysis_state) -> int:
+    """Size one invocation's superstep ceiling from the run's round budget.
+
+    ``max_rounds <= 0`` means "use the configured default", the same resolution
+    ``_check_convergence`` applies when it decides whether to stop.
+    """
+    from ..core import graph_recursion_limit
+
+    rounds = int(getattr(analysis_state, "max_rounds", 0) or 0)
+    if rounds <= 0:
+        # Resume can reach the graph before __init__ ran (restore dispatch and
+        # its tests build the workflow with __new__), so read the config
+        # defensively rather than making the ceiling a hard dependency.
+        rounds = int(getattr(getattr(self, "config", None), "max_rounds", 0) or 0)
+    return graph_recursion_limit(rounds)
+
+
 async def run(
     self,
     initial_state: AnalysisState,
@@ -148,7 +165,10 @@ async def run(
     workflow_state = self._make_initial_workflow_state(initial_state)
 
     # Run workflow
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": GRAPH_RECURSION_LIMIT}
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": _recursion_limit_for(self, initial_state),
+    }
 
     # Verify workflow was properly initialized
     if self.compiled_graph is None:
@@ -449,7 +469,7 @@ async def _invoke_restore_entry(
     )
     config = {
         "configurable": {"thread_id": thread_id},
-        "recursion_limit": GRAPH_RECURSION_LIMIT,
+        "recursion_limit": _recursion_limit_for(self, analysis_state),
     }
     final_state = await self.compiled_graph.ainvoke(workflow_state, config)
     return final_state["analysis_state"]
@@ -548,7 +568,10 @@ async def resume(
             analysis_state = refreshed_state
             self._state = refreshed_state
 
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": GRAPH_RECURSION_LIMIT}
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": _recursion_limit_for(self, analysis_state),
+    }
 
     # Get current state
     state = await self.compiled_graph.aget_state(config)

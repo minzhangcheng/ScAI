@@ -1125,7 +1125,10 @@ class TestWorkflowCoreDispatch:
         from unittest.mock import AsyncMock, MagicMock
         from backend.models.schemas import AnalysisState, TaskStatus
         from backend.state import sessions
-        from backend.workflow.core import SingleCellAnalysisWorkflow
+        from backend.workflow.core import (
+            SingleCellAnalysisWorkflow,
+            graph_recursion_limit,
+        )
 
         session_id = "safe-point-refresh"
         pre_restore = AnalysisState(
@@ -1167,7 +1170,10 @@ class TestWorkflowCoreDispatch:
             sessions.pop(session_id, None)
 
         workflow.compiled_graph.aupdate_state.assert_awaited_once_with(
-            {"configurable": {"thread_id": session_id}, "recursion_limit": 100},
+            {
+                "configurable": {"thread_id": session_id},
+                "recursion_limit": graph_recursion_limit(restored.max_rounds),
+            },
             {"analysis_state": restored},
         )
         assert result is restored

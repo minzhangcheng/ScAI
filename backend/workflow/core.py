@@ -16,8 +16,21 @@ import aiosqlite
 # Configure logger
 logger = logging.getLogger(__name__)
 
+# Fixed base: graph entry, the reporting chain, integration cycles, and slack.
 GRAPH_RECURSION_LIMIT = 100
+# One analysis round executes roughly a dozen graph nodes, and Stage 2 planning
+# or a plan revision each add another pass through the execution nodes. A fixed
+# ceiling therefore aborts a long run right before its report: a ten-round run
+# reached its graphic abstract at superstep 100 and raised GraphRecursionError
+# before the detailed-report node ever ran.
+GRAPH_RECURSION_PER_ROUND = 25
 CHECKPOINTS_TO_KEEP_PER_NAMESPACE = 5
+
+
+def graph_recursion_limit(max_rounds: Optional[int]) -> int:
+    """Superstep ceiling for one graph invocation of a ``max_rounds`` run."""
+    rounds = int(max_rounds or 0)
+    return GRAPH_RECURSION_LIMIT + GRAPH_RECURSION_PER_ROUND * max(1, rounds)
 
 
 from .helpers import ack_restore_safe_point, wait_with_skip_time

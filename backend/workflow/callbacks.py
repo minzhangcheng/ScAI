@@ -131,7 +131,20 @@ class CallbacksMixin:
                 event.get("session_id"),
             )
             return
-        analysis_state = getattr(self, "_current_analysis_state", None)
+        # This projection carries runtime-persistence facts only, so it has to
+        # land on whichever AnalysisState the session store currently treats as
+        # authoritative. ``_current_analysis_state`` is a graph-side object --
+        # ``_restore_entry`` deep-copies the state on entry, and a resume runs
+        # on a checkpoint-hydrated copy while the pointer keeps the pre-resume
+        # object -- and this callback fires from ``close()``, after the terminal
+        # status has already been persisted. Publishing that pointer wrote the
+        # pre-terminal status back over COMPLETED/FAILED, leaving a finished
+        # analysis stuck in ``generating_report`` with its report unoffered.
+        from ..state import sessions as live_sessions
+
+        analysis_state = live_sessions.get(self.session_id)
+        if analysis_state is None:
+            analysis_state = getattr(self, "_current_analysis_state", None)
         if analysis_state is None:
             analysis_state = getattr(self, "_state", None)
         if analysis_state is None:

@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.52.9 · **Last updated**: 2026-09-05
+**Version**: 0.52.10 · **Last updated**: 2026-09-05
 
 ## 1. Runtime Architecture
 
@@ -352,6 +352,18 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.52.x — (2026-09-03 onward)**
+
+- `0.52.10` — Fixes two end-of-run failures that left finished analyses
+  stuck in `generating_report` with their reports unoffered. The
+  runtime-persistence commit projection now lands on whichever
+  `AnalysisState` the session store treats as authoritative instead of the
+  workflow's graph-side pointer, so a close-time projection can no longer
+  write the pre-terminal status back over `COMPLETED` after the detailed
+  report was saved. The LangGraph superstep ceiling is now sized from the
+  run's round budget (`GRAPH_RECURSION_LIMIT + GRAPH_RECURSION_PER_ROUND *
+  max_rounds`) instead of a fixed 100, so a ten-round run no longer
+  exhausts the ceiling at its graphic abstract and raises
+  `GraphRecursionError` before the detailed-report node runs.
 
 - `0.52.9` — Decides persistability in the cell that binds the value instead of
   at a save boundary. The post-cell globals probe now also asks the kernel what
