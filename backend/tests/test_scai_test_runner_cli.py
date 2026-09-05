@@ -354,8 +354,36 @@ def test_profile_globs_expand_sorted_and_unmatched_glob_fails():
     assert "compgen -G" in RUNNER and "profile glob has no matches" in RUNNER
 
 
-def test_profile_roster_is_exactly_fast_client_kernel_backend_full():
-    assert set(__import__("tomllib").loads((ROOT / "test-profiles.toml").read_text())["profiles"]) == {"fast", "client", "kernel", "backend-full"}
+def test_profile_roster_is_exactly_the_five_supported_profiles():
+    """The roster is a contract: docs/test-strategy.md lists it verbatim."""
+    assert set(__import__("tomllib").loads((ROOT / "test-profiles.toml").read_text())["profiles"]) == {
+        "fast", "client", "kernel", "backend-full", "backend-full-gate-off"
+    }
+
+
+def test_gate_off_profile_is_backend_full_in_the_production_configuration():
+    """conftest forces the subsystem on; production defaults it off.
+
+    A deletion measured only against the forced-on suite would be measured
+    against a configuration no deployment runs.
+    """
+    profiles = __import__("tomllib").loads(
+        (ROOT / "test-profiles.toml").read_text()
+    )["profiles"]
+    gate_off = profiles["backend-full-gate-off"]
+    assert gate_off["env"]["SCAI_ENABLE_SNAPSHOT_V2"] == "false"
+    assert gate_off["args"] == profiles["backend-full"]["args"]
+
+
+def test_the_runner_accepts_the_gate_off_profile():
+    assert "backend-full-gate-off" in RUNNER
+    assert "SCAI_ENABLE_SNAPSHOT_V2" in RUNNER
+
+
+def test_documentation_lists_the_gate_off_profile():
+    strategy = (ROOT / "docs" / "test-strategy.md").read_text(encoding="utf-8")
+    assert "backend-full-gate-off" in strategy
+    assert "exactly the following four profiles" not in strategy
 
 
 def test_matching_pointer_executes_exact_name_at_digest():

@@ -848,7 +848,9 @@ def test_runner_does_not_use_host_pytest_or_unbounded_profile_roster():
     assert "python3 -m pytest" not in runner
     assert "fast|client|kernel|backend-full" not in runner
     profiles = __import__("tomllib").loads((ROOT / "test-profiles.toml").read_text(encoding="utf-8"))
-    assert set(profiles["profiles"]) == {"fast", "client", "kernel", "backend-full"}
+    assert set(profiles["profiles"]) == {
+        "fast", "client", "kernel", "backend-full", "backend-full-gate-off"
+    }
 
 
 def test_frontend_fixture_is_the_exact_npm9_layout_contract():

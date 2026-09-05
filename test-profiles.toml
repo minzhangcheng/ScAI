@@ -36,3 +36,9 @@ args = [
 description = "Complete backend suite; serial"
 claim_scope = "complete backend suite"
 args = ["backend/tests"]
+
+[profiles.backend-full-gate-off]
+description = "Complete backend suite in the production snapshot configuration; serial"
+claim_scope = "complete backend suite, snapshot subsystem disabled"
+env = { SCAI_ENABLE_SNAPSHOT_V2 = "false" }
+args = ["backend/tests"]

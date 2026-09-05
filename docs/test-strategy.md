@@ -35,7 +35,7 @@ not a benchmark feature or a performance claim.
 
 ## Supported profiles and claim scope
 
-The profile roster is exactly the following four profiles:
+The profile roster is exactly the following five profiles:
 
 | Profile | Invocation | Scope of a successful claim |
 | --- | --- | --- |
@@ -43,11 +43,16 @@ The profile roster is exactly the following four profiles:
 | `client` | `scripts/scai-test client` | complete retained Python client suite |
 | `kernel` | `scripts/scai-test kernel` | complete known real-kernel/integration evidence |
 | `backend-full` | `scripts/scai-test backend-full` | complete backend suite |
+| `backend-full-gate-off` | `scripts/scai-test backend-full-gate-off` | complete backend suite with the snapshot subsystem disabled, matching the production default |
 
-The four claim scopes are deliberately distinct: `fast` is focused edit-loop
+The five claim scopes are deliberately distinct: `fast` is focused edit-loop
 scope, `client` is the affected client-surface scope, `kernel` is integration
-scope, and `backend-full` is full-suite/release-gate scope. A complete result
-within one scope does not imply any of the other scopes.
+scope, `backend-full` is full-suite/release-gate scope, and
+`backend-full-gate-off` is the same suite in the configuration production
+actually runs. A complete result within one scope does not imply any of the
+other scopes; in particular a `backend-full` result says nothing about the
+subsystem-disabled configuration, because the repository conftest forces
+`SCAI_ENABLE_SNAPSHOT_V2=true` while production defaults it off.
 
 The raw form accepts only explicit pytest arguments and does not create another
 profile:
@@ -57,6 +62,7 @@ scripts/scai-test fast backend/tests/test_x.py::test_y
 scripts/scai-test client
 scripts/scai-test kernel
 scripts/scai-test backend-full
+scripts/scai-test backend-full-gate-off
 scripts/scai-test -- <raw pytest args>
 ```
 
