@@ -501,4 +501,61 @@ describe('AnalysisPanel snapshot-failure retry gate', () => {
     expect(useAppStore.getState().snapshotFailure).not.toBeNull()
     expect(screen.queryByRole('dialog', { name: /analysis snapshots/i })).toBeNull()
   })
+
+  function armRuntimeGate(token: string, generation: number) {
+    useAppStore.setState({
+      snapshotFailure: {
+        failure: {
+          ...blockedFailure.failure,
+          code: 'runtime_persistence_failure',
+          details: { gate_token: token, gate_generation: generation },
+        },
+        allowed_actions: ['retry', 'manage', 'terminate'],
+      },
+    })
+  }
+
+  it('closes a runtime gate dialog the backend reports as no longer active', async () => {
+    // The session was terminated hours earlier, so every action 409s. Swallowing
+    // that left three dead buttons and no close control: the dialog could only
+    // be cleared by reloading the page.
+    armRuntimeGate('runtime-gate-token-9', 9)
+    mockApiFetch.mockRejectedValue(Object.assign(new Error('No active runtime-persistence action consumer is available.'), {
+      status: 409,
+      code: 'RUNTIME_PERSISTENCE_ACTION_INACTIVE',
+    }))
+
+    render(<AnalysisPanel />)
+    fireEvent.click(screen.getByRole('button', { name: /terminate/i }))
+
+    await waitFor(() => {
+      expect(useAppStore.getState().snapshotFailure).toBeNull()
+    })
+    expect(useAppStore.getState().messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        content: expect.stringContaining('no longer active'),
+      }),
+    ]))
+  })
+
+  it('keeps a still-live runtime gate open and surfaces why the action failed', async () => {
+    armRuntimeGate('runtime-gate-token-10', 10)
+    mockApiFetch.mockRejectedValue(Object.assign(new Error('A runtime-persistence action is already pending for this gate.'), {
+      status: 409,
+      code: 'RUNTIME_PERSISTENCE_ACTION_DUPLICATE_OR_CONFLICT',
+    }))
+
+    render(<AnalysisPanel />)
+    fireEvent.click(screen.getByRole('button', { name: /retry persistence/i }))
+
+    await waitFor(() => {
+      expect(useAppStore.getState().messages).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: 'error',
+          content: expect.stringContaining('already pending'),
+        }),
+      ]))
+    })
+    expect(useAppStore.getState().snapshotFailure).not.toBeNull()
+  })
 })

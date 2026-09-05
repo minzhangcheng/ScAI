@@ -24,17 +24,61 @@ class SaveContext:
     lifecycle_file_lock: Any
 
 
+class RequiredValueDemoted(Exception):
+    """A deterministically unpicklable required name was released mid-save.
+
+    Raised only after the name has left the tracker's required set, so the
+    retry that follows builds a different dump instead of repeating one that is
+    guaranteed to fail again. ``names`` travels with it because attribution
+    must survive the release: once a name is out of the required set, the
+    failure record can no longer rediscover it from the tracker.
+    """
+
+    def __init__(self, names) -> None:
+        self.names = set(names)
+        super().__init__(", ".join(sorted(self.names)))
+
+
+# Deterministic refusals from the pickler: the value's structure, not the
+# machine's state, is what failed. Everything else (OSError, MemoryError, a
+# lifecycle error) stays fail-closed, because there a retry could genuinely
+# reach a different outcome.
+_STRUCTURAL_PICKLE_ERRORS = frozenset({
+    "TypeError",
+    "PicklingError",
+    "NotImplementedError",
+    "AttributeError",
+})
+
+_MAX_DEMOTION_RETRIES = 1
+
+
 async def save_session(sandbox, *, bindings):
     async with sandbox._exec_lock:
-        context = await _prepare_save(sandbox, bindings=bindings)
-        if isinstance(context, bool):
-            if context:
-                await _publish_committed_projection(
-                    sandbox, bindings=bindings
+        retries_left = _MAX_DEMOTION_RETRIES
+        demoted: set[str] = set()
+        while True:
+            context = await _prepare_save(sandbox, bindings=bindings)
+            if isinstance(context, bool):
+                if context:
+                    await _publish_committed_projection(
+                        sandbox, bindings=bindings
+                    )
+                return context
+            save_code = _build_save_code(context)
+            try:
+                return await _execute_save(
+                    context,
+                    save_code,
+                    bindings=bindings,
+                    allow_demotion=retries_left > 0,
+                    previously_demoted=demoted,
                 )
-            return context
-        save_code = _build_save_code(context)
-        return await _execute_save(context, save_code, bindings=bindings)
+            except RequiredValueDemoted as demotion:
+                # The offending name is gone from the required set, so the next
+                # pass is a different dump rather than the same one repeated.
+                demoted |= demotion.names
+                retries_left -= 1
 
 
 async def _publish_committed_projection(sandbox, *, bindings) -> None:
@@ -317,6 +361,7 @@ async def _prepare_save(sandbox, *, bindings):
 def _build_save_code(context: SaveContext) -> str:
     save_code = """\
 import dill
+import io
 import json as _scai_json
 import os
 import tempfile
@@ -324,6 +369,42 @@ import types
 import zstandard as zstd
 
 _required_names = set(""" + context.escaped_required + """)
+# Names the host declared required, captured before the backed-AnnData pass
+# below adds to the set. Only these are eligible for the in-memory
+# persistability probe: an AnnData that cannot be pickled is authoritative
+# analysis state, and dropping it silently is exactly the loss the required
+# tier exists to prevent.
+_scai_host_required = set(_required_names)
+_scai_probe_budget = 64 * 1024 * 1024
+
+
+class _ScaiProbeTooLarge(Exception):
+    # The frame outgrew the in-memory persistability probe.
+    pass
+
+
+class _ScaiProbeSink(io.RawIOBase):
+    # Buffer a dill frame in memory, abandoning it past a byte budget.
+
+    def __init__(self, _budget):
+        io.RawIOBase.__init__(self)
+        self._chunks = []
+        self._size = 0
+        self._budget = _budget
+
+    def writable(self):
+        return True
+
+    def write(self, _payload):
+        _view = memoryview(_payload)
+        self._size += _view.nbytes
+        if self._size > self._budget:
+            raise _ScaiProbeTooLarge()
+        self._chunks.append(_view.tobytes())
+        return _view.nbytes
+
+    def frame_bytes(self):
+        return b''.join(self._chunks)
 
 
 def _scai_is_anndata(_o):
@@ -446,9 +527,31 @@ try:
                 # generation. Optional values first serialize into a spooled
                 # file, bounding memory without trusting a library's entire
                 # top-level namespace to be dill-safe.
-                _streamed = _is_required
+                # A required value proves it serializes before a byte of it
+                # reaches the output stream. One that raises here is
+                # deterministically unpicklable -- a retry is the identical
+                # computation -- so it is dropped like an optional value and
+                # the host releases it from the required set. Values past the
+                # budget are the large analysis objects; they stream as before
+                # and a failure there still aborts the generation.
+                _probe_first = (
+                    _is_required
+                    and _var_name in _scai_host_required
+                    and not _scai_is_anndata(_obj)
+                )
+                _streamed = _is_required and not _probe_first
                 try:
-                    if _streamed:
+                    if _probe_first:
+                        _probe = _ScaiProbeSink(_scai_probe_budget)
+                        try:
+                            dill.dump(_frame, _probe)
+                        except _ScaiProbeTooLarge:
+                            _streamed = True
+                            dill.dump(_frame, _f)
+                        else:
+                            _streamed = True
+                            _f.write(_probe.frame_bytes())
+                    elif _is_required:
                         dill.dump(_frame, _f)
                     else:
                         with tempfile.SpooledTemporaryFile(
@@ -498,8 +601,121 @@ print("__SCAI_SAVED_NAMES__:" + _scai_json.dumps(sorted(_saved_names)))
     return save_code
 
 
+def _release_structural_failures(sandbox, names) -> set[str]:
+    """Drop provably unpicklable names from the tracker's required set."""
+    tracker = getattr(sandbox, "runtime_dependency_tracker", None)
+    if tracker is None:
+        return set()
+    releasable = {name for name in names if name in tracker.required_outputs}
+    if not releasable:
+        return set()
+    tracker.release(
+        releasable,
+        lifecycle="superseded",
+        reason=(
+            "Value is structurally unpicklable; every retry repeats the same "
+            "serialization, so it cannot be continuation state."
+        ),
+    )
+    return releasable
+
+
+def _attribute_failed_names(context, skipped, result, previously_demoted) -> set[str]:
+    """Name the required values this attempt failed on, from every channel."""
+    # A name released earlier in this same save stays attributable: the tracker
+    # no longer holds it, so nothing else can name what failed.
+    attributable = set(context.required_names) | set(previously_demoted or ())
+    failed_names = {
+        sv["name"] for sv in skipped if sv.get("name") in attributable
+    }
+    error_text = str(result.error or "")
+    exact_failure_patterns = (
+        r"required runtime variable could not be persisted:\s*([A-Za-z_]\w*)",
+        r"backed AnnData could not be materialized for persistence:\s*([A-Za-z_]\w*)",
+    )
+    for pattern in exact_failure_patterns:
+        failed_names.update(
+            match.group(1)
+            for match in re.finditer(pattern, error_text)
+            if match.group(1) in attributable
+        )
+    missing_match = re.search(
+        r"required runtime variables are missing:\s*([^\n]+)", error_text,
+    )
+    if missing_match:
+        failed_names.update(
+            name.strip()
+            for name in missing_match.group(1).split(",")
+            if name.strip() in attributable
+        )
+    return failed_names
+
+
+def _reject_incomplete_runtime(
+    context,
+    skipped,
+    result,
+    *,
+    bindings,
+    allow_demotion: bool,
+    previously_demoted,
+) -> None:
+    """Always raises: either to demote and retry, or to arm the gate."""
+    sandbox = context.sandbox
+    if skipped:
+        bindings.logger.error(
+            "[%s] save_session rejected incomplete runtime; required "
+            "variables not persisted: %s",
+            sandbox.session_id,
+            [sv["name"] for sv in skipped],
+        )
+    bindings.logger.warning(f"Failed to save session: {result.error}")
+    failed_names = _attribute_failed_names(
+        context, skipped, result, previously_demoted
+    )
+    if allow_demotion:
+        # Only values too large for the in-kernel probe reach this branch, so
+        # the stream is already unusable and the staged file is gone. Releasing
+        # the name makes the retry a different dump rather than the same
+        # deterministic failure a second time.
+        released = _release_structural_failures(sandbox, {
+            sv["name"] for sv in skipped
+            if sv.get("name") in failed_names
+            and sv.get("exc") in _STRUCTURAL_PICKLE_ERRORS
+        })
+        if released:
+            bindings.logger.error(
+                "[%s] Required runtime variable(s) failed mid-stream and are "
+                "structurally unpicklable; released and retrying the save "
+                "without them: %s",
+                sandbox.session_id,
+                ", ".join(sorted(released)),
+            )
+            raise RequiredValueDemoted(released)
+
+    poisoned: set[str] = set()
+    tracker = getattr(sandbox, "runtime_dependency_tracker", None)
+    if tracker is not None and failed_names:
+        poisoned = tracker.record_persistence_failure(failed_names)
+    context.record_generation_failure(
+        result.error or "Runtime serialization failed.",
+        failed_variables=sorted(failed_names),
+        requires_recompute=bool(poisoned),
+        recompute_variables=sorted(poisoned),
+    )
+    raise RuntimeError(
+        f"Sandbox runtime save failed for session {sandbox.session_id}: "
+        f"{result.error or 'unknown error'}"
+    )
+
+
 async def _execute_save(
-    context: SaveContext, save_code: str, *, bindings,
+    context: SaveContext,
+    save_code: str,
+    *,
+    bindings,
+    allow_demotion: bool = False,
+    previously_demoted: set[str] | None = None,
 ) -> bool:
     sandbox = context.sandbox
     result = await sandbox._execute_unlocked(
@@ -534,15 +750,29 @@ async def _execute_save(
 
     if result.success:
         if skipped:
-            # Best-effort tier only: a required failure would have made
-            # result.success False. Surfaced so a later restore that is
-            # missing a value has a breadcrumb explaining why.
+            # Surfaced so a later restore that is missing a value has a
+            # breadcrumb explaining why.
             bindings.logger.info(
                 "[%s] Session saved; %d unpicklable value(s) skipped: %s",
                 sandbox.session_id,
                 len(skipped),
                 ", ".join(f"{sv['name']}({sv['type']})" for sv in skipped),
             )
+            # The in-kernel probe proved these before writing any of their
+            # bytes, so this dump is complete apart from them. Release them
+            # here or every later save re-runs the identical failing
+            # serialization and the analysis stalls on a scratch variable.
+            released = _release_structural_failures(sandbox, {
+                sv["name"] for sv in skipped
+                if sv.get("name") in context.required_names
+            })
+            if released:
+                bindings.logger.error(
+                    "[%s] Required runtime variable(s) are structurally "
+                    "unpicklable and were released from the required set: %s",
+                    sandbox.session_id,
+                    ", ".join(sorted(released)),
+                )
         pkl_path = bindings.Path(sandbox.notebook_state.session_path)
         staged_path = bindings.Path(str(pkl_path) + ".tmp")
         production_transaction = staged_path.exists()
@@ -705,50 +935,13 @@ async def _execute_save(
                 f"Sandbox runtime commit failed for session {sandbox.session_id}"
             ) from exc
     else:
-        if skipped:
-            bindings.logger.error(
-                "[%s] save_session rejected incomplete runtime; required "
-                "variables not persisted: %s",
-                sandbox.session_id,
-                [sv["name"] for sv in skipped],
-            )
-        bindings.logger.warning(f"Failed to save session: {result.error}")
-        failed_names = {
-            sv["name"] for sv in skipped if sv.get("name") in context.required_names
-        }
-        error_text = str(result.error or "")
-        exact_failure_patterns = (
-            r"required runtime variable could not be persisted:\s*([A-Za-z_]\w*)",
-            r"backed AnnData could not be materialized for persistence:\s*([A-Za-z_]\w*)",
-        )
-        for pattern in exact_failure_patterns:
-            failed_names.update(
-                match.group(1)
-                for match in re.finditer(pattern, error_text)
-                if match.group(1) in context.required_names
-            )
-        missing_match = re.search(
-            r"required runtime variables are missing:\s*([^\n]+)", error_text,
-        )
-        if missing_match:
-            failed_names.update(
-                name.strip()
-                for name in missing_match.group(1).split(",")
-                if name.strip() in context.required_names
-            )
-        poisoned: set[str] = set()
-        tracker = getattr(sandbox, "runtime_dependency_tracker", None)
-        if tracker is not None and failed_names:
-            poisoned = tracker.record_persistence_failure(failed_names)
-        context.record_generation_failure(
-            result.error or "Runtime serialization failed.",
-            failed_variables=sorted(failed_names),
-            requires_recompute=bool(poisoned),
-            recompute_variables=sorted(poisoned),
-        )
-        raise RuntimeError(
-            f"Sandbox runtime save failed for session {sandbox.session_id}: "
-            f"{result.error or 'unknown error'}"
+        _reject_incomplete_runtime(
+            context,
+            skipped,
+            result,
+            bindings=bindings,
+            allow_demotion=allow_demotion,
+            previously_demoted=previously_demoted,
         )
 
     # A rebuilt namespace is now on disk, so the pkl the latch was

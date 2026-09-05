@@ -443,6 +443,16 @@ _OS_PROCESS_EXEC_FUNCS = frozenset({
 })
 
 
+# Namespace members that hand back live objects rather than their names.
+# ``keys()`` and bare iteration yield strings, so they stay available for the
+# "what exists right now" question analysis code legitimately asks.
+_NAMESPACE_VALUE_ACCESSORS = frozenset({
+    "items",
+    "values",
+    "copy",
+})
+
+
 _CALL_SITE_PATTERN_KEYS = frozenset({
     "eval() function",
     "exec() function",
@@ -580,6 +590,28 @@ def _validate_code_safety_ast(code: str) -> Tuple[bool, str]:
                     return target_name in {"builtins", "__builtins__"}
         return False
 
+    def _captures_namespace_values(expr) -> Optional[str]:
+        """Name the syntax that materializes namespace *values*, else None."""
+        if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute):
+            if (
+                expr.func.attr in _NAMESPACE_VALUE_ACCESSORS
+                and _is_namespace_expr(expr.func.value)
+            ):
+                return f"globals().{expr.func.attr}()"
+        if (
+            isinstance(expr, ast.Call)
+            and isinstance(expr.func, ast.Name)
+            and expr.func.id == "dict"
+            and any(_is_namespace_expr(arg) for arg in expr.args)
+        ):
+            return "dict(globals())"
+        if isinstance(expr, ast.Dict) and any(
+            key is None and _is_namespace_expr(value)
+            for key, value in zip(expr.keys, expr.values)
+        ):
+            return "{**globals()}"
+        return None
+
     def _subscript_key(expr) -> Optional[str]:
         if not isinstance(expr, ast.Subscript):
             return None
@@ -708,6 +740,28 @@ def _validate_code_safety_ast(code: str) -> Tuple[bool, str]:
             key = _subscript_key(node)
             if isinstance(key, str) and key.startswith("_scai_"):
                 return False, "Access to reserved ScAI kernel namespace"
+
+        # Binding the whole namespace to one name -- the observed form was
+        # `namespace_items = list(globals().items())` -- puts every live object
+        # behind a single user global. The runtime dependency tracker then
+        # promotes that name into its required set, so one unpicklable value
+        # anywhere in the namespace (an sqlite3 connection, an open handle)
+        # fails every later save on a name the analysis never meant to keep.
+        # Only *binding* is rejected: iterating or printing captures nothing.
+        bound_value = None
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.NamedExpr)):
+            bound_value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            bound_value = node.value
+        if bound_value is not None:
+            for bound_node in ast.walk(bound_value):
+                captured = _captures_namespace_values(bound_node)
+                if captured:
+                    return False, (
+                        "Bulk capture of the kernel namespace via "
+                        f"{captured}. Bind the variables you need by name; "
+                        "globals().keys() lists what exists."
+                    )
 
         if (
             isinstance(node, ast.Call)

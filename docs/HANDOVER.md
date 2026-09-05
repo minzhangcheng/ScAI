@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.52.7 · **Last updated**: 2026-09-05
+**Version**: 0.52.8 · **Last updated**: 2026-09-05
 
 ## 1. Runtime Architecture
 
@@ -352,6 +352,22 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.52.x — (2026-09-03 onward)**
+
+- `0.52.8` — Stops one unpicklable scratch variable from wedging runtime
+  persistence. Binding a bulk copy of the kernel namespace
+  (`list(globals().items())`, `dict(globals())`, `{**globals()}`) is now
+  rejected before execution, since the tracker promotes that name into the
+  required set and every object in the namespace goes with it. A required
+  value is proved serializable in memory before any of its bytes reach the
+  output stream, and one that dill structurally refuses is dropped and released
+  from the required set instead of aborting the generation; values past the
+  probe budget still stream, and a structural failure there releases the name
+  and retries the dump once rather than arming the gate forever. Backed AnnData
+  is exempt from the probe and still fails closed. Transient failures (OSError,
+  memory) keep the existing fail-closed gate, and attribution survives a
+  release. The runtime-gate dialog no longer strands the user: a 409 saying the
+  gate is inactive closes it, and every other rejection is surfaced instead of
+  swallowed into the console.
 
 - `0.52.7` — Repairs Literature query construction and bounded recovery for
   PubMed searches. Stage 1 → Stage 2 now preserves deferred Literature topics;

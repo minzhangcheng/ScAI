@@ -126,3 +126,39 @@ def test_static_file_write_check_preserves_reads_and_dynamic_runtime_checks():
     )
     for code in allowed:
         assert validate_code_safety(code) == (True, ""), code
+
+
+def test_blocks_binding_bulk_capture_of_kernel_namespace_values():
+    """`namespace_items = list(globals().items())` wedged runtime persistence.
+
+    The name is promoted into the runtime dependency tracker's required set, so
+    the single sqlite3 connection living somewhere in that namespace failed
+    every subsequent save on a variable the analysis never meant to keep.
+    """
+    blocked = (
+        "namespace_items = list(globals().items())",
+        "snapshot = dict(globals())",
+        "snapshot = globals().copy()",
+        "snapshot = {**globals()}",
+        "ns = globals()\nitems = list(ns.items())",
+        "vals = [v for v in globals().values()]",
+        "big = {n: v for n, v in globals().items() if n.startswith('adata')}",
+        "pairs: list = sorted(globals().items())",
+    )
+    for code in blocked:
+        safe, reason = validate_code_safety(code)
+        assert not safe, code
+        assert "bulk capture" in reason.lower(), reason
+
+
+def test_allows_namespace_key_inspection_and_value_iteration_without_binding():
+    """Asking what exists is legitimate; only materializing values is not."""
+    allowed = (
+        "names = list(globals())",
+        "names = sorted(globals().keys())",
+        "present = 'adata' in globals()",
+        "for name, value in globals().items():\n    print(name, type(value))",
+        "adata = globals()['adata']",
+    )
+    for code in allowed:
+        assert validate_code_safety(code) == (True, ""), code

@@ -8,6 +8,22 @@ import type {
   SnapshotTransactionRecord,
 } from '../../../types/snapshotV2'
 
+/** Narrow a rejected apiFetch to its error envelope without importing the
+ * class: this module is loaded by tests that replace the whole `useApi` module,
+ * where an `instanceof` against a mocked-away export throws on its own. Only
+ * `code` and `message` are read here. */
+function asApiErrorEnvelope(
+  error: unknown,
+): { code: string; message?: string } | null {
+  if (!error || typeof error !== 'object') return null
+  const candidate = error as { code?: unknown; message?: unknown }
+  if (typeof candidate.code !== 'string') return null
+  return {
+    code: candidate.code,
+    message: typeof candidate.message === 'string' ? candidate.message : undefined,
+  }
+}
+
 interface SnapshotFailureActionOptions {
   currentSession: Session | null
   snapshotFailure: SnapshotFailureInfo | null
@@ -22,6 +38,38 @@ interface SnapshotFailureActionOptions {
 }
 
 export function useAnalysisPanelSnapshotFailureActions(options: SnapshotFailureActionOptions) {
+  // Every runtime-gate action can 409. Swallowing that into console.error left
+  // a modal with three buttons that could only 409 again and no close control,
+  // so a terminated session showed a dialog the user could not act on or
+  // dismiss. INACTIVE specifically means the gate is gone -- the session ended,
+  // or another client answered it -- and the dialog is then stale, not live.
+  const reportRuntimeGateFailure = useCallback((error: unknown, action: string) => {
+    const isZh = options.language === 'zh'
+    const apiError = asApiErrorEnvelope(error)
+    if (apiError?.code === 'RUNTIME_PERSISTENCE_ACTION_INACTIVE') {
+      options.clearSnapshotFailure()
+      options.addMessage({
+        id: generateId(),
+        type: 'status',
+        content: isZh
+          ? '运行时持久化门禁已不再生效（会话已结束，或已由其他客户端处理），对话框已关闭。'
+          : 'The runtime persistence gate is no longer active (the session ended '
+            + 'or another client answered it); the dialog has been closed.',
+        timestamp: new Date().toISOString(),
+      })
+      return
+    }
+    options.addMessage({
+      id: generateId(),
+      type: 'error',
+      content: isZh
+        ? `运行时持久化操作「${action}」未被接受：${apiError?.message || String(error)}`
+        : `Runtime persistence action "${action}" was not accepted: `
+          + `${apiError?.message || String(error)}`,
+      timestamp: new Date().toISOString(),
+    })
+  }, [options.clearSnapshotFailure, options.addMessage, options.language])
+
   const runSnapshotFailureCapture = useCallback(async (action: 'retry' | 'proceed') => {
     if (!options.currentSession) return
     try {
@@ -82,12 +130,17 @@ export function useAnalysisPanelSnapshotFailureActions(options: SnapshotFailureA
           }),
         })
       } catch (error) {
-        console.error('Runtime persistence retry failed:', error)
+        reportRuntimeGateFailure(error, 'retry')
       }
       return
     }
     await runSnapshotFailureCapture('retry')
-  }, [options.currentSession, options.snapshotFailure, runSnapshotFailureCapture])
+  }, [
+    options.currentSession,
+    options.snapshotFailure,
+    runSnapshotFailureCapture,
+    reportRuntimeGateFailure,
+  ])
 
   const handleSnapshotFailureProceed = useCallback(
     () => runSnapshotFailureCapture('proceed'),
@@ -128,12 +181,17 @@ export function useAnalysisPanelSnapshotFailureActions(options: SnapshotFailureA
         if (response?.data?.status) useAppStore.getState().updateSession({ status: response.data.status })
         if (response?.success && response?.data?.still_blocked === false) options.clearSnapshotFailure()
       } catch (error) {
-        console.error('Runtime persistence recompute failed:', error)
+        reportRuntimeGateFailure(error, 'recompute')
       }
       return
     }
     options.setShowSnapshotPanel(true)
-  }, [options.currentSession, options.snapshotFailure, options.clearSnapshotFailure])
+  }, [
+    options.currentSession,
+    options.snapshotFailure,
+    options.clearSnapshotFailure,
+    reportRuntimeGateFailure,
+  ])
 
   const handleSnapshotFailureTerminate = useCallback(async () => {
     if (!options.currentSession) return
@@ -177,7 +235,7 @@ export function useAnalysisPanelSnapshotFailureActions(options: SnapshotFailureA
         })
       }
     } catch (error) {
-      console.error('Snapshot failure terminate failed:', error)
+      reportRuntimeGateFailure(error, 'terminate')
     }
   }, [
     options.currentSession,
@@ -185,6 +243,7 @@ export function useAnalysisPanelSnapshotFailureActions(options: SnapshotFailureA
     options.clearSnapshotFailure,
     options.addMessage,
     options.language,
+    reportRuntimeGateFailure,
   ])
 
   return {
