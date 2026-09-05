@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.52.10 · **Last updated**: 2026-09-05
+**Version**: 0.52.11 · **Last updated**: 2026-09-05
 
 ## 1. Runtime Architecture
 
@@ -352,6 +352,24 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.52.x — (2026-09-03 onward)**
+
+- `0.52.11` — Stops the exploration gate from retiring a research direction over
+  evidence a computational round cannot produce. `select_best_directions` told
+  the PI to discount a candidate by `artifact_risk` and `data_sufficiency` —
+  neither of which `CANDIDATE_PROMPT_FIELDS` renders into the candidate block —
+  and offered no counterweight, so a direction was declined for missing wet-lab
+  endpoints (lipid peroxidation, labile iron, enzyme activity, pharmacological
+  rescue) that are absent for every candidate by construction, which made
+  producing the evidence a precondition for being allowed to produce it. The
+  same decline read a susceptibility program rising alongside its own defence
+  program as self-contradiction rather than as a state a further round would
+  resolve. The gate now discounts a candidate for what could make the
+  observation wrong, never for what has not been measured yet; treats evidence
+  pointing both ways as lowering confidence in one conclusion rather than as
+  retiring the direction; and rejects a direction only when this project's own
+  results argue against it, when the data cannot speak to it at all, or when it
+  repeats work already done. The integration gate was given these distinctions
+  in `0.52.1`; this gate was left out of that change.
 
 - `0.52.10` — Fixes two end-of-run failures that left finished analyses
   stuck in `generating_report` with their reports unoffered. The

@@ -314,11 +314,14 @@ SELECTION CRITERIA:
    disproportionately artifacts — ambient RNA, doublets, batch, a cluster driven by a handful of
    cells — so ranking on surprise alone systematically selects for artifacts.
 2. **Innovation + Novelty** raise priority only after reliability and artifact risk have been
-   accounted for. Discount any novelty claim by the candidate's artifact_risk and
-   data_sufficiency; a high-novelty, high-artifact-risk candidate ranks below a solid one.
+   accounted for. Discount any novelty claim by the candidate's artifact_risks and risk_flags;
+   a high-novelty, high-artifact-risk candidate ranks below a solid one. Discount it for what
+   could make the observation wrong, never for what has not been measured yet.
 3. Selected directions should ideally be complementary (not redundant), and selected_directions must be listed in priority order, most important first
 4. Consider the dependency graph: if a direction has prerequisites, ensure its prerequisites are also selected or the direction is independently viable
 5. For each rejected direction, provide an explanation
+
+Two kinds of thin evidence are not grounds for rejection here. The first is a measurement that was never taken: this is a computational analysis, so endpoints only a wet-lab experiment can deliver — protein activity, metabolite or ion levels, morphology, pharmacological rescue — are absent for every candidate by construction, and demanding them makes producing the evidence a precondition for being allowed to produce it. Record them as validation the direction still needs, never as the reason it fails. The second is evidence pointing both ways: markers moving in opposite directions usually describe a real and informative state — a process under pressure alongside the response that opposes it — and separating those two readings is exactly what a further round would do. Contradictory evidence lowers confidence in one specific conclusion; it does not retire the direction. Reject a direction only when this project's own results argue against the direction itself, when the available data cannot speak to it at all, or when it repeats work already done.
 
 Return JSON:
 {{
