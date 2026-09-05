@@ -51,6 +51,19 @@ def test_the_worktree_is_removed_even_when_the_run_fails():
     assert "trap" in script and "git worktree remove" in script
 
 
+def test_a_non_zero_exit_alone_is_not_accepted_as_evidence():
+    """The runner exits non-zero for usage errors too.
+
+    A parametrised node id containing brackets is read as a glob and rejected
+    before pytest starts, so the check would have reported a red tree with no
+    test having run.
+    """
+    script = _script()
+    assert "RED-TREE INCONCLUSIVE" in script
+    assert "evidence.json" in script
+    assert 'counts.get("failed"' in script and 'counts.get("errors"' in script
+
+
 def test_the_script_is_executable():
     if not SCRIPT_PATH.is_file():
         pytest.fail(f"{SCRIPT_PATH} does not exist")

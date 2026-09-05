@@ -588,6 +588,7 @@ class _SimulatedProcessCrash(BaseException):
         ("sig_replaced", "old"),
         ("manifest_replaced", "old"),
         ("metadata_replaced", "old"),
+        ("runtime_manifest_replaced", "old"),
         ("commit_marker", "new"),
         ("sidecars_retired", "new"),
         ("cleanup_backup_0", "new"),
@@ -600,6 +601,11 @@ def test_regular_save_recovers_every_crash_boundary(
     expected,
 ):
     from backend.utils.files import atomic_write_json
+    from backend.utils.runtime_manifest import (
+        build_runtime_manifest,
+        read_runtime_manifest,
+        write_runtime_manifest,
+    )
     from backend.utils.sandbox import _write_pkl_signature
 
     states = tmp_path / "states"
@@ -626,6 +632,24 @@ def test_regular_save_recovers_every_crash_boundary(
         runtime_digest=old_digest,
     )
     atomic_write_json(manifest, {"version": 1, "entries": {"old": {}}})
+    # The generation manifest is a transaction component, so the matrix has to
+    # prove the same thing about it as about the dump: whichever generation
+    # survives a crash, the manifest on disk describes *that* dump. A manifest
+    # that outlived a rolled-back dump would declare names the restored bytes
+    # do not contain, and integrity would then report corruption on an intact
+    # generation.
+    runtime_manifest = states / "crash_session.runtime.json"
+    write_runtime_manifest(
+        runtime_manifest,
+        build_runtime_manifest(
+            revision=1,
+            state_revision=1,
+            pkl_digest=old_digest,
+            saved_names=["adata"],
+            skipped_names=[],
+            serializer_version="dill-zstd-1",
+        ),
+    )
 
     def commit_manifest():
         atomic_write_json(
@@ -658,6 +682,13 @@ def test_regular_save_recovers_every_crash_boundary(
             commit_metadata,
             metadata_path=notebook.state_path,
             manifest_path=manifest,
+            runtime_manifest_path=runtime_manifest,
+            runtime_manifest={
+                "state_revision": 2,
+                "saved_names": ["adata", "markers"],
+                "skipped_names": [],
+                "serializer_version": "dill-zstd-1",
+            },
             commit_manifest=commit_manifest,
             retire_sidecars=lambda: None,
             target_revision=2,
@@ -670,8 +701,10 @@ def test_regular_save_recovers_every_crash_boundary(
         integrity,
         metadata_path=notebook.state_path,
         manifest_path=manifest,
+        runtime_manifest_path=runtime_manifest,
         session_id="",
     )
+    recovered_manifest = read_runtime_manifest(runtime_manifest)
     payload = json.loads(notebook.state_path.read_text())
     persistence = payload["runtime_persistence"]
     if expected == "old":
@@ -680,12 +713,18 @@ def test_regular_save_recovers_every_crash_boundary(
         assert persistence["saved_revision"] == 1
         assert persistence["runtime_digest"] == old_digest
         assert json.loads(manifest.read_text())["version"] == 1
+        assert recovered_manifest["revision"] == 1
+        assert recovered_manifest["pkl_sha256"] == old_digest
+        assert recovered_manifest["saved_names"] == ["adata"]
     else:
         assert outcome == "forward"
         assert live.read_bytes() == b"new-generation"
         assert persistence["saved_revision"] == 2
         assert persistence["runtime_digest"] == new_digest
         assert json.loads(manifest.read_text())["version"] == 2
+        assert recovered_manifest["revision"] == 2
+        assert recovered_manifest["pkl_sha256"] == new_digest
+        assert recovered_manifest["saved_names"] == ["adata", "markers"]
     assert _verify_pkl_integrity(live, integrity)
     assert not live.with_name(f"{live.name}.regular-save.json").exists()
     assert not live.with_name(f"{live.name}.regular-save.tmp").exists()

@@ -53,4 +53,30 @@ if [[ "$STATUS" -eq 0 ]]; then
     echo "RED-TREE FAILED: the test passed at $BASE_SHA, so it proves nothing" >&2
     exit 1
 fi
-echo "RED-TREE OK: failed at $BASE_SHA as required (exit $STATUS)"
+
+# A non-zero exit is not evidence on its own. The runner exits non-zero for
+# usage and configuration errors too -- a parametrised node id containing
+# brackets is read as a glob and rejected before pytest starts -- and that
+# would report a red tree without a single test having run. Only published
+# evidence with a non-zero failed+errors count proves the point.
+EVIDENCE="$(ls -td "$WORKTREE"/test-results/*/ 2>/dev/null | head -1 || true)"
+if [[ -z "$EVIDENCE" || ! -f "${EVIDENCE}evidence.json" ]]; then
+    echo "RED-TREE INCONCLUSIVE: the run at $BASE_SHA published no evidence" >&2
+    echo "  (exit $STATUS -- the runner refused to start rather than the test failing;" >&2
+    echo "   bracketed parametrised node ids must be selected with -k instead)" >&2
+    exit 2
+fi
+
+OBSERVED="$(python3 - "${EVIDENCE}evidence.json" <<'PY'
+import json
+import sys
+
+counts = json.load(open(sys.argv[1]))["outcomes"]["counts"]
+print(int(counts.get("failed", 0)) + int(counts.get("errors", 0)))
+PY
+)"
+if [[ "$OBSERVED" -le 0 ]]; then
+    echo "RED-TREE INCONCLUSIVE: the run at $BASE_SHA published evidence with no failures" >&2
+    exit 2
+fi
+echo "RED-TREE OK: $OBSERVED test(s) failed at $BASE_SHA as required"

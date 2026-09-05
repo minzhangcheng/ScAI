@@ -164,6 +164,7 @@ def _regular_component_paths(
     live_sig: Path,
     metadata_path: Path | None,
     manifest_path: Path | None,
+    runtime_manifest_path: Path | None = None,
 ) -> List[Tuple[Dict[str, Any], Path]]:
     """Resolve signed component descriptors to canonical trusted paths."""
     raw_components = payload.get("components")
@@ -189,11 +190,22 @@ def _regular_component_paths(
             }, path))
         return result
 
+    from backend.utils.runtime_manifest import runtime_manifest_sig_path
+
     known = {
         "pkl": live_pkl,
         "sig": live_sig,
         "metadata": metadata_path,
         "manifest": manifest_path,
+        # The generation manifest and its detached signature roll back together
+        # with the dump they describe: a manifest surviving a rollback would
+        # declare names the restored dump does not contain.
+        "runtime_manifest": runtime_manifest_path,
+        "runtime_manifest_sig": (
+            runtime_manifest_sig_path(runtime_manifest_path)
+            if runtime_manifest_path is not None
+            else None
+        ),
     }
     resolved: List[Tuple[Dict[str, Any], Path]] = []
     seen: set[Tuple[str, str]] = set()
@@ -437,6 +449,7 @@ def recover_regular_save_transaction(
     *,
     metadata_path: Path | None = None,
     manifest_path: Path | None = None,
+    runtime_manifest_path: Path | None = None,
     session_id: str = "",
 ) -> str | None:
     """Recover a process crash in regular runtime persistence.
@@ -451,6 +464,7 @@ def recover_regular_save_transaction(
     live_sig = _sig_path(live_pkl, integrity_dir)
     resolved_components = _regular_component_paths(
         payload, live_pkl, live_sig, metadata_path, manifest_path,
+        runtime_manifest_path,
     )
     component_paths = [path for _component, path in resolved_components]
 
@@ -555,13 +569,23 @@ def _commit_pkl_transaction(
     *,
     metadata_path: Path | None = None,
     manifest_path: Path | None = None,
+    runtime_manifest_path: Path | None = None,
+    runtime_manifest: Dict[str, Any] | None = None,
     commit_manifest=None,
     retire_sidecars=None,
     target_revision: int = 0,
     authoritative_pkl_names: set[str] | None = None,
     fault_hook=None,
 ) -> None:
-    """Install a runtime generation with crash-recoverable commit semantics."""
+    """Install a runtime generation with crash-recoverable commit semantics.
+
+    ``runtime_manifest`` is the generation's own declaration -- what it saved,
+    what it skipped, and which workflow state it belongs to. It is installed by
+    this transaction rather than beside it, because a manifest that can survive
+    a rollback of the dump it describes is worse than no manifest at all: it
+    would declare names the restored dump does not contain, and integrity would
+    then report corruption on a generation that is intact.
+    """
     from . import shared as shared_facade
 
     copy_durable = shared_facade._copy_durable
@@ -595,6 +619,20 @@ def _commit_pkl_transaction(
             ),
             manifest_path,
         ))
+    if runtime_manifest_path is not None:
+        from backend.utils.runtime_manifest import runtime_manifest_sig_path
+
+        for kind, target in (
+            ("runtime_manifest", runtime_manifest_path),
+            ("runtime_manifest_sig", runtime_manifest_sig_path(runtime_manifest_path)),
+        ):
+            component_records.append((
+                _regular_component(
+                    kind, target,
+                    previous_exists=target.is_file(), authoritative=True,
+                ),
+                target,
+            ))
 
     # The old generation may reference sidecars that the new generation
     # retires. Back every live sidecar before publishing the APPLYING journal so
@@ -678,6 +716,28 @@ def _commit_pkl_transaction(
         commit_metadata()
         if fault_hook is not None:
             fault_hook("metadata_replaced")
+        if runtime_manifest_path is not None and runtime_manifest is not None:
+            from backend.utils.runtime_manifest import (
+                build_runtime_manifest,
+                write_runtime_manifest,
+            )
+
+            # Subscripted rather than defaulted: a caller that omitted a field
+            # must fail the commit, not silently publish a manifest declaring
+            # less than the generation actually holds.
+            write_runtime_manifest(
+                runtime_manifest_path,
+                build_runtime_manifest(
+                    revision=int(target_revision),
+                    state_revision=int(runtime_manifest["state_revision"]),
+                    pkl_digest=target_digest,
+                    saved_names=runtime_manifest["saved_names"],
+                    skipped_names=runtime_manifest["skipped_names"],
+                    serializer_version=str(runtime_manifest["serializer_version"]),
+                ),
+            )
+            if fault_hook is not None:
+                fault_hook("runtime_manifest_replaced")
         if metadata_path is not None and not _regular_metadata_matches(
             metadata_path,
             revision=int(target_revision),
@@ -713,11 +773,22 @@ def _commit_pkl_transaction(
             descriptor["target_exists"] = True
             descriptor["target_sha256"] = expected_digest
 
+        # Components written inside the committed region are authenticated
+        # against what they now hold, not against the digest recorded when the
+        # transaction registered their previous copy.
+        from backend.utils.runtime_manifest import runtime_manifest_sig_path
+
         target_paths = {
             "pkl": live_pkl,
             "sig": live_sig,
             "metadata": metadata_path,
             "manifest": manifest_path,
+            "runtime_manifest": runtime_manifest_path,
+            "runtime_manifest_sig": (
+                runtime_manifest_sig_path(runtime_manifest_path)
+                if runtime_manifest_path is not None
+                else None
+            ),
         }
         for descriptor, path in component_records:
             kind = descriptor.get("kind")
