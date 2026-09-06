@@ -142,6 +142,24 @@ async def _shutdown_kernel_manager(manager: KernelManager) -> None:
     manager.shutdown_kernel(now=True)
 
 
+
+def _bootstrap_notebook_cell(code: str, result) -> dict:
+    """One bootstrap execution, in the shape `set_bootstrap_cells` stores.
+
+    `CodeExecutionResult` carries the flattened stdout rather than the raw iopub
+    outputs, so the stream is reconstructed here. The bootstrap raises on
+    failure before this is reached, so there is no error branch to build.
+    """
+    outputs = []
+    if result.output:
+        outputs.append({"type": "stream", "name": "stdout", "text": result.output})
+    return {
+        "code": code,
+        "outputs": outputs,
+        "execution_count": result.execution_count or 0,
+    }
+
+
 class KernelMixin:
     """Jupyter kernel lifecycle: start, readiness, restart, stop."""
 
@@ -295,6 +313,16 @@ class KernelMixin:
                 path_result.error or "unknown error",
             )
             raise RuntimeError("Kernel path/sandbox initialization failed")
+
+        # The environment every later cell assumes, recorded as the notebook's
+        # opening cells (spec 5.3.2). These two still opt out of the ordinary
+        # record gate: it saves, and this runs before restore has read the
+        # notebook off disk, so an append here would overwrite a resumed
+        # session's history with a two-cell file.
+        self.notebook_state.set_bootstrap_cells([
+            _bootstrap_notebook_cell(init_code, result),
+            _bootstrap_notebook_cell(path_setup_code, path_result),
+        ])
 
         self._initialized = True
         logger.info("Kernel initialized")

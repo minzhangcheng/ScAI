@@ -313,3 +313,138 @@ def test_the_mutating_cells_no_longer_opt_out():
         "backend/routes/chat_parts/figures.py",
     ):
         assert "records_history=False" not in (REPO / rel).read_text(), rel
+
+
+# --- the kernel bootstrap is part of the record (spec 5.3.2) ----------------
+
+
+def _bootstrap(notebook, *, common="import scanpy\nSEED = 0", paths="os.chdir('/w')"):
+    notebook.set_bootstrap_cells([
+        {"code": common, "outputs": [
+            {"type": "stream", "name": "stdout", "text": "Environment initialized"}],
+         "execution_count": 1},
+        {"code": paths, "outputs": [], "execution_count": 2},
+    ])
+
+
+@pytest.mark.asyncio
+async def test_the_notebook_starts_with_the_kernel_bootstrap(sandbox):
+    """Cell 0 is the environment, not the first thing the analyst typed.
+
+    Without it the notebook replays into whatever environment the reader
+    happens to have: a different seed, a different working directory, none of
+    the imports. The cells that follow all assume it.
+    """
+    box, kernel, notebook = sandbox
+    _bootstrap(notebook)
+
+    await _run(box, kernel, "sc.pp.pca(adata)", _msgs(count=3, fails=False))
+
+    assert _sources(notebook)[0].startswith("import scanpy")
+    assert _sources(notebook) == [
+        "import scanpy\nSEED = 0", "os.chdir('/w')", "sc.pp.pca(adata)",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_bootstrap_survives_a_save_and_load_round_trip(sandbox):
+    """It has to come back as the bootstrap, not as an ordinary first cell.
+
+    If `load` read it into `cells`, the next kernel start would prepend a second
+    copy, and every resume would add another.
+    """
+    box, kernel, notebook = sandbox
+    _bootstrap(notebook)
+    await _run(box, kernel, "a = 1", _msgs(count=3, fails=False))
+    notebook.save_notebook()
+
+    reloaded = NotebookState(
+        session_id=notebook.session_id, state_dir=str(notebook.state_dir)
+    )
+    assert reloaded.load() is True
+    assert [c["code"] for c in reloaded.bootstrap_cells] == [
+        "import scanpy\nSEED = 0", "os.chdir('/w')",
+    ]
+    assert [c["code"] for c in reloaded.cells] == ["a = 1"]
+    assert _sources(reloaded) == _sources(notebook)
+
+
+@pytest.mark.asyncio
+async def test_a_kernel_restart_does_not_add_a_second_bootstrap(sandbox):
+    """`set_bootstrap_cells` replaces. The environment is recorded once."""
+    box, kernel, notebook = sandbox
+    _bootstrap(notebook)
+    await _run(box, kernel, "a = 1", _msgs(count=3, fails=False))
+    _bootstrap(notebook)
+
+    assert _sources(notebook) == [
+        "import scanpy\nSEED = 0", "os.chdir('/w')", "a = 1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_setting_the_bootstrap_does_not_write_the_notebook(sandbox):
+    """The ordering trap, pinned.
+
+    `_initialize_kernel` runs before `_restore_session` calls
+    `notebook_state.load()`. A save here would put a two-cell notebook over a
+    resumed session's history and restore would read that back.
+    """
+    box, kernel, notebook = sandbox
+    await _run(box, kernel, "a = 1", _msgs(count=1, fails=False))
+    notebook.save_notebook()
+    before = notebook.notebook_path.read_bytes()
+
+    _bootstrap(notebook)
+
+    assert notebook.notebook_path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_the_notebook_is_still_byte_stable_across_repeated_saves(sandbox):
+    """Ids derive from `sha256(index:code)` so an unchanged notebook is
+    unchanged on disk. Prepending the bootstrap shifts every id once -- it must
+    not make each save look different from the last."""
+    box, kernel, notebook = sandbox
+    _bootstrap(notebook)
+    await _run(box, kernel, "a = 1", _msgs(count=3, fails=False))
+    await _run(box, kernel, "raise ValueError", _msgs(count=4, fails=True))
+
+    notebook.save_notebook()
+    first = notebook.notebook_path.read_bytes()
+    notebook.save_notebook()
+    assert notebook.notebook_path.read_bytes() == first
+
+
+@pytest.mark.asyncio
+async def test_an_upgraded_session_gains_a_bootstrap_rather_than_losing_one(sandbox):
+    """A notebook written before this change has no bootstrap-marked cell.
+
+    `load` must leave the live one in place instead of clearing it, or a
+    resumed pre-upgrade session would stay without an environment forever.
+    """
+    box, kernel, notebook = sandbox
+    await _run(box, kernel, "a = 1", _msgs(count=1, fails=False))
+    notebook.save_notebook()
+
+    resumed = NotebookState(
+        session_id=notebook.session_id, state_dir=str(notebook.state_dir)
+    )
+    _bootstrap(resumed)          # this process's kernel start
+    assert resumed.load() is True  # then restore reads the old notebook
+
+    assert [c["code"] for c in resumed.bootstrap_cells] == [
+        "import scanpy\nSEED = 0", "os.chdir('/w')",
+    ]
+    assert [c["code"] for c in resumed.cells] == ["a = 1"]
+
+
+def test_the_bootstrap_executions_stay_out_of_the_ordinary_record_gate():
+    """They are recorded, but not through `add_cell`.
+
+    The gate saves, and `_initialize_kernel` runs before restore has read the
+    notebook, so routing them through it is the overwrite this design avoids.
+    """
+    kernel_source = (BACKEND / "utils/sandbox_parts/kernel.py").read_text()
+    assert kernel_source.count("records_history=False") == 2
+    assert "set_bootstrap_cells([" in kernel_source
