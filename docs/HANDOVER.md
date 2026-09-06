@@ -150,135 +150,59 @@ legacy dataframe implementation. PyTorch `DataLoader` works with
 message. These are deliberate capability restrictions of the per-session
 filesystem boundary, not transient dependency failures.
 
-## 8. Snapshot V2 (in development — not stable)
+## 8. Runtime Persistence
 
-> **Status: in development, disabled by default, not stable.** The feature is off
-> unless an operator sets `SCAI_ENABLE_SNAPSHOT_V2=true`, and the UI marks it
-> experimental when it is on. On-disk layout, manifest schema and API shapes may
-> change without a migration path, and the end-to-end behaviour has not been
-> accepted on a real deployment — only under test, including real-kernel
-> capture/restore acceptance. Treat stored snapshots as disposable: do not rely
-> on one taken by an earlier build still restoring under a later one, and do not
-> present the feature to end users. It is intentionally absent from the user
-> guide.
+There is one persistence mechanism, and it is not a snapshot store. Snapshot V2
+— its object store, manifests, journals, restore transactions, safe point,
+capture gates and HTTP surface — was removed in the plain-persistence work
+(`docs/coding/plain-persistence-spec.md`). What remains is the ordinary save
+that the kernel has always performed.
 
-Snapshot V2 captures a session's analysis state, notebook, workspace files,
-LangGraph checkpoint and — when a kernel is live — the Jupyter runtime, so a
-session can be returned to an earlier point of its analysis. It replaces the V1
-checkpoint mechanism, whose restore path now answers HTTP 410; V1 records remain
-listable and deletable for cleanup only.
+### What is persisted
 
-### Storage model
+At each persistence boundary the sandbox dumps the kernel's supported top-level
+values to `<session>/states/<id>_session.pkl`, with an HMAC signature under
+`<data>/integrity/<id>/` and a `runtime_manifest.json` recording the revision,
+the saved and skipped names, and the serializer version. The write goes through
+`_commit_pkl_transaction`, a journalled multi-component transaction whose
+components (pkl, signature, metadata, runtime manifest, manifest signature)
+commit together or not at all; `recover_regular_save_transaction` drives an
+interrupted one to a terminal state on the next load.
 
-Everything lives under the session directory, laid out by
-`backend/services/snapshot_v2/paths.py`:
+`session.json`, the notebook, the workspace and the LangGraph checkpoint are
+each written by their own path. They are not captured as a set, and nothing
+rewinds them together — there is no restore.
 
-```
-sessions/<id>/v2/          Snapshot V2 root
-├── objects/               Content-addressed blobs, named by sha256
-├── committed/             Published manifests (one JSON per snapshot), HMAC-signed
-├── staging/               In-flight capture and restore working area
-├── journals/              Transaction intent records (capture/restore/import/export/delete)
-└── integrity/             Signature and evidence material
-```
+### What a failure does
 
-Objects are content-addressed, so an unchanged AnnData is stored once and shared
-by every snapshot that references it — what grows the store is genuinely new
-data, not the number of snapshots. A manifest names the objects a snapshot
-consists of and carries a `root_hash` over its own canonical form; both the
-manifest and the integrity material are HMAC-signed with the installation key.
+A save that fails keeps the previous committed generation. The failure is
+recorded on the state (`runtime_persistence`) and surfaced to the user; it does
+not park the workflow on a gate and it never blocks a later run. A value the
+serializer cannot handle is skipped and named in `skipped_names`; an
+environment failure mid-write aborts the dump rather than committing a
+truncated one, so a partial pkl is never importable.
 
-### Lifecycle
+### Sessions from an older build
 
-| Operation | Entry point | Notes |
-|---|---|---|
-| Capture | `SnapshotService.capture` (`service.py`, steps in `service_parts/capture_steps.py`) | Required captures at workflow boundaries are fail-closed; auto-captures are best-effort |
-| Restore | `RestoreJobManager` → `RestoreCoordinator.apply` (`jobs.py`, `restore_parts/`) | Runs as a background job with a safe-point handshake; a pre_restore snapshot is taken first so the restore itself is undoable |
-| Rollback | `recovery.py` `_RecoveryRestorer.rollback` | Reinstates the pre_restore image when a restore fails past its point of no return |
-| Crash recovery | `recover_snapshot_transactions` (`recovery.py`), run at startup and on session load | Drives every non-terminal journal to a terminal state, or blocks the session |
-| GC | `SnapshotGarbageCollector` (`gc.py`) | Mark-and-sweep over reachable objects. Runs on delete/import/recovery — **not** on a timer |
-| Export / import | `exporter.py`, `importer.py` | Snapshots travel inside portable session archives; import defaults to `trust_runtime=false` |
+A session persisted while Snapshot V2 existed can still carry its blockers —
+`snapshot_failure`, `pending_required_snapshot`, `skip_required_snapshot_phase`,
+a snapshot `wait_input_reason`, or `recovery_blocked`. Those fields are still
+declared on `AnalysisState` for exactly this reason: dropping them would let
+such a session load into a WAITING_INPUT no dialog answers.
+`backend/services/legacy_state_sanitizer.py` clears them on load, on import and
+on re-run.
 
-### Concurrency and the safe point
+It refuses one case. A restore that never reached a terminal state leaves the
+session's state, notebook, checkpoint and workspace describing different points
+in the run; clearing `recovery_blocked` there would run the graph against that
+mixture. Such a session stays unstartable until the previous version finishes
+or rolls the restore back. An unreadable journal counts as unfinished. Startup
+logs which sessions are in this state.
 
-Capture, restore, chat delegation and report generation can all be in flight
-against one session, so mutating operations fence through a generation-scoped
-cooperative safe point (`safe_point.py`). A capture or restore *requests* the
-safe point; the workflow *acknowledges* it at a quiescent moment — a graph node
-entry, a step boundary in the bioinformatics loop, or inside a HITL gate via the
-gate's `safe_point_hook`. A busy owner surfaces as `SAFE_POINT_BUSY` → HTTP 409.
-A restore that commits marks the superseded run, which unwinds with
-`WorkflowSupersededError` rather than writing its stale position back.
-
-### Continuation capsules
-
-A snapshot records *where the workflow was*, not just its data. The graph's entry
-node is `restore_entry`, and `build_restore_entry_plan` / `_route_from_restore_entry`
-use the capsule to resume: `IdleCapsule` for a session with no live position,
-`SemanticGateCapsule` for one parked at a resumable HITL gate, and a graph-node
-capsule for a mid-round position. Do not assume a run always begins at
-`initialize_round`.
-
-Accepted actions at the five frozen semantic gates are converted by
-`prepare_restored_semantic_action()` through `SEMANTIC_GATE_ACTION_NEXT_NODES`
-to their exact post-action graph nodes before reconnect. `round_wait`,
-`direction_selection`, and `integration_selection` continue at
-`check_convergence`; `annotation_confirmation` continues at
-`bioinformatics_analysis`; and `plan_revision` continues at
-`planning_dialogue`. The parked gate is not replayed, and there is no
-normal-versus-dedicated resume split.
-
-### Capacity
-
-Two ceilings, both checked before a capture writes and again after it lands: a
-per-session store quota (`SCAI_SNAPSHOT_SESSION_QUOTA_GB`, default 500 GiB) and a
-data-volume free-space reserve (`SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB`, default 50
-GiB). The quota is per session, so the worst case is the quota times the number
-of sessions holding snapshots; the reserve is the only volume-wide bound. The
-snapshot panel advises a cleanup at 90% of the quota. See the
-[Administrator Manual](admin-manual.md) for operator guidance.
-
-A third ceiling is memory, not disk. `_SAVE_ANNDATA_TEMPLATE` deep-copies each
-AnnData before sanitizing and writing it, and the dill path deserializes a second
-copy to verify the round-trip, so a capture transiently needs roughly the size of
-its largest captured object on top of what the kernel already holds. The kernel
-introspection pass therefore reports each AnnData's true byte size (walking
-X/layers/obsp/varp/obsm/varm plus `.raw`, counting sparse data/indices/indptr and
-de-duplicating shared buffers), its own RSS, and the tighter of host
-`MemAvailable` and the cgroup remainder. `_preflight_capture_memory()` refuses
-before allocating when the largest copy would exceed
-`SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO` (default 0.8) of that headroom, raising
-`snapshot_memory_insufficient`. Objects are captured one at a time, so the bound
-is the largest single object, not their sum.
-
-That gate offers `proceed` / `skip` / `terminate` and deliberately omits `retry`:
-the preflight is deterministic, so a retry would refuse again and the gate could
-never clear. `proceed` arms a one-shot
-`AnalysisState.force_snapshot_memory_override` that the next capture consumes.
-Missing evidence never refuses — an unreadable probe or unknown headroom falls
-back to capturing. This is the preflight for Snapshot V2's own copy allocation.
-Regular runtime persistence separately checks namespace count, largest object,
-AnnData total, kernel RSS, estimated pickle size, and save time at persistence
-boundaries. Those budgets default to automatic fractions of the container
-cgroup memory limit (host memory fallback) and may be capped with deployment
-environment variables. With Snapshot V2 disabled only its copy-specific probe
-is absent. Arbitrary analysis allocations can still occur before the next
-persistence boundary, so the container memory limit remains the hard backstop.
-
-### Known limits
-
-- **Not stable.** Layout, schema and API may change without migration.
-- **No object alias identity across restore.** Supported top-level values and
-  workflow continuation are preserved, but the same AnnData embedded inside an
-  arbitrary nested container is not guaranteed to be the *same object* after a
-  restore. Code must not rely on identity checks such as `nested["adata"] is adata`.
-- **GC is event-driven, not scheduled.** Space from superseded objects is
-  reclaimed when snapshots are deleted.
-- **No cross-session total.** Only the per-session quota and the volume reserve
-  bound disk use.
-- **Not accepted end to end on a real deployment.** Coverage is automated,
-  including real-kernel capture/restore acceptance and a fault-barrier matrix,
-  but no operator acceptance run has been recorded.
+Storage left on disk — `<session>/v2/`, `<session>/snapshots/` — is inert.
+Nothing reads it, nothing writes it, and deleting the session deletes it. An
+archive built before the removal still imports: its snapshot members are
+skipped rather than rejected.
 
 ## 9. Request & Data Flow
 

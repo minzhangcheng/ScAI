@@ -253,7 +253,6 @@ class IntegrationMixin:
             analysis_state,
             TaskStatus.RUNNING if no_wait else TaskStatus.WAITING_INPUT,
         )
-        await self._create_auto_snapshot(analysis_state, "pre_integration_gate")
         if no_wait:
             await self._send_message(
                 "status",

@@ -55,9 +55,6 @@ class DummyWorkflow(SynthesisMixin):
     async def _send_state_sync(self, analysis_state, change_type):
         self.sent_messages.append(("state_sync", change_type, AgentType.PI))
 
-    async def _create_auto_snapshot(self, analysis_state, phase):
-        self.sent_messages.append(("snapshot", phase, AgentType.PI))
-
     async def _build_and_save_detailed_segment(self, *args, **kwargs):
         return None
 

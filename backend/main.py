@@ -56,7 +56,6 @@ from .routes.indicators import router as indicators_router
 from .routes.upload import router as upload_router
 from .routes.lifecycle import router as lifecycle_router
 from .routes.interaction import router as interaction_router
-from .routes.snapshots import router as snapshots_router
 from .routes.export_import import router as export_import_router
 from .routes.files import router as files_router
 from .routes.chat import router as chat_router
@@ -118,17 +117,18 @@ logger = logging.getLogger(__name__)
 
 
 def _warn_about_unrecovered_journals() -> None:
-    """Say so when startup is stepping over restore journals it will not touch.
+    """Say so when startup steps over restore journals nothing can finish.
 
-    A crash during the APPLYING stage of a restore leaves the session's files
-    half-swapped and a journal describing how to finish or roll back. With the
-    subsystem disabled that journal is never read, so the session loads and runs
-    against a mix of old and new files without anything being said. Recovery
-    genuinely cannot run here — it needs the object store — but the operator
-    should learn about it from a log line rather than from the results.
+    A crash during the APPLYING stage of a pre-upgrade restore left the
+    session's files half-swapped and a journal describing how to finish or roll
+    back. The subsystem that could read it is gone, so those sessions stay
+    refused (``sanitize_legacy_state`` will not clear their recovery block) and
+    the operator should learn which ones from a log line at startup rather than
+    from a support ticket. The repair is to run the previous version once and
+    let it finish or roll the restore back.
     """
     from backend.config._config import SESSION_DIR
-    from backend.services.snapshot_v2.feature_gate import (
+    from backend.services.legacy_state_sanitizer import (
         has_unfinished_restore_journal,
     )
 
@@ -149,37 +149,13 @@ def _warn_about_unrecovered_journals() -> None:
         return
     if stranded:
         logger.warning(
-            "Snapshot V2 is disabled, so %d session(s) with unfinished restore "
-            "journals were loaded without recovery: %s. If any of them crashed "
-            "mid-restore its files may mix pre- and post-restore content; "
-            "re-enable SCAI_ENABLE_SNAPSHOT_V2 to let recovery finish or roll "
-            "the restore back.",
+            "%d session(s) carry an unfinished restore journal from a previous "
+            "version and will refuse to start: %s. Their files may mix pre- and "
+            "post-restore content, so run the previous version once to let it "
+            "finish or roll the restore back.",
             len(stranded),
             ", ".join(stranded[:10]) + ("…" if len(stranded) > 10 else ""),
         )
-
-
-async def _recover_snapshots_on_startup() -> None:
-    """Recover Snapshot V2 journals only for explicitly enabled deployments."""
-    from backend.config import is_snapshot_v2_enabled
-
-    if not is_snapshot_v2_enabled():
-        await asyncio.to_thread(_warn_about_unrecovered_journals)
-        return
-
-    try:
-        from backend.services.snapshot_v2.recovery import recover_for_all_sessions
-
-        recovery_result = await recover_for_all_sessions()
-        if recovery_result.recovered:
-            logger.info(
-                "Lifespan: recovered %d restore transactions across all sessions",
-                len(recovery_result.recovered_transactions),
-            )
-            if recovery_result.errors:
-                logger.warning("Lifespan recovery errors: %s", recovery_result.errors)
-    except Exception:
-        logger.exception("Lifespan snapshot recovery failed; continuing")
 
 
 @asynccontextmanager
@@ -225,8 +201,9 @@ async def lifespan(app: FastAPI):
     from backend.services.upload import set_session_callbacks
     set_session_callbacks(_update_session_cache, async_save_session)
 
-    # Recover incomplete restore transactions only when Snapshot V2 is enabled.
-    await _recover_snapshots_on_startup()
+    # Name the sessions a pre-upgrade restore left half-swapped; nothing here
+    # can repair them, and they stay refused until the previous version does.
+    await asyncio.to_thread(_warn_about_unrecovered_journals)
 
     # Reclaim export archives stranded by a previous process. Unconditional is
     # safe *here only*: startup runs before any request is served, so
@@ -376,7 +353,6 @@ app.include_router(indicators_router)
 app.include_router(upload_router)
 app.include_router(lifecycle_router)
 app.include_router(interaction_router)
-app.include_router(snapshots_router)
 app.include_router(export_import_router)
 app.include_router(files_router)
 app.include_router(chat_router)

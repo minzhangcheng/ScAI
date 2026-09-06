@@ -292,9 +292,6 @@ async def build_exploration_result(self, ctx):
             )
             detailed_report_url = f"/api/session/{self.session_id}/detailed-report/html" if analysis_state.detailed_report_html_path else None
 
-            # Auto-snapshot before direction selection HITL
-            await self._create_auto_snapshot(analysis_state, "pre_direction")
-
             await self._send_message("exploration_report", {
                 "report_a": exploration_report.model_dump(mode="json"),
                 "round": round_result.round_number,
@@ -508,7 +505,6 @@ async def finalize_synthesis(self, ctx):
     )
 
     # Auto-snapshot before round wait HITL
-    await self._create_auto_snapshot(analysis_state, "pre_round_wait")
 
     # Clear continue event BEFORE announcing waiting status to prevent race
     # condition where frontend signals between status message and event.wait()
@@ -573,7 +569,6 @@ async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
     Auto-skip semantics for the post-exploration direction-selection gate:
     equivalent to "let PI decide" (sets user_chosen_direction = [PI_DECIDE]).
     """
-    await ack_restore_safe_point(self)
     analysis_state = state["analysis_state"]
 
     # Integration gate: auto-skip / timeout now triggers PI_DECIDE_SIGNAL
@@ -593,7 +588,6 @@ async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
         else:
             signaled = await wait_with_skip_time(
                 self._continue_event, wait_seconds, self.session_id, "integration_gate",
-                safe_point_hook=getattr(self, "await_restore_safe_point", None),
             )
             if not signaled:
                 analysis_state.user_chosen_direction = PI_DECIDE_SIGNAL
@@ -675,7 +669,6 @@ async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
                 wait_seconds,
                 self.session_id,
                 GATE_DIRECTION_SELECTION if is_direction_gate else GATE_ROUND_WAIT,
-                safe_point_hook=getattr(self, "await_restore_safe_point", None),
             )
             if not signaled:
                 # Auto-skip on timeout

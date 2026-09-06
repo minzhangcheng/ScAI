@@ -11,7 +11,6 @@ import tarfile
 import time
 import uuid
 import zipfile
-from pathlib import Path
 from typing import Any, Dict, Optional
 import aiofiles
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -23,10 +22,6 @@ from backend.config import (
 )
 from backend.models.schemas import AnalysisState, APIResponse
 from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
-from backend.services.snapshot_v2.feature_gate import (
-    is_snapshot_v2_enabled,
-    require_snapshot_v2_enabled,
-)
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
     update_session_cache as _update_session_cache,
@@ -39,8 +34,7 @@ from backend.state import (
     prepared_exports_lock as _prepared_exports_lock,
     users_pending_deletion,
 )
-from backend.utils.auth import require_active_user, require_session_ownership
-from backend.utils.blob_store import inline_blobs
+from backend.utils.auth import require_active_user
 from backend.utils.files import slugify_session_name, validate_path_within, validate_session_id, temp_file_on_error
 from backend.utils.secret_redaction import strip_analysis_state_secrets
 from starlette.background import BackgroundTask
@@ -67,110 +61,6 @@ from .import_impl import (
 logger = logging.getLogger(__name__)
 
 
-@router.post(
-    "/api/session/{session_id}/import-v2",
-    dependencies=[Depends(require_snapshot_v2_enabled)],
-)
-async def import_v2(
-    session_id: str,
-    request: Request,
-):
-    """Import a V2 snapshot export archive (tar.gz) into a session.
-
-    Accepts a raw tar.gz body (not multipart) uploaded as
-    ``application/gzip`` with an ``X-Filename`` header identifying
-    the archive.  Uses the path *session_id* as the destination
-    session — all snapshot/session IDs in the archive are rebound
-    to this session via a deterministic mapping.
-
-    Headers:
-        X-Trust: ``"true"`` to restore runtime objects (dill/h5ad).
-            Default ``false`` — runtime is marked unavailable and
-            no dill objects are written to the destination store.
-
-    Returns the ``ImportResult`` payload.
-    """
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Authentication required to import V2 snapshots")
-    # Ownership check (also rejects missing sessions for non-auth callers that
-    # slipped past middleware with a stale user_id).
-    await require_session_ownership(session_id=session_id, user_id=user_id)
-
-    trust = (request.headers.get("x-trust") or "").lower() in ("true", "1", "yes")
-
-    # Stream body to a temp file
-    import tempfile
-    tmp = tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False, dir=str(UPLOAD_TEMP_DIR))
-    tmp_path = tmp.name
-    tmp.close()
-
-    # The operator's compressed-archive ceiling, read once before the copy.
-    # `SnapshotImporter` applies the same limit, but only from
-    # `archive_path.stat().st_size` — i.e. after the entire body is already
-    # materialised in UPLOAD_TEMP_DIR, on the same volume as every session's
-    # metadata. A limit evaluated after the allocation it names cannot bound it,
-    # so the rejection has to happen while the body is still arriving.
-    from backend.config._config import default_config
-    from backend.services.snapshot_v2.object_store import SnapshotImportLimits
-
-    max_body_bytes = SnapshotImportLimits.from_config(default_config).max_compressed_bytes
-
-    try:
-        buffer_size = 0
-        with open(tmp_path, "wb") as f:
-            async for chunk in request.stream():
-                if not chunk:
-                    continue
-                f.write(chunk)
-                buffer_size += len(chunk)
-                if buffer_size > max_body_bytes:
-                    # Stop reading; the `finally` below unlinks the partial file.
-                    raise HTTPException(
-                        status_code=413,
-                        detail=(
-                            f"Archive exceeds the {max_body_bytes} byte import "
-                            "limit"
-                        ),
-                    )
-
-        if buffer_size == 0:
-            raise HTTPException(status_code=400, detail="Empty upload")
-
-        from backend.services.snapshot_v2.paths import SnapshotV2Paths
-        from backend.services.snapshot_v2.service import SnapshotService
-        from backend.services.snapshot_v2.errors import (
-            SnapshotV2Error,
-            snapshot_error_detail,
-        )
-
-        paths = SnapshotV2Paths.for_session(session_id)
-        service = SnapshotService(session_id, paths)
-        try:
-            result = await service.import_snapshots(tmp_path, trust_runtime=trust)
-        except SnapshotV2Error as exc:
-            err = snapshot_error_detail(exc)
-            raise HTTPException(
-                status_code=err["status_code"],
-                detail={key: value for key, value in err.items() if key != "status_code"},
-            ) from exc
-
-        if not result.success:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Import failed: {'; '.join(result.errors)}",
-            )
-
-        return result.model_dump(mode="json")
-
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("V2 import failed for session %s", session_id)
-        raise HTTPException(status_code=500, detail=f"Import failed: {exc}")
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
 
 @router.post(
     "/api/session/import",

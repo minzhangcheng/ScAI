@@ -54,14 +54,9 @@ async def run(
     Returns:
         Final analysis state
     """
-    from ...config import is_snapshot_v2_enabled
     from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 
-    if not is_snapshot_v2_enabled():
-        sanitize_legacy_state(
-            initial_state,
-            workflow_active=True,
-        )
+    sanitize_legacy_state(initial_state, workflow_active=True)
 
     from ...utils.runtime_pairing import refresh_runtime_availability
     refresh_runtime_availability(initial_state)
@@ -84,20 +79,6 @@ async def run(
         self._set_status(initial_state, TaskStatus.FAILED)
         return initial_state
 
-    # Entry guard: already blocked on required snapshot failure — hold,
-    # do not start the graph or clear the gate.
-    from ...services.snapshot_v2.errors import is_snapshot_failure_blocked
-    if is_snapshot_failure_blocked(initial_state):
-        logger.warning(
-            f"[{self.session_id}] run blocked: snapshot_failure already present; "
-            "holding WAITING_INPUT until Retry/Manage/Terminate"
-        )
-        self._set_status(initial_state, TaskStatus.WAITING_INPUT)
-        initial_state.wait_input_reason = "snapshot_failure"
-        try:
-            await self._send_state_sync(initial_state, "snapshot_failure")
-        except Exception:
-            pass
         return initial_state
 
     # Guard: terminal restore → no workflow, preserve its exact outcome.
@@ -208,25 +189,6 @@ async def run(
         await self._send_state_sync(initial_state, StateSyncChangeType.LLM_RETRY.value)
         return initial_state
 
-    except RequiredSnapshotBlocked as e:
-        logger.warning(
-            f"[{self.session_id}] Required snapshot blocked workflow: {e}"
-        )
-        from ...services.snapshot_v2.failure_gate import (
-            ensure_workflow_boundary_retry_context,
-        )
-
-        ensure_workflow_boundary_retry_context(
-            initial_state,
-            e,
-            previous_status="running",
-        )
-        try:
-            await self._send_state_sync(initial_state, "snapshot_failure")
-        except Exception:
-            pass
-        return initial_state
-
     except Exception as e:
         import traceback
         error_detail = traceback.format_exc()
@@ -250,68 +212,11 @@ async def generate_report(
     Used when a session completed all analysis rounds but was interrupted
     before report generation finished.
     """
-    from ...config import is_snapshot_v2_enabled
     from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 
-    if not is_snapshot_v2_enabled() and sanitize_legacy_state(
-        initial_state,
-        workflow_active=True,
-    ):
+    if sanitize_legacy_state(initial_state, workflow_active=True):
         if initial_state.status == TaskStatus.COMPLETED:
             return initial_state
-
-    # Entry guard: snapshot_failure or pending post-report snapshot means
-    # reports already ran; hold WAITING_INPUT for capture-only retry.
-    # WS reconnect must not re-run report generators.
-    from ...services.snapshot_v2.errors import is_snapshot_failure_blocked
-    pending = getattr(initial_state, "pending_required_snapshot", None)
-    if is_snapshot_failure_blocked(initial_state) or pending is not None:
-        logger.warning(
-            f"[{self.session_id}] generate_report blocked: "
-            f"snapshot_failure={is_snapshot_failure_blocked(initial_state)} "
-            f"pending_required_snapshot={pending is not None}; "
-            "holding WAITING_INPUT without re-running report generators"
-        )
-        from ...services.snapshot_v2.failure_gate import (
-            ensure_post_report_retry_context,
-            enter_snapshot_failure_gate,
-        )
-
-        if pending is not None and not initial_state.snapshot_failure:
-            enter_snapshot_failure_gate(
-                initial_state,
-                {
-                    "code": "pending_required_snapshot",
-                    "message": (
-                        "Post-report snapshot is pending; use Retry to "
-                        "re-enter capture only (reports will not re-run), "
-                        "or Skip to complete without this snapshot."
-                    ),
-                    "allowed_actions": ["retry", "skip", "manage", "terminate"],
-                },
-                retry_context={
-                    "producer": "post_report",
-                    "resume_policy": "complete",
-                    "snapshot_request": dict(pending),
-                    "previous_status": "generating_report",
-                    "report_generation_id": pending.get("report_generation_id"),
-                },
-            )
-        else:
-            # Always merge typed post_report context (service bare gate
-            # may have snapshot_failure without retry_context).
-            ensure_post_report_retry_context(
-                initial_state,
-                previous_status="generating_report",
-                snapshot_request=(
-                    dict(pending) if isinstance(pending, dict) else {"phase": "post_report"}
-                ),
-            )
-        try:
-            await self._send_state_sync(initial_state, "snapshot_failure")
-        except Exception:
-            pass
-        return initial_state
 
     # Store state for settings provider initialization
     self._state = initial_state
@@ -376,26 +281,6 @@ async def generate_report(
         state = await self._generate_detailed_report(state)
         logger.info(f"[{self.session_id}] Report generation completed")
         return state["analysis_state"]
-    except RequiredSnapshotBlocked as e:
-        logger.warning(
-            f"[{self.session_id}] Required snapshot blocked during report generation: {e}"
-        )
-        from ...services.snapshot_v2.failure_gate import (
-            ensure_post_report_retry_context,
-        )
-
-        # Always merge typed post_report context (bare service gate may
-        # already set snapshot_failure without retry_context).
-        ensure_post_report_retry_context(
-            initial_state,
-            e,
-            previous_status="generating_report",
-        )
-        try:
-            await self._send_state_sync(initial_state, "snapshot_failure")
-        except Exception:
-            pass
-        return initial_state
     except WorkflowSupersededError as e:
         return self._superseded_report_result(initial_state, e)
     except Exception as e:
@@ -417,11 +302,7 @@ def _superseded_state(self, *fallbacks: Optional[AnalysisState]) -> Optional[Ana
     forgetting that in one handler leaks the flag across the process.
     """
     from ...state import sessions as live_sessions
-    from ...services.snapshot_v2.safe_point import (
-        get_snapshot_safe_point_manager as _sp_clear,
-    )
 
-    _sp_clear().clear_superseded(self.session_id)
     state = live_sessions.get(self.session_id)
     for fallback in fallbacks:
         if state:
@@ -493,14 +374,9 @@ async def resume(
     logger.info(f"[{self.session_id}] Resuming workflow for thread {thread_id}")
 
     if analysis_state is not None:
-        from ...config import is_snapshot_v2_enabled
         from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 
-        if not is_snapshot_v2_enabled():
-            sanitize_legacy_state(
-                analysis_state,
-                workflow_active=True,
-            )
+        sanitize_legacy_state(analysis_state, workflow_active=True)
 
     from ...utils.runtime_pairing import refresh_runtime_availability
     if analysis_state is not None:
@@ -522,17 +398,6 @@ async def resume(
             f"coherence={state_runtime_coherence(analysis_state)!r}; "
             "holding without running the graph"
         )
-        return analysis_state
-
-    # Entry guard: already blocked on required snapshot failure.
-    from ...services.snapshot_v2.errors import is_snapshot_failure_blocked
-    if analysis_state is not None and is_snapshot_failure_blocked(analysis_state):
-        logger.warning(
-            f"[{self.session_id}] resume blocked: snapshot_failure already present; "
-            "holding without running the graph"
-        )
-        self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
-        analysis_state.wait_input_reason = "snapshot_failure"
         return analysis_state
 
     # Terminal restore → no workflow, preserve its exact outcome.
@@ -557,22 +422,6 @@ async def resume(
 
     # A restore Retry may reconstruct the workflow after its new job has
     # already requested a safe point. Acknowledge before touching the
-    # checkpointer, then remain frozen until the restore owner releases it.
-    #
-    # This await sits outside the try below, so a restore that commits while
-    # we are frozen here would otherwise escape resume() entirely and land
-    # in the caller's generic `except Exception` — which writes
-    # TaskStatus.FAILED over the state the restore just persisted. Unwind
-    # the same way the in-graph handlers do: quietly, returning the restored
-    # state untouched.
-    try:
-        await self.await_restore_safe_point()
-    except WorkflowSupersededError as exc:
-        logger.info(
-            f"[{self.session_id}] Resume superseded by restore before the "
-            f"graph was entered: {exc}"
-        )
-        return self._superseded_state(analysis_state)
     if analysis_state is not None:
         from ...state import sessions as live_sessions
 
@@ -658,22 +507,6 @@ async def resume(
                 self._set_status(effective, TaskStatus.STOPPED)
                 effective.wait_input_reason = None
             return effective or analysis_state or state.values["analysis_state"]
-        except RequiredSnapshotBlocked as e:
-            logger.warning(
-                f"[{self.session_id}] Required snapshot blocked on resume: {e}"
-            )
-            from ...services.snapshot_v2.failure_gate import (
-                ensure_workflow_boundary_retry_context,
-            )
-
-            effective = analysis_state or state.values.get("analysis_state")
-            if effective:
-                ensure_workflow_boundary_retry_context(
-                    effective,
-                    e,
-                    previous_status="running",
-                )
-            return effective or analysis_state
 
     # No checkpoint found. Exact continuation only — never fall back to a
     # generic fresh run from initialize_round.
@@ -715,21 +548,6 @@ async def resume(
             if analysis_state:
                 self._set_status(analysis_state, TaskStatus.STOPPED)
                 analysis_state.wait_input_reason = None
-            return analysis_state
-        except RequiredSnapshotBlocked as e:
-            logger.warning(
-                f"[{self.session_id}] Required snapshot blocked after restore: {e}"
-            )
-            from ...services.snapshot_v2.failure_gate import (
-                ensure_workflow_boundary_retry_context,
-            )
-
-            if analysis_state:
-                ensure_workflow_boundary_retry_context(
-                    analysis_state,
-                    e,
-                    previous_status="running",
-                )
             return analysis_state
 
     if analysis_state.status in (TaskStatus.WAITING_INPUT, TaskStatus.WAITING_ANNOTATION):

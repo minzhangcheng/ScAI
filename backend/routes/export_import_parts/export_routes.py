@@ -16,20 +16,16 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 import aiofiles
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from backend.config import (
     DATA_BASE_DIR, REPORTS_DIR, SESSION_DIR, STATE_DIR, UPLOAD_DIR, WORKSPACE_DIR,
     UPLOAD_CHUNK_SIZE, UPLOAD_TEMP_DIR,
-    EXPORT_STREAM_PREFIX, PREPARED_EXPORT_PREFIX, SNAPSHOT_EXPORT_PREFIX,
+    EXPORT_STREAM_PREFIX, PREPARED_EXPORT_PREFIX,
     get_session_dir, get_session_metadata_path, get_session_reports,
     get_session_states, get_session_uploads, get_session_workspace, resolve_session_metadata_path,
 )
 from backend.models.schemas import AnalysisState, APIResponse
 from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
-from backend.services.snapshot_v2.feature_gate import (
-    is_snapshot_v2_enabled,
-    require_snapshot_v2_enabled,
-)
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
     update_session_cache as _update_session_cache,
@@ -68,7 +64,6 @@ from .core import (
     ARCHIVE_FORMAT_VERSION,
     _build_export_filename,
     check_export_disk_space,
-    count_v2_snapshot_records,
     new_export_token,
     router,
 )
@@ -79,7 +74,6 @@ from .tar_builders import (
     _add_session_blobs_to_tar,
     _add_session_logs_to_tar,
     _add_reports_to_tar,
-    _add_snapshots_to_tar,
     _add_states_to_tar,
     _add_tree_to_tar,
 )
@@ -119,10 +113,6 @@ def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = F
             "session_id": session_id,
             "version": ARCHIVE_FORMAT_VERSION,
             "data_base_dir": str(DATA_BASE_DIR),
-            # An ordinary archive packs no V2 object storage at all, so a
-            # destination could not otherwise tell "the source had no snapshots"
-            # from "the export dropped them". This is that difference, stated.
-            "snapshot_v2_records_without_payload": count_v2_snapshot_records(state_payload),
         }, indent=2).encode("utf-8")
         _add_bytes(f"{session_id}/manifest.json", manifest)
 
@@ -161,7 +151,6 @@ def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = F
         _add_session_blobs_to_tar(tf, session_id)
 
         # 8. snapshots (JSON state files + session pkl backups)
-        _add_snapshots_to_tar(tf, session_id, include_runtime=include_runtime)
 
         # 9. LLM interaction logs (the detailed report's usage numbers)
         _add_session_logs_to_tar(tf, session_id)
@@ -429,117 +418,3 @@ async def export_download(session_id: str, request: Request, token: str | None =
         filename=info["filename"],
         export_info=info,
     )
-
-@router.post(
-    "/api/session/{session_id}/export-v2",
-    dependencies=[Depends(require_snapshot_v2_enabled)],
-)
-async def export_v2(
-    session_id: str,
-    request: Request,
-    include_runtime: bool = True,
-    snapshot_ids: str | None = None,
-):
-    """Export verified V2 snapshot objects as a tar.gz archive.
-
-    Unlike the legacy ``/export`` endpoint, V2 export streams verified
-    snapshot objects (blobs) from the V2 object store into a portable
-    archive.  Base/workspace objects always export; runtime objects
-    (adata variables, dill residuals) only with ``include_runtime=true``.
-
-    Query params:
-        include_runtime: Include runtime snapshot objects (default True).
-        snapshot_ids: Comma-separated list of snapshot IDs to export
-            (default: all committed snapshots).
-    """
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(
-        session_id=session_id, user_id=user_id,
-    )
-
-    from backend.services.snapshot_v2.paths import SnapshotV2Paths
-    from backend.services.snapshot_v2.service import SnapshotService
-    from backend.services.snapshot_v2.errors import (
-        SnapshotV2Error,
-        snapshot_error_detail,
-    )
-
-    paths = SnapshotV2Paths.for_session(session_id)
-
-    # Parse optional snapshot_ids
-    parsed_ids: list[str] | None = None
-    if snapshot_ids:
-        parsed_ids = [s.strip() for s in snapshot_ids.split(",") if s.strip()]
-
-    export_token = new_export_token()
-    export_info = await reserve_export_record(
-        export_token,
-        session_id=session_id,
-        user_id=user_id,
-        state=state,
-        kind="snapshot-v2",
-    )
-    export_dir = UPLOAD_TEMP_DIR
-    export_dir.mkdir(parents=True, exist_ok=True)
-    filename = (
-        f"{SNAPSHOT_EXPORT_PREFIX}{session_id}."
-        f"g{export_info['generation']}.{export_token[:12]}.tar.gz"
-    )
-    final_path = export_dir / filename
-    service = SnapshotService(session_id, paths)
-    try:
-        await bind_export_path(export_info, final_path, owned=False)
-
-        def _reserve_output() -> None:
-            fd = os.open(
-                final_path,
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                0o600,
-            )
-            # Deletion waits for this route task before reading side surfaces;
-            # publishing ownership inside the worker also covers cancellation
-            # delivered after the exclusive create but before its await returns.
-            export_info["path_owned"] = True
-            os.close(fd)
-            create_export_ownership_marker(final_path)
-            export_info["ownership_marker_required"] = True
-            export_info["ownership_marker_owned"] = True
-
-        await run_in_owned_thread(_reserve_output)
-        export_path = await service.export_snapshots(
-            include_runtime=include_runtime,
-            snapshot_ids=parsed_ids,
-            staging_dir=UPLOAD_TEMP_DIR,
-            output_path=final_path,
-            output_preallocated=True,
-        )
-        if Path(export_path) != final_path:
-            raise RuntimeError("Snapshot exporter returned an unexpected path")
-        size_bytes = final_path.stat().st_size
-        await publish_export_ready(
-            export_info,
-            filename=filename,
-            size=size_bytes,
-        )
-    except SnapshotV2Error as exc:
-        await _retire_failed_export(export_info)
-        err = snapshot_error_detail(exc)
-        raise HTTPException(
-            status_code=err["status_code"],
-            detail={key: value for key, value in err.items() if key != "status_code"},
-        ) from exc
-    except asyncio.CancelledError:
-        await _retire_failed_export(export_info)
-        raise
-    except Exception as exc:
-        await _retire_failed_export(export_info)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    return {
-        "status": "ready",
-        "export_token": export_token,
-        "download_url": f"/api/session/{session_id}/export/download?token={export_token}",
-        "filename": filename,
-        "size_bytes": size_bytes,
-    }

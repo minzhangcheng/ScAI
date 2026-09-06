@@ -59,7 +59,6 @@ from backend.services.session_lifecycle import (
     SessionGoneError,
     assert_generation_writable,
     get_lifecycle_lock,
-    snapshot_operation_active,
 )
 
 logger = logging.getLogger(__name__)

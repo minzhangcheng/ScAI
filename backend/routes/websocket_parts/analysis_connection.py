@@ -254,11 +254,11 @@ async def _run_owned_analysis_connection(
     # Import workflow here to avoid circular imports
     from backend.workflow import SingleCellAnalysisWorkflow
     from backend.services.session_store import assert_recovery_clear
-    from backend.services.snapshot_v2.errors import SnapshotTransactionError
+    from backend.services.legacy_state_sanitizer import RecoveryBlockedError
 
     try:
         assert_recovery_clear(state, session_id=session_id)
-    except SnapshotTransactionError as exc:
+    except RecoveryBlockedError as exc:
         logger.error("[%s] recovery blocked; refusing workflow construction: %s", session_id, exc)
         await _discard_captured_initializing()
         await bindings.send_connection_json(connection_ref, {
@@ -287,10 +287,6 @@ async def _run_owned_analysis_connection(
         # second gate prevents the detached handler from resurrecting a workflow.
         async with get_lifecycle_lock(session_id):
             bindings.assert_generation_writable(session_id, state)
-            if bindings.snapshot_operation_active(session_id):
-                raise SessionGenerationError(
-                    "snapshot operation started before workflow publication"
-                )
             async with state_lock:
                 if _sessions.get(session_id) is not state:
                     raise SessionGenerationError(
@@ -518,7 +514,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     try:
         async with get_lifecycle_lock(session_id):
             bindings.assert_generation_writable(session_id, state)
-            snapshot_operation_running = bindings.snapshot_operation_active(session_id)
             async with state_lock:
                 from backend.services.workflow_runner import _report_tasks
 
@@ -531,7 +526,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 if (
                     not workflow_running
                     and not workflow_initializing
-                    and not snapshot_operation_running
                 ):
                     initializing_token = claim_initializing_session(session_id)
                     claimed_initializing = True

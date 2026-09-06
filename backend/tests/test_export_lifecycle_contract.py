@@ -7,7 +7,6 @@ import os
 import shutil
 import stat
 import tempfile
-import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,7 +24,6 @@ from backend.services.export_lifecycle import (
     unlink_export_archive_and_marker,
 )
 from backend.state import (
-    get_session_lock,
     prepared_exports,
     prepared_exports_lock,
 )
@@ -907,57 +905,3 @@ def test_orphan_sweep_migrates_legacy_unmarked_archives_safely(
     assert unsafe_link.is_symlink()
     assert outside.read_bytes() == b"archive"
     assert list(tmp_path.glob("*.scai-export-owner")) == []
-
-
-@pytest.mark.asyncio
-async def test_snapshot_export_worker_and_session_lock_drain_before_cancellation(
-    monkeypatch, tmp_path,
-):
-    from backend.services.snapshot_v2.exporter import SnapshotExporter
-    from backend.services.snapshot_v2.paths import SnapshotV2Paths
-    from backend.services.snapshot_v2.service import SnapshotService
-
-    session_id = "snapshot-export-worker-drain"
-    output_path = tmp_path / "v2-export-worker.tar.gz"
-    entered = threading.Event()
-    release = threading.Event()
-    finished = threading.Event()
-
-    def blocking_export(self, _session_id, **_kwargs):
-        entered.set()
-        assert release.wait(timeout=3)
-        output_path.write_bytes(b"archive")
-        finished.set()
-        return output_path
-
-    monkeypatch.setattr(SnapshotExporter, "export", blocking_export)
-    paths = SnapshotV2Paths(
-        root=tmp_path / "v2",
-        objects=tmp_path / "objects",
-        staging=tmp_path / "staging",
-        journals=tmp_path / "journals",
-        integrity=tmp_path / "integrity",
-        committed=tmp_path / "committed",
-    )
-    service = SnapshotService(session_id, paths)
-    export = asyncio.create_task(
-        service.export_snapshots(output_path=output_path)
-    )
-    for _ in range(200):
-        if entered.is_set():
-            break
-        await asyncio.sleep(0.01)
-    assert entered.is_set()
-    export.cancel()
-    await asyncio.sleep(0.05)
-    assert not export.done()
-    assert get_session_lock(session_id).locked()
-
-    release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(export, timeout=2)
-
-    assert finished.is_set()
-    assert output_path.read_bytes() == b"archive"
-    assert not get_session_lock(session_id).locked()
-    output_path.unlink()

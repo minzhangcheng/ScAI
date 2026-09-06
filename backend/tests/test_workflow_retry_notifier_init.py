@@ -45,7 +45,7 @@ class _FakeDeepResearchClient:
 
 
 @pytest.mark.asyncio
-async def test_snapshot_v2_disabled_keeps_regular_runtime_budgets(
+async def test_regular_runtime_budgets_are_kept(
     monkeypatch,
     tmp_path,
 ):
@@ -60,7 +60,6 @@ async def test_snapshot_v2_disabled_keeps_regular_runtime_budgets(
         monkeypatch, "backend.workflow.core", "get_session_workspace",
         lambda session_id: tmp_path / "workspace",
     )
-    monkeypatch.setattr("backend.config._config.SNAPSHOT_V2_ENABLED", False)
     gib = 1024 ** 3
     monkeypatch.setattr(
         "backend.utils.runtime_budget.detect_memory_capacity_bytes",

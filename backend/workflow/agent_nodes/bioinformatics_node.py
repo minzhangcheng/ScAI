@@ -84,10 +84,6 @@ async def prepare_bioinformatics_instruction(self, state, analysis_state):
     if state.get("human_guidance"):
         human_guidance = f"\n\nHuman researcher guidance: {state['human_guidance']}"
 
-    # Create snapshot before execution (skip on resume — it already exists)
-    if not resuming:
-        await self._create_auto_snapshot(analysis_state, f"pre_execution_{planning_stage}")
-
     # Step 1: PI provides analysis goals
     if not resuming:
         await self._send_message("status", "PI is defining analysis goals...", AgentType.PI)
@@ -643,17 +639,10 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
             f"[{self.session_id}] Execution revision triggered in stage "
             f"'{planning_stage}' ({action}); staying in stage, bioinfo cache invalidated"
         )
-        # Required boundary: plan_revision semantic gate (pre_major_revision).
-        # Fail closed via capture_required_snapshot → RequiredSnapshotBlocked.
         # This revision signal exists only on the node output. LangGraph has
         # not installed that output yet, so the workflow-level pointer still
-        # names the input and cannot be the capture source.
+        # names the input; move it forward for everything that reads it.
         self._current_graph_state = result_state
-        await self._create_auto_snapshot(
-            analysis_state,
-            "pre_major_revision",
-            workflow_state=result_state,
-        )
     elif action == "stage1_complete":
         # Stage transition: stage1 genuinely completed → set up for stage2.
         # Don't cache the stage1 result — stage2 re-enters this node and must

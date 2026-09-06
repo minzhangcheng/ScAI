@@ -10,10 +10,6 @@ def test_analysis_phase_type_literal_includes_integration():
     assert "integration" in schemas.AnalysisPhaseType.__args__
 
 
-def test_snapshot_phase_literal_has_gate_and_keeps_existing():
-    args = set(schemas.SnapshotPhase.__args__)
-    assert "pre_integration_gate" in args
-    assert {"pre_major_revision", "manual", "pre_round_wait"}.issubset(args)
 
 
 def test_integration_state_field_defaults():

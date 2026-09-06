@@ -191,7 +191,9 @@ async def test_teardown_false_retains_owner_tasks_and_checkpoint(monkeypatch):
     _monitor_tasks[session_id] = monitor_task
 
     manager = MagicMock()
-    monkeypatch.setattr("backend.utils.snapshot.SnapshotManager", manager)
+    monkeypatch.setattr(
+        "backend.utils.checkpoint_paths.checkpoint_sqlite_path", manager,
+    )
     try:
         assert (
             await _helpers.teardown_running_workflow(
@@ -231,7 +233,9 @@ async def test_teardown_timeout_retains_live_run_owner_and_checkpoint(monkeypatc
     workflows.pop(session_id, None)
     _run_tasks[session_id] = run_task
     manager = MagicMock()
-    monkeypatch.setattr("backend.utils.snapshot.SnapshotManager", manager)
+    monkeypatch.setattr(
+        "backend.utils.checkpoint_paths.checkpoint_sqlite_path", manager,
+    )
 
     async def immediate_timeout(awaitable, *, timeout):
         assert timeout == 5.0

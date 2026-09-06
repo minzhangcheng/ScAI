@@ -17,7 +17,6 @@ Usage:
   scripts/scai-test client
   scripts/scai-test kernel
   scripts/scai-test backend-full
-  scripts/scai-test backend-full-gate-off
   scripts/scai-test -- PYTEST_ARG [MORE_PYTEST_ARGS]
 EOF
     exit 2
@@ -29,7 +28,7 @@ RAW=0
 case "$MODE" in
     --) RAW=1; PROFILE=raw; [[ $# -gt 0 ]] || die "raw mode (--) requires pytest arguments" ;;
     fast) PROFILE=fast; [[ $# -gt 0 ]] || die "fast requires at least one explicit node or file" ;;
-    client|kernel|backend-full|backend-full-gate-off) PROFILE="$MODE" ;;
+    client|kernel|backend-full) PROFILE="$MODE" ;;
     *) die "unknown profile: $MODE" ;;
 esac
 
@@ -55,7 +54,7 @@ args = profile.get("args")
 if not isinstance(args, list) or not args or not all(isinstance(item, str) and item for item in args):
     raise SystemExit("profile has no explicit args")
 env = profile.get("env", {})
-if not isinstance(env, dict) or set(env) - {"SCAI_RUN_KERNEL_TESTS", "SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB", "NUMBA_DISABLE_JIT", "SCAI_ENABLE_SNAPSHOT_V2"}:
+if not isinstance(env, dict) or set(env) - {"SCAI_RUN_KERNEL_TESTS", "SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB", "NUMBA_DISABLE_JIT"}:
     raise SystemExit("profile env is not allowlisted")
 json.dump({"args": args, "env": env, "claim_scope": profile.get("claim_scope", "")}, open(sys.argv[3], "w"))
 PY

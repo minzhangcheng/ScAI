@@ -36,7 +36,6 @@ from backend.services.interaction_record_capture import (
     get_or_open_direction_record, map_selections, build_annotation_record,
     populate_direction_record_from_state, resolve_integration_gate,
 )
-from backend.services.snapshot_v2.errors import is_snapshot_failure_blocked
 
 logger = logging.getLogger(__name__)
 
@@ -47,17 +46,6 @@ _UNSAFE_PATTERN = re.compile(r'[{}\[\]\\;`$]|__\w+__|import\s|exec\s*\(|eval\s*\
 
 async def _pause_and_restart_ws(session_id: str, state):
     await _pause_and_restart_ws_impl(session_id, state)
-
-
-def _refuse_if_snapshot_blocked(state, action: str) -> None:
-    if is_snapshot_failure_blocked(state):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Session is blocked on a required snapshot failure; "
-                f"resolve it before {action}."
-            ),
-        )
 
 
 @router.post("/{session_id}/human-input")
@@ -78,7 +66,6 @@ async def send_human_input(session_id: str, request: Request, body: HumanInputRe
         # armed. Every other forward-motion endpoint (run, resume,
         # stop-and-summarize, choose-direction) already refuses here; only the
         # producer-aware retry/skip/terminate handlers may clear the gate.
-        _refuse_if_snapshot_blocked(state, "sending input")
 
         state.pending_human_input = body.message
         state.pending_uploaded_files = [f.model_dump() for f in body.uploaded_files]
@@ -214,7 +201,6 @@ async def request_supplementary_analysis(
         # label of the boundary it was supposed to precede. Checked before the
         # target/status branches below because "round" has no status guard at
         # all and would otherwise reach the signal from any status.
-        _refuse_if_snapshot_blocked(state, "requesting supplementary analysis")
 
         if body.target == "annotation" and state.status != TaskStatus.WAITING_ANNOTATION:
             raise HTTPException(status_code=400, detail="Session is not at annotation confirmation point")
@@ -250,7 +236,6 @@ async def _choose_direction_locked(session_id: str, user_id: str, body: Directio
 
     if state.status != TaskStatus.WAITING_INPUT:
         raise HTTPException(status_code=400, detail="Session is not waiting for input")
-    _refuse_if_snapshot_blocked(state, "choosing a research direction")
     post_exploration_phase_drift = (
         state.current_round == 1
         and state.analysis_phase == AnalysisPhase.EXPLORATION
@@ -402,7 +387,6 @@ async def finalize_from_integration(session_id: str, request: Request):
         # to a COMPLETED final report with the gate still armed. Nothing between
         # here and `generate_final_report` rechecks it, so this endpoint is the
         # only place the fail-closed contract can still hold.
-        _refuse_if_snapshot_blocked(state, "finalizing")
         state.final_report_requested = True
         rec = resolve_integration_gate(state, event_type="finalize")
         await _update_session_cache(session_id, state)

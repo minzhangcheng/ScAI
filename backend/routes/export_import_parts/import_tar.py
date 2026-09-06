@@ -30,10 +30,6 @@ from backend.utils.checkpoint_paths import (
     CHECKPOINT_SQLITE_FILENAME,
     checkpoint_sqlite_path,
 )
-from backend.services.snapshot_v2.feature_gate import (
-    is_snapshot_v2_enabled,
-    require_snapshot_v2_enabled,
-)
 from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
@@ -57,7 +53,7 @@ from .core import (
     ImportCancelled,
     MIN_FREE_DISK_BYTES,
     _IMPORT_PROGRESS_UPDATE_INTERVAL_S,
-    _is_disabled_snapshot_v2_member,
+    _is_retired_snapshot_member,
     free_disk_bytes,
     import_job_record,
     is_runtime_h5ad_name,
@@ -91,7 +87,7 @@ class ImportTarContext:
     archive_session_id: Optional[str] = None
     session_id: Optional[str] = None
     skipped: Dict[str, int] = field(default_factory=lambda: {
-        "snapshot_v2": 0,
+        "retired_snapshot": 0,
         "unsafe_path": 0,
         "off_layout": 0,
         "untrusted_pickle": 0,
@@ -248,13 +244,11 @@ def import_tar_gz(
             if not member.isfile():
                 continue
 
-            if _is_disabled_snapshot_v2_member(member.name):
+            if _is_retired_snapshot_member(member.name):
                 logger.warning(
-                    "Skipping Snapshot V2 member from ordinary import while "
-                    "the subsystem is disabled: %s",
-                    member.name,
+                    "Skipping retired snapshot storage member: %s", member.name,
                 )
-                context.note_skip("snapshot_v2", member.name)
+                context.note_skip("retired_snapshot", member.name)
                 continue
 
             if _is_unsafe_member_name(member.name):
@@ -407,21 +401,17 @@ def import_tar_gz(
         validate_and_rebind_imported_reports(get_session_reports(session_id))
 
     if state_json_data is None:
-        if skipped["snapshot_v2"]:
-            # Every member a Snapshot V2 export emits is filtered above when the
-            # subsystem is off, so the archive is intact and this installation is
-            # the constraint. "State JSON not found" blamed the file for an
-            # operator setting. The env var deliberately stays out of the detail:
-            # this text reaches end users, and the operator-facing wording already
-            # lives in config/_config.py and main.py.
+        if skipped["retired_snapshot"]:
+            # Every member of a snapshot-only export is filtered above, so the
+            # archive is intact and this installation is the constraint. "State
+            # JSON not found" would blame the file for a removed feature.
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "This archive carries only Snapshot V2 snapshot data "
-                    f"({skipped['snapshot_v2']} member(s)) and no session state. "
-                    "Snapshot V2 is not enabled on this server, so the archive "
-                    "cannot be imported here; import it on a server with "
-                    "Snapshot V2 enabled."
+                    "This archive carries only snapshot data "
+                    f"({skipped['retired_snapshot']} member(s)) and no session "
+                    "state. Snapshots were removed from this server, so there "
+                    "is nothing here it can import."
                 ),
             )
         raise HTTPException(status_code=400, detail="Session state JSON not found in archive")

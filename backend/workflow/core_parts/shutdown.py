@@ -258,14 +258,9 @@ async def _close_owned_resources(self) -> bool:
         # and notebook apply() just installed and _verify_live_restore verified —
         # the same hazard the restore path avoids by tearing down before apply.
         # Shut the kernel down, but do not let it persist itself.
-        from ...services.snapshot_v2.safe_point import (
-            get_snapshot_safe_point_manager as _sp_manager,
-        )
-
         def _is_superseded() -> bool:
             return (
                 bool(getattr(self, "_discard_runtime_on_close", False))
-                or _sp_manager().is_superseded(self.session_id)
                 or bool(getattr(self, "_restore_superseded", False))
             )
 

@@ -665,52 +665,6 @@ async def test_detailed_report_owner_blocks_both_workflow_entrypoints():
         detailed_report_tasks.pop("s", None)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("safe_point_state", ["pending", "acquired"])
-async def test_snapshot_safe_point_blocks_both_workflow_entrypoints(
-    safe_point_state,
-):
-    from backend.services import workflow_runner
-    from backend.services.snapshot_v2.safe_point import (
-        get_snapshot_safe_point_manager,
-    )
-
-    state = AnalysisState(id="s", user_id="u")
-    sessions["s"] = state
-    safe_point = get_snapshot_safe_point_manager()
-    owner_token = f"test:{safe_point_state}"
-    if safe_point_state == "pending":
-        assert await safe_point.request_safe_point("s", owner_token)
-    else:
-        assert await safe_point.acquire(
-            "s", {"status": "capture"}, owner_token=owner_token,
-        )
-
-    prepared = False
-
-    async def _prepare():
-        nonlocal prepared
-        prepared = True
-
-    try:
-        with pytest.raises(workflow_runner.SessionWorkflowConflictError):
-            await workflow_runner.start_report_generation("s")
-        with pytest.raises(workflow_runner.SessionWorkflowConflictError):
-            await workflow_runner.start_workflow_if_needed(
-                "s", expected_state=state, prepare=_prepare,
-            )
-        assert prepared is False
-        assert "s" not in initializing_sessions
-        assert "s" not in _run_tasks
-        assert "s" not in workflow_runner._report_tasks
-        assert "s" not in report_workflows
-        assert "s" not in workflows
-    finally:
-        if safe_point_state == "pending":
-            await safe_point.cancel_safe_point_request("s", owner_token)
-        else:
-            await safe_point.release("s", owner_token)
-
 
 @pytest.mark.asyncio
 async def test_standalone_report_reservation_blocks_headless_start(monkeypatch):

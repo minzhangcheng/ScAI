@@ -49,7 +49,6 @@ from .figures import (
     _release_chat_runtime_deferred,
     _reserve_chat_runtime,
 )
-from .snapshots import _create_chat_snapshot
 
 
 import sys

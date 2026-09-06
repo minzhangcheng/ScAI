@@ -69,7 +69,6 @@ async def _user_review_gate(self, state: WorkflowState) -> WorkflowState:
     Blocks until the user responds (approve/skip/modify).
     For modification requests, loops back to planning_dialogue.
     """
-    await ack_restore_safe_point(self)
     analysis_state = state["analysis_state"]
     plan = analysis_state.current_plan
 
@@ -143,7 +142,6 @@ async def _user_review_gate(self, state: WorkflowState) -> WorkflowState:
                 wait_seconds,
                 self.session_id,
                 "plan_review",
-                safe_point_hook=getattr(self, "await_restore_safe_point", None),
             )
             if not signaled:
                 # Auto-skip on timeout regardless of auto_approve_plans,

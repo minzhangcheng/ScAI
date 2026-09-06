@@ -70,7 +70,6 @@ def _make_wf_for_synthesis(state):
     wf.message_callback = None
     wf._send_message = AsyncMock()
     wf._require_core_agent = AsyncMock(return_value=None)
-    wf._create_auto_snapshot = AsyncMock()
     wf._build_and_save_detailed_segment = AsyncMock()  # innovation segment path
     wf._continue_event = asyncio.Event()
     wf._continue_event.set()

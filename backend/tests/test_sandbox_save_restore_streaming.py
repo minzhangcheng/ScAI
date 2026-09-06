@@ -337,10 +337,9 @@ async def test_real_kernel_backed_anndata_materializes_with_aliases_or_fails_clo
 
 
 @pytest.mark.asyncio
-async def test_real_kernel_snapshot_v2_disabled_save_restore_keeps_budgets(
+async def test_real_kernel_save_restore_keeps_budgets(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr("backend.config._config.SNAPSHOT_V2_ENABLED", False)
     from backend.utils.runtime_budget import RuntimeBudgetExceeded
     from backend.utils.sandbox import LocalJupyterSandbox, _sha256_file
 

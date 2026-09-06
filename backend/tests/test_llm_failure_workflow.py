@@ -55,7 +55,6 @@ def _gate_self():
     mock._send_state_sync = AsyncMock()
     mock._set_status = MagicMock()
     mock._settings_provider = MagicMock()
-    mock.await_restore_safe_point = None
     for name in (
         "_wait_for_llm_intervention",
         "_wait_for_disabled_agent_intervention",

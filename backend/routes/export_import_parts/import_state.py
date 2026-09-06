@@ -30,10 +30,6 @@ from backend.utils.checkpoint_paths import (
     CHECKPOINT_SQLITE_FILENAME,
     checkpoint_sqlite_path,
 )
-from backend.services.snapshot_v2.feature_gate import (
-    is_snapshot_v2_enabled,
-    require_snapshot_v2_enabled,
-)
 from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
@@ -57,7 +53,7 @@ from .core import (
     ImportCancelled,
     MIN_FREE_DISK_BYTES,
     _IMPORT_PROGRESS_UPDATE_INTERVAL_S,
-    _is_disabled_snapshot_v2_member,
+    _is_retired_snapshot_member,
     free_disk_bytes,
     import_job_record,
     is_runtime_h5ad_name,
@@ -236,9 +232,8 @@ def _finalize_imported_state(
     the user at snapshot actions whose objects this archive never carried.
     """
     _mark_runtime_availability_after_import(state, imported_pkl=imported_runtime)
-    if not is_snapshot_v2_enabled():
-        # Nothing can own a session that is being created right now.
-        sanitize_legacy_state(state, workflow_active=False)
+    # Nothing can own a session that is being created right now.
+    sanitize_legacy_state(state, workflow_active=False)
     _normalize_imported_status(state)
     _arm_restore_intent_after_import(state)
     # Lifecycle generations belong to this installation, not to the archive.

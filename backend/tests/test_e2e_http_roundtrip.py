@@ -130,23 +130,7 @@ def _import_archive(client, token, blob, *, trust):
     return job["session_id"]
 
 
-@pytest.fixture
-def snapshot_v2(request, monkeypatch):
-    """Pin the Snapshot V2 operator gate for the duration of a round trip.
 
-    The gate is a process-scoped module global, and the repo conftest turns it
-    *on* for the whole suite. An ordinary deployment leaves it off, and both
-    ``/run`` and ``/resume`` call ``sanitize_legacy_state`` only on
-    that path — so the configuration this round trip is supposed to certify was
-    the one configuration it never ran under.
-    """
-    from backend.config import _config
-
-    monkeypatch.setattr(_config, "SNAPSHOT_V2_ENABLED", request.param)
-    return request.param
-
-
-@pytest.mark.parametrize("snapshot_v2", [False, True], indirect=True)
 @pytest.mark.parametrize(
     "include_runtime, trust, keep_source",
     [
@@ -159,7 +143,7 @@ def snapshot_v2(request, monkeypatch):
     ],
 )
 def test_export_import_continue(
-    client, snapshot_v2, include_runtime, trust, keep_source
+    client, include_runtime, trust, keep_source
 ):
     from backend.config import get_session_dir, get_session_states
     from backend.models.schemas import TaskStatus
@@ -274,7 +258,7 @@ def test_export_import_continue(
     # wrote says nothing about whether anything would execute, so check the
     # branch that handler takes and where that branch enters the graph.
     from backend.routes.websockets import should_resume_workflow
-    from backend.services.snapshot_v2.restore_entry import build_restore_entry_plan
+    from backend.workflow.restore_entry import build_restore_entry_plan
 
     assert should_resume_workflow(after) is True, (
         "a session that has already run must continue, not start over"
@@ -291,8 +275,7 @@ def test_export_import_continue(
         )
 
 
-@pytest.mark.parametrize("snapshot_v2", [False, True], indirect=True)
-def test_the_resume_button_moves_a_kernel_without_its_checkpoint(client, snapshot_v2):
+def test_the_resume_button_moves_a_kernel_without_its_checkpoint(client):
     """Re-import a runtime-carrying archive onto the instance that wrote it.
 
     The id collides, so a new one is allocated and the checkpoint is dropped —
@@ -309,7 +292,7 @@ def test_the_resume_button_moves_a_kernel_without_its_checkpoint(client, snapsho
     from backend.config import get_session_states
     from backend.models.schemas import TaskStatus
     from backend.routes.websockets import should_resume_workflow
-    from backend.services.snapshot_v2.restore_entry import build_restore_entry_plan
+    from backend.workflow.restore_entry import build_restore_entry_plan
     from backend.state import sessions
     from backend.utils.runtime_apply import _live_pkl
 
@@ -354,8 +337,7 @@ def test_the_resume_button_moves_a_kernel_without_its_checkpoint(client, snapsho
     assert plan.preserve_round_on_initialize is True
 
 
-@pytest.mark.parametrize("snapshot_v2", [False, True], indirect=True)
-def test_a_session_exported_before_its_first_round_still_starts(client, snapshot_v2):
+def test_a_session_exported_before_its_first_round_still_starts(client):
     """Export during the window between Start and the first round completing.
 
     ``current_round`` is only incremented once PI planning returns, but the

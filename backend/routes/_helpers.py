@@ -100,6 +100,23 @@ async def teardown_running_workflow(
                 retire_live_runtime(session_id, include_checkpoint=True)
         return True
 
-    from backend.utils.snapshot import SnapshotManager
-    await SnapshotManager(session_id).delete_checkpoint()
+    from backend.config import get_session_states
+    from backend.utils.checkpoint_paths import (
+        checkpoint_sqlite_path,
+        sqlite_companion_paths,
+    )
+
+    # Delete the LangGraph checkpoint so the next resume() starts fresh. This
+    # was SnapshotManager.delete_checkpoint, whose only surviving caller is
+    # this one; the paths come from the same helper workflow/core.py uses.
+    db_path = checkpoint_sqlite_path(get_session_states(session_id))
+    deleted = []
+    for path in (db_path, *sqlite_companion_paths(db_path)):
+        if path.exists():
+            deleted.append(path.name)
+        path.unlink(missing_ok=True)
+    if deleted:
+        logger.info(
+            "[%s] Deleted checkpoint files: %s", session_id, ", ".join(deleted),
+        )
     return True

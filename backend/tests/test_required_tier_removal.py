@@ -161,17 +161,17 @@ def test_the_sandbox_carries_no_dependency_tracker():
         assert gone not in text, gone
 
 
-def test_only_snapshot_v2_still_mentions_the_retired_tracker_state_key():
+def test_nothing_still_mentions_the_retired_tracker_state_key():
     """``runtime_dependency_tracker_v2`` had one writer and one reader.
 
-    The writer was the executor; the reader is Snapshot V2's capture pipeline,
-    which is deleted in A2-5. Nothing else ever consumed the key, so there is no
-    read-compatibility question to answer -- only a producer to remove.
+    The writer was the executor; the reader was the snapshot capture pipeline,
+    deleted in A2-5. Nothing else ever consumed the key, so there is no
+    read-compatibility question to answer -- only a producer that is now gone.
     """
     offenders = set()
     for path in sorted(BACKEND.rglob("*.py")):
         rel = path.relative_to(BACKEND.parent).as_posix()
-        if rel.startswith(("backend/tests/", "backend/services/snapshot_v2/")):
+        if rel.startswith("backend/tests/"):
             continue
         if "runtime_dependency_tracker" in path.read_text():
             offenders.add(rel)

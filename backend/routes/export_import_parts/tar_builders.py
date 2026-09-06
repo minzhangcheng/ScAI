@@ -31,10 +31,6 @@ from backend.services.report.output_generation import (
     report_publication_lock,
     resolve_current_report_dir,
 )
-from backend.services.snapshot_v2.feature_gate import (
-    is_snapshot_v2_enabled,
-    require_snapshot_v2_enabled,
-)
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
     update_session_cache as _update_session_cache,
@@ -137,8 +133,7 @@ def _contained_files(root: Path):
     ``_safe_add_file`` builds the member from an open descriptor, so a symlink is
     packed with its *target's* bytes rather than as a link. A link that escapes
     the tree would put out-of-session content in an archive whose scope is a
-    single session, so it is dropped here -- the same fail-closed rule
-    services/snapshot_v2/workspace.py applies.
+    single session, so it is dropped here.
     """
     if not root.exists():
         return
@@ -262,41 +257,6 @@ def _add_portable_state_json(tf, source: Path, arcname: str) -> None:
     payload = json.loads(source.read_text(encoding="utf-8"))
     _add_json_bytes(tf, arcname, strip_analysis_state_secrets(payload))
 
-def _add_snapshots_to_tar(tf, session_id: str, include_runtime: bool = False):
-    """Add snapshot files to tar archive.
-
-    Recurses so per-snapshot blob subdirectories (<snap_id>_blobs/<hash>.b64)
-    are included alongside the top-level state.json / notebook.ipynb /
-    session.pkl.zst files. Without recursion `inline_blobs()` on the imported
-    snapshot would dangle, leaving raw "@scai-blob:<hash>" tokens in restored
-    state.
-
-    When ``include_runtime`` is False (default), sandbox session pickles
-    (``*_session.pkl`` / ``*_session.pkl.zst``) are skipped. These can be
-    multi-GB per snapshot and are only useful for in-memory kernel restore on
-    the *same* trusted instance — they cannot be re-loaded by import on any
-    other instance because ``dill.load`` is arbitrary code execution.
-    """
-    snapshots_dir = get_session_dir(session_id) / "snapshots"
-    if not snapshots_dir.exists():
-        return
-    for snap_file in sorted(snapshots_dir.rglob("*")):
-        try:
-            if not snap_file.is_file():
-                continue
-        except OSError:
-            continue
-        if not include_runtime and is_sandbox_pickle(snap_file.name):
-            continue
-        rel = snap_file.relative_to(snapshots_dir)
-        arcname = f"{session_id}/snapshots/{rel.as_posix()}"
-        if snap_file.suffix.casefold() == ".json":
-            try:
-                _add_portable_state_json(tf, snap_file, arcname)
-            except (OSError, ValueError) as exc:
-                logger.warning("Export: skipping snapshot json %s (%s)", snap_file, exc)
-        else:
-            _safe_add_file(tf, snap_file, arcname)
 
 def _add_states_to_tar(tf, session_id: str, include_runtime: bool = False):
     """Add files under sessions/<id>/states/ to the tar.

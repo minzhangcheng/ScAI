@@ -25,7 +25,7 @@ from ..direction_coverage import (
 )
 from ..helpers import (
     _diff_plan_steps, _get_task_text, _normalize_tasks, _DIFF_LABELS,
-    ack_restore_safe_point, wait_with_skip_time,
+    wait_with_skip_time,
 )
 from ..provenance import restore_provenance_id
 from ..retry import MAX_NODE_RETRIES, _retry_backoff_delay, with_retry

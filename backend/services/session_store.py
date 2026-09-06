@@ -41,7 +41,6 @@ from backend.services.runtime_persistence_projection import (
 )
 from backend.state import (
     sessions, state_lock, session_access_times, last_save_times,
-    session_locks,
 )
 
 logger = logging.getLogger(__name__)
@@ -126,34 +125,6 @@ def _merge_publication_recovery(
         )
 
 
-def mark_recovery_blocked(
-    session_id: str,
-    state: AnalysisState | None,
-    failure: Dict[str, Any] | None = None,
-) -> None:
-    """Mark session recovery-blocked (in-memory + state when available).
-
-    Used when journal recovery returns mutations_blocked or raises unexpectedly.
-    State is mutated for read-only display; callers persist when appropriate.
-    """
-    _recovery_blocked_sessions.add(session_id)
-    if state is None:
-        return
-    state.recovery_blocked = True
-    code = "RECOVERY_UNEXPECTED"
-    message = "Snapshot recovery failed; mutations blocked"
-    if isinstance(failure, dict):
-        code = str(failure.get("code") or code)
-        message = str(failure.get("message") or message)
-    # Merge recovery_error into existing snapshot_transaction — do not wipe
-    # restore/capture fields (transaction_id, status, snapshot_id, etc.).
-    existing = state.snapshot_transaction if isinstance(state.snapshot_transaction, dict) else {}
-    merged = dict(existing)
-    merged["recovery_error"] = {"code": code, "message": message[:500]}
-    state.snapshot_transaction = merged
-    if state.status not in _TERMINAL_STATUSES:
-        state.status = TaskStatus.PAUSED
-
 
 def clear_recovery_blocked(
     session_id: str,
@@ -200,7 +171,7 @@ def assert_recovery_clear(state: AnalysisState | None = None, *, session_id: str
     recovery exception sets ``recovery_blocked`` and must prevent forward
     execution.
     """
-    from backend.services.snapshot_v2.errors import SnapshotTransactionError
+    from backend.services.legacy_state_sanitizer import RecoveryBlockedError
 
     sid = session_id
     if state is None and sid:
@@ -208,16 +179,14 @@ def assert_recovery_clear(state: AnalysisState | None = None, *, session_id: str
     if state is not None:
         sid = sid or getattr(state, "id", None) or getattr(state, "session_id", None)
     if sid and sid in _recovery_blocked_sessions:
-        raise SnapshotTransactionError(
-            "RECOVERY_BLOCKED",
-            "Unresolved snapshot restore journal blocks forward execution; "
-            "recovery must complete before workflow/kernel resume.",
+        raise RecoveryBlockedError(
+            "RECOVERY_BLOCKED: Unresolved restore journal blocks forward "
+            "execution; the previous version must finish or roll it back."
         )
     if state is not None and getattr(state, "recovery_blocked", False):
-        raise SnapshotTransactionError(
-            "RECOVERY_BLOCKED",
-            "Unresolved snapshot restore journal blocks forward execution; "
-            "recovery must complete before workflow/kernel resume.",
+        raise RecoveryBlockedError(
+            "RECOVERY_BLOCKED: Unresolved restore journal blocks forward "
+            "execution; the previous version must finish or roll it back."
         )
 
 
@@ -533,118 +502,6 @@ async def _install_loaded_session(
         return loaded
 
 
-async def _recover_snapshot_v2_on_load(
-    session_id: str,
-) -> tuple[bool, Optional[Dict[str, Any]]]:
-    """Run enabled-mode Snapshot V2 journal recovery before session loading."""
-    recovery_blocked = False
-    recovery_failure: Optional[Dict[str, Any]] = None
-    gc_result = None
-    try:
-        from backend.services.snapshot_v2.paths import SnapshotV2Paths
-        from backend.services.snapshot_v2.recovery import recover_snapshot_transactions
-        from backend.config._config import get_session_dir, get_session_workspace, get_session_states
-
-        paths = SnapshotV2Paths.for_session(session_id)
-        session_dir = str(get_session_dir(session_id))
-        workspace_root = str(get_session_workspace(session_id))
-        states_root = str(get_session_states(session_id))
-        result = await recover_snapshot_transactions(
-            session_id=session_id,
-            paths=paths,
-            session_dir=session_dir,
-            workspace_root=workspace_root,
-            states_root=states_root,
-        )
-        if result.mutations_blocked:
-            recovery_blocked = True
-            recovery_failure = {
-                "code": "RECOVERY_BLOCKED",
-                "message": (
-                    f"Recovery mutations blocked "
-                    f"({len(result.failed_transactions)} failed transactions)"
-                ),
-            }
-            logger.error(
-                "Session %s: recovery failure — mutations blocked (%d failed transactions)",
-                session_id, len(result.failed_transactions),
-            )
-        if result.session_state_rewritten:
-            # Recovery rewrote session.json from the pre_restore snapshot (or
-            # forward-completed the target), but it never touches the in-memory
-            # cache — which still holds the AnalysisState the interrupted
-            # restore installed via `_persist_restored_state`. Left in place,
-            # `ensure_session_loaded` returns that object, clears its recovery
-            # block and persists it, writing the *target* state back over the
-            # file the rollback just restored: the rollback is silently
-            # half-undone and the session is unblocked while its state, files,
-            # notebook and checkpoint no longer agree. Evict so the next read
-            # comes from the disk copy recovery just wrote.
-            async with state_lock:
-                sessions.pop(session_id, None)
-                session_access_times.pop(session_id, None)
-            logger.info(
-                "Session %s: evicted cached state after recovery rewrote "
-                "session.json", session_id,
-            )
-        gc_result = result.gc_result
-        if result.recovered:
-            logger.info(
-                "Session %s: recovered %d restore transactions",
-                session_id, len(result.recovered_transactions),
-            )
-            if result.errors:
-                logger.warning(
-                    "Session %s: recovery errors: %s",
-                    session_id, result.errors,
-                )
-        if gc_result and gc_result.removed_count > 0:
-            logger.info(
-                "Session %s: GC cleaned %d objects (%d bytes)",
-                session_id, gc_result.removed_count, gc_result.removed_bytes,
-            )
-    except Exception as exc:
-        recovery_blocked = True
-        recovery_failure = {
-            "code": "RECOVERY_UNEXPECTED",
-            "message": str(exc)[:500],
-        }
-        logger.exception(
-            "Session %s: snapshot recovery failed; blocking mutations",
-            session_id,
-        )
-
-    if recovery_blocked and recovery_failure is None:
-        recovery_failure = {
-            "code": "RECOVERY_BLOCKED",
-            "message": "Snapshot recovery left mutations blocked",
-        }
-    return recovery_blocked, recovery_failure
-
-
-def _snapshot_transaction_in_flight(session_id: str) -> bool:
-    """True while an in-process snapshot transaction owns this session's journals.
-
-    Journal recovery is *crash* recovery: a STAGED/APPLYING ``restore_apply``
-    journal is taken as proof that the process which wrote it died, so recovery
-    rolls the live session back to the pre_restore snapshot, removes the staging
-    tree and deletes the journal. That inference only holds when nobody is
-    mid-transaction — but this runs on EVERY authenticated request, including
-    the frontend's 2-second poll of the restore's own status endpoint.
-
-    ``SnapshotService.restore_snapshot`` holds the per-session lock from
-    ``stage()`` (journal STAGED) through ``commit()``, and yields inside that
-    window (closing the superseded checkpoint connection, the owned worker in
-    ``async_save_session``). ``recover_snapshot_transactions`` has no awaits,
-    so a request served at one of those yields runs the entire rollback and
-    destroys the restore it was asked to report on.
-
-    Deferring is safe: the journal stays on disk for a later load, and genuine
-    crashes are covered by startup recovery, which runs before any request is
-    served.
-    """
-    lock = session_locks.get(session_id)
-    return lock is not None and lock.locked()
 
 
 async def _recover_publication_transactions_on_load(
@@ -750,17 +607,6 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
         read_lifecycle_record,
     )
 
-    from backend.config import is_snapshot_v2_enabled
-
-    snapshot_v2_enabled = is_snapshot_v2_enabled()
-    # Distinguishes "recovery ran and found nothing" from "recovery was
-    # deferred" — only the former may clear an existing recovery block.
-    recovery_evaluated = False
-    recovery_blocked = False
-    recovery_failure = None
-    # Recovery mutates journals, session.json, runtime files, and checkpoints.
-    # It therefore shares deletion's lifecycle boundary; a load that passed an
-    # early tombstone check must not recover artifacts after delete committed.
     async with get_lifecycle_lock(session_id):
         lifecycle = read_lifecycle_record(session_id)
         if lifecycle and lifecycle.get("status") == "deleted":
@@ -774,23 +620,14 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
             # Do not expose a partially extracted state merely because its
             # session.json happened to arrive before the import commit marker.
             return None
-        if snapshot_v2_enabled and not _snapshot_transaction_in_flight(session_id):
-            recovery_evaluated = True
-            recovery_blocked, recovery_failure = await _recover_snapshot_v2_on_load(
-                session_id,
-            )
-
     # Check cache before disk load
     cached = await _get_cached_session(session_id)
     if cached is not None:
         await _recover_publication_transactions_on_load(session_id, cached)
-        if not snapshot_v2_enabled:
-            from backend.services.legacy_state_sanitizer import (
-                sanitize_legacy_state,
-            )
+        from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 
-            if sanitize_legacy_state(cached, workflow_active=False):
-                await _persist_recovery_marker(session_id, cached)
+        if sanitize_legacy_state(cached, workflow_active=False):
+            await _persist_recovery_marker(session_id, cached)
             # The initial lifecycle check preceded the cache read and any
             # normalization write. Deletion may have committed in between;
             # linearize this cached return against the same generation guard
@@ -799,13 +636,6 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
                 adopt_persisted_generation(cached)
                 refresh_runtime_persistence_projection(session_id, cached)
             return cached
-        # Apply recovery outcome to cached state and return
-        if recovery_blocked:
-            mark_recovery_blocked(session_id, cached, recovery_failure)
-            await _persist_recovery_marker(session_id, cached)
-        elif recovery_evaluated:
-            if clear_recovery_blocked(session_id, cached):
-                await _persist_recovery_marker(session_id, cached)
         async with get_lifecycle_lock(session_id):
             adopt_persisted_generation(cached)
             refresh_runtime_persistence_projection(session_id, cached)
@@ -814,10 +644,6 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
     # Load from disk outside state_lock in a joined, cancellation-safe worker.
     state = await run_in_owned_thread(load_session_from_disk, session_id)
     if state is None:
-        if recovery_blocked:
-            mark_recovery_blocked(session_id, None, recovery_failure)
-        elif recovery_evaluated:
-            clear_recovery_blocked(session_id, None)
         return None
 
     await _recover_publication_transactions_on_load(session_id, state)
@@ -862,47 +688,11 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
         # Save the cleaned-up state so PAUSED status persists
         await _persist_dump_under_lifecycle(session_id, state)
 
-    # Apply Snapshot V2 recovery or disabled-mode stale-state normalization.
-    if not snapshot_v2_enabled:
-        from backend.services.legacy_state_sanitizer import (
-            sanitize_legacy_state,
-        )
+    # Clear the blockers the retired snapshot subsystem left behind. Spec 4.6.
+    from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 
-        if sanitize_legacy_state(state, workflow_active=False):
-            await _persist_recovery_marker(session_id, state)
-    elif recovery_blocked:
-        mark_recovery_blocked(session_id, state, recovery_failure)
+    if sanitize_legacy_state(state, workflow_active=False):
         await _persist_recovery_marker(session_id, state)
-    elif recovery_evaluated and clear_recovery_blocked(session_id, state):
-        # Same guard as the cached and not-found branches above. Omitting it
-        # here read as "recovery reported nothing wrong", but a deferred pass
-        # reports nothing at all: the lock-first endpoints (/resume, /pause,
-        # /stop, prompts) hold the session lock before they load, so
-        # _snapshot_transaction_in_flight always defers for them — and once the
-        # session has been evicted, this is the branch they land on. Clearing
-        # here discarded the process-wide marker and the persisted flag, and
-        # assert_recovery_clear then waved through a session whose restore_apply
-        # journal is still APPLYING. A block left standing costs one lock-free
-        # load (any status poll) to clear once recovery really has run.
-        await _persist_recovery_marker(session_id, state)
-
-    # Reconcile AnalysisState.snapshots from verified V2 manifests
-    # (skip when recovery is blocked — read-only display only)
-    if snapshot_v2_enabled and not recovery_blocked:
-        try:
-            from backend.services.snapshot_v2.paths import SnapshotV2Paths
-            from backend.services.snapshot_v2.service import SnapshotService
-            svc = SnapshotService(session_id, SnapshotV2Paths.for_session(session_id))
-            # Pass the loaded listing as the baseline: the reconcile is
-            # authoritative for V2 projections only, and the state is not in the
-            # cache yet, so it is the sole place the pre-cutover V1 records
-            # (which have no manifest by construction) can be read from.
-            state.snapshots = svc.rebuild_snapshots_from_manifests(state.snapshots)
-        except Exception:
-            logger.debug(
-                "Session %s: snapshot listing reconcile skipped",
-                session_id, exc_info=True,
-            )
 
     # Install under the same lifecycle lock deletion uses.  Re-check after all
     # post-load work because deletion may have committed while it ran.

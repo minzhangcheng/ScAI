@@ -31,33 +31,20 @@ async def _run_analysis_locked(session_id: str, user_id: str):
     from backend.utils.runtime_pairing import refresh_runtime_availability
     refresh_runtime_availability(state)
 
-    from backend.config import is_snapshot_v2_enabled
-    from backend.services.legacy_state_sanitizer import (
-        sanitize_legacy_state,
-    )
+    from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 
-    if not is_snapshot_v2_enabled():
-        sanitize_legacy_state(
-            state,
-            workflow_active=session_id in bindings.workflows,
-        )
+    sanitize_legacy_state(
+        state,
+        workflow_active=session_id in bindings.workflows,
+    )
 
     if state.status == TaskStatus.RUNNING:
         raise HTTPException(status_code=400, detail="Analysis already running")
 
     try:
         bindings.assert_recovery_clear(state, session_id=session_id)
-    except SnapshotTransactionError as exc:
+    except RecoveryBlockedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    if bindings.is_snapshot_failure_blocked(state):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Session is blocked on a required snapshot failure. "
-                "Use Retry, Manage, or Terminate — generic start is refused."
-            ),
-        )
 
     # Idle-restored session: signal explicit_start so the graph node
     # preserves the restored round and plan rather than auto-incrementing.
@@ -206,40 +193,20 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
     from backend.utils.runtime_pairing import refresh_runtime_availability
     refresh_runtime_availability(state)
 
-    from backend.config import is_snapshot_v2_enabled
-    from backend.services.legacy_state_sanitizer import (
-        sanitize_legacy_state,
-    )
+    from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 
-    if not is_snapshot_v2_enabled():
-        sanitize_legacy_state(
-            state,
-            workflow_active=session_id in bindings.workflows,
-        )
+    sanitize_legacy_state(
+        state,
+        workflow_active=session_id in bindings.workflows,
+    )
 
     try:
         bindings.assert_recovery_clear(state, session_id=session_id)
-    except SnapshotTransactionError as exc:
+    except RecoveryBlockedError as exc:
         return APIResponse(
             success=False,
             message=str(exc),
             data={"needs_reconnect": False, "recovery_blocked": True},
-        )
-
-    # Snapshot-failure gate: generic resume must not clear or advance.
-    # Only dedicated producer-aware snapshot-failure actions may clear it.
-    if bindings.is_snapshot_failure_blocked(state):
-        return APIResponse(
-            success=False,
-            message=(
-                "Session is blocked on a required snapshot failure. "
-                "Use a snapshot-failure action — generic resume is refused."
-            ),
-            data={
-                "needs_reconnect": False,
-                "snapshot_failure": getattr(state, "snapshot_failure", None),
-                "wait_input_reason": getattr(state, "wait_input_reason", None),
-            },
         )
 
     # A completed session first has to retire its old workflow. Do not consume

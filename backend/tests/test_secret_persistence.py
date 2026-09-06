@@ -12,7 +12,6 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from backend.models.schemas import AnalysisState
 from backend.services import session_store
-from backend.services.snapshot_v2.service import SnapshotService
 from backend.utils.secret_redaction import (
     SEALED_SECRET_PREFIX,
     SecretRedactionFilter,
@@ -20,6 +19,7 @@ from backend.utils.secret_redaction import (
     open_system_config_payload,
     preserve_runtime_secrets,
     seal_system_config_payload,
+    strip_analysis_state_secrets,
 )
 from backend.utils.db import AppDB
 
@@ -147,8 +147,19 @@ def test_langgraph_checkpoint_serializer_never_contains_raw_key():
     assert restored.agent_server_configs["pi"]["api_key"] == RAW_KEY
 
 
-def test_snapshot_business_state_never_contains_raw_key():
-    payload = SnapshotService._serialize_analysis_state(_state())
+def test_exported_business_state_never_contains_raw_key():
+    """The snapshot serializer is gone; export is the surviving producer.
+
+    Both stripped the same object for the same reason -- a state leaving this
+    installation must not carry the operator's credentials -- so the invariant
+    moves to the caller that still exists rather than being deleted with the
+    one that does not.
+    """
+    payload = json.dumps(
+        strip_analysis_state_secrets(_state().model_dump(mode="json")),
+        ensure_ascii=False,
+        default=str,
+    ).encode("utf-8")
     assert RAW_KEY.encode() not in payload
     assert b"snapshot-default-key" not in payload
     assert SEALED_SECRET_PREFIX.encode() not in payload

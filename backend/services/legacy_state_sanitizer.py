@@ -35,6 +35,16 @@ _HALF_SWAP_JOURNAL_KINDS = frozenset({"", "restore", "restore_apply", "restore_j
 
 _UNFINISHED = frozenset({"STAGED", "STAGING", "APPLYING"})
 
+
+class RecoveryBlockedError(RuntimeError):
+    """Forward execution refused: a legacy restore never reached a terminal state.
+
+    Raised by ``assert_recovery_clear`` at every entry that would mutate the
+    session -- run, resume, WebSocket workflow construction. The message is
+    what the operator sees, so it carries its own code prefix; there is no
+    structured payload behind it any more.
+    """
+
 #: Where Snapshot V2 kept its journals, spelled here rather than imported: the
 #: package is gone, and this predicate exists only to recognise what it left.
 _LEGACY_JOURNAL_DIR = ("journals",)

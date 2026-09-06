@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from backend.services.snapshot_v2.runtime_registry import RuntimeDependencyTracker
 from backend.utils.sandbox import (
     NotebookState,
     LocalJupyterSandbox,
@@ -493,87 +492,6 @@ def test_regular_runtime_commit_rolls_back_pkl_when_metadata_fails(tmp_path):
     assert _verify_pkl_integrity(live, integrity) is True
 
 
-def test_required_dependency_poisoning_requires_explicit_lifecycle_release():
-    tracker = RuntimeDependencyTracker()
-    tracker.record_execution(created={"score"}, declared={"score"})
-
-    assert tracker.record_persistence_failure({"score"}) == set()
-    assert tracker.record_persistence_failure({"score"}) == set()
-    assert tracker.record_persistence_failure({"score"}) == {"score"}
-    with pytest.raises(ValueError, match="unsupported"):
-        tracker.release({"score"}, lifecycle="best_effort", reason="drop it")
-
-    remaining = tracker.release(
-        {"score"},
-        lifecycle="recomputed",
-        reason="The continuation now consumes score_v2.",
-    )
-    assert remaining == set()
-    assert tracker.to_state_dict()["release_log"][-1]["name"] == "score"
-
-
-def test_same_name_explicit_recompute_clears_poison_but_keeps_dependency():
-    tracker = RuntimeDependencyTracker()
-    tracker.record_execution(created={"score"}, declared={"score"})
-    for _ in range(3):
-        tracker.record_persistence_failure({"score"})
-
-    tracker.confirm_recomputed(
-        {"score"},
-        reason="Successful declared output replaced the unpersistable value.",
-    )
-
-    assert tracker.required_outputs == {"score"}
-    assert tracker.record_persistence_failure({"score"}) == set()
-    assert tracker.to_state_dict()["release_log"][-1] == {
-        "name": "score",
-        "lifecycle": "recomputed",
-        "reason": "Successful declared output replaced the unpersistable value.",
-        "retained": "true",
-    }
-
-
-@pytest.mark.asyncio
-async def test_snapshot_commit_journal_is_durable_before_metadata_stamp(monkeypatch):
-    from backend.services.snapshot_v2.restore_parts import coordinator as module
-
-    events = []
-    journal = {
-        "transaction_id": "restore-order",
-        "session_id": "session-order",
-        "status": "APPLYING",
-        "runtime_restore_status": "complete",
-    }
-    monkeypatch.setattr(module, "_read_journal", lambda *_args: dict(journal))
-    monkeypatch.setattr(
-        module,
-        "_write_journal_hmac_signed",
-        lambda _paths, _tx, payload: events.append(f"write:{payload['status']}"),
-    )
-    monkeypatch.setattr(
-        "backend.utils.runtime_apply.commit_runtime_persistence_metadata",
-        lambda *_args, **_kwargs: events.append("stamp"),
-    )
-
-    class _Fault:
-        def check(self, point):
-            if point == "journal_committed":
-                events.append("fault")
-                raise RuntimeError("crash after committed journal")
-
-    coordinator = module.RestoreCoordinator(fault_barrier=_Fault())
-    with pytest.raises(RuntimeError, match="crash"):
-        await coordinator.commit(
-            "restore-order",
-            object(),
-            verification_proof={
-                "verified_live_root_hash": "root",
-                "component_hashes": {},
-                "verified_at": "now",
-            },
-        )
-
-    assert events == ["write:COMMITTED", "fault"]
 
 
 class _SimulatedProcessCrash(BaseException):

@@ -16,46 +16,10 @@ BACKEND = REPO / "backend"
 #: over: most of these files survive with their snapshot references stripped
 #: rather than being deleted, and a list assembled from ``import`` lines missed
 #: 25 of the 42, because a reference is not always an import.
-SNAPSHOT_V2_CENSUS: dict[str, int] = {
-    "backend/agents/bioinformatics/executor_loop.py": 1,
-    "backend/config/__init__.py": 1,
-    "backend/config/_config.py": 9,
-    "backend/main.py": 4,
-    "backend/routes/chat_parts/delegation_flow.py": 2,
-    "backend/routes/chat_parts/endpoint_flow.py": 3,
-    "backend/routes/chat_parts/snapshots.py": 10,
-    "backend/routes/config.py": 3,
-    "backend/routes/export_import.py": 5,
-    "backend/routes/export_import_parts/__init__.py": 1,
-    "backend/routes/export_import_parts/core.py": 5,
-    "backend/routes/export_import_parts/export_routes.py": 8,
-    "backend/routes/export_import_parts/import_archive_policy.py": 4,
-    "backend/routes/export_import_parts/import_identity.py": 4,
-    "backend/routes/export_import_parts/import_impl.py": 4,
-    "backend/routes/export_import_parts/import_routes.py": 8,
-    "backend/routes/export_import_parts/import_state.py": 5,
-    "backend/routes/export_import_parts/import_tar.py": 9,
-    "backend/routes/export_import_parts/import_zip.py": 4,
-    "backend/routes/export_import_parts/tar_builders.py": 4,
-    "backend/routes/interaction.py": 1,
-    "backend/routes/lifecycle.py": 6,
-    "backend/routes/lifecycle_parts/run_resume.py": 4,
-    "backend/routes/lifecycle_parts/snapshot_failures.py": 6,
-    "backend/routes/snapshots.py": 23,
-    "backend/routes/websocket_parts/analysis_connection.py": 1,
-    "backend/routes/websocket_parts/state_sync.py": 1,
-    "backend/services/session_lifecycle.py": 1,
-    "backend/services/session_store.py": 13,
-    "backend/services/workflow_runner.py": 2,
-    "backend/utils/snapshot.py": 1,
-    "backend/workflow/core.py": 1,
-    "backend/workflow/core_parts/execution.py": 15,
-    "backend/workflow/core_parts/initialization.py": 11,
-    "backend/workflow/core_parts/interventions.py": 2,
-    "backend/workflow/core_parts/shutdown.py": 1,
-    "backend/workflow/reporting.py": 8,
-    "backend/workflow/retry.py": 1,
-}
+#: A2-5 emptied it. The three ratchets below stay: an empty table with
+#: live tests is what keeps the surface clean, and a re-entry shows up
+#: as a new key rather than as a silently raised count.
+SNAPSHOT_V2_CENSUS: dict[str, int] = {}
 
 
 def _observed() -> dict[str, int]:
@@ -120,14 +84,6 @@ def test_checkpoint_path_helpers_live_outside_snapshot_v2():
     ]
 
 
-def test_the_snapshot_checkpoint_module_is_only_a_shim():
-    """The V2 copy must not drift from the relocated one before A2-5."""
-    from backend.services.snapshot_v2 import checkpoint_paths as shim
-    from backend.utils import checkpoint_paths as real
-
-    assert shim.checkpoint_sqlite_path is real.checkpoint_sqlite_path
-    assert shim.sqlite_companion_paths is real.sqlite_companion_paths
-    assert shim.CHECKPOINT_SQLITE_FILENAME is real.CHECKPOINT_SQLITE_FILENAME
 
 
 def test_no_surviving_module_imports_the_snapshot_checkpoint_paths():
@@ -154,6 +110,77 @@ def test_runtime_name_validation_lives_outside_snapshot_v2():
 def test_the_runtime_persistence_chain_is_free_of_snapshot_v2():
     for rel in ("utils/runtime_apply.py", "utils/sandbox_parts/regular_save.py"):
         assert "snapshot_v2" not in (BACKEND / rel).read_text(), rel
+
+
+def test_the_snapshot_v2_package_is_gone():
+    """No source, and not importable.
+
+    The directory itself is not the assertion: the test runner mounts this tree
+    into a container that writes ``__pycache__`` as root, so an empty
+    root-owned directory can outlive the sources and cannot be removed from
+    here. What matters is that nothing is left to import.
+    """
+    import importlib.util
+
+    package = BACKEND / "services" / "snapshot_v2"
+    assert not sorted(package.rglob("*.py")), sorted(
+        str(path.relative_to(REPO)) for path in package.rglob("*.py")
+    )
+    spec = importlib.util.find_spec("backend.services.snapshot_v2")
+    # An empty directory still resolves as a namespace package, which is what a
+    # leftover __pycache__ leaves behind. It carries no loader, so nothing can
+    # be imported from it -- a real package would.
+    assert spec is None or spec.loader is None, spec
+
+
+def test_no_snapshot_route_is_registered():
+    from backend.main import app
+
+    paths = {getattr(route, "path", "") for route in app.routes}
+    assert not [p for p in paths if "snapshot" in p.lower()], sorted(paths)
+
+
+def test_no_snapshot_configuration_survives():
+    source = (BACKEND / "config" / "_config.py").read_text()
+    for gone in (
+        "SNAPSHOT_V2_ENABLED",
+        "is_snapshot_v2_enabled",
+        "MAX_SESSION_SNAPSHOT_BYTES",
+        "MAX_SNAPSHOT_KERNEL_PKL_BYTES",
+        "get_integrity_dir",
+        "SCAI_ENABLE_SNAPSHOT_V2",
+    ):
+        assert gone not in source, gone
+
+
+def test_an_old_session_json_carrying_retired_fields_still_loads():
+    """Dropping a field must not make an existing session unreadable.
+
+    Spec 3.12: the risk is a stuck state, not a parse error. The gate fields
+    stay declared precisely so the sanitizer can clear them; the record fields
+    are gone and must be ignored rather than rejected.
+    """
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.services.legacy_state_sanitizer import sanitize_legacy_state
+
+    state = AnalysisState.model_validate({
+        "id": "legacy-load",
+        "name": "legacy",
+        "user_id": "owner",
+        "status": "waiting_input",
+        "wait_input_reason": "snapshot_failure",
+        "snapshot_failure": {"code": "QUOTA_EXCEEDED", "message": "no room"},
+        "pending_required_snapshot": {"phase": "pre_restore"},
+        "snapshots": [{"id": "s1", "name": "old", "phase": "manual"}],
+        "created_from_snapshot_id": "s1",
+        "last_snapshot_id": "s1",
+    })
+
+    assert sanitize_legacy_state(state) is True
+    assert state.snapshot_failure is None
+    assert state.pending_required_snapshot is None
+    assert state.wait_input_reason is None
+    assert state.status is TaskStatus.PAUSED
 def test_the_restore_entry_plan_lives_in_the_workflow_package():
     import pydantic
 
@@ -189,37 +216,40 @@ def test_workflow_core_does_not_import_the_snapshot_restore_entry():
 
     assert "snapshot_v2.restore_entry" not in split_source("backend.workflow.core")
 def test_the_runtime_signature_root_is_not_the_snapshot_directory():
-    """A2-5 may delete get_integrity_dir outright; nothing else uses it.
+    """``get_integrity_dir`` is gone; the runtime chain never used it.
 
-    Spec revision 4 §4.5 claimed the ordinary runtime HMAC lived under
-    ``<sid>/snapshot-v2``. It does not, and acting on that claim would have
-    migrated a directory the runtime chain never reads. Corrected in
-    revision 5; this guard keeps the correction from being undone.
+    Spec revision 4 4.5 claimed the ordinary runtime HMAC lived under
+    ``<sid>/snapshot-v2``. It did not -- that was the snapshot subsystem's own
+    root, and acting on the claim would have migrated a directory the runtime
+    chain never reads. Corrected in revision 5; this guard keeps the correction
+    from being undone by asserting the snapshot-only helper stays deleted and
+    the real root stays where it is.
     """
-    from backend.config._config import get_integrity_dir
+    import backend.config._config as config_module
     from backend.utils.sandbox_parts.shared import _integrity_dir
 
-    assert get_integrity_dir("severance-guard") != _integrity_dir("severance-guard")
+    assert not hasattr(config_module, "get_integrity_dir")
     assert "snapshot" not in str(_integrity_dir("severance-guard"))
 
     callers = set()
     for path in sorted(BACKEND.rglob("*.py")):
         rel = path.relative_to(REPO).as_posix()
-        if rel.startswith("backend/tests/") or rel.endswith("config/_config.py"):
+        if rel.startswith("backend/tests/"):
             continue
         if "get_integrity_dir" in path.read_text():
             callers.add(rel)
-    assert callers == {"backend/services/snapshot_v2/paths.py"}, sorted(callers)
+    assert not callers, sorted(callers)
 def test_the_volatile_type_prefixes_live_outside_snapshot_v2():
-    """Volatile-type exclusion is kept (spec 4.2); its list must outlive V2."""
-    from backend.services.snapshot_v2.runtime_registry import (
-        VOLATILE_RUNTIME_TYPE_PREFIXES as via_v2,
-    )
+    """Volatile-type exclusion is kept (spec 4.2); its list outlived V2.
+
+    Order is behaviour, not style: the tuple's ``repr()`` is embedded verbatim
+    into the generated kernel save script, so a reordering changes what that
+    script excludes.
+    """
     from backend.utils.runtime_types import VOLATILE_RUNTIME_TYPE_PREFIXES
 
     assert isinstance(VOLATILE_RUNTIME_TYPE_PREFIXES, tuple)
     assert VOLATILE_RUNTIME_TYPE_PREFIXES
-    assert via_v2 is VOLATILE_RUNTIME_TYPE_PREFIXES
 
 
 def test_the_save_path_reads_the_prefixes_from_their_new_home():

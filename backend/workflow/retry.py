@@ -7,11 +7,9 @@ from functools import wraps
 from ..constants import LlmFailureAction, NODE_TO_RESULT_KEY
 from ..models.schemas import AgentType
 from ..utils.llm_client import UpstreamExhaustedError
-from ..services.snapshot_v2.errors import RequiredSnapshotBlocked
 from .helpers import (
     reset_unattended_gate_budget,
     _retry_backoff_delay,
-    ack_restore_safe_point,
     WorkflowSupersededError,
     WorkflowTerminatedError,
 )
@@ -49,10 +47,6 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                     f"[{getattr(self, 'session_id', '?')}] Node {node_name} "
                     f"resumed"
                 )
-
-            # Restore safe-point: acknowledge pending request and freeze until
-            # the restore job releases (shared process-wide coordinator).
-            await ack_restore_safe_point(self)
 
             # Check skip_nodes
             if node_name in state.get("skip_nodes", []):
@@ -109,11 +103,6 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                             "status": "failed"
                         }
                     }
-
-                except RequiredSnapshotBlocked:
-                    # Fail-closed snapshot boundary — do not convert into node
-                    # retries. Caught once at the workflow run/resume boundary.
-                    raise
 
                 except WorkflowTerminatedError:
                     # User chose to abort (e.g. TERMINATE at a HITL gate, or a

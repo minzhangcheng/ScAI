@@ -33,7 +33,7 @@ def graph_recursion_limit(max_rounds: Optional[int]) -> int:
     return GRAPH_RECURSION_LIMIT + GRAPH_RECURSION_PER_ROUND * max(1, rounds)
 
 
-from .helpers import ack_restore_safe_point, wait_with_skip_time
+from .helpers import wait_with_skip_time
 from .retry import with_retry, MAX_NODE_RETRIES
 from .state import WorkflowState, make_initial_workflow_state
 from .routing import RoutingMixin
@@ -50,7 +50,6 @@ from .reporting import ReportingMixin
 from .integration import IntegrationMixin
 from .post_execution import PostExecutionReviewMixin
 
-from ..services.snapshot_v2.errors import RequiredSnapshotBlocked
 from .restore_entry import build_restore_entry_plan
 
 from ..models.schemas import (
@@ -176,14 +175,6 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         core_interventions.bind_facade(sys.modules[__name__])
         return core_interventions.get_snapshot_workflow_state(self)
 
-    async def acknowledge_at_boundary(self) -> bool:
-        core_interventions.bind_facade(sys.modules[__name__])
-        return await core_interventions.acknowledge_at_boundary(self)
-
-    async def await_restore_safe_point(self) -> None:
-        core_interventions.bind_facade(sys.modules[__name__])
-        return await core_interventions.await_restore_safe_point(self)
-
     def signal_annotation_confirmed(self):
         core_interventions.bind_facade(sys.modules[__name__])
         return core_interventions.signal_annotation_confirmed(self)
@@ -233,10 +224,6 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
     def _make_initial_workflow_state(analysis_state, current_round=0):
         core_initialization.bind_facade(sys.modules[__name__])
         return core_initialization._make_initial_workflow_state(analysis_state, current_round)
-
-    async def _create_auto_snapshot(self, state: AnalysisState, phase: str, *, workflow_state: Optional[dict[str, Any]]=None):
-        core_initialization.bind_facade(sys.modules[__name__])
-        return await core_initialization._create_auto_snapshot(self, state, phase, workflow_state=workflow_state)
 
     def _merge_supplementary_findings(self, agent_key: str, new_findings: List[str]):
         core_supplementary.bind_facade(sys.modules[__name__])

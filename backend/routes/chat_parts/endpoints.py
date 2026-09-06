@@ -62,7 +62,6 @@ from .delegation import (
     _try_parse_delegation,
 )
 from .figures import _generate_figures_in_chat
-from .snapshots import _create_chat_snapshot
 
 
 import sys

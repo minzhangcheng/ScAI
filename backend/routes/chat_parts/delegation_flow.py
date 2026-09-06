@@ -244,21 +244,10 @@ async def _execute_delegation_success(
         "pending_figures": False,
     })
 
-    # Auto-snapshot after chat delegation completes
-    from backend.models.schemas import TaskStatus as _TaskStatus
-
-    pre_snapshot_status = getattr(state, "status", _TaskStatus.COMPLETED)
-    if not isinstance(pre_snapshot_status, _TaskStatus):
-        try:
-            pre_snapshot_status = _TaskStatus(str(pre_snapshot_status))
-        except Exception:
-            pre_snapshot_status = _TaskStatus.COMPLETED
-    await _create_chat_snapshot(session_id, state)
-
     duration = time.time() - start_time
     logger.info(f"Chat delegation completed for {session_id} in {duration:.1f}s, "
                  f"{len(agent_results)} agents, {len(merged_figures)} figures")
-    return pre_snapshot_status
+    return None
 
 
 async def _run_chat_delegation(
@@ -272,14 +261,12 @@ async def _run_chat_delegation(
     """Background task: orchestrate delegated agent work, then PI synthesizes results."""
     import traceback
     from backend.utils.llm_client import LLMManager
-    from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
 
     user_id = getattr(state, "user_id", "") if state else ""
     config = await resolve_config_for_user(user_id)
     llm_manager = None
     start_time = time.time()
     _delegation_extra_clients: List[Any] = []
-    pre_snapshot_status = None
     try:
         # 1. Send started notification
         delegates = delegation.get("delegates", [])
@@ -304,7 +291,6 @@ async def _run_chat_delegation(
         )
         if outcome is _DELEGATION_STOP:
             return
-        pre_snapshot_status = outcome
 
     except asyncio.CancelledError:
         logger.info(f"Chat delegation cancelled by user for {session_id}")
@@ -333,53 +319,6 @@ async def _run_chat_delegation(
                 "[%s] Skipping stale cancellation terminal delivery", session_id,
             )
         raise
-
-    except RequiredSnapshotBlocked as e:
-        # Coherent HITL: structured snapshot_failure, not generic chat_error.
-        from backend.models.schemas import TaskStatus
-        from backend.services.snapshot_v2.failure_gate import (
-            enter_chat_snapshot_failure_gate,
-        )
-
-        logger.warning(
-            f"[{session_id}] Post-chat snapshot blocked after delegation: {e}"
-        )
-        previous_status = pre_snapshot_status
-        if previous_status is None:
-            previous_status = getattr(state, "status", TaskStatus.COMPLETED)
-        if not isinstance(previous_status, TaskStatus):
-            try:
-                previous_status = TaskStatus(str(previous_status))
-            except Exception:
-                previous_status = TaskStatus.COMPLETED
-        # Always set chat retry_context (service may have written a bare failure).
-        enter_chat_snapshot_failure_gate(state, e, previous_status)
-        identity = _active_delegation_identity(state)
-        terminal_message = (
-            "Chat completed, but a required snapshot failed. "
-            "Use Retry, Manage, or Terminate."
-        )
-        _replace_latest_chat_terminal(state, {
-            "role": "assistant",
-            "content": terminal_message,
-            "timestamp": datetime.now().isoformat(),
-            "snapshot_failure": state.snapshot_failure,
-            "pending_figures": False,
-        })
-        if await _persist_chat_terminal(session_id, state):
-            await _send_chat_ws(session_id, "state_sync", {
-                "change_type": "snapshot_failure",
-                "status": getattr(state.status, "value", state.status),
-                "wait_input_reason": "snapshot_failure",
-                "snapshot_failure": state.snapshot_failure,
-                "chat_message": {
-                    "id": identity.get("id"),
-                    "reply_to": identity.get("reply_to"),
-                    "role": "assistant",
-                    "content": terminal_message,
-                    "pending_figures": False,
-                },
-            })
 
     except Exception as e:
         logger.error(f"Chat delegation error for {session_id}: {traceback.format_exc()}")

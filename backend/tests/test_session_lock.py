@@ -12,7 +12,6 @@ import backend.state as state_mod
 import backend.routes.interaction as ix
 import backend.routes.lifecycle as lc
 import backend.routes.websockets as ws
-import backend.routes.snapshots as snap
 from backend.routes.lifecycle_parts import interventions, run_resume
 from backend.routes.websocket_parts import analysis_connection
 

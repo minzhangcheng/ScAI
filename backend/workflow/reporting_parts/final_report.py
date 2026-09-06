@@ -399,30 +399,15 @@ class FinalReportMixin:
             )
             return {**state, "analysis_state": analysis_state}
 
-        await self._capture_post_report_if_enabled(
-            analysis_state,
-            report_generation_id,
+        analysis_state.detailed_report_fallback_pending = False
+        self._set_status(analysis_state, TaskStatus.COMPLETED)
+        await self._send_message(
+            "completed", analysis_completion_message(report), AgentType.PI
         )
 
-        # Only set COMPLETED if snapshot capture succeeded or Snapshot V2 is
-        # intentionally disabled. If capture failed, RequiredSnapshotBlocked is
-        # raised before this point and the run remains in its failure gate.
-        if analysis_state.pending_required_snapshot is None:
-            analysis_state.detailed_report_fallback_pending = False
-            self._set_status(analysis_state, TaskStatus.COMPLETED)
-            await self._send_message(
-                "completed", analysis_completion_message(report), AgentType.PI
-            )
+        await self._send_state_sync(analysis_state, "analysis_complete")
 
-            await self._send_state_sync(analysis_state, "analysis_complete")
-
-            logger.info(f"[{self.session_id}] Analysis workflow completed")
-        else:
-            logger.warning(
-                "[%s] Post-report snapshot capture failed; "
-                "keeping status GENERATING_REPORT for snapshot-failure HITL gate",
-                self.session_id,
-            )
+        logger.info(f"[{self.session_id}] Analysis workflow completed")
 
         return {
             **state,

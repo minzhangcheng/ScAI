@@ -249,19 +249,10 @@ def validate_collection(payload: bytes) -> dict[str, Any]:
     if document["nodeids_sha256"] != expected_hash:
         _fail("collection node ID hash mismatch")
     effective = document["effective_config"]
-    snapshot_v2 = effective.get("SCAI_ENABLE_SNAPSHOT_V2") if isinstance(effective, dict) else None
-    # Both configurations this project has are recordable; neither is assumed.
-    # An unknown value or an unattributed source is still rejected, because the
-    # point of the field is to say which configuration the run measured.
-    if (
-        not isinstance(effective, dict)
-        or set(effective) != {"SCAI_ENABLE_SNAPSHOT_V2"}
-        or not isinstance(snapshot_v2, dict)
-        or set(snapshot_v2) != {"value", "source", "production_default"}
-        or snapshot_v2["value"] not in {"true", "false"}
-        or snapshot_v2["source"] not in {"root conftest.py setdefault", "caller environment"}
-        or snapshot_v2["production_default"] != "disabled"
-    ):
+    # The build has one configuration, so the recorded set is empty and must be
+    # exactly empty: a key appearing here means a switch was reintroduced
+    # without extending this contract to say what it measured.
+    if effective != {}:
         _fail("collection effective configuration is not exact")
     candidate = document["candidate_tools"]
     required_tools = {"pytest", "pytest-asyncio", "pytest-benchmark", "plugins"}

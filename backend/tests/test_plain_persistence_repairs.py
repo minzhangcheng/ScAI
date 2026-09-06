@@ -146,7 +146,6 @@ async def test_rerun_now_retires_checkpoint_before_choosing_intent(monkeypatch):
     monkeypatch.setattr(lifecycle, "require_session_ownership", AsyncMock(return_value=state))
     monkeypatch.setattr(lifecycle, "async_save_session", AsyncMock())
     monkeypatch.setattr(lifecycle, "assert_recovery_clear", lambda *a, **k: None)
-    monkeypatch.setattr(lifecycle, "is_snapshot_failure_blocked", lambda s: False)
     await lifecycle.run_analysis(sid, SimpleNamespace(state=SimpleNamespace(user_id="u1")))
     assert not checkpoint.exists()
     assert not _live_pkl(sid).exists()
@@ -181,7 +180,6 @@ async def test_rerun_quiesces_existing_workflow_before_retiring_checkpoint(monke
     monkeypatch.setattr(lifecycle, "require_session_ownership", AsyncMock(return_value=state))
     monkeypatch.setattr(lifecycle, "async_save_session", AsyncMock())
     monkeypatch.setattr(lifecycle, "assert_recovery_clear", lambda *a, **k: None)
-    monkeypatch.setattr(lifecycle, "is_snapshot_failure_blocked", lambda s: False)
     action = lifecycle.resume_analysis if completed else lifecycle.run_analysis
     await action(sid, SimpleNamespace(state=SimpleNamespace(user_id="u1")))
     assert not checkpoint.exists()

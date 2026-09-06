@@ -31,22 +31,12 @@ async def _run_simple_chat(monkeypatch, state, *, message_id=""):
     monkeypatch.setattr(chat_endpoints, "_build_chat_context", lambda _state: ("", []))
     monkeypatch.setattr(chat_endpoints, "async_save_session", AsyncMock())
     monkeypatch.setattr(chat_delegation, "_async_save_session_under_lifecycle", AsyncMock())
-    monkeypatch.setattr(chat_endpoints, "_create_chat_snapshot", AsyncMock())
 
     from backend.state import sessions
     sessions[state.id] = state
 
-    from backend.services.snapshot_v2 import safe_point
     from backend.utils import agent_llm
 
-    monkeypatch.setattr(
-        safe_point,
-        "get_snapshot_safe_point_manager",
-        lambda: SimpleNamespace(
-            is_paused=lambda _session_id: False,
-            has_pending_request=lambda _session_id: False,
-        ),
-    )
     monkeypatch.setattr(agent_llm, "get_agent_llm_client", lambda *_args: Client())
 
     try:
@@ -175,19 +165,9 @@ async def test_chat_figure_response_updates_one_stable_message(
     monkeypatch.setattr(chat_endpoints, "async_save_session", save)
     monkeypatch.setattr(chat_delegation, "_async_save_session_under_lifecycle", save)
     monkeypatch.setattr(chat_endpoints, "_generate_figures_in_chat", generate)
-    monkeypatch.setattr(chat_endpoints, "_create_chat_snapshot", AsyncMock())
 
-    from backend.services.snapshot_v2 import safe_point
     from backend.utils import agent_llm
 
-    monkeypatch.setattr(
-        safe_point,
-        "get_snapshot_safe_point_manager",
-        lambda: SimpleNamespace(
-            is_paused=lambda _session_id: False,
-            has_pending_request=lambda _session_id: False,
-        ),
-    )
     monkeypatch.setattr(agent_llm, "get_agent_llm_client", lambda *_args: Client())
 
     from backend.state import sessions

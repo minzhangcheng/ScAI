@@ -334,7 +334,6 @@ async def review_and_confirm_annotations(
         )
         state.annotation_state = ann_state
 
-        await self._create_auto_snapshot(state, "pre_annotation")
 
         # Step 3: Annotation confirmation loop
         original_status = state.status
@@ -358,7 +357,6 @@ async def review_and_confirm_annotations(
                 state.round_wait_seconds,
                 self.session_id,
                 "annotation_confirmation",
-                safe_point_hook=getattr(self, "await_restore_safe_point", None),
             )
             if not signaled:
                 # Auto-skip: accept PI annotations as-is, mark as confirmed

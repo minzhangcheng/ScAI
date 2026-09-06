@@ -44,17 +44,6 @@ class AnalysisPhase(str, Enum):
     INNOVATION = "innovation"
     INTEGRATION = "integration"
 
-SnapshotPhase = Literal[
-    "pre_annotation", "post_annotation", "pre_direction", "post_direction",
-    "pre_round_wait",
-    "pre_execution_stage1", "pre_execution_stage2", "pre_execution_full",
-    "pre_major_revision", "post_report",
-    "manual",
-    "pre_integration_gate",
-    "post_chat",
-    "pre_restore",
-]
-
 AnalysisPhaseType = Literal["exploration", "innovation", "integration"]
 
 PlanStage = Literal["full", "stage1", "stage2"]

@@ -22,9 +22,6 @@ args = [
   "backend/tests/test_kernel_dask_compat.py",
   "backend/tests/test_arboreto_kernel_compat.py",
   "backend/tests/test_sandbox_kernel_isolation.py",
-  "backend/tests/test_snapshot_v2_capture_acceptance.py",
-  "backend/tests/test_snapshot_v2_restore_acceptance.py",
-  "backend/tests/test_snapshot_v2_runtime_kernel.py",
   "backend/tests/test_figure_dedup.py",
   "backend/tests/test_figure_content_census.py",
   "backend/tests/test_sandbox_prose_guard_and_output_contract.py",
@@ -35,10 +32,4 @@ args = [
 [profiles.backend-full]
 description = "Complete backend suite; serial"
 claim_scope = "complete backend suite"
-args = ["backend/tests"]
-
-[profiles.backend-full-gate-off]
-description = "Complete backend suite in the production snapshot configuration; serial"
-claim_scope = "complete backend suite, snapshot subsystem disabled"
-env = { SCAI_ENABLE_SNAPSHOT_V2 = "false" }
 args = ["backend/tests"]

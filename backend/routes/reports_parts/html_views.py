@@ -29,7 +29,6 @@ from backend.services.session_lifecycle import (
     SessionGenerationError,
     assert_generation_writable,
     get_lifecycle_lock,
-    snapshot_operation_active,
 )
 from backend.utils.websocket_delivery import send_report_json
 from backend.utils.config_resolver import resolve_config_for_user
@@ -231,13 +230,6 @@ async def generate_detailed_report(session_id: str, background_tasks: Background
         # removed report tree or write into a reused session ID.
         async with get_lifecycle_lock(session_id):
             assert_generation_writable(session_id, state)
-            if snapshot_operation_active(session_id):
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "Snapshot capture or restore is active for this session"
-                    ),
-                )
             async with state_lock:
                 from backend.services.workflow_runner import (
                     session_has_any_workflow_owner,

@@ -104,10 +104,9 @@ class TestHmacPrimitives:
 
 
 class TestHmacDriftGuard:
-    def test_no_raw_hmac_new_in_snapshot_v2_or_sandbox(self):
+    def test_no_raw_hmac_new_in_runtime_apply_or_sandbox(self):
         import pathlib
         roots = [
-            pathlib.Path("backend/services/snapshot_v2"),
             pathlib.Path("backend/utils/runtime_apply.py"),
         ]
         # sandbox.py is allowlisted ONLY for the streaming helper below.

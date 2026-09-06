@@ -102,28 +102,12 @@ def _collection_payload(session: pytest.Session) -> dict[str, Any]:
     benchmark_loaded = "benchmark" in plugin_names or "pytest_benchmark" in plugin_names or "benchmark" in plugin_repr
     if not asyncio_loaded or not benchmark_loaded:
         raise RuntimeError("required asyncio and benchmark plugins are not loaded")
-    # The evidence must state which configuration was measured. Requiring
-    # "true" went further than that and made the configuration production
-    # actually runs impossible to measure at all: a deliberate disabled run
-    # aborted here and published nothing. What has to be rejected is an
-    # unresolvable value, not a particular one.
-    snapshot_v2_value = os.environ.get("SCAI_ENABLE_SNAPSHOT_V2")
-    snapshot_v2_source = os.environ.get("SCAI_ENABLE_SNAPSHOT_V2_SOURCE")
-    effective_config = {
-        "SCAI_ENABLE_SNAPSHOT_V2": {
-            "value": snapshot_v2_value,
-            "source": snapshot_v2_source,
-            "production_default": "disabled",
-        }
-    }
-    if snapshot_v2_value not in {"true", "false"} or snapshot_v2_source not in {
-        "root conftest.py setdefault",
-        "caller environment",
-    }:
-        raise RuntimeError(
-            "SCAI_ENABLE_SNAPSHOT_V2 effective configuration is not resolvable: "
-            f"value={snapshot_v2_value!r} source={snapshot_v2_source!r}"
-        )
+    # The evidence must state which configuration was measured. There is one
+    # left: the snapshot subsystem is gone, so no environment variable can put
+    # the suite into a second configuration. The key stays, empty, so a future
+    # switch has a declared home and so evidence written before and after this
+    # change stays distinguishable.
+    effective_config: dict[str, Any] = {}
     return {
         "schema": SCHEMA,
         "complete": session.testsfailed == 0,

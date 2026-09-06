@@ -10,7 +10,7 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 from ..config import get_session_states
 from backend.utils.runtime_names import (
@@ -43,81 +43,9 @@ class RuntimeChoiceRequired(Exception):
         super().__init__(f"runtime status '{status}' requires an explicit runtime_choice")
 
 
-def _snapshot_zst(session_id: str, snapshot) -> Path:
-    from .snapshot import SnapshotManager
-    return SnapshotManager(session_id).snapshots_dir / f"{snapshot.id}_session.pkl.zst"
-
-
-def compute_runtime_status(snapshot, session_id: str) -> RuntimeStatus:
-    """Compute the effective runtime status from files, not the stored flag alone.
-
-    - state_only: snapshot was created without runtime state;
-    - missing:    metadata claims runtime but the .zst is absent;
-    - corrupt:    .zst present but not a valid zstd frame;
-    - complete:   .zst present and a valid zstd frame.
-
-    Stage 1 does a cheap zstd-magic check only. A file whose magic is intact but
-    whose body is truncated/corrupt reads as `complete` here; that residual
-    corruption is still caught fail-closed at materialization time by
-    `apply_runtime_pkl` (decompression error) and `verify_live_pkl_or_raise`
-    (HMAC), so it never rehydrates a bad kernel. Full decompress/HMAC-level
-    corruption classification at status time is Stage 3 (preflight).
-    """
-    if not getattr(snapshot, "runtime_state_included", False):
-        return "state_only"
-    zst = _snapshot_zst(session_id, snapshot)
-    if not zst.exists():
-        return "missing"
-    try:
-        with open(zst, "rb") as f:
-            head = f.read(4)
-    except OSError:
-        return "corrupt"
-    if head != ZSTD_MAGIC:
-        return "corrupt"
-    return "complete"
-
-
-def resolve_runtime_choice(
-    status: RuntimeStatus, runtime_choice: Optional[str]
-) -> tuple[str, RuntimeRestoreStatus]:
-    """Map (status, choice) to (action, persisted runtime_restore_status).
-
-    Fail closed: an unavailable runtime with no choice raises RuntimeChoiceRequired,
-    which the route surfaces as HTTP 409. There is no silent default.
-
-    Actions: "apply" (materialize snapshot runtime), "reset" (quarantine live
-    runtime, block resume), "keep" (retain live runtime, mark risk accepted).
-    """
-    if status == "complete":
-        return ("apply", "complete")
-    if runtime_choice is None:
-        raise RuntimeChoiceRequired(status)
-    if runtime_choice == "reset":
-        return ("reset", "unavailable")
-    if runtime_choice == "keep":
-        return ("keep", "intentionally_kept")
-    raise ValueError(f"unknown runtime_choice: {runtime_choice!r}")
-
-
 def _journal_hmac(data: bytes) -> str:
     from ..utils.crypto import sign_hmac_sha256
     return sign_hmac_sha256(data)
-
-
-def preflight_runtime_zst(session_id: str, snapshot, runtime_action: str) -> None:
-    if runtime_action != "apply":
-        return
-    zst = _snapshot_zst(session_id, snapshot)
-    if not zst.exists():
-        raise RuntimeApplyError(f"[{session_id}] runtime_action='apply' but zst absent")
-    import zstandard as zstd
-    try:
-        dctx = zstd.ZstdDecompressor()
-        with open(zst, "rb") as src, open(os.devnull, "wb") as dst:
-            dctx.copy_stream(src, dst)
-    except Exception as exc:
-        raise RuntimeApplyError(f"[{session_id}] zst preflight failed: {exc}") from exc
 
 
 def _live_pkl(session_id: str) -> Path:

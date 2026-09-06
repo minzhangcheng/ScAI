@@ -11,7 +11,7 @@ from datetime import datetime
 
 from typing import Any, Dict, Literal
 
-from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi import APIRouter, HTTPException, Request
 
 from pydantic import BaseModel
 
@@ -38,12 +38,7 @@ from backend.utils.runtime_apply import is_forward_resume_blocked, state_runtime
 
 from backend.utils.checkpoint_paths import checkpoint_sqlite_path
 
-from backend.services.snapshot_v2.errors import (
-    SnapshotTransactionError,
-    is_snapshot_failure_blocked,
-)
-
-from backend.services.snapshot_v2.feature_gate import require_snapshot_v2_enabled
+from backend.services.legacy_state_sanitizer import RecoveryBlockedError
 
 from backend.utils.files import validate_session_id
 
@@ -52,7 +47,6 @@ from backend.state import (
     state_lock as _state_lock,
     workflows,
     get_session_lock,
-    get_snapshot_action_lock,
 )
 
 from backend.services.session_store import update_session_cache as _update_session_cache
@@ -78,7 +72,6 @@ import sys
 from .lifecycle_parts import interventions as lifecycle_interventions
 from .lifecycle_parts import run_resume as lifecycle_run_resume
 from .lifecycle_parts import shared as lifecycle_shared
-from .lifecycle_parts import snapshot_failures as lifecycle_snapshot_failures
 
 async def _resume_workflow(session_id, state, signal_fn=None):
     lifecycle_shared.bind_facade(sys.modules[__name__])
@@ -164,65 +157,3 @@ async def resume_bioinformatics(session_id: str, request: Request):
     """Resume bioinformatics analysis from last checkpoint"""
     lifecycle_interventions.bind_facade(sys.modules[__name__])
     return await lifecycle_interventions.resume_bioinformatics(session_id, request)
-
-@router.post('/{session_id}/snapshot-failure/retry', dependencies=[Depends(require_snapshot_v2_enabled)])
-async def snapshot_failure_retry(session_id: str, request: Request):
-    """Retry a snapshot failure by re-invoking the exact failed capture producer.
-
-    Validates ``SnapshotRetryContext`` from the failure gate. Missing or
-    invalid context returns 409 and leaves the gate intact. Never defaults
-    a missing producer to workflow-boundary.
-    """
-    lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
-    return await lifecycle_snapshot_failures.snapshot_failure_retry(session_id, request)
-
-async def _snapshot_failure_retry_locked(session_id: str, user_id: str):
-    lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
-    return await lifecycle_snapshot_failures._snapshot_failure_retry_locked(session_id, user_id)
-
-@router.post('/{session_id}/snapshot-failure/proceed', dependencies=[Depends(require_snapshot_v2_enabled)])
-async def snapshot_failure_proceed(session_id: str, request: Request):
-    """Capture anyway after the memory preflight refused, accepting the OOM risk.
-
-    Only valid on a gate that offered ``proceed`` — i.e. one raised by the
-    runtime memory preflight. Arms a one-shot override and then runs the
-    ordinary retry dispatch, so the capture re-runs through the same producer
-    with the preflight lowered for that attempt only.
-    """
-    lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
-    return await lifecycle_snapshot_failures.snapshot_failure_proceed(session_id, request)
-
-async def _snapshot_failure_proceed_locked(session_id: str, user_id: str):
-    lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
-    return await lifecycle_snapshot_failures._snapshot_failure_proceed_locked(session_id, user_id)
-
-@router.post('/{session_id}/snapshot-failure/skip', dependencies=[Depends(require_snapshot_v2_enabled)])
-async def snapshot_failure_skip(session_id: str, request: Request):
-    """Skip snapshot creation and continue the analysis.
-
-    Clears the failure gate WITHOUT capturing a snapshot and resumes the
-    workflow, forfeiting only the restore point at that boundary. Producer-aware:
-    workflow_boundary / post_report / chat are skippable; pre_restore is not
-    (skipping would proceed with a restore that overwrites live state without a
-    safety point) and returns 409.
-    """
-    lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
-    return await lifecycle_snapshot_failures.snapshot_failure_skip(session_id, request)
-
-async def _snapshot_failure_skip_locked(session_id: str, user_id: str):
-    lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
-    return await lifecycle_snapshot_failures._snapshot_failure_skip_locked(session_id, user_id)
-
-@router.post('/{session_id}/snapshot-failure/terminate', dependencies=[Depends(require_snapshot_v2_enabled)])
-async def snapshot_failure_terminate(session_id: str, request: Request):
-    """Terminate the session on snapshot failure.
-
-    Delegates to existing workflow teardown — does NOT create a second
-    kernel teardown. Clears the failure gate and stops the workflow.
-    """
-    lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
-    return await lifecycle_snapshot_failures.snapshot_failure_terminate(session_id, request)
-
-async def _snapshot_failure_terminate_locked(session_id: str, user_id: str):
-    lifecycle_snapshot_failures.bind_facade(sys.modules[__name__])
-    return await lifecycle_snapshot_failures._snapshot_failure_terminate_locked(session_id, user_id)

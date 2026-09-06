@@ -19,7 +19,7 @@ BACKEND = REPO / "backend"
 #:   persistence record to the UI, which is exactly the disclosure spec 5.1
 #:   requires. Only its one call into the gate is removed; the module stays.
 #: - ``models/schema_parts/snapshot_failure.py`` and
-#:   ``routes/lifecycle_parts/snapshot_failures.py`` serve Snapshot V2's
+#:   ``routes/lifecycle_parts/snapshot_failures.py`` served Snapshot V2's
 #:   *capture* failure gate -- proceed/skip/terminate on a failed snapshot --
 #:   not the runtime-persistence one. They are still reached from
 #:   ``chat_parts/`` and the V2 restore jobs, and are deleted in A2-5 with the

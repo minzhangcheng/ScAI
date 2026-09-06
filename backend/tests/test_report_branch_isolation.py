@@ -1,6 +1,5 @@
 import hashlib
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -635,9 +634,6 @@ class _ReportingWorkflow(ReportingMixin):
     async def _send_state_sync(self, analysis_state, change_type):
         self.synced.append((analysis_state, change_type))
 
-    async def _create_auto_snapshot(self, analysis_state, phase):
-        self.snapshots.append((analysis_state, phase))
-
     def _set_status(self, analysis_state, status):
         analysis_state.status = status
 
@@ -656,12 +652,6 @@ async def test_workflow_supervisor_report_receives_filtered_branch_state(tmp_pat
         "resolve_report_output_dir",
         lambda session_id, branch_id: tmp_path / "reports" / (branch_id or "main"),
     )
-    # Isolate post-report snapshot capture from real session storage paths.
-    async def _fake_capture(analysis_state, report_generation_id):
-        return SimpleNamespace(snapshot_id="snap-test", failure=None)
-
-    monkeypatch.setattr(workflow, "_capture_post_report_snapshot", _fake_capture)
-
     result = await workflow._generate_detailed_report({"analysis_state": state})
 
     seen = workflow.supervisor_agent.seen_state

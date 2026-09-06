@@ -145,7 +145,6 @@ async def _drive_hitl_gate(
         # own so an unattended run can select its deterministic fallback.
         signaled = await wait_with_skip_time(
             event, effective_wait, self.session_id, node_name,
-            safe_point_hook=getattr(self, "await_restore_safe_point", None),
         )
         action = self._llm_failure_actions.pop(node_name, None)
         if action is None and not signaled and auto_retry and effective_wait >= 0:
@@ -366,92 +365,6 @@ def signal_resume(self):
 def get_snapshot_workflow_state(self) -> dict[str, Any]:
     """Return a detached workflow-state view for snapshot capture."""
     return copy.deepcopy(dict(self._current_graph_state or {}))
-
-async def acknowledge_at_boundary(self) -> bool:
-    """Acknowledge a pending restore/post-chat safe-point at a boundary.
-
-    Uses the process-wide SafePointManager (never a private instance).
-    Transitions a pending request to acquired so the waiting capture or
-    restore job can proceed. Stores a live descriptor including
-    ``kernel_present`` and graph position so post-chat / pre_restore
-    capture can freeze an exact capsule.
-
-    Does not wait for release — callers that must freeze mutations should
-    call ``await_restore_safe_point`` afterward.
-
-    Returns ``True`` if a pending request was acknowledged.
-    """
-    from ...services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
-
-    sp = get_snapshot_safe_point_manager()
-    if not sp.has_pending_request(self.session_id):
-        return False
-
-    generation = sp.get_pending_generation(self.session_id)
-    if generation is None:
-        return False
-
-    graph_state = dict(getattr(self, "_current_graph_state", None) or {})
-    sb = getattr(self, "sandbox", None)
-    if "kernel_present" not in graph_state:
-        graph_state["kernel_present"] = (
-            sb is not None and getattr(sb, "km", None) is not None
-        )
-    if "current_round" not in graph_state:
-        analysis = getattr(self, "state", None) or getattr(
-            self, "_current_analysis_state", None,
-        )
-        if analysis is not None:
-            graph_state["current_round"] = (
-                getattr(analysis, "current_round", 0) or 0
-            )
-
-    acked = await sp.acknowledge_safe_point_request(
-        self.session_id, generation, graph_state, role="workflow",
-    )
-    if acked:
-        logger.info(
-            f"[{self.session_id}] Acknowledged safe-point at boundary "
-            f"(generation {generation})"
-        )
-    return acked
-
-async def await_restore_safe_point(self) -> None:
-    """Acknowledge pending restore safe-point and freeze until released.
-
-    Called at graph-node boundaries and between sandbox steps. Freezes
-    new workflow mutations while a restore job holds the safe point.
-    """
-    from ...services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
-
-    await self.acknowledge_at_boundary()
-    sp = get_snapshot_safe_point_manager()
-    if sp.is_paused(self.session_id):
-        logger.info(
-            f"[{self.session_id}] Waiting for restore safe-point release"
-        )
-        await sp.wait_for(self.session_id)
-        logger.info(f"[{self.session_id}] Restore safe-point released; resuming")
-
-        # If a restore committed while we were frozen, this run is finished.
-        # Its graph position predates the restore, and — decisively — its
-        # checkpointer still holds an open connection to the checkpoint
-        # database file that the restore replaced by rename. On POSIX that fd
-        # still points at the old, now-unlinked inode, so resuming here would
-        # read the pre-restore position and write it back, silently undoing
-        # the restore. Unwind instead and let the next run rebuild the
-        # workflow (and its connection) from the restored checkpoint.
-        if (
-            sp.is_superseded(self.session_id)
-            or getattr(self, "_restore_superseded", False)
-        ):
-            logger.info(
-                f"[{self.session_id}] Run superseded by a snapshot restore; "
-                f"unwinding so the restored checkpoint takes effect"
-            )
-            raise WorkflowSupersededError(
-                "snapshot restore replaced this run's checkpoint"
-            )
 
 def signal_annotation_confirmed(self):
     """Signal that user has confirmed cell type annotations"""

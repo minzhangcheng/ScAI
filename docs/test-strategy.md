@@ -20,9 +20,7 @@ properties:
 - a `--tmpfs /tmp:rw,size=2g` temporary filesystem and no `/dep`, `/extra`,
   production `/data`, or host virtual environment;
 - `NUMBA_DISABLE_JIT=1` for the test environment;
-- `SCAI_RUN_KERNEL_TESTS=1` for the `kernel` profile;
-- `SCAI_ENABLE_SNAPSHOT_V2=true` as a test-only default from the test
-  conftest, while the production default remains disabled.
+- `SCAI_RUN_KERNEL_TESTS=1` for the `kernel` profile.
 
 The image contains the candidate testing tools in its immutable virtual
 environment. The required identities are `pytest==9.1.1`,
@@ -35,7 +33,7 @@ not a benchmark feature or a performance claim.
 
 ## Supported profiles and claim scope
 
-The profile roster is exactly the following five profiles:
+The profile roster is exactly the following four profiles:
 
 | Profile | Invocation | Scope of a successful claim |
 | --- | --- | --- |
@@ -43,16 +41,17 @@ The profile roster is exactly the following five profiles:
 | `client` | `scripts/scai-test client` | complete retained Python client suite |
 | `kernel` | `scripts/scai-test kernel` | complete known real-kernel/integration evidence |
 | `backend-full` | `scripts/scai-test backend-full` | complete backend suite |
-| `backend-full-gate-off` | `scripts/scai-test backend-full-gate-off` | complete backend suite with the snapshot subsystem disabled, matching the production default |
 
-The five claim scopes are deliberately distinct: `fast` is focused edit-loop
+The four claim scopes are deliberately distinct: `fast` is focused edit-loop
 scope, `client` is the affected client-surface scope, `kernel` is integration
-scope, `backend-full` is full-suite/release-gate scope, and
-`backend-full-gate-off` is the same suite in the configuration production
-actually runs. A complete result within one scope does not imply any of the
-other scopes; in particular a `backend-full` result says nothing about the
-subsystem-disabled configuration, because the repository conftest forces
-`SCAI_ENABLE_SNAPSHOT_V2=true` while production defaults it off.
+scope, and `backend-full` is full-suite/release-gate scope. A complete result
+within one scope does not imply any of the other scopes.
+
+There was a fifth, `backend-full-gate-off`, which ran the same suite with the
+snapshot subsystem disabled — the configuration production actually shipped.
+The subsystem is gone, so the build has one configuration and presenting one
+measurement as two would overstate it. The runner refuses the retired profile
+name rather than serving `backend-full` under it.
 
 The raw form accepts only explicit pytest arguments and does not create another
 profile:
@@ -62,7 +61,6 @@ scripts/scai-test fast backend/tests/test_x.py::test_y
 scripts/scai-test client
 scripts/scai-test kernel
 scripts/scai-test backend-full
-scripts/scai-test backend-full-gate-off
 scripts/scai-test -- <raw pytest args>
 ```
 
@@ -152,10 +150,10 @@ does not authorize network access, Docker builds, registry pushes, deployment,
 or production `node_modules` changes; each such boundary needs its own
 explicit authorization.
 
-The root `conftest.py` makes `SCAI_ENABLE_SNAPSHOT_V2=true` effective inside
-pytest. Every Python evidence record and summary discloses that test-only
-configuration; it makes no claim about the production default, which remains
-disabled.
+Every Python evidence record carries an `effective_config` map naming the
+configuration the run measured. It is empty: the snapshot operator gate was the
+only switch the suite had, and it is gone. A key reappearing there without a
+contract change is a reintroduced switch that no evidence explains.
 
 A passing focused profile is not full-suite proof, a healthy existing
 application container is not proof that the current source was rebuilt, and

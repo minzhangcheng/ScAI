@@ -217,51 +217,6 @@ async def test_route_handoff_failure_releases_pending_marker(monkeypatch):
     background_tasks.add_task.assert_not_called()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("safe_point_state", ["pending", "acquired"])
-async def test_route_refuses_generation_while_snapshot_safe_point_is_reserved(
-    monkeypatch,
-    safe_point_state,
-):
-    from backend.services.snapshot_v2.safe_point import (
-        get_snapshot_safe_point_manager,
-    )
-
-    session_id = f"snapshot-reserved-{uuid.uuid4().hex}"
-    state = _report_state(session_id)
-    monkeypatch.setattr(
-        html_views,
-        "require_session_ownership",
-        AsyncMock(return_value=state),
-    )
-    safe_point = get_snapshot_safe_point_manager()
-    owner_token = f"test:{uuid.uuid4().hex}"
-    if safe_point_state == "pending":
-        assert await safe_point.request_safe_point(session_id, owner_token)
-    else:
-        assert await safe_point.acquire(
-            session_id,
-            {"status": "capture"},
-            owner_token=owner_token,
-        )
-    try:
-        with pytest.raises(HTTPException) as exc_info:
-            await html_views.generate_detailed_report(
-                session_id,
-                MagicMock(),
-                _request(),
-            )
-
-        assert exc_info.value.status_code == 409
-        assert "Snapshot capture or restore" in exc_info.value.detail
-        assert session_id not in html_views.detailed_report_tasks
-        assert session_id not in html_views._report_generation_pending
-    finally:
-        if safe_point_state == "pending":
-            await safe_point.cancel_safe_point_request(session_id, owner_token)
-        else:
-            await safe_point.release(session_id, owner_token)
-
 
 @pytest.mark.asyncio
 async def test_missing_config_releases_report_pending_marker(monkeypatch, tmp_path):

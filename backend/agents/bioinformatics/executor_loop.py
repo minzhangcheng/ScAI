@@ -31,35 +31,6 @@ async def start_turn(context) -> TurnStart:
             await context.agent._notify("status", "Analysis resumed")
         except Exception:
             pass
-    session_id = getattr(context.agent, "session_id", None) or getattr(context.analysis_state, "id", None)
-    if session_id:
-        from backend.services.snapshot_v2.safe_point import (
-            get_snapshot_safe_point_manager,
-        )
-        sp = get_snapshot_safe_point_manager()
-        if sp.has_pending_request(session_id):
-            gen = sp.get_pending_generation(session_id)
-            if gen is not None:
-                await sp.acknowledge_safe_point_request(
-                    session_id, gen, role="workflow",
-                )
-        if sp.is_paused(session_id):
-            logger.info(
-                f"[Bioinformatics] Restore safe-point active at step "
-                f"{context.step_count}; freezing until release"
-            )
-            await sp.wait_for(session_id)
-            if sp.is_superseded(session_id):
-                from backend.workflow.helpers import (
-                    WorkflowSupersededError,
-                )
-                logger.info(
-                    f"[Bioinformatics] Run superseded by a snapshot "
-                    f"restore at step {context.step_count}; unwinding"
-                )
-                raise WorkflowSupersededError(
-                    "snapshot restore replaced this run's checkpoint"
-                )
     context.step_count += 1
     context.force_break = False  # Reset per-iteration
     if context.checkpoint_manager.should_checkpoint(context.step_count):

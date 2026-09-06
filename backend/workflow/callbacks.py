@@ -618,7 +618,6 @@ Approve if quality_score >= 7."""
                 analysis_state.round_wait_seconds,
                 self.session_id,
                 "gene_species_mismatch",
-                safe_point_hook=getattr(self, "await_restore_safe_point", None),
             )
 
             if not signaled:

@@ -5,8 +5,6 @@ from pathlib import Path
 import pytest
 
 from backend.config import get_session_states
-from backend.models.schemas import Snapshot, AnalysisState
-from backend.utils.snapshot import SnapshotManager
 from backend.utils import runtime_apply
 
 
@@ -15,8 +13,6 @@ def _integrity_dir_path(sid):
     return _integrity_dir(sid)
 
 
-def _snapshot(runtime_included: bool) -> Snapshot:
-    return Snapshot(name="t", phase="manual", runtime_state_included=runtime_included)
 
 
 def _write_zst(path: Path, payload: bytes = b"hello-runtime") -> None:
@@ -26,78 +22,10 @@ def _write_zst(path: Path, payload: bytes = b"hello-runtime") -> None:
         f.write(zstd.ZstdCompressor().compress(payload))
 
 
-def _write_v1_state_json(mgr: SnapshotManager, state: AnalysisState, snap: Snapshot) -> None:
-    """Hand-written V1 state JSON for restore tests (no create_snapshot)."""
-    mgr._ensure_dir()
-    snap.state_file = f"{snap.id}.json"
-    state_dict = state.model_dump(mode="json")
-    state_dict.pop("snapshots", None)
-    state_dict.pop("realtime_messages", None)
-    (mgr.snapshots_dir / snap.state_file).write_text(
-        json.dumps(state_dict, ensure_ascii=False, default=str),
-        encoding="utf-8",
-    )
 
-
-def test_status_state_only_when_flag_false():
-    snap = _snapshot(False)
-    assert runtime_apply.compute_runtime_status(snap, "sess-status-a") == "state_only"
-
-
-def test_status_missing_when_flag_true_but_no_file():
-    snap = _snapshot(True)
-    assert runtime_apply.compute_runtime_status(snap, "sess-status-b") == "missing"
-
-
-def test_status_complete_when_valid_zst_present():
-    sid = "sess-status-c"
-    snap = _snapshot(True)
-    zst = SnapshotManager(sid).snapshots_dir / f"{snap.id}_session.pkl.zst"
-    _write_zst(zst)
-    try:
-        assert runtime_apply.compute_runtime_status(snap, sid) == "complete"
-    finally:
-        shutil.rmtree(zst.parent, ignore_errors=True)
-
-
-def test_status_corrupt_when_zst_magic_broken():
-    sid = "sess-status-d"
-    snap = _snapshot(True)
-    zst = SnapshotManager(sid).snapshots_dir / f"{snap.id}_session.pkl.zst"
-    _write_zst(zst)
-    data = bytearray(zst.read_bytes())
-    data[0] ^= 0xFF  # break the zstd magic
-    zst.write_bytes(bytes(data))
-    try:
-        assert runtime_apply.compute_runtime_status(snap, sid) == "corrupt"
-    finally:
-        shutil.rmtree(zst.parent, ignore_errors=True)
-
-
-def test_resolve_complete_ignores_choice():
-    assert runtime_apply.resolve_runtime_choice("complete", None) == ("apply", "complete")
-    assert runtime_apply.resolve_runtime_choice("complete", "keep") == ("apply", "complete")
-
-
-def test_resolve_unavailable_without_choice_raises():
-    for status in ("missing", "state_only", "corrupt"):
-        with pytest.raises(runtime_apply.RuntimeChoiceRequired):
-            runtime_apply.resolve_runtime_choice(status, None)
-
-
-def test_resolve_reset_and_keep():
-    assert runtime_apply.resolve_runtime_choice("missing", "reset") == ("reset", "unavailable")
-    assert runtime_apply.resolve_runtime_choice("missing", "keep") == ("keep", "intentionally_kept")
-
-
-def test_resolve_rejects_unknown_choice():
-    with pytest.raises(ValueError):
-        runtime_apply.resolve_runtime_choice("missing", "bogus")
-
-
-def _make_snapshot_zst(sid: str, payload: bytes) -> Path:
+def _make_source_zst(sid: str, payload: bytes) -> Path:
     import zstandard as zstd
-    zst = SnapshotManager(sid).snapshots_dir / "src_session.pkl.zst"
+    zst = get_session_states(sid) / "source_session.pkl.zst"
     zst.parent.mkdir(parents=True, exist_ok=True)
     with open(zst, "wb") as f:
         f.write(zstd.ZstdCompressor().compress(payload))
@@ -110,7 +38,7 @@ def test_apply_materializes_pkl_and_signature_passes():
     states = get_session_states(sid)
     states.mkdir(parents=True, exist_ok=True)
     payload = b"restored-kernel-bytes"
-    zst = _make_snapshot_zst(sid, payload)
+    zst = _make_source_zst(sid, payload)
     try:
         runtime_apply.apply_runtime_pkl(sid, zst)
         live = states / f"{sid}_session.pkl"
@@ -155,57 +83,6 @@ def test_recover_rolls_back_interrupted_apply():
         shutil.rmtree(states, ignore_errors=True)
         shutil.rmtree(_integrity_dir(sid), ignore_errors=True)
 
-
-@pytest.mark.asyncio
-async def test_restore_snapshot_apply_action_signs_live_pkl(tmp_path, monkeypatch):
-    import zstandard as zstd
-    from backend.utils.sandbox import _verify_pkl_integrity, _integrity_dir
-
-    sid = "sess-restore-apply"
-    mgr = SnapshotManager(sid)
-    states = get_session_states(sid)
-    states.mkdir(parents=True, exist_ok=True)
-
-    state = AnalysisState(session_id=sid, user_id="u1", current_round=2)
-    snap = Snapshot(name="t", phase="manual", round_number=2)
-    _write_v1_state_json(mgr, state, snap)
-    zst = mgr.snapshots_dir / f"{snap.id}_session.pkl.zst"
-    with open(zst, "wb") as f:
-        f.write(zstd.ZstdCompressor().compress(b"snap-kernel"))
-    snap.runtime_state_included = True
-
-    try:
-        await mgr.restore_snapshot(snap, runtime_action="apply")
-        live = states / f"{sid}_session.pkl"
-        assert live.read_bytes() == b"snap-kernel"
-        assert _verify_pkl_integrity(live, _integrity_dir(sid)) is True
-    finally:
-        shutil.rmtree(mgr.snapshots_dir.parent, ignore_errors=True)
-        shutil.rmtree(_integrity_dir(sid), ignore_errors=True)
-
-
-@pytest.mark.asyncio
-async def test_restore_snapshot_reset_action_quarantines_live(tmp_path):
-    from backend.utils.sandbox import _write_pkl_signature, _integrity_dir
-
-    sid = "sess-restore-reset"
-    mgr = SnapshotManager(sid)
-    states = get_session_states(sid)
-    states.mkdir(parents=True, exist_ok=True)
-    live = states / f"{sid}_session.pkl"
-    live.write_bytes(b"STALE-LIVE")
-    _write_pkl_signature(live, _integrity_dir(sid))
-
-    state = AnalysisState(session_id=sid, user_id="u1")
-    snap = Snapshot(name="t", phase="manual")
-    _write_v1_state_json(mgr, state, snap)
-    try:
-        await mgr.restore_snapshot(snap, runtime_action="reset")
-        assert not live.exists()
-        assert live.with_suffix(live.suffix + ".quarantine").exists()
-    finally:
-        shutil.rmtree(mgr.snapshots_dir.parent, ignore_errors=True)
-        shutil.rmtree(_integrity_dir(sid), ignore_errors=True)
 
 
 def test_verify_live_pkl_or_raise_passes_when_absent():
@@ -372,9 +249,6 @@ def test_unavailable_reset_sets_status_and_quarantines():
     live.write_bytes(b"LIVE-TO-QUARANTINE")
     _write_pkl_signature(live, _integrity_dir(sid))
     try:
-        action, status = runtime_apply.resolve_runtime_choice("missing", "reset")
-        assert action == "reset"
-        assert status == "unavailable"
         runtime_apply.quarantine_live_runtime(sid)
         assert not live.exists()
         assert live.with_suffix(live.suffix + ".quarantine").exists()
@@ -394,9 +268,6 @@ def test_unavailable_keep_does_not_mutate_live():
     live.write_bytes(b"KEEP-ME")
     _write_pkl_signature(live, _integrity_dir(sid))
     try:
-        action, status = runtime_apply.resolve_runtime_choice("state_only", "keep")
-        assert action == "keep"
-        assert status == "intentionally_kept"
         assert live.exists()
         assert live.read_bytes() == b"KEEP-ME"
         assert _verify_pkl_integrity(live, _integrity_dir(sid)) is True
@@ -404,10 +275,3 @@ def test_unavailable_keep_does_not_mutate_live():
     finally:
         shutil.rmtree(states, ignore_errors=True)
         shutil.rmtree(_integrity_dir(sid), ignore_errors=True)
-
-
-def test_complete_status_ignores_runtime_choice_reset():
-    """complete status always maps to apply, even if caller passes reset."""
-    action, status = runtime_apply.resolve_runtime_choice("complete", "reset")
-    assert action == "apply"
-    assert status == "complete"

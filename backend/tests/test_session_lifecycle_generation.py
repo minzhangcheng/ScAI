@@ -182,7 +182,6 @@ async def test_blocked_save_cannot_recreate_session_after_delete(monkeypatch, tm
 @pytest.mark.asyncio
 async def test_delete_during_load_io_cannot_reinstall_cache(monkeypatch, tmp_path):
     _configure_roots(monkeypatch, tmp_path)
-    monkeypatch.setattr("backend.config.is_snapshot_v2_enabled", lambda: False)
     state = AnalysisState(id="race-load-delete", user_id="owner")
     register_new_generation(state)
     entered = threading.Event()
@@ -215,7 +214,6 @@ async def test_delete_during_load_io_cannot_reinstall_cache(monkeypatch, tmp_pat
 @pytest.mark.asyncio
 async def test_disk_session_still_loads_after_process_cache_restart(monkeypatch, tmp_path):
     _configure_roots(monkeypatch, tmp_path)
-    monkeypatch.setattr("backend.config.is_snapshot_v2_enabled", lambda: False)
     state = AnalysisState(id="restart-load", user_id="owner")
     assert state.scai_version is None
     register_new_generation(state)
@@ -230,67 +228,6 @@ async def test_disk_session_still_loads_after_process_cache_restart(monkeypatch,
     assert loaded.lifecycle_generation == state.lifecycle_generation
     assert loaded.scai_version == VERSION
 
-
-@pytest.mark.asyncio
-async def test_recovery_is_inside_delete_lifecycle_boundary(monkeypatch, tmp_path):
-    _configure_roots(monkeypatch, tmp_path)
-    monkeypatch.setattr("backend.config.is_snapshot_v2_enabled", lambda: True)
-    monkeypatch.setattr(session_store, "_snapshot_transaction_in_flight", lambda _sid: False)
-    state = AnalysisState(id="race-recovery-delete", user_id="owner")
-    register_new_generation(state)
-    sessions.pop(state.id, None)
-    recovery_entered = asyncio.Event()
-    release_recovery = asyncio.Event()
-    load_entered = threading.Event()
-    release_load = threading.Event()
-    recovered_artifact = tmp_path / state.id / "recovered.tmp"
-
-    async def blocked_recovery(_session_id):
-        recovery_entered.set()
-        await release_recovery.wait()
-        recovered_artifact.parent.mkdir(parents=True, exist_ok=True)
-        recovered_artifact.write_text("recovered")
-        return False, None
-
-    def blocked_load(_session_id):
-        load_entered.set()
-        assert release_load.wait(timeout=5)
-        return state.model_copy(deep=True)
-
-    monkeypatch.setattr(session_store, "_recover_snapshot_v2_on_load", blocked_recovery)
-    monkeypatch.setattr(session_store, "load_session_from_disk", blocked_load)
-    load_task = asyncio.create_task(session_store.ensure_session_loaded(state.id))
-    await recovery_entered.wait()
-
-    delete_committed = asyncio.Event()
-
-    async def delete_generation():
-        async with get_lifecycle_lock(state.id):
-            with lifecycle_file_lock(state.id):
-                tombstone_generation(
-                    state.id,
-                    state.user_id,
-                    state.lifecycle_generation,
-                )
-            if recovered_artifact.parent.exists():
-                import shutil
-
-                shutil.rmtree(recovered_artifact.parent)
-            delete_committed.set()
-
-    delete_task = asyncio.create_task(delete_generation())
-    await asyncio.sleep(0)
-    assert delete_committed.is_set() is False
-    release_recovery.set()
-    assert await _wait_thread_event(load_entered)
-    await delete_committed.wait()
-    release_load.set()
-
-    with pytest.raises(SessionGoneError):
-        await load_task
-    await delete_task
-    assert not recovered_artifact.exists()
-    assert state.id not in sessions
 
 
 def test_new_generation_rejects_pre_lifecycle_disk_collision(monkeypatch, tmp_path):
