@@ -51,3 +51,42 @@ def test_the_analysis_input_format_is_untouched():
         "workflow/agent_nodes/shared.py",
     ):
         assert "h5ad" in (BACKEND / rel).read_text(), rel
+def test_the_generation_manifest_still_records_which_names_the_pkl_carries():
+    """The fact the h5ad manifest was recording has a surviving owner.
+
+    ``runtime_save.py`` wrote ``runtime_h5ad_manifest.json`` with an **empty**
+    sidecar dict and ``authoritative_pkl_names=saved_names``. It was not
+    carrying sidecars; it was recording which names the pkl is authoritative
+    for -- which is what A1's ``runtime_manifest.json`` already carries in
+    ``saved_names``. Deleting the older record is only safe while this holds.
+    """
+    from backend.utils.runtime_manifest import build_runtime_manifest
+
+    manifest = build_runtime_manifest(
+        revision=3,
+        state_revision=3,
+        pkl_digest="a" * 64,
+        saved_names=["adata", "results"],
+        skipped_names=[],
+        serializer_version="dill-zstd-1",
+    )
+    assert sorted(manifest["saved_names"]) == ["adata", "results"]
+
+
+def test_the_ordinary_save_no_longer_writes_a_sidecar_manifest():
+    """The producer side, which is separable from Snapshot V2.
+
+    ``_commit_pkl_transaction`` is shared with Snapshot V2's restore, which
+    still writes sidecars through its h5ad component kind, so the transaction's
+    handling of that kind is deleted in A2-5 with the package. What A2-4 can
+    remove is the *ordinary* save's own sidecar manifest, which recorded only
+    which names the pkl is authoritative for -- the fact A1's
+    ``runtime_manifest.json`` already carries in ``saved_names``.
+    """
+    source = (BACKEND / "utils" / "sandbox_parts" / "runtime_save.py").read_text()
+    for gone in (
+        "runtime_h5ad_manifest_path",
+        "write_runtime_h5ad_manifest",
+        "quarantine_unreferenced_runtime_h5ads",
+    ):
+        assert gone not in source, gone

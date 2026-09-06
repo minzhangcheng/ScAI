@@ -731,17 +731,11 @@ async def _execute_save(
                 return
             staged_path.unlink(missing_ok=True)
 
-        manifest_path = None
         runtime_manifest_file = None
         target_digest = None
         if production_transaction:
-            from backend.utils.runtime_apply import runtime_h5ad_manifest_path
             from backend.utils.runtime_manifest import runtime_manifest_path
 
-            manifest_path = runtime_h5ad_manifest_path(
-                sandbox.session_id,
-                states_dir=sandbox.notebook_state.state_dir,
-            )
             runtime_manifest_file = runtime_manifest_path(
                 sandbox.session_id,
                 states_dir=sandbox.notebook_state.state_dir,
@@ -760,30 +754,9 @@ async def _execute_save(
                 )
                 raise
 
-        def _commit_generation_manifest():
-            if not production_transaction:
-                return
-            from backend.utils.runtime_apply import (
-                write_runtime_h5ad_manifest,
-            )
-
-            write_runtime_h5ad_manifest(
-                sandbox.session_id,
-                {},
-                authoritative_pkl_names=saved_names,
-                states_dir=sandbox.notebook_state.state_dir,
-            )
-
-        def _retire_generation_sidecars():
-            from backend.utils.runtime_apply import (
-                quarantine_unreferenced_runtime_h5ads,
-            )
-
-            quarantine_unreferenced_runtime_h5ads(
-                sandbox.session_id,
-                set(),
-                states_dir=sandbox.notebook_state.state_dir,
-            )
+        # The sidecar manifest recorded which names the pkl is authoritative
+        # for. A1's runtime_manifest.json carries exactly that in saved_names,
+        # so the older record is gone rather than kept in parallel.
 
         def _commit_generation_metadata():
             sandbox.saved_runtime_revision = context.revision
@@ -820,7 +793,6 @@ async def _execute_save(
                                 integrity_path,
                                 _commit_generation_metadata,
                                 metadata_path=bindings.Path(sandbox.notebook_state.state_path),
-                                manifest_path=manifest_path,
                                 runtime_manifest_path=runtime_manifest_file,
                                 runtime_manifest={
                                     "state_revision": (context.pairing or {}).get("state_version", 0),
@@ -829,8 +801,6 @@ async def _execute_save(
                                     "skipped_names": skipped_record,
                                     "serializer_version": "dill-zstd-1",
                                 },
-                                commit_manifest=_commit_generation_manifest,
-                                retire_sidecars=_retire_generation_sidecars,
                                 target_revision=context.revision,
                                 authoritative_pkl_names=saved_names,
                                 fault_hook=getattr(
