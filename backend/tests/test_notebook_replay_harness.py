@@ -11,7 +11,6 @@ persistence-baseline.md records that.
 from __future__ import annotations
 
 import importlib.util
-import math
 import pathlib
 import re
 
