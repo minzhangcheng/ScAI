@@ -785,11 +785,11 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
     if cached is not None:
         await _recover_publication_transactions_on_load(session_id, cached)
         if not snapshot_v2_enabled:
-            from backend.services.snapshot_v2.feature_gate import (
-                normalize_disabled_snapshot_state,
+            from backend.services.legacy_state_sanitizer import (
+                sanitize_legacy_state,
             )
 
-            if normalize_disabled_snapshot_state(cached, workflow_active=False):
+            if sanitize_legacy_state(cached, workflow_active=False):
                 await _persist_recovery_marker(session_id, cached)
             # The initial lifecycle check preceded the cache read and any
             # normalization write. Deletion may have committed in between;
@@ -864,11 +864,11 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
 
     # Apply Snapshot V2 recovery or disabled-mode stale-state normalization.
     if not snapshot_v2_enabled:
-        from backend.services.snapshot_v2.feature_gate import (
-            normalize_disabled_snapshot_state,
+        from backend.services.legacy_state_sanitizer import (
+            sanitize_legacy_state,
         )
 
-        if normalize_disabled_snapshot_state(state, workflow_active=False):
+        if sanitize_legacy_state(state, workflow_active=False):
             await _persist_recovery_marker(session_id, state)
     elif recovery_blocked:
         mark_recovery_blocked(session_id, state, recovery_failure)

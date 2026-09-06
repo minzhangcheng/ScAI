@@ -33,9 +33,9 @@ from backend.utils.checkpoint_paths import (
 )
 from backend.services.snapshot_v2.feature_gate import (
     is_snapshot_v2_enabled,
-    normalize_disabled_snapshot_state,
     require_snapshot_v2_enabled,
 )
+from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
     update_session_cache as _update_session_cache,

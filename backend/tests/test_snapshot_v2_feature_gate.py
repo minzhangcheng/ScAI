@@ -309,15 +309,15 @@ def test_stale_snapshot_failure_is_normalized(
     workflow_active,
     expected_status,
 ):
-    from backend.services.snapshot_v2.feature_gate import (
-        normalize_disabled_snapshot_state,
+    from backend.services.legacy_state_sanitizer import (
+        sanitize_legacy_state,
     )
 
     state = _snapshot_blocked_state(producer, previous_status)
     transaction = {"transaction_id": "restore-audit", "status": "failed"}
     state.snapshot_transaction = transaction
 
-    changed = normalize_disabled_snapshot_state(
+    changed = sanitize_legacy_state(
         state,
         workflow_active=workflow_active,
     )
@@ -328,15 +328,15 @@ def test_stale_snapshot_failure_is_normalized(
     assert state.pending_required_snapshot is None
     assert state.status.value == expected_status
     assert state.snapshot_transaction == transaction
-    assert normalize_disabled_snapshot_state(
+    assert sanitize_legacy_state(
         state,
         workflow_active=workflow_active,
     ) is False
 
 
 def test_stale_post_report_snapshot_failure_completes_report():
-    from backend.services.snapshot_v2.feature_gate import (
-        normalize_disabled_snapshot_state,
+    from backend.services.legacy_state_sanitizer import (
+        sanitize_legacy_state,
     )
 
     state = _snapshot_blocked_state("post_report", "generating_report")
@@ -345,7 +345,7 @@ def test_stale_post_report_snapshot_failure_completes_report():
         "report_generation_id": "report-1",
     }
 
-    assert normalize_disabled_snapshot_state(state) is True
+    assert sanitize_legacy_state(state) is True
     assert state.status.value == "completed"
     assert state.pending_required_snapshot is None
 
@@ -361,8 +361,8 @@ def test_recovery_block_is_cleared_when_the_subsystem_is_off():
     """
     from backend.models.schemas import AnalysisState
     from backend.services.session_store import assert_recovery_clear
-    from backend.services.snapshot_v2.feature_gate import (
-        normalize_disabled_snapshot_state,
+    from backend.services.legacy_state_sanitizer import (
+        sanitize_legacy_state,
     )
 
     state = AnalysisState(id="recovery-blocked", user_id="owner")
@@ -372,12 +372,12 @@ def test_recovery_block_is_cleared_when_the_subsystem_is_off():
         "recovery_error": {"code": "RECOVERY_UNEXPECTED", "message": "boom"},
     }
 
-    assert normalize_disabled_snapshot_state(state) is True
+    assert sanitize_legacy_state(state) is True
     assert state.recovery_blocked is False
     # The audit trail survives; only the blocker is dropped.
     assert state.snapshot_transaction == {"transaction_id": "restore-audit"}
     assert_recovery_clear(state, session_id=state.id)
-    assert normalize_disabled_snapshot_state(state) is False
+    assert sanitize_legacy_state(state) is False
 
 
 def test_clearing_a_recovery_block_leaves_the_status_alone():
@@ -389,41 +389,41 @@ def test_clearing_a_recovery_block_leaves_the_status_alone():
     finished session to paused.
     """
     from backend.models.schemas import AnalysisState, TaskStatus
-    from backend.services.snapshot_v2.feature_gate import (
-        normalize_disabled_snapshot_state,
+    from backend.services.legacy_state_sanitizer import (
+        sanitize_legacy_state,
     )
 
     state = AnalysisState(id="finished", user_id="owner")
     state.status = TaskStatus.COMPLETED
     state.recovery_blocked = True
 
-    assert normalize_disabled_snapshot_state(state) is True
+    assert sanitize_legacy_state(state) is True
     assert state.recovery_blocked is False
     assert state.status == TaskStatus.COMPLETED
 
 
 def test_a_session_with_nothing_stale_is_untouched():
     from backend.models.schemas import AnalysisState, TaskStatus
-    from backend.services.snapshot_v2.feature_gate import (
-        normalize_disabled_snapshot_state,
+    from backend.services.legacy_state_sanitizer import (
+        sanitize_legacy_state,
     )
 
     state = AnalysisState(id="clean", user_id="owner")
     state.status = TaskStatus.PAUSED
 
-    assert normalize_disabled_snapshot_state(state) is False
+    assert sanitize_legacy_state(state) is False
     assert state.status == TaskStatus.PAUSED
 
 
 def test_stale_untyped_snapshot_failure_falls_back_to_paused():
-    from backend.services.snapshot_v2.feature_gate import (
-        normalize_disabled_snapshot_state,
+    from backend.services.legacy_state_sanitizer import (
+        sanitize_legacy_state,
     )
 
     state = _snapshot_blocked_state("workflow_boundary")
     state.snapshot_failure.pop("retry_context")
 
-    assert normalize_disabled_snapshot_state(state) is True
+    assert sanitize_legacy_state(state) is True
     assert state.status.value == "paused"
 
 
@@ -608,9 +608,9 @@ def test_a_stranded_non_restore_journal_does_not_block_a_disabled_session(
     kind, status,
 ):
     from backend.models.schemas import AnalysisState
-    from backend.services.snapshot_v2.feature_gate import (
+    from backend.services.legacy_state_sanitizer import (
         has_unfinished_restore_journal,
-        normalize_disabled_snapshot_state,
+        sanitize_legacy_state,
     )
 
     session_id = f"journal-{kind}-{status.lower()}"
@@ -623,7 +623,7 @@ def test_a_stranded_non_restore_journal_does_not_block_a_disabled_session(
     state = AnalysisState(id=session_id, user_id="owner")
     state.recovery_blocked = True
 
-    assert normalize_disabled_snapshot_state(state) is True
+    assert sanitize_legacy_state(state) is True
     assert state.recovery_blocked is False, (
         "the session stays unstartable with Snapshot V2 off, and the operator is "
         "told to re-enable it so recovery can finish a restore that never ran"
@@ -641,9 +641,9 @@ def test_a_stranded_non_restore_journal_does_not_block_a_disabled_session(
 )
 def test_an_unfinished_restore_journal_still_fails_closed(kind, status):
     from backend.models.schemas import AnalysisState
-    from backend.services.snapshot_v2.feature_gate import (
+    from backend.services.legacy_state_sanitizer import (
         has_unfinished_restore_journal,
-        normalize_disabled_snapshot_state,
+        sanitize_legacy_state,
     )
 
     session_id = f"journal-{kind}-{status.lower()}"
@@ -654,7 +654,7 @@ def test_an_unfinished_restore_journal_still_fails_closed(kind, status):
     state = AnalysisState(id=session_id, user_id="owner")
     state.recovery_blocked = True
 
-    assert normalize_disabled_snapshot_state(state) is False
+    assert sanitize_legacy_state(state) is False
     assert state.recovery_blocked is True
 
 

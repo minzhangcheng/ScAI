@@ -32,9 +32,9 @@ from backend.utils.checkpoint_paths import (
 )
 from backend.services.snapshot_v2.feature_gate import (
     is_snapshot_v2_enabled,
-    normalize_disabled_snapshot_state,
     require_snapshot_v2_enabled,
 )
+from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
     update_session_cache as _update_session_cache,
@@ -219,7 +219,7 @@ def _finalize_imported_state(
 ) -> None:
     """Apply every import-time fixup to *state*, in the one order that is correct.
 
-    ``normalize_disabled_snapshot_state`` has to run BEFORE
+    ``sanitize_legacy_state`` has to run BEFORE
     ``_normalize_imported_status``: it picks the next status from the failure's
     ``retry_context``, and it passes ``generating_report`` straight through — the
     one status the frontend renders no controls for, and precisely what
@@ -238,7 +238,7 @@ def _finalize_imported_state(
     _mark_runtime_availability_after_import(state, imported_pkl=imported_runtime)
     if not is_snapshot_v2_enabled():
         # Nothing can own a session that is being created right now.
-        normalize_disabled_snapshot_state(state, workflow_active=False)
+        sanitize_legacy_state(state, workflow_active=False)
     _normalize_imported_status(state)
     _arm_restore_intent_after_import(state)
     # Lifecycle generations belong to this installation, not to the archive.

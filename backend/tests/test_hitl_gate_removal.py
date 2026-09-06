@@ -126,15 +126,15 @@ def test_a_session_frozen_at_the_deleted_gate_is_unblocked_on_load(tmp_path):
     A session saved under the shipped version while the runtime-persistence
     gate was armed carries ``snapshot_failure = {"code":
     "runtime_persistence_failure", ...}`` and a matching ``wait_input_reason``.
-    ``normalize_disabled_snapshot_state`` deliberately refused to clear those,
+    ``sanitize_legacy_state`` deliberately refused to clear those,
     because clearing them would have bypassed a live gate. With the gate and its
     three routes deleted, that refusal leaves the session permanently
     unstartable and the only frontend button that still reaches a backend is
     Terminate, which discards the runtime.
     """
     from backend.models.schemas import AnalysisState, TaskStatus
-    from backend.services.snapshot_v2.feature_gate import (
-        normalize_disabled_snapshot_state,
+    from backend.services.legacy_state_sanitizer import (
+        sanitize_legacy_state,
     )
 
     state = AnalysisState(id="frozen-at-the-gate", user_id="u1")
@@ -146,7 +146,7 @@ def test_a_session_frozen_at_the_deleted_gate_is_unblocked_on_load(tmp_path):
         "retry_context": {"previous_status": "running"},
     }
 
-    changed = normalize_disabled_snapshot_state(state, workflow_active=False)
+    changed = sanitize_legacy_state(state, workflow_active=False)
 
     assert changed is True
     assert state.snapshot_failure is None
@@ -157,7 +157,7 @@ def test_a_session_frozen_at_the_deleted_gate_is_unblocked_on_load(tmp_path):
 def test_an_unfinished_restore_journal_still_refuses(tmp_path, monkeypatch):
     """The one case where staying unstartable is correct is not weakened."""
     from backend.models.schemas import AnalysisState, TaskStatus
-    from backend.services.snapshot_v2 import feature_gate
+    from backend.services import legacy_state_sanitizer as feature_gate
 
     monkeypatch.setattr(
         feature_gate, "has_unfinished_restore_journal", lambda sid: True
@@ -166,7 +166,7 @@ def test_an_unfinished_restore_journal_still_refuses(tmp_path, monkeypatch):
     state.status = TaskStatus.WAITING_INPUT
     state.recovery_blocked = True
 
-    feature_gate.normalize_disabled_snapshot_state(state, workflow_active=False)
+    feature_gate.sanitize_legacy_state(state, workflow_active=False)
     assert state.recovery_blocked is True
 
 

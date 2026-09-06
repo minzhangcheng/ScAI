@@ -32,12 +32,12 @@ async def _run_analysis_locked(session_id: str, user_id: str):
     refresh_runtime_availability(state)
 
     from backend.config import is_snapshot_v2_enabled
-    from backend.services.snapshot_v2.feature_gate import (
-        normalize_disabled_snapshot_state,
+    from backend.services.legacy_state_sanitizer import (
+        sanitize_legacy_state,
     )
 
     if not is_snapshot_v2_enabled():
-        normalize_disabled_snapshot_state(
+        sanitize_legacy_state(
             state,
             workflow_active=session_id in bindings.workflows,
         )
@@ -207,12 +207,12 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
     refresh_runtime_availability(state)
 
     from backend.config import is_snapshot_v2_enabled
-    from backend.services.snapshot_v2.feature_gate import (
-        normalize_disabled_snapshot_state,
+    from backend.services.legacy_state_sanitizer import (
+        sanitize_legacy_state,
     )
 
     if not is_snapshot_v2_enabled():
-        normalize_disabled_snapshot_state(
+        sanitize_legacy_state(
             state,
             workflow_active=session_id in bindings.workflows,
         )

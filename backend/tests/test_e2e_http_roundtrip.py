@@ -136,7 +136,7 @@ def snapshot_v2(request, monkeypatch):
 
     The gate is a process-scoped module global, and the repo conftest turns it
     *on* for the whole suite. An ordinary deployment leaves it off, and both
-    ``/run`` and ``/resume`` call ``normalize_disabled_snapshot_state`` only on
+    ``/run`` and ``/resume`` call ``sanitize_legacy_state`` only on
     that path — so the configuration this round trip is supposed to certify was
     the one configuration it never ran under.
     """

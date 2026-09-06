@@ -55,12 +55,10 @@ async def run(
         Final analysis state
     """
     from ...config import is_snapshot_v2_enabled
-    from ...services.snapshot_v2.feature_gate import (
-        normalize_disabled_snapshot_state,
-    )
+    from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 
     if not is_snapshot_v2_enabled():
-        normalize_disabled_snapshot_state(
+        sanitize_legacy_state(
             initial_state,
             workflow_active=True,
         )
@@ -253,11 +251,9 @@ async def generate_report(
     before report generation finished.
     """
     from ...config import is_snapshot_v2_enabled
-    from ...services.snapshot_v2.feature_gate import (
-        normalize_disabled_snapshot_state,
-    )
+    from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 
-    if not is_snapshot_v2_enabled() and normalize_disabled_snapshot_state(
+    if not is_snapshot_v2_enabled() and sanitize_legacy_state(
         initial_state,
         workflow_active=True,
     ):
@@ -498,12 +494,10 @@ async def resume(
 
     if analysis_state is not None:
         from ...config import is_snapshot_v2_enabled
-        from ...services.snapshot_v2.feature_gate import (
-            normalize_disabled_snapshot_state,
-        )
+        from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 
         if not is_snapshot_v2_enabled():
-            normalize_disabled_snapshot_state(
+            sanitize_legacy_state(
                 analysis_state,
                 workflow_active=True,
             )
