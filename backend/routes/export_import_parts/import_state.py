@@ -26,7 +26,7 @@ from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
 from backend.services.report.output_generation import (
     validate_and_rebind_imported_reports,
 )
-from backend.services.snapshot_v2.checkpoint_paths import (
+from backend.utils.checkpoint_paths import (
     CHECKPOINT_SQLITE_FILENAME,
     checkpoint_sqlite_path,
 )

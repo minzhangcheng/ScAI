@@ -29,16 +29,16 @@ SNAPSHOT_V2_CENSUS: dict[str, int] = {
     "backend/routes/export_import_parts/__init__.py": 1,
     "backend/routes/export_import_parts/core.py": 5,
     "backend/routes/export_import_parts/export_routes.py": 8,
-    "backend/routes/export_import_parts/import_archive_policy.py": 5,
-    "backend/routes/export_import_parts/import_identity.py": 5,
-    "backend/routes/export_import_parts/import_impl.py": 5,
+    "backend/routes/export_import_parts/import_archive_policy.py": 4,
+    "backend/routes/export_import_parts/import_identity.py": 4,
+    "backend/routes/export_import_parts/import_impl.py": 4,
     "backend/routes/export_import_parts/import_routes.py": 8,
-    "backend/routes/export_import_parts/import_state.py": 6,
-    "backend/routes/export_import_parts/import_tar.py": 10,
-    "backend/routes/export_import_parts/import_zip.py": 5,
+    "backend/routes/export_import_parts/import_state.py": 5,
+    "backend/routes/export_import_parts/import_tar.py": 9,
+    "backend/routes/export_import_parts/import_zip.py": 4,
     "backend/routes/export_import_parts/tar_builders.py": 4,
     "backend/routes/interaction.py": 1,
-    "backend/routes/lifecycle.py": 7,
+    "backend/routes/lifecycle.py": 6,
     "backend/routes/lifecycle_parts/run_resume.py": 6,
     "backend/routes/lifecycle_parts/snapshot_failures.py": 6,
     "backend/routes/snapshots.py": 23,
@@ -47,7 +47,7 @@ SNAPSHOT_V2_CENSUS: dict[str, int] = {
     "backend/services/session_lifecycle.py": 1,
     "backend/services/session_store.py": 15,
     "backend/services/workflow_runner.py": 2,
-    "backend/utils/runtime_apply.py": 2,
+    "backend/utils/runtime_apply.py": 1,
     "backend/utils/sandbox_parts/regular_save.py": 3,
     "backend/utils/sandbox_parts/runtime_save.py": 3,
     "backend/utils/sandbox_parts/state_tracking.py": 3,
@@ -107,3 +107,40 @@ def test_runtime_apply_does_not_use_the_snapshot_object_store():
     source = (BACKEND / "utils" / "runtime_apply.py").read_text()
     assert "object_store" not in source
     assert "_hash_file" not in source
+def test_checkpoint_path_helpers_live_outside_snapshot_v2():
+    from backend.utils.checkpoint_paths import (
+        CHECKPOINT_SQLITE_FILENAME,
+        SQLITE_COMPANION_SUFFIXES,
+        checkpoint_sqlite_path,
+        sqlite_companion_paths,
+    )
+
+    assert CHECKPOINT_SQLITE_FILENAME == "checkpoints.sqlite"
+    assert SQLITE_COMPANION_SUFFIXES == ("-wal", "-shm")
+    assert checkpoint_sqlite_path("/tmp/states").name == "checkpoints.sqlite"
+    assert [c.name for c in sqlite_companion_paths("/tmp/s/checkpoints.sqlite")] == [
+        "checkpoints.sqlite-wal",
+        "checkpoints.sqlite-shm",
+    ]
+
+
+def test_the_snapshot_checkpoint_module_is_only_a_shim():
+    """The V2 copy must not drift from the relocated one before A2-5."""
+    from backend.services.snapshot_v2 import checkpoint_paths as shim
+    from backend.utils import checkpoint_paths as real
+
+    assert shim.checkpoint_sqlite_path is real.checkpoint_sqlite_path
+    assert shim.sqlite_companion_paths is real.sqlite_companion_paths
+    assert shim.CHECKPOINT_SQLITE_FILENAME is real.CHECKPOINT_SQLITE_FILENAME
+
+
+def test_no_surviving_module_imports_the_snapshot_checkpoint_paths():
+    """A shim keeps them running; it does not sever them."""
+    offenders = set()
+    for path in sorted(BACKEND.rglob("*.py")):
+        rel = path.relative_to(REPO).as_posix()
+        if rel.startswith(("backend/tests/", "backend/services/snapshot_v2/")):
+            continue
+        if "snapshot_v2.checkpoint_paths" in path.read_text():
+            offenders.add(rel)
+    assert not offenders, sorted(offenders)

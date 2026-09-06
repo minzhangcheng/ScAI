@@ -641,7 +641,7 @@ def retire_live_runtime(session_id: str, *, include_checkpoint: bool = False) ->
         # values that node produced are still in memory. Kept beside a retired
         # runtime it is worse than absent: resume() prefers it over the explicit
         # start intent and continues an old position on an empty kernel.
-        from backend.services.snapshot_v2.checkpoint_paths import (
+        from backend.utils.checkpoint_paths import (
             checkpoint_sqlite_path,
         )
 

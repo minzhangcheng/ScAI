@@ -36,7 +36,7 @@ from backend.utils.auth import require_session_ownership
 
 from backend.utils.runtime_apply import is_forward_resume_blocked, state_runtime_coherence
 
-from backend.services.snapshot_v2.checkpoint_paths import checkpoint_sqlite_path
+from backend.utils.checkpoint_paths import checkpoint_sqlite_path
 
 from backend.services.snapshot_v2.errors import (
     SNAPSHOT_FAILURE_ACTIONS,
