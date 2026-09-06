@@ -51,7 +51,7 @@ from .integration import IntegrationMixin
 from .post_execution import PostExecutionReviewMixin
 
 from ..services.snapshot_v2.errors import RequiredSnapshotBlocked
-from ..services.snapshot_v2.restore_entry import build_restore_entry_plan
+from .restore_entry import build_restore_entry_plan
 
 from ..models.schemas import (
     AnalysisState, AgentType, TaskStatus, RoundResult, AnalysisPhase,

@@ -50,7 +50,7 @@ SNAPSHOT_V2_CENSUS: dict[str, int] = {
     "backend/utils/sandbox_parts/runtime_save.py": 3,
     "backend/utils/sandbox_parts/state_tracking.py": 3,
     "backend/utils/snapshot.py": 1,
-    "backend/workflow/core.py": 2,
+    "backend/workflow/core.py": 1,
     "backend/workflow/core_parts/execution.py": 18,
     "backend/workflow/core_parts/initialization.py": 11,
     "backend/workflow/core_parts/interventions.py": 2,
@@ -156,3 +156,29 @@ def test_runtime_name_validation_lives_outside_snapshot_v2():
 def test_the_runtime_persistence_chain_is_free_of_snapshot_v2():
     for rel in ("utils/runtime_apply.py", "utils/sandbox_parts/regular_save.py"):
         assert "snapshot_v2" not in (BACKEND / rel).read_text(), rel
+def test_the_restore_entry_plan_lives_in_the_workflow_package():
+    import pydantic
+
+    from backend.workflow.restore_entry import (
+        RestoreEntryPlan,
+        build_restore_entry_plan,
+    )
+
+    assert issubclass(RestoreEntryPlan, pydantic.BaseModel)
+
+    class _Bare:
+        pass
+
+    plan = build_restore_entry_plan(_Bare())
+    assert plan.intent == "normal"
+    assert plan.target_node is None
+
+    plan = build_restore_entry_plan(_Bare(), restore_start_intent="explicit_start")
+    assert plan.intent == "explicit_start"
+    assert plan.target_node == "initialize_round"
+    assert plan.preserve_round_on_initialize is True
+
+
+def test_workflow_core_does_not_import_the_snapshot_restore_entry():
+    source = (BACKEND / "workflow" / "core.py").read_text()
+    assert "snapshot_v2.restore_entry" not in source
