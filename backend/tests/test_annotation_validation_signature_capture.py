@@ -9,7 +9,9 @@ class _FakeSandbox:
     def __init__(self, output):
         self._output = output
 
-    async def execute(self, code, save_to_history=True, skip_safety_check=False):
+    async def execute(
+        self, code, save_to_history=True, skip_safety_check=False, **_kwargs
+    ):
         return SimpleNamespace(success=True, output=self._output, error=None)
 
 

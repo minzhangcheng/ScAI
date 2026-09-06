@@ -25,7 +25,9 @@ class _Sandbox:
         self._sig_calls = 0
         self._mutate_after = mutate_after  # iteration index after which signature changes
 
-    async def execute(self, code, save_to_history=True, skip_safety_check=False):
+    async def execute(
+        self, code, save_to_history=True, skip_safety_check=False, **_kwargs
+    ):
         self.executed.append(code)
         if "'var'" in code:                       # introspection
             return SimpleNamespace(success=True, output=json.dumps(_META), error=None)
@@ -129,7 +131,9 @@ async def test_executor_rejects_denylisted_code():
 async def test_executor_fails_fast_when_pre_signature_unavailable():
     # Signature capture returns {} (e.g. kernel error) -> must NOT execute any validation code.
     class _NoSigSandbox(_Sandbox):
-        async def execute(self, code, save_to_history=True, skip_safety_check=False):
+        async def execute(
+            self, code, save_to_history=True, skip_safety_check=False, **_kwargs
+        ):
             self.executed.append(code)
             if "'var'" in code:
                 return SimpleNamespace(success=True, output=json.dumps(_META), error=None)

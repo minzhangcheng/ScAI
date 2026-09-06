@@ -398,18 +398,68 @@ class TestSandboxRuntimeRevision:
         assert sandbox.runtime_revision == rev_before + 1
 
     @pytest.mark.asyncio
-    async def test_runtime_revision_not_incremented_on_internal_code(self, sandbox):
+    async def test_runtime_revision_follows_mutation_not_history(self, sandbox):
+        """save_to_history says whether a cell is recorded, not whether it mutates.
+
+        Several internal cells set it False while binding real values --
+        ``adata_val = <var>.copy()`` among them -- so the two questions had to
+        stop sharing an answer.
+        """
         rev_before = sandbox.runtime_revision
-        result = await sandbox.execute("x = 1", save_to_history=False, skip_safety_check=True)
+        result = await sandbox.execute(
+            "x = 1", save_to_history=False, skip_safety_check=True
+        )
         assert result.success
-        assert sandbox.runtime_revision == rev_before
+        assert sandbox.runtime_revision == rev_before + 1
+
+        rev_after = sandbox.runtime_revision
+        await sandbox.execute(
+            "print(1)",
+            save_to_history=False,
+            skip_safety_check=True,
+            mutates_namespace=False,
+        )
+        assert sandbox.runtime_revision == rev_after
 
     @pytest.mark.asyncio
-    async def test_runtime_revision_not_incremented_on_failure(self, sandbox):
+    async def test_runtime_revision_is_incremented_on_failure(self, sandbox):
+        """A failed cell may have mutated the namespace before it raised."""
         rev_before = sandbox.runtime_revision
         result = await sandbox.execute("1/0", save_to_history=True)
         assert not result.success
-        assert sandbox.runtime_revision == rev_before
+        assert sandbox.runtime_revision == rev_before + 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_cell_leaves_the_runtime_dirty(self, sandbox):
+        """The kernel does not roll a cell back, so persistence must not assume it."""
+        await sandbox.execute("values = [1]", skip_safety_check=True)
+        await sandbox.save_session()
+        saved_before = sandbox.saved_runtime_revision
+
+        result = await sandbox.execute(
+            "values.append(2)\nraise ValueError('after the mutation')",
+            skip_safety_check=True,
+        )
+        assert not result.success
+        assert sandbox.runtime_revision > saved_before, (
+            "a mutation followed by a raise must not leave the runtime looking clean"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_next_save_writes_after_a_failed_cell(self, sandbox):
+        """The point of the revision: a save that short-circuits loses the change."""
+        await sandbox.execute("values = [1]", skip_safety_check=True)
+        await sandbox.save_session()
+        first = sandbox.notebook_state.session_path.read_bytes()
+
+        await sandbox.execute(
+            "values.append(2)\nraise ValueError('boom')", skip_safety_check=True
+        )
+        await sandbox.save_session()
+
+        assert sandbox.notebook_state.session_path.read_bytes() != first, (
+            "the save reused the previous generation and lost the mutation"
+        )
 
     @pytest.mark.asyncio
     async def test_saved_runtime_revision_starts_at_zero(self, sandbox):

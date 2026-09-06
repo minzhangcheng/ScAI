@@ -588,6 +588,7 @@ async def ensure_stage1_baseline_figures(
             build_stage1_baseline_probe_code(),
             save_to_history=False,
             skip_safety_check=True,
+            mutates_namespace=False,
         )
     except Exception as err:  # pragma: no cover - defensive
         logger.warning("[Bioinformatics] Stage 1 baseline probe failed: %r", err)

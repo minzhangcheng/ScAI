@@ -168,6 +168,27 @@ class ExecutionMixin:
             str(self._session_tmp.resolve()),
         ]
 
+    def _note_execution_effect(self, *, mutates_namespace: bool) -> None:
+        """Advance the runtime revision for anything that could change globals.
+
+        Tying this to success made a failed cell's side effects invisible to
+        persistence: the kernel does not roll a cell back, so a statement that
+        mutated ``adata`` before raising leaves it mutated -- but the revision
+        stayed put, and a save whose revision equals the saved revision reuses
+        the previous generation instead of writing one. The mutation was then
+        in the live namespace and in no dump.
+
+        Read-only probes opt out explicitly rather than being inferred from
+        ``save_to_history``, which several mutating internal cells also set to
+        False (``adata_val = adata.copy()`` among them).
+        """
+        if not mutates_namespace:
+            return
+        # Bookkeeping, not correctness: a sandbox still being constructed has no
+        # revision yet, and refusing to execute over a missing counter would be
+        # a worse failure than starting it here.
+        self.runtime_revision = int(getattr(self, "runtime_revision", 0) or 0) + 1
+
     @staticmethod
     def _surface_unpersistable_outputs(result, declared, unpersistable) -> None:
         """Report what this cell bound that cannot survive a kernel restart.
@@ -215,6 +236,7 @@ class ExecutionMixin:
         skip_safety_check: bool = False,
         declared_outputs: Optional[List[str]] = None,
         track_globals: bool = False,
+        mutates_namespace: bool = True,
     ) -> CodeExecutionResult:
         """Execute code in the kernel.
 
@@ -228,6 +250,10 @@ class ExecutionMixin:
                 execution before it is recorded as a required runtime output.
             track_globals: When True (and save_to_history), record created/loaded
                 user-global diffs into the runtime dependency tracker.
+            mutates_namespace: Whether this execution could change user globals.
+                Read-only probes opt out; everything else defaults to True,
+                because a cell that raised part-way still changed what it had
+                already changed.
         """
         declared_raw = [
             str(name).strip()
@@ -300,8 +326,8 @@ class ExecutionMixin:
                 self._surface_unpersistable_outputs(
                     result, declared, unpersistable
                 )
+        self._note_execution_effect(mutates_namespace=mutates_namespace)
         if result.success and save_to_history:
-            self.runtime_revision += 1
             if confirmed_declared:
                 self.record_declared_outputs(confirmed_declared)
                 tracker = getattr(self, "runtime_dependency_tracker", None)
