@@ -2,12 +2,17 @@
 """Compare two scripts/scai-test runs by failing node-id set.
 
 The failure *count* is not acceptance: two different sets of the same size
-satisfy it. Nor is the set alone: a run whose collection did not complete, or
-whose junit.xml disagrees with its own recorded counts, measured nothing. All
-of those exit 2, never 0 -- silence is not agreement.
+satisfy it. Nor is the failing set alone: deleting every passing and skipped
+record from a junit.xml leaves that set intact, so the file is authenticated
+against the size and SHA-256 the runner published for it, and its case count is
+checked against the run's own ``collected``. A run whose collection did not
+complete, whose junit.xml is unauthenticated or altered, or whose junit
+disagrees with its own recorded counts, measured nothing. All of those exit 2,
+never 0 -- silence is not agreement.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import sys
@@ -21,8 +26,12 @@ def load(run: pathlib.Path) -> tuple[str, set[str]]:
     operator has to remember is a check that gets skipped on the twelfth batch.
 
     Note: pytest can emit a junit ``<error>`` for a teardown fault on a test
-    that also passed, which this cross-check reports as a disagreement. That
-    surfaces as exit 2 -- look at it -- never as agreement.
+    that also passed, which the failed+errors cross-check reports as a
+    disagreement. That surfaces as exit 2 -- look at it -- never as agreement.
+
+    The digest check and the case-count check are deliberately both here. The
+    digest alone is defeated by re-recording it after altering the file; the
+    count alone is defeated by any edit that preserves the number of cases.
     """
     junit = run / "junit.xml"
     evidence = run / "evidence.json"
@@ -35,17 +44,36 @@ def load(run: pathlib.Path) -> tuple[str, set[str]]:
     if (data.get("outcomes") or {}).get("complete") is not True:
         raise LookupError("%s: collection did not complete" % run)
 
-    root = ET.parse(junit).getroot()
+    entry = (data.get("artifacts") or {}).get("junit.xml")
+    if not entry:
+        raise LookupError("%s: evidence.json does not record a junit.xml artifact" % run)
+    raw = junit.read_bytes()
+    if int(entry.get("size", -1)) != len(raw):
+        raise LookupError(
+            "%s: junit.xml is %d bytes, evidence records %s"
+            % (run, len(raw), entry.get("size"))
+        )
+    if entry.get("sha256") != hashlib.sha256(raw).hexdigest():
+        raise LookupError("%s: junit.xml does not match its recorded sha256" % run)
+
+    counts = data.get("counts") or {}
+    root = ET.fromstring(raw)
     cases = list(root.iter("testcase"))
     if not cases:
         raise LookupError("no test cases parsed from %s" % junit)
+    collected = int(counts.get("collected", -1))
+    if len(cases) != collected:
+        raise LookupError(
+            "%s: junit.xml holds %d test cases, evidence collected %d"
+            % (run, len(cases), collected)
+        )
+
     names = set()
     for case in cases:
         for child in case:
             if child.tag in ("failure", "error"):
                 names.add("%s::%s" % (case.get("classname"), case.get("name")))
 
-    counts = data.get("counts") or {}
     declared = int(counts.get("failed", -1)) + int(counts.get("errors", 0))
     if declared != len(names):
         raise LookupError(

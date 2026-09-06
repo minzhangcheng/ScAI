@@ -1,9 +1,11 @@
 """The evidence differ must not report agreement it cannot see."""
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import subprocess
+import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -34,19 +36,59 @@ JUNIT = """<?xml version="1.0" encoding="utf-8"?>
 FAILURE = '<failure message="boom">trace</failure>'
 
 
+def _write_evidence(d, *, profile, complete, declared_failed, collected,
+                    manifest=True, junit_digest=None):
+    """Write evidence.json describing the junit.xml already in *d*."""
+    raw = (d / "junit.xml").read_bytes() if (d / "junit.xml").is_file() else b""
+    artifacts = {}
+    if manifest:
+        artifacts["junit.xml"] = {
+            "path": "junit.xml",
+            "size": len(raw),
+            "sha256": junit_digest or hashlib.sha256(raw).hexdigest(),
+        }
+    (d / "evidence.json").write_text(json.dumps({
+        "profile": profile,
+        "counts": {"collected": collected, "passed": collected - declared_failed,
+                   "failed": declared_failed, "errors": 0, "skipped": 0},
+        "outcomes": {"complete": complete, "count": collected},
+        "artifacts": artifacts,
+    }))
+    return d
+
+
 def _run_dir(root, name, body, *, profile="backend-full", complete=True,
-             declared_failed=None):
+             declared_failed=None, manifest=True):
     d = root / name
     d.mkdir(parents=True)
     n = 1 if body else 0
     (d / "junit.xml").write_text(JUNIT.format(n=n, body=body))
-    (d / "evidence.json").write_text(json.dumps({
-        "profile": profile,
-        "counts": {"collected": 3, "passed": 3 - n,
-                   "failed": n if declared_failed is None else declared_failed,
-                   "errors": 0, "skipped": 0},
-        "outcomes": {"complete": complete, "count": 3},
-    }))
+    return _write_evidence(
+        d, profile=profile, complete=complete,
+        declared_failed=n if declared_failed is None else declared_failed,
+        collected=3, manifest=manifest,
+    )
+
+
+def _strip_to_failures(d, *, refresh_digest):
+    """Drop every passing/skipped record, exactly as the reviewer's repro did."""
+    tree = ET.parse(d / "junit.xml")
+    for suite in tree.getroot().iter("testsuite"):
+        for case in list(suite):
+            if case.tag == "testcase" and not any(
+                ch.tag in ("failure", "error") for ch in case
+            ):
+                suite.remove(case)
+    tree.write(d / "junit.xml")
+    if refresh_digest:
+        evidence = json.loads((d / "evidence.json").read_text())
+        raw = (d / "junit.xml").read_bytes()
+        evidence["artifacts"]["junit.xml"] = {
+            "path": "junit.xml",
+            "size": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+        (d / "evidence.json").write_text(json.dumps(evidence))
     return d
 
 
@@ -118,9 +160,45 @@ def test_two_different_profiles_are_not_comparable(tmp_path):
 
 
 def test_junit_and_counts_must_agree(tmp_path):
-    """A truncated junit.xml beside an intact count is the false-green shape."""
+    """A junit whose failures disagree with the recorded count."""
     a = _run_dir(tmp_path, "a", FAILURE)
     b = _run_dir(tmp_path, "b", FAILURE, declared_failed=7)
     result = _diff(a, b)
     assert result.returncode == 2
     assert "introduced: none" not in result.stdout
+
+
+def test_a_junit_stripped_to_its_failures_is_inconclusive(tmp_path):
+    """The failing set alone is not the evidence.
+
+    Deleting every passing and skipped record leaves the failing set intact,
+    so a differ that cross-checks only ``failed + errors`` reports agreement
+    while 6,656 of 6,697 records are gone. The recorded artifact digest is
+    what catches it.
+    """
+    a = _run_dir(tmp_path, "a", FAILURE)
+    b = _strip_to_failures(_run_dir(tmp_path, "b", FAILURE), refresh_digest=False)
+    result = _diff(a, b)
+    assert result.returncode == 2
+    assert "introduced: none" not in result.stdout
+
+
+def test_a_stripped_junit_with_a_refreshed_digest_is_still_inconclusive(tmp_path):
+    """Re-recording the digest must not launder a truncated junit.
+
+    This is the case the digest check alone cannot see, so the case count has
+    to be checked against the run's own ``collected`` as well.
+    """
+    a = _run_dir(tmp_path, "a", FAILURE)
+    b = _strip_to_failures(_run_dir(tmp_path, "b", FAILURE), refresh_digest=True)
+    result = _diff(a, b)
+    assert result.returncode == 2
+    assert "introduced: none" not in result.stdout
+
+
+def test_a_missing_junit_manifest_entry_is_inconclusive(tmp_path):
+    """Unauthenticated evidence is not evidence."""
+    a = _run_dir(tmp_path, "a", FAILURE)
+    b = _run_dir(tmp_path, "b", FAILURE, manifest=False)
+    result = _diff(a, b)
+    assert result.returncode == 2
