@@ -15,6 +15,7 @@ class RestorePlan:
 
     declared: set[str] | None
     legacy: bool
+    pairing: dict | None = None
 
 
 def plan_restore(manifest_path, live_pkl) -> RestorePlan:
@@ -51,7 +52,7 @@ def plan_restore(manifest_path, live_pkl) -> RestorePlan:
         raise RuntimeIntegrityError(
             "runtime dump digest does not match its manifest; refusing to load it"
         )
-    return RestorePlan(declared=set(manifest["saved_names"]), legacy=False)
+    return RestorePlan(declared=set(manifest["saved_names"]), legacy=False, pairing=manifest.get("pairing"))
 
 
 def verify_restored_generation(plan: RestorePlan, restored) -> None:
@@ -86,6 +87,8 @@ def _mark_runtime_unavailable_if_work_exists(sandbox, *, bindings) -> None:
     from backend.state import sessions as live_sessions
 
     state = live_sessions.get(sandbox.session_id)
+    if getattr(state, "runtime_recompute_pending", False):
+        return
     if state is None or int(getattr(state, "current_round", 0) or 0) <= 0:
         return
     if getattr(state, "runtime_restore_status", "complete") != "complete":
@@ -184,9 +187,9 @@ async def restore_session(sandbox, *, bindings):
     )
     degraded_recovery = bool(
         committed_dump
-        and persistence.get("last_attempt_status") == "failed"
-        and attempted_revision > committed_revision
+        and max(attempted_revision, current_revision) > committed_revision
     )
+    attempted_revision = max(attempted_revision, current_revision)
     if committed_dump:
         # A failed newer attempt may have advanced current_revision without
         # publishing a pkl. Rehydrate the verified committed generation,
@@ -426,6 +429,7 @@ except Exception as e:
         sandbox._session_restore_failed = False
         sandbox.saved_runtime_revision = saved_revision
         sandbox.runtime_revision = current_revision
+        sandbox.notebook_state.runtime_persistence["committed_pairing"] = restore_plan.pairing
         sandbox.notebook_state.record_runtime_restored(
             current_revision=current_revision,
             saved_revision=saved_revision,

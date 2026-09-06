@@ -399,11 +399,12 @@ def import_tar_gz(
     # tests for them below.
     imported_live_runtime = wrote_sandbox_pkl or wrote_runtime_h5ad_manifest
     if session_id:
+        if wrote_sandbox_pkl:
+            # Validation can retire both the dump and its h5ad fallback.
+            imported_live_runtime = _resign_imported_live_pkl(session_id)
         if not imported_live_runtime:
             _drop_kernelless_checkpoints(session_id, notify=context.note_skip)
         validate_and_rebind_imported_reports(get_session_reports(session_id))
-        if wrote_sandbox_pkl:
-            _resign_imported_live_pkl(session_id)
 
     if state_json_data is None:
         if skipped["snapshot_v2"]:
@@ -454,6 +455,9 @@ def import_tar_gz(
     )
     state = AnalysisState(**inlined)
     _finalize_imported_state(state, imported_runtime=imported_live_runtime)
+    if imported_live_runtime:
+        from .import_state import validate_imported_pairing
+        validate_imported_pairing(state)
 
     # Write the externalized JSON (with @scai-blob tokens intact) to disk.
     # This keeps session.json consistent with the extracted blob sidecars.

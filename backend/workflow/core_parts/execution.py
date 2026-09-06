@@ -65,6 +65,9 @@ async def run(
             workflow_active=True,
         )
 
+    from ...utils.runtime_pairing import refresh_runtime_availability
+    refresh_runtime_availability(initial_state)
+
     # §1d: never run the graph forward on a kernel that is inconsistent with
     # the restored state. Twin of the lifecycle run guard.
     if is_forward_resume_blocked(
@@ -504,6 +507,10 @@ async def resume(
                 analysis_state,
                 workflow_active=True,
             )
+
+    from ...utils.runtime_pairing import refresh_runtime_availability
+    if analysis_state is not None:
+        refresh_runtime_availability(analysis_state)
 
     # §1d: never run the graph forward on a kernel that is inconsistent with
     # the restored state. This is the workflow-level twin of the lifecycle

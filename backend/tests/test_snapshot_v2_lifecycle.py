@@ -88,11 +88,13 @@ async def test_reanalysis_clears_restore_provenance(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("snapshot_v2", ["true", "false"])
 async def test_reanalysis_refuses_to_mutate_when_teardown_is_incomplete(
-    monkeypatch,
+    monkeypatch, snapshot_v2,
 ):
     import backend.routes.lifecycle as life
 
+    monkeypatch.setenv("SCAI_ENABLE_SNAPSHOT_V2", snapshot_v2)
     sid = "sess-reanalysis-cleanup-incomplete"
     state = AnalysisState(
         id=sid,
@@ -134,7 +136,7 @@ async def test_reanalysis_refuses_to_mutate_when_teardown_is_incomplete(
     assert state.restore_provenance_snapshot_id == "snap-old-restore"
     assert state.runtime_restore_status == "unavailable"
     assert state.runtime_restore_warning == "runtime unavailable"
-    teardown.assert_awaited_once_with(sid, discard_runtime=True)
+    teardown.assert_awaited_once_with(sid, discard_runtime=True, retire_runtime=True)
     update_cache.assert_not_awaited()
     save_session.assert_not_awaited()
 

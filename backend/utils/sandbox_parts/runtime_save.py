@@ -114,6 +114,7 @@ class SaveContext:
     # Defaulted so a caller building a context by hand still produces valid
     # kernel code; _build_save_code substitutes the canonical tuple when empty.
     escaped_volatile_prefixes: str = ""
+    pairing: dict | None = None
 
 
 class RequiredValueDemoted(Exception):
@@ -286,9 +287,21 @@ async def _prepare_save(sandbox, *, bindings):
             return False
         return True
 
+    from backend.state import sessions as live_sessions
+    from backend.utils.runtime_pairing import capture_pairing
+
+    try:
+        pairing = await bindings.asyncio.to_thread(
+            capture_pairing, sandbox.session_id, live_sessions.get(sandbox.session_id),
+            getattr(sandbox.notebook_state, "state_dir", None),
+        )
+    except Exception:
+        _record_generation_failure("Could not read the workflow checkpoint identity")
+        raise
     has_committed_dump = getattr(sandbox.notebook_state, "has_session_dump", None)
     if (
         not restore_failed
+        and previous_persistence.get("committed_pairing") == pairing
         and revision == saved_revision
         and (
             getattr(sandbox.notebook_state, "runtime_persistence", {}) or {}
@@ -451,6 +464,7 @@ async def _prepare_save(sandbox, *, bindings):
         SessionGoneError=SessionGoneError,
         assert_session_generation_active=assert_session_generation_active,
         lifecycle_file_lock=lifecycle_file_lock,
+        pairing=pairing,
     )
 
 
@@ -1013,6 +1027,7 @@ async def _execute_save(
                     saved_revision=context.revision,
                     commit_source="regular_save",
                     runtime_digest=target_digest,
+                    committed_pairing=context.pairing,
                 )
 
         commit_outcome: Dict[str, Any] = {
@@ -1038,12 +1053,8 @@ async def _execute_save(
                                 manifest_path=manifest_path,
                                 runtime_manifest_path=runtime_manifest_file,
                                 runtime_manifest={
-                                    # The runtime revision these bytes
-                                    # captured. Coherence is decided from the
-                                    # save-attempt record, not from here; this
-                                    # is what lets a restore notice a manifest
-                                    # left behind by a different generation.
-                                    "state_revision": int(context.revision or 0),
+                                    "state_revision": (context.pairing or {}).get("state_version", 0),
+                                    "pairing": context.pairing,
                                     "saved_names": sorted(saved_names),
                                     "skipped_names": skipped_record,
                                     "serializer_version": "dill-zstd-1",

@@ -252,6 +252,8 @@ def _quarantine_path(path: Path) -> Path | None:
         candidate = base.with_name(f"{base.name}.{index}")
         index += 1
     path.replace(candidate)
+    from backend.utils.files import fsync_directory
+    fsync_directory(path.parent)
     return candidate
 
 
@@ -372,12 +374,44 @@ def state_runtime_coherence(state) -> str:
     has_generation = bool(persistence.get("committed_source")) and bool(
         persistence.get("committed_digest")
     )
-    return runtime_coherence(
+    verdict = runtime_coherence(
         committed_revision=persistence.get("committed_revision"),
         last_attempt_revision=int(persistence.get("last_attempt_revision") or 0),
         last_attempt_status=persistence.get("last_attempt_status"),
         has_generation=has_generation,
+        current_revision=max(
+            int(persistence.get("current_revision") or 0),
+            int(persistence.get("degraded_from_revision") or 0),
+        ),
     )
+    if verdict != "current":
+        return verdict
+    pairing = persistence.get("committed_pairing")
+    sid = getattr(state, "id", None)
+    if sid:
+        from backend.utils.runtime_manifest import runtime_manifest_path, read_runtime_manifest, RuntimeManifestError
+        manifest_path = runtime_manifest_path(sid)
+        if manifest_path.exists():
+            try:
+                manifest = read_runtime_manifest(manifest_path)
+            except RuntimeManifestError:
+                return "inconsistent"
+            if manifest["pkl_sha256"] != persistence.get("committed_digest"):
+                return "inconsistent"
+            pairing = manifest.get("pairing")
+    if pairing is not None:
+        from backend.utils.runtime_pairing import checkpoint_identity
+        import sqlite3
+
+        version = int(getattr(state, "state_version", 0) or 0)
+        if version != pairing["state_version"]:
+            return "stale" if version > pairing["state_version"] else "inconsistent"
+        try:
+            if checkpoint_identity(sid) != pairing["checkpoint"]:
+                return "stale"
+        except (OSError, sqlite3.Error):
+            return "inconsistent"
+    return verdict
 
 
 def is_forward_resume_blocked(

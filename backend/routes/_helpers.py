@@ -11,6 +11,7 @@ async def teardown_running_workflow(
     session_id: str,
     *,
     discard_runtime: bool = False,
+    retire_runtime: bool = False,
 ) -> bool:
     """Stop active workflow, cancel run/monitor tasks, and delete checkpoint.
 
@@ -83,6 +84,21 @@ async def teardown_running_workflow(
         monitor = _monitor_tasks.pop(session_id, None)
     if monitor and not monitor.done():
         monitor.cancel()
+
+    if retire_runtime:
+        from backend.services.session_lifecycle import (
+            get_lifecycle_lock, lifecycle_file_lock, assert_session_generation_active,
+        )
+        from backend.services.workflow_runner import session_has_any_workflow_owner
+        from backend.utils.runtime_apply import retire_live_runtime
+
+        async with get_lifecycle_lock(session_id):
+            if session_has_any_workflow_owner(session_id):
+                return False
+            with lifecycle_file_lock(session_id):
+                assert_session_generation_active(session_id)
+                retire_live_runtime(session_id, include_checkpoint=True)
+        return True
 
     from backend.utils.snapshot import SnapshotManager
     await SnapshotManager(session_id).delete_checkpoint()

@@ -273,7 +273,8 @@ def _resign_imported_live_pkl(session_id: str) -> bool:
     if not pkl.exists():
         return False
     _write_pkl_signature(pkl, _integrity_dir(session_id))
-    _rekey_imported_runtime_manifest(session_id, pkl)
+    if not _rekey_imported_runtime_manifest(session_id, pkl):
+        return False
     logger.warning(
         "[%s] Re-signed imported sandbox pkl under this installation's key; "
         "the archive's origin is trusted on the caller's authority (trust=true).",
@@ -282,7 +283,7 @@ def _resign_imported_live_pkl(session_id: str) -> bool:
     return True
 
 
-def _rekey_imported_runtime_manifest(session_id: str, pkl) -> None:
+def _rekey_imported_runtime_manifest(session_id: str, pkl) -> bool:
     """Re-sign an imported generation manifest under this installation's key.
 
     The manifest arrives signed by the *source* installation, so it can never
@@ -297,22 +298,26 @@ def _rekey_imported_runtime_manifest(session_id: str, pkl) -> None:
     """
     import json
 
-    from backend.utils.crypto import sign_hmac_sha256
-    from backend.utils.runtime_apply import _retire_stale_runtime_manifest
+    from backend.utils.runtime_apply import retire_live_runtime
     from backend.utils.runtime_manifest import (
         build_runtime_manifest,
-        canonical_manifest_bytes,
         runtime_manifest_path,
         runtime_manifest_sig_path,
         write_runtime_manifest,
+        RUNTIME_MANIFEST_SCHEMA_VERSION,
     )
     from backend.utils.sandbox_parts.regular_save import _sha256_file
 
     manifest_path = runtime_manifest_path(session_id)
     if not manifest_path.exists():
-        return
+        if runtime_manifest_sig_path(manifest_path).exists():
+            retire_live_runtime(session_id, include_checkpoint=True)
+            return False
+        return True
     try:
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or raw.get("schema_version") != RUNTIME_MANIFEST_SCHEMA_VERSION:
+            raise ValueError("unsupported runtime manifest schema")
         manifest = build_runtime_manifest(
             revision=raw["revision"],
             state_revision=raw["state_revision"],
@@ -320,16 +325,16 @@ def _rekey_imported_runtime_manifest(session_id: str, pkl) -> None:
             saved_names=raw["saved_names"],
             skipped_names=raw["skipped_names"],
             serializer_version=raw["serializer_version"],
+            pairing=raw.get("pairing"),
         )
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         logger.warning(
-            "[%s] imported runtime manifest is unusable (%s); retiring it so the "
-            "dump loads as a legacy generation",
+            "[%s] imported runtime manifest is unusable (%s); refusing runtime",
             session_id,
             exc,
         )
-        _retire_stale_runtime_manifest(session_id)
-        return
+        retire_live_runtime(session_id, include_checkpoint=True)
+        return False
 
     if manifest["pkl_sha256"] != _sha256_file(pkl):
         # Not the same situation as an archive that never carried a manifest.
@@ -338,21 +343,49 @@ def _rekey_imported_runtime_manifest(session_id: str, pkl) -> None:
         # mixed together. Accepting the dump as a legacy generation would launder
         # that away, so the runtime is refused: the session imports without one
         # and the existing re-run affordance offers a recompute.
-        from backend.utils.runtime_apply import retire_live_runtime
-
         logger.error(
             "[%s] imported runtime manifest describes different bytes than the "
             "imported dump; refusing the runtime and importing without it",
             session_id,
         )
-        retire_live_runtime(session_id)
-        return
+        retire_live_runtime(session_id, include_checkpoint=True)
+        return False
 
     write_runtime_manifest(manifest_path, manifest)
     logger.info(
         "[%s] re-keyed the imported runtime manifest under this installation's key",
         session_id,
     )
+    return True
+
+
+def validate_imported_pairing(state: AnalysisState) -> None:
+    """Keep a validated generation paired with its imported control state."""
+    from backend.utils.runtime_apply import retire_live_runtime
+    from backend.utils.runtime_manifest import runtime_manifest_path, read_runtime_manifest, write_runtime_manifest
+    from backend.utils.runtime_pairing import checkpoint_identity
+
+    path = runtime_manifest_path(state.id)
+    if not path.exists():
+        return
+    manifest = read_runtime_manifest(path)
+    pairing = manifest.get("pairing")
+    if pairing is None:
+        return
+    checkpoint = checkpoint_identity(state.id)
+    # Reallocated imports intentionally drop the old thread's checkpoint and
+    # start a new graph from the restored inputs; they do not resume that ID.
+    restart_graph = checkpoint is None and state.restore_start_intent == "explicit_start"
+    if state.state_version != pairing["state_version"] or (
+        checkpoint != pairing["checkpoint"] and not restart_graph
+    ):
+        retire_live_runtime(state.id, include_checkpoint=True)
+        _mark_runtime_availability_after_import(state, imported_pkl=False)
+        _arm_restore_intent_after_import(state)
+        return
+    if restart_graph and pairing["checkpoint"] is not None:
+        manifest["pairing"] = {**pairing, "checkpoint": None}
+        write_runtime_manifest(path, manifest)
 
 
 def _cleanup_partial_session(session_id: Optional[str]) -> None:

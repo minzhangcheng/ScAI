@@ -49,6 +49,13 @@ async def prepare_sandbox(agent, state, *, bindings) -> None:
     # newer failed save. Do not silently call that fully current: stop at a
     # durable HITL gate unless the user already chose recompute/reduce.
     persistence = agent.sandbox.sync_runtime_persistence_state(state)
+    if (
+        getattr(state, "runtime_restore_status", "complete") == "unavailable"
+        and not getattr(state, "runtime_recompute_pending", False)
+    ):
+        from backend.services.runtime_persistence_gate import RuntimePersistenceBlocked
+
+        raise RuntimePersistenceBlocked("No runtime survived; explicit re-run is required")
     if getattr(state, "runtime_recompute_pending", False) and persistence.get(
         "requires_recompute"
     ):

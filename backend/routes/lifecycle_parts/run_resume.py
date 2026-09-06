@@ -1,7 +1,7 @@
 """Lifecycle run resume action owners."""
 from __future__ import annotations
 
-_OWNED_NAMES = frozenset({'resume_analysis', '_pause_analysis_locked', '_resume_analysis_locked', 'run_analysis', 'stop_analysis', 'pause_analysis', '_stop_analysis_locked'})
+_OWNED_NAMES = frozenset({'resume_analysis', '_pause_analysis_locked', '_resume_analysis_locked', 'run_analysis', '_run_analysis_locked', 'stop_analysis', 'pause_analysis', '_stop_analysis_locked'})
 
 bindings = None
 
@@ -22,7 +22,14 @@ async def run_analysis(session_id: str, request: Request):
     """Start running analysis (use WebSocket for real-time updates)"""
     bindings.validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
+    async with get_session_lock(session_id):
+        return await _run_analysis_locked(session_id, user_id)
+
+
+async def _run_analysis_locked(session_id: str, user_id: str):
     state = await bindings.require_session_ownership(session_id=session_id, user_id=user_id)
+    from backend.utils.runtime_pairing import refresh_runtime_availability
+    refresh_runtime_availability(state)
 
     from backend.config import is_snapshot_v2_enabled
     from backend.services.snapshot_v2.feature_gate import (
@@ -64,7 +71,7 @@ async def run_analysis(session_id: str, request: Request):
     # executes nothing, so Start/Re-run looked like a silent no-op and the
     # session had no way forward at all.
     from backend.config import get_session_states
-    from backend.utils.runtime_apply import _live_pkl, retire_live_runtime
+    from backend.utils.runtime_apply import _live_pkl
 
     # Decided first, because retiring the runtime changes the answer to every
     # question below it. "Re-run from your data" promises an empty namespace,
@@ -75,13 +82,14 @@ async def run_analysis(session_id: str, request: Request):
         getattr(state, "runtime_restore_status", "complete"),
         coherence=state_runtime_coherence(state),
     ):
+        closed = await bindings.teardown_running_workflow(
+            session_id, discard_runtime=True, retire_runtime=True,
+        )
+        if closed is False:
+            raise HTTPException(status_code=409, detail="Previous workflow cleanup is incomplete")
         state.runtime_recompute_pending = True
-        if retire_live_runtime(session_id, include_checkpoint=True):
-            bindings.logger.warning(
-                "[%s] retired the previous runtime generation and its graph "
-                "checkpoint for an explicit re-run; the next kernel starts empty",
-                session_id,
-            )
+        state.restore_resume_kind = None
+        state.restore_resume_workflow_state = None
 
     # A checkpoint is only resumable together with the kernel it was written
     # against: it names the graph node to continue from, and the pkl holds the
@@ -195,6 +203,8 @@ async def resume_analysis(session_id: str, request: Request):
 
 async def _resume_analysis_locked(session_id: str, user_id: str):
     state = await bindings.require_session_ownership(session_id=session_id, user_id=user_id)
+    from backend.utils.runtime_pairing import refresh_runtime_availability
+    refresh_runtime_availability(state)
 
     from backend.config import is_snapshot_v2_enabled
     from backend.services.snapshot_v2.feature_gate import (
@@ -262,8 +272,14 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         # instead of resuming a graph already at END (infinite loop).
         from backend.workflow.provenance import consume_restore_provenance
 
+        recompute = is_forward_resume_blocked(
+            state.runtime_restore_status, coherence=state_runtime_coherence(state),
+        )
+        cleanup_options = {"discard_runtime": True}
+        if recompute:
+            cleanup_options["retire_runtime"] = True
         cleanup_complete = await bindings.teardown_running_workflow(
-            session_id, discard_runtime=True,
+            session_id, **cleanup_options,
         )
         if cleanup_complete is False:
             return APIResponse(
@@ -289,11 +305,11 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         # Same contract as POST /run: a re-analysis that is clearing an
         # unavailable runtime has to tell the agent its kernel is empty, or it
         # carries on as though adata were still loaded from the original run.
-        if is_forward_resume_blocked(
-            getattr(state, "runtime_restore_status", "complete"),
-            coherence=state_runtime_coherence(state),
-        ):
+        if recompute:
             state.runtime_recompute_pending = True
+            state.restore_resume_kind = None
+            state.restore_resume_workflow_state = None
+            state.restore_start_intent = "explicit_start"
         state.runtime_restore_status = "complete"  # re-run recomputes kernel state
         state.runtime_restore_warning = None  # fresh rerun clears any restore warning
         await bindings._update_session_cache(session_id, state)

@@ -48,40 +48,21 @@ def runtime_coherence(
     last_attempt_revision: int,
     last_attempt_status: str | None,
     has_generation: bool = True,
+    current_revision: int | None = None,
 ) -> str:
-    """Whether the newest committed generation is the newest one the run needed.
+    """Whether observed runtime work is newer than the committed generation.
 
-    Decided from the save-attempt record, which the persistence layer owns and
-    which changes only when a save is actually attempted:
-
-    * ``stale`` -- a save was attempted for a later revision and failed, so the
-      newest committed generation is older than the work that has been done.
-      This is precisely what a failed closing save leaves behind. Results stay
-      viewable and exportable; exact continuation is not promised.
-    * ``inconsistent`` -- the committed generation claims a revision beyond the
-      newest attempt. Not the benign converse of stale: the record disagrees
-      with itself, and reporting "current" would hide it.
-    * ``unavailable`` -- nothing has committed yet.
-
-    Three earlier drafts are worth naming, because each was wrong in a way that
-    looked right:
-
-    1. the session *lifecycle generation*, which fences incarnations and is
-       normally 1 for a session's whole life -- the verdict could never be
-       anything but "current";
-    2. saved against current *runtime* revision, which reports only whether the
-       namespace is dirty between save boundaries;
-    3. a state revision advanced on every durable write -- which the commit's
-       own state publication increments immediately after the commit, so every
-       successful save reported itself stale.
-
-    The attempt record avoids all three because it moves only when a save
-    happens, and records whether that save succeeded.
+    A crash need not leave a failed-save record. The persisted execution
+    revision also detects work lost before the next save attempt. The caller
+    separately compares the signed state/checkpoint pairing; runtime counters
+    alone cannot prove that a graph position belongs to these bytes.
     """
     if not has_generation or committed_revision is None:
         return COHERENCE_UNAVAILABLE
     committed = int(committed_revision or 0)
     attempted = int(last_attempt_revision or 0)
+    if current_revision is not None and int(current_revision) > committed:
+        return COHERENCE_STALE
     if attempted > committed:
         # A newer revision was attempted. Only a failure leaves it uncommitted;
         # a success would have advanced committed_revision with it.
@@ -129,6 +110,7 @@ def build_runtime_manifest(
     saved_names: Iterable[str],
     skipped_names: Iterable[dict[str, Any]],
     serializer_version: str,
+    pairing: dict | None = None,
 ) -> dict[str, Any]:
     """Assemble a generation's declaration, rejecting anything unusable.
 
@@ -167,7 +149,7 @@ def build_runtime_manifest(
     if overlap:
         raise ValueError("names appear both saved and skipped: " + ", ".join(overlap))
 
-    return {
+    record = {
         "schema_version": RUNTIME_MANIFEST_SCHEMA_VERSION,
         "revision": int(revision),
         "state_revision": int(state_revision),
@@ -176,6 +158,18 @@ def build_runtime_manifest(
         "skipped_names": sorted(skipped, key=lambda item: item["name"]),
         "serializer_version": str(serializer_version),
     }
+    if pairing is not None:
+        if (
+            not isinstance(pairing, dict)
+            or type(pairing.get("state_version")) is not int
+            or pairing["state_version"] < 0
+            or (pairing.get("checkpoint") is not None and not _SHA256.fullmatch(str(pairing["checkpoint"])))
+        ):
+            raise ValueError("invalid runtime state/checkpoint pairing")
+        record["pairing"] = {
+            "state_version": pairing["state_version"], "checkpoint": pairing.get("checkpoint"),
+        }
+    return record
 
 
 def _write_durably(target: Path, data: bytes) -> None:
@@ -256,6 +250,7 @@ def read_runtime_manifest(path: str | Path) -> dict[str, Any]:
             saved_names=manifest["saved_names"],
             skipped_names=manifest["skipped_names"],
             serializer_version=manifest["serializer_version"],
+            pairing=manifest.get("pairing"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeManifestError(

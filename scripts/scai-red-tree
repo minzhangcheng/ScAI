@@ -23,6 +23,13 @@ BASE_REF="$1"; shift
 TEST_FILE="$1"; shift
 [[ -f "$TEST_FILE" ]] || die "no such test file: $TEST_FILE"
 
+declare -a NODES=("$@")
+declare -a EXPECTED=()
+for node in "$@"; do
+    [[ "$node" == "$TEST_FILE"::* ]] || die "name each node as $TEST_FILE::test_name"
+    EXPECTED+=("${node##*::}")
+done
+
 BASE_SHA="$(git rev-parse --verify "${BASE_REF}^{commit}")"
 # Unique per invocation: a fixed per-SHA path meant two concurrent checks
 # deleted each other's worktree mid-run.
@@ -42,18 +49,6 @@ git worktree add --detach "$WORKTREE" "$BASE_SHA" >/dev/null
 
 mkdir -p "$WORKTREE/$(dirname "$TEST_FILE")"
 cp "$TEST_FILE" "$WORKTREE/$TEST_FILE"
-
-declare -a NODES=("$@")
-declare -a EXPECTED=()
-for node in "$@"; do
-    if [[ "$node" == *"::"* ]]; then EXPECTED+=("${node##*::}"); fi
-done
-# Refused before anything is created or run. Checking a whole file accepts any
-# pre-existing failure in it as proof that this regression test detects the
-# defect it was written for, which is exactly the claim being made.
-if [[ ${#EXPECTED[@]} -eq 0 ]]; then
-    die "name the nodes to prove, as file::test_name (a whole-file or -k selection cannot be verified)"
-fi
 
 set +e
 ( cd "$WORKTREE" && scripts/scai-test fast "${NODES[@]}" )

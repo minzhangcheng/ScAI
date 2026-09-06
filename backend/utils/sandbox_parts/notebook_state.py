@@ -382,6 +382,7 @@ class NotebookState:
         budget_violations: Optional[List[Dict[str, Any]]] = None,
         top_offenders: Optional[List[Dict[str, Any]]] = None,
         recommended_action: Optional[str] = None,
+        committed_pairing: Optional[Dict[str, Any]] = None,
         persist: bool = True,
     ) -> Dict[str, Any]:
         """Persist the live runtime lifecycle without exposing raw tracebacks."""
@@ -508,6 +509,7 @@ class NotebookState:
                     else previous.get("committed_digest")
                 ),
                 "last_attempt_status": "succeeded",
+                "committed_pairing": copy.deepcopy(committed_pairing),
                 "last_attempt_at": now,
                 "last_attempt_revision": max(0, int(current_revision)),
                 "last_attempt_error": None,

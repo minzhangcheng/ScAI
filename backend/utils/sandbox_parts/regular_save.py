@@ -734,6 +734,7 @@ def _commit_pkl_transaction(
                     saved_names=runtime_manifest["saved_names"],
                     skipped_names=runtime_manifest["skipped_names"],
                     serializer_version=str(runtime_manifest["serializer_version"]),
+                    pairing=runtime_manifest.get("pairing"),
                 ),
             )
             if fault_hook is not None:
