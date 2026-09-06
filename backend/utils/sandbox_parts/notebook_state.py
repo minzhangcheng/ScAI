@@ -382,6 +382,7 @@ class NotebookState:
         budget_violations: Optional[List[Dict[str, Any]]] = None,
         top_offenders: Optional[List[Dict[str, Any]]] = None,
         recommended_action: Optional[str] = None,
+        coherence: Optional[str] = None,
         persist: bool = True,
     ) -> Dict[str, Any]:
         """Persist the live runtime lifecycle without exposing raw tracebacks."""
@@ -476,6 +477,14 @@ class NotebookState:
                 str(runtime_digest)
                 if runtime_digest is not None
                 else previous.get("runtime_digest")
+            ),
+            # Whether this generation describes the same moment as the workflow
+            # state beside it. Reported, never acted on here: it must not reach
+            # `status` or `requires_recompute`, which are what stop a run.
+            "coherence": (
+                str(coherence)
+                if coherence is not None
+                else previous.get("coherence", "current")
             ),
             "budget_violations": safe_budget_violations,
             "top_offenders": safe_top_offenders,

@@ -36,6 +36,39 @@ SKIP_REASONS = frozenset(
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
+COHERENCE_CURRENT = "current"
+COHERENCE_STALE = "stale"
+COHERENCE_INCONSISTENT = "inconsistent"
+COHERENCE_UNAVAILABLE = "unavailable"
+
+
+def runtime_coherence(
+    *, generation_state_revision: int | None, persisted_state_revision: int
+) -> str:
+    """Whether the newest committed runtime describes the persisted state.
+
+    A closing save that failed leaves the state ahead of the runtime: results
+    stay viewable, but promising exact continuation from them would be a lie. A
+    runtime *ahead* of the state is not the benign converse -- it means a dump
+    committed against a state generation that was never persisted, which is a
+    transaction fault rather than a degraded mode, and saying "current" there
+    would hide it.
+
+    This is a report, never a gate on viewing or exporting results. What it does
+    gate is silently binding an older namespace to a newer workflow state and
+    continuing (see ``is_forward_resume_blocked``).
+    """
+    if generation_state_revision is None:
+        return COHERENCE_UNAVAILABLE
+    generation = int(generation_state_revision)
+    persisted = int(persisted_state_revision or 0)
+    if generation < persisted:
+        return COHERENCE_STALE
+    if generation > persisted:
+        return COHERENCE_INCONSISTENT
+    return COHERENCE_CURRENT
+
+
 class RuntimeManifestError(RuntimeError):
     """The manifest is absent, unsigned, tampered with, or malformed."""
 

@@ -68,7 +68,8 @@ async def run(
     # §1d: never run the graph forward on a kernel that is inconsistent with
     # the restored state. Twin of the lifecycle run guard.
     if is_forward_resume_blocked(
-        getattr(initial_state, "runtime_restore_status", "complete")
+        getattr(initial_state, "runtime_restore_status", "complete"),
+        coherence=state_runtime_coherence(initial_state),
     ):
         logger.warning(
             f"[{self.session_id}] run blocked: "
@@ -503,7 +504,8 @@ async def resume(
     # the restored state. This is the workflow-level twin of the lifecycle
     # resume block and covers the WebSocket-reconnect resume path.
     if analysis_state is not None and is_forward_resume_blocked(
-        getattr(analysis_state, "runtime_restore_status", "complete")
+        getattr(analysis_state, "runtime_restore_status", "complete"),
+        coherence=state_runtime_coherence(analysis_state),
     ):
         logger.warning(
             f"[{self.session_id}] resume blocked: runtime_restore_status=unavailable; "

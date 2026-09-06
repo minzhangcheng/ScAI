@@ -286,9 +286,15 @@ async def _execute_chat_agent_inner(
 
     if agent_name == "bioinformatics":
         from backend.agents.bioinformatics_agent import BioinformaticsAgent
-        from backend.utils.runtime_apply import is_forward_resume_blocked
+        from backend.utils.runtime_apply import (
+            is_forward_resume_blocked,
+            state_runtime_coherence,
+        )
 
-        if is_forward_resume_blocked(getattr(state, "runtime_restore_status", "complete")):
+        if is_forward_resume_blocked(
+            getattr(state, "runtime_restore_status", "complete"),
+            coherence=state_runtime_coherence(state),
+        ):
             # The workflow refuses to run forward on a kernel that does not match
             # the state (lifecycle resume and workflow.run/resume all check this).
             # Chat delegation used to bypass that entirely: it would start a fresh

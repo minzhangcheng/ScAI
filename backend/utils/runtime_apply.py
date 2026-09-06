@@ -354,10 +354,45 @@ def recover_runtime_apply_journal(session_id: str) -> None:
     jp.unlink(missing_ok=True)
 
 
-def is_forward_resume_blocked(runtime_restore_status: str) -> bool:
-    """Only "unavailable" blocks forward resume. "intentionally_kept" is a user
-    override that proceeds under a persistent warning; "complete" is normal."""
-    return runtime_restore_status == "unavailable"
+def state_runtime_coherence(state) -> str:
+    """The coherence verdict recorded for a session's newest generation.
+
+    Defaults to "current" for a state that predates the field, so an old
+    session is not blocked by the absence of a record rather than by a real
+    mismatch.
+    """
+    persistence = getattr(state, "runtime_persistence", None) or {}
+    if not isinstance(persistence, dict):
+        return "current"
+    return str(persistence.get("coherence") or "current")
+
+
+def is_forward_resume_blocked(
+    runtime_restore_status: str, *, coherence: str = "current"
+) -> bool:
+    """Whether the run may continue straight into the restored namespace.
+
+    Two independent reasons to stop, and neither is a failure of the session:
+
+    * ``runtime_restore_status == "unavailable"`` -- there is no namespace to
+      continue from. "intentionally_kept" is a user override that proceeds under
+      a persistent warning; "complete" is normal.
+    * a runtime that is not coherent with the persisted workflow state -- stale
+      (a closing save failed, so the state is newer than the newest committed
+      generation) or inconsistent (a generation committed against a state that
+      was never persisted). Continuing would bind an older namespace to a newer
+      graph position without anyone being told.
+
+    Both route into the same existing affordance: the user is offered a re-run
+    from their data rather than being handed a silent mismatch. Viewing results
+    and exporting them are unaffected -- this predicate governs resumption only.
+
+    The keyword defaults to ``"current"`` so a caller that has only a status
+    behaves exactly as before.
+    """
+    if runtime_restore_status == "unavailable":
+        return True
+    return coherence in {"stale", "inconsistent"}
 
 
 def verify_live_pkl_or_raise(session_id: str) -> None:

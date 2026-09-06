@@ -96,7 +96,10 @@ async def run_analysis(session_id: str, request: Request):
     # Remember *why* it is being cleared: this run is the "re-run from your data"
     # the blocked-resume message promises, so the bioinformatics agent has to be
     # told its kernel is empty rather than left to trip over a missing adata.
-    if is_forward_resume_blocked(getattr(state, "runtime_restore_status", "complete")):
+    if is_forward_resume_blocked(
+        getattr(state, "runtime_restore_status", "complete"),
+        coherence=state_runtime_coherence(state),
+    ):
         state.runtime_recompute_pending = True
     state.runtime_restore_status = "complete"
     state.runtime_restore_warning = None
@@ -229,7 +232,10 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         state.max_rounds = state.original_max_rounds
         state.original_max_rounds = None
 
-    if is_forward_resume_blocked(state.runtime_restore_status) and state.status != TaskStatus.COMPLETED:
+    if is_forward_resume_blocked(
+        state.runtime_restore_status,
+        coherence=state_runtime_coherence(state),
+    ) and state.status != TaskStatus.COMPLETED:
         return APIResponse(
             success=True,
             message=(
@@ -273,7 +279,10 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         # Same contract as POST /run: a re-analysis that is clearing an
         # unavailable runtime has to tell the agent its kernel is empty, or it
         # carries on as though adata were still loaded from the original run.
-        if is_forward_resume_blocked(getattr(state, "runtime_restore_status", "complete")):
+        if is_forward_resume_blocked(
+            getattr(state, "runtime_restore_status", "complete"),
+            coherence=state_runtime_coherence(state),
+        ):
             state.runtime_recompute_pending = True
         state.runtime_restore_status = "complete"  # re-run recomputes kernel state
         state.runtime_restore_warning = None  # fresh rerun clears any restore warning
