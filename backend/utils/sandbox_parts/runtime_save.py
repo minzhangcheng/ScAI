@@ -17,6 +17,15 @@ _COVERAGE_MARKERS = {
     "excluded_volatile": "__SCAI_EXCLUDED_VOLATILE__:",
 }
 
+# Spec 5.5's carried __main__ definitions. Deliberately NOT in the table above:
+# that table is the completeness contract, and a producer missing one of its
+# entries is treated as broken. A kernel script from a build before this change
+# emits three markers, and it is not broken -- it is older. Parsed when present,
+# absent without complaint.
+_OPTIONAL_MARKERS = {
+    "carried_definitions": "__SCAI_CARRIED_DEFINITIONS__:",
+}
+
 
 def _parse_coverage_markers(output: str) -> dict | None:
     """Read the generation's coverage record, or say there is none.
@@ -35,7 +44,19 @@ def _parse_coverage_markers(output: str) -> dict | None:
       generation whose own account of itself is truncated must not commit.
     """
     found: dict = {}
+    optional: dict = {}
     for line in (output or "").splitlines():
+        for key, prefix in _OPTIONAL_MARKERS.items():
+            if line.startswith(prefix):
+                try:
+                    value = json.loads(line[len(prefix):])
+                except json.JSONDecodeError:
+                    # An optional record that cannot be read is dropped, not
+                    # fatal. It describes what was brought in; the generation's
+                    # completeness does not rest on it.
+                    value = None
+                if isinstance(value, list):
+                    optional[key] = value
         for key, prefix in _COVERAGE_MARKERS.items():
             if not line.startswith(prefix):
                 continue
@@ -60,6 +81,7 @@ def _parse_coverage_markers(output: str) -> dict | None:
             "coverage record is partial; markers absent: "
             + ", ".join(_COVERAGE_MARKERS[key].strip(":") for key in missing)
         )
+    found.update(optional)
     return found
 
 
@@ -443,9 +465,14 @@ def _scai_is_volatile(_o):
     return _q.startswith(_scai_volatile_prefixes)
 
 
-# Modules, functions, classes and methods are re-established by kernel init and
-# notebook replay. They bloat the dump, and a by-reference frame is the single
-# most likely thing to fail on restore in a different environment.
+# Imported functions, classes and methods are re-established by kernel init and
+# notebook replay, they bloat the dump, and a by-reference frame is the single
+# most likely thing to fail on restore in a different environment. The user's
+# own definitions are none of those things: nothing re-establishes them, so a
+# helper defined in round two was simply gone in round three (spec 5.5).
+#
+# Modules stay excluded unconditionally. They are the bulk the exclusion was
+# aimed at, and a module is never the user's own state.
 _scai_skip_kinds = (
     _scai_types.ModuleType,
     _scai_types.FunctionType,
@@ -453,6 +480,23 @@ _scai_skip_kinds = (
     _scai_types.MethodType,
     type,
 )
+
+
+def _scai_is_own_definition(_o):
+    # A function or class defined in a cell, rather than imported. The kernel
+    # sets __module__ to "__main__" for those.
+    #
+    # The kind test has to come first. An *instance* of a __main__ class also
+    # reports __module__ == "__main__", because the lookup falls through to its
+    # class -- so without it every user object would look like a definition.
+    if isinstance(_o, _scai_types.ModuleType):
+        return False
+    if not isinstance(_o, _scai_skip_kinds):
+        return False
+    try:
+        return getattr(_o, "__module__", None) == "__main__"
+    except Exception:
+        return False
 
 _live = {}
 for _scai_name in list(globals().keys()):
@@ -495,17 +539,38 @@ for _scai_name, _scai_obj in list(_live.items()):
 _to_dump = []
 _excluded_by_kind = []
 _excluded_volatile = []
+# Spec 5.5's carried definitions, reported so a restore can say what it brought
+# back and, for a class, what is still not true about it.
+_carried_definitions = []
 for _scai_name in sorted(_live):
     _scai_obj = _live[_scai_name]
     # These two exclusions used to be silent, so a name dropped here was absent
     # from the dump and absent from every record of the dump. Reporting them
     # separately is what lets a restore say why a name is missing rather than
     # only that it is.
-    if isinstance(_scai_obj, _scai_skip_kinds):
+    if isinstance(_scai_obj, _scai_skip_kinds) and not _scai_is_own_definition(_scai_obj):
         _excluded_by_kind.append({
             "name": _scai_name, "type": type(_scai_obj).__name__,
         })
         continue
+    if _scai_is_own_definition(_scai_obj):
+        # Carried, and for a class the caveat travels with it. Every instance
+        # was pickled in its own frame with its own memo, so dill embedded a
+        # copy of the class in each of them: the restored name is a *different*
+        # object from type(instance), and isinstance(old_instance, ThisClass)
+        # is False. Disclosed rather than hidden -- before this change the name
+        # was absent and the same code raised NameError, which is louder.
+        if isinstance(_scai_obj, type):
+            _carried_definitions.append({
+                "name": _scai_name,
+                "kind": "class",
+                "note": "restored class is not type(instance) for instances "
+                        "restored from other frames",
+            })
+        else:
+            _carried_definitions.append({
+                "name": _scai_name, "kind": "function",
+            })
     if _scai_is_volatile(_scai_obj):
         _scai_t = type(_scai_obj)
         _excluded_volatile.append({
@@ -596,6 +661,8 @@ print("__SCAI_EXCLUDED_KIND__:" + _scai_json.dumps(
     sorted(_excluded_by_kind, key=lambda _e: _e["name"])))
 print("__SCAI_EXCLUDED_VOLATILE__:" + _scai_json.dumps(
     sorted(_excluded_volatile, key=lambda _e: _e["name"])))
+print("__SCAI_CARRIED_DEFINITIONS__:" + _scai_json.dumps(
+    sorted(_carried_definitions, key=lambda _e: _e["name"])))
 """
     return save_code
 
