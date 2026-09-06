@@ -47,8 +47,8 @@ SNAPSHOT_V2_CENSUS: dict[str, int] = {
     "backend/services/session_lifecycle.py": 1,
     "backend/services/session_store.py": 15,
     "backend/services/workflow_runner.py": 2,
-    "backend/utils/sandbox_parts/runtime_save.py": 3,
-    "backend/utils/sandbox_parts/state_tracking.py": 3,
+    "backend/utils/sandbox_parts/runtime_save.py": 1,
+    "backend/utils/sandbox_parts/state_tracking.py": 2,
     "backend/utils/snapshot.py": 1,
     "backend/workflow/core.py": 1,
     "backend/workflow/core_parts/execution.py": 18,
@@ -212,3 +212,22 @@ def test_the_runtime_signature_root_is_not_the_snapshot_directory():
         if "get_integrity_dir" in path.read_text():
             callers.add(rel)
     assert callers == {"backend/services/snapshot_v2/paths.py"}, sorted(callers)
+def test_the_volatile_type_prefixes_live_outside_snapshot_v2():
+    """Volatile-type exclusion is kept (spec 4.2); its list must outlive V2."""
+    from backend.services.snapshot_v2.runtime_registry import (
+        VOLATILE_RUNTIME_TYPE_PREFIXES as via_v2,
+    )
+    from backend.utils.runtime_types import VOLATILE_RUNTIME_TYPE_PREFIXES
+
+    assert isinstance(VOLATILE_RUNTIME_TYPE_PREFIXES, tuple)
+    assert VOLATILE_RUNTIME_TYPE_PREFIXES
+    assert via_v2 is VOLATILE_RUNTIME_TYPE_PREFIXES
+
+
+def test_the_save_path_reads_the_prefixes_from_their_new_home():
+    for rel in ("utils/sandbox_parts/runtime_save.py",
+                "utils/sandbox_parts/state_tracking.py"):
+        source = (BACKEND / rel).read_text()
+        assert "snapshot_v2.runtime_registry import (\n        VOLATILE" not in source
+        assert "VOLATILE_RUNTIME_TYPE_PREFIXES" in source, rel
+        assert "backend.utils.runtime_types" in source, rel

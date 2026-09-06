@@ -446,7 +446,7 @@ async def _prepare_save(sandbox, *, bindings):
     required_names = set(sandbox.get_runtime_dependency_names())
     required_names |= set(CANONICAL_RUNTIME_ARTIFACTS) & set(live_names)
     escaped_required = repr(sorted(required_names))
-    from backend.services.snapshot_v2.runtime_registry import (
+    from backend.utils.runtime_types import (
         VOLATILE_RUNTIME_TYPE_PREFIXES,
     )
     return SaveContext(
@@ -469,7 +469,7 @@ async def _prepare_save(sandbox, *, bindings):
 
 
 def _build_save_code(context: SaveContext) -> str:
-    from backend.services.snapshot_v2.runtime_registry import (
+    from backend.utils.runtime_types import (
         VOLATILE_RUNTIME_TYPE_PREFIXES,
     )
 

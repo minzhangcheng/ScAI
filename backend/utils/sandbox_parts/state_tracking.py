@@ -229,7 +229,7 @@ class StateTrackingMixin:
         objects are the data, and refusing to promote them would be far worse
         than the failure this prevents.
         """
-        from backend.services.snapshot_v2.runtime_registry import (
+        from backend.utils.runtime_types import (
             VOLATILE_RUNTIME_TYPE_PREFIXES,
         )
 
