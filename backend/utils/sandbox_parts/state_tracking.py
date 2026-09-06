@@ -93,16 +93,7 @@ class StateTrackingMixin:
 
     # Enough to reach the handle inside an ordinary scratch value, far too
     # little to serialize an analysis object by accident.
-    PERSISTABILITY_PROBE_BUDGET_BYTES = 8 * 1024 * 1024
     # Containers whose persistability is not in question and whose size is.
-    PERSISTABILITY_PROBE_BULK_MODULES = (
-        "anndata",
-        "pandas",
-        "numpy",
-        "scipy",
-        "polars",
-        "pyarrow",
-    )
 
     def mark_runtime_committed(self, runtime_revision: int | None = None) -> None:
         """Called after a snapshot capture transaction commits the runtime generation.

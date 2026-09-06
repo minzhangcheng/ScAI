@@ -275,7 +275,7 @@ async def _close_owned_resources(self) -> bool:
             # A failure keeps the previous committed generation, is recorded by
             # the persistence layer and no longer holds the shutdown, so the
             # retry-around-an-intervention-gate loop this replaced is gone.
-            while not close_status.get("sandbox", False):
+            if not close_status.get("sandbox", False):
                 try:
                     if _is_superseded():
                         await sandbox.stop(save=False)
@@ -283,7 +283,6 @@ async def _close_owned_resources(self) -> bool:
                         await sandbox.stop(save=True)
                     close_status["sandbox"] = True
                     logger.info(f"[{self.session_id}] Sandbox stopped")
-                    break
                 except asyncio.CancelledError as exc:
                     cancellation = cancellation or exc
                     consume_current_cancellation_request()
@@ -292,12 +291,10 @@ async def _close_owned_resources(self) -> bool:
                         "the live kernel remains registered for cleanup retry",
                         self.session_id,
                     )
-                    break
                 except Exception:
                     logger.exception(
                         "[%s] Error stopping sandbox", self.session_id
                     )
-                    break
         else:
             if not sandbox:
                 close_status["sandbox"] = True

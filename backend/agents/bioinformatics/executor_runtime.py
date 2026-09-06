@@ -63,13 +63,12 @@ async def prepare_sandbox(agent, state, *, bindings) -> None:
             prepare_runtime_recompute,
         )
 
-        # A process restart leaves the notebook metadata as the
-        # authoritative failed/degraded record while the user's explicit
-        # Recompute action lives in AnalysisState. Apply that authorization
-        # to the newly-created sandbox before the executor loop checks the
-        # latch, otherwise it immediately re-arms the same gate.
+        # A process restart leaves the notebook metadata as the authoritative
+        # failed record while the user's explicit re-run authorization lives in
+        # AnalysisState. Apply it to the newly created sandbox so the executor
+        # loop reads the authorization rather than the stale record.
         prepare_runtime_recompute(state, agent.sandbox)
-        persistence = agent.sandbox.sync_runtime_persistence_state(state)
+        agent.sandbox.sync_runtime_persistence_state(state)
     # A failed or degraded newest save no longer holds the run. The previous
     # committed generation is what continues from, coherence reports it as
     # stale, and the UI carries a persistent non-blocking warning (spec 5.1).

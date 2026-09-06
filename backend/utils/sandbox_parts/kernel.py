@@ -425,7 +425,6 @@ class KernelMixin:
                     raise RuntimeError(
                         "runtime persistence did not commit a current generation"
                     )
-                self.notebook_state.save()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -436,6 +435,17 @@ class KernelMixin:
                     "Final runtime persistence failed for %s; the previous "
                     "committed generation is kept and the kernel is closed",
                     self.session_id,
+                )
+            # Independent of the dump, per spec 5.1: when the runtime could not
+            # be persisted the notebook is the only remaining record of what
+            # ran, which is exactly when losing it costs most.
+            try:
+                self.notebook_state.save()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Notebook save failed during stop for %s", self.session_id,
                 )
 
         manager = self.km

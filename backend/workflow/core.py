@@ -148,10 +148,6 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         core_interventions.bind_facade(sys.modules[__name__])
         return await core_interventions._wait_for_llm_intervention(self, error, node_name, analysis_state, wait_seconds=wait_seconds, auto_retry=auto_retry)
 
-    async def _wait_for_runtime_persistence_intervention(self, analysis_state: AnalysisState, *, successful_status: Optional[TaskStatus]=TaskStatus.RUNNING, persist_transitions: bool=False, rotate_generation: bool=False) -> str:
-        core_interventions.bind_facade(sys.modules[__name__])
-        return await core_interventions._wait_for_runtime_persistence_intervention(self, analysis_state, successful_status=successful_status, persist_transitions=persist_transitions, rotate_generation=rotate_generation)
-
     async def _pathology_llm_intervention_callback(self, error: UpstreamExhaustedError, image_label: str) -> LlmFailureAction:
         core_interventions.bind_facade(sys.modules[__name__])
         return await core_interventions._pathology_llm_intervention_callback(self, error, image_label)

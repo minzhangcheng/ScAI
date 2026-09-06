@@ -377,10 +377,6 @@ async def _prepare_save(sandbox, *, bindings):
     bindings.logger.info(f"Saving session to {session_path}")
 
     # Compatibility cleanup for dependency trackers written by older
-    # execute() code. That code could mark a declared output as required
-    # even when a swallowed exception meant the name never existed. Only
-    # prune missing names that were never observed as created; genuinely
-    # tracked cross-cell dependencies remain fail-closed below.
     from backend.utils.runtime_types import (
         VOLATILE_RUNTIME_TYPE_PREFIXES,
     )
@@ -414,7 +410,6 @@ def _build_save_code(context: SaveContext) -> str:
     structural_errors = repr(sorted(STRUCTURAL_PICKLE_ERRORS))
     save_code = """\
 import dill as _scai_dill
-import io as _scai_io
 import json as _scai_json
 import os as _scai_os
 import tempfile as _scai_tempfile
@@ -473,7 +468,7 @@ for _scai_name in list(globals().keys()):
 # remaining namespace made the metadata claim `current` while a real analysis
 # object had disappeared. Materialize one in-memory copy per object identity
 # for the dump, preserving aliases. If materialization fails, abort the whole
-# generation so the runtime-persistence gate remains armed on the live kernel.
+# generation rather than commit a dump that is missing analysis state.
 _scai_materialized_backed = {}
 for _scai_name, _scai_obj in list(_live.items()):
     if not _scai_is_anndata(_scai_obj):

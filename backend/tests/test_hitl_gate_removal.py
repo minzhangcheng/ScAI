@@ -205,3 +205,99 @@ def test_no_frontend_component_calls_a_retired_gate_endpoint():
         if "runtime-persistence/" in path.read_text()
     }
     assert not offenders, sorted(offenders)
+@pytest.mark.asyncio
+async def test_a_failed_closing_save_still_writes_the_notebook(tmp_path, monkeypatch):
+    """Spec 5.1: "The notebook and session metadata are saved independently, so
+    a failed runtime dump cannot take them with it."
+
+    The notebook is the record of what ran. When the runtime dump fails it is
+    the *only* record left, which is exactly when losing it costs most.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from backend.utils.sandbox import LocalJupyterSandbox
+
+    sb = LocalJupyterSandbox(
+        session_id="failed-save-keeps-notebook",
+        state_dir=str(tmp_path / "states"),
+        working_dir=str(tmp_path / "workspace"),
+    )
+    monkeypatch.setattr(sb, "await_pending_saves", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        sb, "save_session", AsyncMock(side_effect=RuntimeError("dump failed"))
+    )
+    notebook_save = MagicMock()
+    monkeypatch.setattr(sb.notebook_state, "save", notebook_save)
+    sb.kc = None
+    sb.km = None
+
+    await sb.stop(save=True)
+
+    assert notebook_save.call_count == 1, "the notebook went down with the dump"
+    assert sb._initialized is False
+
+
+@pytest.mark.asyncio
+async def test_a_closing_save_that_reports_no_generation_still_writes_the_notebook(
+    tmp_path, monkeypatch,
+):
+    """The other failure shape: save_session returns False rather than raising."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from backend.utils.sandbox import LocalJupyterSandbox
+
+    sb = LocalJupyterSandbox(
+        session_id="no-generation-keeps-notebook",
+        state_dir=str(tmp_path / "states"),
+        working_dir=str(tmp_path / "workspace"),
+    )
+    monkeypatch.setattr(sb, "await_pending_saves", AsyncMock(return_value=None))
+    monkeypatch.setattr(sb, "save_session", AsyncMock(return_value=False))
+    notebook_save = MagicMock()
+    monkeypatch.setattr(sb.notebook_state, "save", notebook_save)
+    sb.kc = None
+    sb.km = None
+
+    await sb.stop(save=True)
+
+    assert notebook_save.call_count == 1
+def test_a_degraded_restore_warns_the_agent_without_an_explicit_re_run():
+    """The warning must hang on the record, not on the authorization.
+
+    A restore that fell back to a verified older generation records
+    ``degraded_recovery`` (notebook_state.py). The agent-facing warning used to
+    be reachable because the gate's /recompute route set
+    ``runtime_recompute_pending``; with the gate gone the only setters are the
+    explicit re-run routes, so a degraded restore would proceed silently and
+    the agent would read a round-5 notebook while holding a round-3 namespace.
+    """
+    from backend.agents.bioinformatics_agent import BioinformaticsAgent
+    from backend.models.schemas import AnalysisState
+
+    state = AnalysisState(id="degraded-no-rerun", user_id="u1")
+    state.runtime_recompute_pending = False
+    state.runtime_persistence = {
+        "status": "degraded",
+        "degraded_recovery": True,
+        "degraded_from_revision": 9,
+        "degraded_to_revision": 4,
+    }
+
+    context = BioinformaticsAgent._build_data_context(
+        BioinformaticsAgent.__new__(BioinformaticsAgent), state
+    )
+    assert "RUNTIME RECOVERY REQUIRED" in context
+
+
+def test_an_ordinary_current_runtime_does_not_warn():
+    from backend.agents.bioinformatics_agent import BioinformaticsAgent
+    from backend.models.schemas import AnalysisState
+
+    state = AnalysisState(id="ordinary-runtime", user_id="u1")
+    state.runtime_recompute_pending = False
+    state.runtime_persistence = {"status": "current", "degraded_recovery": False}
+
+    context = BioinformaticsAgent._build_data_context(
+        BioinformaticsAgent.__new__(BioinformaticsAgent), state
+    )
+    assert "RUNTIME RECOVERY REQUIRED" not in context

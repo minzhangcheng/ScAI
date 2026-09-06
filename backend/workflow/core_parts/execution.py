@@ -818,10 +818,10 @@ async def pause(
                 raise RuntimeError(
                     "runtime persistence did not commit a current generation"
                 )
-            self.sandbox.notebook_state.save()
         except Exception:
             logger.warning(
-                "[%s] Pause persistence failed; arming live-kernel gate",
+                "[%s] Pause could not persist the runtime; keeping the "
+                "previous committed generation",
                 self.session_id,
                 exc_info=True,
             )
@@ -838,7 +838,17 @@ async def pause(
                     self.session_id,
                     exc_info=True,
                 )
-        logger.info(f"[{self.session_id}] Sandbox state saved")
+        # Independent of the dump (spec 5.1): a failed runtime save must not
+        # take the notebook with it.
+        try:
+            self.sandbox.notebook_state.save()
+        except Exception:
+            logger.warning(
+                "[%s] Notebook save failed while pausing",
+                self.session_id,
+                exc_info=True,
+            )
+        logger.info(f"[{self.session_id}] Sandbox pause persistence attempted")
 
     logger.info(f"[{self.session_id}] Workflow paused successfully")
     return {
