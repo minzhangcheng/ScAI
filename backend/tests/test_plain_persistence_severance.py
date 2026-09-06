@@ -223,9 +223,17 @@ def test_the_volatile_type_prefixes_live_outside_snapshot_v2():
 
 
 def test_the_save_path_reads_the_prefixes_from_their_new_home():
-    for rel in ("utils/sandbox_parts/runtime_save.py",
-                "utils/sandbox_parts/state_tracking.py"):
-        source = (BACKEND / rel).read_text()
-        assert "snapshot_v2.runtime_registry import (\n        VOLATILE" not in source
-        assert "VOLATILE_RUNTIME_TYPE_PREFIXES" in source, rel
-        assert "backend.utils.runtime_types" in source, rel
+    """Only the save script still needs them.
+
+    ``state_tracking.py`` used them for the cell-time persistability probe,
+    which A2-2 deleted; it must not reacquire them, and it must certainly not
+    reacquire them from the snapshot package.
+    """
+    source = (BACKEND / "utils" / "sandbox_parts" / "runtime_save.py").read_text()
+    assert "VOLATILE_RUNTIME_TYPE_PREFIXES" in source
+    assert "backend.utils.runtime_types" in source
+    assert "snapshot_v2" not in source
+
+    tracking = (BACKEND / "utils" / "sandbox_parts" / "state_tracking.py").read_text()
+    assert "VOLATILE_RUNTIME_TYPE_PREFIXES" not in tracking
+    assert "snapshot_v2" not in tracking

@@ -218,3 +218,73 @@ async def test_a_cell_that_does_not_create_its_declared_output_still_fails(tmp_p
 
     assert result.success is False
     assert "Declared persistent outputs were not created: interact_df" in result.error
+def test_the_cell_time_persistability_probe_is_gone():
+    """Spec 4.7: the probe's verdict has no producer once the tier is deleted.
+
+    Serialisation coverage now comes from what the save actually wrote, and it
+    reaches the agent through spec section 10 -- not from a judgment made in the
+    cell that bound the value.
+    """
+    from backend.tests.split_facade import split_source
+
+    text = split_source("backend.utils.sandbox")
+    for gone in (
+        "_surface_unpersistable_outputs",
+        "_snapshot_globals_with_persistability",
+        "Declared persistent outputs cannot be serialized",
+        "Bound but not carried across a kernel restart",
+    ):
+        assert gone not in text, gone
+
+
+@pytest.mark.asyncio
+async def test_a_cell_binding_an_unserialisable_value_succeeds(tmp_path, monkeypatch):
+    """The computation succeeded. Whether it serialises is the save's business.
+
+    Section 3.11 shows unserialisable values arise on every run, so failing a
+    cell whose computation succeeded was never the right response.
+    """
+    from unittest.mock import AsyncMock
+
+    from backend.utils.sandbox import CodeExecutionResult, LocalJupyterSandbox
+
+    sb = LocalJupyterSandbox(
+        session_id="unserialisable-but-fine",
+        state_dir=str(tmp_path / "states"),
+        working_dir=str(tmp_path / "workspace"),
+    )
+    # The probe is driven, not mocked away: the second _execute_unlocked is the
+    # probe round trip, and it returns the exact markers the probe parses, so on
+    # the unpatched tree the verdict really is produced and really does fail the
+    # cell. Mocking _snapshot_globals_with_persistability instead would make
+    # this pass for the wrong reason.
+    probe_output = (
+        '__USER_GLOBALS__:["conn"]\n'
+        '__UNPERSISTABLE__:{"conn": "sqlite3.Connection"}\n'
+        '__PROBED__:["conn"]\n'
+    )
+    # Enough entries for both shapes: with the probe present the kernel is asked
+    # twice through _execute_unlocked and _snapshot_user_globals once; with it
+    # gone the post-cell snapshot is a second _snapshot_user_globals call. The
+    # spare entries are unused on whichever side is running.
+    monkeypatch.setattr(
+        sb, "_snapshot_user_globals", AsyncMock(side_effect=[set(), {"conn"}])
+    )
+    monkeypatch.setattr(
+        sb,
+        "_execute_unlocked",
+        AsyncMock(side_effect=[
+            CodeExecutionResult(success=True),
+            CodeExecutionResult(success=True, output=probe_output),
+        ]),
+    )
+
+    result = await sb.execute(
+        "import sqlite3\nconn = sqlite3.connect(':memory:')",
+        declared_outputs=["conn"],
+        track_globals=True,
+    )
+
+    assert result.success is True, result.error
+    assert "cannot be serialized" not in (result.error or "")
+    assert "not carried across a kernel restart" not in (result.output or "")

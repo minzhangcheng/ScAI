@@ -153,123 +153,6 @@ class StateTrackingMixin:
                     pass
         return set(self._known_user_globals)
 
-    async def _snapshot_globals_with_persistability(
-        self, before: set[str], loaded: set[str]
-    ) -> tuple[set[str], Dict[str, str], set[str]]:
-        """Post-cell globals plus a verdict on what this cell can persist.
-
-        Promotion into ``required_outputs`` used to be decided from names alone,
-        while the knowledge of what dill refuses lived only inside the save
-        script -- so a cross-cell dependency holding an open handle was promised
-        as continuation state and only discovered to be unpersistable at a save
-        boundary minutes later, where the agent could no longer act on it. This
-        answers the same question in the cell that bound the value, over the
-        round trip the diff already costs.
-
-        Bulk analysis containers are skipped by module rather than serialized:
-        they are known persistable and proving one costs more than the entire
-        save. A value past the byte budget gets no verdict at all -- the large
-        objects are the data, and refusing to promote them would be far worse
-        than the failure this prevents.
-        """
-        from backend.utils.runtime_types import (
-            VOLATILE_RUNTIME_TYPE_PREFIXES,
-        )
-
-        code = (
-            "import json as _scai_pp_json\n"
-            "import io as _scai_pp_io\n"
-            "import types as _scai_pp_types\n"
-            "import dill as _scai_pp_dill\n"
-            f"_scai_pp_before = set({sorted(before)!r})\n"
-            f"_scai_pp_loaded = set({sorted(loaded)!r})\n"
-            f"_scai_pp_budget = {self.PERSISTABILITY_PROBE_BUDGET_BYTES}\n"
-            "_scai_pp_skip = (_scai_pp_types.ModuleType, _scai_pp_types.FunctionType,\n"
-            "                 _scai_pp_types.BuiltinFunctionType,\n"
-            "                 _scai_pp_types.MethodType, type)\n"
-            f"_scai_pp_bulk = {tuple(self.PERSISTABILITY_PROBE_BULK_MODULES)!r}\n"
-            f"_scai_pp_volatile = {tuple(VOLATILE_RUNTIME_TYPE_PREFIXES)!r}\n"
-            "class _ScaiPpTooLarge(Exception):\n"
-            "    pass\n"
-            "class _ScaiPpSink(_scai_pp_io.RawIOBase):\n"
-            "    def __init__(self):\n"
-            "        _scai_pp_io.RawIOBase.__init__(self)\n"
-            "        self._n = 0\n"
-            "    def writable(self):\n"
-            "        return True\n"
-            "    def write(self, _payload):\n"
-            "        self._n += memoryview(_payload).nbytes\n"
-            "        if self._n > _scai_pp_budget:\n"
-            "            raise _ScaiPpTooLarge()\n"
-            "        return memoryview(_payload).nbytes\n"
-            "_scai_pp_after = sorted(\n"
-            "    n for n in list(globals().keys()) if not n.startswith('_')\n"
-            ")\n"
-            "_scai_pp_live = set(_scai_pp_after)\n"
-            "_scai_pp_probe = (\n"
-            "    (_scai_pp_live - _scai_pp_before) | (_scai_pp_loaded & _scai_pp_live)\n"
-            ")\n"
-            "_scai_pp_verdicts = {}\n"
-            "for _scai_pp_name in sorted(_scai_pp_probe):\n"
-            "    _scai_pp_value = globals().get(_scai_pp_name)\n"
-            "    if isinstance(_scai_pp_value, _scai_pp_skip):\n"
-            "        continue\n"
-            "    _scai_pp_type = type(_scai_pp_value)\n"
-            "    _scai_pp_mod = (_scai_pp_type.__module__ or '').lower()\n"
-            "    if _scai_pp_mod.startswith(_scai_pp_bulk):\n"
-            "        continue\n"
-            "    _scai_pp_qual = _scai_pp_mod + '.' + _scai_pp_type.__name__\n"
-            "    if _scai_pp_qual.startswith(_scai_pp_volatile):\n"
-            "        _scai_pp_verdicts[_scai_pp_name] = (\n"
-            "            'volatile handle: ' + _scai_pp_qual\n"
-            "        )[:160]\n"
-            "        continue\n"
-            "    try:\n"
-            "        _scai_pp_dill.dump(_scai_pp_value, _ScaiPpSink())\n"
-            "    except _ScaiPpTooLarge:\n"
-            "        continue\n"
-            "    except Exception as _scai_pp_error:\n"
-            "        _scai_pp_verdicts[_scai_pp_name] = (\n"
-            "            type(_scai_pp_error).__name__ + ': ' + str(_scai_pp_error)\n"
-            "        )[:160]\n"
-            "print('__USER_GLOBALS__:' + _scai_pp_json.dumps(_scai_pp_after))\n"
-            "print('__UNPERSISTABLE__:' + _scai_pp_json.dumps(_scai_pp_verdicts))\n"
-            "print('__PROBED__:' + _scai_pp_json.dumps(sorted(_scai_pp_probe)))\n"
-        )
-        result = await self._execute_unlocked(
-            code, save_to_history=False, skip_safety_check=True
-        )
-        if not result.success:
-            # A probe that could not answer must not look like a clean bill of
-            # health, but it must also not stall the cell: fall back to the
-            # name-only view and let the save boundary stay the backstop.
-            return await self._snapshot_user_globals(), {}, set()
-
-        after: set[str] | None = None
-        verdicts: Dict[str, str] = {}
-        probed: set[str] = set()
-        for line in (result.output or "").splitlines():
-            for marker, sink in (
-                ("__USER_GLOBALS__:", "after"),
-                ("__UNPERSISTABLE__:", "verdicts"),
-                ("__PROBED__:", "probed"),
-            ):
-                if not line.startswith(marker):
-                    continue
-                try:
-                    parsed = json.loads(line[len(marker):].strip())
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                if sink == "after" and isinstance(parsed, list):
-                    after = {str(name) for name in parsed}
-                elif sink == "verdicts" and isinstance(parsed, dict):
-                    verdicts = {str(k): str(v) for k, v in parsed.items()}
-                elif sink == "probed" and isinstance(parsed, list):
-                    probed = {str(name) for name in parsed}
-        if after is None:
-            return await self._snapshot_user_globals(), {}, set()
-        return after, verdicts, probed
-
     async def _runtime_resource_metrics(self) -> Dict[str, Any]:
         """Measure bounded namespace/object/AnnData/RSS signals in the kernel."""
         code = r'''
@@ -474,10 +357,8 @@ print("__SCAI_RUNTIME_METRICS__:" + _scai_json.dumps({
         after: set[str],
         declared: set[str] | None = None,
         loaded: set[str] | None = None,
-        unpersistable: set[str] | None = None,
-        probed: set[str] | None = None,
     ) -> Dict[str, Any]:
-        """Update tracker from a created/loaded user-global diff.
+        """Record a created/loaded/removed user-global diff.
 
         - created: names present after but not before
         - loaded: names statically read by the executed cell and still present
