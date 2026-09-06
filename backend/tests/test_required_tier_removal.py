@@ -288,3 +288,29 @@ async def test_a_cell_binding_an_unserialisable_value_succeeds(tmp_path, monkeyp
     assert result.success is True, result.error
     assert "cannot be serialized" not in (result.error or "")
     assert "not carried across a kernel restart" not in (result.output or "")
+def test_the_persistent_outputs_schema_promises_only_what_is_true():
+    """Spec 4.7: rewrite the promise, keep the field.
+
+    The description claimed the declaration was read for "snapshot restore" and
+    that "Dynamic namespace reads depend on this declaration". After A2-2
+    neither is true: nothing consults it to decide what to persist. It stays as
+    execution provenance, and the words it uses to say so are load-bearing --
+    the executor reads this text on every call.
+    """
+    from backend.agents.bioinformatics.tool_schemas import TOOLS
+
+    execute_code = next(
+        tool["function"] for tool in TOOLS
+        if tool["function"]["name"] == "execute_code"
+    )
+    description = execute_code["parameters"]["properties"]["persistent_outputs"][
+        "description"
+    ]
+
+    assert "snapshot restore" not in description
+    assert "Dynamic namespace reads depend on this declaration" not in description
+    # The three properties test_sandbox_prose_guard_and_output_contract pins.
+    lowered = description.lower()
+    assert "variable names only" in lowered
+    assert "filename" in lowered
+    assert "identifiers" in lowered
