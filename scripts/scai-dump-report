@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""Walk a committed runtime dump and report one row per frame.
+
+    scai-dump-report report <dump.pkl> [--json out.json]
+    scai-dump-report compare <old.json> <new.json>
+
+`report` prints, for each frame: the variable name, the **uncompressed**
+serialized size, and the sha256 of the frame's uncompressed payload. `compare`
+takes two reports of the same session at different rounds and reports the
+fraction of bytes whose digest is unchanged -- the number spec section 6.5's
+frame-index decision turns on.
+
+**It does not unpickle.** It reads opcodes with `pickletools.genops` and takes
+the variable name from the first string the frame pushes, which is how
+`runtime_save` writes the tuple. That is the tool's whole safety property: a
+dump can be walked without importing the objects' modules, so it can be pointed
+at any dump, including one written by code that is no longer installed. A tool
+that had to load the objects could not measure the dumps most worth measuring.
+
+**Peak memory** is the largest single length-prefixed opcode argument, not the
+largest frame and not the dump: `genops` materialises each argument as it reads
+it. One AnnData frame is many arguments, but a single dense array arrives as one
+`BINBYTES`, so budget for the largest array in the session. The decompressed
+stream goes to a temporary file, so disk must hold the uncompressed dump.
+
+**There is no per-frame compressed size.** `runtime_save` writes the whole dump
+through one `ZstdCompressor(level=1).stream_writer(...)`, so a frame's share of
+the file depends on what preceded it in the window and is not separable. Three
+whole-dump numbers -- compressed size on disk, bytes written per save, and the
+pause it cost -- belong in the measurement document, not here.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import pathlib
+import pickletools
+import shutil
+import sys
+import tempfile
+
+DUMP_MAGIC = b"SCAI_ZSTD_DILL_V1\n"
+ALIAS_MARKER = "__SCAI_ALIAS__"
+
+# Opcodes whose argument is the string the frame pushes. dill emits PROTO and
+# FRAME first, so the name is the first string argument, not the first argument.
+_STRING_OPCODES = {
+    "SHORT_BINUNICODE", "BINUNICODE", "BINUNICODE8", "UNICODE",
+    "SHORT_BINSTRING", "BINSTRING", "STRING",
+}
+
+CHUNK = 1024 * 1024
+
+
+def decompress(path: pathlib.Path, target) -> bool:
+    """Write the dump's uncompressed byte stream to `target`.
+
+    Returns whether it was compressed. An uncompressed dump is a valid input:
+    the magic is only written by the compressing writer, and a dump predating it
+    is still a concatenation of pickles.
+    """
+    import zstandard as zstd
+
+    with open(path, "rb") as raw:
+        compressed = raw.read(len(DUMP_MAGIC)) == DUMP_MAGIC
+        if not compressed:
+            raw.seek(0)
+            shutil.copyfileobj(raw, target, CHUNK)
+            return False
+        with zstd.ZstdDecompressor().stream_reader(raw) as stream:
+            shutil.copyfileobj(stream, target, CHUNK)
+    return True
+
+
+def digest_range(handle, start: int, end: int) -> str:
+    """Hash a byte range without holding it. The frames worth measuring are the
+    ones too large to hold."""
+    handle.seek(start)
+    sha = hashlib.sha256()
+    remaining = end - start
+    while remaining > 0:
+        block = handle.read(min(CHUNK, remaining))
+        if not block:
+            break
+        remaining -= len(block)
+        sha.update(block)
+    return sha.hexdigest()
+
+
+def walk(handle) -> list[dict]:
+    """One entry per frame, in file order.
+
+    `genops` stops after STOP and leaves the handle just past it, so the frame
+    boundary is where it left off rather than something this has to parse for.
+    """
+    frames = []
+    handle.seek(0, 2)
+    total = handle.tell()
+    handle.seek(0)
+
+    while handle.tell() < total:
+        start = handle.tell()
+        strings: list[str] = []
+        for opcode, arg, _pos in pickletools.genops(handle):
+            if opcode.name in _STRING_OPCODES and isinstance(arg, str):
+                if len(strings) < 3:
+                    strings.append(arg)
+            if opcode.name == "STOP":
+                break
+        end = handle.tell()
+        if end == start:
+            break
+
+        alias_of = None
+        if strings and strings[0] == ALIAS_MARKER:
+            name = strings[1] if len(strings) > 1 else "<unknown>"
+            alias_of = strings[2] if len(strings) > 2 else "<unknown>"
+        else:
+            name = strings[0] if strings else "<unknown>"
+
+        frames.append({
+            "name": name,
+            "alias_of": alias_of,
+            "offset": start,
+            "size": end - start,
+            "sha256": digest_range(handle, start, end),
+        })
+        handle.seek(end)
+    return frames
+
+
+def cmd_report(args) -> int:
+    path = pathlib.Path(args.dump)
+    with tempfile.TemporaryFile() as plain:
+        compressed = decompress(path, plain)
+        frames = walk(plain)
+
+    total = sum(f["size"] for f in frames)
+    report = {
+        "dump": str(path),
+        "compressed_on_disk": path.stat().st_size,
+        "was_compressed": compressed,
+        "uncompressed_total": total,
+        "frames": frames,
+    }
+    if args.json:
+        pathlib.Path(args.json).write_text(json.dumps(report, indent=2))
+
+    print("%-42s %14s  %s" % ("frame", "uncompressed", "sha256"))
+    for frame in frames:
+        label = frame["name"]
+        if frame["alias_of"]:
+            label = "%s -> %s" % (label, frame["alias_of"])
+        print("%-42s %14d  %s" % (label[:42], frame["size"], frame["sha256"][:16]))
+    print()
+    print("frames: %d" % len(frames))
+    print("uncompressed total: %d" % total)
+    print("compressed on disk: %d" % report["compressed_on_disk"])
+    # Deliberately not a per-frame compressed size; see the module docstring.
+    if total:
+        print("whole-dump ratio: %.3f" % (report["compressed_on_disk"] / total))
+    return 0
+
+
+def cmd_compare(args) -> int:
+    """Two dumps of the *same* session at different rounds.
+
+    Two different sessions share nothing by construction, so comparing them
+    would make deduplication look worthless rather than measuring it.
+    """
+    old = json.loads(pathlib.Path(args.old).read_text())
+    new = json.loads(pathlib.Path(args.new).read_text())
+
+    old_digests = {f["sha256"]: f["size"] for f in old["frames"]}
+    unchanged_bytes = 0
+    unchanged_names, changed_names = [], []
+    for frame in new["frames"]:
+        if frame["sha256"] in old_digests:
+            unchanged_bytes += frame["size"]
+            unchanged_names.append(frame["name"])
+        else:
+            changed_names.append((frame["name"], frame["size"]))
+
+    total = new["uncompressed_total"]
+    print("old: %s (%d frames, %d bytes)"
+          % (old["dump"], len(old["frames"]), old["uncompressed_total"]))
+    print("new: %s (%d frames, %d bytes)"
+          % (new["dump"], len(new["frames"]), total))
+    print()
+    print("frames unchanged by digest: %d of %d"
+          % (len(unchanged_names), len(new["frames"])))
+    if total:
+        print("bytes unchanged by digest: %d of %d (%.1f%%)"
+              % (unchanged_bytes, total, 100.0 * unchanged_bytes / total))
+    print()
+    print("largest changed frames:")
+    for name, size in sorted(changed_names, key=lambda row: -row[1])[:15]:
+        print("  %-42s %14d" % (name[:42], size))
+    print()
+    print("Duplication rate alone does not decide the frame index: the criterion")
+    print("is total bytes written per save and the pause it costs.")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    rp = sub.add_parser("report")
+    rp.add_argument("dump")
+    rp.add_argument("--json", default=None)
+    rp.set_defaults(func=cmd_report)
+
+    cp = sub.add_parser("compare")
+    cp.add_argument("old")
+    cp.add_argument("new")
+    cp.set_defaults(func=cmd_compare)
+
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
