@@ -182,3 +182,25 @@ def test_the_restore_entry_plan_lives_in_the_workflow_package():
 def test_workflow_core_does_not_import_the_snapshot_restore_entry():
     source = (BACKEND / "workflow" / "core.py").read_text()
     assert "snapshot_v2.restore_entry" not in source
+def test_the_runtime_signature_root_is_not_the_snapshot_directory():
+    """A2-5 may delete get_integrity_dir outright; nothing else uses it.
+
+    Spec revision 4 §4.5 claimed the ordinary runtime HMAC lived under
+    ``<sid>/snapshot-v2``. It does not, and acting on that claim would have
+    migrated a directory the runtime chain never reads. Corrected in
+    revision 5; this guard keeps the correction from being undone.
+    """
+    from backend.config._config import get_integrity_dir
+    from backend.utils.sandbox_parts.shared import _integrity_dir
+
+    assert get_integrity_dir("severance-guard") != _integrity_dir("severance-guard")
+    assert "snapshot" not in str(_integrity_dir("severance-guard"))
+
+    callers = set()
+    for path in sorted(BACKEND.rglob("*.py")):
+        rel = path.relative_to(REPO).as_posix()
+        if rel.startswith("backend/tests/") or rel.endswith("config/_config.py"):
+            continue
+        if "get_integrity_dir" in path.read_text():
+            callers.add(rel)
+    assert callers == {"backend/services/snapshot_v2/paths.py"}, sorted(callers)
