@@ -20,6 +20,7 @@ import tarfile
 import uuid
 
 import pytest
+import pytest_asyncio
 
 pytestmark = [
     pytest.mark.skipif(
@@ -27,6 +28,42 @@ pytestmark = [
         reason="Set SCAI_RUN_KERNEL_TESTS=1 to run kernel-dependent tests",
     ),
 ]
+
+
+@pytest_asyncio.fixture
+async def sandbox(session_id):
+    """A sandbox in the directory `get_session_states` resolves to.
+
+    Shadows the shared `sandbox` fixture for this module only. That one roots
+    at `tmp_path/states`, which is fine for a test that only drives the kernel. These are acceptance tests for the export
+    path, and both `runtime_manifest_path` and `_add_states_to_tar` resolve
+    through the canonical layout -- so a session anywhere else makes the export
+    read an empty directory and the assertions pass or fail for the wrong
+    reason. An export reading a different directory from the one the save wrote
+    is the defect class these tests exist to catch.
+    """
+    import shutil
+
+    from backend.config import get_session_dir, get_session_states
+    from backend.utils.sandbox import LocalJupyterSandbox
+
+    session_dir = get_session_dir(session_id)
+    states = get_session_states(session_id)
+    states.mkdir(parents=True, exist_ok=True)
+    workspace = session_dir / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    sb = LocalJupyterSandbox(
+        session_id=session_id,
+        state_dir=str(states),
+        working_dir=str(workspace),
+    )
+    await sb.start()
+    try:
+        yield sb
+    finally:
+        await sb.stop(save=False)
+        shutil.rmtree(session_dir, ignore_errors=True)
 
 
 @pytest.mark.asyncio
@@ -134,6 +171,22 @@ async def test_a_resumable_archive_carries_the_flushed_generation(
     finally:
         workflows.pop(sandbox.session_id, None)
 
+    # A checkpoint, so the pairing this test claims to check has something to
+    # check. The packer takes a verified standalone SQLite backup rather than
+    # copying by path, so this has to be a real database; and the WAL/SHM
+    # companions exist so their exclusion is a result rather than an accident.
+    import sqlite3
+
+    from backend.config import get_session_states
+
+    states_dir = get_session_states(sandbox.session_id)
+    checkpoint = states_dir / "checkpoints.sqlite"
+    with sqlite3.connect(checkpoint) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY)")
+        conn.execute("INSERT OR REPLACE INTO checkpoints VALUES ('node-1')")
+    (states_dir / "checkpoints.sqlite-wal").write_bytes(b"not a real wal")
+    (states_dir / "checkpoints.sqlite-shm").write_bytes(b"not a real shm")
+
     archive = tmp_path / "export.tar.gz"
     with tarfile.open(archive, "w:gz") as tf:
         _add_states_to_tar(tf, sandbox.session_id, include_runtime=True)
@@ -142,7 +195,11 @@ async def test_a_resumable_archive_carries_the_flushed_generation(
         names = tf.getnames()
 
     assert any(name.endswith("_session.pkl") for name in names), names
-    assert any(name.endswith("checkpoints.sqlite") for name in names) or True
+    # The checkpoint travels with the pkl because the two are only useful
+    # together: the checkpoint says which node to resume at, the pkl holds the
+    # values that node expects. This line used to read `... or True`, which
+    # asserted nothing whatever the packer did.
+    assert any(name.endswith("checkpoints.sqlite") for name in names), names
     # No WAL/SHM companion: a copy of those beside a database captured
     # mid-transaction is how a "successful" import yields an unusable graph.
     assert not [name for name in names if name.endswith(("-wal", "-shm"))], names
