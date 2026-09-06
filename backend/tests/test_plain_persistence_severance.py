@@ -47,7 +47,6 @@ SNAPSHOT_V2_CENSUS: dict[str, int] = {
     "backend/services/session_lifecycle.py": 1,
     "backend/services/session_store.py": 15,
     "backend/services/workflow_runner.py": 2,
-    "backend/utils/sandbox_parts/runtime_save.py": 1,
     "backend/utils/sandbox_parts/state_tracking.py": 2,
     "backend/utils/snapshot.py": 1,
     "backend/workflow/core.py": 1,

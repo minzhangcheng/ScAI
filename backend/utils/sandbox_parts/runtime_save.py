@@ -102,8 +102,6 @@ class SaveContext:
     restore_failed: bool
     revision: int
     expected_lifecycle_generation: int
-    required_names: set[str]
-    escaped_required: str
     escaped_path: str
     record_generation_failure: Any
     restore_previous_persistence: Any
@@ -117,61 +115,20 @@ class SaveContext:
     pairing: dict | None = None
 
 
-class RequiredValueDemoted(Exception):
-    """A deterministically unpicklable required name was released mid-save.
-
-    Raised only after the name has left the tracker's required set, so the
-    retry that follows builds a different dump instead of repeating one that is
-    guaranteed to fail again. ``names`` travels with it because attribution
-    must survive the release: once a name is out of the required set, the
-    failure record can no longer rediscover it from the tracker.
-    """
-
-    def __init__(self, names) -> None:
-        self.names = set(names)
-        super().__init__(", ".join(sorted(self.names)))
-
-
-# Deterministic refusals from the pickler: the value's structure, not the
-# machine's state, is what failed. Everything else (OSError, MemoryError, a
-# lifecycle error) stays fail-closed, because there a retry could genuinely
-# reach a different outcome.
-_STRUCTURAL_PICKLE_ERRORS = frozenset({
-    "TypeError",
-    "PicklingError",
-    "NotImplementedError",
-    "AttributeError",
-})
-
-_MAX_DEMOTION_RETRIES = 1
-
-
 async def save_session(sandbox, *, bindings):
+    # One pass. The demotion retry existed so a deterministically unpicklable
+    # *required* value could be released and the dump rebuilt without it; with
+    # no required set such a value is simply skipped and recorded as coverage,
+    # so the second pass would produce the identical dump.
     async with sandbox._exec_lock:
-        retries_left = _MAX_DEMOTION_RETRIES
-        demoted: set[str] = set()
-        while True:
-            context = await _prepare_save(sandbox, bindings=bindings)
-            if isinstance(context, bool):
-                if context:
-                    await _publish_committed_projection(
-                        sandbox, bindings=bindings
-                    )
-                return context
-            save_code = _build_save_code(context)
-            try:
-                return await _execute_save(
-                    context,
-                    save_code,
-                    bindings=bindings,
-                    allow_demotion=retries_left > 0,
-                    previously_demoted=demoted,
-                )
-            except RequiredValueDemoted as demotion:
-                # The offending name is gone from the required set, so the next
-                # pass is a different dump rather than the same one repeated.
-                demoted |= demotion.names
-                retries_left -= 1
+        context = await _prepare_save(sandbox, bindings=bindings)
+        if isinstance(context, bool):
+            if context:
+                await _publish_committed_projection(sandbox, bindings=bindings)
+            return context
+        return await _execute_save(
+            context, _build_save_code(context), bindings=bindings,
+        )
 
 
 async def _publish_committed_projection(sandbox, *, bindings) -> None:
@@ -437,15 +394,6 @@ async def _prepare_save(sandbox, *, bindings):
             sorted(stale_names),
         )
 
-    # Canonical names only matter when they actually exist; a canonical
-    # name that is simply absent is not an error. Tracker-declared names
-    # stay fail-closed whether or not they are live (see _missing_required).
-    from backend.services.snapshot_v2.runtime_registry import (
-        CANONICAL_RUNTIME_ARTIFACTS,
-    )
-    required_names = set(sandbox.get_runtime_dependency_names())
-    required_names |= set(CANONICAL_RUNTIME_ARTIFACTS) & set(live_names)
-    escaped_required = repr(sorted(required_names))
     from backend.utils.runtime_types import (
         VOLATILE_RUNTIME_TYPE_PREFIXES,
     )
@@ -454,8 +402,6 @@ async def _prepare_save(sandbox, *, bindings):
         restore_failed=restore_failed,
         revision=revision,
         expected_lifecycle_generation=expected_lifecycle_generation,
-        required_names=required_names,
-        escaped_required=escaped_required,
         escaped_path=escaped_path,
         escaped_volatile_prefixes=repr(VOLATILE_RUNTIME_TYPE_PREFIXES),
         record_generation_failure=_record_generation_failure,
@@ -485,45 +431,6 @@ import os as _scai_os
 import tempfile as _scai_tempfile
 import types as _scai_types
 import zstandard as _scai_zstd
-
-_required_names = set(""" + context.escaped_required + """)
-# Names the host declared required, captured before the backed-AnnData pass
-# below adds to the set. Only these are eligible for the in-memory
-# persistability probe: an AnnData that cannot be pickled is authoritative
-# analysis state, and dropping it silently is exactly the loss the required
-# tier exists to prevent.
-_scai_host_required = set(_required_names)
-_scai_probe_budget = 64 * 1024 * 1024
-
-
-class _ScaiProbeTooLarge(Exception):
-    # The frame outgrew the in-memory persistability probe.
-    pass
-
-
-class _ScaiProbeSink(_scai_io.RawIOBase):
-    # Buffer a dill frame in memory, abandoning it past a byte budget.
-
-    def __init__(self, _budget):
-        _scai_io.RawIOBase.__init__(self)
-        self._chunks = []
-        self._size = 0
-        self._budget = _budget
-
-    def writable(self):
-        return True
-
-    def write(self, _payload):
-        _view = memoryview(_payload)
-        self._size += _view.nbytes
-        if self._size > self._budget:
-            raise _ScaiProbeTooLarge()
-        self._chunks.append(_view.tobytes())
-        return _view.nbytes
-
-    def frame_bytes(self):
-        return b''.join(self._chunks)
-
 
 def _scai_is_anndata(_o):
     try:
@@ -592,26 +499,15 @@ for _scai_name, _scai_obj in list(_live.items()):
                 "backed AnnData could not be materialized for persistence: "
                 + _scai_name + " (" + type(_e).__name__ + ")"
             ) from _e
-    _required_names.add(_scai_name)
 
-_missing_required = sorted(_n for _n in _required_names if _n not in _live)
-if _missing_required:
-    raise RuntimeError(
-        "required runtime variables are missing: " + ", ".join(_missing_required)
-    )
-
-# Required values first so a failure aborts before any optional bytes are
-# written; the rest of the namespace follows on a best-effort basis.
+# Every value takes the same path: no value is privileged, and none can abort
+# the generation by failing to serialize. Spec 4.4 -- coverage warns, integrity
+# blocks, and a value dill refuses is coverage.
 _to_dump = []
-for _scai_name in sorted(_live):
-    if _scai_name in _required_names:
-        _to_dump.append((_scai_name, _live[_scai_name], True))
 _excluded_by_kind = []
 _excluded_volatile = []
 for _scai_name in sorted(_live):
     _scai_obj = _live[_scai_name]
-    if _scai_name in _required_names:
-        continue
     # These two exclusions used to be silent, so a name dropped here was absent
     # from the dump and absent from every record of the dump. Reporting them
     # separately is what lets a restore say why a name is missing rather than
@@ -628,7 +524,7 @@ for _scai_name in sorted(_live):
             "type": (_scai_t.__module__ or "") + "." + _scai_t.__name__,
         })
         continue
-    _to_dump.append((_scai_name, _scai_obj, False))
+    _to_dump.append((_scai_name, _scai_obj))
 
 _skipped_vars = []
 _saved_object_names = {}
@@ -643,7 +539,7 @@ try:
     with open(_tmp_path, 'wb') as _raw:
         _raw.write(_compression_magic)
         with _scai_zstd.ZstdCompressor(level=1).stream_writer(_raw, closefd=False) as _f:
-            for _var_name, _obj, _is_required in _to_dump:
+            for _var_name, _obj in _to_dump:
                 _object_id = id(_obj)
                 if _object_id in _saved_object_names:
                     _frame = (
@@ -652,51 +548,25 @@ try:
                     )
                 else:
                     _frame = (_var_name, _obj)
-                # Required values may stream because any failure aborts the
-                # generation. Optional values first serialize into a spooled
-                # file, bounding memory without trusting a library's entire
-                # top-level namespace to be dill-safe.
-                # A required value proves it serializes before a byte of it
-                # reaches the output stream. One that raises here is
-                # deterministically unpicklable -- a retry is the identical
-                # computation -- so it is dropped like an optional value and
-                # the host releases it from the required set. Values past the
-                # budget are the large analysis objects; they stream as before
-                # and a failure there still aborts the generation.
-                _probe_first = (
-                    _is_required
-                    and _var_name in _scai_host_required
-                    and not _scai_is_anndata(_obj)
-                )
-                _streamed = _is_required and not _probe_first
+                # Every value serializes into a spooled file first, so a
+                # dill failure is discovered before a byte reaches the
+                # compressed stream and the value can simply be skipped. Only
+                # a failure after that point is unrecoverable: the zstd
+                # compressor's state has already advanced, so the dump would be
+                # desynced and the generation must abort.
+                _streamed = False
                 try:
-                    if _probe_first:
-                        _probe = _ScaiProbeSink(_scai_probe_budget)
-                        try:
-                            _scai_dill.dump(_frame, _probe)
-                        except _ScaiProbeTooLarge:
-                            _streamed = True
-                            _scai_dill.dump(_frame, _f)
-                        else:
-                            _streamed = True
-                            _f.write(_probe.frame_bytes())
-                    elif _is_required:
-                        _scai_dill.dump(_frame, _f)
-                    else:
-                        with _scai_tempfile.SpooledTemporaryFile(
-                            max_size=8 * 1024 * 1024, mode='w+b'
-                        ) as _frame_file:
-                            _scai_dill.dump(_frame, _frame_file)
-                            _frame_file.seek(0)
-                            # Serialization is complete. A failure from this
-                            # point may have partially modified the compressed
-                            # stream, so it must abort the generation.
-                            _streamed = True
-                            while True:
-                                _frame_chunk = _frame_file.read(1024 * 1024)
-                                if not _frame_chunk:
-                                    break
-                                _f.write(_frame_chunk)
+                    with _scai_tempfile.SpooledTemporaryFile(
+                        max_size=8 * 1024 * 1024, mode='w+b'
+                    ) as _frame_file:
+                        _scai_dill.dump(_frame, _frame_file)
+                        _frame_file.seek(0)
+                        _streamed = True
+                        while True:
+                            _frame_chunk = _frame_file.read(1024 * 1024)
+                            if not _frame_chunk:
+                                break
+                            _f.write(_frame_chunk)
                 except Exception as _e:
                     _skipped_vars.append((
                         _var_name,
@@ -708,10 +578,8 @@ try:
                     print(f"__SCAI_SAVE_SKIPPED__\\t{_sv[0]}\\t{_sv[1]}\\t{_sv[2]}\\t{_sv[3]}")
                     if _streamed:
                         raise RuntimeError(
-                            ("required runtime variable could not be persisted: "
-                             if _is_required else
-                             "streamed runtime variable failed mid-write, "
-                             "aborting to avoid a desynced dump: ") + _var_name
+                            "streamed runtime variable failed mid-write, "
+                            "aborting to avoid a desynced dump: " + _var_name
                         ) from _e
                     continue
                 _saved_object_names.setdefault(_object_id, _var_name)
@@ -734,107 +602,25 @@ print("__SCAI_EXCLUDED_VOLATILE__:" + _scai_json.dumps(
     return save_code
 
 
-def _release_structural_failures(sandbox, names) -> set[str]:
-    """Drop provably unpicklable names from the tracker's required set."""
-    tracker = getattr(sandbox, "runtime_dependency_tracker", None)
-    if tracker is None:
-        return set()
-    releasable = {name for name in names if name in tracker.required_outputs}
-    if not releasable:
-        return set()
-    tracker.release(
-        releasable,
-        lifecycle="superseded",
-        reason=(
-            "Value is structurally unpicklable; every retry repeats the same "
-            "serialization, so it cannot be continuation state."
-        ),
-    )
-    return releasable
+def _reject_incomplete_runtime(context, skipped, result, *, bindings) -> None:
+    """Record a failed generation and raise. Always raises.
 
-
-def _attribute_failed_names(context, skipped, result, previously_demoted) -> set[str]:
-    """Name the required values this attempt failed on, from every channel."""
-    # A name released earlier in this same save stays attributable: the tracker
-    # no longer holds it, so nothing else can name what failed.
-    attributable = set(context.required_names) | set(previously_demoted or ())
-    failed_names = {
-        sv["name"] for sv in skipped if sv.get("name") in attributable
-    }
-    error_text = str(result.error or "")
-    exact_failure_patterns = (
-        r"required runtime variable could not be persisted:\s*([A-Za-z_]\w*)",
-        r"backed AnnData could not be materialized for persistence:\s*([A-Za-z_]\w*)",
-    )
-    for pattern in exact_failure_patterns:
-        failed_names.update(
-            match.group(1)
-            for match in re.finditer(pattern, error_text)
-            if match.group(1) in attributable
-        )
-    missing_match = re.search(
-        r"required runtime variables are missing:\s*([^\n]+)", error_text,
-    )
-    if missing_match:
-        failed_names.update(
-            name.strip()
-            for name in missing_match.group(1).split(",")
-            if name.strip() in attributable
-        )
-    return failed_names
-
-
-def _reject_incomplete_runtime(
-    context,
-    skipped,
-    result,
-    *,
-    bindings,
-    allow_demotion: bool,
-    previously_demoted,
-) -> None:
-    """Always raises: either to demote and retry, or to arm the gate."""
+    A value that could not be serialized is coverage, not a rejection: the save
+    script skips it, reports it, and commits. This path is reached only when the
+    script itself failed -- a mid-write desync, an OSError, a lifecycle refusal
+    -- so there is nothing to attribute to a required set and nothing to retry.
+    """
     sandbox = context.sandbox
-    if skipped:
-        bindings.logger.error(
-            "[%s] save_session rejected incomplete runtime; required "
-            "variables not persisted: %s",
-            sandbox.session_id,
-            [sv["name"] for sv in skipped],
+    skipped_names = sorted({sv["name"] for sv in skipped if sv.get("name")})
+    if skipped_names:
+        bindings.logger.warning(
+            "[%s] runtime save failed; values skipped before the failure: %s",
+            sandbox.session_id, skipped_names,
         )
     bindings.logger.warning(f"Failed to save session: {result.error}")
-    failed_names = _attribute_failed_names(
-        context, skipped, result, previously_demoted
-    )
-    if allow_demotion:
-        # Only values too large for the in-kernel probe reach this branch, so
-        # the stream is already unusable and the staged file is gone. Releasing
-        # the name makes the retry a different dump rather than the same
-        # deterministic failure a second time.
-        released = _release_structural_failures(sandbox, {
-            sv["name"] for sv in skipped
-            if sv.get("name") in failed_names
-            and sv.get("exc") in _STRUCTURAL_PICKLE_ERRORS
-        })
-        if released:
-            bindings.logger.error(
-                "[%s] Required runtime variable(s) failed mid-stream and are "
-                "structurally unpicklable; released and retrying the save "
-                "without them: %s",
-                sandbox.session_id,
-                ", ".join(sorted(released)),
-            )
-            raise RequiredValueDemoted(released)
-
-    poisoned: set[str] = set()
-    tracker = getattr(sandbox, "runtime_dependency_tracker", None)
-    if tracker is not None and failed_names:
-        poisoned = tracker.record_persistence_failure(failed_names)
     context.record_generation_failure(
         result.error or "Runtime serialization failed.",
-        failed_variables=sorted(failed_names),
-        requires_recompute=bool(poisoned),
-        recompute_variables=sorted(poisoned),
+        failed_variables=skipped_names,
     )
     raise RuntimeError(
         f"Sandbox runtime save failed for session {sandbox.session_id}: "
@@ -847,8 +633,6 @@ async def _execute_save(
     save_code: str,
     *,
     bindings,
-    allow_demotion: bool = False,
-    previously_demoted: set[str] | None = None,
 ) -> bool:
     sandbox = context.sandbox
     result = await sandbox._execute_unlocked(
@@ -932,21 +716,9 @@ async def _execute_save(
                 len(skipped),
                 ", ".join(f"{sv['name']}({sv['type']})" for sv in skipped),
             )
-            # The in-kernel probe proved these before writing any of their
-            # bytes, so this dump is complete apart from them. Release them
-            # here or every later save re-runs the identical failing
-            # serialization and the analysis stalls on a scratch variable.
-            released = _release_structural_failures(sandbox, {
-                sv["name"] for sv in skipped
-                if sv.get("name") in context.required_names
-            })
-            if released:
-                bindings.logger.error(
-                    "[%s] Required runtime variable(s) are structurally "
-                    "unpicklable and were released from the required set: %s",
-                    sandbox.session_id,
-                    ", ".join(sorted(released)),
-                )
+            # Nothing is released, because nothing was required. Each name is
+            # already in the generation's coverage record with its reason, and
+            # the next save will skip it the same way at the same cost.
         pkl_path = bindings.Path(sandbox.notebook_state.session_path)
         staged_path = bindings.Path(str(pkl_path) + ".tmp")
         production_transaction = staged_path.exists()
@@ -1124,14 +896,7 @@ async def _execute_save(
                 f"Sandbox runtime commit failed for session {sandbox.session_id}"
             ) from exc
     else:
-        _reject_incomplete_runtime(
-            context,
-            skipped,
-            result,
-            bindings=bindings,
-            allow_demotion=allow_demotion,
-            previously_demoted=previously_demoted,
-        )
+        _reject_incomplete_runtime(context, skipped, result, bindings=bindings)
 
     # A rebuilt namespace is now on disk, so the pkl the latch was
     # protecting no longer exists to protect. Clearing here rather than

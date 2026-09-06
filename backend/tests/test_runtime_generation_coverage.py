@@ -130,8 +130,6 @@ def _save_context(tmp_path):
         restore_failed=False,
         revision=1,
         expected_lifecycle_generation=1,
-        required_names=set(),
-        escaped_required=repr([]),
         escaped_path=repr(str(tmp_path / "sid_session.pkl")),
         record_generation_failure=None,
         restore_previous_persistence=None,

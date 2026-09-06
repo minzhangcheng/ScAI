@@ -233,18 +233,16 @@ class LocalJupyterSandbox(
         Each variable is an independent dill frame written through a streaming
         zstd writer. Compression therefore does not build a full in-memory pickle,
         while repetitive sparse/dataframe state no longer expands to multi-GB raw
-        files. Required-variable failure leaves the previous atomic file intact.
+        files. A failed save leaves the previous atomic file intact.
 
-        The whole user namespace is a candidate, not a fixed name list. Two tiers:
-
-        * **Required** — tracker-declared names, canonical artifacts that are
-          live, and *every* AnnData regardless of its variable name. These are
-          fail-closed: missing or unpersistable aborts the save and keeps the
-          previous pkl.
-        * **Everything else** — saved best-effort. Values that cannot be pickled
-          (open loom/h5py handles, sockets, locks) are skipped and reported via
-          ``_last_save_skipped`` instead of failing the save, since one stray
-          file handle must not cost the user their entire runtime state.
+        The whole user namespace is a candidate, not a fixed name list, and no
+        value is privileged. Every value serializes into a spooled file first,
+        so one that dill refuses (an open loom/h5py handle, a socket, a lock) is
+        skipped and reported via ``_last_save_skipped`` before a byte of it
+        reaches the compressed stream. The generation still commits, and what
+        was skipped travels with it as coverage — spec 4.4, where coverage warns
+        and only integrity blocks. One stray file handle must not cost the user
+        their entire runtime state, and it must not wedge the save either.
 
         Modules, functions, classes and methods are excluded — kernel init and
         notebook replay re-establish them, and by-reference frames are what most
