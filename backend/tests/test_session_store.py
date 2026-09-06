@@ -22,7 +22,7 @@ from backend.models.schemas import (
     WebSocketMessage,
 )
 from backend.models.schemas import TaskStatus
-from backend.constants import STRIPPED_FIGURE_PLACEHOLDER, WaitInputReason
+from backend.constants import STRIPPED_FIGURE_PLACEHOLDER
 from backend.state import last_save_times, sessions
 from backend.config import ensure_session_dirs, get_session_states, get_session_workspace
 from backend.tests.figure_image_helpers import valid_image_bytes, valid_pdf_bytes

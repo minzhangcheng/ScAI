@@ -5,8 +5,6 @@ import asyncio
 import pytest
 
 from backend.workflow.core import SingleCellAnalysisWorkflow
-from backend.utils.sandbox_parts.kernel import KernelMixin
-from backend.workflow.helpers import WorkflowSupersededError
 
 
 def _workflow_for_close():

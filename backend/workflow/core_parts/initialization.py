@@ -206,10 +206,6 @@ def __init__(
     self._unattended_gate_retries: Dict[str, int] = {}  # auto-retries spent per node at an unanswered gate
 
     # Runtime persistence gate. Unlike an ordinary node exception this gate
-    # stays inside the running workflow so Retry still has the exact live
-    # kernel namespace that failed to persist.
-    self._runtime_persistence_pause_task: Optional[asyncio.Task] = None
-
     # Supplementary analysis requests queue (set by API, consumed by HITL loop).
     # Each item is (request_text, target) where target is "annotation" | "direction" | "round".
     # Use a deque so consecutive rapid requests are preserved in order rather than overwritten.

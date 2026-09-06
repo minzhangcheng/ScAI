@@ -232,7 +232,6 @@ class ExecutionMixin:
         declared_not_names = sorted(
             {name for name in declared_raw if not name.isidentifier()}
         )
-        confirmed_declared: set[str] = set()
         before: set[str] = set()
         should_track = bool(track_globals or declared) and save_to_history
         async with self._exec_lock:

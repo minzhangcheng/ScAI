@@ -105,10 +105,6 @@ async def close(self, *, save_runtime: bool = True) -> bool:
             discard_event = asyncio.Event()
             self._close_discard_event = discard_event
         discard_event.set()
-    discard_requested = bool(
-        getattr(self, "_discard_runtime_on_close", False)
-        or getattr(self, "_restore_superseded", False)
-    )
     if getattr(self, "_close_complete", False):
         return True
 

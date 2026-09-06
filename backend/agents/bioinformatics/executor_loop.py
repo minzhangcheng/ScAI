@@ -450,7 +450,6 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
 
 async def finish_turn(context, effects) -> LoopExit:
     self = context.agent
-    state = context.analysis_state
     messages = context.messages
     analysis_log = context.analysis_log
     _supervisor_callback = context.supervisor_callback

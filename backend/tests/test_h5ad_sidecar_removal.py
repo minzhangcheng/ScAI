@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import pathlib
 
-import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 BACKEND = REPO / "backend"
