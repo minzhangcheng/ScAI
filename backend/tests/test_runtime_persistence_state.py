@@ -504,11 +504,9 @@ class _SimulatedProcessCrash(BaseException):
         ("journal_applying", "old"),
         ("pkl_replaced", "old"),
         ("sig_replaced", "old"),
-        ("manifest_replaced", "old"),
         ("metadata_replaced", "old"),
         ("runtime_manifest_replaced", "old"),
         ("commit_marker", "new"),
-        ("sidecars_retired", "new"),
         ("cleanup_backup_0", "new"),
     ],
 )
@@ -518,7 +516,6 @@ def test_regular_save_recovers_every_crash_boundary(
     crash_point,
     expected,
 ):
-    from backend.utils.files import atomic_write_json
     from backend.utils.runtime_manifest import (
         build_runtime_manifest,
         read_runtime_manifest,
@@ -531,7 +528,6 @@ def test_regular_save_recovers_every_crash_boundary(
     states.mkdir()
     live = states / "crash_session.pkl"
     staged = states / "crash_session.pkl.tmp"
-    manifest = states / "runtime_h5ad_manifest.json"
     live.write_bytes(b"old-generation")
     staged.write_bytes(b"new-generation")
     _write_pkl_signature(live, integrity)
@@ -549,7 +545,6 @@ def test_regular_save_recovers_every_crash_boundary(
         commit_source="regular_save",
         runtime_digest=old_digest,
     )
-    atomic_write_json(manifest, {"version": 1, "entries": {"old": {}}})
     # The generation manifest is a transaction component, so the matrix has to
     # prove the same thing about it as about the dump: whichever generation
     # survives a crash, the manifest on disk describes *that* dump. A manifest
@@ -568,16 +563,6 @@ def test_regular_save_recovers_every_crash_boundary(
             serializer_version="dill-zstd-1",
         ),
     )
-
-    def commit_manifest():
-        atomic_write_json(
-            manifest,
-            {
-                "version": 2,
-                "entries": {},
-                "authoritative_pkl_names": ["adata"],
-            },
-        )
 
     def commit_metadata():
         notebook.update_runtime_persistence(
@@ -599,7 +584,6 @@ def test_regular_save_recovers_every_crash_boundary(
             integrity,
             commit_metadata,
             metadata_path=notebook.state_path,
-            manifest_path=manifest,
             runtime_manifest_path=runtime_manifest,
             runtime_manifest={
                 "state_revision": 2,
@@ -607,8 +591,6 @@ def test_regular_save_recovers_every_crash_boundary(
                 "skipped_names": [],
                 "serializer_version": "dill-zstd-1",
             },
-            commit_manifest=commit_manifest,
-            retire_sidecars=lambda: None,
             target_revision=2,
             authoritative_pkl_names={"adata"},
             fault_hook=crash_at,
@@ -618,7 +600,6 @@ def test_regular_save_recovers_every_crash_boundary(
         live,
         integrity,
         metadata_path=notebook.state_path,
-        manifest_path=manifest,
         runtime_manifest_path=runtime_manifest,
         session_id="",
     )
@@ -630,7 +611,6 @@ def test_regular_save_recovers_every_crash_boundary(
         assert live.read_bytes() == b"old-generation"
         assert persistence["saved_revision"] == 1
         assert persistence["runtime_digest"] == old_digest
-        assert json.loads(manifest.read_text())["version"] == 1
         assert recovered_manifest["revision"] == 1
         assert recovered_manifest["pkl_sha256"] == old_digest
         assert recovered_manifest["saved_names"] == ["adata"]
@@ -639,7 +619,6 @@ def test_regular_save_recovers_every_crash_boundary(
         assert live.read_bytes() == b"new-generation"
         assert persistence["saved_revision"] == 2
         assert persistence["runtime_digest"] == new_digest
-        assert json.loads(manifest.read_text())["version"] == 2
         assert recovered_manifest["revision"] == 2
         assert recovered_manifest["pkl_sha256"] == new_digest
         assert recovered_manifest["saved_names"] == ["adata", "markers"]
@@ -846,13 +825,12 @@ def test_partial_staged_signature_write_is_removed_before_journal(
 
 @pytest.mark.parametrize(
     "corrupt_component",
-    ["pkl", "sig", "metadata", "manifest", "h5ad"],
+    ["pkl", "sig", "metadata"],
 )
 def test_committed_regular_save_authenticates_every_component_or_rolls_back(
     monkeypatch, tmp_path, corrupt_component,
 ):
     """COMMITTED is not sufficient when any target byte no longer verifies."""
-    from backend.utils.runtime_apply import write_runtime_h5ad_manifest
     from backend.utils.sandbox import _sig_path, _write_pkl_signature
 
     states = tmp_path / "states"
@@ -860,18 +838,9 @@ def test_committed_regular_save_authenticates_every_component_or_rolls_back(
     states.mkdir()
     live = states / "complete_session.pkl"
     staged = states / "complete_session.pkl.tmp"
-    sidecar = states / "adata.h5ad"
-    manifest = states / "runtime_h5ad_manifest.json"
     live.write_bytes(b"old-pkl")
     staged.write_bytes(b"new-pkl")
-    sidecar.write_bytes(b"old-h5ad")
     _write_pkl_signature(live, integrity)
-    write_runtime_h5ad_manifest(
-        "complete",
-        {"adata": _sha256_file(sidecar)},
-        authoritative_pkl_names={"score"},
-        states_dir=states,
-    )
     notebook = NotebookState("complete", str(states))
     old_digest = _sha256_file(live)
     notebook.update_runtime_persistence(
@@ -885,19 +854,8 @@ def test_committed_regular_save_authenticates_every_component_or_rolls_back(
         "pkl": live.read_bytes(),
         "sig": _sig_path(live, integrity).read_bytes(),
         "metadata": notebook.state_path.read_bytes(),
-        "manifest": manifest.read_bytes(),
-        "h5ad": sidecar.read_bytes(),
     }
     new_digest = _sha256_file(staged)
-
-    def commit_manifest():
-        sidecar.write_bytes(b"new-h5ad")
-        write_runtime_h5ad_manifest(
-            "complete",
-            {"adata": _sha256_file(sidecar)},
-            authoritative_pkl_names={"score"},
-            states_dir=states,
-        )
 
     def commit_metadata():
         notebook.update_runtime_persistence(
@@ -919,9 +877,6 @@ def test_committed_regular_save_authenticates_every_component_or_rolls_back(
             integrity,
             commit_metadata,
             metadata_path=notebook.state_path,
-            manifest_path=manifest,
-            commit_manifest=commit_manifest,
-            retire_sidecars=lambda: None,
             target_revision=2,
             authoritative_pkl_names={"score"},
             fault_hook=crash_after_commit,
@@ -931,8 +886,6 @@ def test_committed_regular_save_authenticates_every_component_or_rolls_back(
         "pkl": live,
         "sig": _sig_path(live, integrity),
         "metadata": notebook.state_path,
-        "manifest": manifest,
-        "h5ad": sidecar,
     }[corrupt_component]
     target_path.write_bytes(b"corrupt-target")
 
@@ -940,141 +893,15 @@ def test_committed_regular_save_authenticates_every_component_or_rolls_back(
         live,
         integrity,
         metadata_path=notebook.state_path,
-        manifest_path=manifest,
     )
 
     assert outcome == "rollback"
     assert live.read_bytes() == old_bytes["pkl"]
     assert _sig_path(live, integrity).read_bytes() == old_bytes["sig"]
     assert notebook.state_path.read_bytes() == old_bytes["metadata"]
-    assert manifest.read_bytes() == old_bytes["manifest"]
-    assert sidecar.read_bytes() == old_bytes["h5ad"]
     assert _verify_pkl_integrity(live, integrity)
 
 
-def test_applying_rollback_removes_new_h5ad_created_before_journal_extension(
-    tmp_path,
-):
-    """A kill immediately after manifest publication cannot leave an orphan."""
-    from backend.utils.runtime_apply import write_runtime_h5ad_manifest
-    from backend.utils.sandbox import _write_pkl_signature
-
-    states = tmp_path / "states"
-    integrity = tmp_path / "integrity"
-    states.mkdir()
-    live = states / "new-sidecar_session.pkl"
-    staged = states / "new-sidecar_session.pkl.tmp"
-    manifest = states / "runtime_h5ad_manifest.json"
-    new_sidecar = states / "new_adata.h5ad"
-    live.write_bytes(b"old")
-    staged.write_bytes(b"new")
-    _write_pkl_signature(live, integrity)
-    write_runtime_h5ad_manifest(
-        "new-sidecar", {}, authoritative_pkl_names={"old_object"},
-        states_dir=states,
-    )
-    old_manifest = manifest.read_bytes()
-    notebook = NotebookState("new-sidecar", str(states))
-    notebook.update_runtime_persistence(
-        "current",
-        current_revision=1,
-        saved_revision=1,
-        commit_source="regular_save",
-        runtime_digest=_sha256_file(live),
-    )
-
-    def commit_manifest():
-        new_sidecar.write_bytes(b"new-sidecar-bytes")
-        write_runtime_h5ad_manifest(
-            "new-sidecar",
-            {"new_adata": _sha256_file(new_sidecar)},
-            authoritative_pkl_names={"score"},
-            states_dir=states,
-        )
-
-    def crash_after_manifest(point):
-        if point == "manifest_replaced":
-            raise _SimulatedProcessCrash(point)
-
-    with pytest.raises(_SimulatedProcessCrash):
-        _commit_pkl_transaction(
-            staged,
-            live,
-            integrity,
-            lambda: None,
-            metadata_path=notebook.state_path,
-            manifest_path=manifest,
-            commit_manifest=commit_manifest,
-            target_revision=2,
-            authoritative_pkl_names={"score"},
-            fault_hook=crash_after_manifest,
-        )
-
-    assert new_sidecar.exists()
-    assert recover_regular_save_transaction(
-        live,
-        integrity,
-        metadata_path=notebook.state_path,
-        manifest_path=manifest,
-    ) == "rollback"
-    assert not new_sidecar.exists()
-    assert manifest.read_bytes() == old_manifest
-
-
-def test_in_process_regular_save_failure_removes_new_h5ad_product(tmp_path):
-    from backend.utils.runtime_apply import write_runtime_h5ad_manifest
-    from backend.utils.sandbox import _write_pkl_signature
-
-    states = tmp_path / "states"
-    integrity = tmp_path / "integrity"
-    states.mkdir()
-    live = states / "failed-sidecar_session.pkl"
-    staged = states / "failed-sidecar_session.pkl.tmp"
-    manifest = states / "runtime_h5ad_manifest.json"
-    new_sidecar = states / "failed_adata.h5ad"
-    live.write_bytes(b"old")
-    staged.write_bytes(b"new")
-    _write_pkl_signature(live, integrity)
-    write_runtime_h5ad_manifest(
-        "failed-sidecar", {}, authoritative_pkl_names={"old_object"},
-        states_dir=states,
-    )
-    old_manifest = manifest.read_bytes()
-    notebook = NotebookState("failed-sidecar", str(states))
-    notebook.update_runtime_persistence(
-        "current",
-        current_revision=1,
-        saved_revision=1,
-        commit_source="regular_save",
-        runtime_digest=_sha256_file(live),
-    )
-
-    def commit_manifest():
-        new_sidecar.write_bytes(b"failed-new-sidecar")
-        write_runtime_h5ad_manifest(
-            "failed-sidecar",
-            {"failed_adata": _sha256_file(new_sidecar)},
-            authoritative_pkl_names={"score"},
-            states_dir=states,
-        )
-
-    with pytest.raises(RuntimeError, match="metadata failed"):
-        _commit_pkl_transaction(
-            staged,
-            live,
-            integrity,
-            lambda: (_ for _ in ()).throw(RuntimeError("metadata failed")),
-            metadata_path=notebook.state_path,
-            manifest_path=manifest,
-            commit_manifest=commit_manifest,
-            target_revision=2,
-            authoritative_pkl_names={"score"},
-        )
-
-    assert not new_sidecar.exists()
-    assert manifest.read_bytes() == old_manifest
-    assert live.read_bytes() == b"old"
-    assert _verify_pkl_integrity(live, integrity)
 
 
 def test_notebook_runtime_metadata_redacts_raw_fields_before_persisting(tmp_path):
@@ -1161,7 +988,6 @@ def test_runtime_persistence_identifier_fields_remain_head_bounded(tmp_path):
 def test_regular_save_fails_closed_before_partial_rollback_when_backup_corrupt(
     tmp_path,
 ):
-    from backend.utils.runtime_apply import write_runtime_h5ad_manifest
     from backend.utils.sandbox import _write_pkl_signature
 
     states = tmp_path / "states"
@@ -1169,13 +995,9 @@ def test_regular_save_fails_closed_before_partial_rollback_when_backup_corrupt(
     states.mkdir()
     live = states / "closed_session.pkl"
     staged = states / "closed_session.pkl.tmp"
-    manifest = states / "runtime_h5ad_manifest.json"
     live.write_bytes(b"old")
     staged.write_bytes(b"new")
     _write_pkl_signature(live, integrity)
-    write_runtime_h5ad_manifest(
-        "closed", {}, authoritative_pkl_names={"adata"}, states_dir=states,
-    )
     notebook = NotebookState("closed", str(states))
     notebook.update_runtime_persistence(
         "current",
@@ -1206,8 +1028,6 @@ def test_regular_save_fails_closed_before_partial_rollback_when_backup_corrupt(
             integrity,
             commit_metadata,
             metadata_path=notebook.state_path,
-            manifest_path=manifest,
-            commit_manifest=lambda: None,
             target_revision=2,
             authoritative_pkl_names={"adata"},
             fault_hook=crash_mid_apply,
@@ -1225,7 +1045,6 @@ def test_regular_save_fails_closed_before_partial_rollback_when_backup_corrupt(
             live,
             integrity,
             metadata_path=notebook.state_path,
-            manifest_path=manifest,
         )
 
     # Preflight authenticated every backup before touching any target.
@@ -1350,105 +1169,3 @@ def test_restore_of_older_committed_generation_is_explicitly_degraded(
     assert persistence["degraded_to_revision"] == 7
     assert persistence["last_attempt_status"] == "failed"
     assert persistence["requires_recompute"] is True
-
-
-def test_regular_generation_manifest_names_pkl_and_retires_stale_h5ad(tmp_path):
-    from backend.utils.runtime_apply import (
-        quarantine_unreferenced_runtime_h5ads,
-        write_runtime_h5ad_manifest,
-    )
-
-    stale = tmp_path / "stale_adata.h5ad"
-    stale.write_bytes(b"old sidecar")
-    manifest = write_runtime_h5ad_manifest(
-        "regular-manifest",
-        {},
-        authoritative_pkl_names={"score_table", "adata"},
-        states_dir=tmp_path,
-    )
-    quarantine_unreferenced_runtime_h5ads(
-        "regular-manifest", set(), states_dir=tmp_path,
-    )
-
-    assert json.loads(manifest.read_text()) == {
-        "version": 2,
-        "entries": {},
-        "authoritative_pkl_names": ["adata", "score_table"],
-    }
-    assert not stale.exists()
-    assert (tmp_path / "stale_adata.h5ad.quarantine").read_bytes() == b"old sidecar"
-
-
-def test_committed_sidecar_retire_failure_is_retried_without_pkl_rollback(
-    monkeypatch, tmp_path,
-):
-    from backend.utils.sandbox import _write_pkl_signature
-
-    states = tmp_path / "states"
-    states.mkdir()
-    integrity = tmp_path / "integrity"
-    live = states / "retire_session.pkl"
-    staged = states / "retire_session.pkl.tmp"
-    manifest = states / "runtime_h5ad_manifest.json"
-    stale = states / "stale.h5ad"
-    live.write_bytes(b"old")
-    staged.write_bytes(b"new")
-    stale.write_bytes(b"stale")
-    _write_pkl_signature(live, integrity)
-    notebook = NotebookState("retire", str(states))
-    old_digest = _sha256_file(live)
-    new_digest = _sha256_file(staged)
-    notebook.update_runtime_persistence(
-        "current",
-        current_revision=1,
-        saved_revision=1,
-        commit_source="regular_save",
-        runtime_digest=old_digest,
-    )
-
-    def commit_manifest():
-        from backend.utils.runtime_apply import write_runtime_h5ad_manifest
-        write_runtime_h5ad_manifest(
-            "retire", {}, authoritative_pkl_names={"adata"}, states_dir=states,
-        )
-
-    def commit_metadata():
-        notebook.update_runtime_persistence(
-            "current",
-            current_revision=2,
-            saved_revision=2,
-            commit_source="regular_save",
-            runtime_digest=new_digest,
-        )
-
-    _commit_pkl_transaction(
-        staged,
-        live,
-        integrity,
-        commit_metadata,
-        metadata_path=notebook.state_path,
-        manifest_path=manifest,
-        commit_manifest=commit_manifest,
-        retire_sidecars=lambda: (_ for _ in ()).throw(OSError("busy")),
-        target_revision=2,
-        authoritative_pkl_names={"adata"},
-    )
-
-    journal = live.with_name(f"{live.name}.regular-save.json")
-    assert journal.exists()
-    assert live.read_bytes() == b"new"
-    assert stale.exists()
-
-    outcome = recover_regular_save_transaction(
-        live,
-        integrity,
-        metadata_path=notebook.state_path,
-        manifest_path=manifest,
-        session_id="retire",
-    )
-
-    assert outcome == "forward"
-    assert live.read_bytes() == b"new"
-    assert not stale.exists()
-    assert (states / "stale.h5ad.quarantine").read_bytes() == b"stale"
-    assert not journal.exists()

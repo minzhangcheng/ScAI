@@ -90,3 +90,104 @@ def test_the_ordinary_save_no_longer_writes_a_sidecar_manifest():
         "quarantine_unreferenced_runtime_h5ads",
     ):
         assert gone not in source, gone
+
+
+# ---------------------------------------------------------------------------
+# A2-5 Task 5b: the sidecar itself, not just the manifest the save wrote
+# ---------------------------------------------------------------------------
+
+
+def test_no_producer_of_a_sidecar_survives():
+    """Every writer went with the snapshot package.
+
+    ``atomic_replace_h5ad`` installed one, ``write_runtime_h5ad_manifest``
+    declared the set, and the two ``*_live_runtime_h5ad_set`` helpers staged and
+    finalized it. All four were reachable only from the snapshot restore.
+    """
+    from backend.utils import runtime_apply
+
+    for gone in (
+        "atomic_replace_h5ad",
+        "write_runtime_h5ad_manifest",
+        "install_live_runtime_h5ad_set",
+        "finalize_live_runtime_h5ad_set",
+        "quarantine_unreferenced_runtime_h5ads",
+    ):
+        assert not hasattr(runtime_apply, gone), gone
+
+
+def test_the_save_transaction_has_no_sidecar_half_left():
+    from backend.tests.split_facade import split_source
+
+    source = split_source("backend.utils.sandbox")
+    for gone in (
+        "_validate_runtime_h5ad_manifest",
+        "_include_new_runtime_h5ads_in_rollback",
+        "keep_h5ad_names",
+        "retire_sidecars",
+    ):
+        assert gone not in source, gone
+
+
+def test_a_journal_naming_a_retired_component_kind_still_recovers():
+    """A crash under the previous build must not strand the pkl it was writing.
+
+    Its journal can list ``h5ad`` components this build no longer installs.
+    Resolution skips the kind it does not know rather than refusing the whole
+    transaction, which would abandon the pkl the recovery is really about.
+    """
+    from backend.tests.split_facade import split_source
+
+    source = split_source("backend.utils.sandbox")
+    assert "Ignoring unknown component kind" in source
+
+
+def test_a_runtime_that_lives_only_in_sidecars_is_refused_not_half_loaded(tmp_path):
+    """The one case where deleting the reader would lose data silently.
+
+    A session the previous build restored from a snapshot, and which has not
+    saved since, holds its AnnData in sidecars and not in the pkl beside them.
+    Loading that pkl alone brings the kernel up quietly missing ``adata``. The
+    probe that decides this must fire on a manifest that names something, and
+    must stay silent on the empty one the ordinary save wrote until A2-4 --
+    that form claims nothing and refusing on it would strand healthy sessions.
+    """
+    import json
+
+    from backend.utils.sandbox_parts.runtime_restore import (
+        _names_only_in_retired_sidecars,
+    )
+
+    absent = tmp_path / "missing.json"
+    assert _names_only_in_retired_sidecars(absent) == set()
+
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps({"version": 2, "entries": {}}))
+    assert _names_only_in_retired_sidecars(empty) == set()
+
+    named = tmp_path / "named.json"
+    named.write_text(json.dumps({
+        "version": 2,
+        "entries": {"adata": {"path": "adata.h5ad", "sha256": "0" * 64}},
+    }))
+    assert _names_only_in_retired_sidecars(named) == {"adata"}
+
+    unreadable = tmp_path / "unreadable.json"
+    unreadable.write_text("{not json")
+    assert _names_only_in_retired_sidecars(unreadable) == set()
+
+
+def test_the_generated_restore_script_no_longer_reads_sidecars():
+    from backend.tests.split_facade import split_source
+
+    source = split_source("backend.utils.sandbox")
+    assert "_h5ad_manifest_path" not in source
+    assert "read_h5ad" not in source
+
+
+def test_retiring_a_runtime_still_sweeps_legacy_sidecars():
+    """They are inert, but they name variables the retired generation held."""
+    from backend.tests.split_facade import source_for_path
+
+    source = source_for_path("backend/utils/runtime_apply.py")
+    assert 'states_dir.glob("*.h5ad")' in source

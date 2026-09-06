@@ -1,31 +1,27 @@
-"""Stage 1 runtime-state safety: authoritative status, choice resolution, and a
-crash-recoverable journaled apply of a snapshot's kernel pkl to the live path.
+"""Runtime-state safety: coherence, forward-resume policy, integrity checks,
+and recovery of a runtime apply a previous build left half-written.
 
-This module is intentionally free of workflow/route imports so it can be unit
-tested and reused by both the restore route and sandbox startup recovery.
+Nothing here installs a runtime any more -- the snapshot restore that did was
+removed, and the ordinary save installs through
+``sandbox_parts.regular_save._commit_pkl_transaction``. What survives is the
+part that reads: whether the live pkl is coherent with the state that
+references it, whether forward resume is safe, and how to retire or roll back
+what is on disk.
+
+Intentionally free of workflow/route imports so it can be unit tested and
+reused by sandbox startup recovery.
 """
 import json
 import logging
 import os
-import re
-import shutil
 from pathlib import Path
 from typing import Literal
 
 from ..config import get_session_states
-from backend.utils.runtime_names import (
-    runtime_h5ad_filename,
-    runtime_h5ad_path,
-    validate_runtime_global_name,
-)
 
 logger = logging.getLogger(__name__)
 
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
-
-# Staging temp of atomic_replace_pkl / atomic_replace_h5ad: the pid is what
-# tells an abandoned partial apart from a copy that is still in flight.
-_STAGED_TEMP_SUFFIX = re.compile(r"\.(\d+)\.staged$")
 
 RuntimeStatus = Literal["complete", "missing", "state_only", "corrupt"]
 RuntimeRestoreStatus = Literal["complete", "unavailable", "intentionally_kept"]
@@ -57,116 +53,12 @@ def _live_sig(session_id: str) -> Path:
     return _sig_path(_live_pkl(session_id), _integrity_dir(session_id))
 
 
-def commit_runtime_persistence_metadata(
-    session_id: str,
-    *,
-    source: str = "snapshot_apply",
-) -> dict:
-    """Stamp explicit committed-generation metadata after a verified apply."""
-    from .sandbox import NotebookState
-
-    states = get_session_states(session_id)
-    session_json = states.parent / "session.json"
-    state_payload = {}
-    if session_json.exists():
-        try:
-            state_payload = json.loads(session_json.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            state_payload = {}
-    sandbox_state = state_payload.get("sandbox_state") or {}
-    revision = int(
-        sandbox_state.get("runtime_revision")
-        or sandbox_state.get("saved_runtime_revision")
-        or 0
-    )
-    from backend.services.session_lifecycle import read_lifecycle_record
-
-    lifecycle = read_lifecycle_record(session_id) or {}
-    notebook = NotebookState(
-        session_id,
-        str(states),
-        lifecycle_generation=int(lifecycle.get("generation") or 0),
-    )
-    live_pkl = notebook.session_path
-    from .sandbox import _sha256_file
-
-    runtime_digest = _sha256_file(live_pkl) if live_pkl.is_file() else None
-    persistence = notebook.update_runtime_persistence(
-        "current",
-        current_revision=revision,
-        saved_revision=revision,
-        commit_source=source,
-        runtime_digest=runtime_digest,
-    )
-    if state_payload:
-        state_payload["runtime_persistence"] = persistence
-        sandbox_state["runtime_revision"] = revision
-        sandbox_state["saved_runtime_revision"] = revision
-        sandbox_state["runtime_persistence"] = persistence
-        state_payload["sandbox_state"] = sandbox_state
-        from backend.utils.files import atomic_write_bytes
-
-        atomic_write_bytes(
-            session_json,
-            json.dumps(state_payload, ensure_ascii=False, indent=2).encode("utf-8"),
-        )
-    return persistence
-
 
 def _journal_path(session_id: str) -> Path:
     from .sandbox import _integrity_dir
     return _integrity_dir(session_id) / "runtime_apply.journal.json"
 
 
-def apply_runtime_pkl(session_id: str, snapshot_zst: Path) -> None:
-    """Decompress a snapshot's pkl to the live path and re-sign its HMAC, as one
-    journaled runtime pair. Recoverable across a crash between the two replaces.
-    """
-    import zstandard as zstd
-    from .sandbox import _pkl_hmac_stream, _integrity_dir, _verify_pkl_integrity
-
-    live = _live_pkl(session_id)
-    sig = _live_sig(session_id)
-    idir = _integrity_dir(session_id)
-    idir.mkdir(parents=True, exist_ok=True)
-    live.parent.mkdir(parents=True, exist_ok=True)
-
-    staged = live.with_suffix(live.suffix + ".staged")
-    dctx = zstd.ZstdDecompressor()
-    with open(snapshot_zst, "rb") as src, open(staged, "wb") as dst:
-        dctx.copy_stream(src, dst)
-    staged_sig_value = _pkl_hmac_stream(staged)
-
-    had_live = live.exists()
-    bak_pkl = live.with_suffix(live.suffix + ".bak")
-    bak_sig = sig.with_suffix(sig.suffix + ".bak")
-    if had_live:
-        shutil.copy2(live, bak_pkl)
-    had_sig = sig.exists()
-    if had_sig:
-        shutil.copy2(sig, bak_sig)
-
-    from backend.utils.files import atomic_write_bytes
-    journal = {"state": "APPLYING", "had_live": had_live}
-    pre_hmac = json.dumps(journal, sort_keys=True).encode()
-    journal["hmac"] = _journal_hmac(pre_hmac)
-    atomic_write_bytes(_journal_path(session_id), json.dumps(journal).encode())
-
-    try:
-        os.replace(staged, live)
-        atomic_write_bytes(sig, staged_sig_value.encode())
-        if not _verify_pkl_integrity(live, idir):
-            raise RuntimeApplyError(f"[{session_id}] restored pkl failed integrity after apply")
-    except Exception:
-        recover_runtime_apply_journal(session_id)  # roll back to the backed-up pair
-        raise
-
-    journal["state"] = "COMMITTED"
-    journal["hmac"] = _journal_hmac(json.dumps({"state": "COMMITTED", "had_live": had_live}, sort_keys=True).encode())
-    atomic_write_bytes(_journal_path(session_id), json.dumps(journal).encode())
-    for p in (bak_pkl, bak_sig):
-        p.unlink(missing_ok=True)
-    _journal_path(session_id).unlink(missing_ok=True)
 
 
 def _quarantine_path(path: Path) -> Path | None:
@@ -185,51 +77,13 @@ def _quarantine_path(path: Path) -> Path | None:
     return candidate
 
 
-def quarantine_live_runtime_pkl(session_id: str) -> None:
-    """Move the live dill pkl and its signature aside, leaving h5ads alone.
-
-    The pkl-only half of :func:`quarantine_live_runtime`, for callers that own
-    the h5ad sidecar set separately (rollback drives it through
-    :func:`finalize_live_runtime_h5ad_set`).
-    """
-    for p in (_live_pkl(session_id), _live_sig(session_id)):
-        _quarantine_path(p)
-
-
-def quarantine_live_runtime(session_id: str) -> None:
-    """reset choice: quarantine live pkl, signature, h5ad sidecars, and manifest.
-
-    After Task 3 the sandbox rehydrates from ``runtime_h5ad_manifest.json`` even
-    without a pkl.  Leaving those sidecars in place after ``reset`` would break
-    the reset contract by rehydrating stale AnnData into a fresh kernel.
-    """
-    live = _live_pkl(session_id)
-    sig = _live_sig(session_id)
-    for p in (live, sig):
-        _quarantine_path(p)
-
-    states = _states_dir(session_id)
-    _quarantine_path(runtime_h5ad_manifest_path(session_id))
-
-    # Quarantine every live *.h5ad confined to the states directory (safer than
-    # trusting only manifest-referenced names when the manifest is corrupt).
-    if states.is_dir():
-        try:
-            states_resolved = states.resolve()
-        except OSError:
-            states_resolved = states
-        for p in states.glob("*.h5ad"):
-            if not p.is_file():
-                continue
-            try:
-                if p.resolve().parent != states_resolved:
-                    continue
-            except OSError:
-                continue
-            _quarantine_path(p)
 
 
 def recover_runtime_apply_journal(session_id: str) -> None:
+    # Kept although nothing writes this journal any more: the producer was the
+    # snapshot restore, and a session whose apply was interrupted by the crash
+    # that preceded this upgrade still has one on disk. Deleting the recovery
+    # with the producer would leave that pair half-replaced forever.
     """Complete or roll back an interrupted runtime-pair apply. Idempotent."""
     jp = _journal_path(session_id)
     if not jp.exists():
@@ -404,15 +258,6 @@ def verify_live_pkl_or_raise(session_id: str) -> None:
         )
 
 
-def clear_runtime_restore_status(session_id: str) -> None:
-    from ..state import sessions
-    state = sessions.get(session_id)
-    if state is not None and getattr(state, "runtime_restore_status", "complete") != "complete":
-        state.runtime_restore_status = "complete"
-
-
-# -- Stage 3 restore helpers (atomic pkl/h5ad replacement) -------------------
-
 
 def _states_dir(session_id: str) -> Path:
     return get_session_states(session_id)
@@ -431,102 +276,6 @@ def runtime_h5ad_manifest_path(
     return root / RUNTIME_H5AD_MANIFEST_FILENAME
 
 
-def write_runtime_h5ad_manifest(
-    session_id: str,
-    entries: dict[str, str],
-    *,
-    authoritative_pkl_names: set[str] | list[str] | None = None,
-    states_dir: str | Path | None = None,
-) -> Path:
-    """Atomically write the live h5ad sidecar manifest.
-
-    entries maps validated runtime variable name to the SHA-256 of the live
-    h5ad file written as `{name}.h5ad`.
-    """
-    from backend.utils.files import atomic_write_bytes
-
-    manifest_entries = {}
-    for name, sha256 in sorted(entries.items()):
-        filename = runtime_h5ad_filename(name)
-        if not isinstance(sha256, str) or len(sha256) != 64:
-            raise RuntimeApplyError(
-                f"[{session_id}] invalid h5ad sha256 for {name!r}: {sha256!r}"
-            )
-        manifest_entries[name] = {
-            "path": filename,
-            "sha256": sha256,
-        }
-    payload = {
-        "version": 2 if authoritative_pkl_names is not None else 1,
-        "entries": manifest_entries,
-    }
-    if authoritative_pkl_names is not None:
-        validated_names = []
-        for name in sorted(set(authoritative_pkl_names)):
-            try:
-                validated_names.append(validate_runtime_global_name(name))
-            except ValueError as exc:
-                raise RuntimeApplyError(
-                    f"[{session_id}] invalid authoritative pkl name: {name!r}"
-                ) from exc
-        payload["authoritative_pkl_names"] = validated_names
-    path = runtime_h5ad_manifest_path(session_id, states_dir=states_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_bytes(
-        path,
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
-    )
-    return path
-
-
-def _staged_copy_replace(src: Path, dst: Path) -> None:
-    """Copy *src* onto *dst* through a ``<dst>.<pid>.staged`` temp, then fsync.
-
-    The temp name is one no sweeper in the system can match: both states-dir
-    sweeps glob ``*.h5ad``, GC walks ``objects/`` only, and the snapshot staging
-    sweeps operate on ``<session>/staging``. Quota accounting sums ``objects/``
-    too, so a dataset-sized partial left here by a failed copy — ENOSPC is the
-    realistic case, since restore holds the object-store copy, the staged copy
-    and the live copy at once — is invisible, unreclaimable, and packed verbatim
-    into every v1 export archive. Unlink it while we still know its name.
-    """
-    tmp = dst.with_suffix(dst.suffix + f".{os.getpid()}.staged")
-    try:
-        shutil.copy2(src, tmp)
-        tmp_fd = os.open(tmp, os.O_RDONLY)
-        try:
-            os.fsync(tmp_fd)
-        finally:
-            os.close(tmp_fd)
-        os.replace(str(tmp), str(dst))
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-    dir_fd = os.open(str(dst.parent), os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
-
-
-def _retire_stale_runtime_manifest(session_id: str) -> None:
-    """Move aside a generation manifest that no longer describes the live dump.
-
-    Any path that installs a pkl these functions did not write -- a Snapshot V2
-    restore, an import from another installation -- leaves the previous
-    generation's manifest in place. Its digest then names bytes that are gone,
-    and the next start refuses to restore a session that is in fact intact.
-    Retiring it makes that dump a legacy generation: it loads, its coverage is
-    unknown, and the next successful save writes a manifest that matches.
-    """
-    from backend.utils.runtime_manifest import (
-        runtime_manifest_path,
-        runtime_manifest_sig_path,
-    )
-
-    manifest = runtime_manifest_path(session_id)
-    _quarantine_path(manifest)
-    _quarantine_path(runtime_manifest_sig_path(manifest))
 
 
 def retire_live_runtime(session_id: str, *, include_checkpoint: bool = False) -> bool:
@@ -552,10 +301,10 @@ def retire_live_runtime(session_id: str, *, include_checkpoint: bool = False) ->
     _quarantine_path(manifest)
     _quarantine_path(runtime_manifest_sig_path(manifest))
 
-    # The h5ad sidecars rehydrate a namespace on their own -- restore reads them
-    # whenever the manifest is present, dump or no dump -- so leaving them would
-    # keep the promise of an empty kernel only for the values that happened to
-    # live in the pkl.
+    # Legacy h5ad sidecars, written by a snapshot restore this build no longer
+    # has. Nothing reads them any more, but they name variables the retired
+    # generation held, and a session starting fresh beside them would be told
+    # it depends on them. Retire them with the rest of the generation.
     states_dir = _live_pkl(session_id).parent
     h5ad_manifest = states_dir / RUNTIME_H5AD_MANIFEST_FILENAME
     if h5ad_manifest.exists():
@@ -582,196 +331,3 @@ def retire_live_runtime(session_id: str, *, include_checkpoint: bool = False) ->
             if _quarantine_path(path) is not None:
                 retired = True
     return retired
-
-
-def atomic_replace_pkl(session_id: str, src_pkl_path: str) -> str:
-    """Atomically replace the live session.pkl with a staged copy.
-
-    Re-signs the HMAC after replacement.  Returns the SHA-256 of the
-    written pkl content.
-    """
-    from .sandbox import _pkl_hmac_stream, _integrity_dir, _verify_pkl_integrity
-
-    src = Path(src_pkl_path)
-    if not src.exists():
-        raise RuntimeApplyError(
-            f"[{session_id}] staged pkl not found: {src_pkl_path}"
-        )
-
-    live = _live_pkl(session_id)
-    sig = _live_sig(session_id)
-    idir = _integrity_dir(session_id)
-    idir.mkdir(parents=True, exist_ok=True)
-    live.parent.mkdir(parents=True, exist_ok=True)
-
-    _staged_copy_replace(src, live)
-
-    # Re-sign HMAC
-    from backend.utils.files import atomic_write_bytes
-    sig_value = _pkl_hmac_stream(live)
-    atomic_write_bytes(sig, sig_value.encode())
-
-    if not _verify_pkl_integrity(live, idir):
-        raise RuntimeApplyError(
-            f"[{session_id}] replaced pkl failed integrity check"
-        )
-
-    # These bytes are not the generation the manifest describes.
-    _retire_stale_runtime_manifest(session_id)
-
-    from .sandbox import _sha256_file
-    return _sha256_file(live)
-
-
-def atomic_replace_h5ad(session_id: str, src_h5ad_path: str, var_name: str = "adata") -> str:
-    """Atomically place a staged h5ad into the session's states directory.
-
-    The file is written as ``{states_dir}/{var_name}.h5ad``.
-    Returns the SHA-256 of the written h5ad content.
-    """
-    src = Path(src_h5ad_path)
-    if not src.exists():
-        raise RuntimeApplyError(
-            f"[{session_id}] staged h5ad not found: {src_h5ad_path}"
-        )
-
-    try:
-        safe_var_name = validate_runtime_global_name(var_name)
-    except ValueError as exc:
-        raise RuntimeApplyError(
-            f"[{session_id}] invalid runtime variable name: {var_name!r}"
-        ) from exc
-
-    states = _states_dir(session_id)
-    states.mkdir(parents=True, exist_ok=True)
-    dst = runtime_h5ad_path(states, safe_var_name)
-
-    _staged_copy_replace(src, dst)
-
-    from .sandbox import _sha256_file
-    return _sha256_file(dst)
-
-
-def _reclaim_orphan_staged_temps(states: Path, states_resolved: Path) -> None:
-    """Unlink ``*.<pid>.staged`` partials whose writing process is gone.
-
-    ``atomic_replace_pkl``/``atomic_replace_h5ad`` unlink their own temp when the
-    copy fails, but a process killed mid-copy cannot, and nothing else ever
-    will — the `*.h5ad` sweeps here and in ``quarantine_live_runtime`` cannot
-    match the suffix. A live pid means an in-flight copy, ours or a concurrent
-    process's, and unlinking that would sabotage a running restore, so liveness
-    is what decides rather than the name alone.
-    """
-    for p in states.glob("*.staged"):
-        if not p.is_file():
-            continue
-        match = _STAGED_TEMP_SUFFIX.search(p.name)
-        if match is None:
-            continue
-        try:
-            if p.resolve().parent != states_resolved:
-                continue
-        except OSError:
-            continue
-        try:
-            os.kill(int(match.group(1)), 0)
-        except ProcessLookupError:
-            pass  # writer is gone: the partial can never be completed
-        except OSError:
-            continue  # alive but not signalable by us
-        else:
-            continue  # still running
-        try:
-            p.unlink()
-        except OSError:
-            logger.warning("Could not reclaim orphan staged temp: %s", p)
-
-
-def _quarantine_unreferenced_live_h5ads(
-    session_id: str,
-    keep_names: set[str],
-    *,
-    states_dir: str | Path | None = None,
-) -> None:
-    """Quarantine live ``*.h5ad`` files not in *keep_names* (confined to states)."""
-    states = Path(states_dir) if states_dir is not None else _states_dir(session_id)
-    if not states.is_dir():
-        return
-    try:
-        states_resolved = states.resolve()
-    except OSError:
-        states_resolved = states
-
-    _reclaim_orphan_staged_temps(states, states_resolved)
-
-    keep_filenames = set()
-    for name in keep_names:
-        try:
-            keep_filenames.add(runtime_h5ad_filename(name))
-        except ValueError:
-            continue
-
-    for p in states.glob("*.h5ad"):
-        if not p.is_file():
-            continue
-        try:
-            if p.resolve().parent != states_resolved:
-                continue
-        except OSError:
-            continue
-        if p.name in keep_filenames:
-            continue
-        _quarantine_path(p)
-
-
-def quarantine_unreferenced_runtime_h5ads(
-    session_id: str,
-    keep_names: set[str],
-    *,
-    states_dir: str | Path | None = None,
-) -> None:
-    """Public bounded cleanup after an authoritative manifest is committed."""
-    _quarantine_unreferenced_live_h5ads(
-        session_id,
-        keep_names,
-        states_dir=states_dir,
-    )
-
-
-def finalize_live_runtime_h5ad_set(
-    session_id: str,
-    h5ad_hashes: dict[str, str],
-) -> None:
-    """Make the live sidecar set and its manifest describe exactly *h5ad_hashes*.
-
-    Sandbox restore refuses to rehydrate an h5ad whose sha256 disagrees with its
-    manifest entry, so the files and ``runtime_h5ad_manifest.json`` must never be
-    updated apart — and a sidecar nobody names must not be left lying in the
-    states dir, where the `*.h5ad` sweep would still find it.
-
-    Split out for callers that already placed the bytes themselves: recovery
-    rollback streams them straight out of the object store, so completing the set
-    must not cost a second full-size copy.
-    """
-    _quarantine_unreferenced_live_h5ads(session_id, set(h5ad_hashes))
-    write_runtime_h5ad_manifest(session_id, h5ad_hashes)
-
-
-def install_live_runtime_h5ad_set(
-    session_id: str,
-    staged_h5ads: dict[str, str],
-) -> dict[str, str]:
-    """Install the target live h5ad set and rewrite the manifest to match.
-
-    *staged_h5ads* maps runtime variable name → staged h5ad path.  An empty
-    mapping is valid (pkl-only / residual-only complete runtime): previous live
-    ``*.h5ad`` sidecars are quarantined and the manifest is rewritten with
-    ``entries: {}`` so sandbox restore cannot rehydrate stale AnnData.
-    """
-    h5ad_hashes: dict[str, str] = {}
-    for var_name, h5ad_path in staged_h5ads.items():
-        h5ad_hashes[var_name] = atomic_replace_h5ad(
-            session_id, h5ad_path, var_name=var_name,
-        )
-    finalize_live_runtime_h5ad_set(session_id, h5ad_hashes)
-    return h5ad_hashes

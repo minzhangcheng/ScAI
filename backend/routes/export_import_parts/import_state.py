@@ -254,10 +254,9 @@ def _resign_imported_live_pkl(session_id: str) -> bool:
     the kernel and sandbox startup fails outright, which is strictly worse than
     having no pkl at all.
 
-    Signing here mirrors what Snapshot V2 restore does in
-    ``runtime_apply.apply_runtime_pkl``: content arrives verified by other means
-    (the caller passed ``trust=true``), and integrity for local storage is
-    re-established under the destination key.
+    Content arrives verified by other means (the caller passed
+    ``trust=true``), so integrity for local storage is re-established under the
+    destination key rather than carried in.
 
     Returns True when a signature was written.
     """

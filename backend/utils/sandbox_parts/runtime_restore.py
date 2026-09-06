@@ -72,6 +72,31 @@ def verify_restored_generation(plan: RestorePlan, restored) -> None:
         )
 
 
+def _names_only_in_retired_sidecars(manifest_path) -> set[str]:
+    """Names a retired h5ad sidecar manifest claims, if any.
+
+    Written only by the snapshot restore, which routed AnnData to h5ad files
+    and everything else to the dill residual -- so a name listed here is a name
+    the pkl beside it does not carry. The ordinary save also wrote this file
+    for a while, always with an empty ``entries`` map; that form claims nothing
+    and must not refuse anything. An unreadable manifest is treated as empty:
+    it cannot name a variable, so it cannot be the reason a namespace is
+    incomplete.
+    """
+    import json
+
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(payload, dict):
+        return set()
+    entries = payload.get("entries")
+    if not isinstance(entries, dict):
+        return set()
+    return {name for name in entries if isinstance(name, str) and name}
+
+
 def _mark_runtime_unavailable_if_work_exists(sandbox, *, bindings) -> None:
     """Record that a session which has run has no namespace to continue from.
 
@@ -137,6 +162,9 @@ async def restore_session(sandbox, *, bindings):
             bindings.Path(sandbox.notebook_state.session_path),
             bindings._integrity_dir(sandbox.session_id),
             metadata_path=bindings.Path(sandbox.notebook_state.state_path),
+            # A journal written before the sidecar was retired can still name it
+            # as a component; recovery has to resolve that path to roll such a
+            # transaction back.
             manifest_path=(
                 bindings.Path(sandbox.notebook_state.state_dir)
                 / RUNTIME_H5AD_MANIFEST_FILENAME
@@ -147,9 +175,10 @@ async def restore_session(sandbox, *, bindings):
             ),
             session_id=sandbox.session_id,
         )
-        # Snapshot apply and regular save mutate the same live runtime
-        # files. Recover both journals while holding the same lifecycle
-        # transaction lock used by commit and deletion.
+        # A snapshot apply from the previous build and the ordinary save
+        # mutate the same live runtime files. Recover both journals while
+        # holding the same lifecycle transaction lock used by commit and
+        # deletion; nothing writes the first kind any more.
         recover_runtime_apply_journal(sandbox.session_id)
     if regular_recovery is not None:
         # NotebookState was constructed before recovery inspected the
@@ -160,15 +189,17 @@ async def restore_session(sandbox, *, bindings):
         sandbox.runtime_revision = int(persistence.get("current_revision") or 0)
         sandbox.saved_runtime_revision = int(persistence.get("saved_revision") or 0)
 
-    # Snapshot V2: unresolved APPLYING journals block kernel rehydrate
+    # An unresolved APPLYING restore journal from the previous build blocks
+    # kernel rehydrate: the session's files describe different points in the run.
     from backend.services.session_store import assert_recovery_clear
     assert_recovery_clear(session_id=sandbox.session_id)
 
     sandbox.notebook_state.load()
 
     states_dir = bindings.Path(sandbox.notebook_state.session_path).parent
-    h5ad_manifest = states_dir / RUNTIME_H5AD_MANIFEST_FILENAME
-    has_h5ad_manifest = h5ad_manifest.exists()
+    depends_on_retired_sidecars = _names_only_in_retired_sidecars(
+        states_dir / RUNTIME_H5AD_MANIFEST_FILENAME
+    )
     persistence = dict(sandbox.notebook_state.runtime_persistence)
     attempted_revision = int(
         persistence.get("last_attempt_revision")
@@ -216,7 +247,21 @@ async def restore_session(sandbox, *, bindings):
         )
 
     has_session_dump = committed_dump
-    if not has_session_dump and not has_h5ad_manifest:
+    if depends_on_retired_sidecars:
+        # The previous build kept these names outside the pkl, in h5ad
+        # sidecars its snapshot restore installed. Nothing here can read them,
+        # and the pkl beside them does not carry them -- loading it alone would
+        # bring the kernel up quietly missing the session's main AnnData. Say
+        # so and offer the re-run instead.
+        bindings.logger.warning(
+            "[%s] runtime depends on retired h5ad sidecars (%s); refusing to "
+            "rehydrate a partial namespace",
+            sandbox.session_id,
+            ", ".join(sorted(depends_on_retired_sidecars)),
+        )
+        _mark_runtime_unavailable_if_work_exists(sandbox, bindings=bindings)
+        return
+    if not has_session_dump:
         bindings.logger.info("No session dump to restore")
         _mark_runtime_unavailable_if_work_exists(sandbox, bindings=bindings)
         return
@@ -245,9 +290,7 @@ async def restore_session(sandbox, *, bindings):
             raise
 
     session_path = str(sandbox.notebook_state.session_path.absolute())
-    h5ad_manifest_path = str(h5ad_manifest.absolute())
     escaped_path = repr(session_path)
-    escaped_h5ad_manifest_path = repr(h5ad_manifest_path)
     bindings.logger.info(f"Restoring session from {session_path}")
 
     # Decided here, on the host, before a single frame reaches the kernel: a
@@ -329,59 +372,8 @@ try:
                 _raw.seek(0)
                 _restore_dill_frames(_raw)
 
-    _h5ad_manifest_path = _scai_Path({escaped_h5ad_manifest_path})
-    if _h5ad_manifest_path.exists():
-        try:
-            import anndata as _runtime_anndata
-        except Exception:
-            import scanpy as _runtime_scanpy
-            _runtime_read_h5ad = _runtime_scanpy.read_h5ad
-        else:
-            _runtime_read_h5ad = _runtime_anndata.read_h5ad
-        _payload = _scai_json.loads(_h5ad_manifest_path.read_text())
-        _states_root = _h5ad_manifest_path.parent.resolve()
-        import re as _re
-        _name_re = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]{{0,127}}$")
-        for _name, _entry in sorted((_payload.get("entries") or {{}}).items()):
-            if not isinstance(_name, str) or not _name_re.fullmatch(_name):
-                raise RuntimeError(f"invalid h5ad sidecar variable name: {{_name!r}}")
-            if not isinstance(_entry, dict):
-                raise RuntimeError(f"invalid h5ad sidecar entry for {{_name}}")
-            _expected_filename = f"{{_name}}.h5ad"
-            _raw_path = _entry.get("path")
-            if not isinstance(_raw_path, str) or _raw_path != _expected_filename:
-                raise RuntimeError(
-                    f"h5ad sidecar path must be exactly {{_expected_filename!r}}, got {{_raw_path!r}}"
-                )
-            # The live pkl wins whenever it provides the name. The sidecar set
-            # is written only by snapshot restore / recovery and is never
-            # retired: save_session() dumps every live AnnData into the pkl but
-            # leaves runtime_h5ad_manifest.json frozen at the restored
-            # snapshot's content, hashes and all. Overwriting unconditionally
-            # therefore rolled the namespace back to the restored snapshot on
-            # every later rehydrate (kernel OOM, session reopen), silently
-            # discarding every cell run since the restore -- and the sidecar
-            # hash still matched, so nothing flagged it. A restore's own pkl
-            # never carries the h5ad names (RuntimeCapture routes AnnData to
-            # h5ad and everything else to the dill residual), so the sidecar is
-            # still authoritative for the rehydrate that immediately follows it.
-            if _name in _restored_names:
-                continue
-            # Never join raw manifest path; only the validated basename.
-            _path = (_states_root / _expected_filename).resolve()
-            if _path.parent != _states_root:
-                raise RuntimeError(f"h5ad sidecar path escapes states dir: {{_path}}")
-            if not _path.is_file():
-                raise RuntimeError(f"h5ad sidecar missing for {{_name}}: {{_path}}")
-            _expected = _entry.get("sha256", "")
-            _actual = _scai_hashlib.sha256(_path.read_bytes()).hexdigest()
-            if _actual != _expected:
-                raise RuntimeError(f"h5ad sidecar hash mismatch for {{_name}}")
-            _scai_pending[_name] = _runtime_read_h5ad(_path)
-            _restored_names.append(_name)
-
-    # Every frame read and every sidecar verified: publish the namespace in one
-    # step, then report what it holds in a form the host can parse.
+    # Every frame read: publish the namespace in one step, then report what
+    # it holds in a form the host can parse.
     globals().update(_scai_pending)
     # Released immediately: this dict holds a strong reference to every restored
     # object, so leaving it bound would keep a replaced AnnData alive for the

@@ -1,6 +1,5 @@
 import json
 import shutil
-from pathlib import Path
 
 import pytest
 
@@ -14,40 +13,6 @@ def _integrity_dir_path(sid):
 
 
 
-
-def _write_zst(path: Path, payload: bytes = b"hello-runtime") -> None:
-    import zstandard as zstd
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(zstd.ZstdCompressor().compress(payload))
-
-
-
-def _make_source_zst(sid: str, payload: bytes) -> Path:
-    import zstandard as zstd
-    zst = get_session_states(sid) / "source_session.pkl.zst"
-    zst.parent.mkdir(parents=True, exist_ok=True)
-    with open(zst, "wb") as f:
-        f.write(zstd.ZstdCompressor().compress(payload))
-    return zst
-
-
-def test_apply_materializes_pkl_and_signature_passes():
-    from backend.utils.sandbox import _verify_pkl_integrity, _integrity_dir
-    sid = "sess-apply-a"
-    states = get_session_states(sid)
-    states.mkdir(parents=True, exist_ok=True)
-    payload = b"restored-kernel-bytes"
-    zst = _make_source_zst(sid, payload)
-    try:
-        runtime_apply.apply_runtime_pkl(sid, zst)
-        live = states / f"{sid}_session.pkl"
-        assert live.read_bytes() == payload
-        assert _verify_pkl_integrity(live, _integrity_dir(sid)) is True
-        assert not (states / "runtime_apply.journal.json").exists()
-    finally:
-        shutil.rmtree(states, ignore_errors=True)
-        shutil.rmtree(_integrity_dir(sid), ignore_errors=True)
 
 
 def test_recover_rolls_back_interrupted_apply():
@@ -236,26 +201,7 @@ def test_recover_had_live_false_deletes_unsigned_garbage():
         shutil.rmtree(_integrity_dir_path(sid), ignore_errors=True)
 
 
-# ---- Runtime policy helpers (Batch 2 Task 3) --------------------------------
 
-
-def test_unavailable_reset_sets_status_and_quarantines():
-    """reset choice quarantines live pair and yields runtime_restore_status unavailable."""
-    from backend.utils.sandbox import _write_pkl_signature, _integrity_dir
-    sid = "sess-policy-reset"
-    states = get_session_states(sid)
-    states.mkdir(parents=True, exist_ok=True)
-    live = states / f"{sid}_session.pkl"
-    live.write_bytes(b"LIVE-TO-QUARANTINE")
-    _write_pkl_signature(live, _integrity_dir(sid))
-    try:
-        runtime_apply.quarantine_live_runtime(sid)
-        assert not live.exists()
-        assert live.with_suffix(live.suffix + ".quarantine").exists()
-        assert runtime_apply.is_forward_resume_blocked("unavailable") is True
-    finally:
-        shutil.rmtree(states, ignore_errors=True)
-        shutil.rmtree(_integrity_dir(sid), ignore_errors=True)
 
 
 def test_unavailable_keep_does_not_mutate_live():

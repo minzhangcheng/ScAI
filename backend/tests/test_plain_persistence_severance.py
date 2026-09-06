@@ -112,6 +112,61 @@ def test_the_runtime_persistence_chain_is_free_of_snapshot_v2():
         assert "snapshot_v2" not in (BACKEND / rel).read_text(), rel
 
 
+def test_every_path_that_installs_a_pkl_writes_a_manifest():
+    """A1 exit condition 1.
+
+    The one installer that did not was ``runtime_apply.atomic_replace_pkl``:
+    the bytes it wrote were a generation whose coverage it did not know, so it
+    *retired* the previous manifest rather than writing one, and the dump then
+    loaded as a legacy generation with no coverage and no pairing. That was
+    correct while the snapshot restore existed. It has no caller now, so the
+    condition is discharged by its absence -- and this asserts the absence
+    rather than the promise.
+    """
+    from backend.utils import runtime_apply
+
+    for gone in (
+        "atomic_replace_pkl",
+        "apply_runtime_pkl",
+        "_retire_stale_runtime_manifest",
+        "commit_runtime_persistence_metadata",
+    ):
+        assert not hasattr(runtime_apply, gone), gone
+
+
+def test_a_committed_generation_always_has_a_manifest():
+    """A1 exit condition 2, as an invariant rather than a claim.
+
+    Every remaining path that commits a live pkl goes through
+    ``_commit_pkl_transaction``, whose component set is built by
+    ``_regular_component_paths``. The runtime manifest is one of those
+    components, so it commits with the pkl or not at all -- there is no longer
+    a second installer that can leave one without the other.
+    """
+    from backend.tests.split_facade import split_source
+
+    source = split_source("backend.utils.sandbox")
+    assert "def _commit_pkl_transaction" in source
+    assert "runtime_manifest" in source
+
+    callers = set()
+    for path in sorted(BACKEND.rglob("*.py")):
+        rel = path.relative_to(REPO).as_posix()
+        if rel.startswith("backend/tests/"):
+            continue
+        # Call sites, not mentions: a docstring naming the transaction is not a
+        # second installer, and treating it as one would make this guard fire
+        # on prose.
+        if "_commit_pkl_transaction(" in path.read_text():
+            callers.add(rel)
+    # Its definition and the one call site; the two facade re-exports name it
+    # without parentheses and so do not appear here.
+    assert callers == {
+        "backend/utils/sandbox_parts/regular_save.py",
+        "backend/utils/sandbox_parts/runtime_save.py",
+    }, sorted(callers)
+
+
 def test_the_snapshot_v2_package_is_gone():
     """No source, and not importable.
 
