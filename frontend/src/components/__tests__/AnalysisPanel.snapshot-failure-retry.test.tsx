@@ -254,49 +254,6 @@ describe('AnalysisPanel snapshot-failure retry gate', () => {
     })
   })
 
-  it('keeps a live runtime gate visible while terminate is only pending', async () => {
-    useAppStore.setState({
-      snapshotFailure: {
-        failure: {
-          ...blockedFailure.failure,
-          code: 'runtime_persistence_failure',
-          details: {
-            gate_token: 'runtime-gate-token-8',
-            gate_generation: 8,
-          },
-        },
-        allowed_actions: ['retry', 'manage', 'terminate'],
-      },
-    })
-    mockApiFetch.mockResolvedValueOnce({
-      success: true,
-      message: "Runtime persistence action 'terminate' accepted",
-      data: {
-        status: 'waiting_input',
-        action_pending: true,
-        still_blocked: true,
-      },
-    })
-
-    render(<AnalysisPanel />)
-    fireEvent.click(screen.getByRole('button', { name: /terminate/i }))
-
-    await waitFor(() => {
-      expect(mockApiFetch).toHaveBeenCalledWith(
-        '/session/sess-snap-retry/runtime-persistence/terminate',
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            gate_token: 'runtime-gate-token-8',
-            gate_generation: 8,
-          }),
-        },
-      )
-    })
-    expect(useAppStore.getState().snapshotFailure).not.toBeNull()
-    expect(screen.getByRole('dialog', { name: /snapshot failure/i })).toBeInTheDocument()
-  })
-
   it('hydrates and polls the queued pre-restore retry transaction', async () => {
     const queued = {
       transaction_id: 'restore-job-retry',
@@ -461,47 +418,6 @@ describe('AnalysisPanel snapshot-failure retry gate', () => {
     expect(useAppStore.getState().snapshotFailure).toBeNull()
   })
 
-  it('keeps runtime persistence recovery reachable with Snapshot V2 disabled', async () => {
-    useAppStore.setState({
-      snapshotV2Enabled: false,
-      snapshotFailure: {
-        failure: {
-          ...blockedFailure.failure,
-          code: 'runtime_persistence_failure',
-          message: 'Runtime persistence failed safely',
-          details: {
-            gate_token: 'runtime-gate-token-7',
-            gate_generation: 7,
-            budget_violations: [
-              { resource: 'rss_bytes', observed: 9, limit: 8 },
-            ],
-          },
-        },
-        allowed_actions: ['retry', 'manage', 'terminate'],
-      },
-    })
-    mockApiFetch.mockResolvedValue({
-      success: true,
-      data: { status: 'waiting_input', still_blocked: true },
-    })
-
-    render(<AnalysisPanel />)
-    fireEvent.click(screen.getByRole('button', { name: /retry persistence/i }))
-
-    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledWith(
-      '/session/sess-snap-retry/runtime-persistence/retry',
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          gate_token: 'runtime-gate-token-7',
-          gate_generation: 7,
-        }),
-      },
-    ))
-    expect(useAppStore.getState().snapshotFailure).not.toBeNull()
-    expect(screen.queryByRole('dialog', { name: /analysis snapshots/i })).toBeNull()
-  })
-
   function armRuntimeGate(token: string, generation: number) {
     useAppStore.setState({
       snapshotFailure: {
@@ -515,47 +431,4 @@ describe('AnalysisPanel snapshot-failure retry gate', () => {
     })
   }
 
-  it('closes a runtime gate dialog the backend reports as no longer active', async () => {
-    // The session was terminated hours earlier, so every action 409s. Swallowing
-    // that left three dead buttons and no close control: the dialog could only
-    // be cleared by reloading the page.
-    armRuntimeGate('runtime-gate-token-9', 9)
-    mockApiFetch.mockRejectedValue(Object.assign(new Error('No active runtime-persistence action consumer is available.'), {
-      status: 409,
-      code: 'RUNTIME_PERSISTENCE_ACTION_INACTIVE',
-    }))
-
-    render(<AnalysisPanel />)
-    fireEvent.click(screen.getByRole('button', { name: /terminate/i }))
-
-    await waitFor(() => {
-      expect(useAppStore.getState().snapshotFailure).toBeNull()
-    })
-    expect(useAppStore.getState().messages).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        content: expect.stringContaining('no longer active'),
-      }),
-    ]))
-  })
-
-  it('keeps a still-live runtime gate open and surfaces why the action failed', async () => {
-    armRuntimeGate('runtime-gate-token-10', 10)
-    mockApiFetch.mockRejectedValue(Object.assign(new Error('A runtime-persistence action is already pending for this gate.'), {
-      status: 409,
-      code: 'RUNTIME_PERSISTENCE_ACTION_DUPLICATE_OR_CONFLICT',
-    }))
-
-    render(<AnalysisPanel />)
-    fireEvent.click(screen.getByRole('button', { name: /retry persistence/i }))
-
-    await waitFor(() => {
-      expect(useAppStore.getState().messages).toEqual(expect.arrayContaining([
-        expect.objectContaining({
-          type: 'error',
-          content: expect.stringContaining('already pending'),
-        }),
-      ]))
-    })
-    expect(useAppStore.getState().snapshotFailure).not.toBeNull()
-  })
 })

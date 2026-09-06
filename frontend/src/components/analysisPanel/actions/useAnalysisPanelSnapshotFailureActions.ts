@@ -43,33 +43,6 @@ export function useAnalysisPanelSnapshotFailureActions(options: SnapshotFailureA
   // so a terminated session showed a dialog the user could not act on or
   // dismiss. INACTIVE specifically means the gate is gone -- the session ended,
   // or another client answered it -- and the dialog is then stale, not live.
-  const reportRuntimeGateFailure = useCallback((error: unknown, action: string) => {
-    const isZh = options.language === 'zh'
-    const apiError = asApiErrorEnvelope(error)
-    if (apiError?.code === 'RUNTIME_PERSISTENCE_ACTION_INACTIVE') {
-      options.clearSnapshotFailure()
-      options.addMessage({
-        id: generateId(),
-        type: 'status',
-        content: isZh
-          ? '运行时持久化门禁已不再生效（会话已结束，或已由其他客户端处理），对话框已关闭。'
-          : 'The runtime persistence gate is no longer active (the session ended '
-            + 'or another client answered it); the dialog has been closed.',
-        timestamp: new Date().toISOString(),
-      })
-      return
-    }
-    options.addMessage({
-      id: generateId(),
-      type: 'error',
-      content: isZh
-        ? `运行时持久化操作「${action}」未被接受：${apiError?.message || String(error)}`
-        : `Runtime persistence action "${action}" was not accepted: `
-          + `${apiError?.message || String(error)}`,
-      timestamp: new Date().toISOString(),
-    })
-  }, [options.clearSnapshotFailure, options.addMessage, options.language])
-
   const runSnapshotFailureCapture = useCallback(async (action: 'retry' | 'proceed') => {
     if (!options.currentSession) return
     try {
@@ -117,29 +90,15 @@ export function useAnalysisPanelSnapshotFailureActions(options: SnapshotFailureA
     options.wsConnect,
   ])
 
+  // A failed runtime save no longer opens a gate, so there is no
+  // runtime-persistence retry to offer. This handler now serves only Snapshot
+  // V2's capture failure, which keeps its own gate until A2-5.
   const handleSnapshotFailureRetry = useCallback(async () => {
     if (!options.currentSession) return
-    if ((options.snapshotFailure?.failure.code || '').startsWith('runtime_persistence_')) {
-      try {
-        const details = options.snapshotFailure?.failure.details || {}
-        await apiFetch(`/session/${options.currentSession.id}/runtime-persistence/retry`, {
-          method: 'POST',
-          body: JSON.stringify({
-            gate_token: details.gate_token,
-            gate_generation: details.gate_generation,
-          }),
-        })
-      } catch (error) {
-        reportRuntimeGateFailure(error, 'retry')
-      }
-      return
-    }
     await runSnapshotFailureCapture('retry')
   }, [
     options.currentSession,
-    options.snapshotFailure,
     runSnapshotFailureCapture,
-    reportRuntimeGateFailure,
   ])
 
   const handleSnapshotFailureProceed = useCallback(
@@ -165,41 +124,15 @@ export function useAnalysisPanelSnapshotFailureActions(options: SnapshotFailureA
 
   const handleSnapshotFailureManage = useCallback(async () => {
     if (!options.currentSession) return
-    if ((options.snapshotFailure?.failure.code || '').startsWith('runtime_persistence_')) {
-      try {
-        const details = options.snapshotFailure?.failure.details || {}
-        const response = await apiFetch<{
-          success?: boolean
-          data?: { status?: TaskStatus; still_blocked?: boolean }
-        }>(`/session/${options.currentSession.id}/runtime-persistence/recompute`, {
-          method: 'POST',
-          body: JSON.stringify({
-            gate_token: details.gate_token,
-            gate_generation: details.gate_generation,
-          }),
-        })
-        if (response?.data?.status) useAppStore.getState().updateSession({ status: response.data.status })
-        if (response?.success && response?.data?.still_blocked === false) options.clearSnapshotFailure()
-      } catch (error) {
-        reportRuntimeGateFailure(error, 'recompute')
-      }
-      return
-    }
     options.setShowSnapshotPanel(true)
   }, [
     options.currentSession,
-    options.snapshotFailure,
-    options.clearSnapshotFailure,
-    reportRuntimeGateFailure,
   ])
 
   const handleSnapshotFailureTerminate = useCallback(async () => {
     if (!options.currentSession) return
     try {
-      const runtimeFailure = (options.snapshotFailure?.failure.code || '').startsWith('runtime_persistence_')
-      const endpoint = runtimeFailure
-        ? `/session/${options.currentSession.id}/runtime-persistence/terminate`
-        : `/session/${options.currentSession.id}/snapshot-failure/terminate`
+      const endpoint = `/session/${options.currentSession.id}/snapshot-failure/terminate`
       const response = await apiFetch<{
         success?: boolean
         message?: string
@@ -210,15 +143,7 @@ export function useAnalysisPanelSnapshotFailureActions(options: SnapshotFailureA
           cleanup_incomplete?: boolean
           termination_committed?: boolean
         }
-      }>(endpoint, {
-        method: 'POST',
-        ...(runtimeFailure ? {
-          body: JSON.stringify({
-            gate_token: options.snapshotFailure?.failure.details?.gate_token,
-            gate_generation: options.snapshotFailure?.failure.details?.gate_generation,
-          }),
-        } : {}),
-      })
+      }>(endpoint, { method: 'POST' })
       if (response?.data?.status) useAppStore.getState().updateSession({ status: response.data.status })
       if (response?.data?.termination_committed
         || (response?.success && response?.data?.still_blocked === false)) {
@@ -235,15 +160,13 @@ export function useAnalysisPanelSnapshotFailureActions(options: SnapshotFailureA
         })
       }
     } catch (error) {
-      reportRuntimeGateFailure(error, 'terminate')
+      console.error('Snapshot failure terminate failed:', error)
     }
   }, [
     options.currentSession,
-    options.snapshotFailure,
     options.clearSnapshotFailure,
     options.addMessage,
     options.language,
-    reportRuntimeGateFailure,
   ])
 
   return {
