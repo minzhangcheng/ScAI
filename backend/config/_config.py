@@ -30,6 +30,47 @@ _ENABLE_REPRODUCIBILITY = os.environ.get("SCAI_ENABLE_REPRODUCIBILITY", "").lowe
     "yes",
 )
 
+#: Wall-clock floor between step-boundary runtime saves, in minutes. Spec 5.1
+#: states the exposure bound in terms of it: at most one round, or this many
+#: minutes, of work is at risk -- and only while saves succeed.
+#:
+#: 30 is a default, not a measurement. Spec 12 lists it as open, to be confirmed
+#: from A2-10's before/after save timings; that confirmation changes this one
+#: line. Round and closing boundaries ignore it entirely.
+RUNTIME_SAVE_FLOOR_MINUTES_DEFAULT = 30
+
+
+def _resolve_save_floor_minutes() -> int:
+    """Read the floor, ignoring anything that is not a positive whole number.
+
+    Import time: a typo in a deployment environment must not turn into a
+    backend that cannot start, so an unusable value logs and falls back.
+    """
+    raw = os.environ.get("SCAI_RUNTIME_SAVE_FLOOR_MINUTES", "").strip()
+    if not raw:
+        return RUNTIME_SAVE_FLOOR_MINUTES_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "SCAI_RUNTIME_SAVE_FLOOR_MINUTES=%r is not a whole number of "
+            "minutes; using %d",
+            raw, RUNTIME_SAVE_FLOOR_MINUTES_DEFAULT,
+        )
+        return RUNTIME_SAVE_FLOOR_MINUTES_DEFAULT
+    if value <= 0:
+        logging.getLogger(__name__).warning(
+            "SCAI_RUNTIME_SAVE_FLOOR_MINUTES=%s is not positive; using %d. A "
+            "floor of zero would save after every step, which costs minutes "
+            "each time -- set the boundary itself if that is what you want.",
+            raw, RUNTIME_SAVE_FLOOR_MINUTES_DEFAULT,
+        )
+        return RUNTIME_SAVE_FLOOR_MINUTES_DEFAULT
+    return value
+
+
+RUNTIME_SAVE_FLOOR_MINUTES = _resolve_save_floor_minutes()
+
 _ENABLE_METHOD_DECISION_GUIDANCE = os.environ.get(
     "SCAI_ENABLE_METHOD_DECISION_GUIDANCE", ""
 ).lower() in (

@@ -50,6 +50,7 @@ const themeOwnedPaths = [
   'src/components/shared/CustomTypeInput.tsx',
   'src/components/shared/ErrorBanner.tsx',
   'src/components/sidebar/NewSessionForm.tsx',
+  'src/components/runtime/RuntimePersistenceBanner.tsx',
   'src/components/runtime/RuntimeWarningBanner.tsx',
   'src/constants/agents.ts',
   'src/pages/Admin.tsx',

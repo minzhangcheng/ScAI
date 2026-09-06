@@ -78,6 +78,30 @@ cost; sample count adds smaller per-sample QC and metadata overhead. Treat this
 row as capacity-planning guidance, not a claim that every analysis method is
 validated at one million cells.
 
+#### When the runtime is saved
+
+The kernel's runtime is persisted on a schedule, not continuously:
+
+| Boundary | Behaviour |
+|---|---|
+| **Round boundary** | Always. The graph reaches it once per round, after the round's work is complete and before the next one starts. |
+| **Step boundary** (a cell finishing inside a round) | Only once `SCAI_RUNTIME_SAVE_FLOOR_MINUTES` (default **30**) have passed since the last **successful** save. A save takes minutes on a large kernel, and this boundary can fire several times a minute. |
+| **Closing** (the analysis ends) | Exactly one attempt. A failure keeps the previous committed generation, is recorded, and does not hold the shutdown. |
+
+So the work at risk from a crash is bounded by **one round, or the floor,
+whichever comes first** — and that bound **holds only while saves succeed**.
+After a failed save the window runs from the last successful commit, not from
+the failed attempt, and it keeps growing until one succeeds. The analysis page
+says so: a persistent, non-blocking banner appears whenever the committed
+generation is behind the session, and it shows the time of the last successful
+save rather than the last attempt.
+
+The 30-minute default is not a measurement. It is a starting value pending
+before/after save timings on real sessions; expect it to be confirmed or
+adjusted in a later release. Lower it on an instance where the kernel is small
+and crashes are the concern; raise it where saves are slow and the round
+boundary is protection enough.
+
 #### Runtime persistence budgets
 
 Runtime persistence has its own resource gate. By default, its memory
@@ -608,6 +632,7 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 | `SCAI_JWT_SECRET` | Generated and stored as `.jwt_secret` | HS256 JWT signing |
 | `SCAI_CONFIG_SECRET` | Generated local encryption material | Encrypts stored user/model secrets |
 | `SCAI_ENABLE_REPRODUCIBILITY` | Disabled | Truthy `1`, `true`, or `yes` enables reproducibility bundles |
+| `SCAI_RUNTIME_SAVE_FLOOR_MINUTES` | `30` | Minutes that must pass since the last **successful** runtime save before a step boundary saves again. Round and closing boundaries ignore it. Unset, non-integer or non-positive values log and fall back |
 | `SCAI_RUNTIME_MAX_RSS_GB` | `auto` | Per-session kernel RSS ceiling for regular runtime persistence; numeric values are GiB administrator caps |
 | `SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB` | `auto` | Total estimated size of live AnnData objects; numeric values are GiB administrator caps |
 | `SCAI_MODE` | `prod` | Docker entrypoint mode; the production image rejects `dev` |

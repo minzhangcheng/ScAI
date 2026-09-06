@@ -1,6 +1,7 @@
 import { AlertCircle, CheckCircle2, Loader2, Pause, Play, Square } from 'lucide-react'
 
 import { ValidationDialog } from '../ValidationDialog'
+import { RuntimePersistenceBanner } from '../runtime/RuntimePersistenceBanner'
 import { RuntimeWarningBanner } from '../runtime/RuntimeWarningBanner'
 import type { AnalysisPanelController } from './useAnalysisPanelController'
 
@@ -62,6 +63,17 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
           />
         </div>
       )}
+
+      {/* What the last committed generation promises (spec 5.1). Persistent
+          and non-blocking: the capture gate that used to stop the analysis
+          here is gone, and there is nothing a dialog could offer — the
+          previous generation is intact and the run continues either way. */}
+      <div className="mb-2 empty:mb-0">
+        <RuntimePersistenceBanner
+          record={currentSession.runtimePersistence as never}
+          isZh={language === 'zh'}
+        />
+      </div>
 
       {/* Header - Compact */}
       <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-slate-700">

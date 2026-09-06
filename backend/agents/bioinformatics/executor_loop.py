@@ -745,6 +745,18 @@ async def prepare_loop_context(
         )
         await checkpoint_mgr.save(checkpoint_data)
         if save_sandbox:
+            from backend.services.save_cadence import runtime_save_due
+
+            # Spec 5.1: a step boundary persists only once the wall-clock floor
+            # has passed. A save is minutes of work, and this boundary can fire
+            # several times a minute; the round boundary is what bounds the
+            # exposure. Skipping is not a failure and writes no record.
+            if not runtime_save_due(self.sandbox, "step_boundary"):
+                logger.debug(
+                    "[Bioinformatics] Step-boundary save skipped: inside the "
+                    "runtime save floor",
+                )
+                return
             try:
                 await self.sandbox.save_session()
             finally:

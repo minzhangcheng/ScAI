@@ -76,6 +76,7 @@ def project_runtime_persistence(
         "projection_status": "current",
         "projection_error": None,
     })
+    _disclose_exposure(authoritative, state)
     sandbox_state = dict(getattr(state, "sandbox_state", None) or {})
     sandbox_state.update({
         "runtime_revision": current_revision,
@@ -83,6 +84,40 @@ def project_runtime_persistence(
         "runtime_persistence": authoritative,
     })
     return authoritative, sandbox_state
+
+
+def _disclose_exposure(record: Dict[str, Any], state: AnalysisState) -> None:
+    """Add the two fields the client cannot derive, in place. Spec 5.1.
+
+    ``coherence`` is A1's ``runtime_coherence()`` verdict --
+    ``current`` / ``stale`` / ``inconsistent`` / ``unavailable``. It needs the
+    manifest, the signed pairing and the checkpoint identity, none of which the
+    browser has. Without it the UI could only read ``status``, which says
+    whether the *last attempt* succeeded, not whether the committed generation
+    still matches the session.
+
+    ``exposure_since`` is the last **successful** commit, never the last
+    attempt. That distinction is the whole point: goal 2 bounds the work at
+    risk relative to the last generation that reached disk, so a UI that
+    measured from the last attempt would keep showing "saved N minutes ago"
+    through an unbounded run of failures.
+    """
+    from backend.utils.runtime_apply import state_runtime_coherence
+
+    # The verdict is computed from the projected record, which the caller is
+    # about to install; feed it the record rather than the stale one still on
+    # the state object.
+    probe = state.model_copy(update={"runtime_persistence": dict(record)})
+    try:
+        record["coherence"] = state_runtime_coherence(probe)
+    except Exception:
+        logger.warning(
+            "Could not determine runtime coherence for %s",
+            getattr(state, "id", "?"),
+            exc_info=True,
+        )
+        record["coherence"] = "inconsistent"
+    record["exposure_since"] = record.get("last_saved_at")
 
 
 def apply_runtime_persistence_projection(

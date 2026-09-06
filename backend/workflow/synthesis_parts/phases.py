@@ -556,6 +556,43 @@ async def run_pi_synthesis(self, state):
     await persist_round_result(self, ctx)
     return await finalize_synthesis(self, ctx)
 
+async def _save_round_boundary_runtime(self, analysis_state) -> None:
+    """Attempt the round-boundary runtime save. Never raises.
+
+    The logger is resolved locally rather than through ``bind_facade``: this is
+    a failure path, and a helper whose only job is to swallow an exception must
+    not itself raise ``NameError`` because the facade had not been bound.
+    """
+    import logging
+
+    from backend.services.save_cadence import runtime_save_due
+
+    log = logging.getLogger(__name__)
+    sandbox = getattr(self, "sandbox", None)
+    if sandbox is None or getattr(sandbox, "km", None) is None:
+        return
+    if not runtime_save_due(sandbox, "round_boundary"):
+        return
+    try:
+        await sandbox.save_session()
+    except Exception:
+        log.warning(
+            "[%s] Round-boundary runtime save failed; keeping the previous "
+            "committed generation",
+            self.session_id,
+            exc_info=True,
+        )
+    finally:
+        try:
+            sandbox.sync_runtime_persistence_state(analysis_state)
+        except Exception:
+            log.warning(
+                "[%s] Could not publish the runtime persistence record",
+                self.session_id,
+                exc_info=True,
+            )
+
+
 async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
     """Block between rounds, waiting for user input or continue signal from frontend.
 
@@ -570,6 +607,18 @@ async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
     equivalent to "let PI decide" (sets user_chosen_direction = [PI_DECIDE]).
     """
     analysis_state = state["analysis_state"]
+
+    # Spec 6.4's round boundary. The graph runs pi_synthesis -> this gate ->
+    # check_convergence, so this is the last point at which a round's work is
+    # complete and the next one has not started; an earlier point would skip the
+    # user's decision, the integration and the report. Reached on every round,
+    # gating or not.
+    #
+    # Spec 5.1 states the exposure bound in terms of this boundary, so it saves
+    # unconditionally. A failure keeps the previous committed generation, is
+    # recorded, and does not hold the gate: the user is about to be asked a
+    # question and must not be blocked behind a dump.
+    await _save_round_boundary_runtime(self, analysis_state)
 
     # Integration gate: auto-skip / timeout now triggers PI_DECIDE_SIGNAL
     # (instead of final_report_requested), so PI gets a chance to select
