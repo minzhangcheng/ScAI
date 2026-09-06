@@ -470,7 +470,6 @@ except Exception as e:
             "failed",
             current_revision=current_revision,
             saved_revision=saved_revision,
-            failed_variables=sorted(sandbox.get_runtime_dependency_names()),
             error_summary=detail,
         )
         bindings.logger.error(

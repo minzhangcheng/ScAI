@@ -344,17 +344,6 @@ class ExecutionMixin:
             mutates_namespace=mutates_namespace, reached_kernel=reached_kernel
         )
         if result.success and save_to_history:
-            if confirmed_declared:
-                self.record_declared_outputs(confirmed_declared)
-                tracker = getattr(self, "runtime_dependency_tracker", None)
-                if tracker is not None:
-                    tracker.confirm_recomputed(
-                        confirmed_declared,
-                        reason=(
-                            "Successful execution explicitly re-produced the "
-                            "declared persistent output."
-                        ),
-                    )
             self.notebook_state.update_runtime_persistence(
                 "live_dirty",
                 current_revision=self.runtime_revision,

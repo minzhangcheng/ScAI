@@ -205,7 +205,6 @@ class LocalJupyterSandbox(
             "loaded": set(),
             "removed": set(),
         }
-        self.runtime_dependency_tracker = None  # set by agent / capture pipeline
         # Workflow-owned projection publisher. The sandbox remains the sole
         # runtime metadata authority and calls this only after a durable commit.
         self.runtime_persistence_commit_callback: Optional[Callable] = None

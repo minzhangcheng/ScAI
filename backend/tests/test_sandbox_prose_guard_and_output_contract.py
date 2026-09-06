@@ -162,14 +162,23 @@ async def test_valid_identifier_remains_required(tmp_path, monkeypatch):
     assert "adata.h5ad" not in result.error
 
 
-def test_no_tracker_fallback_cannot_readd_nonidentifier():
-    # bioinformatics_agent.py is a partial facade: part of its implementation
-    # was split into backend.agents.bioinformatics, so reading the path alone
-    # can scan a re-export header and make this assertion pass over nothing.
+def test_declared_outputs_are_recorded_as_identifiers_only():
+    """The dependency tracker is gone; the identifier filter on it is not.
+
+    This used to anchor on the tracker's "No tracker (should not happen...)"
+    fallback comment. With no tracker that branch is the only branch, but the
+    filter it carried still has to be there: persistent_outputs names user
+    globals, and a path or a filename can never appear in the namespace.
+
+    bioinformatics_agent.py is a partial facade -- part of its implementation
+    was split into backend.agents.bioinformatics -- so reading the path alone
+    can scan a re-export header and make this assertion pass over nothing.
+    """
     source = source_for_path("backend/agents/bioinformatics_agent.py")
-    marker = "No tracker (should not happen with track_globals)"
-    fallback = source[source.index(marker):source.index("sandbox_state[", source.index(marker))]
-    assert "isidentifier()" in fallback
+    marker = "Advisory provenance only"
+    start = source.index(marker)
+    block = source[start:source.index("runtime_revision", start)]
+    assert "isidentifier()" in block
 
 
 def test_tool_schema_describes_variable_names():

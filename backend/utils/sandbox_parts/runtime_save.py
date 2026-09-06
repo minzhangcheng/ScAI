@@ -283,7 +283,6 @@ async def _prepare_save(sandbox, *, bindings):
         )
         _record_generation_failure(
             "Runtime restore failed and no recomputation has completed.",
-            failed_variables=sorted(sandbox.get_runtime_dependency_names()),
         )
         return False
     session_path = str(sandbox.notebook_state.session_path.absolute())
@@ -303,7 +302,6 @@ async def _prepare_save(sandbox, *, bindings):
             _record_generation_failure(
                 "Runtime restore failed and the live namespace has not "
                 "rebuilt required continuation state.",
-                failed_variables=sorted(sandbox.get_runtime_dependency_names()),
             )
             return False
         bindings.logger.warning(
@@ -384,16 +382,6 @@ async def _prepare_save(sandbox, *, bindings):
     # even when a swallowed exception meant the name never existed. Only
     # prune missing names that were never observed as created; genuinely
     # tracked cross-cell dependencies remain fail-closed below.
-    live_names = await sandbox._snapshot_user_globals()
-    stale_names = sandbox._prune_legacy_unobserved_required(live_names)
-    if stale_names:
-        bindings.logger.warning(
-            "[%s] Pruned legacy required outputs never observed in the "
-            "kernel: %s",
-            sandbox.session_id,
-            sorted(stale_names),
-        )
-
     from backend.utils.runtime_types import (
         VOLATILE_RUNTIME_TYPE_PREFIXES,
     )

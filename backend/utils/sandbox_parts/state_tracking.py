@@ -130,63 +130,6 @@ class StateTrackingMixin:
         state.sandbox_state = sandbox_state
         return snapshot
 
-    def get_runtime_dependency_names(self) -> set[str]:
-        """Return accumulated required runtime names from the dependency tracker."""
-        tracker = getattr(self, "runtime_dependency_tracker", None)
-        if tracker is None:
-            return set()
-        return set(tracker.required_outputs)
-
-    def record_declared_outputs(self, names) -> None:
-        """Merge explicit persistent_outputs into the dependency tracker."""
-        if not names:
-            return
-        if self.runtime_dependency_tracker is None:
-            from backend.services.snapshot_v2.runtime_registry import (
-                RuntimeDependencyTracker,
-            )
-            self.runtime_dependency_tracker = RuntimeDependencyTracker()
-        self.runtime_dependency_tracker.merge_declared(set(names))
-
-    def release_runtime_dependencies(
-        self,
-        names,
-        *,
-        lifecycle: str,
-        reason: str,
-    ) -> set[str]:
-        """Release no-longer-needed continuation state with an audit reason."""
-        tracker = self.runtime_dependency_tracker
-        if tracker is None:
-            return set()
-        return tracker.release(
-            set(names or set()),
-            lifecycle=lifecycle,
-            reason=reason,
-        )
-
-    def _prune_legacy_unobserved_required(self, live_names: set[str]) -> set[str]:
-        """Drop legacy declarations that were required but never created.
-
-        Before declared-output verification was added, a successful tool call
-        could swallow an exception and still poison the persisted tracker with
-        a name that had never existed. Created dependencies are deliberately not
-        pruned here: if one of those is unexpectedly absent, save_session must
-        retain the fail-closed missing-runtime error.
-        """
-        tracker = self.runtime_dependency_tracker
-        if tracker is None or not tracker.needs_legacy_declared_cleanup:
-            return set()
-        stale = (
-            tracker.required_outputs
-            - tracker.created_outputs
-            - set(live_names)
-        )
-        if stale:
-            tracker.record_execution(removed=stale)
-        tracker.mark_legacy_declared_cleanup_complete()
-        return stale
-
     async def _snapshot_user_globals(self) -> set[str]:
         """Return non-underscore user global names currently in the kernel."""
         code = (
@@ -552,24 +495,6 @@ print("__SCAI_RUNTIME_METRICS__:" + _scai_json.dumps({
             "removed": set(removed),
         }
         self._known_user_globals = set(after)
-        if self.runtime_dependency_tracker is None:
-            from backend.services.snapshot_v2.runtime_registry import (
-                RuntimeDependencyTracker,
-            )
-            self.runtime_dependency_tracker = RuntimeDependencyTracker()
-        # Only promote loaded names that were previously created by a cell.
-        # Passing the full intersection would promote every pre-existing name.
-        # `removed` names (del'd from the namespace) are pruned from the required
-        # set so a declared-then-deleted transient (e.g. a loompy connection)
-        # cannot permanently break snapshot capture.
-        self.runtime_dependency_tracker.record_execution(
-            created=created,
-            loaded=loaded,
-            declared=set(declared or set()),
-            removed=removed,
-            unpersistable=set(unpersistable or set()),
-            probed=set(probed or set()),
-        )
         return self._last_execution_diff
 
     @staticmethod

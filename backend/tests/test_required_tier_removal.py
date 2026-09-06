@@ -8,8 +8,12 @@ from __future__ import annotations
 
 import contextlib
 import io
+import pathlib
 
 import pytest
+
+REPO = pathlib.Path(__file__).resolve().parents[2]
+BACKEND = REPO / "backend"
 
 try:
     from backend.utils.sandbox_parts.runtime_save import (
@@ -138,3 +142,79 @@ def test_a_declared_name_that_is_absent_no_longer_fails_the_save(tmp_path):
 
     parsed = _parse_coverage_markers(stream.getvalue())
     assert parsed["saved_names"] == ["something_else"]
+def test_the_sandbox_carries_no_dependency_tracker():
+    """Asserted over the whole sandbox split, not one part.
+
+    ``backend/utils/sandbox.py`` is a facade over ``sandbox_parts/``; a negative
+    assertion read from the facade's own file would pass unconditionally.
+    """
+    from backend.tests.split_facade import split_source
+
+    text = split_source("backend.utils.sandbox")
+    for gone in (
+        "runtime_dependency_tracker",
+        "RuntimeDependencyTracker",
+        "get_runtime_dependency_names",
+        "record_declared_outputs",
+        "release_runtime_dependencies",
+    ):
+        assert gone not in text, gone
+
+
+def test_only_snapshot_v2_still_mentions_the_retired_tracker_state_key():
+    """``runtime_dependency_tracker_v2`` had one writer and one reader.
+
+    The writer was the executor; the reader is Snapshot V2's capture pipeline,
+    which is deleted in A2-5. Nothing else ever consumed the key, so there is no
+    read-compatibility question to answer -- only a producer to remove.
+    """
+    offenders = set()
+    for path in sorted(BACKEND.rglob("*.py")):
+        rel = path.relative_to(BACKEND.parent).as_posix()
+        if rel.startswith(("backend/tests/", "backend/services/snapshot_v2/")):
+            continue
+        if "runtime_dependency_tracker" in path.read_text():
+            offenders.add(rel)
+    assert not offenders, sorted(offenders)
+
+
+def test_the_execution_diff_outlives_the_tracker():
+    """created/loaded/removed is sandbox state in its own right and stays."""
+    from backend.tests.split_facade import split_source
+
+    text = split_source("backend.utils.sandbox")
+    assert "_last_execution_diff" in text
+    assert "_known_user_globals" in text
+@pytest.mark.asyncio
+async def test_a_cell_that_does_not_create_its_declared_output_still_fails(tmp_path, monkeypatch):
+    """Spec 4.7 keeps this: a contract about the agent's own statement.
+
+    Ported from test_sandbox_globals_diff_prune.py, which is deleted with the
+    dependency tracker it was written for. The half that checked the tracker was
+    not poisoned goes with the tracker; the half that checks the cell fails is
+    the part that survives, and it is cheap to fix in the cell that binds it.
+    """
+    from unittest.mock import AsyncMock
+
+    from backend.utils.sandbox import CodeExecutionResult, LocalJupyterSandbox
+
+    sb = LocalJupyterSandbox(
+        session_id="missing-declared-output",
+        state_dir=str(tmp_path / "states"),
+        working_dir=str(tmp_path / "workspace"),
+    )
+    monkeypatch.setattr(sb, "_snapshot_user_globals", AsyncMock(side_effect=[set(), set()]))
+    monkeypatch.setattr(
+        sb,
+        "_execute_unlocked",
+        AsyncMock(return_value=CodeExecutionResult(success=True, output="error swallowed")),
+    )
+
+    result = await sb.execute(
+        "try:\n    raise RuntimeError('failed')\nexcept Exception:\n    pass",
+        declared_outputs=["interact_df"],
+        track_globals=True,
+    )
+
+    assert result.success is False
+    assert "Declared persistent outputs were not created: interact_df" in result.error
