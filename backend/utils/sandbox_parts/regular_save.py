@@ -221,7 +221,7 @@ def _regular_component_paths(
             raise RuntimeError(f"duplicate regular runtime component: {kind}:{name}")
         seen.add(key)
         if kind == "h5ad":
-            from backend.services.snapshot_v2.runtime_names import (
+            from backend.utils.runtime_names import (
                 resolve_confined_runtime_h5ad_path,
             )
 
@@ -265,7 +265,7 @@ def _validate_runtime_h5ad_manifest(
             raise RuntimeError(
                 "runtime h5ad manifest v2 lacks authoritative_pkl_names"
             )
-        from backend.services.snapshot_v2.runtime_names import (
+        from backend.utils.runtime_names import (
             validate_runtime_global_name,
         )
 
@@ -280,7 +280,7 @@ def _validate_runtime_h5ad_manifest(
                 "runtime h5ad manifest repeats an authoritative pkl name"
             )
 
-    from backend.services.snapshot_v2.runtime_names import (
+    from backend.utils.runtime_names import (
         resolve_confined_runtime_h5ad_path,
         validate_runtime_global_name,
     )

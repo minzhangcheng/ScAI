@@ -47,8 +47,6 @@ SNAPSHOT_V2_CENSUS: dict[str, int] = {
     "backend/services/session_lifecycle.py": 1,
     "backend/services/session_store.py": 15,
     "backend/services/workflow_runner.py": 2,
-    "backend/utils/runtime_apply.py": 1,
-    "backend/utils/sandbox_parts/regular_save.py": 3,
     "backend/utils/sandbox_parts/runtime_save.py": 3,
     "backend/utils/sandbox_parts/state_tracking.py": 3,
     "backend/utils/snapshot.py": 1,
@@ -144,3 +142,17 @@ def test_no_surviving_module_imports_the_snapshot_checkpoint_paths():
         if "snapshot_v2.checkpoint_paths" in path.read_text():
             offenders.add(rel)
     assert not offenders, sorted(offenders)
+def test_runtime_name_validation_lives_outside_snapshot_v2():
+    import pytest
+
+    from backend.utils.runtime_names import validate_runtime_global_name
+
+    assert validate_runtime_global_name("adata") == "adata"
+    for bad in ("", "9lives", "a b", "../etc/passwd", "x" * 129):
+        with pytest.raises(ValueError):
+            validate_runtime_global_name(bad)
+
+
+def test_the_runtime_persistence_chain_is_free_of_snapshot_v2():
+    for rel in ("utils/runtime_apply.py", "utils/sandbox_parts/regular_save.py"):
+        assert "snapshot_v2" not in (BACKEND / rel).read_text(), rel

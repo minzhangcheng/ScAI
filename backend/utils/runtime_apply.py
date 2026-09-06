@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from ..config import get_session_states
-from backend.services.snapshot_v2.runtime_names import (
+from backend.utils.runtime_names import (
     runtime_h5ad_filename,
     runtime_h5ad_path,
     validate_runtime_global_name,
