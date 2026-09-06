@@ -118,6 +118,15 @@ def _allocate_import_session_id(archive_session_id: str, user_id: str) -> str:
     silently transfers another user's session. Importing is therefore defined as
     "create a session", never "overwrite one": on any collision the archive is
     materialized under a fresh id and every embedded path is rebound to it.
+
+    One archive cannot accept that. A resumable archive carries a LangGraph
+    checkpoint, the checkpoint database is keyed by session id (spec 3.6) and
+    cannot be renamed into place, so a reallocated id drops it: the runtime pkl
+    still arrives and the session still imports, but it re-enters the graph at
+    the start of a new round instead of continuing where it stopped -- a session
+    that looks resumable and is not. ``_refuse_resumable_collision`` in
+    ``import_tar.py`` refuses that case, at the manifest, which is the first
+    point where the archive says what it claims to be.
     """
     if _claim_session_id(archive_session_id, user_id):
         return archive_session_id

@@ -26,6 +26,11 @@ from backend.config import (
 )
 from backend.models.schemas import AnalysisState, APIResponse
 from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
+from backend.services.resumable_export import (
+    ResumableExportUnavailable,
+    assert_boundary_held,
+    flush_for_resumable_export,
+)
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
     update_session_cache as _update_session_cache,
@@ -81,6 +86,40 @@ from .tar_builders import (
 logger = logging.getLogger(__name__)
 
 
+def _generation_facts(
+    session_id: str, state_payload, include_runtime: bool,
+) -> dict:
+    """What the archive can say about the runtime it does or does not carry.
+
+    Read from the state payload the packer is already holding rather than from
+    the live session, so the manifest describes the bytes in this archive.
+
+    A results-only archive still reports the source's coherence: it tells a
+    destination why there is no runtime here -- deliberately omitted, or
+    because the source had none to give.
+    """
+    persistence = {}
+    if isinstance(state_payload, dict):
+        raw = state_payload.get("runtime_persistence")
+        if isinstance(raw, dict):
+            persistence = raw
+
+    facts = {
+        "runtime_coherence": persistence.get("coherence"),
+        "runtime_committed_revision": persistence.get("committed_revision"),
+        "runtime_committed_digest": persistence.get("committed_digest"),
+        # Spec 4.4's coverage record: which names the generation holds and
+        # which it could not. A destination that rehydrates a dump missing
+        # `adata` should be able to learn that from the archive, not from the
+        # kernel coming up short.
+        "runtime_saved_names": persistence.get("saved_names"),
+        "runtime_skipped_names": persistence.get("failed_variables"),
+    }
+    if not include_runtime:
+        facts["runtime_omitted_reason"] = "include_runtime=false"
+    return facts
+
+
 def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = False) -> None:
     """Write the portable session archive for *session_id* to *tar_path*.
 
@@ -109,10 +148,15 @@ def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = F
 
         # Manifest first: the importer latches the session id from the first
         # member it sees and reconciles it against this file.
+        # An archive is read long after the HTTP response that produced it
+        # is gone, so it says for itself whether it can continue the analysis
+        # or only restore the results, and on what generation. Spec 5.4.
         manifest = json.dumps({
             "session_id": session_id,
             "version": ARCHIVE_FORMAT_VERSION,
             "data_base_dir": str(DATA_BASE_DIR),
+            "resumable": bool(include_runtime),
+            **_generation_facts(session_id, state_payload, include_runtime),
         }, indent=2).encode("utf-8")
         _add_bytes(f"{session_id}/manifest.json", manifest)
 
@@ -183,6 +227,15 @@ async def _pack_session_archive(
     """
     check_export_disk_space()
 
+    # Spec 5.4. A resumable archive has to carry a runtime generation that
+    # matches the state and the checkpoint beside it, so the kernel is flushed
+    # *before* the state file is written and the pairing that flush produced is
+    # what the capture is checked against afterwards. A results-only export
+    # skips all of it: `include_runtime=false` must not pause an analysis.
+    pairing_before = None
+    if include_runtime:
+        pairing_before = await flush_for_resumable_export(session_id, state)
+
     save_task = asyncio.create_task(
         async_save_session(session_id, state, force=True),
         name=f"export-state-save:{session_id}:{export_info['token']}",
@@ -217,6 +270,14 @@ async def _pack_session_archive(
         session_id,
         include_runtime,
     )
+
+    if include_runtime:
+        # The checkpoint copy is taken inside `_build_session_tar`. If the graph
+        # advanced between the flush and that copy, the archive's three files no
+        # longer describe one moment -- and the destination would notice, retire
+        # the runtime and the checkpoint, and still report a successful import.
+        # Refuse here instead, where the user can retry.
+        assert_boundary_held(session_id, state, pairing_before)
 
     return tar_path, _build_export_filename(session_id, state.name)
 
@@ -297,6 +358,19 @@ async def export_state(session_id: str, request: Request, include_runtime: bool 
         claimed = await claim_export_stream(export_token, session_id)
         if claimed is None:
             raise HTTPException(status_code=410, detail="Export was retired")
+    except ResumableExportUnavailable as unavailable:
+        await _retire_failed_export(export_info)
+        # 409, not 500: nothing is broken. The session is intact, the previous
+        # generation is intact, and a results-only export still works -- the
+        # caller has an action, so give them one to take. Spec 5.4.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": unavailable.reason,
+                "message": unavailable.detail,
+                "results_only_export_available": True,
+            },
+        ) from unavailable
     except BaseException:
         await _retire_failed_export(export_info)
         raise
@@ -351,6 +425,19 @@ async def export_prepare(session_id: str, request: Request, include_runtime: boo
             filename=filename,
             size=size_bytes,
         )
+    except ResumableExportUnavailable as unavailable:
+        await _retire_failed_export(export_info)
+        # 409, not 500: nothing is broken. The session is intact, the previous
+        # generation is intact, and a results-only export still works -- the
+        # caller has an action, so give them one to take. Spec 5.4.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": unavailable.reason,
+                "message": unavailable.detail,
+                "results_only_export_available": True,
+            },
+        ) from unavailable
     except BaseException:
         await _retire_failed_export(export_info)
         raise

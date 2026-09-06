@@ -542,6 +542,30 @@ Whether the imported session can *continue* analysing depends on one choice at e
 
 Exact continuation needs three things together: `include_runtime=true` at export, `X-Trust: true` at import, and the archive's session ID still free on the destination. A runtime export resumes on a *different* installation as well as the original one, but that last condition is the one that quietly decides how precisely it resumes. Import never overwrites an existing session: when that ID is already taken it allocates a fresh one, and the LangGraph checkpoint — keyed by the archive's session ID and impossible to rename into place — is dropped along with it. The kernel pkl still arrives, so the imported session keeps its in-memory values, but Resume re-enters the graph at the start of a new round instead of continuing at the node the session was paused on. Re-importing a runtime archive onto the installation that produced it therefore gives exact continuation only if the original session was deleted first. Two installation-scoped mechanisms are handled at import: the pkl's HMAC sidecar is regenerated under the destination's key (it is never shipped in the archive), and credentials sealed with the source installation's key are dropped rather than treated as corruption — reconfigure the API key after import.
 
+**A resumable export flushes the kernel first, and is refused rather than
+approximated.** `include_runtime=true` writes the live kernel to disk, verifies
+that generation, and only then builds the archive — so the runtime, the session
+state and the workflow checkpoint inside it describe one moment. If the flush
+fails, or the analysis advances while the archive is being built, the export
+answers **409** with a reason instead of producing an archive that imports
+cleanly and cannot continue. A results-only export is unaffected and never
+interrupts the analysis.
+
+The archive says what it is. Its `manifest.json` records `resumable`, the
+committed generation's revision and digest, its coherence state, and which
+variable names that generation holds and which it could not — so an archive
+read months later is self-describing.
+
+**Importing a resumable archive onto a session ID that already exists is
+refused.** The workflow checkpoint is keyed by session ID and cannot be renamed
+into place, so importing under a fresh ID would drop it: the runtime would
+arrive, the import would report success, and Resume would restart the round.
+Delete or rename the existing session first, or re-export without runtime.
+A results-only archive still lands under a fresh ID as before — it has no
+checkpoint to lose, and reallocating is what keeps a re-import from overwriting
+the live session.
+
+
 Resuming needs a session that was exported while paused or waiting for input. A session exported after it completed has a checkpoint sitting at the end of the graph, so there is nothing to continue; re-analysis starts a fresh round instead.
 
 It remains a migration format, not a complete service backup.

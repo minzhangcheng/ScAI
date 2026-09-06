@@ -107,7 +107,13 @@ def _export_download(client, token, session_id, *, include_runtime):
     return dl.content
 
 
-def _import_archive(client, token, blob, *, trust):
+def _import_job(client, token, blob, *, trust):
+    """Run an import to a terminal state and return the job, whatever it says.
+
+    Separate from `_import_archive` because a refusal is now a designed outcome
+    (a resumable archive onto a live session id), and a helper that asserts
+    success cannot express it.
+    """
     headers = {
         **_auth(token),
         "X-Filename": "export_test.tar.gz",
@@ -126,6 +132,11 @@ def _import_archive(client, token, blob, *, trust):
         if job["status"] in ("completed", "failed", "cancelled"):
             break
         time.sleep(0.05)
+    return job
+
+
+def _import_archive(client, token, blob, *, trust):
+    job = _import_job(client, token, blob, trust=trust)
     assert job["status"] == "completed", f"import did not complete: {job}"
     return job["session_id"]
 
@@ -135,7 +146,6 @@ def _import_archive(client, token, blob, *, trust):
     "include_runtime, trust, keep_source",
     [
         (True, True, False),    # cross-instance migration, runtime carried
-        (True, True, True),     # same instance: the id collides, a new one is allocated
         (False, False, False),  # the default export: no runtime at all
         (True, False, False),   # runtime exported, not trusted on the way in
         (False, True, False),   # trust is harmless without exported runtime
@@ -275,19 +285,58 @@ def test_export_import_continue(
         )
 
 
-def test_the_resume_button_moves_a_kernel_without_its_checkpoint(client):
-    """Re-import a runtime-carrying archive onto the instance that wrote it.
+def test_a_resumable_archive_is_refused_onto_a_live_session_id(client):
+    """Spec 3.6, spec 5.4. The old behaviour here was the failure.
 
-    The id collides, so a new one is allocated and the checkpoint is dropped —
-    it is keyed by the archive's thread id. The kernel survives, which leaves
-    ``runtime_restore_status`` at ``complete``, and the frontend only offers
-    Re-run while the runtime is *un*available. So Resume is the sole control
-    here, and it never sets a start intent of its own: unless the import armed
-    one, ``resume()`` finds no checkpoint and no continuation target and holds
-    without executing.
+    Re-importing a runtime-carrying archive onto the installation that wrote it
+    used to allocate a fresh id and drop the checkpoint with it -- the kernel
+    landed, ``runtime_restore_status`` stayed ``complete``, the UI offered
+    Resume, and Resume restarted the round. A session that looked resumable and
+    was not, with nothing anywhere saying so.
 
-    Every other case in this file continues through ``POST /run``, which arms
-    the intent itself and therefore cannot tell whether the import did.
+    The import refuses now, and says how to resolve it. The results-only path is
+    unaffected: it carries no checkpoint and still lands under a fresh id.
+    """
+    token = _token(client)
+    started = client.post(
+        "/api/session/start",
+        json={"instruction": "cluster the cells"},
+        headers=_auth(token),
+    )
+    assert started.status_code == 200, started.text
+    src_id = started.json()["session_id"]
+
+    _populate(src_id, live_pkl=True)
+    _advance(src_id)
+    client.post(f"/api/session/{src_id}/save", headers=_auth(token))
+
+    blob = _export_download(client, token, src_id, include_runtime=True)
+    job = _import_job(client, token, blob, trust=True)
+
+    assert job["status"] == "failed", job
+    assert "already exists" in job["error"]
+    assert "checkpoint is bound to that session ID" in job["error"]
+    assert "without runtime" in job["error"]
+
+    # The results-only path is untouched: no checkpoint travels, so nothing is
+    # lost by landing under a fresh id.
+    results_only = _export_download(client, token, src_id, include_runtime=False)
+    reallocated = _import_archive(client, token, results_only, trust=False)
+    assert reallocated != src_id
+
+
+def test_the_resume_button_is_not_a_silent_no_op(client):
+    """Resume never arms a start intent of its own.
+
+    Unless the import armed one, ``resume()`` finds no checkpoint and no
+    continuation target and holds without executing. Every other case in this
+    file continues through ``POST /run``, which arms the intent itself and
+    therefore cannot tell whether the import did.
+
+    The source is deleted before the import so the archive lands on its own id
+    -- which is what a resumable archive now requires, and which also gives this
+    test the checkpoint it needs to be about Resume rather than about the
+    collision.
     """
     from backend.config import get_session_states
     from backend.models.schemas import TaskStatus
@@ -310,13 +359,20 @@ def test_the_resume_button_moves_a_kernel_without_its_checkpoint(client):
     client.post(f"/api/session/{src_id}/save", headers=_auth(token))
 
     blob = _export_download(client, token, src_id, include_runtime=True)
+
+    # Delete the source so the archive lands on its own id. A resumable archive
+    # requires that now, and it is also what lets the checkpoint travel -- which
+    # is what makes this a test about Resume rather than about the collision.
+    client.delete(f"/api/session/{src_id}", headers=_auth(token))
+    sessions.pop(src_id, None)
+
     new_id = _import_archive(client, token, blob, trust=True)
-    assert new_id != src_id, "a colliding id must not be reused"
+    assert new_id == src_id, "with the source deleted the archive keeps its id"
 
     state = sessions[new_id]
     assert _live_pkl(new_id).exists(), "the trusted kernel should have landed"
-    assert not (get_session_states(new_id) / "checkpoints.sqlite").exists(), (
-        "a checkpoint keyed by the archive's thread id must not be reused"
+    assert (get_session_states(new_id) / "checkpoints.sqlite").exists(), (
+        "the archive's checkpoint travels when its id is free"
     )
     assert state.runtime_restore_status == "complete", (
         "the kernel is here, so the UI will offer Resume and not Re-run"
@@ -328,13 +384,21 @@ def test_the_resume_button_moves_a_kernel_without_its_checkpoint(client):
 
     after = sessions[new_id]
     assert after.status == TaskStatus.RUNNING
-    assert should_resume_workflow(after) is True
-    plan = build_restore_entry_plan(after)
-    assert plan.target_node == "initialize_round", (
-        "Resume must re-enter the round loop; without an armed start intent "
-        "resume() holds and the button is a silent no-op"
+    assert should_resume_workflow(after) is True, (
+        "a session that has already run must continue, not start over"
     )
-    assert plan.preserve_round_on_initialize is True
+
+    # With the checkpoint present the entry plan is deliberately *empty*: there
+    # is a graph position to continue from, so `resume()` routes through the
+    # checkpoint rather than being seeded with a target node. An archive whose
+    # checkpoint was dropped takes the other branch, which is what the
+    # kernel-less cases in `test_export_import_continue` assert.
+    plan = build_restore_entry_plan(after)
+    assert plan.intent == "normal", plan
+    assert plan.target_node is None, plan
+    assert (get_session_states(new_id) / "checkpoints.sqlite").exists(), (
+        "the position resume() continues from has to still be there"
+    )
 
 
 def test_a_session_exported_before_its_first_round_still_starts(client):

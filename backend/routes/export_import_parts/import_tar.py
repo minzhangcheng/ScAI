@@ -63,6 +63,38 @@ from .core import (
 
 logger = logging.getLogger(__name__)
 
+
+def _refuse_resumable_collision(manifest_data: dict, context) -> None:
+    """Refuse an archive that claims to be resumable onto a taken session id.
+
+    The LangGraph checkpoint is keyed by session id and cannot be renamed into
+    place (spec 3.6), so the reallocation `_allocate_import_session_id` performs
+    on a collision drops it. The runtime pkl still lands and the import still
+    reports success, which is precisely why this has to be refused rather than
+    warned about: the user would learn about it only when Resume restarted the
+    round.
+
+    Only a *claimed* resumable archive is refused. An archive built before this
+    field existed carries no claim and keeps the old behaviour, which is correct
+    for it -- it has no checkpoint to lose.
+    """
+    if not manifest_data.get("resumable"):
+        return
+    if context.session_id == context.archive_session_id:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"Session {context.archive_session_id} already exists on this "
+            "installation. This archive carries a runtime and a workflow "
+            "checkpoint, and the checkpoint is bound to that session ID -- "
+            "importing under a new ID would drop it, and the session would "
+            "restart the round instead of continuing. Delete or rename the "
+            "existing session first, or re-export without runtime to import "
+            "the results only."
+        ),
+    )
+
 from dataclasses import dataclass, field
 
 from .import_archive_policy import (
@@ -284,6 +316,7 @@ def import_tar_gz(
                                 f"directory {archive_session_id!r}"
                             ),
                         )
+                    _refuse_resumable_collision(manifest_data, context)
                     old_base_dir = manifest_data.get("data_base_dir", "")
                     manifest_version = str(manifest_data.get("version", ""))
                     if manifest_version and manifest_version not in _SUPPORTED_ARCHIVE_VERSIONS:
