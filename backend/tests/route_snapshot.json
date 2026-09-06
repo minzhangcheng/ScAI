@@ -644,24 +644,6 @@
     ]
   ],
   [
-    "/api/session/{session_id}/runtime-persistence/recompute",
-    [
-      "POST"
-    ]
-  ],
-  [
-    "/api/session/{session_id}/runtime-persistence/retry",
-    [
-      "POST"
-    ]
-  ],
-  [
-    "/api/session/{session_id}/runtime-persistence/terminate",
-    [
-      "POST"
-    ]
-  ],
-  [
     "/api/session/{session_id}/save",
     [
       "POST"

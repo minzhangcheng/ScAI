@@ -718,27 +718,3 @@ class TestBioinformaticsNodeUpstreamPropagation:
         bioinfo_result = result.get("bioinformatics_result", {})
         assert bioinfo_result.get("status") == "failed"
         assert bioinfo_result.get("status") != "max_steps_reached"
-
-    @pytest.mark.asyncio
-    async def test_runtime_discard_unwinds_superseded_bioinformatics_node(
-        self, mock_workflow, bioinfo_state,
-    ):
-        from backend.services.runtime_persistence_gate import (
-            RuntimePersistenceBlocked,
-        )
-        from backend.workflow.helpers import WorkflowSupersededError
-
-        mock_workflow.bioinformatics_agent.run_autonomous_analysis = AsyncMock(
-            side_effect=RuntimePersistenceBlocked("runtime save failed")
-        )
-        mock_workflow._wait_for_runtime_persistence_intervention = AsyncMock(
-            return_value="discard"
-        )
-
-        with pytest.raises(WorkflowSupersededError):
-            await mock_workflow._bioinformatics_analysis(bioinfo_state)
-
-        assert (
-            mock_workflow.bioinformatics_agent.run_autonomous_analysis.await_count
-            == 1
-        )

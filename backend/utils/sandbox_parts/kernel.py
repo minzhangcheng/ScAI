@@ -411,11 +411,11 @@ class KernelMixin:
         snapshot restore has already installed the authoritative pkl/notebook for
         this session: saving would overwrite them with the pre-restore kernel.
 
-        With ``save=True`` a failed or explicitly refused runtime save keeps the
-        kernel alive and raises ``RuntimePersistenceShutdownBlocked``. The live
-        namespace may be the only copy of the newest work, so callers must route
-        the failure through the runtime-persistence intervention gate instead of
-        treating cleanup as successful.
+        With ``save=True`` the closing save is **one attempt** (spec 5.1). A
+        failure keeps the previous committed generation, is recorded by the
+        persistence layer, and does not stop the shutdown: holding the kernel
+        alive for a person to answer is the gate this replaced. The state is
+        then stale rather than current, and the UI says so.
         """
         if save:
             try:
@@ -428,19 +428,15 @@ class KernelMixin:
                 self.notebook_state.save()
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
-                from backend.services.runtime_persistence_gate import (
-                    RuntimePersistenceShutdownBlocked,
-                )
-
+            except Exception:
+                # One attempt (spec 5.1). The previous committed generation is
+                # intact and the failure is already recorded; shutting down
+                # anyway is the point of removing the gate.
                 logger.exception(
-                    "Failed to save session during stop for %s; preserving live kernel",
+                    "Final runtime persistence failed for %s; the previous "
+                    "committed generation is kept and the kernel is closed",
                     self.session_id,
                 )
-                raise RuntimePersistenceShutdownBlocked(
-                    f"Final runtime persistence failed for session {self.session_id}; "
-                    "the live kernel was preserved"
-                ) from exc
 
         manager = self.km
 

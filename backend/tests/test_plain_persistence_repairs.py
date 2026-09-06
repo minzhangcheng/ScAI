@@ -85,7 +85,7 @@ async def test_executor_stops_after_local_restore_marks_unavailable(monkeypatch)
     from backend.agents.bioinformatics.executor_runtime import prepare_sandbox
     from backend.config import get_session_states, get_session_workspace
     from backend.models.schemas import AnalysisState
-    from backend.services.runtime_persistence_gate import RuntimePersistenceBlocked
+    from backend.services.runtime_recompute import RuntimeUnavailable
     from backend.state import sessions
     from backend.utils.sandbox import LocalJupyterSandbox
     from backend.utils.sandbox_parts import kernel
@@ -105,7 +105,7 @@ async def test_executor_stops_after_local_restore_marks_unavailable(monkeypatch)
     sb._wait_for_ready = AsyncMock()
     sb._initialize_kernel = AsyncMock()
     agent = SimpleNamespace(sandbox=sb, _notify=AsyncMock(), code_history=[])
-    with pytest.raises(RuntimePersistenceBlocked):
+    with pytest.raises(RuntimeUnavailable):
         await prepare_sandbox(agent, state, bindings=SimpleNamespace(
             logger=logging.getLogger(__name__), CodeExecution=object,
         ))

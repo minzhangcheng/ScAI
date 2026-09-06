@@ -96,11 +96,10 @@ def apply_runtime_persistence_projection(
         return dict(getattr(state, "runtime_persistence", None) or {})
     state.runtime_persistence, state.sandbox_state = projection
     if state.runtime_persistence.get("projection_status") == "lifecycle_mismatch":
-        from backend.services.runtime_persistence_gate import (
-            enter_runtime_persistence_gate,
-        )
-
-        enter_runtime_persistence_gate(state, state.runtime_persistence)
+        # Recorded and disclosed, not held. The record travels to the UI as a
+        # persistent non-blocking warning (spec 5.1); a mismatch belongs to
+        # another session incarnation and there is nothing a dialog could do
+        # about it.
         sandbox_state = dict(state.sandbox_state or {})
         sandbox_state["runtime_persistence"] = dict(state.runtime_persistence)
         state.sandbox_state = sandbox_state

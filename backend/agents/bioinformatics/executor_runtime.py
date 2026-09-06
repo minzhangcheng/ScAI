@@ -45,21 +45,21 @@ async def prepare_sandbox(agent, state, *, bindings) -> None:
                 ))
             logger.info(f"[Bioinformatics] Restored {len(agent.code_history)} cells into code_history from notebook state")
 
-    # A verified older generation may be the only runtime that survived a
-    # newer failed save. Do not silently call that fully current: stop at a
-    # durable HITL gate unless the user already chose recompute/reduce.
+    # No committed generation at all is the one condition that still stops
+    # forward execution, and it is answered by an explicit re-run rather than a
+    # dialog: there is nothing to retry, because nothing was ever saved.
     persistence = agent.sandbox.sync_runtime_persistence_state(state)
     if (
         getattr(state, "runtime_restore_status", "complete") == "unavailable"
         and not getattr(state, "runtime_recompute_pending", False)
     ):
-        from backend.services.runtime_persistence_gate import RuntimePersistenceBlocked
+        from backend.services.runtime_recompute import RuntimeUnavailable
 
-        raise RuntimePersistenceBlocked("No runtime survived; explicit re-run is required")
+        raise RuntimeUnavailable("No runtime survived; explicit re-run is required")
     if getattr(state, "runtime_recompute_pending", False) and persistence.get(
         "requires_recompute"
     ):
-        from backend.services.runtime_persistence_gate import (
+        from backend.services.runtime_recompute import (
             prepare_runtime_recompute,
         )
 
@@ -70,24 +70,6 @@ async def prepare_sandbox(agent, state, *, bindings) -> None:
         # latch, otherwise it immediately re-arms the same gate.
         prepare_runtime_recompute(state, agent.sandbox)
         persistence = agent.sandbox.sync_runtime_persistence_state(state)
-    if (
-        (
-            persistence.get("degraded_recovery")
-            or persistence.get("status") == "failed"
-            or persistence.get("requires_recompute")
-        )
-        and not getattr(state, "runtime_recompute_pending", False)
-    ):
-        from backend.services.runtime_persistence_gate import (
-            RuntimePersistenceBlocked,
-            enter_runtime_persistence_gate,
-        )
-
-        enter_runtime_persistence_gate(
-            state,
-            persistence,
-            degraded_recovery=bool(persistence.get("degraded_recovery")),
-        )
-        raise RuntimePersistenceBlocked(
-            "Runtime persistence requires an explicit recovery action"
-        )
+    # A failed or degraded newest save no longer holds the run. The previous
+    # committed generation is what continues from, coherence reports it as
+    # stale, and the UI carries a persistent non-blocking warning (spec 5.1).

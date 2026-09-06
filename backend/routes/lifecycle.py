@@ -39,7 +39,6 @@ from backend.utils.runtime_apply import is_forward_resume_blocked, state_runtime
 from backend.utils.checkpoint_paths import checkpoint_sqlite_path
 
 from backend.services.snapshot_v2.errors import (
-    SNAPSHOT_FAILURE_ACTIONS,
     SnapshotTransactionError,
     is_snapshot_failure_blocked,
 )
@@ -78,7 +77,6 @@ router = APIRouter(prefix="/api/session", tags=["lifecycle"])
 import sys
 from .lifecycle_parts import interventions as lifecycle_interventions
 from .lifecycle_parts import run_resume as lifecycle_run_resume
-from .lifecycle_parts import runtime_persistence as lifecycle_runtime_persistence
 from .lifecycle_parts import shared as lifecycle_shared
 from .lifecycle_parts import snapshot_failures as lifecycle_snapshot_failures
 
@@ -148,33 +146,6 @@ async def llm_failure_action(session_id: str, request: Request, req: LlmFailureA
 async def _llm_failure_action_locked(session_id: str, user_id: str, req: LlmFailureActionRequest):
     lifecycle_interventions.bind_facade(sys.modules[__name__])
     return await lifecycle_interventions._llm_failure_action_locked(session_id, user_id, req)
-
-def _raise_runtime_persistence_action_409(result) -> None:
-    lifecycle_runtime_persistence.bind_facade(sys.modules[__name__])
-    return lifecycle_runtime_persistence._raise_runtime_persistence_action_409(result)
-
-async def _runtime_persistence_action_locked(session_id: str, user_id: str, action: str, *, gate_token: str | None=None, generation: int | None=None):
-    lifecycle_runtime_persistence.bind_facade(sys.modules[__name__])
-    return await lifecycle_runtime_persistence._runtime_persistence_action_locked(session_id, user_id, action, gate_token=gate_token, generation=generation)
-
-async def _runtime_persistence_action(session_id: str, request: Request, action: str):
-    lifecycle_runtime_persistence.bind_facade(sys.modules[__name__])
-    return await lifecycle_runtime_persistence._runtime_persistence_action(session_id, request, action)
-
-@router.post('/{session_id}/runtime-persistence/retry')
-async def runtime_persistence_retry(session_id: str, request: Request):
-    lifecycle_runtime_persistence.bind_facade(sys.modules[__name__])
-    return await lifecycle_runtime_persistence.runtime_persistence_retry(session_id, request)
-
-@router.post('/{session_id}/runtime-persistence/recompute')
-async def runtime_persistence_recompute(session_id: str, request: Request):
-    lifecycle_runtime_persistence.bind_facade(sys.modules[__name__])
-    return await lifecycle_runtime_persistence.runtime_persistence_recompute(session_id, request)
-
-@router.post('/{session_id}/runtime-persistence/terminate')
-async def runtime_persistence_terminate(session_id: str, request: Request):
-    lifecycle_runtime_persistence.bind_facade(sys.modules[__name__])
-    return await lifecycle_runtime_persistence.runtime_persistence_terminate(session_id, request)
 
 @router.post('/{session_id}/retry-node')
 async def retry_node(session_id: str, request: Request, body: RetryNodeRequest):

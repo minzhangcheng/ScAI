@@ -162,10 +162,6 @@ class CallbacksMixin:
             and state_generation
             and event_generation != state_generation
         ):
-            from ..services.runtime_persistence_gate import (
-                enter_runtime_persistence_gate,
-            )
-
             mismatch = dict(
                 getattr(analysis_state, "runtime_persistence", None) or {}
             )
@@ -179,7 +175,10 @@ class CallbacksMixin:
                 ),
                 "projection_status": "lifecycle_mismatch",
             })
-            enter_runtime_persistence_gate(analysis_state, mismatch)
+            # A commit whose lifecycle generation does not match the session's
+            # belongs to another incarnation, so it is recorded and disclosed
+            # rather than installed. It is not a question for a dialog.
+            analysis_state.runtime_persistence = mismatch
             await self._send_state_sync(
                 analysis_state,
                 StateSyncChangeType.RUNTIME_PERSISTENCE_FAILURE.value,

@@ -759,72 +759,6 @@ async def resume(
     self._consume_restore_resume_metadata(analysis_state)
     return analysis_state
 
-async def _recover_failed_pause_persistence(
-    self,
-    thread_id: str,
-    analysis_state: AnalysisState,
-) -> None:
-    """Own the live-kernel pause failure gate until one action completes."""
-    try:
-        action = await self._wait_for_runtime_persistence_intervention(
-            analysis_state,
-            successful_status=TaskStatus.PAUSED,
-            persist_transitions=True,
-        )
-        if action == "retry":
-            self._set_status(analysis_state, TaskStatus.PAUSED)
-        elif action == "recompute":
-            self._set_status(analysis_state, TaskStatus.RUNNING)
-            self._pause_event.set()
-            previous = getattr(analysis_state, "pre_pause_status", None)
-            if previous == TaskStatus.WAITING_ANNOTATION:
-                self._annotation_event.set()
-            elif previous == TaskStatus.WAITING_PLAN_REVIEW:
-                self._plan_review_event.set()
-            elif previous == TaskStatus.WAITING_SPECIES_INPUT:
-                self._species_event.set()
-            elif previous in (
-                TaskStatus.WAITING_INPUT,
-            ):
-                self._continue_event.set()
-        elif action == "terminate":
-            self._set_status(analysis_state, TaskStatus.STOPPED)
-            analysis_state.termination_reason = "runtime_persistence_failure"
-            # Release every cooperative waiter after checkpointing a stop
-            # decision. The graph observes should_continue=False at its next
-            # conditional boundary rather than remaining parked forever.
-            config = {"configurable": {"thread_id": thread_id}}
-            try:
-                await self.compiled_graph.aupdate_state(config, {
-                    "analysis_state": analysis_state,
-                    "human_stop_requested": True,
-                    "should_continue": False,
-                })
-            except Exception:
-                logger.warning(
-                    "[%s] Could not checkpoint pause-failure termination",
-                    self.session_id,
-                    exc_info=True,
-                )
-            self._pause_event.set()
-            self._continue_event.set()
-            self._annotation_event.set()
-            self._plan_review_event.set()
-            self._species_event.set()
-        await self._send_state_sync(
-            analysis_state,
-            StateSyncChangeType.RUNTIME_PERSISTENCE_FAILURE.value,
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        logger.exception(
-            "[%s] Pause runtime-persistence recovery task failed",
-            self.session_id,
-        )
-    finally:
-        self._runtime_persistence_pause_task = None
-
 async def pause(
     self,
     thread_id: str,
@@ -891,52 +825,19 @@ async def pause(
                 self.session_id,
                 exc_info=True,
             )
-            from ...services.runtime_persistence_gate import (
-                enter_runtime_persistence_gate,
-            )
-
+            # The pause could not persist the runtime. The previous committed
+            # generation stands, coherence reports the state as stale, and the
+            # UI carries a persistent non-blocking warning (spec 5.1). Arming a
+            # dialog and holding the pause is the gate this replaced.
             try:
-                persistence = self.sandbox.sync_runtime_persistence_state(
-                    analysis_state
+                self.sandbox.sync_runtime_persistence_state(analysis_state)
+            except Exception:
+                logger.warning(
+                    "[%s] Could not synchronise runtime persistence after a "
+                    "failed pause save",
+                    self.session_id,
+                    exc_info=True,
                 )
-            except Exception as sync_error:
-                persistence = dict(
-                    getattr(analysis_state, "runtime_persistence", None) or {}
-                )
-                persistence.update({
-                    "status": "failed",
-                    "error_summary": (
-                        "Pause runtime state synchronization failed: "
-                        f"{type(sync_error).__name__}"
-                    ),
-                })
-            failure = enter_runtime_persistence_gate(
-                analysis_state,
-                persistence,
-                degraded_recovery=bool(
-                    persistence.get("degraded_recovery")
-                ),
-            )
-            task = getattr(
-                self, "_runtime_persistence_pause_task", None,
-            )
-            if task is None or task.done():
-                task = asyncio.create_task(
-                    self._recover_failed_pause_persistence(
-                        thread_id, analysis_state,
-                    ),
-                    name=f"runtime-persistence-pause:{self.session_id}",
-                )
-                self._runtime_persistence_pause_task = task
-            # Let the recovery task establish its in-memory arbitration
-            # fields before the HTTP response exposes the gate token.
-            await asyncio.sleep(0)
-            return {
-                "success": False,
-                "status": analysis_state.status.value,
-                "still_blocked": True,
-                "snapshot_failure": failure,
-            }
         logger.info(f"[{self.session_id}] Sandbox state saved")
 
     logger.info(f"[{self.session_id}] Workflow paused successfully")

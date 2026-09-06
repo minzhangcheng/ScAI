@@ -208,12 +208,6 @@ def __init__(
     # Runtime persistence gate. Unlike an ordinary node exception this gate
     # stays inside the running workflow so Retry still has the exact live
     # kernel namespace that failed to persist.
-    self._runtime_persistence_event = asyncio.Event()
-    self._runtime_persistence_action: Optional[str] = None
-    self._runtime_persistence_gate_active = False
-    self._runtime_persistence_action_pending = False
-    self._runtime_persistence_gate_token = ""
-    self._runtime_persistence_gate_generation = 0
     self._runtime_persistence_pause_task: Optional[asyncio.Task] = None
 
     # Supplementary analysis requests queue (set by API, consumed by HITL loop).

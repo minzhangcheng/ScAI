@@ -16,15 +16,6 @@ def bind_facade(facade) -> None:
 
 
 async def start_turn(context) -> TurnStart:
-    if (context.analysis_state.runtime_persistence or {}).get("requires_recompute"):
-        from backend.services.runtime_persistence_gate import (
-            RuntimePersistenceBlocked,
-            enter_runtime_persistence_gate,
-        )
-        enter_runtime_persistence_gate(context.analysis_state, context.analysis_state.runtime_persistence)
-        raise RuntimePersistenceBlocked(
-            "Runtime dependencies require recomputation before continuing"
-        )
     if context.agent._pause_event is not None and not context.agent._pause_event.is_set():
         logger.info(
             f"[Bioinformatics] Pause requested at step {context.step_count}, "
@@ -78,12 +69,8 @@ async def start_turn(context) -> TurnStart:
                 save_sandbox=True,
             )
         except Exception as e:
-            from backend.services.runtime_persistence_gate import (
-                RuntimePersistenceBlocked,
-                is_runtime_persistence_blocked,
-            )
-            if isinstance(e, RuntimePersistenceBlocked) or is_runtime_persistence_blocked(context.analysis_state):
-                raise RuntimePersistenceBlocked(str(e)) from e
+            # A checkpoint save that failed leaves the previous committed
+            # generation; the run continues and coherence reports it stale.
             logger.warning(f"[Bioinformatics] Checkpoint save failed at step {context.step_count}: {e}")
     context.agent._set_llm_context()
     MAX_MESSAGES = 80
@@ -597,12 +584,6 @@ async def finish_turn(context, effects) -> LoopExit:
                 save_sandbox=True,
             )
         except Exception as e:
-            from backend.services.runtime_persistence_gate import (
-                RuntimePersistenceBlocked,
-                is_runtime_persistence_blocked,
-            )
-            if isinstance(e, RuntimePersistenceBlocked) or is_runtime_persistence_blocked(state):
-                raise RuntimePersistenceBlocked(str(e)) from e
             logger.warning(
                 "[Bioinformatics] Plan-revision checkpoint save failed at "
                 "step %s: %s",
@@ -797,17 +778,9 @@ async def prepare_loop_context(
             try:
                 await self.sandbox.save_session()
             finally:
-                persistence = self.sandbox.sync_runtime_persistence_state(state)
-                if persistence.get("status") == "failed" or persistence.get("requires_recompute"):
-                    from backend.services.runtime_persistence_gate import (
-                        RuntimePersistenceBlocked,
-                        enter_runtime_persistence_gate,
-                    )
-
-                    enter_runtime_persistence_gate(state, persistence)
-                    raise RuntimePersistenceBlocked(
-                        "Runtime persistence failed; waiting for user action"
-                    )
+                # The record is published either way. A failed save keeps the
+                # previous committed generation and does not stop the run.
+                self.sandbox.sync_runtime_persistence_state(state)
 
     # A resumed executor must keep its original tool transcript, but an
     # approved replacement plan has to be made visible before the next LLM

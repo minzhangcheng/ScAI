@@ -269,42 +269,17 @@ async def execute_bioinformatics_analysis(self, ctx):
     planning_stage = ctx["planning_stage"]
     instruction = ctx["instruction"]
     max_steps = ctx["max_steps"]
-    while True:
-        try:
-            result = await self.bioinformatics_agent.run_autonomous_analysis(
-                analysis_state,
-                instruction,
-                max_steps=max_steps,
-                figure_review_callback=self._figure_review_callback,
-                supervisor_callback=self._supervisor_callback,
-                planning_stage=planning_stage,  # Pass stage context to agent
-            )
-            break
-        except Exception as exc:
-            from backend.services.runtime_persistence_gate import (
-                RuntimePersistenceBlocked,
-            )
-
-            if not isinstance(exc, RuntimePersistenceBlocked):
-                raise
-            action = await self._wait_for_runtime_persistence_intervention(
-                analysis_state
-            )
-            if action == "terminate":
-                from backend.workflow.helpers import WorkflowTerminatedError
-
-                raise WorkflowTerminatedError(
-                    "User terminated after runtime persistence failure"
-                )
-            if action == "discard":
-                raise WorkflowSupersededError(
-                    "runtime owner was superseded while persistence was blocked"
-                )
-            # Retry re-enters from the executor checkpoint after the exact
-            # live namespace is committed. Recompute/reduce likewise
-            # re-enters, with runtime_recompute_pending adding the recovery
-            # instruction to the agent's data context.
-            continue
+    # No retry loop: a failed runtime save no longer raises for a person to
+    # answer (spec 5.1). RuntimeUnavailable still propagates -- there is nothing
+    # to retry when nothing was ever saved, and the route offers the re-run.
+    result = await self.bioinformatics_agent.run_autonomous_analysis(
+        analysis_state,
+        instruction,
+        max_steps=max_steps,
+        figure_review_callback=self._figure_review_callback,
+        supervisor_callback=self._supervisor_callback,
+        planning_stage=planning_stage,  # Pass stage context to agent
+    )
 
     return result
 
