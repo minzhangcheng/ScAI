@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Compare two scripts/scai-test runs by failing node-id set.
+
+The failure *count* is not acceptance: two different sets of the same size
+satisfy it. Nor is the set alone: a run whose collection did not complete, or
+whose junit.xml disagrees with its own recorded counts, measured nothing. All
+of those exit 2, never 0 -- silence is not agreement.
+"""
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+import xml.etree.ElementTree as ET
+
+
+def load(run: pathlib.Path) -> tuple[str, set[str]]:
+    """Return (profile, failing node ids) for one run, or raise LookupError.
+
+    Validating here rather than in a checklist step is deliberate: a check the
+    operator has to remember is a check that gets skipped on the twelfth batch.
+
+    Note: pytest can emit a junit ``<error>`` for a teardown fault on a test
+    that also passed, which this cross-check reports as a disagreement. That
+    surfaces as exit 2 -- look at it -- never as agreement.
+    """
+    junit = run / "junit.xml"
+    evidence = run / "evidence.json"
+    if not junit.is_file():
+        raise LookupError("no junit.xml under %s" % run)
+    if not evidence.is_file():
+        raise LookupError("no evidence.json under %s" % run)
+
+    data = json.loads(evidence.read_text())
+    if (data.get("outcomes") or {}).get("complete") is not True:
+        raise LookupError("%s: collection did not complete" % run)
+
+    root = ET.parse(junit).getroot()
+    cases = list(root.iter("testcase"))
+    if not cases:
+        raise LookupError("no test cases parsed from %s" % junit)
+    names = set()
+    for case in cases:
+        for child in case:
+            if child.tag in ("failure", "error"):
+                names.add("%s::%s" % (case.get("classname"), case.get("name")))
+
+    counts = data.get("counts") or {}
+    declared = int(counts.get("failed", -1)) + int(counts.get("errors", 0))
+    if declared != len(names):
+        raise LookupError(
+            "%s: evidence declares %d failed+errors, junit.xml carries %d"
+            % (run, declared, len(names))
+        )
+    return str(data.get("profile") or ""), names
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 3:
+        print("usage: scai-evidence-diff <base-run-dir> <new-run-dir>",
+              file=sys.stderr)
+        return 2
+    try:
+        base_profile, base = load(pathlib.Path(argv[1]))
+        new_profile, new = load(pathlib.Path(argv[2]))
+    except (LookupError, ValueError, json.JSONDecodeError, ET.ParseError) as exc:
+        print("INCONCLUSIVE: %s" % exc, file=sys.stderr)
+        return 2
+
+    if base_profile != new_profile:
+        print("INCONCLUSIVE: different profiles: %r vs %r"
+              % (base_profile, new_profile), file=sys.stderr)
+        return 2
+
+    introduced = sorted(new - base)
+    fixed = sorted(base - new)
+    print("profile: %s" % base_profile)
+    print("base failing: %d    new failing: %d" % (len(base), len(new)))
+    print("introduced: %s" % ("none" if not introduced else ""))
+    for node in introduced:
+        print("    + %s" % node)
+    print("fixed: %s" % ("none" if not fixed else ""))
+    for node in fixed:
+        print("    - %s" % node)
+    return 0 if not introduced and not fixed else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
