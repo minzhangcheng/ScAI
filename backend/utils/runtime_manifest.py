@@ -44,45 +44,49 @@ COHERENCE_UNAVAILABLE = "unavailable"
 
 def runtime_coherence(
     *,
-    committed_state_revision: int | None,
-    state_revision: int,
+    committed_revision: int | None,
+    last_attempt_revision: int,
+    last_attempt_status: str | None,
     has_generation: bool = True,
 ) -> str:
-    """Whether the newest committed generation belongs to the persisted state.
+    """Whether the newest committed generation is the newest one the run needed.
 
-    ``state_revision`` advances on every durable write of the session's state;
-    ``committed_state_revision`` is whichever value was current when the newest
-    runtime generation committed. The comparison therefore answers the question
-    the spec asks -- does this dump belong to the state persisted beside it --
-    rather than the narrower one a runtime-only counter can answer.
+    Decided from the save-attempt record, which the persistence layer owns and
+    which changes only when a save is actually attempted:
 
-    Two earlier drafts got this wrong and are worth naming. The first compared
-    the session *lifecycle generation*, which fences incarnations (deletion,
-    same-id re-import) and is normally 1 for a session's whole life, so the
-    verdict was permanently "current". The second compared saved against current
-    *runtime* revision, which only reports whether the namespace is dirty: a
-    state that advanced with no cell execution was invisible to it.
-
-    * ``stale`` -- the state moved on after the newest generation committed,
-      which is what a failed closing save leaves behind. Results stay viewable
-      and exportable; exact continuation is not promised.
-    * ``inconsistent`` -- a generation claims a state revision the session never
-      reached. Not the benign converse of stale: something recorded a commit
-      against a state that was rolled back, and reporting "current" would hide
-      it.
+    * ``stale`` -- a save was attempted for a later revision and failed, so the
+      newest committed generation is older than the work that has been done.
+      This is precisely what a failed closing save leaves behind. Results stay
+      viewable and exportable; exact continuation is not promised.
+    * ``inconsistent`` -- the committed generation claims a revision beyond the
+      newest attempt. Not the benign converse of stale: the record disagrees
+      with itself, and reporting "current" would hide it.
     * ``unavailable`` -- nothing has committed yet.
 
-    Evaluated when a run or resume is about to begin, not continuously: between
-    save boundaries the two legitimately diverge, and treating that as
-    staleness would block every session mid-analysis.
+    Three earlier drafts are worth naming, because each was wrong in a way that
+    looked right:
+
+    1. the session *lifecycle generation*, which fences incarnations and is
+       normally 1 for a session's whole life -- the verdict could never be
+       anything but "current";
+    2. saved against current *runtime* revision, which reports only whether the
+       namespace is dirty between save boundaries;
+    3. a state revision advanced on every durable write -- which the commit's
+       own state publication increments immediately after the commit, so every
+       successful save reported itself stale.
+
+    The attempt record avoids all three because it moves only when a save
+    happens, and records whether that save succeeded.
     """
-    if not has_generation or committed_state_revision is None:
+    if not has_generation or committed_revision is None:
         return COHERENCE_UNAVAILABLE
-    committed = int(committed_state_revision or 0)
-    current = int(state_revision or 0)
-    if committed < current:
-        return COHERENCE_STALE
-    if committed > current:
+    committed = int(committed_revision or 0)
+    attempted = int(last_attempt_revision or 0)
+    if attempted > committed:
+        # A newer revision was attempted. Only a failure leaves it uncommitted;
+        # a success would have advanced committed_revision with it.
+        return COHERENCE_STALE if last_attempt_status == "failed" else COHERENCE_CURRENT
+    if committed > attempted:
         return COHERENCE_INCONSISTENT
     return COHERENCE_CURRENT
 

@@ -382,7 +382,6 @@ class NotebookState:
         budget_violations: Optional[List[Dict[str, Any]]] = None,
         top_offenders: Optional[List[Dict[str, Any]]] = None,
         recommended_action: Optional[str] = None,
-        committed_state_revision: Optional[int] = None,
         persist: bool = True,
     ) -> Dict[str, Any]:
         """Persist the live runtime lifecycle without exposing raw tracebacks."""
@@ -508,17 +507,6 @@ class NotebookState:
                     if runtime_digest is not None
                     else previous.get("committed_digest")
                 ),
-                # The state revision this generation committed against, supplied
-                # by the transaction that has just finished. Deriving it here
-                # instead meant calling has_session_dump(), which checks the
-                # already-replaced dump against the *previous* digest and so
-                # reported every successful commit as having no generation --
-                # at the cost of two full reads of a multi-gigabyte file.
-                "committed_state_revision": (
-                    max(0, int(committed_state_revision))
-                    if committed_state_revision is not None
-                    else previous.get("committed_state_revision")
-                ),
                 "last_attempt_status": "succeeded",
                 "last_attempt_at": now,
                 "last_attempt_revision": max(0, int(current_revision)),
@@ -596,15 +584,20 @@ class NotebookState:
         self._migrate_committed_runtime_metadata()
         persistence = dict(self.runtime_persistence)
         runtime_digest = persistence.get("committed_digest")
+        # Derived from the committed record, not by re-verifying the file. The
+        # verification form ran an HMAC pass and a SHA-256 pass over the whole
+        # dump every time metadata was written -- several gigabytes twice per
+        # save -- and still could not answer the question during a commit, when
+        # the recorded digest belongs to the generation being replaced.
+        # ``has_session_dump()`` keeps the expensive form for the one caller
+        # that needs proof: restore.
         has_current_session = bool(
             persistence.get("committed_source") in {
                 "regular_save", "snapshot_apply"
             }
             and self.session_path.exists()
-            and _verify_pkl_integrity(self.session_path, _integrity_dir(self.session_id))
             and isinstance(runtime_digest, str)
             and len(runtime_digest) == 64
-            and _sha256_file(self.session_path) == runtime_digest
         )
         return {
             "session_id": self.session_id,

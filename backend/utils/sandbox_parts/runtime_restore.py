@@ -71,6 +71,39 @@ def verify_restored_generation(plan: RestorePlan, restored) -> None:
         )
 
 
+def _mark_runtime_unavailable_if_work_exists(sandbox, *, bindings) -> None:
+    """Record that a session which has run has no namespace to continue from.
+
+    A fresh session restores nothing and that is correct. One that has completed
+    rounds and restores nothing has lost its runtime, and the difference matters:
+    the first should start, the second must be offered a re-run rather than
+    continue the graph over variables that no longer exist.
+
+    ``_mark_runtime_availability_after_import`` makes this call for an imported
+    session. Nothing made it for a local process restart, so the status stayed
+    "complete" and the run proceeded.
+    """
+    from backend.state import sessions as live_sessions
+
+    state = live_sessions.get(sandbox.session_id)
+    if state is None or int(getattr(state, "current_round", 0) or 0) <= 0:
+        return
+    if getattr(state, "runtime_restore_status", "complete") != "complete":
+        return
+    state.runtime_restore_status = "unavailable"
+    state.runtime_restore_warning = (
+        "This session has completed rounds but no runtime state could be "
+        "restored, so in-memory values from the earlier run (adata and friends) "
+        "are gone. Re-run the analysis from the imported data to recompute them."
+    )
+    bindings.logger.warning(
+        "[%s] session has %s completed round(s) but nothing to restore; marked "
+        "runtime unavailable so the graph is not run over a missing namespace",
+        sandbox.session_id,
+        getattr(state, "current_round", 0),
+    )
+
+
 async def restore_session(sandbox, *, bindings):
     """Restore session from per-variable streaming dill dump if available.
 
@@ -182,6 +215,7 @@ async def restore_session(sandbox, *, bindings):
     has_session_dump = committed_dump
     if not has_session_dump and not has_h5ad_manifest:
         bindings.logger.info("No session dump to restore")
+        _mark_runtime_unavailable_if_work_exists(sandbox, bindings=bindings)
         return
 
     # A present pkl with a missing/invalid HMAC is a hard error, not a silent

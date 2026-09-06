@@ -64,7 +64,24 @@ async def run_analysis(session_id: str, request: Request):
     # executes nothing, so Start/Re-run looked like a silent no-op and the
     # session had no way forward at all.
     from backend.config import get_session_states
-    from backend.utils.runtime_apply import _live_pkl
+    from backend.utils.runtime_apply import _live_pkl, retire_live_runtime
+
+    # Decided first, because retiring the runtime changes the answer to every
+    # question below it. "Re-run from your data" promises an empty namespace,
+    # and the agent prompt says so; leaving the dump on disk let the new kernel
+    # rehydrate the old variables, and retiring it *after* the checkpoint test
+    # left the graph resuming an old node against a namespace that was gone.
+    if is_forward_resume_blocked(
+        getattr(state, "runtime_restore_status", "complete"),
+        coherence=state_runtime_coherence(state),
+    ):
+        state.runtime_recompute_pending = True
+        if retire_live_runtime(session_id, include_checkpoint=True):
+            bindings.logger.warning(
+                "[%s] retired the previous runtime generation and its graph "
+                "checkpoint for an explicit re-run; the next kernel starts empty",
+                session_id,
+            )
 
     # A checkpoint is only resumable together with the kernel it was written
     # against: it names the graph node to continue from, and the pkl holds the
@@ -92,27 +109,8 @@ async def run_analysis(session_id: str, request: Request):
     if getattr(state, "skip_required_snapshot_phase", None) is not None:
         state.skip_required_snapshot_phase = None
 
-    # Fresh rerun clears any snapshot restore state — new kernel will be built.
-    # Remember *why* it is being cleared: this run is the "re-run from your data"
-    # the blocked-resume message promises, so the bioinformatics agent has to be
-    # told its kernel is empty rather than left to trip over a missing adata.
-    if is_forward_resume_blocked(
-        getattr(state, "runtime_restore_status", "complete"),
-        coherence=state_runtime_coherence(state),
-    ):
-        state.runtime_recompute_pending = True
-        # Clearing the guard is not the same as clearing the runtime. Until this
-        # was here the dump stayed on disk, the new kernel rehydrated it, and the
-        # agent was told its namespace was empty while the old variables were
-        # still bound.
-        from backend.utils.runtime_apply import retire_live_runtime
-
-        if retire_live_runtime(session_id):
-            bindings.logger.warning(
-                "[%s] retired the previous runtime generation for an explicit "
-                "re-run; the next kernel starts empty",
-                session_id,
-            )
+    # The recompute decision and its retirement happened above, before anything
+    # read the files it retires.
     state.runtime_restore_status = "complete"
     state.runtime_restore_warning = None
     state.status = TaskStatus.RUNNING

@@ -168,7 +168,9 @@ class ExecutionMixin:
             str(self._session_tmp.resolve()),
         ]
 
-    def _note_execution_effect(self, *, mutates_namespace: bool) -> None:
+    def _note_execution_effect(
+        self, *, mutates_namespace: bool, reached_kernel: bool
+    ) -> None:
         """Advance the runtime revision for anything that could change globals.
 
         Tying this to success made a failed cell's side effects invisible to
@@ -184,9 +186,11 @@ class ExecutionMixin:
         """
         if not mutates_namespace:
             return
-        if not getattr(self, "_last_execution_reached_kernel", False):
-            # Blocked by the safety check, or the kernel was dead: no statement
-            # ran, so nothing changed.
+        if not reached_kernel:
+            # Blocked by the safety check, the kernel was dead, or the send
+            # itself raised: no statement ran, so nothing changed. Passed in
+            # rather than read from the instance, because the probes between
+            # the execution and this call use the same field.
             return
         # Bookkeeping, not correctness: a sandbox still being constructed has no
         # revision yet, and refusing to execute over a missing counter would be
@@ -277,6 +281,12 @@ class ExecutionMixin:
             result = await self._execute_unlocked(
                 code, save_to_history=save_to_history, skip_safety_check=skip_safety_check
             )
+            # Captured here, before the declared-output probes below run: they
+            # call _execute_unlocked too, and would otherwise overwrite this
+            # execution's verdict with their own.
+            reached_kernel = bool(
+                getattr(self, "_last_execution_reached_kernel", False)
+            )
             if declared_not_names:
                 result.output = (result.output or "") + (
                     "\n[Kernel] Ignored persistent_outputs entries that are "
@@ -330,7 +340,9 @@ class ExecutionMixin:
                 self._surface_unpersistable_outputs(
                     result, declared, unpersistable
                 )
-        self._note_execution_effect(mutates_namespace=mutates_namespace)
+        self._note_execution_effect(
+            mutates_namespace=mutates_namespace, reached_kernel=reached_kernel
+        )
         if result.success and save_to_history:
             if confirmed_declared:
                 self.record_declared_outputs(confirmed_declared)
@@ -423,8 +435,10 @@ class ExecutionMixin:
         
         try:
             # Send execute request
-            self._last_execution_reached_kernel = True
             msg_id = self.kc.execute(code)
+            # Only after the request is accepted. Setting it beforehand counted
+            # a send that raised as code having run.
+            self._last_execution_reached_kernel = True
 
             # Collect outputs — only process messages belonging to THIS execution (matched by msg_id).
             # Timeout is wall-clock: the deadline is fixed before the loop so a task that

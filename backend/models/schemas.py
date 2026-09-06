@@ -239,12 +239,6 @@ class AnalysisState(BaseModel):
     # bioinformatics data context so the agent reloads its inputs instead of
     # referencing variables from a session it can no longer see.
     runtime_recompute_pending: bool = False
-    #: Advances on every durable write of this session's state. It is the only
-    #: counter that tracks the *workflow* rather than the kernel, which is what
-    #: coherence has to compare a runtime generation against: the runtime
-    #: revision alone can only say whether the namespace is dirty, not whether
-    #: the dump belongs to the state persisted beside it.
-    state_revision: int = 0
 
     # Audit reason when a session is terminated (e.g. snapshot_failure).
     termination_reason: Optional[str] = None

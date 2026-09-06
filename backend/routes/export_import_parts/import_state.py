@@ -332,11 +332,20 @@ def _rekey_imported_runtime_manifest(session_id: str, pkl) -> None:
         return
 
     if manifest["pkl_sha256"] != _sha256_file(pkl):
-        logger.warning(
-            "[%s] imported runtime manifest describes different bytes; retiring it",
+        # Not the same situation as an archive that never carried a manifest.
+        # Here the archive asserts what these bytes should be and they are not
+        # that, which is positive evidence of corruption or of two generations
+        # mixed together. Accepting the dump as a legacy generation would launder
+        # that away, so the runtime is refused: the session imports without one
+        # and the existing re-run affordance offers a recompute.
+        from backend.utils.runtime_apply import retire_live_runtime
+
+        logger.error(
+            "[%s] imported runtime manifest describes different bytes than the "
+            "imported dump; refusing the runtime and importing without it",
             session_id,
         )
-        _retire_stale_runtime_manifest(session_id)
+        retire_live_runtime(session_id)
         return
 
     write_runtime_manifest(manifest_path, manifest)

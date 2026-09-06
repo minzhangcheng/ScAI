@@ -1,17 +1,22 @@
-"""Coherence: does the newest committed generation belong to the persisted state?
+"""Coherence: is the newest committed generation the newest one the run needed?
 
-Distinct from integrity (is the generation internally sound) and coverage (what
-did it leave out). Three drafts of this were wrong in instructive ways, and the
-tests below pin each of them shut:
+Distinct from integrity (is a generation internally sound) and coverage (what it
+left out). Four drafts of this were wrong, each in a way that looked right, and
+the tests below pin every one of them shut:
 
-* comparing the session *lifecycle generation*, which fences incarnations and
-  is normally 1 for a whole session, so the verdict was permanently "current";
-* comparing saved against current *runtime* revision, which only reports whether
-  the namespace is dirty and cannot see a state that advanced without any cell
-  execution;
-* deriving "is there a generation" by re-verifying the dump on disk against the
-  *previous* digest, which reported every successful commit as having none --
-  and read a multi-gigabyte file twice to do it.
+1. the session *lifecycle generation* -- fences incarnations, normally 1 for a
+   session's whole life, so the verdict could never be anything but "current";
+2. saved against current *runtime* revision -- reports only whether the
+   namespace is dirty between save boundaries;
+3. a state revision advanced on every durable write -- which the commit's own
+   state publication increments immediately afterwards, so every successful save
+   reported itself stale;
+4. deriving "is there a generation" by re-verifying the dump against the
+   *previous* digest, which answered no for every successful commit and read a
+   multi-gigabyte file twice to do it.
+
+What survives is the save-attempt record: it moves only when a save happens and
+it records whether that save succeeded.
 """
 import pytest
 
@@ -39,33 +44,43 @@ def _require_module_under_test():
         pytest.fail(f"module under test is missing: {_IMPORT_ERROR}")
 
 
-# --- the verdict itself ------------------------------------------------------
+# --- the verdict -------------------------------------------------------------
 
-def test_a_generation_paired_with_the_current_state_is_current():
+def test_a_committed_generation_at_the_latest_attempt_is_current():
     assert (
-        runtime_coherence(committed_state_revision=5, state_revision=5)
+        runtime_coherence(
+            committed_revision=5, last_attempt_revision=5, last_attempt_status="succeeded"
+        )
         == COHERENCE_CURRENT
     )
 
 
-def test_a_state_that_moved_on_makes_the_generation_stale():
+def test_a_failed_attempt_for_a_later_revision_is_stale():
+    """What a failed closing save leaves behind."""
     assert (
-        runtime_coherence(committed_state_revision=5, state_revision=6)
+        runtime_coherence(
+            committed_revision=5, last_attempt_revision=7, last_attempt_status="failed"
+        )
         == COHERENCE_STALE
     )
 
 
-def test_a_generation_ahead_of_the_state_is_inconsistent():
+def test_a_generation_beyond_the_newest_attempt_is_inconsistent():
     assert (
-        runtime_coherence(committed_state_revision=7, state_revision=6)
+        runtime_coherence(
+            committed_revision=7, last_attempt_revision=5, last_attempt_status="succeeded"
+        )
         == COHERENCE_INCONSISTENT
     )
 
 
-def test_no_committed_generation_is_unavailable():
+def test_nothing_committed_is_unavailable():
     assert (
         runtime_coherence(
-            committed_state_revision=None, state_revision=3, has_generation=False
+            committed_revision=None,
+            last_attempt_revision=3,
+            last_attempt_status="failed",
+            has_generation=False,
         )
         == COHERENCE_UNAVAILABLE
     )
@@ -74,41 +89,38 @@ def test_no_committed_generation_is_unavailable():
 # --- read off a state --------------------------------------------------------
 
 class _State:
-    def __init__(self, *, state_revision=0, persistence=None, current_round=0):
-        self.state_revision = state_revision
+    def __init__(self, persistence=None, current_round=0, state_revision=0):
         self.runtime_persistence = persistence if persistence is not None else {}
         self.current_round = current_round
+        # Present only so the tests can reproduce the third draft's defect: a
+        # counter that advanced on every durable state write, which the commit
+        # publication incremented immediately after the commit. Nothing in the
+        # verdict may read it.
+        self.state_revision = state_revision
 
 
-def _committed(committed_state_revision):
+def _record(committed, attempted, status):
     return {
         "committed_source": "regular_save",
         "committed_digest": "d" * 64,
-        "committed_state_revision": committed_state_revision,
+        "committed_revision": committed,
+        "last_attempt_revision": attempted,
+        "last_attempt_status": status,
     }
 
 
-def test_a_state_at_the_revision_its_generation_committed_against_is_current():
-    state = _State(state_revision=4, persistence=_committed(4))
+def test_a_session_whose_last_save_succeeded_is_current():
+    state = _State(_record(4, 4, "succeeded"))
     assert state_runtime_coherence(state) == COHERENCE_CURRENT
 
 
-def test_a_state_written_after_the_last_commit_is_stale():
-    """What a failed closing save leaves behind."""
-    state = _State(state_revision=7, persistence=_committed(4))
+def test_a_session_whose_closing_save_failed_is_stale():
+    state = _State(_record(4, 6, "failed"))
     assert state_runtime_coherence(state) == COHERENCE_STALE
 
 
-def test_a_session_with_no_committed_generation_is_unavailable():
-    state = _State(state_revision=2, persistence={})
-    assert state_runtime_coherence(state) == COHERENCE_UNAVAILABLE
-
-
-def test_a_generation_from_before_this_contract_is_not_called_stale():
-    """Absence of a pairing is not evidence of a mismatch."""
-    persistence = _committed(None)
-    state = _State(state_revision=9, persistence=persistence)
-    assert state_runtime_coherence(state) == COHERENCE_CURRENT
+def test_a_session_with_no_generation_is_unavailable():
+    assert state_runtime_coherence(_State({})) == COHERENCE_UNAVAILABLE
 
 
 # --- what it gates -----------------------------------------------------------
@@ -133,10 +145,9 @@ def test_an_unrecorded_generation_does_not_block():
     It is also the state of a fresh session, of every session predating this
     contract, and of one restored by a path that installs a dump without writing
     a manifest. Whether a session that has worked still has a usable runtime is
-    a different question owned by ``runtime_restore_status`` -- import sets it
-    to "unavailable" for exactly that case. An earlier version answered it here
-    too, using ``current_round > 0``, and blocked nineteen legitimate resumes
-    whose persistence record simply had not been populated.
+    owned by ``runtime_restore_status``, which import and now local restore both
+    set. Answering it here as well blocked nineteen legitimate resumes whose
+    persistence record simply had not been populated.
     """
     assert (
         is_forward_resume_blocked("complete", coherence=COHERENCE_UNAVAILABLE) is False
@@ -150,9 +161,7 @@ def test_an_unrecorded_generation_does_not_block():
 def test_a_pending_recompute_is_not_blocked_by_the_block_that_offered_it():
     assert (
         is_forward_resume_blocked(
-            "unavailable",
-            coherence=COHERENCE_STALE,
-            recompute_pending=True,
+            "unavailable", coherence=COHERENCE_STALE, recompute_pending=True
         )
         is False
     )
@@ -174,66 +183,87 @@ def _notebook(tmp_path, name="coh"):
     return NotebookState(name, str(states))
 
 
-def test_a_successful_commit_records_its_pairing(tmp_path):
+def test_an_ordinary_successful_save_is_not_reported_stale(tmp_path):
+    """The commit publishes its own state immediately afterwards.
+
+    A verdict derived from any counter that advances on every durable state
+    write went stale the moment that publication happened -- with no failure
+    anywhere.
+    """
     notebook = _notebook(tmp_path)
     snapshot = notebook.update_runtime_persistence(
+        "current",
+        current_revision=7,
+        saved_revision=7,
+        commit_source="regular_save",
+        runtime_digest="e" * 64,
+    )
+    # The state has been written once more since the commit -- which is what
+    # publishing the commit itself does. Nothing failed.
+    #
+    # The stale field is written in deliberately: a draft of this recorded the
+    # state revision a generation committed against and compared it to the
+    # session's current one, so an ordinary commit reported itself stale the
+    # instant its own publication advanced the counter. The verdict must ignore
+    # such a record entirely, not merely stop producing one.
+    snapshot = dict(snapshot)
+    snapshot["committed_state_revision"] = 7
+    published = _State(snapshot, state_revision=8)
+    assert state_runtime_coherence(published) == COHERENCE_CURRENT
+
+
+def test_a_failed_save_after_a_good_one_is_reported_stale(tmp_path):
+    notebook = _notebook(tmp_path)
+    notebook.update_runtime_persistence(
         "current",
         current_revision=3,
         saved_revision=3,
         commit_source="regular_save",
-        runtime_digest="e" * 64,
-        committed_state_revision=11,
+        runtime_digest="a" * 64,
     )
-    assert snapshot["committed_state_revision"] == 11
-    assert snapshot["committed_digest"] == "e" * 64
-
-    state = _State(state_revision=11, persistence=snapshot)
-    assert state_runtime_coherence(state) == COHERENCE_CURRENT
-
-    moved_on = _State(state_revision=12, persistence=snapshot)
-    assert state_runtime_coherence(moved_on) == COHERENCE_STALE
+    snapshot = notebook.update_runtime_persistence(
+        "failed", current_revision=5, saved_revision=3, error_summary="closing save failed"
+    )
+    assert state_runtime_coherence(_State(snapshot)) == COHERENCE_STALE
 
 
-def test_recording_a_commit_never_re_reads_the_dump(tmp_path, monkeypatch):
-    """The pairing comes from the transaction, not from re-verifying the file.
-
-    An earlier version called has_session_dump() here. That checks the
-    already-replaced dump against the *previous* digest -- so it answered False
-    for every successful commit -- and hashed a multi-gigabyte file twice to do
-    it.
-    """
+def test_a_later_success_clears_the_stale_verdict(tmp_path):
     notebook = _notebook(tmp_path)
+    notebook.update_runtime_persistence(
+        "current", current_revision=3, saved_revision=3,
+        commit_source="regular_save", runtime_digest="a" * 64,
+    )
+    notebook.update_runtime_persistence(
+        "failed", current_revision=5, saved_revision=3, error_summary="boom"
+    )
+    snapshot = notebook.update_runtime_persistence(
+        "current", current_revision=5, saved_revision=5,
+        commit_source="regular_save", runtime_digest="b" * 64,
+    )
+    assert state_runtime_coherence(_State(snapshot)) == COHERENCE_CURRENT
 
-    def _explode(_self):
-        raise AssertionError("re-verified the dump while recording metadata")
 
+def test_writing_metadata_never_scans_the_dump(tmp_path, monkeypatch):
+    """Both full-file passes, not just the one behind has_session_dump().
+
+    The verification form ran an HMAC pass and a SHA-256 pass over the whole
+    dump on every metadata write -- several gigabytes twice per save.
+    """
+    from backend.utils.sandbox_parts import notebook_state as module
+
+    notebook = _notebook(tmp_path)
+    notebook.session_path.write_bytes(b"SCAI_ZSTD_DILL_V1\ndump")
+
+    def _explode(*_args, **_kwargs):
+        raise AssertionError("scanned the dump while writing metadata")
+
+    monkeypatch.setattr(module, "_sha256_file", _explode)
+    monkeypatch.setattr(module, "_verify_pkl_integrity", _explode)
     monkeypatch.setattr(type(notebook), "has_session_dump", _explode)
 
     snapshot = notebook.update_runtime_persistence(
-        "current",
-        current_revision=1,
-        saved_revision=1,
-        commit_source="regular_save",
-        runtime_digest="f" * 64,
-        committed_state_revision=2,
+        "current", current_revision=1, saved_revision=1,
+        commit_source="regular_save", runtime_digest="f" * 64,
     )
-    assert snapshot["committed_state_revision"] == 2
-
-
-def test_a_failed_attempt_leaves_the_previous_pairing_alone(tmp_path):
-    notebook = _notebook(tmp_path)
-    notebook.update_runtime_persistence(
-        "current",
-        current_revision=1,
-        saved_revision=1,
-        commit_source="regular_save",
-        runtime_digest="a" * 64,
-        committed_state_revision=5,
-    )
-    snapshot = notebook.update_runtime_persistence(
-        "failed", current_revision=2, saved_revision=1, error_summary="boom"
-    )
-    assert snapshot["committed_state_revision"] == 5
-
-    state = _State(state_revision=9, persistence=snapshot)
-    assert state_runtime_coherence(state) == COHERENCE_STALE
+    notebook.save_metadata()
+    assert snapshot["committed_digest"] == "f" * 64

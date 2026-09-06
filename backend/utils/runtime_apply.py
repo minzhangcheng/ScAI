@@ -357,12 +357,10 @@ def recover_runtime_apply_journal(session_id: str) -> None:
 def state_runtime_coherence(state) -> str:
     """Whether this session's newest generation belongs to its persisted state.
 
-    Computed on read rather than latched at write time: between save boundaries
-    a running analysis legitimately advances its state past the last committed
-    generation, so a stored verdict would flap and, worse, could be consulted
-    long after the numbers behind it changed.
+    Computed on read rather than latched at write time, so it cannot be
+    consulted long after the record behind it changed.
 
-    A state that predates the fields reports "current": absence of a record is
+    A state that predates these fields reports "current": absence of a record is
     not evidence of a mismatch, and blocking on it would strand every session
     that existed before this contract.
     """
@@ -374,14 +372,10 @@ def state_runtime_coherence(state) -> str:
     has_generation = bool(persistence.get("committed_source")) and bool(
         persistence.get("committed_digest")
     )
-    committed = persistence.get("committed_state_revision")
-    if has_generation and committed is None:
-        # Committed before this contract existed. Its pairing is unknown, which
-        # is not the same as wrong.
-        return "current"
     return runtime_coherence(
-        committed_state_revision=committed,
-        state_revision=int(getattr(state, "state_revision", 0) or 0),
+        committed_revision=persistence.get("committed_revision"),
+        last_attempt_revision=int(persistence.get("last_attempt_revision") or 0),
+        last_attempt_status=persistence.get("last_attempt_status"),
         has_generation=has_generation,
     )
 
@@ -573,7 +567,7 @@ def _retire_stale_runtime_manifest(session_id: str) -> None:
     _quarantine_path(runtime_manifest_sig_path(manifest))
 
 
-def retire_live_runtime(session_id: str) -> bool:
+def retire_live_runtime(session_id: str, *, include_checkpoint: bool = False) -> bool:
     """Move the live runtime aside so the next kernel starts empty.
 
     "Re-run from your data" promised an empty namespace and the agent prompt
@@ -595,6 +589,36 @@ def retire_live_runtime(session_id: str) -> bool:
     manifest = runtime_manifest_path(session_id)
     _quarantine_path(manifest)
     _quarantine_path(runtime_manifest_sig_path(manifest))
+
+    # The h5ad sidecars rehydrate a namespace on their own -- restore reads them
+    # whenever the manifest is present, dump or no dump -- so leaving them would
+    # keep the promise of an empty kernel only for the values that happened to
+    # live in the pkl.
+    states_dir = _live_pkl(session_id).parent
+    h5ad_manifest = states_dir / RUNTIME_H5AD_MANIFEST_FILENAME
+    if h5ad_manifest.exists():
+        _quarantine_path(h5ad_manifest)
+        for sidecar in sorted(states_dir.glob("*.h5ad")):
+            _quarantine_path(sidecar)
+        retired = True
+
+    if include_checkpoint:
+        # A checkpoint names the graph node to continue from and assumes the
+        # values that node produced are still in memory. Kept beside a retired
+        # runtime it is worse than absent: resume() prefers it over the explicit
+        # start intent and continues an old position on an empty kernel.
+        from backend.services.snapshot_v2.checkpoint_paths import (
+            checkpoint_sqlite_path,
+        )
+
+        checkpoint = checkpoint_sqlite_path(states_dir)
+        for path in (
+            checkpoint,
+            checkpoint.with_name(checkpoint.name + "-wal"),
+            checkpoint.with_name(checkpoint.name + "-shm"),
+        ):
+            if _quarantine_path(path) is not None:
+                retired = True
     return retired
 
 

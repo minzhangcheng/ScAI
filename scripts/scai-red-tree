@@ -17,7 +17,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
 die() { echo "error: $*" >&2; exit 2; }
-[[ $# -ge 2 ]] || die "usage: scripts/scai-red-tree <base-ref> <test-file> [<node> ...]"
+[[ $# -ge 3 ]] || die "usage: scripts/scai-red-tree <base-ref> <test-file> <node> [<node> ...]"
 
 BASE_REF="$1"; shift
 TEST_FILE="$1"; shift
@@ -43,17 +43,16 @@ git worktree add --detach "$WORKTREE" "$BASE_SHA" >/dev/null
 mkdir -p "$WORKTREE/$(dirname "$TEST_FILE")"
 cp "$TEST_FILE" "$WORKTREE/$TEST_FILE"
 
-declare -a NODES=()
+declare -a NODES=("$@")
 declare -a EXPECTED=()
-if [[ $# -gt 0 ]]; then
-    NODES=("$@")
-    # Only ``file::name`` selections can be verified individually. A bare file,
-    # or a -k expression, is checked as a whole.
-    for node in "$@"; do
-        if [[ "$node" == *"::"* ]]; then EXPECTED+=("${node##*::}"); fi
-    done
-else
-    NODES=("$TEST_FILE")
+for node in "$@"; do
+    if [[ "$node" == *"::"* ]]; then EXPECTED+=("${node##*::}"); fi
+done
+# Refused before anything is created or run. Checking a whole file accepts any
+# pre-existing failure in it as proof that this regression test detects the
+# defect it was written for, which is exactly the claim being made.
+if [[ ${#EXPECTED[@]} -eq 0 ]]; then
+    die "name the nodes to prove, as file::test_name (a whole-file or -k selection cannot be verified)"
 fi
 
 set +e
