@@ -8,22 +8,6 @@ import type {
   SnapshotTransactionRecord,
 } from '../../../types/snapshotV2'
 
-/** Narrow a rejected apiFetch to its error envelope without importing the
- * class: this module is loaded by tests that replace the whole `useApi` module,
- * where an `instanceof` against a mocked-away export throws on its own. Only
- * `code` and `message` are read here. */
-function asApiErrorEnvelope(
-  error: unknown,
-): { code: string; message?: string } | null {
-  if (!error || typeof error !== 'object') return null
-  const candidate = error as { code?: unknown; message?: unknown }
-  if (typeof candidate.code !== 'string') return null
-  return {
-    code: candidate.code,
-    message: typeof candidate.message === 'string' ? candidate.message : undefined,
-  }
-}
-
 interface SnapshotFailureActionOptions {
   currentSession: Session | null
   snapshotFailure: SnapshotFailureInfo | null

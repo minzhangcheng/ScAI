@@ -38,19 +38,6 @@ function phaseOf(details?: Record<string, unknown>): string | null {
   return null
 }
 
-function formatBytes(value: unknown): string {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return '—'
-  if (value < 1024) return `${Math.round(value)} B`
-  const units = ['KiB', 'MiB', 'GiB', 'TiB']
-  let amount = value / 1024
-  let unit = 0
-  while (amount >= 1024 && unit < units.length - 1) {
-    amount /= 1024
-    unit += 1
-  }
-  return `${amount.toFixed(amount >= 10 ? 1 : 2)} ${units[unit]}`
-}
-
 export function SnapshotFailureDialog({
   failure,
   isZh = false,
@@ -72,18 +59,6 @@ export function SnapshotFailureDialog({
   // The memory preflight refused before allocating anything. There is no Retry
   // on this gate: the check is deterministic, so it would refuse again.
   const isMemoryRefusal = record.code === 'snapshot_memory_insufficient'
-  const isRuntimePersistence = (record.code || '').startsWith('runtime_persistence_')
-  const runtimeDetails = record.details || {}
-  const budgetViolations = Array.isArray(runtimeDetails.budget_violations)
-    ? runtimeDetails.budget_violations.filter((item): item is Record<string, unknown> =>
-        Boolean(item) && typeof item === 'object',
-      )
-    : []
-  const topOffenders = Array.isArray(runtimeDetails.top_offenders)
-    ? runtimeDetails.top_offenders.filter((item): item is Record<string, unknown> =>
-        Boolean(item) && typeof item === 'object',
-      )
-    : []
 
   // The backend message can be a short sentence or a multi-thousand-character
   // kernel traceback. Split off the first line as a human summary and keep the
@@ -103,9 +78,7 @@ export function SnapshotFailureDialog({
       <div className="bg-white dark:bg-surface-900 rounded-xl shadow-xl w-full max-w-md max-h-[85vh] flex flex-col">
         <div className="flex items-start justify-between gap-3 p-5 pb-3 shrink-0 border-b border-slate-100 dark:border-slate-800">
           <h3 className="text-base font-semibold text-red-700">
-            {isRuntimePersistence
-              ? t('snapshotFailureRuntimeTitle')
-              : t('snapshotFailureTitle')}
+            {t('snapshotFailureTitle')}
           </h3>
           {onClose && (
             <button
@@ -177,53 +150,6 @@ export function SnapshotFailureDialog({
               {t('snapshotFailureMemoryRefusal')}
             </p>
           )}
-          {isRuntimePersistence && (
-            <div className="space-y-3">
-              {runtimeDetails.degraded_recovery === true && (
-                <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3">
-                  {t('snapshotFailureDegradedRecovery', {
-                    committed: String(runtimeDetails.committed_revision ?? '—'),
-                    attempted: String(runtimeDetails.attempted_revision ?? '—'),
-                  })}
-                </p>
-              )}
-              {budgetViolations.length > 0 && (
-                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
-                  <div className="text-xs font-semibold text-slate-700 mb-2">
-                    {t('snapshotFailureResourceLimits')}
-                  </div>
-                  <ul className="space-y-1 text-xs text-slate-600">
-                    {budgetViolations.map((item, index) => (
-                      <li key={`${String(item.resource)}-${index}`}>
-                        <code>{String(item.resource || 'resource')}</code>: {' '}
-                        {typeof item.observed === 'number' ? formatBytes(item.observed) : String(item.observed ?? '—')}
-                        {' / '}
-                        {typeof item.limit === 'number' ? formatBytes(item.limit) : String(item.limit ?? '—')}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {topOffenders.length > 0 && (
-                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
-                  <div className="text-xs font-semibold text-slate-700 mb-2">
-                    {t('snapshotFailureLargestObjects')}
-                  </div>
-                  <ul className="space-y-1 text-xs text-slate-600">
-                    {topOffenders.map((item, index) => (
-                      <li key={`${String(item.name)}-${index}`} className="flex justify-between gap-3">
-                        <span className="truncate">
-                          <code>{String(item.name || 'object')}</code>
-                          {item.type ? ` (${String(item.type)})` : ''}
-                        </span>
-                        <span className="shrink-0">{formatBytes(item.bytes)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          )}
         </div>
 
         <div className="flex flex-col gap-2 p-5 pt-3 shrink-0 border-t border-slate-100">
@@ -233,9 +159,7 @@ export function SnapshotFailureDialog({
               onClick={() => onRetry({ regenerateReports: false })}
               className="w-full px-3 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
             >
-              {isRuntimePersistence
-                ? t('snapshotFailureRetryPersistence')
-                : t('snapshotFailureRetry')}
+              {t('snapshotFailureRetry')}
             </button>
           )}
           {actions.has('proceed') && (
@@ -268,9 +192,7 @@ export function SnapshotFailureDialog({
               onClick={onManage}
               className="w-full px-3 py-2 text-sm bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-medium"
             >
-              {isRuntimePersistence
-                ? t('snapshotFailureRecomputeRuntime')
-                : t('snapshotFailureManage')}
+              {t('snapshotFailureManage')}
             </button>
           )}
           {actions.has('terminate') && (

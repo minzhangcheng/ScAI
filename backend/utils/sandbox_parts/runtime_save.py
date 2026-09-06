@@ -403,6 +403,7 @@ async def _prepare_save(sandbox, *, bindings):
 
 def _build_save_code(context: SaveContext) -> str:
     from backend.utils.runtime_types import (
+        STRUCTURAL_PICKLE_ERRORS,
         VOLATILE_RUNTIME_TYPE_PREFIXES,
     )
 
@@ -410,6 +411,7 @@ def _build_save_code(context: SaveContext) -> str:
         context.escaped_volatile_prefixes
         or repr(VOLATILE_RUNTIME_TYPE_PREFIXES)
     )
+    structural_errors = repr(sorted(STRUCTURAL_PICKLE_ERRORS))
     save_code = """\
 import dill as _scai_dill
 import io as _scai_io
@@ -418,6 +420,11 @@ import os as _scai_os
 import tempfile as _scai_tempfile
 import types as _scai_types
 import zstandard as _scai_zstd
+
+# A refusal that is a property of the value is coverage (spec 4.4); a machine
+# failure is not, and must abort rather than commit a generation that reports
+# itself complete.
+_scai_structural_errors = frozenset(""" + structural_errors + """)
 
 def _scai_is_anndata(_o):
     try:
@@ -567,6 +574,15 @@ try:
                         raise RuntimeError(
                             "streamed runtime variable failed mid-write, "
                             "aborting to avoid a desynced dump: " + _var_name
+                        ) from _e
+                    if type(_e).__name__ not in _scai_structural_errors:
+                        # The machine failed, not the value. A retry could
+                        # reach a different outcome, so this is not coverage
+                        # and the generation must not commit as complete.
+                        raise RuntimeError(
+                            "runtime persistence failed on the environment, "
+                            "not on the value: " + _var_name
+                            + " (" + type(_e).__name__ + ")"
                         ) from _e
                     continue
                 _saved_object_names.setdefault(_object_id, _var_name)

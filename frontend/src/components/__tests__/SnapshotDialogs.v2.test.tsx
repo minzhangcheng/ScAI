@@ -230,42 +230,6 @@ describe('SnapshotFailureDialog', () => {
     expect(dialog.textContent).not.toMatch(/Retry re-enters capture only/i)
   })
 
-  it('shows degraded runtime evidence and recompute/reduce action', () => {
-    render(
-      <SnapshotFailureDialog
-        failure={{
-          failure: {
-            ...baseFailure.failure,
-            code: 'runtime_persistence_degraded_recovery',
-            message: 'Restored the last verified runtime generation',
-            details: {
-              degraded_recovery: true,
-              committed_revision: 7,
-              attempted_revision: 8,
-              budget_violations: [
-                { resource: 'rss_bytes', observed: 9 * 1024 ** 3, limit: 8 * 1024 ** 3 },
-              ],
-              top_offenders: [
-                { name: 'adata_copy', type: 'AnnData', bytes: 6 * 1024 ** 3 },
-              ],
-            },
-          },
-          allowed_actions: ['retry', 'manage', 'terminate'],
-        }}
-        onRetry={vi.fn()}
-        onProceed={vi.fn()}
-        onSkip={vi.fn()}
-        onManage={vi.fn()}
-        onTerminate={vi.fn()}
-      />,
-    )
-
-    expect(screen.getByText(/last verified runtime revision/i)).toBeInTheDocument()
-    expect(screen.getByText('adata_copy', { selector: 'code' })).toBeInTheDocument()
-    expect(screen.getByText(/6.00 GiB/i)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /recompute or reduce runtime/i })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /retry persistence/i })).toBeInTheDocument()
-  })
 })
 
 describe('RuntimeChoiceDialog', () => {

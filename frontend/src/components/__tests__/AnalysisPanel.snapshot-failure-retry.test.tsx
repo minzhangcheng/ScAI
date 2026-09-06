@@ -418,17 +418,4 @@ describe('AnalysisPanel snapshot-failure retry gate', () => {
     expect(useAppStore.getState().snapshotFailure).toBeNull()
   })
 
-  function armRuntimeGate(token: string, generation: number) {
-    useAppStore.setState({
-      snapshotFailure: {
-        failure: {
-          ...blockedFailure.failure,
-          code: 'runtime_persistence_failure',
-          details: { gate_token: token, gate_generation: generation },
-        },
-        allowed_actions: ['retry', 'manage', 'terminate'],
-      },
-    })
-  }
-
 })

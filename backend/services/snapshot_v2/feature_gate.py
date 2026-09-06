@@ -124,18 +124,20 @@ def normalize_disabled_snapshot_state(
     wait_reason = getattr(state, "wait_input_reason", None)
     transaction = getattr(state, "snapshot_transaction", None)
 
-    # Runtime persistence reuses the structured failure envelope so it can
-    # survive load/reconnect and share the hardened dialog, but it is not a
-    # Snapshot V2 feature. Disabling Snapshot V2 must never clear that safety
-    # gate or let analysis run past an unpersisted live namespace.
-    runtime_persistence_failure = bool(
-        isinstance(failure, dict)
-        and str(failure.get("code") or "").startswith("runtime_persistence_")
-    )
+    # Runtime persistence used to reuse this envelope so it could survive
+    # load/reconnect and share the hardened dialog, and it was carved out here
+    # because clearing it would have bypassed a live gate. The
+    # runtime-persistence gate and its three routes are gone (spec 5.1): a
+    # failed save now keeps the previous committed generation and the analysis
+    # continues with a persistent non-blocking warning. An envelope persisted
+    # under the old version therefore guards nothing and, left in place, would
+    # make the session permanently unstartable with Terminate -- which discards
+    # the runtime -- as the only button still reaching a backend. It is cleared
+    # like any other stale blocker.
     failure_gate = (
-        (bool(failure) and not runtime_persistence_failure)
+        bool(failure)
         or bool(pending)
-        or wait_reason == "snapshot_failure"
+        or wait_reason in ("snapshot_failure", "runtime_persistence_failure")
     )
     recovery_gate = bool(getattr(state, "recovery_blocked", False)) or (
         isinstance(transaction, dict) and "recovery_error" in transaction
@@ -181,7 +183,7 @@ def normalize_disabled_snapshot_state(
     if failure is not None:
         setattr(state, "snapshot_failure", None)
         changed = True
-    if wait_reason == "snapshot_failure":
+    if wait_reason in ("snapshot_failure", "runtime_persistence_failure"):
         setattr(state, "wait_input_reason", None)
         changed = True
     if pending is not None:

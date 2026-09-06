@@ -216,7 +216,7 @@ export function AnalysisDialogs({ controller }: AnalysisDialogsProps) {
 
       {/* Snapshot failure HITL — Retry re-enters capture only; Skip continues
           without capturing at that boundary (skippable producers only) */}
-      {(snapshotV2Enabled || (snapshotFailure?.failure.code || '').startsWith('runtime_persistence_')) && snapshotFailure && !showSnapshotPanel && (
+      {snapshotV2Enabled && snapshotFailure && !showSnapshotPanel && (
         <SnapshotFailureDialog
           failure={snapshotFailure}
           isZh={language === 'zh'}

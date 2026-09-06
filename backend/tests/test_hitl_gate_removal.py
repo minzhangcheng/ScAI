@@ -120,3 +120,88 @@ async def test_a_failed_final_save_still_closes_the_kernel(tmp_path, monkeypatch
     await sb.stop(save=True)
 
     assert sb._initialized is False
+def test_a_session_frozen_at_the_deleted_gate_is_unblocked_on_load(tmp_path):
+    """The upgrade path. Spec 4.6.
+
+    A session saved under the shipped version while the runtime-persistence
+    gate was armed carries ``snapshot_failure = {"code":
+    "runtime_persistence_failure", ...}`` and a matching ``wait_input_reason``.
+    ``normalize_disabled_snapshot_state`` deliberately refused to clear those,
+    because clearing them would have bypassed a live gate. With the gate and its
+    three routes deleted, that refusal leaves the session permanently
+    unstartable and the only frontend button that still reaches a backend is
+    Terminate, which discards the runtime.
+    """
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.services.snapshot_v2.feature_gate import (
+        normalize_disabled_snapshot_state,
+    )
+
+    state = AnalysisState(id="frozen-at-the-gate", user_id="u1")
+    state.status = TaskStatus.WAITING_INPUT
+    state.wait_input_reason = "runtime_persistence_failure"
+    state.snapshot_failure = {
+        "code": "runtime_persistence_failure",
+        "message": "Runtime persistence failed",
+        "retry_context": {"previous_status": "running"},
+    }
+
+    changed = normalize_disabled_snapshot_state(state, workflow_active=False)
+
+    assert changed is True
+    assert state.snapshot_failure is None
+    assert state.wait_input_reason is None
+    assert state.status != TaskStatus.WAITING_INPUT
+
+
+def test_an_unfinished_restore_journal_still_refuses(tmp_path, monkeypatch):
+    """The one case where staying unstartable is correct is not weakened."""
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.services.snapshot_v2 import feature_gate
+
+    monkeypatch.setattr(
+        feature_gate, "has_unfinished_restore_journal", lambda sid: True
+    )
+    state = AnalysisState(id="half-applied-restore", user_id="u1")
+    state.status = TaskStatus.WAITING_INPUT
+    state.recovery_blocked = True
+
+    feature_gate.normalize_disabled_snapshot_state(state, workflow_active=False)
+    assert state.recovery_blocked is True
+
+
+#: Ways a component can *condition on* the retired gate code. Prose that merely
+#: names it is fine and is how the remaining state-sync branch explains itself;
+#: an earlier version of this guard matched any occurrence and failed on its own
+#: explanatory comment.
+_GATE_BRANCH_PATTERNS = (
+    "startsWith('runtime_persistence_')",
+    '=== \'runtime_persistence_',
+    '=== "runtime_persistence_',
+    "isRuntimePersistence",
+)
+
+
+def test_no_frontend_component_branches_on_the_deleted_gate():
+    """A dialog that points Retry at an endpoint that 409s is worse than none."""
+    frontend = REPO / "frontend" / "src"
+    offenders = {}
+    for path in sorted(frontend.rglob("*.ts*")):
+        rel = path.relative_to(REPO).as_posix()
+        if "__tests__" in rel:
+            continue
+        text = path.read_text()
+        hits = [pat for pat in _GATE_BRANCH_PATTERNS if pat in text]
+        if hits:
+            offenders[rel] = hits
+    assert not offenders, offenders
+
+
+def test_no_frontend_component_calls_a_retired_gate_endpoint():
+    frontend = REPO / "frontend" / "src"
+    offenders = {
+        path.relative_to(REPO).as_posix()
+        for path in sorted(frontend.rglob("*.ts*"))
+        if "runtime-persistence/" in path.read_text()
+    }
+    assert not offenders, sorted(offenders)

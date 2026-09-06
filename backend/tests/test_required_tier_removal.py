@@ -314,3 +314,62 @@ def test_the_persistent_outputs_schema_promises_only_what_is_true():
     assert "variable names only" in lowered
     assert "filename" in lowered
     assert "identifiers" in lowered
+class _StructurallyUnpicklable:
+    """The value itself is the problem. A retry repeats the same refusal."""
+
+    def __reduce__(self):
+        raise TypeError("this value cannot be pickled, ever")
+
+
+class _MachineFailure:
+    """The machine is the problem. A retry could genuinely reach a different
+    outcome, so it must not be recorded as a property of the value."""
+
+    def __reduce__(self):
+        raise OSError(28, "No space left on device")
+
+
+def test_a_structural_refusal_is_coverage(tmp_path):
+    """Spec 4.4: 'serialisation failed' is a fact about the value."""
+    namespace = {"adata": [1, 2, 3], "stubborn": _StructurallyUnpicklable()}
+    stream = io.StringIO()
+    with contextlib.redirect_stdout(stream):
+        exec(
+            compile(_build_save_code(_save_context(tmp_path)), "<save_code>", "exec"),
+            dict(namespace),
+        )
+
+    parsed = _parse_coverage_markers(stream.getvalue())
+    assert parsed["saved_names"] == ["adata"]
+
+
+def test_an_environment_failure_aborts_the_generation(tmp_path):
+    """An ENOSPC is not a property of the value and must not commit as current.
+
+    Spec 4.4 lists three coverage reasons -- serialisation failed, excluded by
+    kind, excluded as volatile -- and every one is a fact about the value.
+    Skipping a variable because the disk filled records a machine failure as a
+    value failure, commits the generation as ``current`` (which resets
+    ``failed_variables`` and ``error_summary``), and leaves the only trace in a
+    manifest field nothing reads.
+    """
+    namespace = {"adata": [1, 2, 3], "unlucky": _MachineFailure()}
+    stream = io.StringIO()
+    with pytest.raises(Exception) as excinfo:
+        with contextlib.redirect_stdout(stream):
+            exec(
+                compile(_build_save_code(_save_context(tmp_path)), "<save_code>", "exec"),
+                dict(namespace),
+            )
+    assert "unlucky" in str(excinfo.value)
+    assert not (tmp_path / "sid_session.pkl.tmp").exists()
+
+
+def test_the_two_classes_are_named_in_one_place():
+    """The distinction is behaviour, so it is a constant, not a literal set."""
+    from backend.utils.runtime_types import STRUCTURAL_PICKLE_ERRORS
+
+    assert "TypeError" in STRUCTURAL_PICKLE_ERRORS
+    assert "PicklingError" in STRUCTURAL_PICKLE_ERRORS
+    assert "OSError" not in STRUCTURAL_PICKLE_ERRORS
+    assert "MemoryError" not in STRUCTURAL_PICKLE_ERRORS

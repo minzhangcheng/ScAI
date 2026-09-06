@@ -200,10 +200,12 @@ function handleStateSync(data: any, context: MessageHandlerContext): void {
           })
         }
       }
-    } else if (
-      syncContent.change_type === 'snapshot_failure' ||
-      syncContent.change_type === 'runtime_persistence_failure'
-    ) {
+    } else if (syncContent.change_type === 'snapshot_failure') {
+      // 'runtime_persistence_failure' still arrives -- it is how the backend
+      // announces that the persistence record changed -- but it no longer
+      // arms a dialog: the gate and its three actions are gone (spec 5.1), so
+      // a dialog raised here would offer only buttons that 409. Rendering the
+      // record as a persistent non-blocking warning is A2-7's work.
       const failure = syncContent.snapshot_failure
       if (failure) {
         const store = useAppStore.getState()
