@@ -71,13 +71,13 @@ def refresh_runtime_availability(state) -> None:
     if int(getattr(state, "current_round", 0) or 0) <= 0:
         return
     from backend.config import get_session_states
-    from backend.utils.runtime_apply import _live_pkl, RUNTIME_H5AD_MANIFEST_FILENAME
+    from backend.utils.runtime_apply import _live_pkl
 
     sid = getattr(state, "id", None)
     if not sid:
         return
     states = get_session_states(sid)
-    if _live_pkl(sid).exists() or (states / RUNTIME_H5AD_MANIFEST_FILENAME).exists():
+    if _live_pkl(sid).exists():
         return
     if not ((states / f"{sid}_state.json").exists() or (states / "checkpoints.sqlite").exists()):
         return
