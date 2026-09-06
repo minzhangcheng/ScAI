@@ -231,24 +231,6 @@ def test_save_code_enumerates_the_namespace_rather_than_a_name_list(monkeypatch)
     assert "_scai_is_anndata" in code
 
 
-def test_save_code_requires_canonical_artifacts_that_are_live(monkeypatch):
-    code = _extract_save_code(monkeypatch, {"adata", "scratch"}, set())
-
-    assert "_required_names = set(['adata'])" in code
-
-
-def test_save_code_does_not_require_canonical_artifacts_that_are_absent(monkeypatch):
-    code = _extract_save_code(monkeypatch, {"scratch"}, set())
-
-    assert "_required_names = set([])" in code
-
-
-def test_save_code_keeps_tracker_declarations_required(monkeypatch):
-    code = _extract_save_code(monkeypatch, {"scratch"}, {"deg_table"})
-
-    assert "_required_names = set(['deg_table'])" in code
-
-
 def _run_save_code(code, namespace):
     """Execute the generated code against a synthetic kernel namespace."""
     import io
@@ -386,15 +368,6 @@ def test_modules_and_callables_are_excluded(monkeypatch):
     restored = _read_frames(target)
 
     assert set(restored) == {"keepme"}
-
-
-def test_missing_required_variable_still_fails_closed(monkeypatch):
-    """Relaxing the optional tier must not relax the required one."""
-    code = _extract_save_code(monkeypatch, set(), {"deg_table"})
-    namespace = {"__builtins__": __builtins__, "something_else": 1}
-
-    with pytest.raises(RuntimeError, match="required runtime variables are missing"):
-        _run_save_code(code, namespace)
 
 
 def test_aliased_objects_restore_to_one_object(monkeypatch):

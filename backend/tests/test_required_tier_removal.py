@@ -119,3 +119,22 @@ def test_the_save_context_no_longer_carries_a_required_set():
     fields = {f.name for f in dataclasses.fields(SaveContext)}
     assert "required_names" not in fields
     assert "escaped_required" not in fields
+def test_a_declared_name_that_is_absent_no_longer_fails_the_save(tmp_path):
+    """The inverse of the deleted ``test_missing_required_variable_still_fails_closed``.
+
+    A name the agent declared and the cell did not create used to abort the
+    generation at save time -- minutes later, addressed to the operator, about a
+    cell the agent could no longer change. Spec 4.7 keeps the declared-output
+    check in the cell that binds the value, where it is cheap to fix; the
+    save-time abort is what goes.
+    """
+    namespace = {"something_else": 1}
+    stream = io.StringIO()
+    with contextlib.redirect_stdout(stream):
+        exec(
+            compile(_build_save_code(_save_context(tmp_path)), "<save_code>", "exec"),
+            dict(namespace),
+        )
+
+    parsed = _parse_coverage_markers(stream.getvalue())
+    assert parsed["saved_names"] == ["something_else"]
