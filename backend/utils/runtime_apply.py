@@ -368,7 +368,10 @@ def state_runtime_coherence(state) -> str:
 
 
 def is_forward_resume_blocked(
-    runtime_restore_status: str, *, coherence: str = "current"
+    runtime_restore_status: str,
+    *,
+    coherence: str = "current",
+    recompute_pending: bool = False,
 ) -> bool:
     """Whether the run may continue straight into the restored namespace.
 
@@ -390,8 +393,17 @@ def is_forward_resume_blocked(
     The keyword defaults to ``"current"`` so a caller that has only a status
     behaves exactly as before.
     """
+    if recompute_pending:
+        # The user already answered this block by choosing to re-run from their
+        # data. Asking again is how the offer became a loop: the lifecycle route
+        # cleared runtime_restore_status, the graph re-checked the same
+        # condition through coherence, and failed the session it was supposed to
+        # restart.
+        return False
     if runtime_restore_status == "unavailable":
         return True
+    # "unavailable" coherence means nothing has committed yet, which is the
+    # normal state of a fresh session and must not block its first run.
     return coherence in {"stale", "inconsistent"}
 
 
@@ -515,6 +527,26 @@ def _staged_copy_replace(src: Path, dst: Path) -> None:
         os.close(dir_fd)
 
 
+def _retire_stale_runtime_manifest(session_id: str) -> None:
+    """Move aside a generation manifest that no longer describes the live dump.
+
+    Any path that installs a pkl these functions did not write -- a Snapshot V2
+    restore, an import from another installation -- leaves the previous
+    generation's manifest in place. Its digest then names bytes that are gone,
+    and the next start refuses to restore a session that is in fact intact.
+    Retiring it makes that dump a legacy generation: it loads, its coverage is
+    unknown, and the next successful save writes a manifest that matches.
+    """
+    from backend.utils.runtime_manifest import (
+        runtime_manifest_path,
+        runtime_manifest_sig_path,
+    )
+
+    manifest = runtime_manifest_path(session_id)
+    _quarantine_path(manifest)
+    _quarantine_path(runtime_manifest_sig_path(manifest))
+
+
 def atomic_replace_pkl(session_id: str, src_pkl_path: str) -> str:
     """Atomically replace the live session.pkl with a staged copy.
 
@@ -546,6 +578,9 @@ def atomic_replace_pkl(session_id: str, src_pkl_path: str) -> str:
         raise RuntimeApplyError(
             f"[{session_id}] replaced pkl failed integrity check"
         )
+
+    # These bytes are not the generation the manifest describes.
+    _retire_stale_runtime_manifest(session_id)
 
     from backend.services.snapshot_v2.object_store import _hash_file
     return _hash_file(live)

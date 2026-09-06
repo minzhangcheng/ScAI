@@ -24,7 +24,9 @@ TEST_FILE="$1"; shift
 [[ -f "$TEST_FILE" ]] || die "no such test file: $TEST_FILE"
 
 BASE_SHA="$(git rev-parse --verify "${BASE_REF}^{commit}")"
-WORKTREE="/home/minzhang/scai-red-tree/${BASE_SHA:0:12}"
+# Unique per invocation: a fixed per-SHA path meant two concurrent checks
+# deleted each other's worktree mid-run.
+WORKTREE="/home/minzhang/scai-red-tree/${BASE_SHA:0:12}.$$"
 
 cleanup() {
     git worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true
@@ -67,16 +69,40 @@ if [[ -z "$EVIDENCE" || ! -f "${EVIDENCE}evidence.json" ]]; then
     exit 2
 fi
 
-OBSERVED="$(python3 - "${EVIDENCE}evidence.json" <<'PY'
-import json
+# A count is not a signature. A fixture blowing up on a missing dependency also
+# raises the failed+errors total, and would then be reported as proof that this
+# regression test detects the defect. Only two shapes count: a call-phase
+# failure, or the guard this project's tests use to say the module under test
+# does not exist yet.
+OBSERVED="$(python3 - "${EVIDENCE}junit.xml" <<'PY'
 import sys
+import xml.etree.ElementTree as ET
 
-counts = json.load(open(sys.argv[1]))["outcomes"]["counts"]
-print(int(counts.get("failed", 0)) + int(counts.get("errors", 0)))
+MISSING_SUBJECT = "module under test is missing"
+qualifying = 0
+other_errors = []
+for case in ET.parse(sys.argv[1]).iter("testcase"):
+    failure = case.find("failure")
+    if failure is not None:
+        qualifying += 1
+        continue
+    error = case.find("error")
+    if error is None:
+        continue
+    if MISSING_SUBJECT in (error.get("message") or "") or MISSING_SUBJECT in (error.text or ""):
+        qualifying += 1
+    else:
+        other_errors.append(f"{case.get('name')}: {(error.get('message') or '')[:120]}")
+
+print(qualifying)
+for line in other_errors[:5]:
+    print("UNQUALIFIED " + line, file=sys.stderr)
 PY
 )"
 if [[ "$OBSERVED" -le 0 ]]; then
-    echo "RED-TREE INCONCLUSIVE: the run at $BASE_SHA published evidence with no failures" >&2
+    echo "RED-TREE INCONCLUSIVE: the run at $BASE_SHA produced no call-phase failure" >&2
+    echo "  (any errors above are setup or environment problems, not evidence" >&2
+    echo "   that the test detects the defect it was written for)" >&2
     exit 2
 fi
 echo "RED-TREE OK: $OBSERVED test(s) failed at $BASE_SHA as required"

@@ -301,7 +301,7 @@ class LocalJupyterSandbox(
             ")))\n"
         )
         result = await self._execute_unlocked(
-            code, save_to_history=False, skip_safety_check=True, mutates_namespace=False
+            code, save_to_history=False, skip_safety_check=True
         )
         if not result.success:
             return None

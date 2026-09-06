@@ -104,3 +104,30 @@ def test_a_stray_signature_without_a_manifest_is_corruption_not_legacy(tmp_path)
     manifest_path.unlink()
     with pytest.raises(RuntimeIntegrityError):
         plan_restore(manifest_path, pkl)
+
+
+def test_the_digest_is_streamed_rather_than_read_into_memory(tmp_path, monkeypatch):
+    """Real dumps reach several gigabytes; the backend must not hold one.
+
+    ``Path.read_bytes`` is made to raise so the constraint is enforced by the
+    test rather than merely intended: a future edit that reaches for the whole
+    file fails here instead of in production.
+    """
+    manifest_path, pkl = _generation(tmp_path, ["adata"])
+
+    def _refuse(self):
+        raise AssertionError(f"read the whole dump into memory: {self}")
+
+    from pathlib import Path as _Path
+
+    original = _Path.read_bytes
+
+    def _guarded(self):
+        if str(self).endswith("_session.pkl"):
+            _refuse(self)
+        return original(self)
+
+    monkeypatch.setattr(_Path, "read_bytes", _guarded)
+
+    plan = plan_restore(manifest_path, pkl)
+    assert plan.declared == {"adata"}

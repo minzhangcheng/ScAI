@@ -188,3 +188,30 @@ def test_the_save_script_does_not_clobber_user_variables(tmp_path):
     assert set(parsed["saved_names"]) == {"adata", *collided}
     assert parsed["excluded_by_kind"] == []
     assert parsed["excluded_volatile"] == []
+
+
+def test_no_caller_passes_the_probe_flag_to_the_unlocked_executor():
+    """``_execute_unlocked`` has no ``mutates_namespace`` parameter.
+
+    A blind replace once added it to one such call, so every dill restore
+    failure raised TypeError and replaced the real diagnosis with it.
+    """
+    import inspect
+    import re
+    from pathlib import Path
+
+    from backend.utils.sandbox_parts.execution import ExecutionMixin
+
+    signature = inspect.signature(ExecutionMixin._execute_unlocked)
+    assert "mutates_namespace" not in signature.parameters
+
+    root = Path(__file__).resolve().parents[2]
+    pattern = re.compile(
+        r"_execute_unlocked\((?:[^()]|\([^()]*\))*mutates_namespace", re.S
+    )
+    offenders = [
+        str(path.relative_to(root))
+        for path in (root / "backend").rglob("*.py")
+        if "tests" not in path.parts and pattern.search(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, f"_execute_unlocked called with mutates_namespace in {offenders}"

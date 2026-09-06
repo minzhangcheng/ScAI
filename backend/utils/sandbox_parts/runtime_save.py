@@ -873,6 +873,16 @@ async def _execute_save(
             else None
         )
     except RuntimeCoverageError as coverage_error:
+        # The kernel may already have written a multi-gigabyte staged dump. It
+        # can never be committed now, and nothing else reclaims it.
+        try:
+            _staged_probe.unlink(missing_ok=True)
+        except OSError:
+            bindings.logger.warning(
+                "[%s] could not remove the staged dump of a generation whose "
+                "coverage record was unusable",
+                sandbox.session_id,
+            )
         # Route this through the same channel as any other failed save rather
         # than letting it escape mid-function. An exception raised here unwinds
         # past the generation-failure bookkeeping while the caller still holds
@@ -1028,14 +1038,13 @@ async def _execute_save(
                                 manifest_path=manifest_path,
                                 runtime_manifest_path=runtime_manifest_file,
                                 runtime_manifest={
-                                    # The state revision a generation belongs to
-                                    # is the session lifecycle generation that
-                                    # was active when it committed; that counter
-                                    # already has an owner, so coherence does not
-                                    # need a new one.
-                                    "state_revision": int(
-                                        context.expected_lifecycle_generation or 0
-                                    ),
+                                    # The runtime revision this generation
+                                    # captured. Coherence is decided from the
+                                    # live persistence record rather than from
+                                    # here; this pairing lets a restore notice a
+                                    # manifest left behind by a different
+                                    # generation.
+                                    "state_revision": int(context.revision or 0),
                                     "saved_names": sorted(saved_names),
                                     "skipped_names": skipped_record,
                                     "serializer_version": "dill-zstd-1",

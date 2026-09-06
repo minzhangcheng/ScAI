@@ -43,28 +43,38 @@ COHERENCE_UNAVAILABLE = "unavailable"
 
 
 def runtime_coherence(
-    *, generation_state_revision: int | None, persisted_state_revision: int
+    *, saved_revision: int | None, current_revision: int, has_generation: bool = True
 ) -> str:
-    """Whether the newest committed runtime describes the persisted state.
+    """Whether the newest committed runtime still describes the live namespace.
 
-    A closing save that failed leaves the state ahead of the runtime: results
-    stay viewable, but promising exact continuation from them would be a lie. A
-    runtime *ahead* of the state is not the benign converse -- it means a dump
-    committed against a state generation that was never persisted, which is a
-    transaction fault rather than a degraded mode, and saying "current" there
-    would hide it.
+    Both numbers belong to the persistence layer and advance with it:
+    ``current_revision`` rises whenever an execution could have changed user
+    globals, ``saved_revision`` only when a generation commits. Comparing them
+    is therefore a statement about this session's own history.
 
-    This is a report, never a gate on viewing or exporting results. What it does
-    gate is silently binding an older namespace to a newer workflow state and
-    continuing (see ``is_forward_resume_blocked``).
+    An earlier draft compared the session *lifecycle generation* instead. That
+    counter fences incarnations -- deletion, same-id re-import -- and is
+    normally 1 for the whole life of a session, so the comparison could never
+    be anything but equal and the verdict was permanently "current".
+
+    * ``stale`` -- the live namespace moved past the newest committed
+      generation, which is what a failed closing save leaves behind. Results
+      stay viewable and exportable; exact continuation is not promised.
+    * ``inconsistent`` -- a generation claims a revision the live runtime never
+      reached. Not the benign converse of stale: it means a commit recorded a
+      revision that was rolled back, and reporting "current" would hide it.
+    * ``unavailable`` -- nothing committed yet.
+
+    This is a report. The only thing it gates is silently binding an older
+    namespace to a newer graph position (see ``is_forward_resume_blocked``).
     """
-    if generation_state_revision is None:
+    if not has_generation or saved_revision is None:
         return COHERENCE_UNAVAILABLE
-    generation = int(generation_state_revision)
-    persisted = int(persisted_state_revision or 0)
-    if generation < persisted:
+    saved = int(saved_revision or 0)
+    current = int(current_revision or 0)
+    if saved < current:
         return COHERENCE_STALE
-    if generation > persisted:
+    if saved > current:
         return COHERENCE_INCONSISTENT
     return COHERENCE_CURRENT
 
@@ -157,6 +167,15 @@ def build_runtime_manifest(
 
 
 def _write_durably(target: Path, data: bytes) -> None:
+    """Write, replace, and fsync the directory entry.
+
+    Without the directory fsync the rename can be lost to a power cut while the
+    transaction has already published its COMMITTED journal -- a generation
+    reported as installed whose manifest is not there, which recovery then
+    rolls back or refuses.
+    """
+    from backend.utils.files import fsync_directory
+
     tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     try:
         with open(tmp, "wb") as handle:
@@ -164,6 +183,7 @@ def _write_durably(target: Path, data: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, target)
+        fsync_directory(target.parent)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise

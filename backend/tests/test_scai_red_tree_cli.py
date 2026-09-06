@@ -61,7 +61,24 @@ def test_a_non_zero_exit_alone_is_not_accepted_as_evidence():
     script = _script()
     assert "RED-TREE INCONCLUSIVE" in script
     assert "evidence.json" in script
-    assert 'counts.get("failed"' in script and 'counts.get("errors"' in script
+    assert "published no evidence" in script
+
+
+def test_a_setup_error_is_not_accepted_as_evidence():
+    """A count is not a signature.
+
+    A fixture failing on a missing dependency raises failed+errors just as a
+    real detection does, and would otherwise be reported as proof.
+    """
+    script = _script()
+    assert "junit.xml" in script
+    assert "call-phase failure" in script
+    assert "module under test is missing" in script
+
+
+def test_the_worktree_path_is_unique_per_invocation():
+    """Two concurrent checks must not delete each other's worktree."""
+    assert "${BASE_SHA:0:12}.$$" in _script()
 
 
 def test_the_script_is_executable():

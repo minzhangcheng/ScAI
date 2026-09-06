@@ -273,6 +273,13 @@ def _resign_imported_live_pkl(session_id: str) -> bool:
     if not pkl.exists():
         return False
     _write_pkl_signature(pkl, _integrity_dir(session_id))
+    # The generation manifest that travelled with the archive is signed with the
+    # *source* installation's key, so it can never verify here. Retiring it makes
+    # the imported dump a legacy generation -- it loads, its coverage is unknown,
+    # and the first successful save writes a manifest this installation can read.
+    from backend.utils.runtime_apply import _retire_stale_runtime_manifest
+
+    _retire_stale_runtime_manifest(session_id)
     logger.warning(
         "[%s] Re-signed imported sandbox pkl under this installation's key; "
         "the archive's origin is trusted on the caller's authority (trust=true).",

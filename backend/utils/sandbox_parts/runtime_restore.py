@@ -27,13 +27,12 @@ def plan_restore(manifest_path, live_pkl) -> RestorePlan:
     wrong with this generation, and it must not be quietly downgraded to the
     legacy path.
     """
-    import hashlib
-
     from backend.utils.runtime_manifest import (
         RuntimeManifestError,
         read_runtime_manifest,
         runtime_manifest_sig_path,
     )
+    from backend.utils.sandbox_parts.regular_save import _sha256_file
 
     manifest_path = Path(manifest_path)
     signature_path = runtime_manifest_sig_path(manifest_path)
@@ -45,7 +44,9 @@ def plan_restore(manifest_path, live_pkl) -> RestorePlan:
     except RuntimeManifestError as exc:
         raise RuntimeIntegrityError(str(exc)) from exc
 
-    digest = hashlib.sha256(Path(live_pkl).read_bytes()).hexdigest()
+    # Chunked: real dumps reach several gigabytes, and read_bytes() would put
+    # all of it in the backend process at once.
+    digest = _sha256_file(Path(live_pkl))
     if digest != manifest["pkl_sha256"]:
         raise RuntimeIntegrityError(
             "runtime dump digest does not match its manifest; refusing to load it"
@@ -345,6 +346,10 @@ try:
     # Every frame read and every sidecar verified: publish the namespace in one
     # step, then report what it holds in a form the host can parse.
     globals().update(_scai_pending)
+    # Released immediately: this dict holds a strong reference to every restored
+    # object, so leaving it bound would keep a replaced AnnData alive for the
+    # rest of the session.
+    _scai_pending.clear()
     print(f"Session restored: {{len(_restored_names)}} variables")
     print("__SCAI_RESTORED_NAMES__:" + _scai_json.dumps(sorted(_restored_names)))
 except Exception as e:

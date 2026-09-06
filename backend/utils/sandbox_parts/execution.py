@@ -184,6 +184,10 @@ class ExecutionMixin:
         """
         if not mutates_namespace:
             return
+        if not getattr(self, "_last_execution_reached_kernel", False):
+            # Blocked by the safety check, or the kernel was dead: no statement
+            # ran, so nothing changed.
+            return
         # Bookkeeping, not correctness: a sandbox still being constructed has no
         # revision yet, and refusing to execute over a missing counter would be
         # a worse failure than starting it here.
@@ -364,6 +368,11 @@ class ExecutionMixin:
                 Internal operations such as runtime persistence use their own
                 stricter deadline instead of inheriting the general sandbox timeout.
         """
+        # Nothing has reached the kernel yet. Every early return below leaves
+        # this False, so a request the kernel never saw cannot mark the runtime
+        # dirty and force a multi-gigabyte save of an unchanged namespace.
+        self._last_execution_reached_kernel = False
+
         # Check if kernel is dead (failed restart)
         if self._kernel_dead:
             return CodeExecutionResult(
@@ -414,6 +423,7 @@ class ExecutionMixin:
         
         try:
             # Send execute request
+            self._last_execution_reached_kernel = True
             msg_id = self.kc.execute(code)
 
             # Collect outputs — only process messages belonging to THIS execution (matched by msg_id).

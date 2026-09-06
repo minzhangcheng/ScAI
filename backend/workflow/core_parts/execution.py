@@ -70,10 +70,15 @@ async def run(
     if is_forward_resume_blocked(
         getattr(initial_state, "runtime_restore_status", "complete"),
         coherence=state_runtime_coherence(initial_state),
+        recompute_pending=bool(
+            getattr(initial_state, "runtime_recompute_pending", False)
+        ),
     ):
         logger.warning(
-            f"[{self.session_id}] run blocked: "
-            "runtime_restore_status=unavailable; refusing to start the graph"
+            f"[{self.session_id}] run blocked: runtime_restore_status="
+            f"{getattr(initial_state, 'runtime_restore_status', 'complete')!r} "
+            f"coherence={state_runtime_coherence(initial_state)!r}; "
+            "refusing to start the graph"
         )
         self._set_status(initial_state, TaskStatus.FAILED)
         return initial_state
@@ -506,6 +511,9 @@ async def resume(
     if analysis_state is not None and is_forward_resume_blocked(
         getattr(analysis_state, "runtime_restore_status", "complete"),
         coherence=state_runtime_coherence(analysis_state),
+        recompute_pending=bool(
+            getattr(analysis_state, "runtime_recompute_pending", False)
+        ),
     ):
         logger.warning(
             f"[{self.session_id}] resume blocked: runtime_restore_status=unavailable; "
