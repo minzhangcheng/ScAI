@@ -5,7 +5,7 @@ import { Language } from '../i18n/translations'
 import type { ChatMessage } from '../types'
 import type { SnapshotRecordV2, SnapshotStoreStatus, SnapshotTransactionRecord, SnapshotFailureInfo } from '../types/snapshotV2'
 import type { AnnotationData } from '../utils/annotationGate'
-import { AgentError, AgentModels, AgentPrompts, AgentServerConfig, AgentTemperatures, AgentType, AgentVisionSettings, AuthUser, ExplorationFailedInfo, LlmFailureInfo, Message, Session, SpeciesInputInfo } from './domain'
+import { AgentError, AgentModels, AgentPrompts, AgentServerConfig, AgentTemperatures, AgentType, AgentVisionSettings, AuthUser, ExplorationFailedInfo, LlmFailureInfo, Message, PendingChatFollowup, Session, SpeciesInputInfo } from './domain'
 
 export interface AppState {
   // Language
@@ -24,6 +24,8 @@ export interface AppState {
   currentSession: Session | null
   setCurrentSession: (session: Session | null) => void
   updateSession: (updates: Partial<Session>) => void
+  pendingChatFollowup: PendingChatFollowup | null
+  setPendingChatFollowup: (draft: PendingChatFollowup | null) => void
   
   // Messages (real-time)
   messages: Message[]

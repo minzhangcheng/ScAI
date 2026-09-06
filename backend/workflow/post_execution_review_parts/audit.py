@@ -781,6 +781,11 @@ def _clean_list(
     """
     if limit <= 0:
         return []
+    # Review fields are list-shaped contracts.  Treat scalar and nested mapping
+    # values as malformed instead of iterating a string character-by-character
+    # or serializing an arbitrary object into the review record.
+    if not isinstance(values, (list, tuple)):
+        return []
     bounded_diagnostic = None
     if diagnostic:
         from backend.utils.error_parsing import bounded_diagnostic
@@ -809,16 +814,24 @@ def sanitize_review_plan(
     plan: Any,
     max_tasks: int,
     valid_step_ids: Optional[Set[int]] = None,
+    *,
+    direction_pass_id: str = "",
+    source_round: int = 0,
+    direction: str = "",
+    lineage_id: str = "main",
 ) -> Dict[str, Any]:
     """Bound the PI's review output. The task cap is the cost ceiling: an LLM PI
     asked what else could be done answers with 1-15 items every single time, so
     the number of tasks admitted is a hard constant here, not the PI's choice."""
     if not isinstance(plan, dict):
-        return {"gaps": [], "supplementary_tasks": [], "out_of_scope": [],
+        return {"gaps": [], "requested_tasks": [], "supplementary_tasks": [], "out_of_scope": [],
                 "step_decisions": [], "verdict": "no_action",
-                "rationale": "Review returned no structured plan."}
+                "rationale": "Review returned no structured plan.", "followups": []}
     cap = max(0, int(max_tasks))
-    tasks = _clean_list(plan.get("supplementary_tasks"), cap, _MAX_TASK_LEN)
+    requested_tasks = _clean_list(
+        plan.get("supplementary_tasks"), _MAX_LIST, _MAX_TASK_LEN,
+    )
+    tasks = requested_tasks[:cap]
     verdict = str(plan.get("verdict", "") or "").strip().lower()
     if verdict not in ("supplement", "no_action"):
         # Supplementary execution requires an explicit PI authorization. Keep
@@ -844,13 +857,28 @@ def sanitize_review_plan(
             "status": status,
             "reason": str(value.get("reason") or "")[:_MAX_GAP_LEN],
         })
+    # Follow-up IDs are assigned exactly once at this decision boundary from a
+    # server-owned direction pass identity. Persisted records are later read as
+    # canonical values and never re-sanitized or re-hashed.
+    from backend.utils.direction_payload import sanitize_followup_items
+    followups = sanitize_followup_items(
+        plan.get("followups"),
+        pass_identity=direction_pass_id,
+        source_round=source_round,
+        direction=direction,
+        lineage_id=lineage_id,
+    )
     return {
         "gaps": _clean_list(plan.get("gaps"), _MAX_LIST, _MAX_GAP_LEN),
+        # Keep the PI's bounded intent visible when the technical budget trims
+        # every executable task.  The executor consumes only supplementary_tasks.
+        "requested_tasks": requested_tasks,
         "supplementary_tasks": tasks,
         "out_of_scope": _clean_list(plan.get("out_of_scope"), _MAX_LIST, _MAX_GAP_LEN),
         "step_decisions": step_decisions,
         "verdict": verdict,
         "rationale": str(plan.get("rationale", "") or "")[:2000],
+        "followups": followups,
     }
 
 
@@ -1019,6 +1047,7 @@ def empty_review_meta(status: str, reason: str, attempt_id: str = "") -> Dict[st
         "review_status": status,
         "review_reason": reason,
         "review_plan": {},
+        "followups": [],
         "review_result": {},
         "plan_audit": {},
         "supplementary_findings": [],

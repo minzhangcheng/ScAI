@@ -10,7 +10,16 @@ from backend.routes.chat_parts import delegation as chat_delegation
 from backend.routes.chat_parts import endpoints as chat_endpoints
 
 
-async def _run_simple_chat(monkeypatch, state, *, message_id=""):
+async def _run_simple_chat(
+    monkeypatch,
+    state,
+    *,
+    message_id="",
+    followup_id="",
+    branch_id="",
+    client_content="A stable answer",
+    client_error="",
+):
     async def require_owner(*, session_id, user_id):
         assert session_id == state.id
         assert user_id == state.user_id
@@ -24,11 +33,25 @@ async def _run_simple_chat(monkeypatch, state, *, message_id=""):
 
     class Client:
         async def chat(self, **_kwargs):
-            return SimpleNamespace(content="A stable answer")
+            if client_error:
+                raise RuntimeError(client_error)
+            return SimpleNamespace(content=client_content)
 
     monkeypatch.setattr(chat_endpoints, "require_session_ownership", require_owner)
     monkeypatch.setattr(chat_endpoints, "resolve_config_for_user", resolve_config)
-    monkeypatch.setattr(chat_endpoints, "_build_chat_context", lambda _state: ("", []))
+    monkeypatch.setattr(
+        chat_endpoints,
+        "_build_chat_context",
+        lambda _state, _direction_context="": ("", []),
+    )
+    monkeypatch.setattr(
+        chat_endpoints,
+        "resolve_followup_reference",
+        lambda _state, requested, *, lineage_id: {
+            "followup_id": requested,
+            "source_context": {"direction": "trusted direction"},
+        },
+    )
     monkeypatch.setattr(chat_endpoints, "async_save_session", AsyncMock())
     monkeypatch.setattr(chat_delegation, "_async_save_session_under_lifecycle", AsyncMock())
     monkeypatch.setattr(chat_endpoints, "_create_chat_snapshot", AsyncMock())
@@ -60,6 +83,8 @@ async def _run_simple_chat(monkeypatch, state, *, message_id=""):
             file_types="[]",
             message_id=message_id,
             files=[],
+            followup_id=followup_id,
+            branch_id=branch_id,
         )
     finally:
         sessions.pop(state.id, None)
@@ -81,6 +106,61 @@ async def test_client_user_id_and_assistant_reply_identity_are_persisted(monkeyp
     assert assistant_message["reply_to"] == client_message_id
     assert result["id"] == assistant_message["id"]
     assert result["reply_to"] == client_message_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_error", ["", "provider unavailable"])
+async def test_simple_chat_terminal_paths_preserve_followup_identity(
+    monkeypatch, client_error,
+):
+    state = AnalysisState(id="chat-followup-simple", user_id="owner")
+    client_message_id = "3f435a33-bf5d-474f-b037-b51de804ba9a"
+
+    result = await _run_simple_chat(
+        monkeypatch,
+        state,
+        message_id=client_message_id,
+        followup_id="fu-simple",
+        branch_id="main",
+        client_error=client_error,
+    )
+
+    user_message, assistant_message = state.chat_messages
+    assert user_message["followup_id"] == "fu-simple"
+    assert user_message["branch_id"] == "main"
+    assert assistant_message["followup_id"] == "fu-simple"
+    assert assistant_message["branch_id"] == "main"
+    assert assistant_message["reply_to"] == client_message_id
+    assert result["followup_id"] == "fu-simple"
+    assert result["branch_id"] == "main"
+    if client_error:
+        assert "provider unavailable" in assistant_message["content"]
+
+
+def test_delegation_terminal_replacement_preserves_followup_identity():
+    state = AnalysisState(id="delegation-followup-identity", user_id="owner")
+    state.chat_messages = [{
+        "id": "placeholder-id",
+        "role": "assistant",
+        "content": "Working on it",
+        "timestamp": "2026-08-04T00:00:00",
+        "delegation_active": True,
+        "reply_to": "user-id",
+        "followup_id": "fu-delegation",
+        "branch_id": "branch-a",
+    }]
+
+    assert chat_delegation._replace_latest_chat_terminal(state, {
+        "role": "assistant",
+        "content": "Cancelled",
+        "timestamp": "2026-08-04T00:01:00",
+        "pending_figures": False,
+    }) is True
+    terminal = state.chat_messages[0]
+    assert terminal["id"] == "placeholder-id"
+    assert terminal["reply_to"] == "user-id"
+    assert terminal["followup_id"] == "fu-delegation"
+    assert terminal["branch_id"] == "branch-a"
 
 
 def test_legacy_chat_history_ids_are_stable_without_mutating_state():

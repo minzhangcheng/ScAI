@@ -2,6 +2,7 @@ import { useCallback, useEffect } from 'react'
 
 import { apiFetch } from '../../hooks/useApi'
 import { useAppStore } from '../../stores/appStore'
+import { chatOwnerKey, normalizeBranchId } from '../../utils/chatOwnership'
 import { CUSTOM_TYPE_SENTINEL, getTypeOptions, hasCustomOption } from '../../utils/dataTypes'
 import { upsertChatMessage } from '../../utils/chatMessages'
 import type { ChatMessage } from '../../types'
@@ -112,6 +113,7 @@ function useChatAttachmentActions(history: ChatHistoryController) {
 export function useChatSend(history: ChatHistoryController) {
   const {
     addChatMessage, chatLoading, currentSession, input, optimisticMessageIdsRef,
+    pendingFollowup, setPendingChatFollowup,
     selectedFiles, sendOwnerRef, sendRequestSequenceRef, setChatAbortController,
     setChatDelegationActive, setChatDelegationPlan, setChatLoading, setChatMessages,
     setError, setInput, setSelectedFiles, setTextareaHeight, t,
@@ -132,8 +134,19 @@ export function useChatSend(history: ChatHistoryController) {
 
     // Capture session ID at send time to detect cross-session pollution
     const sendSessionId = currentSession.id
+    const sendBranchId = normalizeBranchId(currentSession.restoreBranchId)
+    const handoff = pendingFollowup
+      && pendingFollowup.sessionId === sendSessionId
+      && normalizeBranchId(pendingFollowup.branchId) === sendBranchId
+      && pendingFollowup.followupId
+      ? pendingFollowup
+      : null
 
     const message = input.trim() || (selectedFiles.length > 0 ? `[${selectedFiles.map(sf => sf.file.name).join(', ')}]` : '')
+    const retryDraftText = input.trim() || handoff?.instruction || ''
+    if (handoff) {
+      setPendingChatFollowup({ ...handoff, branchId: sendBranchId, instruction: retryDraftText })
+    }
     setInput('')
     setError(null)
     setTextareaHeight(MIN_TEXTAREA_HEIGHT)
@@ -150,20 +163,24 @@ export function useChatSend(history: ChatHistoryController) {
       return Boolean(
         owner
         && owner.sessionId === sendSessionId
+        && owner.branchId === sendBranchId
         && owner.requestId === requestId
         && owner.controller === abortController
         && useAppStore.getState().currentSession?.id === sendSessionId
+        && normalizeBranchId(useAppStore.getState().currentSession?.restoreBranchId) === sendBranchId
       )
     }
     setChatAbortController(abortController)
 
     // Optimistic: add user message immediately
     const clientMessageId = createChatMessageId()
-    const sessionOptimisticIds = optimisticMessageIdsRef.current.get(sendSessionId) ?? new Set<string>()
+    const ownerKey = chatOwnerKey(sendSessionId, sendBranchId)!
+    const sessionOptimisticIds = optimisticMessageIdsRef.current.get(ownerKey) ?? new Set<string>()
     sessionOptimisticIds.add(clientMessageId)
-    optimisticMessageIdsRef.current.set(sendSessionId, sessionOptimisticIds)
+    optimisticMessageIdsRef.current.set(ownerKey, sessionOptimisticIds)
     sendOwnerRef.current = {
       sessionId: sendSessionId,
+      branchId: sendBranchId,
       requestId,
       controller: abortController,
       messageId: clientMessageId,
@@ -178,6 +195,9 @@ export function useChatSend(history: ChatHistoryController) {
         type: sf.file.type.startsWith('image/') ? 'image' : 'file',
         target_agent: sf.targetAgent,
       })),
+      ...(handoff
+        ? { followup_id: handoff.followupId, branch_id: sendBranchId }
+        : {}),
     }
     addChatMessage(userMsg)
     setChatLoading(true)
@@ -191,6 +211,10 @@ export function useChatSend(history: ChatHistoryController) {
       formData.append('file_samples', JSON.stringify(filesToSend.map((sf) => sf.sampleNumber || null)))
       formData.append('file_types', JSON.stringify(filesToSend.map((sf) => sf.dataType || null)))
       formData.append('message_id', clientMessageId)
+      if (handoff) {
+        formData.append('followup_id', handoff.followupId)
+        formData.append('branch_id', sendBranchId)
+      }
       filesToSend.forEach((sf) => formData.append('files', sf.file))
 
       const data = await apiFetch<any>(`/session/${sendSessionId}/chat`, {
@@ -203,6 +227,18 @@ export function useChatSend(history: ChatHistoryController) {
       if (!ownsRequest()) {
         console.warn('ChatPanel: Session changed during request, discarding response')
         return
+      }
+
+      // The backend has accepted the request, so the editable handoff is no
+      // longer pending. Keep it on abort or any rejected request for retry.
+      if (handoff) {
+        const latestDraft = useAppStore.getState().pendingChatFollowup
+        if (
+          latestDraft?.sessionId === sendSessionId
+          && latestDraft.followupId === handoff.followupId
+        ) {
+          setPendingChatFollowup(null)
+        }
       }
 
       if (data.status === 'processing') {
@@ -225,6 +261,12 @@ export function useChatSend(history: ChatHistoryController) {
         figures: data.figures,
         pending_figures: data.pending_figures,
         reply_to: data.reply_to || clientMessageId,
+        ...(handoff
+          ? {
+              followup_id: data.followup_id || handoff.followupId,
+              branch_id: data.branch_id || sendBranchId,
+            }
+          : {}),
       }
       setChatMessages(upsertChatMessage(
         useAppStore.getState().chatMessages,
@@ -233,14 +275,39 @@ export function useChatSend(history: ChatHistoryController) {
     } catch (e: any) {
       if (!ownsRequest()) return
       if (e.name === 'AbortError') {
+        if (handoff) {
+          const latestDraft = useAppStore.getState().pendingChatFollowup
+          if (
+            latestDraft?.sessionId === sendSessionId
+            && normalizeBranchId(latestDraft.branchId) === sendBranchId
+            && latestDraft.followupId === handoff.followupId
+          ) {
+            setPendingChatFollowup({ ...latestDraft, instruction: retryDraftText })
+            setInput(retryDraftText)
+          }
+        }
         addChatMessage({
           id: createChatMessageId(),
           role: 'assistant',
           content: t('chatCancelled'),
           timestamp: new Date().toISOString(),
           reply_to: clientMessageId,
+          ...(handoff
+            ? { followup_id: handoff.followupId, branch_id: sendBranchId }
+            : {}),
         })
       } else {
+        if (handoff && ownsRequest()) {
+          const latestDraft = useAppStore.getState().pendingChatFollowup
+          if (
+            latestDraft?.sessionId === sendSessionId
+            && normalizeBranchId(latestDraft.branchId) === sendBranchId
+            && latestDraft.followupId === handoff.followupId
+          ) {
+            setPendingChatFollowup({ ...latestDraft, instruction: retryDraftText })
+            setInput(retryDraftText)
+          }
+        }
         setError(t('chatError'))
       }
     } finally {
@@ -260,6 +327,7 @@ export function useChatSend(history: ChatHistoryController) {
     if (!currentSession?.id) return
 
     const stopSessionId = currentSession.id
+    const stopBranchId = normalizeBranchId(currentSession.restoreBranchId)
     const stopRequestSequence = sendRequestSequenceRef.current
     const stoppedOwner = sendOwnerRef.current
     const { chatAbortController: controller, chatDelegationActive: isDelegation } = useAppStore.getState()
@@ -267,6 +335,7 @@ export function useChatSend(history: ChatHistoryController) {
       const latest = useAppStore.getState()
       return Boolean(
         latest.currentSession?.id === stopSessionId
+        && normalizeBranchId(latest.currentSession?.restoreBranchId) === stopBranchId
         && sendRequestSequenceRef.current === stopRequestSequence
         && sendOwnerRef.current === stoppedOwner
         && latest.chatAbortController === controller

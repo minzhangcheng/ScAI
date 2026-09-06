@@ -11,6 +11,10 @@ import json
 import logging
 
 from ...models.schemas import AnalysisState
+from ...utils.direction_payload import (
+    build_direction_projection,
+    build_direction_projection_block,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +47,7 @@ class ExecutionReviewMixin:
         max_tasks: int,
         trigger_reason: str,
         session_names: Optional[Dict[str, Any]] = None,
+        direction_context: str = "",
     ) -> Dict[str, Any]:
         """PI triages a completed round into at most `max_tasks` supplementary
         analyses.
@@ -63,6 +68,59 @@ class ExecutionReviewMixin:
 
         audit_block = self._format_execution_audit(plan_audit, admissions)
         names_block = self._format_session_names(session_names)
+        phase_value = getattr(getattr(state, "analysis_phase", ""), "value", None)
+        phase_value = str(phase_value or getattr(state, "analysis_phase", "") or "").lower()
+        innovation_review = bool(str(direction or "").strip()) and (
+            phase_value == "innovation" or bool(direction_context)
+        )
+        if innovation_review and not direction_context:
+            direction_context = build_direction_projection_block(
+                build_direction_projection(state, direction)
+            )
+        direction_context_section = direction_context if innovation_review else ""
+        review_role = (
+            "Your job here is to assess this direction's completed evidence and make one "
+            "PI decision about useful in-scope deepening. You may combine repair of "
+            "unfinished plan work with a bounded analysis that advances the selected "
+            "question. Keep other unresolved questions explicit in `followups` for the "
+            "report and user Chat handoff."
+            if innovation_review else
+            "Your job here is TRIAGE, not brainstorming: decide which of this round's own "
+            "unfinished business can still be repaired right now inside the live analysis "
+            "session, and return a short executable list. Everything else must be set aside "
+            "explicitly."
+        )
+        direction_guidance = (
+            """
+Use the selected-direction evidence context above to distinguish what this round
+already answered from remaining questions. A clean technical audit does not imply
+that the scientific question is exhausted. Null, opposing, heterogeneous, or
+ambiguous results may still justify a useful follow-up, while repeated analyses of
+overlapping data are not independent validation.
+
+For each remaining question choose one disposition: `deepen_now` means it is useful,
+in scope, and executable against loaded data under the shared supplementary task,
+iteration, and timeout budget; `offer_in_chat` means it needs user prioritization,
+broader tools, or more work than that budget; `needs_new_data` means the required
+measurement/input is absent; `closed` means you have a reasoned decision that no
+useful increment remains. These are PI decisions, not host keyword verdicts.
+"""
+            if innovation_review else ""
+        )
+        followups_schema = (
+            """
+  \"followups\": [
+    {{\"question\": \"<remaining question>\",
+      \"why_it_matters\": \"<information this would add>\",
+      \"disposition\": \"deepen_now\" | \"offer_in_chat\" | \"needs_new_data\" | \"closed\",
+      \"reason\": \"<why this disposition fits the current scope>\",
+      \"evidence_references\": [\"<execution or evidence id>\"],
+      \"suggested_instruction\": \"<editable Chat instruction, when useful>\",
+      \"required_input\": \"<new input needed, when applicable>\"}}
+  ],
+"""
+            if innovation_review else ""
+        )
         findings_block = self._format_review_items(findings) or "None reported."
         suggestions_block = self._format_review_items(agent_suggestions) or "None."
         # Mirror sanitize_review_plan's own clamp so the prompt never advertises a
@@ -71,6 +129,12 @@ class ExecutionReviewMixin:
 
         if is_terminal_round:
             horizon_block = (
+                "## Automatic-pass boundary\n"
+                "This is the only automatic supplementary pass for this selected direction. "
+                "A question that is not executable within the shared budget must remain in "
+                "`followups` with its PI disposition; do not describe it as dropped and do "
+                "not create a renamed direction to bypass this boundary.\n"
+                if innovation_review else
                 "## This is the terminal round\n"
                 "No later round will exist, so anything you defer is dropped for good. "
                 "Prioritize what would most change this analysis's conclusions if it came "
@@ -78,15 +142,19 @@ class ExecutionReviewMixin:
             )
         else:
             horizon_block = (
+                "## Automatic-pass boundary\n"
+                "This is the only automatic supplementary pass for this selected direction. "
+                "Keep broader or not-yet-executable questions in `followups` for the report "
+                "and Chat; do not requeue them as a new direction or imply that another "
+                "automatic pass will be commissioned later.\n"
+                if innovation_review else
                 "## A later round remains\n"
                 "Work that genuinely belongs to a fresh line of investigation can wait for "
                 "the next round. Keep this pass to what is unfinished here.\n"
             )
 
         prompt = f"""You are the PI auditing a COMPLETED analysis round before writing its summary.
-Your job here is TRIAGE, not brainstorming: decide which of this round's own unfinished
-business can still be repaired right now inside the live analysis session, and return a
-short executable list. Everything else must be set aside explicitly.
+{review_role}
 
 ## Project
 Project: {state.name}
@@ -110,10 +178,13 @@ validate step IDs and status syntax.
 {suggestions_block}
 
 {names_block}
+{direction_context_section}
 ## What may become a supplementary task
 A supplementary task is handed to a restricted code generator that runs against THE DATA
 ALREADY LOADED IN THIS SESSION'S KERNEL, in this round, with no new inputs of any kind.
 Only work satisfiable that way may enter `supplementary_tasks`.
+
+{direction_guidance}
 
 This restricted pass cannot register or PI-review a PublicationFigure. A missing
 publication-figure deliverable must NOT become a supplementary task: leave that gap open
@@ -165,6 +236,7 @@ Reply with STRICT JSON only:
   ],
   "supplementary_tasks": ["<one executable analysis instruction>"],
   "out_of_scope": ["<follow-up needing new data or new experiments — one-line reason>"],
+{followups_schema}
   "verdict": "supplement" | "no_action",
   "rationale": "<2-4 sentences: what you are repairing, and what you are deliberately leaving>"
 }}"""
@@ -222,13 +294,27 @@ Rules:
   not raise a claim's confidence beyond what this pass actually shows.
 - If the pass produced nothing usable, say so plainly. "unresolved" with the gaps intact
   is a valid and useful outcome.
+- Keep any remaining-question records from the review plan linked by their existing
+  ``followup_id``. You may update their outcome or explanation, but this assessment
+  cannot commission another automatic pass.
 
 Reply with STRICT JSON only:
 {{
   "verdict": "resolved" | "partial" | "unresolved",
   "summary": "<2-5 sentences of report-ready prose: what these analyses showed and what it changes about this round's interpretation>",
   "resolved_gaps": ["<gap now closed, with the evidence that closed it>"],
-  "remaining_gaps": ["<gap still open, and why>"]
+  "remaining_gaps": ["<gap still open, and why>"],
+  "followups": [
+    {{"followup_id": "<existing id>", "question": "<remaining question>",
+      "why_it_matters": "<information this would add>",
+      "disposition": "deepen_now" | "offer_in_chat" | "needs_new_data" | "closed",
+      "reason": "<updated PI reason>",
+      "evidence_references": ["<execution or evidence id>"],
+      "suggested_instruction": "<editable Chat instruction, when useful>",
+      "required_input": "<new input needed, when applicable>",
+      "execution_outcome": "<factual outcome for this supplementary pass, when this question was explicitly assessed>",
+      "execution_reference": "<known execution or evidence id only when explicitly tied to this question>"}}
+  ]
 }}"""
 
         parsed = self._safe_parse_json(await self.chat(prompt, temperature=0.2), default={})

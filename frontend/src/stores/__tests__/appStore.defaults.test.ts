@@ -30,6 +30,7 @@ describe('Agent page defaults', () => {
     expect(Object.keys(useAppStore.getState())).toEqual([
       'language', 'setLanguage', 'apiConfig', 'setApiConfig',
       'currentSession', 'setCurrentSession', 'updateSession',
+      'pendingChatFollowup', 'setPendingChatFollowup',
       'messages', 'addMessage', 'setMessages', 'clearMessages',
       'prompts', 'setPrompt', 'resetPromptsToDefault', 'getDefaultPromptsForLanguage',
       'models', 'setModel', 'resetModelsToDefault',

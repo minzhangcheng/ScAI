@@ -4,6 +4,8 @@ import { apiFetch } from '../../hooks/useApi'
 import { useTranslation } from '../../i18n/translations'
 import { useAppStore } from '../../stores/appStore'
 import { reconcileChatHistory } from '../../utils/chatMessages'
+import { chatOwnerKey, normalizeBranchId } from '../../utils/chatOwnership'
+import type { PendingChatFollowup } from '../../stores/domain'
 
 export const MIN_TEXTAREA_HEIGHT = 72
 
@@ -17,6 +19,7 @@ export interface SelectedFileWithAgent {
 
 export interface ChatRequestOwner {
   sessionId: string
+  branchId: string
   requestId: number
   controller: AbortController
   messageId: string
@@ -55,6 +58,7 @@ export function createChatMessageId(): string {
 export function useChatHistory() {
   const {
     language, currentSession,
+    pendingChatFollowup, setPendingChatFollowup,
     chatMessages, addChatMessage, setChatMessages,
     chatLoading, setChatLoading,
     chatDelegationActive, chatDelegationPlan,
@@ -72,19 +76,29 @@ export function useChatHistory() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const loadedSessionRef = useRef<string | null>(null)
   const historyGenerationRef = useRef(0)
-  const activeChatSessionRef = useRef<string | null>(currentSession?.id || null)
+  const activeChatOwnerRef = useRef<string | null>(
+    chatOwnerKey(currentSession?.id, currentSession?.restoreBranchId),
+  )
   const optimisticMessageIdsRef = useRef(new Map<string, Set<string>>())
   const sendRequestSequenceRef = useRef(0)
   const sendOwnerRef = useRef<ChatRequestOwner | null>(null)
   const [textareaHeight, setTextareaHeight] = useState(MIN_TEXTAREA_HEIGHT)
+  const appliedFollowupRef = useRef<{
+    sessionId: string | null
+    branchId: string
+    followupId: string
+    text: string
+  } | null>(null)
   const resizingRef = useRef(false)
   const resizeStartRef = useRef({ y: 0, height: 0 })
 
   // Retire all request-owned state before a different session can use it.
   useEffect(() => {
     const sessionId = currentSession?.id || null
-    if (activeChatSessionRef.current === sessionId) return
-    activeChatSessionRef.current = sessionId
+    const branchId = normalizeBranchId(currentSession?.restoreBranchId)
+    const ownerKey = chatOwnerKey(sessionId, branchId)
+    if (activeChatOwnerRef.current === ownerKey) return
+    activeChatOwnerRef.current = ownerKey
 
     const owner = sendOwnerRef.current
     if (owner) {
@@ -100,6 +114,7 @@ export function useChatHistory() {
     setError(null)
   }, [
     currentSession?.id,
+    currentSession?.restoreBranchId,
     setChatAbortController,
     setChatDelegationActive,
     setChatDelegationPlan,
@@ -116,16 +131,18 @@ export function useChatHistory() {
       loadedSessionRef.current = null
       return
     }
-    if (loadedSessionRef.current === currentSession.id) return
     const sessionId = currentSession.id
-    loadedSessionRef.current = sessionId
-    for (const cachedSessionId of optimisticMessageIdsRef.current.keys()) {
-      if (cachedSessionId !== sessionId) {
-        optimisticMessageIdsRef.current.delete(cachedSessionId)
+    const branchId = normalizeBranchId(currentSession.restoreBranchId)
+    const ownerKey = chatOwnerKey(sessionId, branchId)
+    if (loadedSessionRef.current === ownerKey) return
+    loadedSessionRef.current = ownerKey
+    for (const cachedOwnerKey of optimisticMessageIdsRef.current.keys()) {
+      if (cachedOwnerKey !== ownerKey) {
+        optimisticMessageIdsRef.current.delete(cachedOwnerKey)
       }
     }
-    const optimisticIds = optimisticMessageIdsRef.current.get(sessionId) ?? new Set<string>()
-    optimisticMessageIdsRef.current.set(sessionId, optimisticIds)
+    const optimisticIds = optimisticMessageIdsRef.current.get(ownerKey!) ?? new Set<string>()
+    optimisticMessageIdsRef.current.set(ownerKey!, optimisticIds)
     setChatMessages(
       useAppStore.getState().chatMessages.filter(message => optimisticIds.has(message.id)),
     )
@@ -134,6 +151,7 @@ export function useChatHistory() {
       historyGenerationRef.current === generation
       && !controller.signal.aborted
       && useAppStore.getState().currentSession?.id === sessionId
+      && normalizeBranchId(useAppStore.getState().currentSession?.restoreBranchId) === branchId
     )
 
     apiFetch<{ messages: typeof chatMessages }>(
@@ -159,12 +177,73 @@ export function useChatHistory() {
       })
 
     return () => controller.abort()
-  }, [currentSession?.id, setChatMessages])
+  }, [currentSession?.id, currentSession?.restoreBranchId, setChatMessages])
+
+  // A report handoff is an editable local draft.  Apply it only to the owning
+  // session and only once per reference so normal user edits are preserved.
+  useEffect(() => {
+    const draft: PendingChatFollowup | null = pendingChatFollowup
+    const sessionId = currentSession?.id || null
+    const currentBranchId = normalizeBranchId(currentSession?.restoreBranchId)
+    const draftBranchId = normalizeBranchId(draft?.branchId)
+    const applied = appliedFollowupRef.current
+
+    // A follow-up draft belongs to the session branch where it was created.
+    // Clear the whole current input on owner change, including edits made
+    // after the instruction was applied. Ordinary text has no applied owner
+    // and therefore survives a branch switch.
+    if (
+      applied
+      && (applied.sessionId !== sessionId || applied.branchId !== currentBranchId)
+    ) {
+      setInput('')
+      appliedFollowupRef.current = null
+    }
+
+    if (
+      !draft
+      || draft.sessionId !== sessionId
+      || draftBranchId !== currentBranchId
+      || !draft.followupId
+    ) {
+      if (appliedFollowupRef.current) {
+        // A cleared or mismatched handoff also invalidates text that was
+        // derived from it. This is a no-op after a successful send because
+        // the composer is already empty.
+        setInput('')
+        appliedFollowupRef.current = null
+      }
+      return
+    }
+    if (
+      appliedFollowupRef.current?.followupId === draft.followupId
+      && appliedFollowupRef.current.sessionId === sessionId
+      && appliedFollowupRef.current.branchId === currentBranchId
+    ) {
+      if (
+        appliedFollowupRef.current.text !== draft.instruction
+        && input === appliedFollowupRef.current.text
+      ) {
+        appliedFollowupRef.current.text = draft.instruction
+        setInput(draft.instruction)
+      }
+      return
+    }
+    appliedFollowupRef.current = {
+      sessionId,
+      branchId: currentBranchId,
+      followupId: draft.followupId,
+      text: draft.instruction,
+    }
+    setInput(draft.instruction)
+    setError(null)
+  }, [currentSession?.id, currentSession?.restoreBranchId, pendingChatFollowup, input])
 
   // Poll backend during loading as fallback (covers both delegation and slow figure generation)
   useEffect(() => {
     if (!chatLoading || !currentSession?.id) return
     const sessionId = currentSession.id
+    const branchId = normalizeBranchId(currentSession.restoreBranchId)
     let active = true
     const controllers = new Set<AbortController>()
     const interval = setInterval(async () => {
@@ -174,6 +253,7 @@ export function useChatHistory() {
         active
         && !controller.signal.aborted
         && useAppStore.getState().currentSession?.id === sessionId
+        && normalizeBranchId(useAppStore.getState().currentSession?.restoreBranchId) === branchId
       )
       try {
         const data = await apiFetch<{ messages: typeof chatMessages }>(
@@ -210,7 +290,15 @@ export function useChatHistory() {
       controllers.forEach(controller => controller.abort())
       controllers.clear()
     }
-  }, [chatLoading, currentSession?.id, setChatMessages, setChatLoading, setChatDelegationActive, setChatDelegationPlan])
+  }, [
+    chatLoading,
+    currentSession?.id,
+    currentSession?.restoreBranchId,
+    setChatMessages,
+    setChatLoading,
+    setChatDelegationActive,
+    setChatDelegationPlan,
+  ])
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -220,6 +308,7 @@ export function useChatHistory() {
 
   return {
     language, currentSession, chatMessages, addChatMessage, setChatMessages, chatLoading,
+    pendingFollowup: pendingChatFollowup, setPendingChatFollowup,
     setChatLoading, chatDelegationActive, chatDelegationPlan, setChatDelegationActive,
     setChatDelegationPlan, setChatAbortController, authUser, t, input, setInput, error,
     setError, selectedFiles, setSelectedFiles, defaultAgent, setDefaultAgent, filePreviews,

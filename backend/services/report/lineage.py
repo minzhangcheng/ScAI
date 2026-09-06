@@ -530,6 +530,17 @@ def build_lineage_report_state(
     report_state.sandbox_state = sandbox_state
     normalized = [normalize_legacy_round_result(r) for r in report_state.round_results]
     report_state.round_results = [r for r in normalized if r.lineage_id == target]
+    # Review records are session-level state and may contain decisions from
+    # several restored branches.  Keep only this report's lineage; records from
+    # pre-lineage sessions are legacy-main records and remain visible there.
+    report_state.post_execution_reviews = [
+        review
+        for review in (report_state.post_execution_reviews or [])
+        if (
+            not isinstance(review, dict)
+            or str(review.get("lineage_id") or "main").strip() == target
+        )
+    ]
     report_state.publication_figures = [
         figure
         for figure in report_state.publication_figures

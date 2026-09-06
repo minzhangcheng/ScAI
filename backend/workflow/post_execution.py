@@ -17,10 +17,12 @@ produces exactly one RoundResult for one direction — `max_rounds`, the directi
 queue and the integration bookkeeping stay untouched.
 """
 import logging
+import inspect
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..models.schemas import AgentType
+from ..models.schema_parts.enums import AnalysisPhase
 from ..services.figure_contract import visual_plan_inheritance_for_plan
 from .post_execution_review import (
     audit_plan_execution,
@@ -34,6 +36,16 @@ from .post_execution_review import (
 )
 from .post_execution_review_parts.reconciliation import (
     reconcile_plan_evidence,
+)
+from .direction_coverage import (
+    build_result_identity_key,
+    current_lineage_id,
+    normalize_direction_key,
+)
+from ..utils.direction_payload import (
+    build_direction_projection,
+    build_direction_projection_block,
+    FOLLOWUP_DISPOSITIONS,
 )
 
 logger = logging.getLogger(__name__)
@@ -300,16 +312,276 @@ class PostExecutionReviewMixin:
                 return record
         return None
 
+    def _find_stored_direction_review(
+        self, analysis_state, direction_pass_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Find the one durable review record for an innovation direction pass."""
+        if not direction_pass_id:
+            return None
+        for record in reversed(getattr(analysis_state, "post_execution_reviews", None) or []):
+            if isinstance(record, dict) and record.get("direction_pass_id") == direction_pass_id:
+                return record
+        return None
+
     def _store_review(self, analysis_state, meta: Dict[str, Any]) -> None:
         try:
             records = getattr(analysis_state, "post_execution_reviews", None)
             if records is None:
                 return
+            stable_id = str(meta.get("direction_pass_id") or "").strip()
+            if stable_id:
+                for index in range(len(records) - 1, -1, -1):
+                    existing = records[index]
+                    if isinstance(existing, dict) and existing.get("direction_pass_id") == stable_id:
+                        records[index] = meta
+                        return
             records.append(meta)
             if len(records) > _MAX_STORED_REVIEWS:
                 del records[:-_MAX_STORED_REVIEWS]
         except Exception as e:
             logger.debug(f"[{self.session_id}] could not store review record: {e}")
+
+    async def _persist_review_state(self, analysis_state) -> bool:
+        """Force-save a review lifecycle transition before/after work."""
+        try:
+            callback = getattr(self, "state_callback", None)
+            if callback is not None:
+                try:
+                    supports_force = "force" in inspect.signature(callback).parameters
+                except (TypeError, ValueError):
+                    supports_force = False
+                outcome = (
+                    callback(analysis_state, force=True)
+                    if supports_force
+                    else callback(analysis_state)
+                )
+                if inspect.isawaitable(outcome):
+                    outcome = await outcome
+                return outcome is not False
+            from ..services.session_store import async_save_session
+            outcome = await async_save_session(self.session_id, analysis_state, force=True)
+            return outcome is not False
+        except Exception as exc:
+            logger.warning(
+                f"[{self.session_id}] Could not persist post-execution review lifecycle: {exc}"
+            )
+            return False
+
+    @staticmethod
+    def _serialize_review_record(value: Any) -> Any:
+        """Serialize a bounded provenance object for replayable review state."""
+        if isinstance(value, dict):
+            return {
+                str(key): PostExecutionReviewMixin._serialize_review_record(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [PostExecutionReviewMixin._serialize_review_record(item) for item in value]
+        dumper = getattr(value, "model_dump", None)
+        if callable(dumper):
+            try:
+                return PostExecutionReviewMixin._serialize_review_record(dumper(mode="json"))
+            except Exception:
+                try:
+                    return PostExecutionReviewMixin._serialize_review_record(dumper())
+                except Exception:
+                    return None
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    @staticmethod
+    def _bounded_assessment_text(value: Any, limit: int) -> Optional[str]:
+        """Accept only bounded scalar prose at the PI assessment boundary."""
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        return text[:limit] if text else None
+
+    @staticmethod
+    def _bounded_assessment_items(
+        value: Any, *, limit: int = 12, item_limit: int = 500,
+    ) -> List[str]:
+        """Read list-shaped PI fields without iterating malformed scalars."""
+        if not isinstance(value, (list, tuple)):
+            return []
+        output: List[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            text = item.strip()
+            if not text:
+                continue
+            output.append(text[:item_limit])
+            if len(output) >= limit:
+                break
+        return output
+
+    @staticmethod
+    def _bounded_assessment_verdict(value: Any) -> str:
+        """Keep the persisted assessment verdict within its finite contract."""
+        verdict = value.strip().lower() if isinstance(value, str) else ""
+        return verdict if verdict in {"resolved", "partial", "unresolved"} else "partial"
+
+    @staticmethod
+    def _known_review_execution_ids(
+        raw_result: Any, supplementary: Dict[str, Any],
+    ) -> List[str]:
+        """Return only execution IDs present in the attempted pass evidence."""
+        values: List[str] = []
+        seen: Set[str] = set()
+
+        def add(value: Any) -> None:
+            if isinstance(value, dict):
+                value = value.get("id") or value.get("execution_id")
+            else:
+                value = getattr(value, "id", None) or getattr(value, "execution_id", None)
+            if not isinstance(value, (str, int)):
+                return
+            text = str(value).strip()[:120]
+            if text and text not in seen:
+                seen.add(text)
+                values.append(text)
+
+        for record in (supplementary.get("evidence_records") or []):
+            if isinstance(record, dict) and str(record.get("status") or "").lower() in {
+                "completed", "failed",
+            }:
+                add(record)
+        raw_mapping = raw_result if isinstance(raw_result, dict) else {}
+        for execution in raw_mapping.get("code_history") or []:
+            add(execution)
+        return values[:12]
+
+    @staticmethod
+    def _shared_review_outcome(
+        supplementary: Dict[str, Any], known_execution_ids: List[str],
+    ) -> str:
+        """Describe pass-level execution without claiming each task ran."""
+        status = str(supplementary.get("status") or "unknown").strip().lower()[:80]
+        if not status:
+            status = "unknown"
+        evidence_note = (
+            " Stored execution evidence is available."
+            if known_execution_ids else
+            " No stored execution evidence record is available."
+        )
+        return (
+            f"Shared supplementary pass outcome: {status}. This is a pass-level "
+            "status, not a task-specific execution claim for this follow-up."
+            + evidence_note
+        )
+
+    @staticmethod
+    def _shared_review_reference(
+        attempt_id: str, direction_pass_id: str, known_execution_ids: List[str],
+    ) -> str:
+        parts = []
+        if direction_pass_id:
+            parts.append(f"pass:{direction_pass_id}")
+        elif attempt_id:
+            parts.append(f"attempt:{attempt_id}")
+        if known_execution_ids:
+            parts.append("evidence:" + ",".join(known_execution_ids))
+        return "; ".join(parts)[:1200]
+
+    @classmethod
+    def _attach_shared_review_outcome(
+        cls,
+        followups: List[Dict[str, Any]],
+        *,
+        supplementary: Dict[str, Any],
+        known_execution_ids: List[str],
+        attempt_id: str,
+        direction_pass_id: str,
+    ) -> List[Dict[str, Any]]:
+        """Associate attempted technical evidence while preserving PI IDs."""
+        if not followups:
+            return followups
+        outcome = cls._shared_review_outcome(supplementary, known_execution_ids)
+        reference = cls._shared_review_reference(
+            attempt_id, direction_pass_id, known_execution_ids,
+        )
+        for item in followups:
+            # A PI-linked reference was admitted only after the caller checked it
+            # against known pass evidence. Otherwise expose the honest shared-pass
+            # association, which cannot be mistaken for task-level execution.
+            item.setdefault("execution_outcome", outcome)
+            item.setdefault("execution_reference", reference)
+        return followups
+
+    @classmethod
+    def _merge_followup_assessment(
+        cls,
+        followups: List[Dict[str, Any]],
+        assessment: Any,
+        *,
+        known_execution_ids: Optional[Set[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Apply PI assessment updates while preserving server-owned IDs."""
+        current = [dict(item) for item in (followups or []) if isinstance(item, dict)]
+        by_id = {
+            str(item.get("followup_id")): item
+            for item in current
+            if str(item.get("followup_id") or "").strip()
+        }
+        updates = assessment.get("followups") if isinstance(assessment, dict) else None
+        if not isinstance(updates, list):
+            return current
+        allowed = {
+            "question", "why_it_matters", "disposition", "reason",
+            "evidence_references", "suggested_instruction", "required_input",
+            "execution_outcome", "execution_reference",
+        }
+        for update in updates:
+            if not isinstance(update, dict):
+                continue
+            followup_id = str(update.get("followup_id") or "").strip()
+            target = by_id.get(followup_id)
+            if target is None:
+                continue
+            if "disposition" in update and str(update.get("disposition") or "").strip().lower() not in FOLLOWUP_DISPOSITIONS:
+                continue
+            for key in allowed:
+                if key not in update:
+                    continue
+                value = update[key]
+                if key == "evidence_references":
+                    if isinstance(value, (list, tuple)):
+                        refs = []
+                        for ref in value:
+                            if not isinstance(ref, str):
+                                continue
+                            text = ref.strip()[:160]
+                            if text and text not in refs:
+                                refs.append(text)
+                            if len(refs) >= 12:
+                                break
+                        target[key] = refs
+                    continue
+                if key == "execution_reference":
+                    # A PI may tie a question to one real pass execution, but
+                    # cannot mint an identity through this mutable field.
+                    if (
+                        isinstance(value, str)
+                        and known_execution_ids is not None
+                        and value.strip() in known_execution_ids
+                    ):
+                        target[key] = value.strip()[:160]
+                    continue
+                limit = {
+                    "question": 1000,
+                    "why_it_matters": 1200,
+                    "reason": 1200,
+                    "suggested_instruction": 1400,
+                    "required_input": 1200,
+                    "execution_outcome": 1200,
+                }.get(key, 1200)
+                bounded = cls._bounded_assessment_text(value, limit)
+                if bounded is not None:
+                    target[key] = bounded
+            target["followup_id"] = followup_id
+        return current
 
     async def _run_post_execution_review(
         self,
@@ -340,8 +612,25 @@ class PostExecutionReviewMixin:
         result_status = str(result.get("status", "completed") or "completed")
         is_terminal = self._is_last_direction_round_of_batch(analysis_state)
         has_runtime = bool(getattr(self, "bioinformatics_agent", None))
-
         plan = getattr(analysis_state, "current_plan", None)
+
+        phase_value = getattr(getattr(analysis_state, "analysis_phase", ""), "value", None)
+        phase_value = str(phase_value or getattr(analysis_state, "analysis_phase", "") or "").lower()
+        round_number = int(getattr(analysis_state, "current_round", 0) or 0)
+        direction = str(getattr(analysis_state, "current_round_direction", "") or "").strip()
+        direction_key = normalize_direction_key(direction)
+        plan_phase = str(getattr(plan, "phase", "") or "").lower()
+        innovation_direction = bool(direction_key) and (
+            phase_value == AnalysisPhase.INNOVATION.value
+            or plan_phase == AnalysisPhase.INNOVATION.value
+            or (not phase_value and str(planning_stage or "").lower() == "full")
+        )
+        lineage_id = current_lineage_id(analysis_state)
+        direction_pass_id = (
+            build_result_identity_key(lineage_id, AnalysisPhase.INNOVATION.value, round_number, direction_key)
+            if innovation_direction else ""
+        )
+
         attempt_id = compute_review_attempt_id(
             int(getattr(analysis_state, "current_round", 0) or 0),
             str(getattr(plan, "id", "") or ""),
@@ -350,36 +639,102 @@ class PostExecutionReviewMixin:
             result_status,
         )
 
-        def _decline(status: str, reason: str, **extra) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        async def _decline(status: str, reason: str, **extra) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             meta = empty_review_meta(status, reason, attempt_id)
             meta["plan_audit"] = audit_summary
-            meta["round_number"] = int(
-                getattr(analysis_state, "current_round", 0) or 0
-            )
+            meta["round_number"] = round_number
+            if direction_pass_id:
+                meta.update({
+                    "direction_pass_id": direction_pass_id,
+                    "direction_key": direction_key,
+                    "direction": direction,
+                    "lineage_id": lineage_id,
+                    "lifecycle": status,
+                    "lifecycle_status": status,
+                })
             meta.update(extra)
             self._store_review(analysis_state, meta)
+            await self._persist_review_state(analysis_state)
             return meta, empty_merge
 
         # 2) Idempotency. Node retry (@with_retry, 3 attempts), websocket reconnect
         #    and Snapshot V2 restore all re-enter this node; a supplementary pass
         #    must not be paid for twice for the same execution.
-        stored = self._find_stored_review(analysis_state, attempt_id)
+        stored = self._find_stored_direction_review(analysis_state, direction_pass_id)
+        if stored is None:
+            stored = self._find_stored_review(analysis_state, attempt_id)
         if stored is not None:
             logger.info(
                 f"[{self.session_id}] reusing post-execution review for attempt {attempt_id[:8]}"
             )
+            lifecycle = str(stored.get("lifecycle") or stored.get("lifecycle_status") or "").lower()
+            replay_payload = stored.get("merge_payload")
+            if lifecycle == "terminal_persistence_pending":
+                # The paid pass already ran.  Retry the same terminal record and
+                # payload, releasing it to the caller only after the forced save
+                # is acknowledged; never call either agent again.
+                if not isinstance(replay_payload, dict):
+                    return stored, empty_merge
+                retry_record = dict(stored)
+                terminal_lifecycle = str(
+                    stored.get("terminal_lifecycle")
+                    or ("completed" if stored.get("review_status") == "completed" else "failed")
+                ).lower()
+                if terminal_lifecycle not in {"completed", "failed"}:
+                    terminal_lifecycle = "failed"
+                retry_record["lifecycle"] = terminal_lifecycle
+                retry_record["lifecycle_status"] = terminal_lifecycle
+                retry_record["persistence_status"] = "acknowledged"
+                retry_record.pop("persistence_failure", None)
+                self._store_review(analysis_state, retry_record)
+                if not await self._persist_review_state(analysis_state):
+                    retry_record["lifecycle"] = "terminal_persistence_pending"
+                    retry_record["lifecycle_status"] = "terminal_persistence_pending"
+                    retry_record["persistence_status"] = "pending"
+                    retry_record["persistence_failure"] = (
+                        "Terminal supplementary review state could not be durably "
+                        "acknowledged; the retained merge remains pending replay."
+                    )
+                    self._store_review(analysis_state, retry_record)
+                    return retry_record, empty_merge
+                retry_record["persistence_status"] = "acknowledged"
+                retry_record.pop("persistence_failure", None)
+                self._store_review(analysis_state, retry_record)
+                return retry_record, replay_payload
+            if lifecycle in {"reserved", "running", "reservation_failed"}:
+                interrupted = dict(stored)
+                interrupted["review_status"] = "interrupted"
+                interrupted["lifecycle"] = "interrupted"
+                interrupted["lifecycle_status"] = "interrupted"
+                interrupted["interruption_reason"] = (
+                    "A durable supplementary reservation has no terminal result; "
+                    "automatic rerun was not attempted."
+                )
+                interrupted["review_reason"] = interrupted["interruption_reason"]
+                self._store_review(analysis_state, interrupted)
+                await self._persist_review_state(analysis_state)
+                return interrupted, empty_merge
+            if isinstance(replay_payload, dict):
+                return stored, replay_payload
             return stored, empty_merge
 
         if audit is None:
             from .post_execution_review import PlanAudit
             audit = PlanAudit()
 
-        review_pi, reason = should_run_post_execution_review(
-            audit, admissions, result_status, is_terminal, has_runtime=has_runtime
-        )
+        if innovation_direction:
+            review_pi = True
+            reason = (
+                "Selected innovation direction receives one PI review so completed "
+                "evidence and useful remaining questions are considered together."
+            )
+        else:
+            review_pi, reason = should_run_post_execution_review(
+                audit, admissions, result_status, is_terminal, has_runtime=has_runtime
+            )
         if not review_pi:
             logger.info(f"[{self.session_id}] Post-execution review skipped: {reason}")
-            return _decline("skipped", reason)
+            return await _decline("skipped", reason)
 
         logger.info(f"[{self.session_id}] PI post-execution review requested: {reason}")
         max_iterations, step_timeout, total_timeout, max_tasks = \
@@ -390,8 +745,10 @@ class PostExecutionReviewMixin:
         # 3) PI reviews the completed result set and triages what is worth doing.
         await self._send_message("status", "PI is reviewing execution completeness...", AgentType.PI)
         agent_suggestions = self._collect_agent_suggestions(result)
-        direction = str(getattr(analysis_state, "current_round_direction", "") or "")
         session_names = await self._collect_session_names(analysis_state, result, has_runtime)
+        direction_context = build_direction_projection_block(
+            build_direction_projection(analysis_state, direction, lineage_id=lineage_id)
+        )
         try:
             raw_plan = await self.pi_agent.review_round_execution(
                 state=analysis_state,
@@ -405,15 +762,38 @@ class PostExecutionReviewMixin:
                 max_tasks=max_tasks,
                 trigger_reason=reason,
                 session_names=session_names,
+                direction_context=direction_context if innovation_direction else "",
             )
         except Exception as e:
             logger.warning(f"[{self.session_id}] post-execution review planning failed: {e}")
-            return _decline("failed", f"Review planning failed: {e}")
+            return await _decline("failed", f"Review planning failed: {e}")
+
+        # An empty/unparseable PI response means review was unavailable.  Keep
+        # the ordinary round/report path moving, but do not persist it as a PI
+        # no-action decision for an innovation direction.
+        if innovation_direction and (
+            not isinstance(raw_plan, dict)
+            or not raw_plan
+            or "parse_error" in raw_plan
+        ):
+            return await _decline(
+                "failed",
+                "Review returned no structured innovation decision; no scientific closure was recorded.",
+            )
 
         review_plan = sanitize_review_plan(
             raw_plan,
             max_tasks,
             valid_step_ids={step.step_id for step in audit.steps},
+            direction_pass_id=direction_pass_id,
+            source_round=round_number,
+            direction=direction,
+            lineage_id=lineage_id,
+        )
+        raw_verdict = raw_plan.get("verdict") if isinstance(raw_plan, dict) else None
+        explicit_no_action = (
+            isinstance(raw_verdict, str)
+            and raw_verdict.strip().lower() == "no_action"
         )
         decisions = {
             item["plan_step_id"]: item
@@ -428,13 +808,81 @@ class PostExecutionReviewMixin:
             if step.status == "completed" and getattr(step, "executed_at", None) is None:
                 step.executed_at = now
 
-        if review_plan["verdict"] == "no_action" or not review_plan["supplementary_tasks"]:
+        if review_plan["verdict"] == "no_action" and explicit_no_action:
             logger.info(f"[{self.session_id}] PI declined supplementary analysis")
-            return _decline(
+            return await _decline(
                 "no_action",
                 review_plan.get("rationale") or "PI found no supplementary analysis warranted.",
                 review_plan=review_plan,
+                followups=review_plan.get("followups") or [],
             )
+        if review_plan["verdict"] == "no_action":
+            technical_status = "unavailable" if not has_runtime else "failed"
+            technical_reason = (
+                "Supplementary execution was unavailable because no live analysis "
+                "runtime is attached; the PI review did not provide an explicit "
+                "no_action decision."
+                if not has_runtime else
+                "Supplementary execution was technically skipped because the PI "
+                "review did not provide an explicit no_action or supplement decision."
+            )
+            return await _decline(
+                technical_status,
+                technical_reason,
+                review_plan=review_plan,
+                followups=review_plan.get("followups") or [],
+                technical_skip=True,
+            )
+        if not review_plan["supplementary_tasks"]:
+            technical_status = "unavailable" if not has_runtime else "skipped"
+            technical_reason = (
+                "Supplementary execution was unavailable because no live analysis "
+                "runtime is attached; the PI request and follow-up records were retained."
+                if not has_runtime else
+                "Supplementary execution was technically skipped because its configured "
+                "task budget admitted no task; the PI request and follow-up records were retained."
+            )
+            return await _decline(
+                technical_status,
+                technical_reason,
+                review_plan=review_plan,
+                followups=review_plan.get("followups") or [],
+                technical_skip=True,
+            )
+
+        # Reserve the single direction-level pass before invoking the restricted
+        # executor. A plan/evidence-sensitive attempt id is retained for legacy
+        # records, but cannot authorize a second pass after a revision or retry.
+        reservation = {
+            "review_attempt_id": attempt_id,
+            "direction_pass_id": direction_pass_id,
+            "direction_key": direction_key,
+            "direction": direction,
+            "lineage_id": lineage_id,
+            "round_number": round_number,
+            "lifecycle": "reserved",
+            "lifecycle_status": "reserved",
+            "review_status": "reserved",
+            "review_reason": reason,
+            "review_plan": review_plan,
+            "followups": list(review_plan.get("followups") or []),
+            "review_result": {},
+            "plan_audit": audit_summary,
+            "supplementary_findings": [],
+            "evidence_records": [],
+        }
+        if direction_pass_id:
+            self._store_review(analysis_state, reservation)
+            if not await self._persist_review_state(analysis_state):
+                reservation["review_status"] = "failed"
+                reservation["lifecycle"] = "reservation_failed"
+                reservation["lifecycle_status"] = "reservation_failed"
+                reservation["review_reason"] = (
+                    "The supplementary reservation could not be durably acknowledged; "
+                    "automatic execution was skipped."
+                )
+                self._store_review(analysis_state, reservation)
+                return reservation, empty_merge
 
         # 4) Restricted execution. Its own bounded loop, its own timeout; it cannot
         #    call report_findings, consult_pi or the publication-figure pipeline,
@@ -475,41 +923,112 @@ class PostExecutionReviewMixin:
             logger.warning(f"[{self.session_id}] supplementary assessment failed: {e}")
             assessment = {"verdict": "partial", "summary": "", "resolved_gaps": [],
                           "remaining_gaps": review_plan.get("gaps", [])}
+        if not isinstance(assessment, dict):
+            assessment = {
+                "verdict": "partial",
+                "summary": "",
+                "resolved_gaps": [],
+                "remaining_gaps": review_plan.get("gaps") or [],
+            }
 
-        meta = {
-            "review_attempt_id": attempt_id,
-            "review_status": supplementary.get("status", "failed"),
-            "review_reason": reason,
-            "review_plan": review_plan,
-            "review_result": {
-                "status": supplementary.get("status"),
-                "summary": supplementary.get("summary"),
-                "warnings": supplementary.get("warnings", []),
-                "evidence_records": supplementary.get("evidence_records", []),
-            },
-            "plan_audit": audit_summary,
-            "supplementary_findings": supplementary.get("findings", []),
-            "assessment": {
-                "verdict": str(assessment.get("verdict", "partial") or "partial"),
-                "summary": str(assessment.get("summary", "") or "")[:4000],
-                "resolved_gaps": list(assessment.get("resolved_gaps") or [])[:12],
-                "remaining_gaps": list(assessment.get("remaining_gaps") or [])[:12],
-            },
-            "round_number": int(getattr(analysis_state, "current_round", 0) or 0),
-        }
-        self._store_review(analysis_state, meta)
-
+        raw_result_mapping = raw_result if isinstance(raw_result, dict) else {}
+        known_execution_ids = self._known_review_execution_ids(
+            raw_result_mapping, supplementary,
+        )
+        final_followups = self._merge_followup_assessment(
+            list(review_plan.get("followups") or []),
+            assessment,
+            known_execution_ids=set(known_execution_ids),
+        )
+        final_followups = self._attach_shared_review_outcome(
+            final_followups,
+            supplementary=supplementary,
+            known_execution_ids=known_execution_ids,
+            attempt_id=attempt_id,
+            direction_pass_id=direction_pass_id,
+        )
+        shared_outcome = self._shared_review_outcome(
+            supplementary, known_execution_ids,
+        )
+        shared_reference = self._shared_review_reference(
+            attempt_id, direction_pass_id, known_execution_ids,
+        )
         merge_payload = {
             "findings": supplementary.get("findings", []),
             "finding_records": supplementary.get("finding_records", []),
             # Restricted supplementary work repairs computational evidence only.
             # Any visual gap is returned to the main reviewed figure pipeline.
             "figures": [],
-            "code_history": raw_result.get("code_history") or [],
-            "analysis_log": raw_result.get("analysis_log") or [],
+            "code_history": raw_result_mapping.get("code_history") or [],
+            "analysis_log": raw_result_mapping.get("analysis_log") or [],
             "evidence_records": supplementary.get("evidence_records", []),
-            "assessment_summary": meta["assessment"]["summary"],
+            "assessment_summary": self._bounded_assessment_text(
+                assessment.get("summary"), 4000,
+            ) or "",
         }
+        serialized_merge = self._serialize_review_record(merge_payload)
+
+        meta = {
+            "review_attempt_id": attempt_id,
+            "direction_pass_id": direction_pass_id,
+            "direction_key": direction_key,
+            "direction": direction,
+            "lineage_id": lineage_id,
+            "review_status": supplementary.get("status", "failed"),
+            "lifecycle": "completed" if supplementary.get("status") == "completed" else "failed",
+            "lifecycle_status": "completed" if supplementary.get("status") == "completed" else "failed",
+            "review_reason": reason,
+            "review_plan": review_plan,
+            "followups": final_followups,
+            "review_result": {
+                "status": supplementary.get("status"),
+                "summary": supplementary.get("summary"),
+                "warnings": supplementary.get("warnings", []),
+                "evidence_records": supplementary.get("evidence_records", []),
+                "finding_records": supplementary.get("finding_records", []),
+            },
+            "plan_audit": audit_summary,
+            "supplementary_findings": supplementary.get("findings", []),
+            "evidence_records": supplementary.get("evidence_records", []),
+            "merge_payload": serialized_merge,
+            "assessment": {
+                "verdict": self._bounded_assessment_verdict(
+                    assessment.get("verdict"),
+                ),
+                "summary": self._bounded_assessment_text(
+                    assessment.get("summary"), 4000,
+                ) or "",
+                "resolved_gaps": self._bounded_assessment_items(
+                    assessment.get("resolved_gaps"),
+                ),
+                "remaining_gaps": self._bounded_assessment_items(
+                    assessment.get("remaining_gaps"),
+                ),
+                "execution_outcome": shared_outcome,
+                "execution_reference": shared_reference,
+            },
+            "round_number": round_number,
+        }
+        self._store_review(analysis_state, meta)
+        if direction_pass_id:
+            if not await self._persist_review_state(analysis_state):
+                # Keep every terminal field and the serialized replay payload in
+                # the existing review record.  The caller must not merge paid
+                # evidence until a later re-entry acknowledges this exact record.
+                meta["terminal_lifecycle"] = meta["lifecycle"]
+                meta["lifecycle"] = "terminal_persistence_pending"
+                meta["lifecycle_status"] = "terminal_persistence_pending"
+                meta["persistence_status"] = "pending"
+                meta["persistence_failure"] = (
+                    "Terminal supplementary review state could not be durably "
+                    "acknowledged; the retained merge remains pending replay."
+                )
+                self._store_review(analysis_state, meta)
+                logger.warning(
+                    f"[{self.session_id}] Terminal supplementary review persistence "
+                    "is pending; merge held for replay"
+                )
+                return meta, empty_merge
         logger.info(
             f"[{self.session_id}] Post-execution review complete: "
             f"status={meta['review_status']}, verdict={meta['assessment']['verdict']}, "
@@ -538,40 +1057,88 @@ class PostExecutionReviewMixin:
         evidence like any other and must be citable. `result` is updated in place
         so a re-audit sees the new executions.
         """
-        from ..models.schemas import AnalysisStep
+        from ..models.schemas import AnalysisStep, CodeExecution
 
-        tagged_records = [
-            {
+        def _identity(value: Any) -> str:
+            return str(getattr(value, "id", None) or (value.get("id") if isinstance(value, dict) else "") or "").strip()
+
+        def _record_key(record: Any) -> Tuple[str, str, Tuple[str, ...]]:
+            if isinstance(record, dict):
+                return (
+                    str(record.get("id") or ""),
+                    str(record.get("text") or "").strip(),
+                    tuple(sorted(str(item) for item in (record.get("evidence_execution_ids") or []))),
+                )
+            return (
+                str(getattr(record, "id", "") or ""),
+                str(getattr(record, "text", "") or "").strip(),
+                tuple(sorted(str(item) for item in (getattr(record, "evidence_execution_ids", None) or []))),
+            )
+
+        existing_record_keys = {
+            _record_key(record)
+            for record in (result.get("finding_records") or [])
+            if isinstance(record, dict)
+        }
+        tagged_records = []
+        for record in (merge_payload.get("finding_records") or []):
+            if not isinstance(record, dict) or not str(record.get("text", "")).strip():
+                continue
+            original_key = _record_key(record)
+            tagged_record = {
                 **record,
                 "text": f"[Supplementary] {record.get('text', '')}",
             }
-            for record in (merge_payload.get("finding_records") or [])
-            if isinstance(record, dict) and str(record.get("text", "")).strip()
-        ]
+            key = _record_key(tagged_record)
+            if key in existing_record_keys or original_key in existing_record_keys:
+                continue
+            existing_record_keys.add(key)
+            tagged_records.append(tagged_record)
         tagged = [record["text"] for record in tagged_records]
-        merged_findings = list(all_findings) + tagged
+        merged_findings = list(all_findings)
+        for finding in (merge_payload.get("findings") or []):
+            text = f"[Supplementary] {str(finding).strip()}"
+            if text.strip() and text not in merged_findings:
+                merged_findings.append(text)
+        for finding in tagged:
+            if finding not in merged_findings:
+                merged_findings.append(finding)
         # Defense in depth for old checkpoints or mocked executors carrying the
         # pre-isolation payload shape: unreviewed supplementary images never join
         # the round's archival figure collection.
         merged_figures = list(all_figures)
 
-        existing_code_ids = {c.id for c in analysis_state.code_history}
+        existing_code_ids = {_identity(c) for c in analysis_state.code_history if _identity(c)}
         added_executions = []
+        replay_executions = []
+        replay_ids: Set[str] = set()
         for execution in merge_payload.get("code_history") or []:
-            if getattr(execution, "id", None) is None or execution.id in existing_code_ids:
+            if isinstance(execution, dict):
+                try:
+                    execution = CodeExecution(**execution)
+                except Exception:
+                    continue
+            execution_id = _identity(execution)
+            if not execution_id:
+                continue
+            if execution_id in replay_ids:
+                continue
+            replay_ids.add(execution_id)
+            replay_executions.append(execution)
+            if execution_id in existing_code_ids:
                 continue
             analysis_state.code_history.append(execution)
             existing_code_ids.add(execution.id)
             added_executions.append(execution)
 
-        existing_step_ids = {s.id for s in analysis_state.analysis_log}
+        existing_step_ids = {_identity(s) for s in analysis_state.analysis_log if _identity(s)}
         for step in merge_payload.get("analysis_log") or []:
             if isinstance(step, dict):
                 try:
                     step = AnalysisStep(**step)
                 except Exception:
                     continue
-            if step.id in existing_step_ids:
+            if not _identity(step) or step.id in existing_step_ids:
                 continue
             step.round_number = max(int(getattr(analysis_state, "current_round", 1) or 1), 1)
             analysis_state.analysis_log.append(step)
@@ -580,12 +1147,15 @@ class PostExecutionReviewMixin:
         # Keep the raw result consistent so the re-audit and any later reader see
         # the supplementary executions as part of this round.
         result["findings"] = merged_findings
-        result["finding_records"] = list(
-            result.get("finding_records") or []
-        ) + tagged_records
+        result["finding_records"] = list(result.get("finding_records") or []) + tagged_records
         result["figures"] = merged_figures
-        if added_executions:
-            result["code_history"] = list(result.get("code_history") or []) + added_executions
+        if replay_executions:
+            current_result_ids = {
+                _identity(item) for item in (result.get("code_history") or []) if _identity(item)
+            }
+            result["code_history"] = list(result.get("code_history") or []) + [
+                item for item in replay_executions if _identity(item) not in current_result_ids
+            ]
             # Successful supplementary executions ARE citable evidence, so they join
             # the round's evidence ids — the report and the audit both need them.
             #
@@ -598,11 +1168,14 @@ class PostExecutionReviewMixin:
             # more cells does not make those findings bound. Overwriting it would
             # buy coverage eligibility by erasing the fact that earned the
             # ineligibility — exactly the hedging the gate exists to force.
-            fresh_ids = [e.id for e in added_executions if not getattr(e, "error", None)]
-            if fresh_ids:
+            successful_ids = [
+                _identity(e) for e in replay_executions if not getattr(e, "error", None)
+            ]
+            if successful_ids:
+                existing_evidence_ids = list(result.get("evidence_execution_ids") or [])
                 result["evidence_execution_ids"] = list(
-                    result.get("evidence_execution_ids") or []
-                ) + fresh_ids
+                    dict.fromkeys(existing_evidence_ids + successful_ids)
+                )
 
         logger.info(
             f"[{self.session_id}] Merged supplementary pass: +{len(tagged)} finding(s), "

@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.52.12 · **Last updated**: 2026-09-06
+**Version**: 0.53.1 · **Last updated**: 2026-09-07
 
 ## 1. Runtime Architecture
 
@@ -350,6 +350,22 @@ six minutes per occurrence rather than blocking.
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.53.x — (2026-09-07 onward)**
+
+- `0.53.1` — Adds conditional deepening for selected innovation directions: one
+  PI-owned review can request a bounded supplementary pass within the shared
+  budget, while durable reservation and replay preserve original and
+  supplementary execution evidence without rerunning a paid pass. Early
+  direction context and bounded follow-ups now flow through synthesis and
+  detailed reports. Actionable follow-ups open editable, lineage-scoped Chat
+  drafts without automatic execution, and Chat outcomes preserve session and
+  branch identity across success, error, cancellation, history, and WebSocket
+  paths. Generated and regenerated report HTML share the same Markdown escaping
+  behavior. Focused backend evidence passed `87/87` nodes, the report-rendering
+  regression passed `3/3`, and the isolated frontend suite passed `413/413`
+  tests in `188/188` suites. No client, kernel, backend-full, image-build,
+  deployment, or historical-session mutation was performed.
 
 **0.52.x — (2026-09-03 onward)**
 

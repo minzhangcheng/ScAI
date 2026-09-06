@@ -476,6 +476,8 @@ export interface ChatMessage {
   delegation_active?: boolean
   pending_figures?: boolean
   reply_to?: string
+  followup_id?: string
+  branch_id?: string
   files?: { filename: string; type: string; target_agent?: string }[]
   figures?: {
     name: string

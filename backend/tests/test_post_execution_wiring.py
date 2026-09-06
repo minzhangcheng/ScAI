@@ -31,7 +31,7 @@ _PDF_SHA256 = "0" * 64
 class _Harness(PostExecutionReviewMixin):
     """Minimal host for the mixin: only the collaborators it actually reaches."""
 
-    def __init__(self, pi=None, bio=None, config=None, state=None):
+    def __init__(self, pi=None, bio=None, config=None, state=None, state_callback=None):
         self.session_id = "sess-test"
         self.pi_agent = pi
         self.bioinformatics_agent = bio
@@ -43,7 +43,12 @@ class _Harness(PostExecutionReviewMixin):
             max_rounds=3,
         )
         self.sent = []
+        self.saves = []
         self._current_analysis_state = state
+        async def _save(current, force=False):
+            self.saves.append((current, force))
+            return True
+        self.state_callback = state_callback or _save
 
     async def _send_message(self, kind, payload, agent=None):
         self.sent.append((kind, payload, agent))
@@ -59,6 +64,7 @@ def _state(plan=None, **kwargs):
         max_rounds=3,
         current_plan=plan,
         current_round_direction="test direction",
+        restore_branch_id=None,
         code_history=[],
         analysis_log=[],
         score_definitions=[],
@@ -546,10 +552,12 @@ class _PI:
                                           "remaining_gaps": []}
         self._raise = raise_on_review
         self.review_calls = 0
+        self.review_inputs = []
         self.assessment_inputs = []
 
     async def review_round_execution(self, **kwargs):
         self.review_calls += 1
+        self.review_inputs.append(kwargs)
         if self._raise:
             raise RuntimeError("planner down")
         return self._plan
@@ -564,9 +572,11 @@ class _Bio:
         self._result = result
         self._raise = raise_on_run
         self.calls = 0
+        self.task_inputs = []
 
     async def run_supplementary_tasks(self, **kwargs):
         self.calls += 1
+        self.task_inputs.append(kwargs)
         if self._raise:
             raise RuntimeError("executor down")
         return self._result if self._result is not None else {
@@ -640,6 +650,8 @@ async def test_fully_evidenced_round_is_still_reviewed_by_pi_without_supplement(
 
     assert meta["review_status"] == "no_action"
     assert pi.review_calls == 1 and bio.calls == 0 and merge == {}
+    assert pi.review_inputs[0]["direction"] == "D1"
+    assert "D1" in pi.review_inputs[0]["direction_context"]
     assert plan.steps[0].status == "completed"
     assert plan.steps[0].executed_at is not None
 
@@ -705,6 +717,166 @@ async def test_unmet_step_triggers_pass_and_merges_back():
 
 
 @pytest.mark.asyncio
+async def test_repair_and_deepening_share_one_configured_pass_budget():
+    plan = _plan([PlanStep(id=1, title="Pathway activity", method="Run decoupler run_ulm")])
+    state = _state(plan)
+    pi = _PI(plan={
+        "gaps": ["The approved pathway step is incomplete."],
+        "step_decisions": [],
+        "supplementary_tasks": ["Repair the approved pathway computation", "Deepen the selected direction"],
+        "verdict": "supplement",
+    })
+    bio = _Bio()
+    cfg = SimpleNamespace(
+        enable_post_execution_review=True,
+        post_execution_review_max_tasks=1,
+        post_execution_review_max_iterations=5,
+        post_execution_review_timeout_seconds=900,
+        max_rounds=3,
+    )
+    harness = _Harness(pi=pi, bio=bio, config=cfg)
+
+    meta, merge = await harness._run_post_execution_review(
+        state, _unmet_result(), {"n_unmet": 1}, "full",
+    )
+
+    assert meta["review_status"] == "completed"
+    assert bio.calls == 1
+    assert bio.task_inputs[0]["tasks"] == ["Repair the approved pathway computation"]
+    assert bio.task_inputs[0]["max_iterations"] == 5
+    assert merge["findings"]
+
+
+@pytest.mark.asyncio
+async def test_reservation_save_failure_skips_automatic_execution():
+    plan = _plan([PlanStep(id=1, title="Pathway activity", method="Run decoupler run_ulm")])
+    state = _state(plan)
+    pi, bio = _PI(), _Bio()
+    saves = []
+
+    async def fail_save(_state, force=False):
+        saves.append(force)
+        return False
+
+    harness = _Harness(
+        pi=pi, bio=bio, state_callback=fail_save,
+    )
+    meta, merge = await harness._run_post_execution_review(
+        state, _unmet_result(), {"n_unmet": 1}, "full",
+    )
+
+    assert meta["lifecycle"] == "reservation_failed"
+    assert meta["review_status"] == "failed"
+    assert merge == {}
+    assert bio.calls == 0
+    assert saves == [True]
+
+
+@pytest.mark.asyncio
+async def test_terminal_save_failure_holds_replay_until_ack_without_rerun():
+    """A paid pass is replayable after terminal persistence is acknowledged."""
+    plan = _plan([PlanStep(id=1, title="Pathway activity", method="Run decoupler run_ulm")])
+    state = _state(plan)
+    pi, bio = _PI(), _Bio()
+    save_outcomes = iter([True, False, True])
+    events = []
+
+    async def save(current, force=False):
+        events.append(("save", force, bio.calls))
+        return next(save_outcomes)
+
+    harness = _Harness(pi=pi, bio=bio, state=state, state_callback=save)
+    result = _unmet_result()
+    original_result = dict(result)
+
+    first, held_merge = await harness._run_post_execution_review(
+        state, result, {"n_unmet": 1}, "full",
+    )
+
+    assert bio.calls == 1 and pi.review_calls == 1
+    assert held_merge == {}
+    assert result == original_result
+    assert first["lifecycle"] == "terminal_persistence_pending"
+    assert first["persistence_status"] == "pending"
+    assert first["merge_payload"]["findings"] == [
+        "Pathway activity is elevated in the treated group [execution_id supp-1]."
+    ]
+    assert first["merge_payload"]["code_history"]
+    assert events[:2] == [("save", True, 0), ("save", True, 1)]
+
+    second, replay = await harness._run_post_execution_review(
+        state, result, {"n_unmet": 1}, "full",
+    )
+
+    assert bio.calls == 1 and pi.review_calls == 1
+    assert events == [("save", True, 0), ("save", True, 1), ("save", True, 1)]
+    assert second["lifecycle"] == "completed"
+    assert second["persistence_status"] == "acknowledged"
+    assert replay["findings"] == first["merge_payload"]["findings"]
+    findings, _ = harness._merge_supplementary_into_round(
+        state, result, result["findings"], result["figures"], replay,
+    )
+    replay_findings, _ = harness._merge_supplementary_into_round(
+        state, result, findings, result["figures"], replay,
+    )
+    assert replay_findings == findings
+    assert [item.id for item in state.code_history].count("supp-1") == 1
+
+
+@pytest.mark.asyncio
+async def test_nonterminal_direction_reservation_is_reconciled_as_interrupted():
+    from backend.utils.direction_payload import direction_pass_identity
+
+    plan = _plan([PlanStep(id=1, title="Pathway activity", method="Run decoupler run_ulm")])
+    state = _state(plan, post_execution_reviews=[{
+        "direction_pass_id": direction_pass_identity("main", 2, "test direction"),
+        "direction_key": "test direction",
+        "direction": "test direction",
+        "lineage_id": "main",
+        "round_number": 2,
+        "lifecycle": "reserved",
+        "lifecycle_status": "reserved",
+        "review_status": "reserved",
+        "review_plan": {"supplementary_tasks": ["run once"]},
+    }])
+    pi, bio = _PI(), _Bio()
+    harness = _Harness(pi=pi, bio=bio)
+
+    meta, merge = await harness._run_post_execution_review(
+        state, _unmet_result(), {"n_unmet": 1}, "full",
+    )
+
+    assert meta["lifecycle"] == "interrupted"
+    assert meta["review_status"] == "interrupted"
+    assert "no terminal result" in meta["interruption_reason"]
+    assert pi.review_calls == 0 and bio.calls == 0
+    assert merge == {}
+
+
+@pytest.mark.asyncio
+async def test_direction_pass_identity_reuses_terminal_work_after_plan_revision():
+    plan = _plan([PlanStep(id=1, title="Pathway activity", method="Run decoupler run_ulm")])
+    state = _state(plan)
+    pi, bio = _PI(), _Bio()
+    harness = _Harness(pi=pi, bio=bio)
+
+    first, _ = await harness._run_post_execution_review(
+        state, _unmet_result(), {"n_unmet": 1}, "full",
+    )
+    state.current_plan = _plan([PlanStep(id=1, title="Revised pathway activity", method="Run decoupler run_ulm")])
+    revised_result = _unmet_result()
+    revised_result["evidence_execution_ids"] = ["new-receipt"]
+    second, replay = await harness._run_post_execution_review(
+        state, revised_result, {"n_unmet": 1}, "revision",
+    )
+
+    assert second["direction_pass_id"] == first["direction_pass_id"]
+    assert second["review_attempt_id"] == first["review_attempt_id"]
+    assert pi.review_calls == 1 and bio.calls == 1
+    assert replay["findings"] == first["supplementary_findings"]
+
+
+@pytest.mark.asyncio
 async def test_evidence_records_reach_pi_and_meta_without_raw_provenance():
     plan = _plan([PlanStep(id=1, title="Pathway activity", method="Run decoupler run_ulm")])
     state = _state(plan)
@@ -748,6 +920,87 @@ async def test_evidence_records_reach_pi_and_meta_without_raw_provenance():
     assert merge["findings"] == []
     import json
     json.dumps(meta)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pass_status", "execution_id", "execution_error"),
+    [("completed", "supp-assessment-ok", ""), ("failed", "supp-assessment-failed", "RuntimeError")],
+)
+async def test_assessment_is_bounded_and_keeps_attempt_outcome_and_ids(
+    pass_status, execution_id, execution_error,
+):
+    plan = _plan([PlanStep(id=1, title="Pathway activity", method="Run decoupler run_ulm")])
+    state = _state(plan)
+    evidence_records = [{
+        "execution_id": execution_id,
+        "status": pass_status,
+        "stdout_excerpt": "result output",
+        "error": execution_error,
+    }]
+    execution = _execution("dc.run_ulm(adata)", error=execution_error or None, exec_id=execution_id)
+    raw_result = {
+        "status": pass_status,
+        "summary": "Attempted the requested supplementary analysis.",
+        "findings": [],
+        "figures": [],
+        "warnings": [],
+        "evidence_records": evidence_records,
+        "code_history": [execution],
+        "analysis_log": [],
+    }
+    followup_plan = {
+        "gaps": ["The question remains open."],
+        "step_decisions": [],
+        "supplementary_tasks": ["Run the requested computation"],
+        "followups": [{
+            "question": "Which result should be checked next?",
+            "disposition": "offer_in_chat",
+            "suggested_instruction": "Inspect the retained result.",
+        }],
+        "verdict": "supplement",
+    }
+
+    class _MalformedAssessmentPI(_PI):
+        async def assess_supplementary_result(self, **kwargs):
+            self.assessment_inputs.append(kwargs)
+            followup_id = kwargs["review_plan"]["followups"][0]["followup_id"]
+            return {
+                "verdict": "resolved",
+                "summary": {"unexpected": ["nested"]},
+                "resolved_gaps": "scalar gap",
+                "remaining_gaps": {"nested": ["oversized"]},
+                "followups": [{
+                    "followup_id": followup_id,
+                    "question": "Q" * 5000,
+                    "execution_outcome": {"nested": "not prose"},
+                    "execution_reference": "forged-reference",
+                }],
+            }
+
+    pi = _MalformedAssessmentPI(plan=followup_plan)
+    harness = _Harness(pi=pi, bio=_Bio(result=raw_result))
+    result = _unmet_result()
+    meta, merge = await harness._run_post_execution_review(
+        state, result, {"n_unmet": 1}, "full",
+    )
+
+    assert meta["assessment"]["summary"] == ""
+    assert meta["assessment"]["resolved_gaps"] == []
+    assert meta["assessment"]["remaining_gaps"] == []
+    followup = meta["followups"][0]
+    assessed_id = pi.assessment_inputs[0]["review_plan"]["followups"][0]["followup_id"]
+    assert followup["followup_id"] == assessed_id
+    assert len(followup["question"]) <= 1000
+    assert pass_status in followup["execution_outcome"]
+    assert execution_id in followup["execution_reference"]
+    assert meta["assessment"]["execution_outcome"].startswith(
+        f"Shared supplementary pass outcome: {pass_status}"
+    )
+    assert execution_id in meta["assessment"]["execution_reference"]
+    assert merge["evidence_records"] == evidence_records
+    assert merge["code_history"][0].id == execution_id
+    assert result["evidence_execution_ids"] == ["e1"]
 
 
 def test_merge_discards_unreviewed_automatic_supplementary_figures():
@@ -924,7 +1177,19 @@ async def test_pass_is_paid_for_once_per_execution():
 
     assert pi.review_calls == 1 and bio.calls == 1, "re-entry must reuse the stored review"
     assert second["review_attempt_id"] == first["review_attempt_id"]
-    assert merge == {}, "a reused review must not merge its findings twice"
+    # A terminal review is replayed through the stored merge payload. The caller's
+    # identity-based merge remains responsible for suppressing duplicate findings
+    # and receipts on the re-entry.
+    assert merge["findings"] == first["supplementary_findings"]
+    findings, figures = harness._merge_supplementary_into_round(
+        state, result, result["findings"], result["figures"], merge,
+    )
+    replay_findings, replay_figures = harness._merge_supplementary_into_round(
+        state, result, findings, figures, merge,
+    )
+    assert replay_findings == findings
+    assert replay_figures == figures
+    assert [item.id for item in state.code_history].count("supp-1") == 1
 
 
 @pytest.mark.asyncio
@@ -961,7 +1226,8 @@ async def test_tasks_without_explicit_pi_supplement_verdict_never_execute():
         state, _unmet_result(), audit_summary, "full"
     )
 
-    assert meta["review_status"] == "no_action"
+    assert meta["review_status"] == "failed"
+    assert meta["technical_skip"] is True
     assert bio.calls == 0 and merge == {}
 
 
@@ -994,7 +1260,8 @@ async def test_zero_task_budget_still_reports_observations_to_pi():
     meta, _ = await harness._run_post_execution_review(
         state, _unmet_result(), audit_summary, "full")
 
-    assert meta["review_status"] == "no_action"
+    assert meta["review_status"] == "skipped"
+    assert meta["technical_skip"] is True
     assert meta["plan_audit"]["n_unmet"] == 1, "the audit still runs and is recorded"
     assert pi.review_calls == 1 and bio.calls == 0
 
@@ -1037,7 +1304,9 @@ async def test_no_runtime_still_reports_observations_but_runs_no_tasks():
     meta, merge = await harness._run_post_execution_review(
         state, _unmet_result(), audit_summary, "full")
 
-    assert meta["review_status"] == "no_action" and merge == {}
+    assert meta["review_status"] == "unavailable"
+    assert meta["technical_skip"] is True
+    assert merge == {}
     assert harness.pi_agent.review_calls == 1
 
 
@@ -1062,5 +1331,5 @@ async def test_last_direction_triggers_on_an_otherwise_clean_round():
     meta, _ = await harness._run_post_execution_review(
         state, _unmet_result(), audit_summary, "full")
 
-    assert "last direction" in meta["review_reason"].lower()
+    assert "selected innovation direction" in meta["review_reason"].lower()
     assert pi.review_calls == 1

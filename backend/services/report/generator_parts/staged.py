@@ -364,6 +364,10 @@ async def _assemble_report(
         record_files,
         reports_dir=generator.output_dir,
     )
+    followups = bindings.build_report_followups(
+        report_state,
+        lineage_id=generator.target_lineage_id,
+    )
     appendix_data = {
         "project_name": report_state.name,
         "project_description": report_state.initial_instruction,
@@ -451,6 +455,7 @@ async def _assemble_report(
     report = {
         "id": report_id,
         "session_id": report_state.id,
+        "branch_id": None if generator.target_lineage_id == "main" else generator.target_lineage_id,
         "title": report_plan.get("title") or report_state.name,
         "abstract": abstract,
         "sections": sections,
@@ -468,6 +473,7 @@ async def _assemble_report(
         "unreported_figures": unreported_figures,
         "quality_disclosures": quality_disclosures,
         "degraded_fallback": force_fallback,
+        "followups": followups,
         "appendix": appendix_data,
         "analysis_log": generator._build_full_analysis_log(report_state),
         "score_definitions": [sd.model_dump(mode="json") for sd in report_state.score_definitions] if report_state.score_definitions else [],

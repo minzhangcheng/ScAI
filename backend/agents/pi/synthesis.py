@@ -9,6 +9,10 @@ import logging
 
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ..prompt_blocks import build_integration_block
+from ...utils.direction_payload import (
+    build_direction_projection_block,
+    collect_direction_projections,
+)
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -432,9 +436,27 @@ Current research direction: {current_direction or "N/A"}
                 cross_modal_block = "\n## Literature Context Summary\n" + "\n".join(lit_parts)
 
         mech_lines = []
-        for r in state.round_results[-3:]:
-            for p in (getattr(r, "data_driven_mechanism_programs", []) or [])[:3]:
-                mech_lines.append(f"- {p.to_prompt_text(style='compact', max_observations=2, max_genes=8, max_alternatives=2, max_missing=2)}")
+        # Use the selected-direction projection rather than a recency slice. An
+        # early direction remains part of the final PI context even after later
+        # rounds, while the projection itself applies lineage and per-direction
+        # bounds and retains source execution references and limiting evidence.
+        for projection in collect_direction_projections(state):
+            block = build_direction_projection_block(projection, max_chars=5000)
+            if block:
+                mech_lines.append(block)
+        if not mech_lines:
+            # Legacy records may have mechanism programs but no direction key.
+            # Preserve that evidence without silently discarding older rounds.
+            for result in state.round_results:
+                for program in (getattr(result, "data_driven_mechanism_programs", []) or [])[:3]:
+                    program_text = program.to_prompt_text(
+                        style="compact",
+                        max_observations=2,
+                        max_genes=8,
+                        max_alternatives=2,
+                        max_missing=2,
+                    )
+                    mech_lines.append(f"- {program_text}")
         mechanism_block = ""
         if mech_lines:
             mechanism_block = (

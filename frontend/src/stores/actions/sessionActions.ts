@@ -2,16 +2,18 @@ import type { StoreApi } from 'zustand'
 
 import { DEFAULT_SIDEBAR_WIDTH, clampSidebarWidth } from '../../constants/layout'
 import type { AppState } from '../appState'
+import { normalizeBranchId } from '../../utils/chatOwnership'
 
 type SetState = StoreApi<AppState>['setState']
 type GetState = StoreApi<AppState>['getState']
 
 type CurrentSessionKeys = 'currentSession' | 'setCurrentSession' | 'updateSession'
+  | 'pendingChatFollowup' | 'setPendingChatFollowup'
 
 export function createCurrentSessionActions(set: SetState): Pick<AppState, CurrentSessionKeys> {
   return {
     currentSession: null,
-    setCurrentSession: currentSession => set({
+    setCurrentSession: currentSession => set(state => ({
       currentSession,
       snapshotCount: 0,
       showSnapshotCleanupReminder: false,
@@ -22,10 +24,23 @@ export function createCurrentSessionActions(set: SetState): Pick<AppState, Curre
       explorationFailedInfo: null,
       showExplorationFailedDialog: false,
       realtimeHistoryError: null,
-    }),
+      ...(state.currentSession?.id !== currentSession?.id
+        || normalizeBranchId(state.currentSession?.restoreBranchId)
+          !== normalizeBranchId(currentSession?.restoreBranchId)
+        ? { pendingChatFollowup: null }
+        : {}),
+    })),
     updateSession: updates => set(state => ({
       currentSession: state.currentSession ? { ...state.currentSession, ...updates } : null,
+      ...(Object.prototype.hasOwnProperty.call(updates, 'restoreBranchId')
+        && state.currentSession
+        && normalizeBranchId(state.currentSession.restoreBranchId)
+          !== normalizeBranchId(updates.restoreBranchId)
+        ? { pendingChatFollowup: null }
+        : {}),
     })),
+    pendingChatFollowup: null,
+    setPendingChatFollowup: pendingChatFollowup => set({ pendingChatFollowup }),
   }
 }
 

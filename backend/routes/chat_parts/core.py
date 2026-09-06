@@ -34,7 +34,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/session", tags=["chat"])
 
-def _build_chat_context(state: Any) -> tuple:
+def _build_chat_context(
+    state: Any,
+    direction_context: str = "",
+) -> tuple:
     """Build analysis context summary for PI Agent chat.
 
     Returns:
@@ -77,6 +80,16 @@ def _build_chat_context(state: Any) -> tuple:
     # Final summary
     if state.final_summary:
         parts.append(f"\nFinal Summary: {state.final_summary[:1000]}")
+
+    # A report follow-up may refer to a direction from an older round.  The
+    # caller resolves that context against the owned session before any chat
+    # mutation; keep the optional block separate from the ordinary recency
+    # summary so it cannot be supplied by the client.
+    if isinstance(direction_context, str) and direction_context.strip():
+        parts.append(
+            "\nServer-resolved selected-direction context:\n"
+            + direction_context.strip()
+        )
 
     # Literature reports
     if state.literature_reports:

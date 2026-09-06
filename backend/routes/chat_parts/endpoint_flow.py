@@ -1,7 +1,7 @@
 """Phases for chat_with_pi."""
 from __future__ import annotations
 
-from fastapi import File, Form
+from fastapi import File, Form, HTTPException
 
 from backend.constants import NO_OUTPUT_TOKEN_CAP
 
@@ -25,6 +25,8 @@ async def chat_with_pi(
     file_types: str = Form(default="[]"),
     message_id: str = Form(default=""),
     files: List[UploadFile] = File(default=[]),
+    followup_id: str = Form(default=""),
+    branch_id: str = Form(default=""),
 ):
     """Chat with PI Agent using analysis context. Supports file uploads with per-file agent targeting."""
     from backend.utils.agent_llm import get_agent_llm_client
@@ -45,6 +47,41 @@ async def chat_with_pi(
         raise HTTPException(
             status_code=409,
             detail="Cannot chat while a snapshot or restore operation is in progress",
+        )
+
+    # Resolve report handoffs against the live session lineage before uploads,
+    # message append, or any other durable mutation.  A handoff never changes
+    # the runtime branch selected by the session.
+    active_lineage = str(
+        getattr(state, "restore_branch_id", None) or "main"
+    ).strip() or "main"
+    requested_followup_id = (
+        followup_id.strip() if isinstance(followup_id, str) else ""
+    )
+    resolved_followup: Dict[str, Any] | None = None
+    direction_context = ""
+    handoff_branch_id = active_lineage
+    if requested_followup_id:
+        requested_branch_id = (
+            branch_id.strip() if isinstance(branch_id, str) else active_lineage
+        ) or active_lineage
+        if requested_branch_id != active_lineage:
+            raise HTTPException(
+                status_code=400,
+                detail="Chat follow-up branch does not match the active session branch",
+            )
+        resolved_followup = resolve_followup_reference(
+            state,
+            requested_followup_id,
+            lineage_id=active_lineage,
+        )
+        if resolved_followup is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Chat follow-up reference is missing, stale, or not owned by this session branch",
+            )
+        direction_context = build_direction_projection_block(
+            resolved_followup.get("source_context")
         )
 
     # Parse per-file metadata arrays
@@ -74,22 +111,33 @@ async def chat_with_pi(
                 per_file_types=per_file_types,
                 message=message,
                 message_id=user_message_id,
+                followup_id=requested_followup_id,
+                branch_id=handoff_branch_id,
             )
         )
     else:
         saved_files = []
         image_b64_list = []
         data_file_contents = []
-        state.chat_messages.append({
+        user_message = {
             "id": user_message_id,
             "role": "user",
             "content": message,
             "timestamp": datetime.now().isoformat(),
             "files": [],
-        })
+        }
+        if requested_followup_id:
+            user_message.update({
+                "followup_id": requested_followup_id,
+                "branch_id": handoff_branch_id,
+            })
+        state.chat_messages.append(user_message)
 
     # --- Build context & prompt ---
-    context, figure_inventory = _build_chat_context(state)
+    if direction_context:
+        context, figure_inventory = _build_chat_context(state, direction_context)
+    else:
+        context, figure_inventory = _build_chat_context(state)
     _custom_models = state.custom_models or {}
     _custom_temps = state.custom_temperatures or {}
     pi_model = _custom_models.get(PI_AGENT_NAME) or getattr(config.models, f"{PI_AGENT_NAME}_model", "")
@@ -195,6 +243,9 @@ async def chat_with_pi(
             image_b64_list,
             saved_files,
             user_message_id,
+            followup_id=requested_followup_id,
+            branch_id=handoff_branch_id,
+            source_context=direction_context,
         )
 
         return {"status": "processing", "plan": delegation.get("plan", "")}
@@ -237,6 +288,11 @@ async def chat_with_pi(
         "reply_to": user_message_id,
         "pending_figures": bool(generate_requests),
     }
+    if requested_followup_id:
+        assistant_msg.update({
+            "followup_id": requested_followup_id,
+            "branch_id": handoff_branch_id,
+        })
     if response_figures:
         assistant_msg["figures"] = list(response_figures)
     state.chat_messages.append(assistant_msg)

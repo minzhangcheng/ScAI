@@ -53,6 +53,10 @@ from backend.routes.upload import (
 )
 from backend.utils.settings_provider import AgentSettingsProvider
 from backend.utils.sandbox import _TPL_NOOP_INSTALL
+from backend.utils.direction_payload import (
+    build_direction_projection_block,
+    resolve_followup_reference,
+)
 
 from .core import _build_chat_context, router
 
@@ -226,6 +230,8 @@ async def _commit_chat_uploads(
     per_file_types: list,
     message: str,
     message_id: str | None = None,
+    followup_id: str = "",
+    branch_id: str = "main",
 ) -> tuple[List[Dict[str, Any]], List[str], List[str]]:
     """Atomically publish one generation-bound group of chat attachments."""
     _preflight_chat_upload_limits(files)
@@ -373,6 +379,11 @@ async def _commit_chat_uploads(
                 "timestamp": datetime.now().isoformat(),
                 "files": saved_files,
             }
+            if followup_id:
+                user_message_record.update({
+                    "followup_id": followup_id,
+                    "branch_id": branch_id,
+                })
             state.chat_messages.append(user_message_record)
 
             save_task = asyncio.create_task(
@@ -428,11 +439,21 @@ async def _run_owned_chat_delegation(
     user_content: str,
     image_b64_list: List[str],
     saved_files: List[Dict[str, Any]],
+    followup_id: str,
+    branch_id: str,
+    source_context: str,
 ) -> None:
     """Run only after durable publication and retire only this exact owner."""
     owner = asyncio.current_task()
     try:
         await start_event.wait()
+        delegation_kwargs = {}
+        if followup_id:
+            delegation_kwargs = {
+                "followup_id": followup_id,
+                "branch_id": branch_id,
+                "source_context": source_context,
+            }
         await _run_chat_delegation(
             session_id,
             state,
@@ -440,6 +461,7 @@ async def _run_owned_chat_delegation(
             user_content,
             image_b64_list,
             saved_files,
+            **delegation_kwargs,
         )
     finally:
         async with chat_task_lock:
@@ -455,6 +477,10 @@ async def _publish_chat_delegation(
     image_b64_list: List[str],
     saved_files: List[Dict[str, Any]],
     user_message_id: str = "",
+    *,
+    followup_id: str = "",
+    branch_id: str = "main",
+    source_context: str = "",
 ) -> asyncio.Task:
     """Atomically reserve, persist, and release one generation-bound task."""
     start_event = asyncio.Event()
@@ -469,6 +495,11 @@ async def _publish_chat_delegation(
         "delegation_active": True,
         "reply_to": user_message_id,
     }
+    if followup_id:
+        placeholder.update({
+            "followup_id": followup_id,
+            "branch_id": branch_id,
+        })
     task: asyncio.Task | None = None
     publication_committed = False
 
@@ -492,11 +523,14 @@ async def _publish_chat_delegation(
                         session_id,
                         start_event,
                         state,
-                        delegation,
-                        user_content,
-                        image_b64_list,
-                        saved_files,
-                    ),
+                    delegation,
+                    user_content,
+                    image_b64_list,
+                    saved_files,
+                    followup_id,
+                    branch_id,
+                    source_context,
+                ),
                     name=f"chat-delegation:{session_id}",
                 )
                 chat_tasks[session_id] = task
@@ -547,10 +581,34 @@ async def _publish_chat_delegation(
 
 
 @router.post("/{session_id}/chat")
-async def chat_with_pi(request: Request, session_id: str, message: str=Form(...), target_agents: str=Form(default='[]'), file_groups: str=Form(default='[]'), file_samples: str=Form(default='[]'), file_types: str=Form(default='[]'), message_id: str=Form(default=''), files: List[UploadFile]=File(default=[])):
+async def chat_with_pi(
+    request: Request,
+    session_id: str,
+    message: str = Form(...),
+    target_agents: str = Form(default='[]'),
+    file_groups: str = Form(default='[]'),
+    file_samples: str = Form(default='[]'),
+    file_types: str = Form(default='[]'),
+    message_id: str = Form(default=''),
+    files: List[UploadFile] = File(default=[]),
+    followup_id: str = Form(default=''),
+    branch_id: str = Form(default=''),
+):
     """Chat with PI Agent using analysis context. Supports file uploads with per-file agent targeting."""
     endpoint_flow.bind_facade(sys.modules[__name__])
-    return await endpoint_flow.chat_with_pi(request, session_id, message, target_agents, file_groups, file_samples, file_types, message_id, files)
+    return await endpoint_flow.chat_with_pi(
+        request,
+        session_id,
+        message,
+        target_agents,
+        file_groups,
+        file_samples,
+        file_types,
+        message_id,
+        files,
+        followup_id=followup_id,
+        branch_id=branch_id,
+    )
 
 @router.post("/{session_id}/chat/cancel")
 async def cancel_chat(request: Request, session_id: str):

@@ -9,6 +9,10 @@ import logging
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ...utils.formatting import as_list, coerce_json_text
 from ...services.sample_design import sequencing_design_instruction
+from ...utils.direction_payload import (
+    build_direction_projection,
+    build_direction_projection_block,
+)
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -305,6 +309,9 @@ Reply in JSON format:
         """
         logger.info(f"[PI] Generating innovation-phase instructions for direction: {user_direction[:100]}")
 
+        direction_projection = build_direction_projection(state, user_direction)
+        direction_context_block = build_direction_projection_block(direction_projection)
+
         # Build exploration context
         exploration_context = ""
         if state.exploration_report:
@@ -384,6 +391,7 @@ PI Direction Assessment: {state.exploration_report.pi_direction_assessment[:500]
 ## User's Chosen Research Direction: {user_direction}
 {exploration_context}
 {notes_section}{out_of_scope_section}
+{direction_context_block}
 ## Available Data
 {state.build_experimental_design_summary()}
 
@@ -391,6 +399,12 @@ You are now in the INNOVATION PHASE. Generate TARGETED, HYPOTHESIS-DRIVEN analys
 Focus specifically on: {user_direction}
 
 Design specific analyses to deeply investigate this direction.
+
+Use the selected-direction evidence context above. State what the existing evidence
+already answers, then explain the question, method, and expected information gain for
+each proposed task. Explain how a null, opposing, heterogeneous, or ambiguous result
+would change the interpretation and which dependent tasks should stop or be reframed.
+Do not treat repeated analyses of overlapping data as independent validation.
 
 {MECHANISM_EVIDENCE_POLICY}
 

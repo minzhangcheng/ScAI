@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import json
 import re
+import hashlib
 
 from ..models.schema_parts.enums import AgentType
 from .formatting import as_list
@@ -667,3 +668,786 @@ def build_direction_context_block(context: Any) -> str:
         )
         lines.extend(f"- {item}" for item in context.notes[:MAX_BLOCK_NOTES])
     return "\n".join(lines)
+
+
+# --- bounded direction evidence and follow-up handoff -----------------------
+
+# These limits intentionally live with the projection.  Planning, reporting,
+# and Chat should see the same bounded source view rather than each inventing a
+# different truncation rule for the same scientific record.
+MAX_DIRECTION_ROUNDS = 12
+MAX_DIRECTION_FINDINGS = 8
+MAX_DIRECTION_MECHANISMS = 8
+MAX_DIRECTION_REVIEWS = 8
+MAX_DIRECTION_CHAT_OUTCOMES = 8
+MAX_DIRECTION_FOLLOWUPS = 12
+MAX_DIRECTION_TEXT = 1200
+MAX_DIRECTION_CONTEXT_TEXT = 16000
+
+FOLLOWUP_DISPOSITIONS = frozenset({
+    "deepen_now", "offer_in_chat", "needs_new_data", "closed",
+})
+
+
+def _model_dict(value: Any) -> Dict[str, Any]:
+    """Return a detached JSON-shaped mapping for a model or mapping."""
+    if isinstance(value, dict):
+        return dict(value)
+    dumper = getattr(value, "model_dump", None)
+    if callable(dumper):
+        try:
+            return dict(dumper(mode="json"))
+        except Exception:
+            try:
+                return dict(dumper())
+            except Exception:
+                return {}
+    return {}
+
+
+def _lineage(value: Any) -> str:
+    return str(_get(value, "lineage_id", None) or "main").strip() or "main"
+
+
+def _round_number(value: Any) -> int:
+    try:
+        return max(0, int(_get(value, "round_number", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _direction_key_for(value: Any) -> str:
+    return normalize_direction_text(
+        _get(value, "direction_key", "") or _get(value, "direction", "")
+    )
+
+
+def _bounded_text(value: Any, limit: int = MAX_DIRECTION_TEXT) -> str:
+    text = str(value or "").strip()
+    return text[:limit]
+
+
+def _bounded_strings(values: Any, limit: int = MAX_DIRECTION_FINDINGS) -> List[str]:
+    if isinstance(values, str):
+        values = [values]
+    elif not isinstance(values, (list, tuple)):
+        return []
+    out: List[str] = []
+    for value in values or []:
+        text = _bounded_text(value)
+        if text and text not in out:
+            out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def direction_pass_identity(
+    lineage_id: str,
+    round_number: int,
+    direction_key: str,
+    *,
+    phase: str = "innovation",
+) -> str:
+    """Build the stable server-owned identity for one direction pass.
+
+    The workflow owns the same identity components as its result ledger.  This
+    helper intentionally does not import workflow code, keeping the utility
+    below the workflow dependency boundary.
+    """
+    lineage = str(lineage_id or "main").strip() or "main"
+    phase_text = str(phase or "innovation").strip() or "innovation"
+    key = normalize_direction_text(direction_key)
+    return f"{lineage}:{phase_text}:{int(round_number or 0)}:{key}"
+
+
+def _reference_values(value: Any, limit: int = MAX_DIRECTION_FINDINGS) -> List[str]:
+    """Keep only compact source references, never client file paths/content."""
+    values = value if isinstance(value, (list, tuple)) else ([] if value is None else [value])
+    references: List[str] = []
+    for raw in values:
+        if isinstance(raw, dict):
+            raw = (
+                raw.get("execution_id")
+                or raw.get("evidence_id")
+                or raw.get("source")
+                or raw.get("id")
+            )
+        text = _bounded_text(raw, 160)
+        if text and text not in references:
+            references.append(text)
+        if len(references) >= limit:
+            break
+    return references
+
+
+def stable_followup_id(
+    pass_identity: str,
+    ordinal: int,
+    item: Dict[str, Any],
+) -> str:
+    """Derive a repeatable follow-up reference from a server-owned pass."""
+    identity_payload = {
+        "question": _bounded_text(item.get("question"), 800),
+        "why_it_matters": _bounded_text(item.get("why_it_matters"), 800),
+        "disposition": _bounded_text(item.get("disposition"), 80),
+        "reason": _bounded_text(item.get("reason"), 800),
+        "suggested_instruction": _bounded_text(item.get("suggested_instruction"), 800),
+        "required_input": _bounded_text(item.get("required_input"), 800),
+        "evidence_references": _reference_values(item.get("evidence_references")),
+    }
+    payload = json.dumps(
+        {"pass": str(pass_identity or ""), "ordinal": int(ordinal), "item": identity_payload},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return "fu-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def sanitize_followup_items(
+    values: Any,
+    *,
+    pass_identity: str = "",
+    source_round: int = 0,
+    direction: str = "",
+    lineage_id: str = "main",
+    limit: int = MAX_DIRECTION_FOLLOWUPS,
+) -> List[Dict[str, Any]]:
+    """Normalize PI-authored remaining questions into bounded handoff records.
+
+    This is a structural sanitizer. It preserves the PI's disposition and
+    uncertainty, but never decides whether a question is scientifically useful.
+    The workflow calls this once while persisting the PI decision.  It supplies
+    the server-owned pass identity, and this function assigns the resulting
+    ``followup_id`` once.  Persisted records are read by
+    ``_stored_followup_items`` below, which keeps that ID unchanged even when an
+    assessment adds an outcome or the item order changes.
+    """
+    if not isinstance(values, (list, tuple)):
+        return []
+    lineage = str(lineage_id or "main").strip() or "main"
+    default_identity = pass_identity or direction_pass_identity(
+        lineage, source_round, direction,
+    )
+    output: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for ordinal, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            continue
+        question = _bounded_text(raw.get("question"), 1000)
+        if not question:
+            continue
+        disposition = str(raw.get("disposition") or "").strip().lower()
+        if disposition not in FOLLOWUP_DISPOSITIONS:
+            continue
+        evidence = _reference_values(raw.get("evidence_references"))
+        # Source ownership is supplied by the workflow.  A PI response may
+        # describe the question, but it cannot move the follow-up to another
+        # round or direction by writing those fields in its payload.
+        try:
+            item_round = max(0, int(source_round or 0))
+        except (TypeError, ValueError):
+            item_round = 0
+        normalized = {
+            "question": question,
+            "why_it_matters": _bounded_text(raw.get("why_it_matters"), 1200),
+            "disposition": disposition,
+            "reason": _bounded_text(raw.get("reason"), 1200),
+            "evidence_references": evidence,
+            "suggested_instruction": _bounded_text(raw.get("suggested_instruction"), 1400),
+            "required_input": _bounded_text(raw.get("required_input"), 1200),
+            "source_round": item_round,
+            "direction": _bounded_text(direction, 800),
+            "lineage_id": lineage,
+        }
+        # The ID is server-owned. A raw PI response cannot choose the source
+        # record it will later resolve in Chat.
+        normalized["followup_id"] = stable_followup_id(default_identity, ordinal, normalized)
+        if normalized["followup_id"] in seen:
+            continue
+        seen.add(normalized["followup_id"])
+        output.append(normalized)
+        if len(output) >= max(0, int(limit)):
+            break
+    return output
+
+
+def _review_followup_values(review: Any) -> List[Any]:
+    """Read the one canonical persisted review location.
+
+    New records keep follow-ups at the review-record root.  Old records have no
+    follow-up decision and therefore intentionally produce an empty list rather
+    than trying to infer one from an assessment or free-text field.
+    """
+    if not isinstance(review, dict) or not isinstance(review.get("followups"), list):
+        return []
+    return list(review["followups"])
+
+
+def _stored_followup_items(values: Any, *, limit: int = MAX_DIRECTION_FOLLOWUPS) -> List[Dict[str, Any]]:
+    """Bound canonical persisted follow-ups without changing their IDs.
+
+    This is deliberately separate from ``sanitize_followup_items``.  A stored
+    decision is an addressable record: recomputing its hash from mutable text or
+    ordinal would invalidate an already rendered report after assessment merge.
+    """
+    if not isinstance(values, (list, tuple)):
+        return []
+    output: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in values:
+        if not isinstance(raw, dict):
+            continue
+        followup_id = str(raw.get("followup_id") or "").strip()
+        question = _bounded_text(raw.get("question"), 1000)
+        disposition = str(raw.get("disposition") or "").strip().lower()
+        if not followup_id or not question or disposition not in FOLLOWUP_DISPOSITIONS:
+            continue
+        if followup_id in seen:
+            continue
+        item = {
+            "followup_id": followup_id[:160],
+            "question": question,
+            "why_it_matters": _bounded_text(raw.get("why_it_matters"), 1200),
+            "disposition": disposition,
+            "reason": _bounded_text(raw.get("reason"), 1200),
+            "evidence_references": _reference_values(raw.get("evidence_references")),
+            "suggested_instruction": _bounded_text(raw.get("suggested_instruction"), 1400),
+            "required_input": _bounded_text(raw.get("required_input"), 1200),
+            "source_round": _round_number(raw),
+            "direction": _bounded_text(raw.get("direction"), 800),
+            "lineage_id": _lineage(raw),
+        }
+        for field_name in ("execution_outcome", "execution_reference"):
+            value = raw.get(field_name)
+            if value not in (None, "", [], {}):
+                item[field_name] = _bounded_text(value, 1200)
+        output.append(item)
+        seen.add(followup_id)
+        if len(output) >= max(0, int(limit)):
+            break
+    return output
+
+
+def _result_projection(result: Any) -> Dict[str, Any]:
+    """Project one RoundResult without copying arbitrary notebook payloads."""
+    round_number = _round_number(result)
+    programs = []
+    for program in (_get(result, "data_driven_mechanism_programs") or [])[:MAX_DIRECTION_MECHANISMS]:
+        data = _model_dict(program)
+        if not data:
+            continue
+        programs.append({
+            "id": _bounded_text(data.get("id"), 120),
+            "label": _bounded_text(data.get("label"), 300),
+            "description": _bounded_text(data.get("description"), 1000),
+            "round_number": _round_number(data) or round_number,
+            "cell_types": _bounded_strings(data.get("cell_types"), 8),
+            "conditions_compared": _bounded_text(data.get("conditions_compared"), 500),
+            "triggering_observations": _bounded_strings(
+                data.get("triggering_observations"), MAX_DIRECTION_FINDINGS,
+            ),
+            "evidence_strength": _bounded_text(data.get("evidence_strength"), 80),
+            "specificity": _bounded_text(data.get("specificity"), 80),
+            "bulk_support": _bounded_text(data.get("bulk_support"), 80),
+            "supporting_genes": _bounded_strings(data.get("supporting_genes"), 12),
+            "supporting_pathways": _bounded_strings(data.get("supporting_pathways"), 12),
+            "supporting_scores": _bounded_strings(data.get("supporting_scores"), 8),
+            "supporting_tables": _bounded_strings(data.get("supporting_tables"), 8),
+            "evidence_execution_ids": _reference_values(data.get("evidence_execution_ids")),
+            "alternative_explanations": _bounded_strings(data.get("alternative_explanations"), 6),
+            "missing_evidence": _bounded_strings(data.get("missing_evidence"), 6),
+            "interpretation": _bounded_text(data.get("interpretation"), 1200),
+        })
+    conflicts = []
+    for conflict in (_get(result, "conflicts") or [])[:MAX_DIRECTION_FINDINGS]:
+        if isinstance(conflict, dict):
+            conflicts.append({
+                "description": _bounded_text(conflict.get("description"), 800),
+                "resolution": _bounded_text(conflict.get("resolution"), 800),
+                "agents": _bounded_strings(conflict.get("agents"), 6),
+            })
+        else:
+            text = _bounded_text(conflict)
+            if text:
+                conflicts.append({"description": text, "resolution": "", "agents": []})
+    return {
+        "round_number": round_number,
+        "phase": _bounded_text(_get(result, "phase", "innovation"), 40),
+        "direction": _bounded_text(_get(result, "direction", ""), 800),
+        "direction_key": _direction_key_for(result),
+        "result_identity_key": _bounded_text(_get(result, "result_identity_key", ""), 240),
+        "round_status": _bounded_text(_get(result, "round_status", ""), 40),
+        "evidence_status": _bounded_text(_get(result, "evidence_status", ""), 40),
+        "summary": _bounded_text(_get(result, "pi_summary", "") or _get(result, "summary", ""), 1600),
+        "findings": {
+            "pathology": _bounded_strings(_get(result, "pathology_findings") or [], MAX_DIRECTION_FINDINGS),
+            "bioinformatics": _bounded_strings(_get(result, "bioinformatics_findings") or [], MAX_DIRECTION_FINDINGS),
+            "biochemistry": _bounded_strings(_get(result, "biochemistry_findings") or [], MAX_DIRECTION_FINDINGS),
+            "literature": _bounded_strings(_get(result, "literature_findings") or [], MAX_DIRECTION_FINDINGS),
+        },
+        "conflicts": conflicts,
+        "next_questions": _bounded_strings(_get(result, "next_steps") or [], MAX_DIRECTION_FINDINGS),
+        "evidence_execution_ids": _reference_values(_get(result, "evidence_execution_ids") or []),
+        "evidence_notes": _bounded_strings(_get(result, "evidence_notes") or [], MAX_DIRECTION_FINDINGS),
+        "evidence_gate_findings": _bounded_strings(
+            _get(result, "evidence_gate_findings") or [], MAX_DIRECTION_FINDINGS,
+        ),
+        "mechanism_programs": programs,
+    }
+
+
+def _round_is_persisted_finished(result: Any) -> bool:
+    """Whether a persisted innovation result can contribute direction context.
+
+    This is an evidence-presence check, not a scientific completion verdict.
+    A result may be partial or marked failed after writing useful observations;
+    those observations must remain available to the PI. Empty legacy records are
+    harmless and are represented only when they carry an explicit direction.
+    """
+    phase = str(_get(result, "phase", "") or "").strip().lower()
+    if phase != "innovation":
+        return False
+    return bool(_direction_key_for(result))
+
+
+def _selected_direction_keys(state: Any, lineage_id: str) -> List[str]:
+    keys: List[str] = []
+    for result in getattr(state, "round_results", None) or []:
+        if _lineage(result) != lineage_id or not _round_is_persisted_finished(result):
+            continue
+        key = _direction_key_for(result)
+        if key and key not in keys:
+            keys.append(key)
+    # Include selected directions that have not reached a RoundResult only as a
+    # context placeholder; callers can then explain that no result was retained.
+    for entry in (
+        list(getattr(state, "active_direction_batch", None) or [])
+        + list(getattr(state, "user_chosen_directions", None) or [])
+    ):
+        key = normalize_direction_text(_get(entry, "direction", ""))
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def build_direction_projection(
+    state: Any,
+    direction: str = "",
+    *,
+    lineage_id: Optional[str] = None,
+    max_rounds: int = MAX_DIRECTION_ROUNDS,
+) -> Dict[str, Any]:
+    """Collect bounded evidence and follow-up records for one direction."""
+    target_lineage = str(
+        lineage_id or getattr(state, "restore_branch_id", None) or "main"
+    ).strip() or "main"
+    requested_key = normalize_direction_text(direction)
+    keys = [requested_key] if requested_key else _selected_direction_keys(state, target_lineage)
+    key = requested_key or (keys[0] if len(keys) == 1 else "")
+    matching_results = []
+    for raw in getattr(state, "round_results", None) or []:
+        if _lineage(raw) != target_lineage or not _round_is_persisted_finished(raw):
+            continue
+        result_key = _direction_key_for(raw)
+        if key and result_key != key:
+            continue
+        if not key and result_key not in keys:
+            continue
+        matching_results.append(_result_projection(raw))
+    matching_results.sort(key=lambda item: item.get("round_number", 0))
+    matching_results = matching_results[-max(1, int(max_rounds)):]
+    if not direction and not key and matching_results:
+        key = matching_results[0].get("direction_key", "")
+    resolved_direction = direction or next(
+        (str(item.get("direction") or "") for item in matching_results if item.get("direction")),
+        "",
+    )
+    if not resolved_direction and key:
+        resolved_direction = key
+
+    candidate = candidate_for_state(state, resolved_direction) if resolved_direction else None
+    candidate_projection = _model_dict(candidate) if candidate else {}
+    if candidate_projection:
+        # Keep candidate identity and all direction-specific evidence, but bound
+        # large arrays before the projection crosses into an LLM prompt.
+        candidate_projection = {
+            str(name): (
+                _bounded_strings(value, 12)
+                if isinstance(value, list)
+                else _bounded_text(value, 1200)
+                if isinstance(value, str)
+                else value
+            )
+            for name, value in candidate_projection.items()
+            if name not in {"articles", "queries", "raw_results"}
+        }
+
+    pass_identities = {
+        direction_pass_identity(target_lineage, item.get("round_number", 0), item.get("direction_key", ""))
+        for item in matching_results
+        if item.get("direction_key")
+    }
+    reviews: List[Dict[str, Any]] = []
+    followups: List[Dict[str, Any]] = []
+    for raw_review in reversed(list(getattr(state, "post_execution_reviews", None) or [])):
+        if not isinstance(raw_review, dict) or _lineage(raw_review) != target_lineage:
+            continue
+        review_key = normalize_direction_text(
+            raw_review.get("direction_key") or raw_review.get("direction", "")
+        )
+        review_round = _round_number(raw_review)
+        review_identity = str(
+            raw_review.get("direction_pass_id")
+            or raw_review.get("direction_pass_identity")
+            or raw_review.get("result_identity_key")
+            or ""
+        )
+        matches = bool(
+            (key and review_key == key)
+            or (review_identity and review_identity in pass_identities)
+            or (not key and review_round in {r.get("round_number") for r in matching_results})
+        )
+        if not matches:
+            continue
+        review_copy = {
+            "review_status": _bounded_text(raw_review.get("review_status"), 80),
+            "review_reason": _bounded_text(raw_review.get("review_reason"), 1200),
+            "round_number": review_round,
+            "direction": _bounded_text(raw_review.get("direction") or resolved_direction, 800),
+            "direction_key": review_key or key,
+            "review_attempt_id": _bounded_text(raw_review.get("review_attempt_id"), 120),
+            "assessment": _model_dict(raw_review.get("assessment")),
+        }
+        reviews.append(review_copy)
+        pass_identity = review_identity or direction_pass_identity(
+            target_lineage, review_round, review_key or key,
+        )
+        items = _review_followup_values(raw_review)
+        # Review records are already sanitized at decision persistence. Keep
+        # their IDs and mutable outcome fields unchanged across projection.
+        followups.extend(_stored_followup_items(items))
+        if len(reviews) >= MAX_DIRECTION_REVIEWS:
+            break
+
+    unique_followups: List[Dict[str, Any]] = []
+    seen_followups: set[str] = set()
+    for item in followups:
+        if item["followup_id"] in seen_followups:
+            continue
+        seen_followups.add(item["followup_id"])
+        unique_followups.append(item)
+        if len(unique_followups) >= MAX_DIRECTION_FOLLOWUPS:
+            break
+
+    chat_outcomes: List[Dict[str, Any]] = []
+    followup_ids = {item["followup_id"] for item in unique_followups}
+    for message in reversed(list(getattr(state, "chat_messages", None) or [])):
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("branch_id") or "main") != target_lineage:
+            continue
+        message_followup = str(message.get("followup_id") or "")
+        if not message_followup or message_followup not in followup_ids:
+            continue
+        chat_outcomes.append({
+            "id": _bounded_text(message.get("id"), 120),
+            "role": _bounded_text(message.get("role"), 40),
+            "followup_id": message_followup,
+            "branch_id": target_lineage,
+            "reply_to": _bounded_text(message.get("reply_to"), 120),
+            "content": _bounded_text(message.get("content"), 1600),
+            "timestamp": _bounded_text(message.get("timestamp"), 80),
+        })
+        if len(chat_outcomes) >= MAX_DIRECTION_CHAT_OUTCOMES:
+            break
+
+    available_data = ""
+    try:
+        available_data = _bounded_text(state.build_experimental_design_summary(), 2400)
+    except Exception:
+        available_data = ""
+    omissions = []
+    total_results = sum(
+        1 for raw in getattr(state, "round_results", None) or []
+        if _lineage(raw) == target_lineage and _round_is_persisted_finished(raw)
+        and (not key or _direction_key_for(raw) == key)
+    )
+    if total_results > len(matching_results):
+        omissions.append(f"{total_results - len(matching_results)} earlier direction result(s) omitted by the context cap.")
+    return {
+        "lineage_id": target_lineage,
+        "direction": resolved_direction,
+        "direction_key": key,
+        "pass_identities": sorted(pass_identities),
+        "candidate": candidate_projection,
+        "rounds": matching_results,
+        "reviews": reviews,
+        "followups": unique_followups,
+        "chat_outcomes": chat_outcomes,
+        "available_data": available_data,
+        "omissions": omissions,
+    }
+
+
+def collect_direction_projections(
+    state: Any,
+    *,
+    lineage_id: Optional[str] = None,
+    max_directions: int = MAX_DIRECTION_ROUNDS,
+) -> List[Dict[str, Any]]:
+    """Return one projection for each retained innovation direction."""
+    target = str(lineage_id or getattr(state, "restore_branch_id", None) or "main").strip() or "main"
+    keys = _selected_direction_keys(state, target)
+    try:
+        direction_cap = max(1, int(max_directions))
+    except (TypeError, ValueError):
+        direction_cap = MAX_DIRECTION_ROUNDS
+    projections = [
+        build_direction_projection(state, key, lineage_id=target)
+        for key in keys[:direction_cap]
+    ]
+    projections = [
+        item for item in projections
+        if item.get("direction_key") or item.get("direction")
+    ]
+    omitted = max(0, len(keys) - direction_cap)
+    if omitted and projections:
+        omissions = projections[0].setdefault("omissions", [])
+        omissions.append(
+            f"{omitted} selected innovation direction(s) omitted by the "
+            f"{direction_cap}-direction context cap; persisted records remain available."
+        )
+    return projections
+
+
+def build_direction_projection_block(
+    projection: Any,
+    *,
+    max_chars: int = MAX_DIRECTION_CONTEXT_TEXT,
+) -> str:
+    """Format a projection for PI planning, review, synthesis, or Chat.
+
+    The formatter keeps source references and a visible omission note when its
+    caller supplies a smaller context budget.  A raw prefix slice is unsafe:
+    it can remove every limiting observation and execution join key while still
+    looking like a complete context block.
+    """
+    if not isinstance(projection, dict):
+        return ""
+
+    def _values_text(values: Any, limit: int = MAX_DIRECTION_FINDINGS) -> str:
+        if isinstance(values, str):
+            values = [values]
+        elif not isinstance(values, (list, tuple)):
+            return ""
+        return "; ".join(_bounded_text(value, 600) for value in (values or [])[:limit])
+
+    lines = ["## Selected Direction Evidence Context"]
+    direction = _bounded_text(projection.get("direction"), 800)
+    if direction:
+        lines.append(f"Direction: {direction}")
+
+    candidate = projection.get("candidate") or {}
+    if candidate:
+        lines.append("Frozen candidate details (observations and PI notes):")
+        for field_name in (
+            "core_observation", "main_hypothesis", "rationale", "key_uncertainties",
+            "alternative_hypotheses", "supporting_data", "artifact_risks",
+        ):
+            value = candidate.get(field_name)
+            if value in (None, "", [], {}):
+                continue
+            if isinstance(value, list):
+                value = _values_text(value, 8)
+            elif isinstance(value, dict):
+                value = json.dumps(value, ensure_ascii=False)[:1000]
+            lines.append(f"- {field_name}: {_bounded_text(value, 1200)}")
+
+    source_references: List[str] = []
+
+    def _add_refs(values: Any) -> None:
+        for value in values or []:
+            ref = _bounded_text(value, 160)
+            if ref and ref not in source_references:
+                source_references.append(ref)
+
+    for round_data in projection.get("rounds") or []:
+        round_number = round_data.get("round_number", "?")
+        lines.append(f"\n### Source Round {round_number}")
+        if round_data.get("result_identity_key"):
+            lines.append(f"Result identity: {round_data['result_identity_key']}")
+            _add_refs([round_data["result_identity_key"]])
+        if round_data.get("round_status") or round_data.get("evidence_status"):
+            lines.append(
+                "Persisted status: "
+                f"{round_data.get('round_status') or 'unknown'} / "
+                f"evidence {round_data.get('evidence_status') or 'unknown'}"
+            )
+        if round_data.get("evidence_execution_ids"):
+            lines.append("Execution evidence IDs: " + _values_text(round_data["evidence_execution_ids"], 12))
+            _add_refs(round_data["evidence_execution_ids"])
+        if round_data.get("summary"):
+            lines.append(f"PI summary: {round_data['summary']}")
+        findings = round_data.get("findings") or {}
+        for modality, values in findings.items():
+            if values:
+                lines.append(f"{modality.title()} observations: " + _values_text(values))
+        for conflict in round_data.get("conflicts") or []:
+            description = conflict.get("description")
+            resolution = conflict.get("resolution")
+            if description:
+                lines.append(
+                    f"Contrary/conflicting evidence: {description}"
+                    + (f" Resolution: {resolution}" if resolution else "")
+                )
+        if round_data.get("evidence_notes"):
+            lines.append("Evidence limitations: " + _values_text(round_data["evidence_notes"]))
+        if round_data.get("evidence_gate_findings"):
+            lines.append("Measured evidence observations: " + _values_text(round_data["evidence_gate_findings"]))
+        if round_data.get("next_questions"):
+            lines.append("Open questions recorded by the PI: " + _values_text(round_data["next_questions"]))
+        for program in round_data.get("mechanism_programs") or []:
+            program_id = program.get("id") or ""
+            label = program.get("label") or "Mechanism record"
+            if program_id:
+                _add_refs([program_id])
+            if program.get("evidence_execution_ids"):
+                _add_refs(program["evidence_execution_ids"])
+            lines.append(f"Mechanism evidence: {label}")
+            if program.get("triggering_observations"):
+                lines.append("Triggering observations: " + _values_text(program["triggering_observations"]))
+            evidence = "; ".join(
+                (program.get("supporting_genes") or [])[:8]
+                + (program.get("supporting_pathways") or [])[:8]
+            )
+            if evidence:
+                lines.append("Supporting genes/pathways: " + evidence)
+            if program.get("evidence_execution_ids"):
+                lines.append("Mechanism execution IDs: " + _values_text(program["evidence_execution_ids"], 12))
+            if program.get("interpretation"):
+                lines.append("PI interpretation: " + _bounded_text(program["interpretation"], 1200))
+            if program.get("alternative_explanations"):
+                lines.append("Alternative explanations: " + _values_text(program["alternative_explanations"], 4))
+            if program.get("missing_evidence"):
+                lines.append("Missing/limiting evidence: " + _values_text(program["missing_evidence"], 4))
+
+    for review in (projection.get("reviews") or [])[:MAX_DIRECTION_REVIEWS]:
+        if review.get("review_attempt_id"):
+            _add_refs([review["review_attempt_id"]])
+        if review.get("assessment"):
+            assessment = review["assessment"]
+            summary = assessment.get("summary") if isinstance(assessment, dict) else ""
+            if summary:
+                lines.append(
+                    f"Follow-up assessment (round {review.get('round_number', '?')}): "
+                    f"{_bounded_text(summary, 1200)}"
+                )
+            if isinstance(assessment, dict) and assessment.get("remaining_gaps"):
+                lines.append("Assessment limitations: " + _values_text(assessment["remaining_gaps"]))
+
+    if projection.get("followups"):
+        lines.append("Remaining questions and PI dispositions:")
+        for item in projection["followups"][:MAX_DIRECTION_FOLLOWUPS]:
+            line = f"- [{item.get('disposition')}] {item.get('question')}"
+            if item.get("why_it_matters"):
+                line += f" Why it matters: {item['why_it_matters']}"
+            if item.get("reason"):
+                line += f" Reason: {item['reason']}"
+            if item.get("evidence_references"):
+                line += " Evidence refs: " + _values_text(item["evidence_references"], 8)
+                _add_refs(item["evidence_references"])
+            if item.get("execution_reference"):
+                line += " Outcome ref: " + _bounded_text(item["execution_reference"], 160)
+                _add_refs([item["execution_reference"]])
+            lines.append(line)
+
+    if projection.get("chat_outcomes"):
+        lines.append("Chat outcomes linked to these follow-ups:")
+        for outcome in projection["chat_outcomes"][:MAX_DIRECTION_CHAT_OUTCOMES]:
+            role = _bounded_text(outcome.get("role"), 40) or "message"
+            content = _bounded_text(outcome.get("content"), 1000)
+            identity = _bounded_text(outcome.get("id"), 120)
+            if identity:
+                _add_refs([identity])
+            lines.append(f"- {role}: {content}" + (f" (message {identity})" if identity else ""))
+    if projection.get("available_data"):
+        lines.append("Available-data context:\n" + _bounded_text(projection["available_data"], 2400))
+
+    existing_omissions = [str(value) for value in (projection.get("omissions") or []) if str(value).strip()]
+    references_line = "Source references: " + (", ".join(source_references[:MAX_DIRECTION_FINDINGS * 4]) or "none recorded")
+    max_len = max(1, int(max_chars or MAX_DIRECTION_CONTEXT_TEXT))
+    full = "\n".join(lines + (["Context omissions: " + "; ".join(existing_omissions)] if existing_omissions else []) + [references_line])
+    if len(full) <= max_len:
+        return full
+
+    # Keep a small, explicit trailer in every capped block.  The source IDs in
+    # this trailer let a reviewer join the omitted prose back to persisted
+    # records, while the omission message prevents a shortened context from
+    # being mistaken for complete evidence.
+    omitted_note = "Context omissions: direction context was capped; omitted material remains in persisted records."
+    if existing_omissions:
+        omitted_note += " " + "; ".join(existing_omissions)
+    trailer = "\n" + omitted_note + "\n" + references_line
+    if len(trailer) >= max_len:
+        # Preserve a machine-readable indication even for an unusually tiny
+        # caller budget.  Normal report/Chat budgets are large enough for the
+        # full trailer and source IDs.
+        compact = "Context omissions: capped."
+        if max_len <= len(compact):
+            return compact[:max_len]
+        return compact + ("\n" + references_line)[: max_len - len(compact)]
+    body_budget = max_len - len(trailer)
+    body_lines: List[str] = []
+    used = 0
+    omitted_count = 0
+    for line in lines:
+        extra = len(line) + (1 if body_lines else 0)
+        if used + extra > body_budget:
+            omitted_count += 1
+            continue
+        body_lines.append(line)
+        used += extra
+    if omitted_count:
+        omitted_note = (
+            "Context omissions: direction context was capped; "
+            f"{omitted_count} rendered item(s) omitted. Persisted records and source references remain available."
+        )
+        if existing_omissions:
+            omitted_note += " " + "; ".join(existing_omissions)
+        trailer = "\n" + omitted_note + "\n" + references_line
+        if len(trailer) > max_len:
+            trailer = trailer[:max_len]
+    return "\n".join(body_lines) + trailer
+
+
+def resolve_followup_reference(
+    state: Any,
+    followup_id: str,
+    *,
+    lineage_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Resolve a stable follow-up only inside the owned active lineage."""
+    requested = str(followup_id or "").strip()
+    if not requested or len(requested) > 160:
+        return None
+    target_lineage = str(lineage_id or getattr(state, "restore_branch_id", None) or "main").strip() or "main"
+    for raw_review in reversed(list(getattr(state, "post_execution_reviews", None) or [])):
+        if not isinstance(raw_review, dict) or _lineage(raw_review) != target_lineage:
+            continue
+        round_number = _round_number(raw_review)
+        direction = str(raw_review.get("direction") or "").strip()
+        key = normalize_direction_text(raw_review.get("direction_key") or direction)
+        items = _stored_followup_items(_review_followup_values(raw_review))
+        for item in items:
+            if item.get("followup_id") != requested:
+                continue
+            projection = build_direction_projection(
+                state, item.get("direction") or direction, lineage_id=target_lineage,
+            )
+            return {
+                **item,
+                "direction_key": projection.get("direction_key") or key,
+                "source_context": projection,
+            }
+    return None
