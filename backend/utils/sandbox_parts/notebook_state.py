@@ -382,14 +382,13 @@ class NotebookState:
         budget_violations: Optional[List[Dict[str, Any]]] = None,
         top_offenders: Optional[List[Dict[str, Any]]] = None,
         recommended_action: Optional[str] = None,
-        coherence: Optional[str] = None,
+        committed_state_revision: Optional[int] = None,
         persist: bool = True,
     ) -> Dict[str, Any]:
         """Persist the live runtime lifecycle without exposing raw tracebacks."""
         now = datetime.now().isoformat()
         previous = dict(self.runtime_persistence)
         from backend.utils.error_parsing import bounded_diagnostic, compact_traceback
-        from backend.utils.runtime_manifest import runtime_coherence as _runtime_coherence
 
         def _safe_runtime_text(value: Any, limit: int) -> str:
             # Redaction must precede slicing: a credential or private path near
@@ -479,21 +478,6 @@ class NotebookState:
                 if runtime_digest is not None
                 else previous.get("runtime_digest")
             ),
-            # Whether the newest committed generation still describes the live
-            # namespace. Derived here rather than passed in, so every update --
-            # a successful commit, a failed attempt, a restore -- refreshes it,
-            # and a later success clears a stale verdict instead of leaving it
-            # latched. Reported, never acted on here: it must not reach
-            # `status` or `requires_recompute`, which are what stop a run.
-            "coherence": (
-                str(coherence)
-                if coherence is not None
-                else _runtime_coherence(
-                    saved_revision=max(0, int(saved_revision)),
-                    current_revision=max(0, int(current_revision)),
-                    has_generation=self.has_session_dump(),
-                )
-            ),
             "budget_violations": safe_budget_violations,
             "top_offenders": safe_top_offenders,
             "source": "notebook_state",
@@ -523,6 +507,17 @@ class NotebookState:
                     str(runtime_digest)
                     if runtime_digest is not None
                     else previous.get("committed_digest")
+                ),
+                # The state revision this generation committed against, supplied
+                # by the transaction that has just finished. Deriving it here
+                # instead meant calling has_session_dump(), which checks the
+                # already-replaced dump against the *previous* digest and so
+                # reported every successful commit as having no generation --
+                # at the cost of two full reads of a multi-gigabyte file.
+                "committed_state_revision": (
+                    max(0, int(committed_state_revision))
+                    if committed_state_revision is not None
+                    else previous.get("committed_state_revision")
                 ),
                 "last_attempt_status": "succeeded",
                 "last_attempt_at": now,

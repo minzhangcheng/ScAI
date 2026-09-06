@@ -44,7 +44,17 @@ mkdir -p "$WORKTREE/$(dirname "$TEST_FILE")"
 cp "$TEST_FILE" "$WORKTREE/$TEST_FILE"
 
 declare -a NODES=()
-if [[ $# -gt 0 ]]; then NODES=("$@"); else NODES=("$TEST_FILE"); fi
+declare -a EXPECTED=()
+if [[ $# -gt 0 ]]; then
+    NODES=("$@")
+    # Only ``file::name`` selections can be verified individually. A bare file,
+    # or a -k expression, is checked as a whole.
+    for node in "$@"; do
+        if [[ "$node" == *"::"* ]]; then EXPECTED+=("${node##*::}"); fi
+    done
+else
+    NODES=("$TEST_FILE")
+fi
 
 set +e
 ( cd "$WORKTREE" && scripts/scai-test fast "${NODES[@]}" )
@@ -74,33 +84,48 @@ fi
 # regression test detects the defect. Only two shapes count: a call-phase
 # failure, or the guard this project's tests use to say the module under test
 # does not exist yet.
-OBSERVED="$(python3 - "${EVIDENCE}junit.xml" <<'PY'
+OBSERVED="$(python3 - "${EVIDENCE}junit.xml" "${EXPECTED[@]}" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
 
 MISSING_SUBJECT = "module under test is missing"
-qualifying = 0
+expected = set(sys.argv[2:])
+qualifying = set()
 other_errors = []
 for case in ET.parse(sys.argv[1]).iter("testcase"):
-    failure = case.find("failure")
-    if failure is not None:
-        qualifying += 1
+    name = case.get("name") or ""
+    if case.find("failure") is not None:
+        qualifying.add(name)
         continue
     error = case.find("error")
     if error is None:
         continue
     if MISSING_SUBJECT in (error.get("message") or "") or MISSING_SUBJECT in (error.text or ""):
-        qualifying += 1
+        qualifying.add(name)
     else:
-        other_errors.append(f"{case.get('name')}: {(error.get('message') or '')[:120]}")
+        other_errors.append(f"{name}: {(error.get('message') or '')[:120]}")
 
-print(qualifying)
+if expected:
+    # Every named node has to be the one that failed. Counting any failure in
+    # the file would accept an unrelated pre-existing failure as proof that this
+    # regression test detects the defect it was written for.
+    unproven = sorted(
+        node for node in expected
+        if not any(name == node or name.startswith(node + "[") for name in qualifying)
+    )
+    for node in unproven:
+        print("UNPROVEN " + node, file=sys.stderr)
+    print(0 if unproven else len(expected))
+else:
+    print(len(qualifying))
+
 for line in other_errors[:5]:
     print("UNQUALIFIED " + line, file=sys.stderr)
 PY
 )"
 if [[ "$OBSERVED" -le 0 ]]; then
-    echo "RED-TREE INCONCLUSIVE: the run at $BASE_SHA produced no call-phase failure" >&2
+    echo "RED-TREE INCONCLUSIVE: at $BASE_SHA, not every named node failed the way" >&2
+    echo "  a detection would (see UNPROVEN/UNQUALIFIED above)" >&2
     echo "  (any errors above are setup or environment problems, not evidence" >&2
     echo "   that the test detects the defect it was written for)" >&2
     exit 2

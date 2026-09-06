@@ -273,19 +273,77 @@ def _resign_imported_live_pkl(session_id: str) -> bool:
     if not pkl.exists():
         return False
     _write_pkl_signature(pkl, _integrity_dir(session_id))
-    # The generation manifest that travelled with the archive is signed with the
-    # *source* installation's key, so it can never verify here. Retiring it makes
-    # the imported dump a legacy generation -- it loads, its coverage is unknown,
-    # and the first successful save writes a manifest this installation can read.
-    from backend.utils.runtime_apply import _retire_stale_runtime_manifest
-
-    _retire_stale_runtime_manifest(session_id)
+    _rekey_imported_runtime_manifest(session_id, pkl)
     logger.warning(
         "[%s] Re-signed imported sandbox pkl under this installation's key; "
         "the archive's origin is trusted on the caller's authority (trust=true).",
         session_id,
     )
     return True
+
+
+def _rekey_imported_runtime_manifest(session_id: str, pkl) -> None:
+    """Re-sign an imported generation manifest under this installation's key.
+
+    The manifest arrives signed by the *source* installation, so it can never
+    verify here. Demoting the generation to legacy would work but would throw
+    away its coverage and pairing for a dump the caller has already trusted far
+    more than a JSON file: importing the pkl at all is an explicit grant of
+    arbitrary code execution.
+
+    So the manifest is re-keyed rather than retired -- but only if it still
+    describes these bytes. A manifest whose digest does not match the imported
+    dump belongs to some other generation and is quarantined instead.
+    """
+    import json
+
+    from backend.utils.crypto import sign_hmac_sha256
+    from backend.utils.runtime_apply import _retire_stale_runtime_manifest
+    from backend.utils.runtime_manifest import (
+        build_runtime_manifest,
+        canonical_manifest_bytes,
+        runtime_manifest_path,
+        runtime_manifest_sig_path,
+        write_runtime_manifest,
+    )
+    from backend.utils.sandbox_parts.regular_save import _sha256_file
+
+    manifest_path = runtime_manifest_path(session_id)
+    if not manifest_path.exists():
+        return
+    try:
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = build_runtime_manifest(
+            revision=raw["revision"],
+            state_revision=raw["state_revision"],
+            pkl_digest=raw["pkl_sha256"],
+            saved_names=raw["saved_names"],
+            skipped_names=raw["skipped_names"],
+            serializer_version=raw["serializer_version"],
+        )
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "[%s] imported runtime manifest is unusable (%s); retiring it so the "
+            "dump loads as a legacy generation",
+            session_id,
+            exc,
+        )
+        _retire_stale_runtime_manifest(session_id)
+        return
+
+    if manifest["pkl_sha256"] != _sha256_file(pkl):
+        logger.warning(
+            "[%s] imported runtime manifest describes different bytes; retiring it",
+            session_id,
+        )
+        _retire_stale_runtime_manifest(session_id)
+        return
+
+    write_runtime_manifest(manifest_path, manifest)
+    logger.info(
+        "[%s] re-keyed the imported runtime manifest under this installation's key",
+        session_id,
+    )
 
 
 def _cleanup_partial_session(session_id: Optional[str]) -> None:

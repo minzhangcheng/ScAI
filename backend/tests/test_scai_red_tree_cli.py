@@ -72,13 +72,20 @@ def test_a_setup_error_is_not_accepted_as_evidence():
     """
     script = _script()
     assert "junit.xml" in script
-    assert "call-phase failure" in script
+    assert "a detection would" in script
     assert "module under test is missing" in script
 
 
 def test_the_worktree_path_is_unique_per_invocation():
     """Two concurrent checks must not delete each other's worktree."""
     assert "${BASE_SHA:0:12}.$$" in _script()
+
+
+def test_named_nodes_must_each_be_the_node_that_failed():
+    """An unrelated pre-existing failure in the same file is not evidence."""
+    script = _script()
+    assert "UNPROVEN" in script
+    assert "Every named node has to be the one that failed" in script
 
 
 def test_the_script_is_executable():

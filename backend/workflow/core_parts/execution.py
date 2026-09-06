@@ -516,7 +516,9 @@ async def resume(
         ),
     ):
         logger.warning(
-            f"[{self.session_id}] resume blocked: runtime_restore_status=unavailable; "
+            f"[{self.session_id}] resume blocked: runtime_restore_status="
+            f"{getattr(analysis_state, 'runtime_restore_status', 'complete')!r} "
+            f"coherence={state_runtime_coherence(analysis_state)!r}; "
             "holding without running the graph"
         )
         return analysis_state

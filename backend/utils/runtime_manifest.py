@@ -43,38 +43,46 @@ COHERENCE_UNAVAILABLE = "unavailable"
 
 
 def runtime_coherence(
-    *, saved_revision: int | None, current_revision: int, has_generation: bool = True
+    *,
+    committed_state_revision: int | None,
+    state_revision: int,
+    has_generation: bool = True,
 ) -> str:
-    """Whether the newest committed runtime still describes the live namespace.
+    """Whether the newest committed generation belongs to the persisted state.
 
-    Both numbers belong to the persistence layer and advance with it:
-    ``current_revision`` rises whenever an execution could have changed user
-    globals, ``saved_revision`` only when a generation commits. Comparing them
-    is therefore a statement about this session's own history.
+    ``state_revision`` advances on every durable write of the session's state;
+    ``committed_state_revision`` is whichever value was current when the newest
+    runtime generation committed. The comparison therefore answers the question
+    the spec asks -- does this dump belong to the state persisted beside it --
+    rather than the narrower one a runtime-only counter can answer.
 
-    An earlier draft compared the session *lifecycle generation* instead. That
-    counter fences incarnations -- deletion, same-id re-import -- and is
-    normally 1 for the whole life of a session, so the comparison could never
-    be anything but equal and the verdict was permanently "current".
+    Two earlier drafts got this wrong and are worth naming. The first compared
+    the session *lifecycle generation*, which fences incarnations (deletion,
+    same-id re-import) and is normally 1 for a session's whole life, so the
+    verdict was permanently "current". The second compared saved against current
+    *runtime* revision, which only reports whether the namespace is dirty: a
+    state that advanced with no cell execution was invisible to it.
 
-    * ``stale`` -- the live namespace moved past the newest committed
-      generation, which is what a failed closing save leaves behind. Results
-      stay viewable and exportable; exact continuation is not promised.
-    * ``inconsistent`` -- a generation claims a revision the live runtime never
-      reached. Not the benign converse of stale: it means a commit recorded a
-      revision that was rolled back, and reporting "current" would hide it.
-    * ``unavailable`` -- nothing committed yet.
+    * ``stale`` -- the state moved on after the newest generation committed,
+      which is what a failed closing save leaves behind. Results stay viewable
+      and exportable; exact continuation is not promised.
+    * ``inconsistent`` -- a generation claims a state revision the session never
+      reached. Not the benign converse of stale: something recorded a commit
+      against a state that was rolled back, and reporting "current" would hide
+      it.
+    * ``unavailable`` -- nothing has committed yet.
 
-    This is a report. The only thing it gates is silently binding an older
-    namespace to a newer graph position (see ``is_forward_resume_blocked``).
+    Evaluated when a run or resume is about to begin, not continuously: between
+    save boundaries the two legitimately diverge, and treating that as
+    staleness would block every session mid-analysis.
     """
-    if not has_generation or saved_revision is None:
+    if not has_generation or committed_state_revision is None:
         return COHERENCE_UNAVAILABLE
-    saved = int(saved_revision or 0)
-    current = int(current_revision or 0)
-    if saved < current:
+    committed = int(committed_state_revision or 0)
+    current = int(state_revision or 0)
+    if committed < current:
         return COHERENCE_STALE
-    if saved > current:
+    if committed > current:
         return COHERENCE_INCONSISTENT
     return COHERENCE_CURRENT
 

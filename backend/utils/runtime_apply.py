@@ -355,16 +355,35 @@ def recover_runtime_apply_journal(session_id: str) -> None:
 
 
 def state_runtime_coherence(state) -> str:
-    """The coherence verdict recorded for a session's newest generation.
+    """Whether this session's newest generation belongs to its persisted state.
 
-    Defaults to "current" for a state that predates the field, so an old
-    session is not blocked by the absence of a record rather than by a real
-    mismatch.
+    Computed on read rather than latched at write time: between save boundaries
+    a running analysis legitimately advances its state past the last committed
+    generation, so a stored verdict would flap and, worse, could be consulted
+    long after the numbers behind it changed.
+
+    A state that predates the fields reports "current": absence of a record is
+    not evidence of a mismatch, and blocking on it would strand every session
+    that existed before this contract.
     """
+    from backend.utils.runtime_manifest import runtime_coherence
+
     persistence = getattr(state, "runtime_persistence", None) or {}
     if not isinstance(persistence, dict):
         return "current"
-    return str(persistence.get("coherence") or "current")
+    has_generation = bool(persistence.get("committed_source")) and bool(
+        persistence.get("committed_digest")
+    )
+    committed = persistence.get("committed_state_revision")
+    if has_generation and committed is None:
+        # Committed before this contract existed. Its pairing is unknown, which
+        # is not the same as wrong.
+        return "current"
+    return runtime_coherence(
+        committed_state_revision=committed,
+        state_revision=int(getattr(state, "state_revision", 0) or 0),
+        has_generation=has_generation,
+    )
 
 
 def is_forward_resume_blocked(
@@ -402,8 +421,15 @@ def is_forward_resume_blocked(
         return False
     if runtime_restore_status == "unavailable":
         return True
-    # "unavailable" coherence means nothing has committed yet, which is the
-    # normal state of a fresh session and must not block its first run.
+    # "unavailable" coherence is deliberately not a block. It means no
+    # generation has been recorded, which is true of a fresh session, of every
+    # session that predates this contract, and of one restored by a path that
+    # installs a dump without writing a manifest. Whether a session that has
+    # *worked* has a usable runtime is a different question, and
+    # ``runtime_restore_status`` already owns it -- import marks it
+    # "unavailable" for exactly that case. Answering it here as well produced
+    # false blocks wherever the persistence record simply had not been
+    # populated.
     return coherence in {"stale", "inconsistent"}
 
 
@@ -545,6 +571,31 @@ def _retire_stale_runtime_manifest(session_id: str) -> None:
     manifest = runtime_manifest_path(session_id)
     _quarantine_path(manifest)
     _quarantine_path(runtime_manifest_sig_path(manifest))
+
+
+def retire_live_runtime(session_id: str) -> bool:
+    """Move the live runtime aside so the next kernel starts empty.
+
+    "Re-run from your data" promised an empty namespace and the agent prompt
+    says so, but clearing ``runtime_restore_status`` only removed the *guard*:
+    the dump was still on disk, so the new kernel rehydrated the old variables
+    and the run proceeded over state the user had asked to discard.
+
+    Quarantined rather than deleted -- the bytes are the only copy of that
+    generation, and a user who re-runs by mistake should not lose it silently.
+    """
+    from backend.utils.runtime_manifest import (
+        runtime_manifest_path,
+        runtime_manifest_sig_path,
+    )
+
+    live = _live_pkl(session_id)
+    retired = _quarantine_path(live) is not None
+    _quarantine_path(_live_sig(session_id))
+    manifest = runtime_manifest_path(session_id)
+    _quarantine_path(manifest)
+    _quarantine_path(runtime_manifest_sig_path(manifest))
+    return retired
 
 
 def atomic_replace_pkl(session_id: str, src_pkl_path: str) -> str:

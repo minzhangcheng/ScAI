@@ -101,6 +101,18 @@ async def run_analysis(session_id: str, request: Request):
         coherence=state_runtime_coherence(state),
     ):
         state.runtime_recompute_pending = True
+        # Clearing the guard is not the same as clearing the runtime. Until this
+        # was here the dump stayed on disk, the new kernel rehydrated it, and the
+        # agent was told its namespace was empty while the old variables were
+        # still bound.
+        from backend.utils.runtime_apply import retire_live_runtime
+
+        if retire_live_runtime(session_id):
+            bindings.logger.warning(
+                "[%s] retired the previous runtime generation for an explicit "
+                "re-run; the next kernel starts empty",
+                session_id,
+            )
     state.runtime_restore_status = "complete"
     state.runtime_restore_warning = None
     state.status = TaskStatus.RUNNING

@@ -1001,6 +1001,20 @@ async def _execute_save(
                 states_dir=sandbox.notebook_state.state_dir,
             )
 
+        def _current_state_revision() -> int:
+            """The workflow state revision this generation is committing against.
+
+            Read from the session store's live object, the same source the
+            runtime-persistence projection treats as authoritative. Coherence
+            compares this against the state's revision later, which is what
+            makes a failed closing save visible: the state moves on, the
+            recorded pairing does not.
+            """
+            from backend.state import sessions as live_sessions
+
+            live = live_sessions.get(sandbox.session_id)
+            return int(getattr(live, "state_revision", 0) or 0)
+
         def _commit_generation_metadata():
             sandbox.saved_runtime_revision = context.revision
             updater = getattr(
@@ -1013,6 +1027,7 @@ async def _execute_save(
                     saved_revision=context.revision,
                     commit_source="regular_save",
                     runtime_digest=target_digest,
+                    committed_state_revision=_current_state_revision(),
                 )
 
         commit_outcome: Dict[str, Any] = {
@@ -1038,13 +1053,14 @@ async def _execute_save(
                                 manifest_path=manifest_path,
                                 runtime_manifest_path=runtime_manifest_file,
                                 runtime_manifest={
-                                    # The runtime revision this generation
-                                    # captured. Coherence is decided from the
-                                    # live persistence record rather than from
-                                    # here; this pairing lets a restore notice a
-                                    # manifest left behind by a different
-                                    # generation.
-                                    "state_revision": int(context.revision or 0),
+                                    # The workflow state revision this
+                                    # generation belongs to -- not its own
+                                    # runtime revision, which is already
+                                    # recorded as `revision`. Writing the
+                                    # runtime counter into both fields made the
+                                    # pairing tautological and unable to detect
+                                    # a state that had moved on.
+                                    "state_revision": _current_state_revision(),
                                     "saved_names": sorted(saved_names),
                                     "skipped_names": skipped_record,
                                     "serializer_version": "dill-zstd-1",

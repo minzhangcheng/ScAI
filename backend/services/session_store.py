@@ -427,6 +427,13 @@ async def _async_save_session_under_lifecycle(
             logger.debug("Throttled save for %s", session_id)
             return
     last_save_times[session_id] = now
+    # Advance before the dump so the persisted copy carries the revision it was
+    # written at. A runtime generation records whichever value was current when
+    # it committed, and coherence compares the two.
+    try:
+        state.state_revision = int(getattr(state, "state_revision", 0) or 0) + 1
+    except (TypeError, ValueError):
+        state.state_revision = 1
     # model_dump on the event loop (snapshot the mutable model here to avoid
     # racing with in-place mutation); offload the blob writes + JSON write.
     dumped = _durable_state_dump(state, session_id=session_id)
