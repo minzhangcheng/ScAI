@@ -608,9 +608,7 @@ class BioinformaticsAgent(
         modality = self._infer_modality()
         cache_key = (sp, modality)
         if getattr(self, "_cached_static_sp_key", None) != cache_key:
-            result = build_static_executor_prompt(
-                sp, modality, str(self.sandbox.working_dir)
-            )
+            result = build_static_executor_prompt(sp, modality)
             self._cached_static_sp_key, self._cached_static_sp = cache_key, result
         return self._cached_static_sp
 

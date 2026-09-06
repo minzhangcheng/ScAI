@@ -313,12 +313,24 @@ CELL TYPE ANNOTATION WORKFLOW:
 """
 
 
-def _executor_prompt_workspace(workspace_dir: str) -> str:
-    """Workspace layout and code-level contract."""
-    return f"""
+def _executor_prompt_workspace() -> str:
+    """Workspace layout and code-level contract.
+
+    Takes no workspace path, deliberately. The section used to open with the
+    literal directory, which is the obvious source of the absolute paths that
+    then appeared throughout generated notebooks. It also never varied the
+    cached prompt -- `_static_system_prompt` keys its cache on (system prompt,
+    modality) alone -- so an agent that outlived one sandbox would have served
+    the wrong path anyway.
+    """
+    return """
 === Working Directory ===
-Your Jupyter kernel is running in: {workspace_dir}
-A variable `_WORKSPACE_DIR` (pathlib.Path) is pre-defined in the kernel and points to this directory.
+The notebook's first cells define `_WORKSPACE_DIR` (a pathlib.Path) and change
+into it. That definition is part of the notebook, so code rooted at
+`_WORKSPACE_DIR` runs anywhere the notebook is replayed; a hard-coded path runs
+only on the machine that produced it. Never write an absolute path into code.
+The literal value is deliberately not given to you here -- you do not need it,
+and code that contains it is not reproducible.
 All output files MUST be saved using `_WORKSPACE_DIR` as the root. NEVER use relative paths like './' or '../'.
 - Figures: in execute_code, call `plt.savefig('name.jpg')` or `sc.pl.*(save='_name.jpg')` with a bare filename — files land under `_WORKSPACE_DIR/figures` automatically and a companion PDF is generated. Do NOT manually save a separate PDF, and do NOT save figures into nested results/<dir>/figures/ paths. For report-quality figures, use generate_publication_figure instead. (Inside generate_publication_figure's `code`, the tool wraps saving — see that tool's notes.)
 - Tables/CSV results: save to `_WORKSPACE_DIR / 'tables'`
@@ -401,6 +413,10 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 - Examples: sc.tl.umap(..., random_state=42), sc.tl.leiden(..., random_state=42),
   sc.tl.pca(..., random_state=42), train_test_split(..., random_state=42)
 - NEVER omit the random_state parameter in stochastic functions
+- NEVER pass random_state=None or seed=None. Passing None is not "supplying the
+  parameter" -- it reseeds from system entropy, so the same notebook produces a
+  different embedding on every run. It is worse than omitting the argument,
+  because it reads as deliberate.
 - Use n_jobs=1 when determinism is critical
 - Print key metrics and results
 - Generate informative visualizations
@@ -408,11 +424,9 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 """
 
 
-def build_static_executor_prompt(
-    sp: str, modality: str, workspace_dir: str
-) -> str:
+def build_static_executor_prompt(sp: str, modality: str) -> str:
     return (
         _executor_prompt_tools(sp, modality)
         + _executor_prompt_methods()
-        + _executor_prompt_workspace(workspace_dir)
+        + _executor_prompt_workspace()
     )

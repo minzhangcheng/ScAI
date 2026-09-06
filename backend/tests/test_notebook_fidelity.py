@@ -448,3 +448,89 @@ def test_the_bootstrap_executions_stay_out_of_the_ordinary_record_gate():
     kernel_source = (BACKEND / "utils/sandbox_parts/kernel.py").read_text()
     assert kernel_source.count("records_history=False") == 2
     assert "set_bootstrap_cells([" in kernel_source
+
+
+# --- what the executor is told to generate (spec 5.3.4, 5.3.5) --------------
+#
+# These assert the prompt text, which is all a test can assert. They do not
+# prove the model complies; spec section 8 records that as an accepted risk,
+# and it is why this batch's prompt changes are committed alone.
+
+
+def _workspace_prompt():
+    from backend.agents.bioinformatics.executor_prompt import (
+        _executor_prompt_workspace,
+    )
+
+    return _executor_prompt_workspace()
+
+
+def test_the_prompt_cannot_name_the_session_root_because_it_is_not_given_one():
+    """The absolute path was in the instructions, so it ended up in the code.
+
+    One real notebook held 630 absolute-path occurrences while the prompt
+    already forbade them -- and the prompt was also handing the model the exact
+    string to paste. A path a cell hard-codes cannot be replayed anywhere else,
+    not even in the same installation's clean workspace.
+
+    Asserted structurally rather than by passing a path and looking for it: the
+    section takes no workspace argument now, so there is nothing to interpolate
+    and no way to reintroduce one without changing the signature.
+    """
+    import inspect
+
+    from backend.agents.bioinformatics.executor_prompt import (
+        _executor_prompt_workspace,
+        build_static_executor_prompt,
+    )
+
+    assert inspect.signature(_executor_prompt_workspace).parameters == {}
+    assert "workspace" not in inspect.signature(build_static_executor_prompt).parameters
+    assert "_WORKSPACE_DIR" in _workspace_prompt()
+
+
+def test_the_prompt_points_at_the_notebook_cell_that_defines_the_root():
+    """`_WORKSPACE_DIR` is only a portable root if its definition travels.
+
+    It is set by the kernel bootstrap, which became notebook cells 0 and 1 in
+    this batch. Before that a notebook using the variable was no more replayable
+    than one hard-coding the path.
+    """
+    lowered = _workspace_prompt().lower()
+    assert "first cell" in lowered or "opening cell" in lowered or "bootstrap" in lowered
+
+
+def test_the_prompt_forbids_random_state_none():
+    """"Never omit it" is satisfied by passing None, which is not determinism.
+
+    `sc.tl.umap(adata, random_state=None)` has the parameter, reads as compliant
+    to any check that looks for its presence, and reseeds from entropy on every
+    run -- so the replay contract's embedding tolerance can never be met.
+    """
+    prompt = _workspace_prompt()
+    assert "random_state=None" in prompt, "the failure mode is not named"
+    assert "seed=None" in prompt
+
+
+def test_the_prompt_still_requires_a_fixed_seed():
+    """The existing instruction is not weakened by the new one."""
+    prompt = _workspace_prompt()
+    assert "random_state=42" in prompt
+    assert "NEVER omit the random_state parameter" in prompt
+
+
+def test_the_templates_emit_no_absolute_paths():
+    """The prompt is advice; a template is code we ship.
+
+    A template that hard-coded a path would put one in every notebook regardless
+    of what the model was told.
+    """
+    import re
+
+    for rel in (
+        "backend/agents/bioinformatics/kernel_templates.py",
+        "backend/agents/bioinformatics/kernel_template_sections.py",
+    ):
+        source = (REPO / rel).read_text()
+        literals = re.findall(r"""['"](/(?:data|workspace|home|tmp)/[^'"]*)['"]""", source)
+        assert literals == [], (rel, literals)
