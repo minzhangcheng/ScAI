@@ -153,7 +153,11 @@ if (
 
 # Define the workspace Path before any matplotlib wrappers refer to it.  Do not
 # chdir, create directories, or install the I/O sandbox until path_setup_code.
-_WORKSPACE_DIR = Path(__SCAI_WORKSPACE_REPR__)
+# The recorded run's root, overridable so this notebook can be replayed
+# somewhere else. Nothing sets these in production, so the literal is what runs.
+_SCAI_WORKSPACE = os.environ.get('SCAI_REPLAY_WORKSPACE') or __SCAI_WORKSPACE_REPR__
+_SCAI_SESSION_TMP = os.environ.get('SCAI_REPLAY_SESSION_TMP') or __SCAI_SESSION_TMP_REPR__
+_WORKSPACE_DIR = Path(_SCAI_WORKSPACE)
 # ``-P`` keeps the workspace off Python's startup path so it cannot shadow the
 # trusted sitecustomize module. Restore ordinary notebook import semantics only
 # after the native boundary is already active.
@@ -163,7 +167,7 @@ if str(_WORKSPACE_DIR) not in sys.path:
 SEED = 42
 
 # === Isolate Numba cache per session to prevent concurrent cache corruption ===
-_numba_cache = Path(__SCAI_SESSION_TMP_REPR__) / 'numba_cache'
+_numba_cache = Path(_SCAI_SESSION_TMP) / 'numba_cache'
 _numba_cache.mkdir(parents=True, exist_ok=True)
 os.environ['NUMBA_CACHE_DIR'] = str(_numba_cache)
 # Prevent Numba from spawning extra threads that compete for cache locks
@@ -515,12 +519,22 @@ def build_path_setup_source(sandbox) -> str:
 import os
 from pathlib import Path
 
-# Redirect tempfile to per-session subdir
-os.environ['TMPDIR'] = {repr(str(sandbox._session_tmp))}
-os.environ['TEMP'] = {repr(str(sandbox._session_tmp))}
-os.environ['TMP'] = {repr(str(sandbox._session_tmp))}
+# Same three roots as the common bootstrap, resolved the same way: the
+# recorded literal unless a replay overrides it. Re-resolved rather than reused
+# because the two cells are independently replayable.
+_SCAI_WORKSPACE = os.environ.get('SCAI_REPLAY_WORKSPACE') or {repr(working_dir_abs)}
+_SCAI_SESSION_TMP = os.environ.get('SCAI_REPLAY_SESSION_TMP') or {repr(str(sandbox._session_tmp))}
+_SCAI_STATE_DIR = os.environ.get('SCAI_REPLAY_STATE_DIR') or {repr(state_dir_abs)}
 
-_WORKSPACE_DIR = Path({repr(working_dir_abs)})
+Path(_SCAI_SESSION_TMP).mkdir(parents=True, exist_ok=True)
+
+# Redirect tempfile to per-session subdir
+os.environ['TMPDIR'] = _SCAI_SESSION_TMP
+os.environ['TEMP'] = _SCAI_SESSION_TMP
+os.environ['TMP'] = _SCAI_SESSION_TMP
+
+_WORKSPACE_DIR = Path(_SCAI_WORKSPACE)
+_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 os.chdir(_WORKSPACE_DIR)
 
 # Create standard subdirectories
@@ -550,10 +564,13 @@ _ORIGINAL_PATH_TOUCH = _pathlib.Path.touch
 
 # Leaf directories where write operations are allowed. Reads remain available
 # outside these roots so uploaded inputs and installed libraries still work.
+# Derived from the roots above, so an overridden workspace is the one the
+# guard permits. Hard-coding the literals here would let a replay chdir into a
+# clean workspace and then be refused permission to write in it.
 _ALLOWED_WRITE_ROOTS = [
-    {repr(working_dir_abs)},   # Analysis outputs and user-visible artifacts
-    {repr(state_dir_abs)},     # Trusted runtime persistence cells
-    {repr(str(sandbox._session_tmp))},   # Per-session temporary files
+    _SCAI_WORKSPACE,     # Analysis outputs and user-visible artifacts
+    _SCAI_STATE_DIR,     # Trusted runtime persistence cells
+    _SCAI_SESSION_TMP,   # Per-session temporary files
 ]
 
 # The guard shares its namespace with the analysis code it guards, so it

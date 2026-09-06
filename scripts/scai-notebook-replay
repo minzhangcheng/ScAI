@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import sys
 import time
@@ -247,7 +248,23 @@ def run_in_kernel(cells: list[dict], workspace: pathlib.Path) -> tuple[list[dict
     from jupyter_client.manager import start_new_kernel
 
     workspace.mkdir(parents=True, exist_ok=True)
-    manager, client = start_new_kernel(kernel_name="python3", cwd=str(workspace))
+    session_tmp = workspace / "tmp"
+    session_tmp.mkdir(parents=True, exist_ok=True)
+
+    # The bootstrap cell records the absolute roots of the run it came from and
+    # chdirs to them. Without these the replay would leave the clean workspace
+    # on cell 1 and write into the original session's directory -- which is not
+    # a clean workspace, and would also mean two replays of one session fought
+    # over the same files. The bootstrap prefers these when set and falls back
+    # to its recorded literals when they are not, so production is unaffected.
+    environment = dict(os.environ)
+    environment["SCAI_REPLAY_WORKSPACE"] = str(workspace)
+    environment["SCAI_REPLAY_SESSION_TMP"] = str(session_tmp)
+    environment["SCAI_REPLAY_STATE_DIR"] = str(workspace)
+
+    manager, client = start_new_kernel(
+        kernel_name="python3", cwd=str(workspace), env=environment,
+    )
     outcomes, fingerprint = [], {}
     try:
         for cell in cells:
@@ -373,8 +390,9 @@ def cmd_replay(args) -> int:
     if not any(c["bootstrap"] for c in cells):
         print(
             "warning: this notebook has no bootstrap cell, so the replay runs in "
-            "whatever environment this process has. Sessions written before "
-            "A2-9 are in that state; the result is not a contract verdict.",
+            "whatever environment this process has, and SCAI_REPLAY_* have "
+            "nothing to override. Sessions written before A2-9 are in that "
+            "state; the result is not a contract verdict.",
             file=sys.stderr,
         )
 

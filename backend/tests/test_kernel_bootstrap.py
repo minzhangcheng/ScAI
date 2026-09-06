@@ -90,10 +90,10 @@ async def test_bootstrap_injects_repr_safe_paths_before_workspace_use(tmp_path):
         repr(str(sandbox.notebook_state.state_dir)), repr("<state-dir>")
     )
     assert hashlib.sha256(normalized_common.encode()).hexdigest() == (
-        "fa78e6f3d675b3df84327de00efbef33473ed3808009258799f9c0b098a3d105"
+        "5abac8b0bbb5da8dc959a7805ed22718ffc098e36b5e85a57d4f1935e1e241c9"
     )
     assert hashlib.sha256(normalized_path.encode()).hexdigest() == (
-        "3d244c95b341b84498e13e6a98381f76b1b1c62b00ff45e273514287d6c5113b"
+        "6519d8cef92a107dd7596eeda885a290bd702846c841f021fe5f95cd3a1f72c5"
     )
 
 
