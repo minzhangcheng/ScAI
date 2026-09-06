@@ -180,8 +180,16 @@ def test_the_restore_entry_plan_lives_in_the_workflow_package():
 
 
 def test_workflow_core_does_not_import_the_snapshot_restore_entry():
-    source = (BACKEND / "workflow" / "core.py").read_text()
-    assert "snapshot_v2.restore_entry" not in source
+    """Assert over the whole split, not over the re-export header.
+
+    ``backend/workflow/core.py`` is a facade whose implementation lives in
+    ``core_parts/``. A negative assertion read from the facade's own file would
+    pass unconditionally the day this import moves into a part, which is what
+    ``test_facade_patch_targets`` forbids.
+    """
+    from backend.tests.split_facade import split_source
+
+    assert "snapshot_v2.restore_entry" not in split_source("backend.workflow.core")
 def test_the_runtime_signature_root_is_not_the_snapshot_directory():
     """A2-5 may delete get_integrity_dir outright; nothing else uses it.
 
