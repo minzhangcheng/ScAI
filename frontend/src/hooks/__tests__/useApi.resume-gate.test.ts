@@ -20,9 +20,9 @@ function resumeResponse(data: Record<string, unknown>) {
 }
 
 // Only the runtime-unavailable refusal carries a dedicated flag. Recovery
-// blocked, a snapshot failure and a pending plan review all answer 200 with
-// `success: false` and nothing else to key off, so that half of the guard needs
-// a response shape of its own to be exercised at all.
+// blocked and a pending plan review answer 200 with `success: false` and
+// nothing else to key off, so that half of the guard needs a response shape of
+// its own to be exercised at all.
 function refusedResponse(data: Record<string, unknown> = {}) {
   return {
     ok: true,

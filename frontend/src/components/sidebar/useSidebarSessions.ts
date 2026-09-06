@@ -210,7 +210,7 @@ export function useSidebarSessions() {
     if (!currentSession || exporting) return
 
     // Opt-in for runtime kernel state. Off by default — the pickle is only
-    // restorable on the same trusted instance and can add multi-GB per snapshot.
+    // restorable on the same trusted instance and can add multiple gigabytes.
     const includeRuntime = window.confirm(
       language === 'zh'
         ? '是否包含内核运行时状态 (session.pkl)？\n\n选择「确定」会让归档包含已加载的 adata 等内存变量和工作流断点，导入后（包括导入到其他实例）可以接着分析下去，但归档体积会变大（可能多几 GB）。\n\n选择「取消」打包不带运行时状态：体积小，数据、图表、报告和历史都在，但导入后无法继续分析，只能从数据重跑。'

@@ -120,8 +120,8 @@ describe('what the import flow reports when it finishes', () => {
         : {
             status: 'completed',
             session_id: 's1',
-            skipped: { snapshot_v2: 3, checkpoint_dropped: 1 },
-            skipped_examples: ['snapshot_v2: s1/v2/objects/aa'],
+            skipped: { retired_snapshot: 3, checkpoint_dropped: 1 },
+            skipped_examples: ['retired_snapshot: s1/v2/objects/aa'],
           }
     })
 
@@ -131,7 +131,7 @@ describe('what the import flow reports when it finishes', () => {
     expect(screen.getByText('Import successful')).toBeInTheDocument()
     const detail = screen.getByText(/Session imported successfully/)
     expect(detail.textContent).toContain('4 item(s) were not restored')
-    expect(detail.textContent).toContain('Snapshot V2 data (3)')
+    expect(detail.textContent).toContain('snapshot data from an older build (3)')
     expect(detail.textContent).toContain('workflow checkpoints (1)')
   })
 

@@ -3,7 +3,6 @@
 
 import { Language } from '../i18n/translations'
 import type { ChatMessage } from '../types'
-import type { SnapshotRecordV2, SnapshotStoreStatus, SnapshotTransactionRecord, SnapshotFailureInfo } from '../types/snapshotV2'
 import type { AnnotationData } from '../utils/annotationGate'
 import { AgentError, AgentModels, AgentPrompts, AgentServerConfig, AgentTemperatures, AgentType, AgentVisionSettings, AuthUser, ExplorationFailedInfo, LlmFailureInfo, Message, Session, SpeciesInputInfo } from './domain'
 
@@ -148,22 +147,6 @@ export interface AppState {
   sessionLoading: boolean
   setSessionLoading: (loading: boolean) => void
 
-  // Snapshot count and cleanup reminder
-  snapshotCount: number
-  setSnapshotCount: (count: number) => void
-  showSnapshotCleanupReminder: boolean
-  setShowSnapshotCleanupReminder: (show: boolean) => void
-
-  // Snapshot V2 state
-  snapshotsV2: SnapshotRecordV2[]
-  setSnapshotsV2: (snapshots: SnapshotRecordV2[]) => void
-  snapshotStoreStatus: SnapshotStoreStatus | null
-  setSnapshotStoreStatus: (status: SnapshotStoreStatus | null) => void
-  snapshotTransaction: SnapshotTransactionRecord | null
-  setSnapshotTransaction: (txn: SnapshotTransactionRecord | null) => void
-  snapshotFailure: SnapshotFailureInfo | null
-  setSnapshotFailure: (failure: SnapshotFailureInfo | null) => void
-  clearSnapshotFailure: () => void
   /** Backend AnalysisState.runtime_restore_status — survives reload via session load. */
   runtimeRestoreStatus: 'complete' | 'unavailable' | 'intentionally_kept'
   setRuntimeRestoreStatus: (status: 'complete' | 'unavailable' | 'intentionally_kept') => void
@@ -172,8 +155,6 @@ export interface AppState {
   hydrateRuntimeRestoreFromSession: (payload: {
     runtime_restore_status?: string | null
     runtime_restore_warning?: string | null
-    snapshot_failure?: SnapshotFailureInfo['failure'] | Record<string, unknown> | null
-    snapshot_failure_allowed_actions?: SnapshotFailureInfo['allowed_actions'] | null
   }) => void
   isForwardResumeBlocked: () => boolean
   isRerunEnabled: () => boolean
@@ -185,8 +166,6 @@ export interface AppState {
   // Server-side API configuration flag (set when backend confirms a key is configured)
   apiConfigured: boolean
   setApiConfigured: (v: boolean) => void
-  snapshotV2Enabled: boolean
-  setSnapshotV2Enabled: (enabled: boolean) => void
 
   // Auth state
   authReady: boolean

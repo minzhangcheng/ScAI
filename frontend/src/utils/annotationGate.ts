@@ -57,9 +57,9 @@ function toClusterAnnotation(raw: RawClusterAnnotation): ClusterAnnotation {
  *
  * The dialog used to be reconstructible only from the transient
  * `annotation_confirmation` realtime message. That message is lossy — /load
- * replays a bounded window, the stream is capped, and snapshot restore drops it
- * — so once it was gone the gate could not be reopened at all. This lets a
- * reloaded client reach the gate from persisted state instead.
+ * replays a bounded window and the stream is capped — so once it was gone the
+ * gate could not be reopened at all. This lets a reloaded client reach the gate
+ * from persisted state instead.
  *
  * Returns null when no gate is pending.
  */

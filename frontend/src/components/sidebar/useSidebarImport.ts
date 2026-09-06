@@ -11,7 +11,7 @@ import type { SidebarProgressInfo } from './types'
 // an unknown kind falls back to its raw key so a newly added counter still
 // surfaces instead of being swallowed.
 const IMPORT_SKIP_LABELS: Record<string, TranslationKey> = {
-  snapshot_v2: 'importSkippedSnapshotV2',
+  retired_snapshot: 'importSkippedRetiredSnapshot',
   unsafe_path: 'importSkippedUnsafePath',
   off_layout: 'importSkippedOffLayout',
   untrusted_pickle: 'importSkippedUntrustedPickle',

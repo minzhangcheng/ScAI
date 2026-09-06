@@ -3,43 +3,18 @@ import { transformRoundResults } from '../../../utils/transformLoadResponse'
 import { devLog } from '../../../utils/logger'
 import { resultIdentityKey } from '../../../utils/roundKey'
 import type { ChatMessage } from '../../../types'
-import { resolveSnapshotFailureActions } from '../../../utils/snapshotV2'
 import { reconcileChatHistory, upsertChatMessage } from '../../../utils/chatMessages'
 import { apiFetch, generateId } from '../client'
 import { mergeRealtimeMessages } from '../realtimeHistory'
 import { reloadSessionState } from './sessionReload'
 import type { MessageHandlerContext } from './types'
 
-const SNAPSHOT_CLEANUP_THRESHOLD = 20
-const SNAPSHOT_REMINDER_INTERVAL = 5
-const MAX_RESTORE_COMMIT_REFRESH_KEYS = 64
-
 function handleStateSync(data: any, context: MessageHandlerContext): void {
-  const {
-    attempt, isCurrentAttempt, restoreCommitRefreshesRef, stateSyncEpochRef,
-  } = context
+  const { isCurrentAttempt, stateSyncEpochRef } = context
   // Normalise: some backend paths nest fields under `content`
   // while others place them at the top level of the message.
   const syncContent = data.content ?? data
-  const restoreInfo = syncContent.change_type === 'snapshot_transaction'
-    ? syncContent.snapshot_transaction
-    : null
-  const restoreSessionId = useAppStore.getState().currentSession?.id
-  const restoreRefreshKey = (
-    restoreSessionId && restoreInfo?.transaction_id
-      ? `${restoreSessionId}:${attempt}:${restoreInfo.transaction_id}`
-      : null
-  )
-  const repeatedRestoreCommit = Boolean(
-    restoreInfo?.status === 'committed'
-    && restoreInfo.session_id === restoreSessionId
-    && restoreRefreshKey
-    && restoreCommitRefreshesRef.current.keys.has(restoreRefreshKey)
-  )
-  // A replayed commit is the same causal sync that already owns the in-flight
-  // reload. Advancing the epoch while deduplicating its replacement would
-  // invalidate the only authoritative response.
-  if (!repeatedRestoreCommit) stateSyncEpochRef.current += 1
+  stateSyncEpochRef.current += 1
   const currentVersion = useAppStore.getState().stateVersion
 
   const terminalChat = syncContent.chat_message
@@ -133,93 +108,6 @@ function handleStateSync(data: any, context: MessageHandlerContext): void {
         })
         store.setShowSpeciesInputDialog(true)
       }
-    } else if (syncContent.change_type === 'snapshot_transaction') {
-      const info = syncContent.snapshot_transaction
-      if (info) {
-        const store = useAppStore.getState()
-        store.setSnapshotTransaction(info)
-
-        // A committed restore has already rewritten session.json, the
-        // notebook, the workspace and the graph checkpoint on the
-        // server, and this sync deliberately carries no `status` /
-        // `current_round` / `version`, so the partial-update block below
-        // writes nothing. The refresh used to be gated on
-        // `info.reconnect`, a field no producer emits —
-        // SnapshotTransactionRecord has no such key — so whenever the
-        // Snapshot panel was unmounted at commit time (page reloaded
-        // mid-restore: the panel only auto-reopens for a *retry*
-        // transaction) the client kept rendering pre-restore state and
-        // dispatched the user's next action against a server that had
-        // moved. Refetch rather than reconnect: it is idempotent and
-        // does not tear down a live socket. Guarded per transaction id
-        // because `_resend_wait_input_state_sync` replays the stored
-        // transaction on every reconnect.
-        const activeSessionId = store.currentSession?.id
-        const refreshKey = (
-          activeSessionId && info.transaction_id
-            ? `${activeSessionId}:${attempt}:${info.transaction_id}`
-            : null
-        )
-        if (
-          info.status === 'committed'
-          && activeSessionId
-          && info.session_id === activeSessionId
-          && refreshKey
-          && !restoreCommitRefreshesRef.current.keys.has(refreshKey)
-        ) {
-          const refreshes = restoreCommitRefreshesRef.current
-          refreshes.keys.add(refreshKey)
-          refreshes.order.push(refreshKey)
-          while (refreshes.order.length > MAX_RESTORE_COMMIT_REFRESH_KEYS) {
-            const expired = refreshes.order.shift()
-            if (expired) refreshes.keys.delete(expired)
-          }
-          const restoreReloadEpoch = stateSyncEpochRef.current
-          const ownsRestoreReload = () => (
-            isCurrentAttempt()
-            && useAppStore.getState().currentSession?.id === activeSessionId
-            && stateSyncEpochRef.current === restoreReloadEpoch
-          )
-          const releaseRefresh = () => {
-            if (restoreCommitRefreshesRef.current.keys.has(refreshKey)) {
-              const retained = restoreCommitRefreshesRef.current
-              retained.keys.delete(refreshKey)
-              retained.order = retained.order.filter(key => key !== refreshKey)
-            }
-          }
-          void reloadSessionState(activeSessionId, ownsRestoreReload).then(applied => {
-            if (!applied) releaseRefresh()
-          }).catch(reloadErr => {
-            if (ownsRestoreReload()) {
-              console.error(
-                'WebSocket: Failed to reload session state after restore commit:',
-                reloadErr,
-              )
-            }
-            releaseRefresh()
-          })
-        }
-      }
-    } else if (syncContent.change_type === 'snapshot_failure') {
-      // 'runtime_persistence_failure' still arrives -- it is how the backend
-      // announces that the persistence record changed -- but it no longer
-      // arms a dialog: the gate and its three actions are gone (spec 5.1), so
-      // a dialog raised here would offer only buttons that 409. Rendering the
-      // record as a persistent non-blocking warning is A2-7's work.
-      const failure = syncContent.snapshot_failure
-      if (failure) {
-        const store = useAppStore.getState()
-        store.setSnapshotFailure({
-          failure,
-          allowed_actions: resolveSnapshotFailureActions(failure),
-        })
-      } else if (failure === null) {
-        useAppStore.getState().clearSnapshotFailure()
-      }
-      const txn = syncContent.snapshot_transaction
-      if (txn) {
-        useAppStore.getState().setSnapshotTransaction(txn)
-      }
     } else if (
       syncContent.change_type === 'species_resolved' ||
       syncContent.change_type === 'species_auto_skipped'
@@ -230,12 +118,7 @@ function handleStateSync(data: any, context: MessageHandlerContext): void {
     // Only write fields the message actually carries. `updateSession`
     // spreads this object over the session, so a key present with value
     // `undefined` erases the real value rather than being ignored — and
-    // not every state_sync producer sends the full shape. The restore
-    // job's `snapshot_transaction` sync in particular sends only
-    // `change_type` + `snapshot_transaction`, so every progress event
-    // during a restore used to blank `status` and `currentRound`,
-    // leaving the Analysis Control header with no matching branch and
-    // therefore no buttons at all until a manual page reload.
+    // not every state_sync producer sends the full shape.
     const sessionUpdate: Partial<Session> = {}
     if (syncContent.status !== undefined) sessionUpdate.status = syncContent.status
     if (syncContent.current_round !== undefined) sessionUpdate.currentRound = syncContent.current_round
@@ -324,15 +207,6 @@ export function handleWebSocketMessage(
       // Also add to message stream for visibility
     }
 
-    if (data.type === 'snapshot_count') {
-      const count = data.content?.count ?? 0
-      useAppStore.getState().setSnapshotCount(count)
-
-      if (count >= SNAPSHOT_CLEANUP_THRESHOLD && count % SNAPSHOT_REMINDER_INTERVAL === 0) {
-        useAppStore.getState().setShowSnapshotCleanupReminder(true)
-      }
-      return  // Don't add to MessageStream
-    }
 
     // Handle chat_result - final response from chat delegation
     if (data.type === 'chat_result') {

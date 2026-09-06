@@ -17,7 +17,7 @@ import {
   createRuntimeSessionActions,
   createUiSessionActions,
 } from './actions/sessionActions'
-import { createSnapshotActions } from './actions/snapshotActions'
+import { createRuntimeActions } from './actions/runtimeActions'
 import {
   migratePersistedState,
   partialize,
@@ -33,8 +33,8 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
   ...createChatMessageActions(set),
   ...createUiSessionActions(set),
   ...createAgentErrorActions(set, get),
-  ...createRuntimeSessionActions(set, get),
-  ...createSnapshotActions(set, get),
+  ...createRuntimeSessionActions(set),
+  ...createRuntimeActions(set, get),
   ...createInterventionActions(set),
   ...createAuthActions(set, get),
 })
