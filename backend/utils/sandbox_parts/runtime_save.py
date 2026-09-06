@@ -3,8 +3,97 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import inspect
+import json
 import re
 from typing import Any, Dict
+
+
+class RuntimeCoverageError(RuntimeError):
+    """The kernel did not report a usable coverage record for this generation."""
+
+
+_COVERAGE_MARKERS = {
+    "saved_names": "__SCAI_SAVED_NAMES__:",
+    "excluded_by_kind": "__SCAI_EXCLUDED_KIND__:",
+    "excluded_volatile": "__SCAI_EXCLUDED_VOLATILE__:",
+}
+
+
+def _parse_coverage_markers(output: str) -> dict | None:
+    """Read the generation's coverage record, or say there is none.
+
+    Three outcomes, and the difference between the last two matters:
+
+    * every marker present and well formed -- the generation can describe
+      itself, and a manifest is written from this record;
+    * no marker at all -- this producer does not report coverage. That is a
+      pre-transaction custom kernel or a test double, not a claim of
+      completeness: the generation commits *without* a manifest and a later
+      restore treats it as legacy, coverage unknown. Returning an empty record
+      instead would be the real hazard, because an empty record asserts that
+      nothing was excluded;
+    * some markers, or malformed ones -- the producer is broken, and a
+      generation whose own account of itself is truncated must not commit.
+    """
+    found: dict = {}
+    for line in (output or "").splitlines():
+        for key, prefix in _COVERAGE_MARKERS.items():
+            if not line.startswith(prefix):
+                continue
+            if key in found:
+                raise RuntimeCoverageError(f"coverage marker repeated: {prefix}")
+            try:
+                parsed = json.loads(line[len(prefix):])
+            except json.JSONDecodeError as exc:
+                raise RuntimeCoverageError(
+                    f"malformed coverage marker {prefix}: {exc}"
+                ) from exc
+            if not isinstance(parsed, list):
+                raise RuntimeCoverageError(
+                    f"malformed coverage marker {prefix}: expected a list"
+                )
+            found[key] = parsed
+    if not found:
+        return None
+    missing = sorted(set(_COVERAGE_MARKERS) - set(found))
+    if missing:
+        raise RuntimeCoverageError(
+            "coverage record is partial; markers absent: "
+            + ", ".join(_COVERAGE_MARKERS[key].strip(":") for key in missing)
+        )
+    return found
+
+
+def _classify_skipped(skipped, *, excluded_by_kind, excluded_volatile):
+    """One coverage record from the three channels the kernel reports.
+
+    A value dill refused, a value never offered because of its kind, and a
+    value excluded as a volatile handle are three different facts about the
+    same generation; collapsing them loses the only signal that says whether a
+    name is worth recomputing.
+    """
+    entries: dict = {}
+    for item in skipped or ():
+        name = str(item.get("name") or "")
+        if name:
+            entries[name] = {
+                "name": name,
+                "type": str(item.get("type") or "unknown"),
+                "reason": "serialization_failed",
+            }
+    for reason, source in (
+        ("excluded_by_kind", excluded_by_kind),
+        ("excluded_volatile", excluded_volatile),
+    ):
+        for item in source or ():
+            name = str(item.get("name") or "")
+            if name:
+                entries.setdefault(name, {
+                    "name": name,
+                    "type": str(item.get("type") or "unknown"),
+                    "reason": reason,
+                })
+    return [entries[name] for name in sorted(entries)]
 
 
 @dataclass
@@ -375,13 +464,13 @@ def _build_save_code(context: SaveContext) -> str:
         or repr(VOLATILE_RUNTIME_TYPE_PREFIXES)
     )
     save_code = """\
-import dill
-import io
+import dill as _scai_dill
+import io as _scai_io
 import json as _scai_json
-import os
-import tempfile
-import types
-import zstandard as zstd
+import os as _scai_os
+import tempfile as _scai_tempfile
+import types as _scai_types
+import zstandard as _scai_zstd
 
 _required_names = set(""" + context.escaped_required + """)
 # Names the host declared required, captured before the backed-AnnData pass
@@ -398,11 +487,11 @@ class _ScaiProbeTooLarge(Exception):
     pass
 
 
-class _ScaiProbeSink(io.RawIOBase):
+class _ScaiProbeSink(_scai_io.RawIOBase):
     # Buffer a dill frame in memory, abandoning it past a byte budget.
 
     def __init__(self, _budget):
-        io.RawIOBase.__init__(self)
+        _scai_io.RawIOBase.__init__(self)
         self._chunks = []
         self._size = 0
         self._budget = _budget
@@ -448,10 +537,10 @@ def _scai_is_volatile(_o):
 # notebook replay. They bloat the dump, and a by-reference frame is the single
 # most likely thing to fail on restore in a different environment.
 _scai_skip_kinds = (
-    types.ModuleType,
-    types.FunctionType,
-    types.BuiltinFunctionType,
-    types.MethodType,
+    _scai_types.ModuleType,
+    _scai_types.FunctionType,
+    _scai_types.BuiltinFunctionType,
+    _scai_types.MethodType,
     type,
 )
 
@@ -503,11 +592,27 @@ _to_dump = []
 for _scai_name in sorted(_live):
     if _scai_name in _required_names:
         _to_dump.append((_scai_name, _live[_scai_name], True))
+_excluded_by_kind = []
+_excluded_volatile = []
 for _scai_name in sorted(_live):
     _scai_obj = _live[_scai_name]
     if _scai_name in _required_names:
         continue
-    if isinstance(_scai_obj, _scai_skip_kinds) or _scai_is_volatile(_scai_obj):
+    # These two exclusions used to be silent, so a name dropped here was absent
+    # from the dump and absent from every record of the dump. Reporting them
+    # separately is what lets a restore say why a name is missing rather than
+    # only that it is.
+    if isinstance(_scai_obj, _scai_skip_kinds):
+        _excluded_by_kind.append({
+            "name": _scai_name, "type": type(_scai_obj).__name__,
+        })
+        continue
+    if _scai_is_volatile(_scai_obj):
+        _scai_t = type(_scai_obj)
+        _excluded_volatile.append({
+            "name": _scai_name,
+            "type": (_scai_t.__module__ or "") + "." + _scai_t.__name__,
+        })
         continue
     _to_dump.append((_scai_name, _scai_obj, False))
 
@@ -523,7 +628,7 @@ _compression_magic = b"SCAI_ZSTD_DILL_V1\\n"
 try:
     with open(_tmp_path, 'wb') as _raw:
         _raw.write(_compression_magic)
-        with zstd.ZstdCompressor(level=1).stream_writer(_raw, closefd=False) as _f:
+        with _scai_zstd.ZstdCompressor(level=1).stream_writer(_raw, closefd=False) as _f:
             for _var_name, _obj, _is_required in _to_dump:
                 _object_id = id(_obj)
                 if _object_id in _saved_object_names:
@@ -554,20 +659,20 @@ try:
                     if _probe_first:
                         _probe = _ScaiProbeSink(_scai_probe_budget)
                         try:
-                            dill.dump(_frame, _probe)
+                            _scai_dill.dump(_frame, _probe)
                         except _ScaiProbeTooLarge:
                             _streamed = True
-                            dill.dump(_frame, _f)
+                            _scai_dill.dump(_frame, _f)
                         else:
                             _streamed = True
                             _f.write(_probe.frame_bytes())
                     elif _is_required:
-                        dill.dump(_frame, _f)
+                        _scai_dill.dump(_frame, _f)
                     else:
-                        with tempfile.SpooledTemporaryFile(
+                        with _scai_tempfile.SpooledTemporaryFile(
                             max_size=8 * 1024 * 1024, mode='w+b'
                         ) as _frame_file:
-                            dill.dump(_frame, _frame_file)
+                            _scai_dill.dump(_frame, _frame_file)
                             _frame_file.seek(0)
                             # Serialization is complete. A failure from this
                             # point may have partially modified the compressed
@@ -600,13 +705,17 @@ try:
                 _saved_count += 1
 except Exception:
     try:
-        os.remove(_tmp_path)
+        _scai_os.remove(_tmp_path)
     except OSError:
         pass
     raise
 
 print(f"Session saved: {_saved_count} variables")
 print("__SCAI_SAVED_NAMES__:" + _scai_json.dumps(sorted(_saved_names)))
+print("__SCAI_EXCLUDED_KIND__:" + _scai_json.dumps(
+    sorted(_excluded_by_kind, key=lambda _e: _e["name"])))
+print("__SCAI_EXCLUDED_VOLATILE__:" + _scai_json.dumps(
+    sorted(_excluded_volatile, key=lambda _e: _e["name"])))
 """
     return save_code
 
@@ -747,16 +856,47 @@ async def _execute_save(
                 })
     sandbox._last_save_skipped = skipped
 
-    saved_names: set[str] = set()
-    for line in (result.output or "").splitlines():
-        if not line.startswith("__SCAI_SAVED_NAMES__:"):
-            continue
-        try:
-            parsed_names = bindings.json.loads(line.split(":", 1)[1])
-        except (bindings.json.JSONDecodeError, TypeError):
-            continue
-        if isinstance(parsed_names, list):
-            saved_names = {str(name) for name in parsed_names}
+    # A coverage record describes a dump, so it is required exactly when a dump
+    # was produced. The staged file is the same discriminator the commit below
+    # uses to tell a real save from the test doubles and pre-transaction custom
+    # kernels that never stage one: demanding a record from those would fail a
+    # save that had no generation to describe in the first place. When a dump
+    # does exist, missing or malformed markers fail the generation rather than
+    # degrading to an empty record.
+    _staged_probe = bindings.Path(
+        str(bindings.Path(sandbox.notebook_state.session_path)) + ".tmp"
+    )
+    try:
+        coverage = (
+            _parse_coverage_markers(result.output or "")
+            if result.success and _staged_probe.exists()
+            else None
+        )
+    except RuntimeCoverageError as coverage_error:
+        # Route this through the same channel as any other failed save rather
+        # than letting it escape mid-function. An exception raised here unwinds
+        # past the generation-failure bookkeeping while the caller still holds
+        # the execution lock, and a later save waiting on that lock never
+        # returns -- observed as a hang, not as an error.
+        context.record_generation_failure(
+            f"Runtime coverage record unusable: {coverage_error}",
+        )
+        raise RuntimeError(
+            f"Sandbox runtime save failed for session {sandbox.session_id}: "
+            f"{coverage_error}"
+        ) from coverage_error
+    saved_names: set[str] = (
+        {str(name) for name in coverage["saved_names"]} if coverage else set()
+    )
+    skipped_record = (
+        _classify_skipped(
+            skipped,
+            excluded_by_kind=coverage["excluded_by_kind"],
+            excluded_volatile=coverage["excluded_volatile"],
+        )
+        if coverage
+        else []
+    )
 
     if result.success:
         if skipped:
@@ -798,11 +938,17 @@ async def _execute_save(
             staged_path.unlink(missing_ok=True)
 
         manifest_path = None
+        runtime_manifest_file = None
         target_digest = None
         if production_transaction:
             from backend.utils.runtime_apply import runtime_h5ad_manifest_path
+            from backend.utils.runtime_manifest import runtime_manifest_path
 
             manifest_path = runtime_h5ad_manifest_path(
+                sandbox.session_id,
+                states_dir=sandbox.notebook_state.state_dir,
+            )
+            runtime_manifest_file = runtime_manifest_path(
                 sandbox.session_id,
                 states_dir=sandbox.notebook_state.state_dir,
             )
@@ -880,6 +1026,20 @@ async def _execute_save(
                                 _commit_generation_metadata,
                                 metadata_path=bindings.Path(sandbox.notebook_state.state_path),
                                 manifest_path=manifest_path,
+                                runtime_manifest_path=runtime_manifest_file,
+                                runtime_manifest={
+                                    # The state revision a generation belongs to
+                                    # is the session lifecycle generation that
+                                    # was active when it committed; that counter
+                                    # already has an owner, so coherence does not
+                                    # need a new one.
+                                    "state_revision": int(
+                                        context.expected_lifecycle_generation or 0
+                                    ),
+                                    "saved_names": sorted(saved_names),
+                                    "skipped_names": skipped_record,
+                                    "serializer_version": "dill-zstd-1",
+                                },
                                 commit_manifest=_commit_generation_manifest,
                                 retire_sidecars=_retire_generation_sidecars,
                                 target_revision=context.revision,

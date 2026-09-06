@@ -199,7 +199,18 @@ def _extract_save_code(monkeypatch, live_names, tracker_required):
 
     async def _execute_unlocked(code, **_kwargs):
         captured["code"] = code
-        return types.SimpleNamespace(success=True, output="", error=None)
+        # A successful save always reports its coverage; a double that omits it
+        # is claiming a generation nothing can describe, which the host now
+        # refuses rather than recording as empty.
+        return types.SimpleNamespace(
+            success=True,
+            output=(
+                '__SCAI_SAVED_NAMES__:[]\n'
+                '__SCAI_EXCLUDED_KIND__:[]\n'
+                '__SCAI_EXCLUDED_VOLATILE__:[]'
+            ),
+            error=None,
+        )
 
     sandbox._snapshot_user_globals = _snapshot_user_globals
     sandbox._prune_legacy_unobserved_required = lambda _live: set()

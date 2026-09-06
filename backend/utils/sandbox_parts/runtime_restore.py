@@ -24,6 +24,8 @@ async def restore_session(sandbox, *, bindings):
         lifecycle_file_lock,
     )
 
+    from backend.utils.runtime_manifest import runtime_manifest_path
+
     with lifecycle_file_lock(sandbox.session_id):
         assert_session_generation_active(sandbox.session_id)
         regular_recovery = bindings.recover_regular_save_transaction(
@@ -33,6 +35,10 @@ async def restore_session(sandbox, *, bindings):
             manifest_path=(
                 bindings.Path(sandbox.notebook_state.state_dir)
                 / RUNTIME_H5AD_MANIFEST_FILENAME
+            ),
+            runtime_manifest_path=runtime_manifest_path(
+                sandbox.session_id,
+                states_dir=sandbox.notebook_state.state_dir,
             ),
             session_id=sandbox.session_id,
         )

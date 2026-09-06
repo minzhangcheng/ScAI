@@ -53,7 +53,7 @@ async def test_save_captures_revision_after_waiting_for_execution_lock(
         Path(str(sb.notebook_state.session_path) + ".tmp").write_bytes(b"generation")
         return CodeExecutionResult(
             success=True,
-            output='Session saved: 1 variables\n__SCAI_SAVED_NAMES__:["adata"]',
+            output='Session saved: 1 variables\n__SCAI_SAVED_NAMES__:["adata"]\n__SCAI_EXCLUDED_KIND__:[]\n__SCAI_EXCLUDED_VOLATILE__:[]',
         )
 
     monkeypatch.setattr(sb, "_execute_unlocked", fake_save_code)
@@ -91,7 +91,7 @@ async def test_save_fast_path_waits_for_inflight_execution(tmp_path, monkeypatch
         Path(str(live) + ".tmp").write_bytes(b"new-generation")
         return CodeExecutionResult(
             success=True,
-            output='Session saved: 1 variables\n__SCAI_SAVED_NAMES__:["adata"]',
+            output='Session saved: 1 variables\n__SCAI_SAVED_NAMES__:["adata"]\n__SCAI_EXCLUDED_KIND__:[]\n__SCAI_EXCLUDED_VOLATILE__:[]',
         )
 
     monkeypatch.setattr(sb, "_execute_unlocked", fake_save_code)
@@ -131,7 +131,7 @@ async def test_restore_refusal_waits_for_inflight_execution(tmp_path, monkeypatc
         Path(str(sb.notebook_state.session_path) + ".tmp").write_bytes(b"rebuilt")
         return CodeExecutionResult(
             success=True,
-            output='Session saved: 1 variables\n__SCAI_SAVED_NAMES__:["adata"]',
+            output='Session saved: 1 variables\n__SCAI_SAVED_NAMES__:["adata"]\n__SCAI_EXCLUDED_KIND__:[]\n__SCAI_EXCLUDED_VOLATILE__:[]',
         )
 
     monkeypatch.setattr(sb, "_rebuilt_since_restore_failure", fake_rebuilt.__get__(sb))
@@ -178,7 +178,7 @@ async def test_concurrent_direct_async_saves_serialize_one_generation(
         )
         return CodeExecutionResult(
             success=True,
-            output='Session saved: 1 variables\n__SCAI_SAVED_NAMES__:["adata"]',
+            output='Session saved: 1 variables\n__SCAI_SAVED_NAMES__:["adata"]\n__SCAI_EXCLUDED_KIND__:[]\n__SCAI_EXCLUDED_VOLATILE__:[]',
         )
 
     monkeypatch.setattr(sb, "_execute_unlocked", fake_save_code)
@@ -314,7 +314,7 @@ def _save_test_sandbox(tmp_path, session_id, monkeypatch):
             "success": True,
             "output": (
                 'Session saved: 1 variables\n'
-                '__SCAI_SAVED_NAMES__:["adata"]'
+                '__SCAI_SAVED_NAMES__:["adata"]\n__SCAI_EXCLUDED_KIND__:[]\n__SCAI_EXCLUDED_VOLATILE__:[]'
             ),
             "error": None,
         })()

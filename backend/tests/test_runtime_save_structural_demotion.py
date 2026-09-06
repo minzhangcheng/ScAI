@@ -142,7 +142,7 @@ async def test_probe_dropped_required_name_is_released_from_the_tracker(tmp_path
             output=(
                 "__SCAI_SAVE_SKIPPED__\tres\tPrerank\tNotImplementedError\t"
                 "CachedSession cannot be pickled\n"
-                'Session saved: 1 variables\n__SCAI_SAVED_NAMES__:["adata"]'
+                'Session saved: 1 variables\n__SCAI_SAVED_NAMES__:["adata"]\n__SCAI_EXCLUDED_KIND__:[]\n__SCAI_EXCLUDED_VOLATILE__:[]\n__SCAI_EXCLUDED_KIND__:[]\n__SCAI_EXCLUDED_VOLATILE__:[]'
             ),
         )
 
@@ -177,7 +177,7 @@ async def test_structural_mid_stream_failure_demotes_and_the_retry_commits(tmp_p
         sandbox.notebook_state.session_path.write_bytes(b"DUMP")
         return CodeExecutionResult(
             success=True,
-            output='Session saved: 0 variables\n__SCAI_SAVED_NAMES__:[]',
+            output='Session saved: 0 variables\n__SCAI_SAVED_NAMES__:[]\n__SCAI_EXCLUDED_KIND__:[]\n__SCAI_EXCLUDED_VOLATILE__:[]\n__SCAI_EXCLUDED_KIND__:[]\n__SCAI_EXCLUDED_VOLATILE__:[]',
         )
 
     sandbox._execute_unlocked = _save
