@@ -1,3 +1,4 @@
+import inspect
 import json
 from types import SimpleNamespace
 
@@ -111,3 +112,35 @@ async def test_prerequisite_removed_from_rejected(monkeypatch):
     rejected_texts = {r["direction"] for r in decision["rejected_directions"]}
     assert "B" in selected_texts
     assert "B" not in rejected_texts
+
+
+# --- thin evidence is not a veto at the exploration gate ----------------------
+#
+# The gate declined a candidate because "the necessary defining measurements --
+# lipid peroxidation, labile iron, GPX4 activity, death morphology, and
+# ferroptosis-specific rescue -- are absent". Every one of those is a wet-lab
+# endpoint no computational round can produce, so the criterion made producing
+# the evidence a precondition for being allowed to produce it. The same decline
+# also read a susceptibility program rising alongside its own defence program as
+# self-contradiction rather than as a state worth resolving. The integration
+# gate was taught both distinctions in 0.52.1; this gate was not.
+
+
+def test_exploration_gate_does_not_reject_for_evidence_only_wet_lab_could_produce():
+    src = inspect.getsource(PIAgent.select_best_directions)
+    assert "never as the reason it fails" in src
+    assert "never for what has not been measured yet" in src
+
+
+def test_exploration_gate_treats_opposing_evidence_as_confidence_not_veto():
+    src = inspect.getsource(PIAgent.select_best_directions)
+    assert "it does not retire the direction" in src
+
+
+def test_exploration_gate_does_not_discount_novelty_by_data_sufficiency():
+    # data_sufficiency conflates "this project's data cannot answer it" with "no
+    # round has measured it yet", and only the first bears on whether a direction
+    # is worth running. It is not rendered into the candidate block either.
+    from backend.utils.direction_payload import CANDIDATE_PROMPT_FIELDS
+    assert "data_sufficiency" not in inspect.getsource(PIAgent.select_best_directions)
+    assert "data_sufficiency" not in CANDIDATE_PROMPT_FIELDS
