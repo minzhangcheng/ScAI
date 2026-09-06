@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.52.11 · **Last updated**: 2026-09-05
+**Version**: 0.52.12 · **Last updated**: 2026-09-06
 
 ## 1. Runtime Architecture
 
@@ -352,6 +352,11 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.52.x — (2026-09-03 onward)**
+
+- `0.52.12` — Keeps replay-safe vision retries bound to the configured agent
+  model by forwarding `model` on every `chat_with_vision` attempt. Regression
+  coverage verifies that the configured model is preserved across all retry
+  calls.
 
 - `0.52.11` — Stops the exploration gate from retiring a research direction over
   evidence a computational round cannot produce. `select_best_directions` told

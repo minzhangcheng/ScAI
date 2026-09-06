@@ -16,13 +16,13 @@ bioinformatics figure revision already owns a budget, and
 """
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, create_autospec
 
 import pytest
 
 from backend.agents.pi_agent import PIAgent
 from backend.models.schemas import AnalysisState, PublicationFigure
-from backend.utils.llm_client import UpstreamExhaustedError
+from backend.utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
 
 _GOOD_REVIEW = (
     '{"approved":true,"quality_score":8,"feedback":"ok",'
@@ -50,7 +50,8 @@ def _payload_rejected():
 
 
 def _pi_agent(vision_side_effect):
-    vision = AsyncMock(side_effect=vision_side_effect)
+    vision = create_autospec(OpenAICompatibleClient, instance=True).chat_with_vision
+    vision.side_effect = vision_side_effect
     provider = MagicMock()
     provider.get_model.return_value = "test-model"
     provider.get_system_prompt.return_value = ""
@@ -99,6 +100,10 @@ async def test_review_figure_recovers_from_a_replayed_interruption():
     assert not review.get("review_unavailable")
     assert review["approved"] is True
     assert vision.await_count == 3
+    assert all(
+        call.kwargs["model"] == "test-model"
+        for call in vision.await_args_list
+    )
 
 
 @pytest.mark.asyncio
