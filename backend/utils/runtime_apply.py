@@ -691,8 +691,8 @@ def atomic_replace_pkl(session_id: str, src_pkl_path: str) -> str:
     # These bytes are not the generation the manifest describes.
     _retire_stale_runtime_manifest(session_id)
 
-    from backend.services.snapshot_v2.object_store import _hash_file
-    return _hash_file(live)
+    from .sandbox import _sha256_file
+    return _sha256_file(live)
 
 
 def atomic_replace_h5ad(session_id: str, src_h5ad_path: str, var_name: str = "adata") -> str:
@@ -720,8 +720,8 @@ def atomic_replace_h5ad(session_id: str, src_h5ad_path: str, var_name: str = "ad
 
     _staged_copy_replace(src, dst)
 
-    from backend.services.snapshot_v2.object_store import _hash_file
-    return _hash_file(dst)
+    from .sandbox import _sha256_file
+    return _sha256_file(dst)
 
 
 def _reclaim_orphan_staged_temps(states: Path, states_resolved: Path) -> None:

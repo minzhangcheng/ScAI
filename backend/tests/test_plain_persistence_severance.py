@@ -47,7 +47,7 @@ SNAPSHOT_V2_CENSUS: dict[str, int] = {
     "backend/services/session_lifecycle.py": 1,
     "backend/services/session_store.py": 15,
     "backend/services/workflow_runner.py": 2,
-    "backend/utils/runtime_apply.py": 4,
+    "backend/utils/runtime_apply.py": 2,
     "backend/utils/sandbox_parts/regular_save.py": 3,
     "backend/utils/sandbox_parts/runtime_save.py": 3,
     "backend/utils/sandbox_parts/state_tracking.py": 3,
@@ -103,3 +103,7 @@ def test_the_census_has_no_stale_entries():
     assert not stale, (
         "lower these census values to what the tree actually holds: %r" % stale
     )
+def test_runtime_apply_does_not_use_the_snapshot_object_store():
+    source = (BACKEND / "utils" / "runtime_apply.py").read_text()
+    assert "object_store" not in source
+    assert "_hash_file" not in source
