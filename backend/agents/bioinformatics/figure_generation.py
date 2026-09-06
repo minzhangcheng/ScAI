@@ -108,7 +108,6 @@ async def execute_initial_render(attempt: FigureAttemptState) -> str | None:
     if preinstall_expression_runtime:
         runtime_setup = await agent.sandbox.execute(
             runtime_code(),
-            save_to_history=False,
             skip_safety_check=True,
         )
         if runtime_setup.error:

@@ -270,7 +270,7 @@ class KernelMixin:
 
         init_code = _bootstrap_owner.build_common_bootstrap_source(self)
         result = await self._execute_unlocked(
-            init_code, save_to_history=False, skip_safety_check=True
+            init_code, records_history=False, skip_safety_check=True
         )
         if result.output:
             logger.debug("Kernel init stdout: %s", result.output[:1000])
@@ -284,7 +284,7 @@ class KernelMixin:
 
         path_setup_code = _bootstrap_owner.build_path_setup_source(self)
         path_result = await self._execute_unlocked(
-            path_setup_code, save_to_history=False, skip_safety_check=True
+            path_setup_code, records_history=False, skip_safety_check=True
         )
         if path_result.output:
             logger.debug("Kernel path-setup stdout: %s", path_result.output[:1000])

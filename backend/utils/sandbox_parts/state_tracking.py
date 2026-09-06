@@ -129,7 +129,7 @@ class StateTrackingMixin:
             "print('__USER_GLOBALS__:' + _jg.dumps(sorted(_names)))\n"
         )
         result = await self._execute_unlocked(
-            code, save_to_history=False, skip_safety_check=True
+            code, records_history=False, skip_safety_check=True
         )
         if not result.success:
             return set(self._known_user_globals)
@@ -327,7 +327,7 @@ print("__SCAI_RUNTIME_METRICS__:" + _scai_json.dumps({
 }))
 '''
         result = await self._execute_unlocked(
-            code, save_to_history=False, skip_safety_check=True
+            code, records_history=False, skip_safety_check=True
         )
         if not result.success:
             return {"top_offenders": []}

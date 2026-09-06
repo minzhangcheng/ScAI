@@ -337,7 +337,6 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
         if preinstall_expression_runtime:
             runtime_setup_result = await self.sandbox.execute(
                 build_expression_runtime_code(),
-                save_to_history=False,
                 skip_safety_check=True,
             )
         if (
@@ -387,8 +386,7 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
         "    if isinstance(_obj, _ad.AnnData):\n"
         "        _obj.obs_names_make_unique()\n"
         "        _obj.var_names_make_unique()\n"
-        "del _ad\n",
-        save_to_history=False, skip_safety_check=True
+        "del _ad\n", skip_safety_check=True
     )
     try:
         cohort_after = await probe_canonical_cohort(self.sandbox)

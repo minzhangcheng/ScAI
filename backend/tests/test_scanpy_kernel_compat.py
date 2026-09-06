@@ -226,7 +226,7 @@ async def test_live_scanpy_scrublet_layer_preserves_x_and_copy_contract(
             "assert adata.layers['counts'] is input_layer\n"
             "assert np.array_equal(adata.layers['counts'], input_layer_values)\n"
             "assert 'doublet_score' in returned.obs\n",
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert result.success, result.error

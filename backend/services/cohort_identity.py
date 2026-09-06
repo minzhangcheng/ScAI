@@ -70,7 +70,7 @@ def parse_cohort_probe(output: str) -> Optional[Dict[str, Any]]:
 async def probe_canonical_cohort(sandbox) -> Optional[Dict[str, Any]]:
     result = await sandbox.execute(
         cohort_probe_code(),
-        save_to_history=False,
+        records_history=False,
         skip_safety_check=True,
     )
     if getattr(result, "error", None):

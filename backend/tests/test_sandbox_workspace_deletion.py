@@ -205,7 +205,7 @@ async def test_live_kernel_deletion_is_session_scoped(tmp_path):
             "assert not private_path_dir.exists()\n"
         )
         positive = await sandbox.execute(
-            positive_code, save_to_history=False
+            positive_code, records_history=False
         )
         assert positive.success, positive.error
 
@@ -270,7 +270,7 @@ async def test_live_kernel_deletion_is_session_scoped(tmp_path):
             "assert Path(" + repr(str(dirfd_dir)) + ").is_dir()\n"
         )
         negative = await sandbox.execute(
-            negative_code, save_to_history=False, skip_safety_check=True
+            negative_code, records_history=False, skip_safety_check=True
         )
         assert negative.success, negative.error
     finally:

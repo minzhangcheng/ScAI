@@ -313,7 +313,7 @@ async def test_live_native_collection_binding_runs_gseapy_prerank(tmp_path):
             "permutation_num=2, min_size=1, max_size=10, outdir=None, "
             "no_plot=True, seed=0)\n"
             "assert 'SET_A' in enrichment.res2d['Term'].tolist()\n",
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert result.success, result.error

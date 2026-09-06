@@ -85,7 +85,7 @@ from pandas import CategoricalDtype
 adata.obs['cat'] = pd.Categorical(['a','b']*25)
 print("adata:", adata.shape)
 """
-    result = await sandbox.execute(code, save_to_history=False, skip_safety_check=True)
+    result = await sandbox.execute(code, records_history=False, skip_safety_check=True)
     assert result.success, f"Failed to create adata: {result.error}"
     return sandbox
 

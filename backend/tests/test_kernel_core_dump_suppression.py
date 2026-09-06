@@ -174,7 +174,7 @@ async def test_pre_execute_death_log_uses_pre_restart_reason(tmp_path, caplog):
     caplog.set_level(logging.WARNING, logger=execution_module.logger.name)
 
     result = await sandbox._execute_unlocked(
-        "pass", save_to_history=False, skip_safety_check=True
+        "pass", records_history=False, skip_safety_check=True
     )
 
     assert result.success is False
@@ -219,7 +219,7 @@ async def test_iopub_death_error_uses_pre_restart_reason(
     sandbox._restart_kernel = AsyncMock(side_effect=restart)
 
     result = await sandbox._execute_unlocked(
-        "pass", save_to_history=False, skip_safety_check=True
+        "pass", records_history=False, skip_safety_check=True
     )
 
     assert result.success is False

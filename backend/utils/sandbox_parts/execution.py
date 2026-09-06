@@ -181,8 +181,10 @@ class ExecutionMixin:
         in the live namespace and in no dump.
 
         Read-only probes opt out explicitly rather than being inferred from
-        ``save_to_history``, which several mutating internal cells also set to
-        False (``adata_val = adata.copy()`` among them).
+        ``records_history``. Inferring was wrong even before that flag was
+        renamed: several mutating internal cells stayed out of the notebook
+        (``adata_val = adata.copy()`` among them), so "not recorded" never
+        implied "changed nothing".
         """
         if not mutates_namespace:
             return
@@ -200,7 +202,7 @@ class ExecutionMixin:
     async def execute(
         self,
         code: str,
-        save_to_history: bool = True,
+        records_history: bool = True,
         skip_safety_check: bool = False,
         declared_outputs: Optional[List[str]] = None,
         track_globals: bool = False,
@@ -210,13 +212,18 @@ class ExecutionMixin:
 
         Args:
             code: Python code to execute
-            save_to_history: Whether to save successful execution to notebook history
+            records_history: Whether this execution belongs in the notebook.
+                Default True: the notebook is a record of what the kernel ran,
+                failures included. Read-only probes opt out explicitly. The same
+                execution boundary carries `mutates_namespace`; the two are
+                orthogonal, and one boundary with two flags is legible where two
+                boundaries drift.
             skip_safety_check: If True, skip dangerous-pattern validation.
                 Only set this for trusted internal code (e.g. kernel init, session restore).
             declared_outputs: Optional persistent_outputs declared by the agent
                 tool call. Every declared name must exist after successful code
                 execution before it is recorded as a required runtime output.
-            track_globals: When True (and save_to_history), record created/loaded
+            track_globals: When True (and records_history), record created/loaded
                 user-global diffs into the runtime dependency tracker.
             mutates_namespace: Whether this execution could change user globals.
                 Read-only probes opt out; everything else defaults to True,
@@ -233,12 +240,12 @@ class ExecutionMixin:
             {name for name in declared_raw if not name.isidentifier()}
         )
         before: set[str] = set()
-        should_track = bool(track_globals or declared) and save_to_history
+        should_track = bool(track_globals or declared) and records_history
         async with self._exec_lock:
             if should_track:
                 before = await self._snapshot_user_globals()
             result = await self._execute_unlocked(
-                code, save_to_history=save_to_history, skip_safety_check=skip_safety_check
+                code, records_history=records_history, skip_safety_check=skip_safety_check
             )
             # Captured here, before the declared-output probes below run: they
             # call _execute_unlocked too, and would otherwise overwrite this
@@ -290,7 +297,7 @@ class ExecutionMixin:
         self._note_execution_effect(
             mutates_namespace=mutates_namespace, reached_kernel=reached_kernel
         )
-        if result.success and save_to_history:
+        if result.success and records_history:
             self.notebook_state.update_runtime_persistence(
                 "live_dirty",
                 current_revision=self.runtime_revision,
@@ -301,7 +308,7 @@ class ExecutionMixin:
     async def _execute_unlocked(
         self,
         code: str,
-        save_to_history: bool = True,
+        records_history: bool = True,
         skip_safety_check: bool = False,
         execution_timeout: Optional[float] = None,
     ) -> CodeExecutionResult:
@@ -309,7 +316,12 @@ class ExecutionMixin:
 
         Args:
             code: Python code to execute
-            save_to_history: Whether to save successful execution to notebook history
+            records_history: Whether this execution belongs in the notebook.
+                Default True: the notebook is a record of what the kernel ran,
+                failures included. Read-only probes opt out explicitly. The same
+                execution boundary carries `mutates_namespace`; the two are
+                orthogonal, and one boundary with two flags is legible where two
+                boundaries drift.
             skip_safety_check: If True, skip dangerous-pattern validation.
                 Only set this for trusted internal code (e.g. kernel init, session restore).
             execution_timeout: Optional wall-clock limit for this execution.
@@ -519,8 +531,13 @@ class ExecutionMixin:
                         "traceback": content.get('traceback', [])
                     })
             
-            # Save to history
-            if save_to_history and not error_msg:
+            # A cell that raised is part of what the kernel ran, so it is
+            # part of the record (spec 3.10). `save_notebook` already builds the
+            # `error` output type; the traceback was constructed above and then
+            # thrown away here. A cell the safety check rejected is *not*
+            # recorded -- it returned before reaching the kernel, so there is
+            # nothing to replay.
+            if records_history:
                 self.notebook_state.add_cell(code, outputs, execution_count)
                 self.notebook_state.save()
             

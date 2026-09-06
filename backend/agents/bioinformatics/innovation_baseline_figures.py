@@ -670,7 +670,6 @@ async def ensure_innovation_baseline_figures(
     try:
         probe_result = await sandbox.execute(
             build_innovation_baseline_probe_code(),
-            save_to_history=False,
             skip_safety_check=True,
             mutates_namespace=False,
         )

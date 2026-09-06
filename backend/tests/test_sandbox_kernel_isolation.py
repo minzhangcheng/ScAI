@@ -342,7 +342,7 @@ async def test_live_kernel_write_entrypoints_and_modes_are_session_scoped(tmp_pa
                 }}, sort_keys=True))
                 """
             ),
-            save_to_history=False,
+            records_history=False,
         )
         assert probe.success, probe.error
         payload_line = next(
@@ -393,7 +393,7 @@ async def test_live_kernel_write_entrypoints_and_modes_are_session_scoped(tmp_pa
                 }}))
                 """
             ),
-            save_to_history=False,
+            records_history=False,
         )
         assert after_restart.success, after_restart.error
         restart_line = next(

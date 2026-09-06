@@ -51,14 +51,14 @@ async def test_a_variable_bound_after_the_last_save_survives_export(
     sentinel = f"sentinel_{uuid.uuid4().hex[:8]}"
 
     result = await sandbox.execute(
-        "baseline_value = 1", save_to_history=False, skip_safety_check=True,
+        "baseline_value = 1", records_history=False, skip_safety_check=True,
     )
     assert result.success, result.error
     assert await sandbox.save_session() is True
 
     result = await sandbox.execute(
         f"{sentinel} = 'bound-after-the-last-save'",
-        save_to_history=False,
+        records_history=False,
         skip_safety_check=True,
     )
     assert result.success, result.error
@@ -112,11 +112,11 @@ async def test_a_resumable_archive_carries_the_flushed_generation(
 
     sentinel = f"sentinel_{uuid.uuid4().hex[:8]}"
     assert (await sandbox.execute(
-        "baseline_value = 1", save_to_history=False, skip_safety_check=True,
+        "baseline_value = 1", records_history=False, skip_safety_check=True,
     )).success
     assert await sandbox.save_session() is True
     assert (await sandbox.execute(
-        f"{sentinel} = 'after'", save_to_history=False, skip_safety_check=True,
+        f"{sentinel} = 'after'", records_history=False, skip_safety_check=True,
     )).success
 
     from backend.services.resumable_export import flush_for_resumable_export

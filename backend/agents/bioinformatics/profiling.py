@@ -263,7 +263,7 @@ class ProfilingMixin:
         await self._notify("status", description[:200])
         try:
             result = await self.sandbox.execute(
-                code, save_to_history=True,
+                code, records_history=True,
                 declared_outputs=declared, track_globals=True,
             )
         except Exception as exc:                          # noqa: BLE001

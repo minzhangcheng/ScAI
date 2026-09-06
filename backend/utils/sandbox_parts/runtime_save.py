@@ -635,7 +635,7 @@ async def _execute_save(
     sandbox = context.sandbox
     result = await sandbox._execute_unlocked(
         save_code,
-        save_to_history=False,
+        records_history=False,
         skip_safety_check=True,
     )
 

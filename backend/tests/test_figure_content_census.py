@@ -366,7 +366,7 @@ async def test_live_s3_renderer_contracts(tmp_path):
             "assert 'metadata' not in _forced_seen\n"
             "assert _forced_seen['dpi'] == 77\n"
             "assert _forced_seen['facecolor'] == 'yellow'\n",
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert forced_conversion.success, forced_conversion.error
@@ -384,7 +384,7 @@ async def test_live_s3_renderer_contracts(tmp_path):
             scanpy_code, str(figures), "live"
         )
         scanpy_result = await sandbox.execute(
-            scanpy_wrapper, save_to_history=False, skip_safety_check=True
+            scanpy_wrapper, records_history=False, skip_safety_check=True
         )
         assert scanpy_result.success, scanpy_result.error
         recovered = figures / "scatter_markers.jpg"
@@ -408,7 +408,7 @@ async def test_live_s3_renderer_contracts(tmp_path):
             str(figures / "canonical.pdf"),
         )
         publication_result = await sandbox.execute(
-            publication_wrapper, save_to_history=False, skip_safety_check=True
+            publication_wrapper, records_history=False, skip_safety_check=True
         )
         assert publication_result.success, publication_result.error
         assert (figures / "canonical.jpg").is_file()
@@ -422,7 +422,7 @@ async def test_live_s3_renderer_contracts(tmp_path):
             "assert plt.close is _original_plt_close\n"
             "assert plt.show is _capturing_show\n"
             "assert plt.savefig is _original_plt_savefig\n",
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert identity.success, identity.error
@@ -446,7 +446,7 @@ async def test_live_s3_renderer_contracts(tmp_path):
             str(figures / "exception-canonical.pdf"),
         )
         exception_result = await sandbox.execute(
-            exception_wrapper, save_to_history=False, skip_safety_check=True
+            exception_wrapper, records_history=False, skip_safety_check=True
         )
         assert not exception_result.success
         assert "RuntimeError" in exception_result.error
@@ -465,7 +465,7 @@ async def test_live_s3_renderer_contracts(tmp_path):
             "assert plt.close is _original_plt_close\n"
             "assert plt.show is _capturing_show\n"
             "assert plt.savefig is _original_plt_savefig\n",
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert exception_identity.success, exception_identity.error

@@ -13,7 +13,7 @@ class _FakeSandbox:
         self.codes = []
 
     async def execute(
-        self, code, save_to_history=True, skip_safety_check=False, **_kwargs
+        self, code, records_history=True, skip_safety_check=False, **_kwargs
     ):
         self.codes.append(code)
         output = self.outputs.pop(0)

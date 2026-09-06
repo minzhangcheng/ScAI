@@ -615,7 +615,7 @@ async def test_execute_reader_is_drained_before_kernel_teardown(tmp_path):
 
     task = asyncio.create_task(
         sandbox._execute_unlocked(
-            "pass", save_to_history=False, skip_safety_check=True
+            "pass", records_history=False, skip_safety_check=True
         )
     )
     assert await asyncio.to_thread(entered.wait, 1)
@@ -737,7 +737,7 @@ print('__SCAI_BOOTSTRAP__' + json.dumps({
     'scanpy_figdir': str(sc.settings.figdir) if 'sc' in globals() else None,
 }))
 """,
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert probe.success, probe.error
@@ -768,7 +768,7 @@ plt.plot([0, 1], [1, 0])
 plt.show()
 print(f'open_figures={len(plt.get_fignums())}')
 """,
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert show.success, show.error
@@ -788,7 +788,7 @@ except PermissionError:
 finally:
     plt.close('all')
 """,
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert denied.success, denied.error
@@ -809,7 +809,7 @@ print('__SCAI_WRAPPERS__' + json.dumps({
     'show_noop': bool(getattr(plt.show, '_scai_noop', False)),
 }))
 """,
-                save_to_history=False,
+                records_history=False,
                 skip_safety_check=True,
             )
             assert identities.success, identities.error
@@ -839,7 +839,7 @@ print('__SCAI_WRAPPERS__' + json.dumps({
         await assert_wrappers_are_single_layer()
         restored = await sandbox.execute(
             "print(f\"restored_value={user_value['restored']}\")",
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert restored.success, restored.error
@@ -851,7 +851,7 @@ print('__SCAI_WRAPPERS__' + json.dumps({
         await assert_wrappers_are_single_layer()
         restored_again = await sandbox.execute(
             "print(f\"restored_again={user_value['restored']}\")",
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert restored_again.success, restored_again.error
@@ -880,7 +880,7 @@ async def test_live_kernel_trust_module_cannot_be_shadowed_by_workspace(tmp_path
 import scai_kernel_trust
 print('__SCAI_TRUST_ORIGIN__' + str(scai_kernel_trust.__file__))
 """,
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert origin.success, origin.error
@@ -904,7 +904,7 @@ fig.text(0.5, 0.5, 'OVERLAP', fontsize=12)
         )
         rendered = await sandbox.execute(
             wrapper,
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert rendered.success, rendered.error
@@ -939,7 +939,7 @@ class UserStdout:
 
 sys.stdout = UserStdout()
 """,
-            save_to_history=False,
+            records_history=False,
         )
         assert polluted.success, polluted.error
 
@@ -956,7 +956,7 @@ fig.text(0.5, 0.5, 'OVERLAP', fontsize=12)
         )
         rendered = await sandbox.execute(
             wrapper,
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert rendered.success, rendered.error
@@ -1059,7 +1059,7 @@ print("__SCAI_THREAD_BACKENDS__" + json.dumps({
     "network_shape": list(network.shape),
 }))
 """,
-            save_to_history=False,
+            records_history=False,
         )
         assert probe.success, probe.error
         payload_line = next(
@@ -1112,7 +1112,7 @@ plt.savefig('shadowed_path.png')
 plt.close('all')
 print(f'shadowed={Path is not _probe_pathlib.Path}')
 """,
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert poisoned.success, poisoned.error

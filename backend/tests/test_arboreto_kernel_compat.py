@@ -162,7 +162,7 @@ async def test_live_trusted_adapter_modules_cannot_be_shadowed(tmp_path, module_
         result = await sandbox.execute(
             f"import {module_name}\n"
             f"print('__SCAI_ADAPTER_ORIGIN__' + str({module_name}.__file__))\n",
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert result.success, result.error
@@ -246,7 +246,7 @@ async def test_live_arboreto_grnboost2_uses_locked_backend(tmp_path):
             "links = grnboost2(expression, ['G1', 'G2', 'G3', 'G4', 'G5'], "
             "['G1', 'G2'], seed=0)\n"
             "assert len(links) >= 0\n",
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert result.success, result.error

@@ -385,7 +385,7 @@ except Exception as e:
     print(f"__SCAI_RESTORE_ERROR__: {{type(e).__name__}}: {{e}}")
     raise
 """
-    result = await sandbox._execute_unlocked(restore_code, save_to_history=False, skip_safety_check=True)
+    result = await sandbox._execute_unlocked(restore_code, records_history=False, skip_safety_check=True)
 
     if result.success and "Session restored:" in (result.output or ""):
         restored_names: set[str] = set()

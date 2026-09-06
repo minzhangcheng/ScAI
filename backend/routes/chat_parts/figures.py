@@ -254,7 +254,7 @@ async def _generate_figures_in_chat(
 
             wrapped = _build_figure_setup_code(fig_dir, ts, code)
 
-            result = await sandbox.execute(wrapped, save_to_history=False)
+            result = await sandbox.execute(wrapped, )
             logger.info(f"Chat sandbox execute: success={result.success}, "
                         f"kernel_figures={len(result.figures)}, error={result.error}")
             if result.output:
