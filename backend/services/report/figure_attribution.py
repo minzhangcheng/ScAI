@@ -2,14 +2,18 @@
 
 The report outline binds every figure to the round it came from, so a figure can
 never migrate into a section that describes a different stage of the analysis.
-Round provenance is recovered from three sources, most reliable first:
+Round provenance is recovered from four sources, most reliable first:
 
-1. **Supervision records** — ``saved_figure_filenames`` on a record that also
+1. **Current registered bytes** — an immutable render hash bound to the actual
+   report path is authoritative, even when an older log reused its basename.
+2. **Supervision records** — ``saved_figure_filenames`` on a record that also
    carries ``round_number``. Authoritative, but sparse in practice: the sandbox
    only emits the ``[Auto-saved]`` marker for figures still open when a cell
    finishes, so analysis code that closes its own figures leaves no record.
-2. **``PublicationFigure.round_number``** — set when a figure is promoted.
-3. **File mtime against round boundaries** — complete coverage, lowest
+3. **``PublicationFigure.round_number``** — set when a figure is promoted; the
+   stem-only fallback is retained for restored/legacy records without usable
+   immutable hashes.
+4. **File mtime against round boundaries** — complete coverage, lowest
    precision. A round owns the half-open interval that ends at its own
    ``timestamp``; the first round's interval is open at the start.
 
@@ -26,7 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .artifacts import artifact_stems
+from .artifacts import archival_path_matches_record, artifact_stems
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +102,32 @@ def _round_for_epoch(bounds: Sequence[Tuple[int, float, float]], ts: float) -> O
     return None
 
 
+def _registered_path_matches(figure: Any, path: Any) -> bool:
+    """Require a matching registered path/stem before using its bytes."""
+    actual = Path(str(path or ""))
+    if not str(path or ""):
+        return False
+    declared = str(getattr(figure, "png_path", "") or "")
+    if declared:
+        try:
+            if Path(declared).resolve() == actual.resolve():
+                return True
+        except (OSError, RuntimeError):
+            pass
+        return Path(declared).stem == actual.stem
+    record_name = str(getattr(figure, "name", "") or "")
+    return bool(record_name) and Path(record_name).stem == actual.stem
+
+
+def _has_usable_render_hashes(figure: Any) -> bool:
+    """Whether a publication record has a digest that can bind its bytes."""
+    for field in ("render_sha256", "preview_sha256"):
+        value = str(getattr(figure, field, "") or "").strip().lower()
+        if len(value) == 64 and all(char in "0123456789abcdef" for char in value):
+            return True
+    return False
+
+
 def attribute_figures_to_rounds(
     figure_names: Iterable[str],
     state: Any = None,
@@ -115,7 +145,34 @@ def attribute_figures_to_rounds(
     wanted = set(names)
     attributed: Dict[str, int] = {}
 
-    # Source 1: supervision records (authoritative where present).
+    # A current registered render with exact bytes is authoritative even when
+    # an older supervision record reused the same basename. The shared helper
+    # checks bytes; this owner also checks the related path/stem so another
+    # filename containing identical bytes cannot borrow the record's round.
+    registered_exact: set[str] = set()
+    active_lineage = getattr(state, "restore_branch_id", None) or "main"
+    for pf in getattr(state, "publication_figures", None) or []:
+        if not bool(getattr(pf, "is_current", True)):
+            continue
+        if (getattr(pf, "lineage_id", None) or "main") != active_lineage:
+            continue
+        rn = getattr(pf, "round_number", 0) or 0
+        if rn <= 0:
+            continue
+        for name in names:
+            path = (figure_paths or {}).get(name)
+            if path is None or not _registered_path_matches(pf, path):
+                continue
+            try:
+                matches = archival_path_matches_record(pf, path)
+            except Exception:
+                matches = False
+            if matches:
+                attributed[name] = int(rn)
+                registered_exact.add(name)
+
+    # Source 1: supervision records (authoritative where present, and the last
+    # logged writer wins for an unregistered repeated basename).
     for rec in records or []:
         if not isinstance(rec, dict):
             continue
@@ -124,13 +181,16 @@ def attribute_figures_to_rounds(
             continue
         for fname in rec.get("saved_figure_filenames") or []:
             base = os.path.basename(str(fname))
-            if base in wanted and base not in attributed:
+            if base in wanted and base not in registered_exact:
                 attributed[base] = int(rn)
 
-    # Source 2: publication figures promoted during a known round.
+    # Source 2: publication figures promoted during a known round. Keep this
+    # stem-only fallback for restored/legacy records without usable hashes.
     for pf in getattr(state, "publication_figures", None) or []:
         rn = getattr(pf, "round_number", 0) or 0
         if rn <= 0:
+            continue
+        if _has_usable_render_hashes(pf):
             continue
         stems = artifact_stems([pf])
         for candidate in names:

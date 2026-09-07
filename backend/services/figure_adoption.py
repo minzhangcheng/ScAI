@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -53,6 +54,7 @@ from backend.models.schemas import PublicationFigure
 from backend.services.figure_contract import normalize_figure_type
 from backend.services.report.artifacts import (
     LAYOUT_UNVERIFIED_KIND,
+    archival_path_matches_record,
     image_file_sha256,
     pdf_file_sha256,
     preview_render_sha256,
@@ -63,6 +65,10 @@ logger = logging.getLogger(__name__)
 #: Prefix for the semantic identity of an adopted record. Keyed by requirement
 #: rather than by filename, so re-running the pass recognizes its own work.
 ADOPTED_LOGICAL_PREFIX = "adopted"
+_UNVERIFIED_PROVENANCE = (
+    "Workspace render has no current execution association; retained for PI "
+    "context only and cannot be adopted."
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +79,7 @@ class AdoptionCandidate:
     path: str
     pdf_path: Optional[str] = None
     provenance: str = ""
+    source_execution_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -100,9 +107,99 @@ def _layout_unverified() -> Dict[str, Any]:
     }
 
 
-def _logical_id(binding: FigureBinding) -> str:
+@dataclass(frozen=True)
+class _LoggedWriter:
+    """The last analysis-log observation for one saved figure stem."""
+
+    execution_id: Optional[str]
+    description: str
+
+
+def _entry_value(entry: Any, key: str, default: Any = None) -> Any:
+    if isinstance(entry, Mapping):
+        return entry.get(key, default)
+    return getattr(entry, key, default)
+
+
+def _active_receipt_identity(state: Any) -> Optional[Dict[str, Any]]:
+    """Return the complete current technical identity, or no identity."""
+    plan_id = str(
+        getattr(getattr(state, "current_plan", None), "id", "") or ""
+    ).strip()
+    sandbox_state = getattr(state, "sandbox_state", None)
+    cohort = (
+        sandbox_state.get("cohort_identity_v1")
+        if isinstance(sandbox_state, Mapping)
+        else None
+    )
+    if not plan_id or not isinstance(sandbox_state, Mapping):
+        return None
+    if not isinstance(cohort, Mapping):
+        return None
+    if "cohort_generation" not in cohort or "cohort_digest" not in cohort:
+        return None
+    try:
+        return {
+            "round_number": int(getattr(state, "current_round", 0) or 0),
+            "plan_id": plan_id,
+            "lineage_id": getattr(state, "restore_branch_id", None) or "main",
+            "analysis_generation": int(
+                sandbox_state.get("analysis_generation", 0) or 0
+            ),
+            "cohort_generation": int(cohort.get("cohort_generation", 0) or 0),
+            "cohort_digest": str(cohort.get("cohort_digest") or ""),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def _current_source_receipt(state: Any, execution_id: Any) -> Any:
+    """Resolve a log-linked receipt using technical identity fields only."""
+    wanted = str(execution_id or "").strip()
+    active = _active_receipt_identity(state)
+    if not wanted or active is None:
+        return None
+    history = getattr(state, "code_history", None) or []
+    receipt = next(
+        (
+            item for item in history
+            if str(_entry_value(item, "id", "") or "").strip() == wanted
+        ),
+        None,
+    )
+    if receipt is None:
+        return None
+    if (
+        _entry_value(receipt, "evidence_schema_version") != 2
+        or _entry_value(receipt, "execution_status") != "succeeded"
+        or _entry_value(receipt, "error")
+    ):
+        return None
+    try:
+        return receipt if (
+            int(_entry_value(receipt, "round_number", 0) or 0)
+            == active["round_number"]
+            and str(_entry_value(receipt, "plan_id", "") or "")
+            == active["plan_id"]
+            and (_entry_value(receipt, "lineage_id", None) or "main")
+            == active["lineage_id"]
+            and int(_entry_value(receipt, "analysis_generation", 0) or 0)
+            == active["analysis_generation"]
+            and int(_entry_value(receipt, "cohort_generation", 0) or 0)
+            == active["cohort_generation"]
+            and str(_entry_value(receipt, "cohort_digest", "") or "")
+            == active["cohort_digest"]
+        ) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _logical_id(
+    binding: FigureBinding, *, plan_id: str, round_number: int
+) -> str:
     return (
-        f"{ADOPTED_LOGICAL_PREFIX}:{binding.plan_step_id}:"
+        f"{ADOPTED_LOGICAL_PREFIX}:{plan_id}:{int(round_number)}:"
+        f"{binding.plan_step_id}:"
         f"{normalize_figure_type(binding.figure_type)}"
     )
 
@@ -196,32 +293,46 @@ def adopt_bindings(
     here removes or invalidates an existing record.
     """
     by_name = {c.name: c for c in (candidates or [])}
+    active_lineage = getattr(state, "restore_branch_id", None) or "main"
     existing = {
-        str(getattr(figure, "logical_figure_id", "") or "")
+        (
+            getattr(figure, "lineage_id", None) or "main",
+            str(getattr(figure, "logical_figure_id", "") or ""),
+        )
         for figure in (getattr(state, "publication_figures", None) or [])
     }
-    plan = getattr(state, "current_plan", None)
-    plan_id = str(getattr(plan, "id", "") or "").strip() or None
-    lineage = getattr(state, "restore_branch_id", None) or "main"
-    sandbox_state = getattr(state, "sandbox_state", None) or {}
 
     added: List[Any] = []
     for binding in bindings or []:
-        logical = _logical_id(binding)
-        if logical in existing:
-            continue
         candidate = by_name.get(binding.filename)
         if candidate is None:
             continue
+        source = _current_source_receipt(state, candidate.source_execution_id)
+        if source is None:
+            logger.info(
+                "[FigureAdoption] candidate %r has no current execution "
+                "receipt; leaving it unattributed",
+                candidate.name,
+            )
+            continue
+        plan_id = str(_entry_value(source, "plan_id", "") or "").strip()
+        round_number = int(_entry_value(source, "round_number", 0) or 0)
+        logical = _logical_id(
+            binding, plan_id=plan_id, round_number=round_number
+        )
+        if (active_lineage, logical) in existing:
+            continue
         record = _build_record(
-            binding, candidate, logical,
-            plan_id=plan_id, lineage=lineage, state=state,
-            sandbox_state=sandbox_state, review_status=review_status,
+            binding,
+            candidate,
+            logical,
+            source_execution=source,
+            review_status=review_status,
         )
         if record is None:
             continue
         state.publication_figures.append(record)
-        existing.add(logical)
+        existing.add((active_lineage, logical))
         added.append(record)
         logger.info(
             "[FigureAdoption] adopted %r for plan step %s (%s)",
@@ -236,10 +347,7 @@ def _build_record(
     candidate: AdoptionCandidate,
     logical: str,
     *,
-    plan_id: Optional[str],
-    lineage: str,
-    state: Any,
-    sandbox_state: Dict[str, Any],
+    source_execution: Any,
     review_status: FigureReviewStatus,
 ) -> Optional[Any]:
     image = Path(candidate.path)
@@ -275,6 +383,29 @@ def _build_record(
         )
         return None
 
+    try:
+        receipt_round = int(
+            _entry_value(source_execution, "round_number", 0) or 0
+        )
+        receipt_analysis_generation = int(
+            _entry_value(source_execution, "analysis_generation", 0) or 0
+        )
+        receipt_cohort_generation = int(
+            _entry_value(source_execution, "cohort_generation", 0) or 0
+        )
+    except (TypeError, ValueError):
+        logger.warning(
+            "[FigureAdoption] source receipt for %r has invalid identity; "
+            "not adopted",
+            candidate.path,
+        )
+        return None
+    receipt_plan_id = str(_entry_value(source_execution, "plan_id", "") or "").strip()
+    receipt_lineage = _entry_value(source_execution, "lineage_id", None) or "main"
+    receipt_digest = str(
+        _entry_value(source_execution, "cohort_digest", "") or ""
+    ) or None
+
     record = PublicationFigure(
         id=str(uuid.uuid4()),
         name=candidate.name,
@@ -292,27 +423,20 @@ def _build_record(
         diagnostic=False,
         purpose="result",
         plan_step_id=binding.plan_step_id,
-        plan_id=plan_id,
+        plan_id=receipt_plan_id or None,
         logical_figure_id=logical,
         render_attempt_id=str(uuid.uuid4()),
         producer_status="published",
         is_published_head=True,
         is_current=True,
-        lineage_id=lineage,
-        round_number=int(getattr(state, "current_round", 0) or 0),
-        analysis_generation=int(sandbox_state.get("analysis_generation", 0) or 0),
-        cohort_generation=int(
-            (sandbox_state.get("cohort_identity_v1") or {}).get(
-                "cohort_generation", 0
-            ) or 0
-        ),
-        cohort_digest=(
-            str(
-                (sandbox_state.get("cohort_identity_v1") or {}).get(
-                    "cohort_digest", ""
-                ) or ""
-            ) or None
-        ),
+        lineage_id=receipt_lineage,
+        round_number=receipt_round,
+        analysis_generation=receipt_analysis_generation,
+        cohort_generation=receipt_cohort_generation,
+        cohort_digest=receipt_digest,
+        source_execution_id=str(
+            _entry_value(source_execution, "id", "") or ""
+        ).strip() or None,
     )
     if not record.preview_sha256:
         logger.warning(
@@ -344,42 +468,112 @@ def build_adoption_candidates(state: Any, workspace: Any) -> List[AdoptionCandid
         return []
 
     provenance = _provenance_by_stem(getattr(state, "analysis_log", None))
-    candidates: List[AdoptionCandidate] = []
+    verified: List[AdoptionCandidate] = []
+    unverified: List[AdoptionCandidate] = []
+    registered = list(getattr(state, "publication_figures", None) or [])
     for entry in discovered:
         name = str(entry.get("name") or "")
         path = str(entry.get("path") or "")
         if not name or not path:
             continue
+        if any(
+            _registered_render_matches_candidate(figure, path, name)
+            for figure in registered
+        ):
+            logger.info(
+                "[FigureAdoption] %r already matches a registered render; "
+                "not offered for re-adoption",
+                path,
+            )
+            continue
         pdf = entry.get("pdf_path")
         if not pdf:
             guess = Path(path).with_suffix(".pdf")
             pdf = str(guess) if guess.is_file() else None
-        candidates.append(AdoptionCandidate(
+        writer = provenance.get(name)
+        source = _current_source_receipt(
+            state, writer.execution_id if writer is not None else None
+        )
+        if writer is None:
+            provenance_text = _UNVERIFIED_PROVENANCE
+        elif source is None:
+            provenance_text = (
+                f"{writer.description}; no current execution association; "
+                "retained for PI context only and cannot be adopted."
+            )
+        else:
+            provenance_text = writer.description
+        candidate = AdoptionCandidate(
             name=name,
             path=path,
             pdf_path=pdf,
-            provenance=provenance.get(name, ""),
-        ))
-    return candidates
+            provenance=provenance_text,
+            source_execution_id=(
+                str(_entry_value(source, "id", "") or "").strip() or None
+                if source is not None else None
+            ),
+        )
+        (verified if source is not None else unverified).append(candidate)
+    return [*verified, *unverified]
 
 
-def _provenance_by_stem(analysis_log: Any) -> Dict[str, str]:
-    """Map each saved file's stem to the execution that wrote it."""
-    out: Dict[str, str] = {}
+def _registered_render_matches_path(
+    figure: Any, path: str, candidate_name: str
+) -> bool:
+    """Require a related path/stem before treating matching bytes as owned."""
+    declared = str(getattr(figure, "png_path", "") or "")
+    if declared:
+        try:
+            if Path(declared).resolve() == Path(path).resolve():
+                return True
+        except (OSError, RuntimeError):
+            pass
+        return Path(declared).stem == Path(path).stem == candidate_name
+    record_name = str(getattr(figure, "name", "") or "")
+    return bool(record_name) and Path(record_name).stem == candidate_name
+
+
+def _registered_render_matches_candidate(
+    figure: Any, path: str, candidate_name: str
+) -> bool:
+    if not _registered_render_matches_path(figure, path, candidate_name):
+        return False
+    try:
+        return archival_path_matches_record(figure, path)
+    except Exception:
+        logger.warning(
+            "[FigureAdoption] could not compare %r with registered render",
+            path,
+            exc_info=True,
+        )
+        return False
+
+
+def _provenance_by_stem(analysis_log: Any) -> Dict[str, _LoggedWriter]:
+    """Map each saved file's stem to its last logged writer."""
+    out: Dict[str, _LoggedWriter] = {}
     for entry in analysis_log or []:
-        if not isinstance(entry, dict):
-            continue
-        names = entry.get("saved_figure_filenames") or []
+        names = _entry_value(entry, "saved_figure_filenames", None) or []
+        if isinstance(names, (str, bytes)):
+            names = [names]
         if not names:
             continue
-        step = entry.get("step_number")
-        description = str(entry.get("code_description") or "").strip()
+        step = _entry_value(entry, "step_number", None)
+        description = str(_entry_value(entry, "code_description", "") or "").strip()
         line = f"execute_code step {step}: {description}" if description else \
             f"execute_code step {step}"
+        execution_id = str(
+            _entry_value(entry, "execution_id", "") or ""
+        ).strip() or None
         for filename in names:
             stem = Path(str(filename)).stem
-            if stem and stem not in out:
-                out[stem] = line
+            if stem:
+                # analysis_log is chronological; the last observed writer is
+                # the only safe association when a stem was reused.
+                out[stem] = _LoggedWriter(
+                    execution_id=execution_id,
+                    description=line,
+                )
     return out
 
 

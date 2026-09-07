@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.53.1 · **Last updated**: 2026-09-07
+**Version**: 0.53.2 · **Last updated**: 2026-09-07
 
 ## 1. Runtime Architecture
 
@@ -352,6 +352,20 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.53.x — (2026-09-07 onward)**
+
+- `0.53.2` — Preserves current-round identity when workspace figures are
+  adopted: typed analysis-log entries now join to current successful schema-v2
+  execution receipts, carry source, round, plan, lineage, analysis-generation,
+  and cohort metadata, and leave unverifiable legacy renders visible to the PI
+  without adopting them. Innovation baseline probes now inspect only output
+  identifiers declared by those current receipts instead of scanning the whole
+  kernel namespace, so older differential, enrichment, or AnnData variables are
+  not relabeled as later-round results. Report round attribution gives an exact
+  registered path-and-bytes match precedence over stale same-name supervision
+  records; unregistered repeated names use the latest logged writer. Focused
+  backend evidence passed `81/81` tests; no client, kernel, backend-full,
+  frontend, image-build, deployment, or historical-session repair was
+  performed.
 
 - `0.53.1` — Adds conditional deepening for selected innovation directions: one
   PI-owned review can request a bounded supplementary pass within the shared

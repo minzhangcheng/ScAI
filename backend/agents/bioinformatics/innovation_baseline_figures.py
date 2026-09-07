@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import logging
+from collections.abc import Iterable
 from typing import Any, Dict, List, Mapping, Optional
 
 logger = logging.getLogger(__name__)
@@ -108,18 +109,36 @@ class InnovationBaselineFigureSpec:
     code: str
 
 
-def build_innovation_baseline_probe_code() -> str:
+def _valid_output_names(output_names: Optional[Iterable[Any]]) -> List[str]:
+    """Keep only safe, ordered kernel identifiers from the explicit allowlist."""
+    result: List[str] = []
+    for value in output_names or []:
+        name = str(value or "").strip()
+        if name and name.isidentifier() and name not in result:
+            result.append(name)
+    return result
+
+
+def build_innovation_baseline_probe_code(
+    output_names: Optional[Iterable[Any]] = None,
+) -> str:
     """Return kernel code that reports what this round can still visualize.
 
     Discovery happens in the live kernel because the analysis agent names its
-    own objects. The probe reports metadata only; it never draws or mutates.
+    own objects. ``output_names`` is an explicit receipt-derived allowlist; the
+    probe reports metadata only and never draws or mutates. A declared realized
+    output is a successful output-name declaration, not host-measured proof that
+    the execution materially changed the object.
     """
+
+    allowed_names = _valid_output_names(output_names)
 
     return (
         "import json as _ib_json\n"
         "_ib_out = {}\n"
         "try:\n"
         "    import pandas as _ib_pd\n"
+        f"    _ib_output_names = {allowed_names!r}\n"
         f"    _ib_group_hints = {list(_GROUP_KEYS)!r}\n"
         f"    _ib_lfc_hints = {list(_LFC_HINTS)!r}\n"
         f"    _ib_pval_hints = {list(_PVAL_HINTS)!r}\n"
@@ -199,8 +218,9 @@ def build_innovation_baseline_probe_code() -> str:
         "    _ib_best = None\n"
         "    try:\n"
         "        import anndata as _ib_ad\n"
-        "        for _ib_name, _ib_obj in list(globals().items()):\n"
-        "            if _ib_name.startswith('_') or not isinstance(_ib_obj, _ib_ad.AnnData):\n"
+        "        for _ib_name in _ib_output_names:\n"
+        "            _ib_obj = globals().get(_ib_name)\n"
+        "            if not isinstance(_ib_obj, _ib_ad.AnnData):\n"
         "                continue\n"
         "            _ib_group_key, _ib_group_levels = _ib_pick_group(_ib_obj.obs)\n"
         "            _ib_scores = _ib_score_columns(_ib_obj.obs)\n"
@@ -222,8 +242,9 @@ def build_innovation_baseline_probe_code() -> str:
         "        _ib_best = None\n"
         "    _ib_de = []\n"
         "    _ib_enr = []\n"
-        "    for _ib_name, _ib_obj in list(globals().items()):\n"
-        "        if _ib_name.startswith('_') or not isinstance(_ib_obj, _ib_pd.DataFrame):\n"
+        "    for _ib_name in _ib_output_names:\n"
+        "        _ib_obj = globals().get(_ib_name)\n"
+        "        if not isinstance(_ib_obj, _ib_pd.DataFrame):\n"
         "            continue\n"
         "        _ib_rows = int(len(_ib_obj))\n"
         "        _ib_cols = list(_ib_obj.columns)\n"
@@ -649,6 +670,95 @@ def should_render_innovation_baselines(current_round: Any) -> bool:
         return False
 
 
+def _entry_value(entry: Any, key: str, default: Any = None) -> Any:
+    if isinstance(entry, Mapping):
+        return entry.get(key, default)
+    return getattr(entry, key, default)
+
+
+def _active_receipt_identity(state: Any) -> Optional[Dict[str, Any]]:
+    """Return the current technical identity, or no identity to query."""
+    plan_id = str(
+        getattr(getattr(state, "current_plan", None), "id", "") or ""
+    ).strip()
+    sandbox_state = getattr(state, "sandbox_state", None)
+    cohort = (
+        sandbox_state.get("cohort_identity_v1")
+        if isinstance(sandbox_state, Mapping)
+        else None
+    )
+    if not plan_id or not isinstance(sandbox_state, Mapping):
+        return None
+    if not isinstance(cohort, Mapping):
+        return None
+    if "cohort_generation" not in cohort or "cohort_digest" not in cohort:
+        return None
+    try:
+        return {
+            "round_number": int(getattr(state, "current_round", 0) or 0),
+            "plan_id": plan_id,
+            "lineage_id": getattr(state, "restore_branch_id", None) or "main",
+            "analysis_generation": int(
+                sandbox_state.get("analysis_generation", 0) or 0
+            ),
+            "cohort_generation": int(cohort.get("cohort_generation", 0) or 0),
+            "cohort_digest": str(cohort.get("cohort_digest") or ""),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def _receipt_matches_current(receipt: Any, active: Mapping[str, Any]) -> bool:
+    """Match lifecycle and identity fields without reading execution prose."""
+    if (
+        _entry_value(receipt, "evidence_schema_version") != 2
+        or _entry_value(receipt, "execution_status") != "succeeded"
+        or _entry_value(receipt, "error")
+    ):
+        return False
+    try:
+        return (
+            int(_entry_value(receipt, "round_number", 0) or 0)
+            == active["round_number"]
+            and str(_entry_value(receipt, "plan_id", "") or "")
+            == active["plan_id"]
+            and (_entry_value(receipt, "lineage_id", None) or "main")
+            == active["lineage_id"]
+            and int(_entry_value(receipt, "analysis_generation", 0) or 0)
+            == active["analysis_generation"]
+            and int(_entry_value(receipt, "cohort_generation", 0) or 0)
+            == active["cohort_generation"]
+            and str(_entry_value(receipt, "cohort_digest", "") or "")
+            == active["cohort_digest"]
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _current_realized_output_names(state: Any) -> List[str]:
+    """Select declared outputs from newest matching successful receipts.
+
+    The names bound here are declarations recorded by successful executions;
+    they do not prove that an object was newly created or materially changed.
+    """
+    active = _active_receipt_identity(state)
+    if active is None:
+        return []
+    names: List[str] = []
+    history = list(getattr(state, "code_history", None) or [])
+    for receipt in reversed(history):
+        if not _receipt_matches_current(receipt, active):
+            continue
+        outputs = _entry_value(receipt, "realized_persistent_outputs", None) or []
+        if isinstance(outputs, (str, bytes)):
+            outputs = [outputs]
+        for value in outputs:
+            name = str(value or "").strip()
+            if name and name.isidentifier() and name not in names:
+                names.append(name)
+    return names
+
+
 async def ensure_innovation_baseline_figures(
     agent: Any, state: Any
 ) -> Dict[str, str]:
@@ -667,9 +777,16 @@ async def ensure_innovation_baseline_figures(
     sandbox = getattr(agent, "sandbox", None)
     if sandbox is None:
         return {}
+    output_names = _current_realized_output_names(state)
+    if not output_names:
+        logger.info(
+            "[Bioinformatics] No current receipt-declared outputs for "
+            "innovation baseline"
+        )
+        return {}
     try:
         probe_result = await sandbox.execute(
-            build_innovation_baseline_probe_code(),
+            build_innovation_baseline_probe_code(output_names),
             save_to_history=False,
             skip_safety_check=True,
         )

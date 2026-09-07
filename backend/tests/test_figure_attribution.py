@@ -12,6 +12,7 @@ from backend.services.report.figure_attribution import (
     figures_by_round,
     round_boundaries,
 )
+from backend.services.report.artifacts import image_file_sha256
 
 _T0 = datetime(2026, 1, 1, 12, 0, 0)
 
@@ -36,6 +37,33 @@ def _png(path, mtime=None):
     return path
 
 
+def _real_png(path, seed):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    fig, ax = plt.subplots(figsize=(4, 3), dpi=120)
+    ax.imshow(rng.random((64, 64)))
+    ax.set_title(str(seed))
+    fig.savefig(path, format="png")
+    plt.close(fig)
+    return path
+
+
+def _registered(path, round_number):
+    return SimpleNamespace(
+        name=path.stem,
+        png_path=str(path),
+        render_sha256=image_file_sha256(path),
+        preview_sha256=None,
+        round_number=round_number,
+        is_current=True,
+        lineage_id="main",
+    )
+
+
 def test_boundaries_are_half_open_and_unbounded_at_the_edges():
     bounds = round_boundaries(_state([_round(1, 10), _round(2, 20), _round(3, 30)]))
     assert [b[0] for b in bounds] == [1, 2, 3]
@@ -56,6 +84,65 @@ def test_supervision_records_win_over_mtime(tmp_path):
         ["a.png"], state=state, records=records, figure_paths={"a.png": fig}
     )
     assert attr == {"a.png": 1}
+
+
+def test_exact_current_registered_bytes_win_over_an_older_same_stem_log(
+    tmp_path,
+):
+    _real_png(tmp_path / "old_shared.png", seed=1)
+    new = _real_png(tmp_path / "shared.png", seed=2)
+    state = _state(
+        [_round(1, 10), _round(2, 20)],
+        pub=[SimpleNamespace(
+            name="shared",
+            png_path=str(new),
+            render_sha256=image_file_sha256(new),
+            preview_sha256=None,
+            round_number=2,
+            is_current=True,
+            lineage_id="main",
+        )],
+    )
+    records = [{"round_number": 1, "saved_figure_filenames": ["shared.png"]}]
+
+    attr = attribute_figures_to_rounds(
+        ["shared.png"],
+        state=state,
+        records=records,
+        figure_paths={"shared.png": new},
+    )
+    assert attr == {"shared.png": 2}
+
+
+def test_identical_bytes_under_another_filename_do_not_steal_registered_round(
+    tmp_path,
+):
+    registered_path = _real_png(tmp_path / "registered.png", seed=3)
+    other_path = tmp_path / "other.png"
+    other_path.write_bytes(registered_path.read_bytes())
+    state = _state(
+        [_round(1, 10), _round(2, 20)],
+        pub=[_registered(registered_path, 2)],
+    )
+    records = [{"round_number": 1, "saved_figure_filenames": ["other.png"]}]
+
+    attr = attribute_figures_to_rounds(
+        ["other.png"],
+        state=state,
+        records=records,
+        figure_paths={"other.png": other_path},
+    )
+    assert attr == {"other.png": 1}
+
+
+def test_last_supervision_writer_wins_for_an_unregistered_repeated_stem():
+    records = [
+        {"round_number": 1, "saved_figure_filenames": ["reused.png"]},
+        {"round_number": 2, "saved_figure_filenames": ["reused.png"]},
+    ]
+    assert attribute_figures_to_rounds(
+        ["reused.png"], state=None, records=records
+    ) == {"reused.png": 2}
 
 
 def test_publication_round_used_when_no_record(tmp_path):
