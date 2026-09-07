@@ -778,6 +778,29 @@ def _sandboxed_write_bytes(self, *args, **kwargs):
 _builtins.open = _sandboxed_open
 _sandbox_io.open = _sandboxed_open
 open = _sandboxed_open
+
+# Owned by the bootstrap, which recreates it on every start. Persisting it
+# would let a restore put the saved generation's write guard back over the
+# freshly installed one, so a later fix to the guard would never reach a
+# resumed session. The tag travels on the function, not on its name: a user is
+# free to define something called `open`, and that one IS theirs.
+# Looked up rather than named directly: `get_seed` and `check_and_fix_nan` come
+# from the common bootstrap cell, and this cell is executed on its own by the
+# write-guard tests (and, in a replay, by anyone running cells out of order).
+# Referring to them as bare names makes this cell depend on the other one.
+for _scai_owned_name in ('_sandboxed_open', 'get_seed', 'check_and_fix_nan'):
+    _scai_owned = globals().get(_scai_owned_name)
+    if _scai_owned is None:
+        continue
+    try:
+        _scai_owned._scai_bootstrap_owned = True
+    except (AttributeError, TypeError):
+        pass
+del _scai_owned_name
+try:
+    del _scai_owned
+except NameError:
+    pass
 os.open = _sandboxed_os_open
 os.mkdir = _sandboxed_os_mkdir
 _pathlib.Path.mkdir = _sandboxed_mkdir

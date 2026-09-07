@@ -240,10 +240,22 @@ async def test_commit_publication_preserves_pairing(monkeypatch):
         "session_id": sid, "current_revision": 5, "saved_revision": 5,
         "runtime_persistence": persistence,
     })
+    # The subject: a persistence commit must not advance state_version, or it
+    # would invalidate the pairing it just recorded.
     assert state.state_version == 7
     assert state_runtime_coherence(state) == "current"
+
     await workflow._send_state_sync(state, "round_completed")
-    assert state_runtime_coherence(state) == "stale"
+
+    # And a sync that is not a persistence commit *does* advance it ...
+    assert state.state_version == 8
+    # ... without making the generation stale. This line previously asserted
+    # "stale", which is what made crash recovery impossible unless the process
+    # happened to die parked at a gate: `round_completed`, `round_start` and a
+    # user's Continue all sync without running a single cell, and stale is a
+    # hard block whose only escape retires the dump. Staleness is the kernel's
+    # question, and `current_revision == committed_revision` answers it.
+    assert state_runtime_coherence(state) == "current"
 
 
 def test_manifest_roundtrip_preserves_control_pairing(tmp_path):

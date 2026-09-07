@@ -131,3 +131,57 @@ async def test_an_imported_function_is_not_reported_as_carried(sandbox):
     assert "mine" in carried
     assert "sqrt" not in carried
     assert "sqrt" in {s["name"] for s in manifest["skipped_names"]}
+
+
+@pytest.mark.asyncio
+async def test_the_bootstrap_write_guard_is_not_carried_into_the_dump(sandbox):
+    """`open` in the user namespace is the sandbox write guard.
+
+    It is a `__main__` function, so §5.5's narrowing began carrying it -- the
+    real run 31545a54 listed `open` among its nine carried frames. Restore does
+    `globals().update(_scai_pending)`, so a resumed session's `open` would
+    become the saved generation's code object and every later fix to the guard
+    would stop reaching it.
+
+    `get_seed` and `check_and_fix_nan` are the same shape: the bootstrap
+    recreates them on every start, so carrying them can only put an older copy
+    over a fresh one.
+    """
+    result = await sandbox.execute("value = 1\n", skip_safety_check=True)
+    assert result.success, result.error
+    assert await sandbox.save_session() is True
+
+    manifest = _manifest_for(sandbox)
+    saved = set(manifest["saved_names"])
+    carried = {c["name"] for c in manifest.get("carried_definitions", [])}
+
+    for owned in ("open", "get_seed", "check_and_fix_nan"):
+        assert owned not in saved, f"{owned} is bootstrap-owned and was dumped"
+        assert owned not in carried, f"{owned} is bootstrap-owned and was carried"
+
+    # The user's own definitions still travel; the exclusion is by provenance,
+    # not by being callable.
+    assert "value" in saved
+
+
+@pytest.mark.asyncio
+async def test_a_user_definition_named_open_is_still_theirs(sandbox):
+    """Provenance, not spelling.
+
+    Excluding by name would silently drop a user's own `open`, which is their
+    state and must be carried. The tag rides on the bootstrap's function object,
+    so rebinding the name in a cell produces an ordinary user definition.
+    """
+    result = await sandbox.execute(
+        "def open(path):\n    return ('mine', path)\n", skip_safety_check=True,
+    )
+    assert result.success, result.error
+    assert await sandbox.save_session() is True
+
+    manifest = _manifest_for(sandbox)
+    carried = {c["name"] for c in manifest.get("carried_definitions", [])}
+
+    assert "open" in carried, (
+        "a user-defined `open` was excluded by name; the exclusion must key on "
+        "the bootstrap's tag, not the spelling"
+    )

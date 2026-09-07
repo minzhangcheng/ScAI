@@ -182,17 +182,24 @@ def state_runtime_coherence(state) -> str:
                 return "inconsistent"
             pairing = manifest.get("pairing")
     if pairing is not None:
-        from backend.utils.runtime_pairing import checkpoint_identity
-        import sqlite3
-
         version = int(getattr(state, "state_version", 0) or 0)
-        if version != pairing["state_version"]:
-            return "stale" if version > pairing["state_version"] else "inconsistent"
-        try:
-            if checkpoint_identity(sid) != pairing["checkpoint"]:
-                return "stale"
-        except (OSError, sqlite3.Error):
+        if version < int(pairing["state_version"]):
+            # Regression, not progress: this record cannot belong to the
+            # session in front of us.
             return "inconsistent"
+        # Forward drift is NOT staleness. `state_version` advances on every
+        # state sync but the persistence commit, and the checkpoint hash
+        # advances whenever a graph node returns -- neither requires the kernel
+        # to execute anything. Treating either as stale meant that a save at a
+        # round boundary, a click on Continue, `round_start`, and a crash during
+        # planning left a correct dump that resume refused and that POST /run
+        # then retired. `runtime_coherence` above already answered the question
+        # this function is asked here, using the kernel's own revision counter.
+        #
+        # The matched-pair property the pairing proves is still enforced where
+        # it belongs: `resumable_export` compares the manifest's pairing with a
+        # freshly captured one before it will build a resumable archive, so a
+        # dump and a checkpoint that disagree still cannot be shipped together.
     return verdict
 
 

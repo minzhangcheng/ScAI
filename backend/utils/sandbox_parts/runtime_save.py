@@ -465,6 +465,13 @@ def _build_save_code(context: SaveContext) -> str:
     save_code = """\
 import dill as _scai_dill
 import json as _scai_json
+# Captured, not resolved at use: the kernel namespace binds `open` to the
+# sandbox write guard, and an analysis cell is free to rebind it. A bare
+# `open` in this script therefore fails every save as soon as a user
+# defines one -- the same shadowing that once destroyed user variables
+# named types, io, os, dill, tempfile and zstd.
+import builtins as _scai_builtins
+_scai_open = _scai_builtins.open
 import os as _scai_os
 import tempfile as _scai_tempfile
 import types as _scai_types
@@ -517,6 +524,13 @@ _scai_skip_kinds = (
 def _scai_is_own_definition(_o):
     # A function or class defined in a cell, rather than imported. The kernel
     # sets __module__ to "__main__" for those.
+    #
+    # Bootstrap-owned callables are excluded even though they satisfy that: the
+    # bootstrap recreates them on every start, and `open` is the write guard, so
+    # carrying it lets a restore reinstate the saved generation's guard over the
+    # fresh one.
+    if getattr(_o, "_scai_bootstrap_owned", False):
+        return False
     #
     # The kind test has to come first. An *instance* of a __main__ class also
     # reports __module__ == "__main__", because the lookup falls through to its
@@ -622,7 +636,7 @@ _tmp_path = """ + context.escaped_path + """ + '.tmp'
 _saved_count = 0
 _compression_magic = b"SCAI_ZSTD_DILL_V1\\n"
 try:
-    with open(_tmp_path, 'wb') as _raw:
+    with _scai_open(_tmp_path, 'wb') as _raw:
         _raw.write(_compression_magic)
         with _scai_zstd.ZstdCompressor(level=1).stream_writer(_raw, closefd=False) as _f:
             for _var_name, _obj in _to_dump:

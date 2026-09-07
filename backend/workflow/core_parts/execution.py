@@ -409,6 +409,15 @@ async def resume(
             f"coherence={state_runtime_coherence(analysis_state)!r}; "
             "holding without running the graph"
         )
+        # Holding must not leave the session RUNNING. It used to: a held
+        # WebSocket reconnect persisted RUNNING, POST /run then answered 400
+        # "Analysis already running" and /resume acts only on PAUSED, so the
+        # session was reachable only through Pause. PAUSED keeps the one action
+        # that can actually resolve this -- re-running from the input data --
+        # available, and the run path's twin of this guard likewise sets a
+        # status rather than returning untouched.
+        if analysis_state.status == TaskStatus.RUNNING:
+            self._set_status(analysis_state, TaskStatus.PAUSED)
         return analysis_state
 
     # Terminal restore → no workflow, preserve its exact outcome.
