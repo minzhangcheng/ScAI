@@ -205,32 +205,25 @@ def test_the_bootstrap_lets_a_replay_choose_a_clean_workspace(replayable_session
 
 
 @pytest.mark.asyncio
-async def test_a_replay_reproduces_the_analysis_but_not_the_bootstrap(
+async def test_a_replay_reproduces_the_run_including_its_bootstrap(
     replayable_session, tmp_path,
 ):
-    """The whole harness, end to end, and the limitation it found.
+    """The whole harness, end to end, on a seeded toy session.
 
-    **Not spec section 7 Goal 4**, which needs a completed analysis on real
-    input data. This asserts the machinery, and pins a finding that only running
-    it could produce.
+    **Not spec §7 Goal 4**, which needs a completed analysis on real input data.
+    This asserts the machinery: every cell executes -- cell 0 included -- the
+    recorded failure fails again, the replay continues past it, and every
+    declared variable matches. A seeded session should reproduce exactly, so a
+    divergence here is a defect rather than floating-point drift.
 
-    **The analysis cells replay exactly.** Same outcomes, including the recorded
-    failure failing again, and every declared variable matches. That is the part
-    A2-9 set out to make true.
-
-    **The bootstrap cell does not run in a plain kernel.** It references modules
-    ScAI's launcher injects through its own `sitecustomize` --
-    `scai_kernel_trust`, the pydeseq2/scanpy/arboreto compat shims -- so a
-    plain `python3` kernel raises ModuleNotFoundError on cell 0.
-
-    That is a real limit on the replay contract and it is asserted rather than
-    tolerated: the contract says "a clean kernel ... within the same
-    installation", and this shows the two readings of "clean kernel" are not the
-    same. Either the replay must launch a kernel the way the sandbox does, which
-    makes the notebook replayable only by ScAI, or the bootstrap must degrade
-    when the trusted modules are absent, which makes the recorded cell no longer
-    exactly what ran. That is a spec decision, recorded in the baseline, not one
-    to settle by loosening this test.
+    This test previously asserted the opposite about cell 0. The bootstrap
+    imported `scai_kernel_trust` and three compat shims that exist only because
+    ScAI's launcher puts `backend/utils/kernel_startup` on the kernel path, so a
+    plain kernel raised ModuleNotFoundError and the test pinned that as a known
+    limitation. The 2026-09-07 amendment to the replay contract defines "clean
+    kernel" to include those modules, the bootstrap now tolerates their absence,
+    and the harness puts the directory on the path -- so cell 0 runs, and the
+    thing to assert is that it does.
     """
     _sb, states = replayable_session
     tool = _harness()
@@ -251,11 +244,24 @@ async def test_a_replay_reproduces_the_analysis_but_not_the_bootstrap(
     _Rp.fingerprint = str(fingerprint)
     _Rp.report = str(report)
 
-    tool.cmd_replay(_Rp())
+    exit_code = tool.cmd_replay(_Rp())
 
     payload = json.loads(report.read_text())
     outcomes = payload["cell_outcomes"]
     assert len(outcomes) == payload["cells"] > 0
+
+    summary = "\n".join(
+        "cell %s (bootstrap=%s): %s -> %s %s"
+        % (row["index"], row["bootstrap"], row["original"], row["replayed"],
+           row.get("replayed_ename"))
+        for row in payload["outcome_divergences"]
+    )
+
+    # Cell 0 is the environment. If it does not run, nothing after it means
+    # anything, and the notebook is not the complete record A2-9 made it.
+    bootstrap_rows = [row for row in outcomes if row["bootstrap"]]
+    assert bootstrap_rows, "the notebook has no bootstrap cell"
+    assert all(row["replayed"] == "ok" for row in bootstrap_rows), summary
 
     # It did not stop at the recorded failure.
     raised = [row for row in outcomes if row["original"] == "raised"]
@@ -266,27 +272,40 @@ async def test_a_replay_reproduces_the_analysis_but_not_the_bootstrap(
         "the replay stopped at the first failure: " + repr(after_failure)
     )
 
-    divergences = payload["outcome_divergences"]
-    summary = "\n".join(
-        "cell %s (bootstrap=%s): %s -> %s %s"
-        % (row["index"], row["bootstrap"], row["original"], row["replayed"],
-           row.get("replayed_ename"))
-        for row in divergences
-    )
+    assert payload["outcome_divergences"] == [], summary
 
-    # Every divergence is the bootstrap, and it is the known one.
-    assert all(row["bootstrap"] for row in divergences), summary
-    assert divergences, (
-        "the bootstrap replayed in a plain kernel -- if that is now true, this "
-        "test and the baseline's finding both need updating"
-    )
-    assert all(
-        row["replayed_ename"] == "ModuleNotFoundError" for row in divergences
-    ), summary
-
-    # And the analysis itself reproduced: no declared variable diverged.
     diverged = [v for v in payload["variables"] if v["verdict"] == "diverged"]
     assert diverged == [], diverged
     assert any(v["verdict"] == "match" for v in payload["variables"])
+    assert exit_code == 0
 
     assert (tmp_path / "clean").exists()
+
+
+def test_the_bootstrap_tolerates_scais_kernel_modules_being_absent():
+    """The conditional guard, asserted on the source it generates.
+
+    Conditional rather than removed: inside ScAI the modules are always there
+    and the cell does exactly what it always did, so the recorded cell is still
+    what ran. A rewrite would have cost that, which is why this is a guard.
+    """
+    from backend.utils.sandbox_parts.kernel_bootstrap import (
+        _COMMON_BOOTSTRAP_TEMPLATE,
+    )
+
+    source = _COMMON_BOOTSTRAP_TEMPLATE
+    assert "try:\n    import scai_kernel_trust as _scai_kernel_trust" in source
+    assert "if _scai_kernel_trust is not None:" in source
+    # The shims are imported when missing, not merely skipped: they patch
+    # library defects and can move numbers.
+    assert "__import__(_scai_compat_name)" in source
+    assert 'sys.modules["scai_pydeseq2_compat"].install()' not in source
+
+
+def test_the_harness_puts_the_kernel_startup_modules_on_the_path():
+    """"Same installation" includes them. Without this the replay runs but is a
+    weaker claim than the contract describes, and the harness says so."""
+    source = HARNESS.read_text()
+    assert 'REPO / "backend" / "utils" / "kernel_startup"' in source
+    assert 'environment["PYTHONPATH"]' in source
+    assert "weaker claim" in source

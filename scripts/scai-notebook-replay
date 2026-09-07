@@ -262,6 +262,26 @@ def run_in_kernel(cells: list[dict], workspace: pathlib.Path) -> tuple[list[dict
     environment["SCAI_REPLAY_SESSION_TMP"] = str(session_tmp)
     environment["SCAI_REPLAY_STATE_DIR"] = str(workspace)
 
+    # "Within the same installation" includes ScAI's kernel-startup modules.
+    # The bootstrap tolerates their absence, but the compat shims patch library
+    # defects, so a replay without them can produce different numbers -- the
+    # difference between "the notebook runs" and "the notebook reproduces". The
+    # launcher puts this directory on a production kernel's path; the replay
+    # does the same, so the two agree.
+    startup = REPO / "backend" / "utils" / "kernel_startup"
+    if startup.is_dir():
+        existing = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = (
+            f"{startup}{os.pathsep}{existing}" if existing else str(startup)
+        )
+    else:
+        print(
+            "warning: %s not found, so the replay runs without ScAI's "
+            "compatibility patches and is a weaker claim than the contract "
+            "describes" % startup,
+            file=sys.stderr,
+        )
+
     manager, client = start_new_kernel(
         kernel_name="python3", cwd=str(workspace), env=environment,
     )
@@ -316,6 +336,7 @@ def outcome_divergences(outcomes: list[dict]) -> list[dict]:
 # --- entry points ------------------------------------------------------------
 
 
+REPO = pathlib.Path(__file__).resolve().parents[1]
 DUMP_MAGIC = b"SCAI_ZSTD_DILL_V1\n"
 
 

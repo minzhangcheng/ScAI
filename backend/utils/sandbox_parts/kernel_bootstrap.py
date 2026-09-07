@@ -378,9 +378,20 @@ plt.show = _capturing_show  # Baseline capturing_show; referenced by defensive r
 
 # Keep publication-finalization capabilities outside IPython's mutable user_ns.
 # The startup module accepts this tuple once and exposes no mutation API.
-import scai_kernel_trust as _scai_kernel_trust
+#
+# Optional so this cell -- which is cell 0 of the notebook -- can also run when
+# replayed outside ScAI, where the launcher has not put `kernel_startup` on the
+# path. Inside ScAI the module is always there and this is exactly the code that
+# always ran; the guard changes nothing here. Outside, the capability holder has
+# nothing to hold: it exists so publication finalisation cannot be reached
+# through the user namespace, which is a production concern, not a replay one.
+try:
+    import scai_kernel_trust as _scai_kernel_trust
+except ImportError:
+    _scai_kernel_trust = None
 _scai_kernel_shell = get_ipython()
-_scai_kernel_trust.capture_runtime(
+if _scai_kernel_trust is not None:
+    _scai_kernel_trust.capture_runtime(
     builtins_map=_scai_bootstrap_builtins.dict(
         _scai_bootstrap_builtins.vars(_scai_bootstrap_builtins)
     ),
@@ -393,9 +404,9 @@ _scai_kernel_trust.capture_runtime(
     plt_show=_capturing_show,
     plt_get_fignums=plt.get_fignums,
     plt_gcf=plt.gcf,
-    figure_savefig=_original_savefig,
-    runtime_savefig=_combined_savefig,
-)
+        figure_savefig=_original_savefig,
+        runtime_savefig=_combined_savefig,
+    )
 del _scai_kernel_shell
 del _scai_kernel_trust
 
@@ -409,9 +420,38 @@ try:
 except ImportError:
     pass
 
-sys.modules["scai_pydeseq2_compat"].install()
-sys.modules["scai_scanpy_compat"].install()
-sys.modules["scai_arboreto_compat"].install()
+# These patch library defects, so a kernel running without them produces wrong
+# numbers rather than an error. Installation is therefore FAIL-CLOSED: a missing
+# adapter aborts the bootstrap.
+#
+# The single exception is a replay, which declares itself by setting
+# SCAI_REPLAY_WORKSPACE -- the same variable this cell reads above for the
+# workspace root. There the adapters may legitimately be absent, the alternative
+# is not running at all, and the harness reports the replay as degraded. Every
+# other kernel, production included, still raises.
+_scai_is_replay = bool(os.environ.get('SCAI_REPLAY_WORKSPACE'))
+for _scai_compat_name in (
+    "scai_pydeseq2_compat", "scai_scanpy_compat", "scai_arboreto_compat",
+):
+    _scai_compat = sys.modules.get(_scai_compat_name)
+    if _scai_compat is None:
+        try:
+            _scai_compat = __import__(_scai_compat_name)
+        except ImportError:
+            if not _scai_is_replay:
+                raise
+            print(
+                "[sandbox] %s unavailable; this replay runs without its "
+                "compatibility patches and its numbers are a weaker claim"
+                % _scai_compat_name
+            )
+            continue
+    _scai_compat.install()
+# Both names go: a bare leftover in the user namespace is how the save script
+# once destroyed user variables called `types`, `io` and `os`.
+del _scai_compat_name
+del _scai_compat
+del _scai_is_replay
 
 try:
     import anndata as ad

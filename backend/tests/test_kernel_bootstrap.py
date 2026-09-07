@@ -69,11 +69,15 @@ async def test_bootstrap_injects_repr_safe_paths_before_workspace_use(tmp_path):
         "backend/utils/kernel_startup/sitecustomize.py"
     ).read_text(encoding="utf-8")
     assert "import scai_pydeseq2_compat" in trusted_startup
-    assert 'sys.modules["scai_pydeseq2_compat"].install()' in init_source
+    # Installed through one loop now rather than three literal calls; the
+    # fail-closed property is asserted structurally in
+    # test_bootstrap_adapter_installation_is_fail_closed.
+    assert '"scai_pydeseq2_compat"' in init_source
+    assert "_scai_compat.install()" in init_source
     assert "import scai_scanpy_compat" in trusted_startup
-    assert 'sys.modules["scai_scanpy_compat"].install()' in init_source
+    assert '"scai_scanpy_compat"' in init_source
     assert "import scai_arboreto_compat" in trusted_startup
-    assert 'sys.modules["scai_arboreto_compat"].install()' in init_source
+    assert '"scai_arboreto_compat"' in init_source
     assert "Set num_workers=0" in init_source
     assert "os.chdir(_WORKSPACE_DIR)" in path_source
     assert "_sandboxed_open" in path_source
@@ -90,7 +94,7 @@ async def test_bootstrap_injects_repr_safe_paths_before_workspace_use(tmp_path):
         repr(str(sandbox.notebook_state.state_dir)), repr("<state-dir>")
     )
     assert hashlib.sha256(normalized_common.encode()).hexdigest() == (
-        "5abac8b0bbb5da8dc959a7805ed22718ffc098e36b5e85a57d4f1935e1e241c9"
+        "0ebf1f31fd3b4e94a82ee2135113045a96a69bda720cc1f95d957ab39900c392"
     )
     assert hashlib.sha256(normalized_path.encode()).hexdigest() == (
         "6519d8cef92a107dd7596eeda885a290bd702846c841f021fe5f95cd3a1f72c5"
@@ -99,6 +103,19 @@ async def test_bootstrap_injects_repr_safe_paths_before_workspace_use(tmp_path):
 
 @pytest.mark.asyncio
 async def test_bootstrap_adapter_installation_is_fail_closed(tmp_path):
+    """A missing compat adapter must abort the bootstrap.
+
+    These three patch library defects, so a kernel that runs without them
+    returns wrong numbers rather than an error -- the failure mode a test cannot
+    see afterwards. The one exception is a replay, which declares itself by
+    setting SCAI_REPLAY_WORKSPACE and is reported as degraded; every other
+    kernel raises.
+
+    Asserted on the structure rather than on one spelling of the call. The
+    previous version matched `sys.modules["name"].install()` literally and
+    required no enclosing try -- a proxy that a rewrite could satisfy while
+    losing the property, or break while keeping it.
+    """
     sandbox = _sandbox(tmp_path)
     sandbox._execute_unlocked = AsyncMock(
         side_effect=[
@@ -110,46 +127,80 @@ async def test_bootstrap_adapter_installation_is_fail_closed(tmp_path):
     await sandbox._initialize_kernel()
     init_source = sandbox._execute_unlocked.await_args_list[0].args[0]
     tree = ast.parse(init_source)
-    parents = {
-        child: node
-        for node in ast.walk(tree)
-        for child in ast.iter_child_nodes(node)
-    }
+
     adapter_names = {
         "scai_pydeseq2_compat",
         "scai_scanpy_compat",
         "scai_arboreto_compat",
     }
-    found = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-            continue
-        if node.func.attr != "install" or not isinstance(node.func.value, ast.Subscript):
-            continue
-        subscript = node.func.value
-        if not (
-            isinstance(subscript.value, ast.Attribute)
-            and isinstance(subscript.value.value, ast.Name)
-            and subscript.value.value.id == "sys"
-            and subscript.value.attr == "modules"
-            and isinstance(subscript.slice, ast.Constant)
-            and subscript.slice.value in adapter_names
-        ):
-            continue
-        adapter = subscript.slice.value
-        found.add(adapter)
-        ancestor = parents.get(node)
-        while ancestor is not None:
-            if isinstance(ancestor, ast.Try):
-                caught = {
-                    handler.type.id
-                    for handler in ancestor.handlers
-                    if isinstance(handler.type, ast.Name)
-                }
-                assert not caught.intersection({"ImportError", "ModuleNotFoundError"})
-            ancestor = parents.get(ancestor)
+    named = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and node.value in adapter_names
+    }
+    assert named == adapter_names, named
 
-    assert found == adapter_names
+    installs = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "install"
+    ]
+    assert installs, "no adapter is installed"
+
+    # Every ImportError handler that guards an adapter import must re-raise,
+    # and the only way past it must be the declared-replay flag.
+    adapter_handlers = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        imports_adapter = any(
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id == "__import__"
+            for inner in ast.walk(node)
+        )
+        if not imports_adapter:
+            continue
+        for handler in node.handlers:
+            if isinstance(handler.type, ast.Name) and handler.type.id in (
+                "ImportError", "ModuleNotFoundError"
+            ):
+                adapter_handlers.append(handler)
+
+    assert adapter_handlers, "the adapter import is not guarded at all"
+    for handler in adapter_handlers:
+        raises = [n for n in ast.walk(handler) if isinstance(n, ast.Raise)]
+        assert raises, "an adapter ImportError is swallowed without re-raising"
+        guards = [
+            n for n in ast.walk(handler)
+            if isinstance(n, ast.If)
+            and any(
+                isinstance(sub, ast.Name) and sub.id == "_scai_is_replay"
+                for sub in ast.walk(n.test)
+            )
+        ]
+        assert guards, (
+            "the re-raise is not conditioned on a declared replay, so either "
+            "production degrades silently or a replay cannot run"
+        )
+
+
+def test_the_replay_flag_is_the_only_way_past_fail_closed(tmp_path):
+    """Named explicitly, because it is the whole exception.
+
+    SCAI_REPLAY_WORKSPACE is set by `scripts/scai-notebook-replay` and by
+    nothing in the production path -- the same variable the cell above reads for
+    the workspace root, so a kernel that degrades is exactly a kernel that was
+    told it is a replay.
+    """
+    from backend.utils.sandbox_parts.kernel_bootstrap import (
+        _COMMON_BOOTSTRAP_TEMPLATE,
+    )
+
+    source = _COMMON_BOOTSTRAP_TEMPLATE
+    assert "_scai_is_replay = bool(os.environ.get('SCAI_REPLAY_WORKSPACE'))" in source
+    assert "if not _scai_is_replay:\n                raise" in source
 
 
 def test_kernel_launch_environment_is_session_scoped(tmp_path):
