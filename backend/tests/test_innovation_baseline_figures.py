@@ -637,21 +637,18 @@ def test_table_panels_survive_a_kernel_with_no_anndata():
 
 
 def test_the_volcano_legend_counts_the_table_not_the_subsample():
-    """Points are thinned above a cap so the PNG stays renderable. Deriving the
-    legend from what survived stated a significant-feature count that was a
-    fraction of the truth, inside a figure registered as a platform diagnostic
-    and therefore never put in front of a reviewer."""
+    """The host must not choose a significance threshold, and the p-value
+    column the platform picks may be raw rather than adjusted, so the volcano
+    draws every row as one neutral series and the legend reports the full
+    table's row count and the column names used -- never a classification
+    derived from a hard-coded cutoff."""
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    np = pytest.importorskip("numpy")
+    pytest.importorskip("numpy")
 
     table = _make_scanpy_de_table(rows=200_000)
-    truth = int((
-        (-np.log10(table["pvals_adj"].to_numpy()) >= 1.30103)
-        & (np.abs(table["logfoldchanges"].to_numpy()) >= 1.0)
-    ).sum())
-    assert truth > 0
+    total = len(table)
 
     namespace = {"marker_de": table}
     parsed = _exec_probe(namespace, ["marker_de"])
@@ -660,12 +657,19 @@ def test_the_volcano_legend_counts_the_table_not_the_subsample():
         if spec.figure_type == "volcano"
     )
 
+    assert "1.30103" not in volcano.code
+    assert ">= 1.0" not in volcano.code
+    assert "axvline" not in volcano.code
+    assert "axhline" not in volcano.code
+
     plt.close("all")
     exec(compile(volcano.code, "<volcano>", "exec"), namespace, namespace)
     labels = [text.get_text() for text in namespace["_ib_ax"].get_legend().get_texts()]
     plt.close("all")
 
-    assert any(f"{truth:,}" in label for label in labels), labels
+    assert any(f"{total:,}" in label for label in labels), labels
+    assert any("logfoldchanges" in label for label in labels), labels
+    assert any("pvals_adj" in label for label in labels), labels
 
 
 def _scored_adata(score_names, n_obs=200):

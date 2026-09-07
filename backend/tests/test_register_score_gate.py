@@ -102,7 +102,7 @@ def test_provenance_label_falls_back_for_legacy_scores():
 def test_panel_size_cell_marks_underpowered():
     sd = {"n_genes": 5, "n_genes_matched": 5, "gene_list": ["a"] * 5,
           "power": {"underpowered": True}}
-    assert panel_size_cell(sd) == "5/5 (underpowered)"
+    assert panel_size_cell(sd) == "5/5 (small matched panel)"
 
 
 def test_panel_size_cell_shows_matched_over_nominal():
@@ -121,7 +121,8 @@ def test_report_section_renders_panel_size_column():
     )
     html = build_score_definitions_section_html([sd])
     assert "Panel Size" in html
-    assert "underpowered" in html
+    assert "small matched panel" in html
+    assert "not a power" in html
     assert "hand-assembled" in html
 
 

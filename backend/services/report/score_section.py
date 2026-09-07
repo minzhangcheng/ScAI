@@ -70,11 +70,13 @@ def provenance_label(sd: Dict[str, Any]) -> str:
 
 
 def panel_size_cell(sd: Dict[str, Any]) -> str:
-    """Nominal / matched panel size plus an underpowered marker.
+    """Nominal / matched panel size plus a small-matched-panel marker.
 
-    The matched count is what governs power. A panel that looks large but whose
-    genes are largely absent from the analysed matrix cannot support a negative
-    conclusion, and that has to be visible in the report rather than buried.
+    The matched count is what governs what the panel can detect; this is a
+    size heuristic, not a power calculation. A panel that looks large but
+    whose genes are largely absent from the analysed matrix cannot support a
+    negative conclusion, and that has to be visible in the report rather than
+    buried.
     """
     n = sd.get("n_genes") or len(sd.get("gene_list") or [])
     matched = sd.get("n_genes_matched")
@@ -82,7 +84,7 @@ def panel_size_cell(sd: Dict[str, Any]) -> str:
         return "N/A"
     text = str(n) if matched is None else f"{matched}/{n}"
     if (sd.get("power") or {}).get("underpowered"):
-        text += " (underpowered)"
+        text += " (small matched panel)"
     return text
 
 
@@ -154,7 +156,7 @@ def build_score_definitions_section_html(
             </div>
             <div class="section-content">
                 <p>The following scores were computed during the analysis. Each score's gene set and computation method are documented for transparency and reproducibility. Expand "Gene List" to view all genes.</p>
-                <p style="font-size:0.9em;color:#555"><strong>Reading "Source" and "Panel Size":</strong> a source of the form <code>resource version: set_id</code> identifies a named set from a versioned external resource and can be re-fetched exactly; <em>derived</em> panels are reproducible from this notebook; <em>hand-assembled</em> panels were assembled for this analysis and carry correspondingly less weight. Panel Size shows genes matched in the analysed matrix over the nominal panel size. A panel marked <em>underpowered</em> may still be reported as a positive observation, but a non-significant result from it is not evidence of absence.</p>
+                <p style="font-size:0.9em;color:#555"><strong>Reading "Source" and "Panel Size":</strong> a source of the form <code>resource version: set_id</code> identifies a named set from a versioned external resource and can be re-fetched exactly; <em>derived</em> panels are reproducible from this notebook; <em>hand-assembled</em> panels were assembled for this analysis and carry correspondingly less weight. Panel Size shows genes matched in the analysed matrix over the nominal panel size. A panel marked <em>(small matched panel)</em> matched fewer than 10 genes -- a size heuristic, not a power analysis; a positive result may still be reported as an observation, but a non-significant result from such a panel does not support a negative conclusion.</p>
                 <div style="margin-bottom:12px">{download_link}</div>
                 {table_html}
             </div>

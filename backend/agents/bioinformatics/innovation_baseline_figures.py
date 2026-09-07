@@ -459,43 +459,25 @@ def _build_volcano_code(table: Mapping[str, Any]) -> str:
         "_ib_ok = _ib_np.isfinite(_ib_x) & _ib_np.isfinite(_ib_p) & (_ib_p > 0)\n"
         "_ib_x = _ib_x[_ib_ok]\n"
         "_ib_y = -_ib_np.log10(_ib_p[_ib_ok])\n"
-        # Counted over the whole table and BEFORE any thinning. Deriving the
-        # legend from the subsample stated a significant-feature count that
-        # was a fraction of the truth, inside a figure that skips review.
-        "_ib_full = (_ib_y >= 1.30103) & (_ib_np.abs(_ib_x) >= 1.0)\n"
-        "_ib_n_sig = int(_ib_full.sum())\n"
-        "_ib_n_other = int((~_ib_full).sum())\n"
+        # No significance threshold is drawn: the host must not choose a
+        # scientific cutoff, and the p-value column picked above may be raw
+        # rather than multiple-testing-adjusted, so a fixed line would not
+        # even be a consistent error rate. Every finite row is plotted as one
+        # neutral series, and the legend reports the row count and the
+        # column names used instead of a classification.
         "_ib_total = int(_ib_x.size)\n"
         f"_ib_cap = {_MAX_SCATTER_POINTS!r}\n"
         "_ib_thinned = _ib_total > _ib_cap\n"
         "if _ib_thinned:\n"
-        "    _ib_sig_idx = _ib_np.nonzero(_ib_full)[0]\n"
-        "    _ib_oth_idx = _ib_np.nonzero(~_ib_full)[0]\n"
-        "    if _ib_sig_idx.size > _ib_cap // 2:\n"
-        "        _ib_sig_idx = _ib_sig_idx[_ib_np.linspace(\n"
-        "            0, _ib_sig_idx.size - 1, _ib_cap // 2, dtype=int)]\n"
-        "    _ib_room = max(1, _ib_cap - int(_ib_sig_idx.size))\n"
-        "    if _ib_oth_idx.size > _ib_room:\n"
-        "        _ib_oth_idx = _ib_oth_idx[_ib_np.linspace(\n"
-        "            0, _ib_oth_idx.size - 1, _ib_room, dtype=int)]\n"
-        "    _ib_keep = _ib_np.sort(_ib_np.concatenate([_ib_sig_idx, _ib_oth_idx]))\n"
+        "    _ib_keep = _ib_np.linspace(0, _ib_total - 1, _ib_cap, dtype=int)\n"
         "    _ib_x, _ib_y = _ib_x[_ib_keep], _ib_y[_ib_keep]\n"
         "_ib_fig, _ib_ax = _ib_plt.subplots(figsize=(6.6, 5.2), layout='constrained')\n"
         "if _ib_x.size:\n"
-        "    _ib_sig = (_ib_y >= 1.30103) & (_ib_np.abs(_ib_x) >= 1.0)\n"
         "    _ib_ax.scatter(\n"
-        "        _ib_x[~_ib_sig], _ib_y[~_ib_sig], s=5, alpha=0.35, linewidths=0,\n"
-        "        color='#9aa0a6', rasterized=_ib_x.size > 50000,\n"
-        "        label=f'other (n={_ib_n_other:,})',\n"
+        "        _ib_x, _ib_y, s=5, alpha=0.45, linewidths=0,\n"
+        "        color='#4878a8', rasterized=_ib_x.size > 50000,\n"
+        f"        label=f'n = {{_ib_total:,}} rows; x: {lfc}, y: -log10({pval})',\n"
         "    )\n"
-        "    _ib_ax.scatter(\n"
-        "        _ib_x[_ib_sig], _ib_y[_ib_sig], s=7, alpha=0.75, linewidths=0,\n"
-        "        color='#c0392b', rasterized=_ib_x.size > 50000,\n"
-        "        label=f'|lfc|>=1 and p<0.05 (n={_ib_n_sig:,})',\n"
-        "    )\n"
-        "    _ib_ax.axhline(1.30103, color='#546e7a', lw=0.8, ls='--')\n"
-        "    _ib_ax.axvline(-1.0, color='#546e7a', lw=0.8, ls='--')\n"
-        "    _ib_ax.axvline(1.0, color='#546e7a', lw=0.8, ls='--')\n"
         "    _ib_ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1.0),\n"
         "                  frameon=False, fontsize=8, markerscale=2.0)\n"
         "    if _ib_thinned:\n"
@@ -595,7 +577,7 @@ def build_innovation_baseline_figure_specs(
         specs.append(InnovationBaselineFigureSpec(
             name=f"{prefix}_volcano_{cleaned['var']}",
             description=(
-                "Platform-generated effect-size versus significance view of "
+                "Platform-generated effect-size versus p-value view of "
                 f"{cleaned['var']}; the differential result's baseline view."
             ),
             figure_type="volcano",
